@@ -1,0 +1,22 @@
+# Claude Code / Codex working directories
+.claude/
+.codex
+.worktrees/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+.ruff_cache/
+# uv.lock and .python-version are intentionally committed (not ignored).
+
+# Secrets
+.env
+
+# Scaffolding
+.gx-new-version
+setup-incomplete.md

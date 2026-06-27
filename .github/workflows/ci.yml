@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  code-quality:
+    name: Code quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --locked --group dev
+      - run: uv run --no-sync ruff check src/ tests/
+      - run: uv run --no-sync ruff format --check src/ tests/
+      - run: uv run --no-sync ty check src/
+      - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
+
+  # --- semgrep start ---
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.61.0
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep scan --error --config=p/python --config=p/security-audit --config=p/secrets
+  # --- semgrep end ---
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --locked --group dev
+      - run: uv run --no-sync pytest

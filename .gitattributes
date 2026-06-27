@@ -1,0 +1,19 @@
+# Line endings: store and check out all text as LF.
+* text=auto eol=lf
+
+# Shell scripts must stay LF even on Windows checkouts.
+*.sh text eol=lf
+
+# Generated lockfile: kept out of GitHub language stats. Its textual diff stays
+# reviewable on purpose — dependency changes must be visible in review.
+uv.lock linguist-generated=true
+
+# Binary files — never normalize or diff.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
