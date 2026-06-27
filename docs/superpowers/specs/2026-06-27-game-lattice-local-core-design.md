@@ -113,8 +113,10 @@ boundary-named modules, because `scripts/check_typing_boundaries.py` permits `An
 
 The loader is split into pure assembly (`loader.build_lattice(parsed_docs)`) and the impure
 orchestrator (`orchestrate.load_lattice(config)`). Graph logic is therefore tested without
-touching disk. `reconcile` is likewise split: a pure `apply_reconcile(file_text, updates)`
-that returns new file text, and an impure caller that resolves, hashes, and writes.
+touching disk. `reconcile` is likewise split: a pure `apply_reconcile(current_file_text,
+updates)` that returns new file text by editing only the `seen` scalars, and an impure caller
+that resolves the selection, hashes the upstream targets, re-reads each downstream file fresh
+immediately before writing, and writes atomically.
 
 ## 4. Loading and indexing
 
@@ -169,13 +171,20 @@ Canonicalization: line endings normalized to `\n`, trailing whitespace stripped 
 leading and trailing blank lines trimmed. Internal blank lines are preserved. This removes
 editor noise (trailing spaces, final-newline churn, CRLF) without hiding substantive edits.
 
-The `seen` value is `sha256(canonical_bytes_utf8)` truncated to the first 7 hex characters,
-matching the decision-record example. Each `seen` only ever compares one section against its
-own past self, so truncation collision risk is negligible for this corpus.
+The `seen` value is `sha256(canonical_bytes_utf8)` truncated to the first 32 hex characters
+(128 bits). The decision-record example used a 7-character value illustratively; 128 bits is
+collision-safe for any realistic corpus while keeping the stored lockfile value short. Each
+`seen` only ever compares one section against its own past self.
 
-`hashing.canonicalize` must be idempotent and stable. This is asserted with `hypothesis`
-property tests: trailing-whitespace, CRLF, and final-newline variants of the same content
-must produce one hash; any substantive character change must produce a different hash.
+`hashing.canonicalize` must be idempotent and stable. Two `hypothesis` properties pin this:
+
+- Canonicalization-equivalent variants hash identically: trailing-whitespace, CRLF, and
+  final-newline variants of one content always produce one hash. This is a true universal and
+  is asserted over generated inputs.
+- Distinct contents hash distinctly: asserted with fixed example pairs, not as a universal
+  claim, because a hash collision is possible in principle for any digest. At 128 bits the
+  practical collision probability for this corpus is negligible, but the test states only what
+  is actually guaranteed.
 
 ## 6. Commands
 
@@ -225,11 +234,18 @@ The conscious "I looked, still fine," and the only mutating command.
 - For each selected edge, recompute the upstream hash and set that edge's `seen` to it.
 - A BROKEN edge cannot be reconciled. `reconcile` refuses it and reports that the ref must be
   fixed first.
-- Rewrite mechanism: split the file into frontmatter text and body text. Only the frontmatter
-  block is round-tripped through `ruamel.yaml`, which preserves key order and comments, so the
-  diff touches only the changed `seen` scalars. The body after the closing `---` is never
-  passed through the YAML engine; it is reattached verbatim. The result is written atomically
-  (temp file in the same directory, then `os.replace`) so an interruption cannot corrupt the doc.
+- Rewrite mechanism: reconcile re-reads the target file fresh immediately before writing, then
+  edits only the targeted `seen` scalar(s) in place. That fresh content is split into
+  frontmatter text and body text; only the frontmatter block is round-tripped through
+  `ruamel.yaml`, which preserves key order and comments, so the diff touches only the changed
+  `seen` scalars. The body after the closing `---` is never passed through the YAML engine; it
+  is reattached verbatim from that same fresh read. Because the edit is applied to the current
+  on-disk content rather than a copy captured at lattice-load time, a concurrent body or
+  other-frontmatter edit made between load and write is preserved, not clobbered. The result is
+  written atomically (temp file in the same directory, then `os.replace`) so an interruption
+  cannot corrupt the doc. Advisory locks and a merge step are intentionally out of scope:
+  `reconcile` is a single-user local action and CI invokes only the read-only `check`, so the
+  residual same-instant double-write race does not justify that machinery.
 
 ### 6.4 `graph`
 
@@ -300,6 +316,9 @@ Test-driven, per the project conventions, with tests mirroring source one to one
   `--json` shapes.
 - A `reconcile` round-trip test: a STALE edge, then `reconcile`, then `check` is clean, and the
   resulting file diff touches only the `seen` scalar.
+- A `reconcile` concurrency test: a body edit applied to the target file between lattice load
+  and the write is preserved in the output, proving the in-place fresh-read rewrite does not
+  reattach a stale body.
 - A pure-loader uniqueness test: a fixture with a colliding id raises `DuplicateIdError`.
 - Coverage at or above the existing 80 percent gate. The existing `test_conventions.py` stays
   green.
