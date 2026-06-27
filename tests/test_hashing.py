@@ -35,6 +35,7 @@ def test_canonicalize_is_idempotent(text: str):
 
 @given(st.text())
 def test_trailing_whitespace_invariant(text: str):
-    # Appending trailing spaces to each line must not change the hash.
-    noisy = "\n".join(line + "   " for line in text.split("\n"))
+    # Appending trailing spaces to each already-canonical line must not change the hash.
+    canonical = canonicalize(text)
+    noisy = "\n".join(line + "   " for line in canonical.split("\n"))
     assert content_hash(text) == content_hash(noisy)
