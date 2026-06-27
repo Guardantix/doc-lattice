@@ -2,6 +2,7 @@
 .claude/
 .codex
 .worktrees/
+.superpowers/
 
 # Python
 .venv/
