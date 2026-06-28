@@ -25,3 +25,7 @@ VALID_SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 
 BlockedReason = Literal["malformed", "not-found", "cross-team"]
 VALID_BLOCKED_REASONS: frozenset[str] = frozenset(get_args(BlockedReason))
+
+# ASCII control character boundaries for text sanitization
+ASCII_CONTROL_MIN: int = 0x20
+ASCII_DELETE: int = 0x7F
