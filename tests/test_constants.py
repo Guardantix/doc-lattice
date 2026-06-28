@@ -6,10 +6,12 @@ from game_lattice.constants import (
     VALID_AUTHORITIES,
     VALID_EDGE_STATES,
     VALID_LAYERS,
+    VALID_LOCATION_KINDS,
     VALID_STATUSES,
     Authority,
     EdgeState,
     Layer,
+    LocationKind,
     Status,
 )
 
@@ -35,3 +37,8 @@ def test_authorities_match_literal():
 def test_edge_states_match_literal():
     assert frozenset(get_args(EdgeState)) == VALID_EDGE_STATES
     assert {"OK", "STALE", "UNRECONCILED", "BROKEN"} == set(VALID_EDGE_STATES)
+
+
+def test_location_kinds_match_literal():
+    assert frozenset(get_args(LocationKind)) == VALID_LOCATION_KINDS
+    assert {"file", "section"} == set(VALID_LOCATION_KINDS)

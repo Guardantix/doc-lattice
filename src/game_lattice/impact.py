@@ -1,10 +1,7 @@
 """Reverse-walk the lattice to find every doc affected by a change to a target."""
 
-from pathlib import Path
-
 from .error_types import ValidationError
-from .model import Lattice, Node
-from .resolve import split_ref
+from .model import Lattice, Node, split_ref
 
 
 def expand_targets(lattice: Lattice, token: str) -> set[str]:
@@ -25,9 +22,9 @@ def expand_targets(lattice: Lattice, token: str) -> set[str]:
     if location is None:
         return set()
     if location.kind == "file":
-        return {target_id} | _anchors_in_file(lattice, location.path)
+        return {target_id} | set(lattice.anchors_by_path.get(location.path, frozenset()))
     expanded = {target_id} | set(lattice.ancestors.get(target_id, ()))
-    file_id = _file_id_for_path(lattice, location.path)
+    file_id = lattice.file_id_by_path.get(location.path)
     if file_id is not None:
         expanded.add(file_id)
     return expanded
@@ -66,20 +63,5 @@ def impact(lattice: Lattice, token: str) -> list[Node]:
             queue.append(source_id)
             node = lattice.nodes_by_id.get(source_id)
             if node is not None:
-                queue.extend(_anchors_in_file(lattice, node.path))
+                queue.extend(lattice.anchors_by_path.get(node.path, frozenset()))
     return [lattice.nodes_by_id[i] for i in sorted(affected)]
-
-
-def _anchors_in_file(lattice: Lattice, path: Path) -> set[str]:
-    return {
-        anchor
-        for anchor, loc in lattice.index.items()
-        if loc.kind == "section" and loc.path == path
-    }
-
-
-def _file_id_for_path(lattice: Lattice, path: Path) -> str | None:
-    for id_, loc in lattice.index.items():
-        if loc.kind == "file" and loc.path == path:
-            return id_
-    return None

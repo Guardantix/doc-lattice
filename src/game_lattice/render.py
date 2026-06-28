@@ -8,9 +8,31 @@ _MERMAID_ID_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
 def _label(lattice: Lattice, node_id: str) -> str:
+    """Return the human-readable name for a node: its title, or its id as a fallback.
+
+    The result is raw text; each renderer escapes it for its own quoting rules.
+    """
     node = lattice.nodes_by_id.get(node_id)
-    title = node.title if node is not None and node.title else node_id
-    return title.replace('"', "'")
+    return node.title if node is not None and node.title else node_id
+
+
+def _dot_escape(text: str) -> str:
+    """Escape text for a DOT double-quoted string.
+
+    Backslash is doubled first so it does not consume the quote escape, then each double
+    quote is escaped. Without this a trailing backslash would escape the closing quote and
+    corrupt the label.
+    """
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _mermaid_escape(text: str) -> str:
+    """Escape text for a Mermaid double-quoted label.
+
+    Mermaid has no backslash escape inside ``"..."``; a literal double quote is replaced
+    with an apostrophe so the label stays well-formed.
+    """
+    return text.replace('"', "'")
 
 
 def _mermaid_id(node_id: str) -> str:
@@ -40,7 +62,6 @@ def _graph_edges(
     Returns:
         Sorted ``(upstream_file_id, source_id, is_stale)`` triples, broken edges omitted.
     """
-    path_to_file = {node.path: node_id for node_id, node in lattice.nodes_by_id.items()}
     collapsed: dict[tuple[str, str], bool] = {}
     for source_id in lattice.nodes_by_id:
         for edge in lattice.nodes_by_id[source_id].derives_from:
@@ -49,7 +70,7 @@ def _graph_edges(
             location = lattice.index.get(edge.target_id)
             if location is None:
                 continue
-            upstream = path_to_file.get(location.path, edge.target_id)
+            upstream = lattice.file_id_by_path.get(location.path, edge.target_id)
             is_stale = (source_id, edge.target_id) in stale_edges
             key = (upstream, source_id)
             collapsed[key] = collapsed.get(key, False) or is_stale
@@ -68,7 +89,8 @@ def to_mermaid(lattice: Lattice, stale_edges: set[tuple[str, str]]) -> str:
     """
     lines = ["graph TD"]
     for node_id in sorted(lattice.nodes_by_id):
-        lines.append(f'    {_mermaid_id(node_id)}["{_label(lattice, node_id)}"]')
+        label = _mermaid_escape(_label(lattice, node_id))
+        lines.append(f'    {_mermaid_id(node_id)}["{label}"]')
     for upstream, source_id, is_stale in _graph_edges(lattice, stale_edges):
         arrow = "-.->" if is_stale else "-->"
         lines.append(f"    {_mermaid_id(upstream)} {arrow} {_mermaid_id(source_id)}")
@@ -87,9 +109,10 @@ def to_dot(lattice: Lattice, stale_edges: set[tuple[str, str]]) -> str:
     """
     lines = ["digraph lattice {"]
     for node_id in sorted(lattice.nodes_by_id):
-        lines.append(f'    "{node_id}" [label="{_label(lattice, node_id)}"];')
+        label = _dot_escape(_label(lattice, node_id))
+        lines.append(f'    "{_dot_escape(node_id)}" [label="{label}"];')
     for upstream, source_id, is_stale in _graph_edges(lattice, stale_edges):
         style = " [style=dashed]" if is_stale else ""
-        lines.append(f'    "{upstream}" -> "{source_id}"{style};')
+        lines.append(f'    "{_dot_escape(upstream)}" -> "{_dot_escape(source_id)}"{style};')
     lines.append("}")
     return "\n".join(lines) + "\n"

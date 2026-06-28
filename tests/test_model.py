@@ -5,7 +5,37 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from game_lattice.model import Edge, Lattice, Location, Node, NodeMeta, ParsedDoc, RawEdge
+from game_lattice.model import (
+    Edge,
+    Lattice,
+    Location,
+    Node,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    split_ref,
+)
+
+
+def test_split_ref_keys_on_trailing_id():
+    assert split_ref("art-direction#accent") == "accent"
+    assert split_ref("accent") == "accent"
+    assert split_ref("a#b#c") == "c"
+
+
+def test_edge_resolve_links_ref_to_index():
+    index = {"accent": Location(path=Path("a.md"), kind="section", span=(1, 2))}
+    edge = Edge.resolve("art-direction#accent", "h", index)
+    assert edge.target_ref == "art-direction#accent"
+    assert edge.target_id == "accent"
+    assert edge.seen == "h"
+
+
+def test_edge_resolve_unknown_ref_is_broken():
+    edge = Edge.resolve("ghost", None, {})
+    assert edge.target_ref == "ghost"
+    assert edge.target_id is None
+    assert edge.seen is None
 
 
 def test_nodemeta_validates_and_defaults():
@@ -49,6 +79,9 @@ def test_lattice_holds_maps():
         index={"x": Location(path=Path("x.md"), kind="file", span=(1, 1))},
         dependents={},
         ancestors={},
+        file_id_by_path={Path("x.md"): "x"},
+        anchors_by_path={Path("x.md"): frozenset()},
     )
     assert lat.nodes_by_id["x"].id == "x"
+    assert lat.file_id_by_path[Path("x.md")] == "x"
     assert ParsedDoc(path=Path("x.md"), meta=NodeMeta(id="x"), body="").meta.id == "x"

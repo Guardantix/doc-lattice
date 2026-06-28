@@ -11,8 +11,8 @@ from ruamel.yaml.error import YAMLError
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
 from .hashing import content_hash
-from .model import Lattice
-from .resolve import split_ref, target_content
+from .model import Lattice, split_ref
+from .resolve import target_content
 
 
 def reconcile(

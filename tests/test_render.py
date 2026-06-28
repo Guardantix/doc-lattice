@@ -43,6 +43,15 @@ def test_section_edge_drawn_from_owning_file_not_bare_anchor():
     assert "    u --> down" not in lines
 
 
+def test_dot_escapes_backslash_and_quote_in_label():
+    # A title with a backslash and quotes must not corrupt the DOT string: the backslash
+    # is doubled and each quote escaped. A naive replace leaves a trailing backslash that
+    # would escape the closing quote and break the label.
+    lat = build_lattice([ParsedDoc(Path("a.md"), NodeMeta(id="a", title='C:\\path "x"'), "body\n")])
+    out = to_dot(lat, set())
+    assert r'"a" [label="C:\\path \"x\""];' in out
+
+
 def test_mermaid_sanitizes_node_ids_with_spaces():
     lat = build_lattice(
         [

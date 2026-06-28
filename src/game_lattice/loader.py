@@ -4,8 +4,7 @@ import warnings
 from collections import defaultdict
 
 from .error_types import DuplicateIdError
-from .model import Edge, Lattice, Location, Node, ParsedDoc
-from .resolve import split_ref
+from .model import Edge, Lattice, Location, Node, ParsedDoc, split_ref
 from .sections import Heading, build_toc, section_span, split_body_lines
 
 
@@ -70,11 +69,21 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             tickets=tuple(doc.meta.tickets),
         )
 
+    file_id_by_path = {node.path: node_id for node_id, node in nodes.items()}
+    anchors_by_path = {
+        path: frozenset(
+            id_ for id_, loc in index.items() if loc.kind == "section" and loc.path == path
+        )
+        for path in file_id_by_path
+    }
+
     return Lattice(
         nodes_by_id=nodes,
         index=index,
         dependents={k: frozenset(v) for k, v in dependents.items()},
         ancestors=ancestors,
+        file_id_by_path=file_id_by_path,
+        anchors_by_path=anchors_by_path,
     )
 
 
@@ -103,12 +112,12 @@ def _resolve_edges(doc: ParsedDoc, index: dict[str, Location]) -> list[Edge]:
                 " keeping the last occurrence",
                 stacklevel=2,
             )
-        target_id = tid if tid in index else None
-        deduped[tid] = Edge(target_ref=raw.ref, target_id=target_id, seen=raw.seen)
+        deduped[tid] = Edge.resolve(raw.ref, raw.seen, index)
     return list(deduped.values())
 
 
 def _line_count(body: str) -> int:
+    """Return the 1-based line count of a body, never less than 1 for an empty body."""
     return max(1, len(split_body_lines(body)))
 
 
@@ -119,6 +128,11 @@ def _register(
     sources: dict[str, str],
     where: str,
 ) -> None:
+    """Record an id in the shared index, failing if it collides with an existing id.
+
+    ``sources`` tracks where each id was first seen so a duplicate names both registration
+    sites in the error.
+    """
     if id_ in index:
         msg = f"duplicate id {id_!r}: already registered at {sources[id_]}, again at {where}"
         raise DuplicateIdError(msg)
@@ -131,6 +145,12 @@ def _record_ancestors(
     spans: dict[str, tuple[int, int]],
     ancestors: dict[str, tuple[str, ...]],
 ) -> None:
+    """Record each anchor's enclosing anchored sections, outermost to innermost.
+
+    A section encloses another when its span strictly contains the other's; ties on one
+    boundary still count as enclosing. Editing a nested section propagates impact to
+    dependents of its ancestors, so the order runs outermost first.
+    """
     for _, head in anchored:
         anchor = head.anchor
         if anchor is None:

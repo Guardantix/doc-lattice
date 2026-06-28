@@ -6,13 +6,7 @@ import pytest
 
 from game_lattice.error_types import BrokenRefError
 from game_lattice.model import Lattice, Location, Node
-from game_lattice.resolve import split_ref, target_content
-
-
-def test_split_ref_keys_on_trailing_id():
-    assert split_ref("art-direction#accent") == "accent"
-    assert split_ref("accent") == "accent"
-    assert split_ref("a#b#c") == "c"
+from game_lattice.resolve import target_content
 
 
 def _lattice() -> Lattice:
@@ -35,6 +29,8 @@ def _lattice() -> Lattice:
         },
         dependents={},
         ancestors={},
+        file_id_by_path={Path("doc.md"): "doc"},
+        anchors_by_path={Path("doc.md"): frozenset({"accent"})},
     )
 
 

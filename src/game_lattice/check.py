@@ -40,6 +40,12 @@ def check_lattice(lattice: Lattice) -> list[EdgeStatus]:
 def _classify(
     lattice: Lattice, source_id: str, target_ref: str, target_id: str | None, seen: str | None
 ) -> EdgeStatus:
+    """Classify one edge as BROKEN, UNRECONCILED, STALE, or OK.
+
+    A broken edge (no resolved target) is BROKEN. Otherwise the live target hash is
+    compared against ``seen``: a missing ``seen`` is UNRECONCILED, a mismatch is STALE, and
+    a match is OK.
+    """
     if target_id is None:
         return EdgeStatus(source_id, target_ref, None, "BROKEN", seen, None)
     actual = content_hash(target_content(lattice, target_id))

@@ -39,6 +39,18 @@ def test_broken_ref_is_none_not_error():
     assert "ghost" not in lat.dependents
 
 
+def test_path_indexes_map_paths_to_ids():
+    docs = [
+        _doc("up.md", "# Up {#accent}\n\n## Tone {#tone}\nx\n", id="up"),
+        _doc("down.md", "body\n", id="down"),
+    ]
+    lat = build_lattice(docs)
+    assert lat.file_id_by_path[Path("up.md")] == "up"
+    assert lat.file_id_by_path[Path("down.md")] == "down"
+    assert lat.anchors_by_path[Path("up.md")] == frozenset({"accent", "tone"})
+    assert lat.anchors_by_path.get(Path("down.md"), frozenset()) == frozenset()
+
+
 def test_duplicate_id_raises():
     docs = [_doc("a.md", "b\n", id="dup"), _doc("b.md", "c\n", id="dup")]
     with pytest.raises(DuplicateIdError):

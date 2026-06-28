@@ -1,22 +1,10 @@
-"""Resolve refs to ids and fetch the current content a target id covers."""
+"""Fetch the current content a target id covers, and map location paths to nodes."""
 
 from pathlib import Path
 
 from .error_types import BrokenRefError
 from .model import Lattice, Node
 from .sections import section_text
-
-
-def split_ref(ref: str) -> str:
-    """Return the stable id a ref points at.
-
-    Args:
-        ref: A ref written bare (``accent``) or namespaced (``art-direction#accent``).
-
-    Returns:
-        The trailing id after the last ``#``; the namespace prefix is display-only.
-    """
-    return ref.rsplit("#", 1)[-1]
 
 
 def target_content(lattice: Lattice, target_id: str) -> str:
@@ -44,8 +32,9 @@ def target_content(lattice: Lattice, target_id: str) -> str:
 
 
 def _node_for_path(lattice: Lattice, path: Path) -> Node:
-    for node in lattice.nodes_by_id.values():
-        if node.path == path:
-            return node
-    msg = f"no node owns location path {path!r}"
-    raise BrokenRefError(msg)
+    """Return the tracked node that owns a location path via the loader's path index."""
+    node_id = lattice.file_id_by_path.get(path)
+    if node_id is None:
+        msg = f"no node owns location path {path!r}"
+        raise BrokenRefError(msg)
+    return lattice.nodes_by_id[node_id]
