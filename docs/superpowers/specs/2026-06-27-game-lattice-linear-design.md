@@ -84,12 +84,16 @@ Four immutable types, all network-free once built.
 - `Ticket(identifier, title, url, state: TicketState, parent: TicketRef | None,
   children: tuple[TicketRef, ...])`. One resolved Linear issue.
 - `Finding(severity: Severity, node_id, node_title, node_path, drifted_refs: tuple[str, ...],
-  ticket_ref: str, ticket: Ticket | None)`. One reportable result. `ticket_ref` is the raw
-  identifier as written in frontmatter and is always present; `ticket` is the resolved issue, or
-  `None` for a `BLOCKED` finding where the ref could not be resolved.
+  ticket_ref: str, reason: BlockedReason | None, ticket: Ticket | None)`. One reportable result.
+  `ticket_ref` is the raw identifier as written in frontmatter and is always present. For a graded
+  finding (DANGER, WARNING, INFO), `ticket` is the resolved issue and `reason` is `None`. For a
+  `BLOCKED` finding, `ticket` is `None` and `reason` says why the ref could not be resolved. The two
+  fields are mutually exclusive, so the model can represent exactly the `--json` shape in section 4.1
+  and nothing illegal.
 
-`LinearStateType = Literal["triage", "backlog", "unstarted", "started", "completed", "canceled"]`
-and `Severity = Literal["DANGER", "WARNING", "INFO", "BLOCKED"]` are added to `constants.py` with the
+`LinearStateType = Literal["triage", "backlog", "unstarted", "started", "completed", "canceled"]`,
+`Severity = Literal["DANGER", "WARNING", "INFO", "BLOCKED"]`, and
+`BlockedReason = Literal["malformed", "not-found", "cross-team"]` are added to `constants.py` with the
 existing `Literal` plus `get_args()` plus `frozenset` pattern, and imported wherever those values are
 used.
 
@@ -136,24 +140,26 @@ stay free of any network-derived domain.
 ```
 
 `findings` is the only key; it is ordered as in section 5.1. A BLOCKED finding carries the offending
-`ticket_ref`, a `reason` of `"malformed"` (rejected by the shape check) or `"not-found"` (Linear
-returned `null`), and a `null` ticket. There are no separate top-level lists: the command examines
-only the tickets on trigger nodes, so a malformed or unresolved ref is always either irrelevant
-(its node is not in the trigger map, so it is never collected) or a BLOCKED finding (its node is).
-Under `--exit-code`, DANGER and BLOCKED findings drive exit 1.
+`ticket_ref`, a `null` ticket, and a `reason` of `"malformed"` (rejected by the shape check),
+`"cross-team"` (a `linear_team` is set and the ref belongs to another team, so it is never queried,
+section 7), or `"not-found"` (queried, but Linear returned `null`). There are no separate top-level
+lists: the command examines only the tickets on trigger nodes, so an unresolvable ref is always
+either irrelevant (its node is not in the trigger map, so it is never collected) or a BLOCKED finding
+(its node is). Under `--exit-code`, DANGER and BLOCKED findings drive exit 1.
 
 ## 5. The stale-shipped join
 
 `stale_shipped.py` is pure. Its entry point takes the built `Lattice`, a trigger map
 `Mapping[node_id, tuple[str, ...]]` (each downstream node id mapped to the upstream refs that justify
-looking at it), a `Mapping[identifier, Ticket]`, and the set of identifiers the fetch layer rejected
-as malformed (used only to label a BLOCKED finding's `reason`). It returns the graded findings
-(DANGER, BLOCKED, WARNING, INFO) and nothing else; there are no separate report-only lists, because
-only trigger-node tickets are ever in scope. It performs no I/O and no network, so it is unit-tested
-against synthetic trigger maps and ticket maps. For each trigger node, each of its `tickets:` refs is
-resolved against the ticket map: a hit grades by state, a miss is BLOCKED (`reason` `"malformed"` if
-the ref is in the rejected set, else `"not-found"`). A node that lists the same ref twice yields one
-finding, not two.
+looking at it), a `Mapping[identifier, Ticket]`, and a `rejected` map `Mapping[ref, BlockedReason]`
+of the refs the pure partitioner refused to query (each tagged `"malformed"` or `"cross-team"`). It
+returns the graded findings (DANGER, BLOCKED, WARNING, INFO) and nothing else; there are no separate
+report-only lists, because only trigger-node tickets are ever in scope. It performs no I/O and no
+network, so it is unit-tested against synthetic trigger maps and ticket maps. For each trigger node,
+each of its `tickets:` refs is resolved: a hit in the ticket map grades by state; otherwise it is
+BLOCKED, with `reason` taken from the `rejected` map when present (`"malformed"` or `"cross-team"`)
+and `"not-found"` when the ref was queried but came back `null`. A node that lists the same ref twice
+yields one finding, not two.
 
 ### 5.1 Finding identity and grading
 
@@ -164,7 +170,7 @@ out into one finding per edge. The severity comes from the implementing ticket's
 | Ticket state / ref outcome | Severity | Meaning |
 |---|---|---|
 | `completed` | DANGER | Shipped work built against a spec that has since drifted. |
-| invalid shape or unresolved (`null`) | BLOCKED | A ticket ref on a drifted node cannot be resolved, so whether shipped work is endangered is undeterminable. The gate fails closed on it. |
+| malformed, cross-team, or unresolved (`null`) | BLOCKED | A ticket ref on a drifted node cannot be resolved, so whether shipped work is endangered is undeterminable. The gate fails closed on it. |
 | `started` | WARNING | In-flight work (In Progress or In Review) against a spec that just drifted. |
 | `unstarted`, `backlog` | INFO | Not started; the worker will pick up the current spec. |
 | `canceled`, `triage` | omitted | Not a real risk; produces no finding. |
@@ -175,13 +181,14 @@ node with only OK edges never enters the trigger map at all, so the healthy case
 completed ticket's still-open children are attached to its DANGER finding as context, since a "done"
 parent with open children is itself a signal.
 
-The gate fails closed. A ticket ref on a trigger node that is malformed (rejected by the shape check)
-or unresolved (Linear returned `null`) becomes a **BLOCKED** finding carrying the node id, path, the
-offending `ticket_ref`, and a `reason`, because `tickets:` is repo-controlled and a drifted doc must
-not be able to silence its own DANGER by replacing a completed ticket with a typo or a deleted id.
-A malformed or unresolved ref on a node that is *not* a trigger node endangers no shipped work and is
-never collected in the first place, so it simply does not appear. The gate fails closed exactly where
-drift and an unverifiable ticket coincide, and stays quiet everywhere else.
+The gate fails closed. A ticket ref on a trigger node that the partitioner refused to query
+(malformed shape, or cross-team when a `linear_team` is set) or that Linear returned `null` for
+becomes a **BLOCKED** finding carrying the node id, path, the offending `ticket_ref`, and a `reason`,
+because `tickets:` is repo-controlled and a drifted doc must not be able to silence its own DANGER by
+swapping a completed ticket for a typo, a deleted id, or another team's id. An unresolvable ref on a
+node that is *not* a trigger node endangers no shipped work and is never collected in the first
+place, so it simply does not appear. The gate fails closed exactly where drift and an unverifiable
+ticket coincide, and stays quiet everywhere else.
 
 Findings are returned in a deterministic order keyed on an explicit severity rank (DANGER 0, BLOCKED
 1, WARNING 2, INFO 3), then node id, then `ticket_ref`. The rank is explicit, not the declaration
@@ -216,10 +223,14 @@ is fetched once. When no valid identifier remains to resolve (the lattice refere
 `LINEAR_API_KEY` or touching the network. A no-ticket run therefore succeeds with no findings and
 needs no credential.
 
-`linear_query.py` is pure. It first partitions identifiers into valid and invalid by matching each
-against the expected shape (section 9), so the set that reaches the wire is decided in pure,
-unit-tested code; invalid identifiers are returned for reporting and never queried. For the valid
-set it builds one GraphQL `query` document with one index-named aliased `issue(id:)` field per
+`linear_query.py` is pure. It first partitions identifiers into a valid set and a `rejected` map
+`Mapping[ref, BlockedReason]`: a ref failing the shape check is tagged `"malformed"`, and, when a
+`linear_team` is configured, a well-formed ref whose team prefix is not the configured one is tagged
+`"cross-team"` (section 7). Only the valid set reaches the wire, so what is queried is decided in
+pure, unit-tested code; both rejected kinds are returned for the join to turn into BLOCKED findings
+and are never queried, which also keeps an off-team identifier from leaking metadata into output. For
+the valid set it builds one GraphQL `query` document with one index-named aliased `issue(id:)` field
+per
 identifier (`i0: issue(id: $id0)`), sharing a single fragment for the ticket fields including
 `parent` and `children(first: 50)`. The child cap is deliberate and not paginated in this slice;
 children are context, not a gate. Identifier sets larger than a fixed batch size (for example 50)
@@ -270,17 +281,22 @@ No new config keys. `linear_team`, already parsed and forward-compat in the loca
 active here:
 
 ```yaml
-linear_team: PC          # optional; when set, validates and scopes referenced tickets
+linear_team: PC          # optional; when set, confines queries to this team and fails closed off it
 ```
 
-When `linear_team` is set, an identifier whose team prefix does not match is flagged as a
-cross-team reference (a soft note) rather than silently queried. When it is null, identifiers are
-validated only against the generic shape and queried as written. Because `linear_team` comes from a
-repo-controlled `.game-lattice.yml`, it is never interpolated into a regex; it is itself validated
-against a fixed team-key shape `^[A-Z][A-Z0-9]*$` when first used, and the prefix match is done by
-splitting the identifier on `-` and comparing the segment by string equality (section 9). This keeps
-a crafted `linear_team` from causing catastrophic backtracking or from widening the allowlist.
-Credentials never live in config; `LINEAR_API_KEY` is read from the environment, per decision 11.
+When `linear_team` is set it is a fail-closed boundary, not a soft note. An identifier whose team
+prefix is not the configured one is **never queried**: the partitioner tags it `"cross-team"`, so it
+cannot leak another team's ticket metadata into output, and on a trigger node it becomes a BLOCKED
+finding with `reason="cross-team"` that fails `--exit-code`. This matters because `tickets:` is
+repo-controlled and the command runs with a credential; silently dropping an off-team ref would let a
+drifted doc dodge its own gate. When `linear_team` is null there is no team boundary to enforce, so
+identifiers are validated only against the generic shape and queried as written. Because
+`linear_team` comes from a repo-controlled `.game-lattice.yml`, it is never interpolated into a
+regex; it is itself validated against a fixed team-key shape `^[A-Z][A-Z0-9]*$` when first used, and
+the prefix match is done by splitting the identifier on `-` and comparing the segment by string
+equality (section 9). This keeps a crafted `linear_team` from causing catastrophic backtracking or
+from widening the allowlist. Credentials never live in config; `LINEAR_API_KEY` is read from the
+environment, per decision 11.
 
 ## 8. Error handling
 
@@ -349,6 +365,11 @@ internal network the credentialed process can reach.
   never spliced into a pattern; it is validated against `^[A-Z][A-Z0-9]*$` and the prefix is matched
   by splitting the identifier on `-` and comparing for equality, so a crafted value cannot cause
   catastrophic backtracking or widen the allowlist.
+- **Team isolation is fail-closed (CWE-285, improper authorization scope).** When `linear_team` is
+  set, an off-team identifier is never queried, so repo-controlled `tickets:` cannot use the
+  credential to pull another team's ticket metadata, and on a trigger node it surfaces as a
+  `cross-team` BLOCKED finding that fails `--exit-code` rather than silently dropping out of the gate
+  (section 7).
 - **Bounded outbound fan-out (CWE-400, CWE-770).** A total distinct-identifier cap bounds each run,
   so a doc set listing thousands of `tickets:` cannot drive unbounded requests or burn the user's
   rate limit; exceeding it is a `LinearError`. The per-response read is byte-capped and
@@ -394,22 +415,27 @@ Test-driven, per project conventions, tests mirroring sources one to one, all of
     (`completed` DANGER, `started` WARNING, `unstarted` and `backlog` INFO, `canceled` and `triage`
     omitted), so no state can be silently mis-graded; one finding per `(node, ticket_ref)`, with a
     ref listed twice on a node collapsing to one finding; `drifted_refs` aggregation across multiple
-    stale edges on a node; a completed ticket's open children attached as context; a malformed
-    `ticket_ref` on a trigger node becomes a BLOCKED finding with `reason="malformed"` and an
-    unresolved one with `reason="not-found"`, while a ref whose node is outside the trigger map
-    produces nothing; a two-hop `--from` dependent receives non-empty `drifted_refs` from the
+    stale edges on a node; a completed ticket's open children attached as context; a trigger-node
+    ref becomes a BLOCKED finding with `reason="malformed"` when in the rejected map as malformed,
+    `reason="cross-team"` when rejected as cross-team, and `reason="not-found"` when queried but
+    absent from the ticket map, while a ref whose node is outside the trigger map produces nothing; a
+    two-hop `--from` dependent receives non-empty `drifted_refs` from the
     transitive closure, not an empty tuple (the regression test for the closure fix); the explicit
     severity rank orders DANGER, then BLOCKED, then WARNING, then INFO, with node id and `ticket_ref`
     tie-breaks; a node with no tickets yields nothing.
-  - `test_linear_query.py`: the document is a `query` and never a `mutation`; the valid/invalid
-    partition, with invalid identifiers (including an empty or whitespace `tickets:` entry, and a
-    non-ASCII-digit value under the `re.ASCII` guard) never reaching the document; a crafted
-    `linear_team` is validated by shape and matched by split-and-equality, never spliced into a
-    regex; the total-identifier cap raises `LinearError` at one over the cap but not at exactly the
-    cap; chunking emits one document at exactly the batch size and two at batch size plus one (the
-    off-by-one boundary); identifiers passed as variables, not interpolated; aliases unique; the
+  - `test_linear_query.py`: the document is a `query` and never a `mutation`; the partition returns
+    the valid set plus a `rejected` map tagging malformed refs (including an empty or whitespace
+    `tickets:` entry, and a non-ASCII-digit value under the `re.ASCII` guard) `"malformed"` and, when
+    `linear_team` is set, off-team refs `"cross-team"`, with neither reaching the document; with no
+    `linear_team`, an off-team-looking ref is queried, not rejected; a crafted `linear_team` is
+    validated by shape and matched by split-and-equality, never spliced into a regex; the
+    total-identifier cap raises `LinearError` at one over the cap but not at exactly the cap; chunking
+    emits one document at exactly the batch size and two at batch size plus one (the off-by-one
+    boundary); identifiers passed as variables, not interpolated; aliases unique; the
     alias-to-identifier mapping is returned and round-trips; dedupe.
-  - `test_tickets.py`: model construction; the `LinearStateType` and `Severity` literal enforcement.
+  - `test_tickets.py`: model construction; a graded `Finding` has a resolved ticket and `reason
+    None` while a BLOCKED one has `ticket None` and a non-null `reason`; the `LinearStateType`,
+    `Severity`, and `BlockedReason` literal enforcement.
   - `test_linear_render.py`: severity grouping in the human table including the BLOCKED bucket; the
     `--json` shape with a `null` ticket and a `reason` on a BLOCKED finding; a rich-markup title is
     escaped; a hypothesis property that the shared render-safe helper is idempotent and leaves no
@@ -437,21 +463,23 @@ Test-driven, per project conventions, tests mirroring sources one to one, all of
   whose only ticket is canceled; the `--json` payload matches the exact finding objects; `--from`
   mode; the exit codes (0 by default even with findings, 1 on a DANGER finding under `--exit-code`,
   1 on a BLOCKED finding under `--exit-code` with no DANGER present, WARNING also under `--warn-exit`,
-  2 on auth or network error); a malformed or unresolved ticket on a drifted node fails the gate (the
-  false-pass regression test); a lattice with no tickets succeeds with no findings and without
+  2 on auth or network error); a malformed, unresolved, or (with `linear_team` set) cross-team ticket
+  on a drifted node fails the gate, the cross-team case asserting the ref was never queried (the
+  false-pass regression tests); a lattice with no tickets succeeds with no findings and without
   requiring `LINEAR_API_KEY`; an unknown `--from` id exits 2; the no-key actionable error when a
   ticket was present; `--from` and a positional target together as a usage error.
-- `test_constants.py` and `test_error_types.py` gain the new members: the `VALID_LINEAR_STATE_TYPES`
-  and `VALID_SEVERITIES` frozensets match their literals, and `LinearError` carries code
-  `LINEAR_ERROR`.
+- `test_constants.py` and `test_error_types.py` gain the new members: the `VALID_LINEAR_STATE_TYPES`,
+  `VALID_SEVERITIES`, and `VALID_BLOCKED_REASONS` frozensets match their literals, and `LinearError`
+  carries code `LINEAR_ERROR`.
 - Coverage at or above the existing 80 percent gate. `test_conventions.py` stays green: the new
   modules carry module docstrings and Google-style docstrings, use the constants pattern, and keep
   `Any` and `cast` confined to `linear_parser.py`.
 
 Fixtures extend `tests/conftest.py` with a node whose STALE edge also carries `tickets:` (including
-one drifted node that lists a malformed and an unresolved ticket ref, to exercise BLOCKED), plus a
-synthetic ticket-map fixture covering completed, started, unstarted, and canceled states, a parent
-with open children, and an unresolved identifier. Zero secrets, zero network.
+one drifted node that lists a malformed, an unresolved, and an off-team ticket ref, to exercise all
+three BLOCKED reasons), plus a synthetic ticket-map fixture covering completed, started, unstarted,
+and canceled states, a parent with open children, and an unresolved identifier. Zero secrets, zero
+network.
 
 ## 11. Dependencies
 
