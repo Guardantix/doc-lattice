@@ -29,6 +29,10 @@ In scope:
 - Shipping `init` as version 0.2.0: bumping `__version__` across the version locations and adding a
   `RELEASING.md` checklist that makes the matching `v0.2.0` release tag a non-optional, atomic part
   of the release (section 8), since the generated gates pin that tag.
+- Updating `roadmap.md` as the closing step of the slice, so the PR is atomic and self-consistent:
+  move `init` out of the roadmap's "Later spec" into a shipped entry pointing at this spec, and
+  correct the now-stale `linear` entry (already merged in PR #3) to shipped in the same edit, so the
+  roadmap reflects reality the moment this lands.
 
 Explicitly out of scope, deferred or declined (see section 11):
 
