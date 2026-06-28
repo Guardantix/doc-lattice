@@ -146,7 +146,7 @@ stay free of any network-derived domain.
 `findings` is the only key; it is ordered as in section 5.1. A BLOCKED finding carries the offending
 `ticket_ref`, a `null` ticket, and a `reason` of `"malformed"` (rejected by the shape check),
 `"cross-team"` (a `linear_team` is set and the ref belongs to another team, so it is never queried,
-section 7), or `"not-found"` (queried, but Linear returned `null`). There are no separate top-level
+section 7), or `"not-found"` (queried, but absent from the filtered result). There are no separate top-level
 lists: the command examines only the tickets on trigger nodes, so an unresolvable ref is always
 either irrelevant (its node is not in the trigger map, so it is never collected) or a BLOCKED finding
 (its node is). Under `--exit-code`, DANGER and BLOCKED findings drive exit 1.
@@ -162,8 +162,8 @@ report-only lists, because only trigger-node tickets are ever in scope. It perfo
 network, so it is unit-tested against synthetic trigger maps and ticket maps. For each trigger node,
 each of its `tickets:` refs is resolved: a hit in the ticket map grades by state; otherwise it is
 BLOCKED, with `reason` taken from the `rejected` map when present (`"malformed"` or `"cross-team"`)
-and `"not-found"` when the ref was queried but came back `null`. A node that lists the same ref twice
-yields one finding, not two.
+and `"not-found"` when the ref was queried but absent from the filtered result. A node that lists the
+same ref twice yields one finding, not two.
 
 ### 5.1 Finding identity and grading
 
@@ -174,7 +174,7 @@ out into one finding per edge. The severity comes from the implementing ticket's
 | Ticket state / ref outcome | Severity | Meaning |
 |---|---|---|
 | `completed` | DANGER | Shipped work built against a spec that has since drifted. |
-| malformed, cross-team, or unresolved (`null`) | BLOCKED | A ticket ref on a drifted node cannot be resolved, so whether shipped work is endangered is undeterminable. The gate fails closed on it. |
+| malformed, cross-team, or not-found (absent from the filtered result) | BLOCKED | A ticket ref on a drifted node cannot be resolved, so whether shipped work is endangered is undeterminable. The gate fails closed on it. |
 | `started` | WARNING | In-flight work (In Progress or In Review) against a spec that just drifted. |
 | `unstarted`, `backlog` | INFO | Not started; the worker will pick up the current spec. |
 | `canceled`, `triage`, `duplicate` | omitted | Not a real risk; produces no finding. |
@@ -186,8 +186,9 @@ completed ticket's still-open children are attached to its DANGER finding as con
 parent with open children is itself a signal.
 
 The gate fails closed. A ticket ref on a trigger node that the partitioner refused to query
-(malformed shape, or cross-team when a `linear_team` is set) or that Linear returned `null` for
-becomes a **BLOCKED** finding carrying the node id, path, the offending `ticket_ref`, and a `reason`,
+(malformed shape, or cross-team when a `linear_team` is set) or that was queried but absent from the
+filtered result becomes a **BLOCKED** finding carrying the node id, path, the offending `ticket_ref`,
+and a `reason`,
 because `tickets:` is repo-controlled and a drifted doc must not be able to silence its own DANGER by
 swapping a completed ticket for a typo, a deleted id, or another team's id. An unresolvable ref on a
 node that is *not* a trigger node endangers no shipped work and is never collected in the first
@@ -234,17 +235,22 @@ needs no credential.
 `"cross-team"` (section 7). Only the valid set reaches the wire, so what is queried is decided in
 pure, unit-tested code; both rejected kinds are returned for the join to turn into BLOCKED findings
 and are never queried, which also keeps an off-team identifier from leaking metadata into output. For
-the valid set it builds one GraphQL `query` document with one index-named aliased `issue(id:)` field
-per
-identifier (`i0: issue(id: $id0)`), sharing a single fragment for the ticket fields including
-`parent` and `children(first: 50)`. The child cap is deliberate and not paginated in this slice;
-children are context, not a gate. Identifier sets larger than a fixed batch size (for example 50)
-are chunked into several documents whose results are merged. A total distinct-identifier cap bounds
-the whole run, so a malicious doc set listing thousands of `tickets:` cannot drive unbounded
-outbound requests against Linear (section 9); exceeding it is a `LinearError`, not a silent flood.
-Identifiers are passed as GraphQL variables, never interpolated into the document text. The builder
-returns the alias-to-identifier mapping alongside the document so results can be keyed back to the
-exact identifier that was queried.
+the valid set it builds GraphQL `query` documents over the `issues(filter:)` connection rather than
+the root `issue(id:)` lookup, because the root `issue(id:)` field is non-null (`Issue!`): a missing,
+deleted, or typo'd id resolves to a top-level `errors` array with `data: null` that, by GraphQL
+non-null propagation, nulls the whole batch and would crash the audit on a single bad ref. The
+`issues(filter:)` connection instead returns whatever matches and an empty node list for no match,
+never an error, so absence is a normal result. Identifiers are grouped by team key (the segment
+before the last `-`); each group queries `issues(filter: { team: { key: { eq: $team } }, number: {
+in: $numbers } }, first: <batch>)` for that team's numbers, sharing one fragment for the ticket
+fields including `parent` and `children(first: 50)`. The child cap is deliberate and not paginated in
+this slice; children are context, not a gate. A group's numbers larger than a fixed batch size (for
+example 50) are chunked into several documents whose results are merged. A total distinct-identifier
+cap bounds the whole run, so a malicious doc set listing thousands of `tickets:` cannot drive
+unbounded outbound requests against Linear (section 9); exceeding it is a `LinearError`, not a silent
+flood. The team key and numbers are passed as GraphQL variables, never interpolated into the document
+text. The builder records the team key for each document so results can be keyed back to the exact
+identifier that was queried.
 
 `linear_client.py` is the transport, copied in shape from the proven `gx-linear-skills` client but
 hardened (see section 9): a synchronous `urllib.request` POST to the hardcoded
@@ -269,16 +275,20 @@ conversion there. It parses the JSON, rejects a GraphQL `errors` array or a miss
 a `LinearError`, and validates each issue node into a typed `Ticket`. Because Linear's schema is not
 ours to pin, ticket models validate the fields we query and ignore unknown fields (pydantic
 `extra="ignore"`), unlike our own frontmatter models, which forbid extras. The ticket map is keyed
-by the identifier that was *queried* (recovered through the alias-to-identifier mapping the builder
-returned), never by the `identifier` the response echoes, so a case or formatting difference in the
-echo cannot cause a lookup miss that a downstream node would then read as a false BLOCKED. Every
-string field from the response, not only titles and state names but also identifiers and urls, is
-stripped of control characters (C0, C1, and DEL) here, at the boundary, so a hostile response cannot
-smuggle terminal escape sequences downstream of validation (section 9). A missing ticket comes back as a
-`null` alias value, which is the unresolved case from section 5.1, distinct from an `errors` array;
-the parser records the unresolved identifier and
-does not raise. This mirrors the local core's decision that a BROKEN edge is a normal reported state
-rather than a crash.
+by the identifier that was *queried*, reconstructed as `{team}-{number}` from the validated team key
+for that document and each node's own `number`, never by the `identifier` the response echoes, so a
+case or formatting difference in the echo cannot cause a lookup miss that a downstream node would
+then read as a false BLOCKED. Because the query filtered on that team key and those numbers, every
+returned node belongs to the team and carries a queried number, so the reconstructed key always
+matches a queried id. Every string field from the response, not only titles and state names but also
+identifiers and urls, is stripped of control characters (C0, C1, and DEL) here, at the boundary, so a
+hostile response cannot smuggle terminal escape sequences downstream of validation (section 9). A
+missing ticket is simply absent from the filtered nodes: a queried identifier with no returned node
+is the not-found case, derived downstream as a `tickets.get` miss rather than recorded here, so the
+parser returns only the resolved ticket map and does not raise. A top-level `errors` array remains a
+`LinearError`, now correctly reserved for genuine errors (auth, rate limit, malformed query) rather
+than routine not-found. This mirrors the local core's decision that a BROKEN edge is a normal
+reported state rather than a crash.
 
 ## 7. Configuration
 
@@ -452,13 +462,14 @@ Test-driven, per project conventions, tests mirroring sources one to one, all of
   parent and children; the ticket map is keyed by the queried identifier even when the response
   echoes a different-cased `identifier`, so no false BLOCKED; an unknown extra field is ignored, not
   rejected; control characters in a title, a url, and an identifier are stripped at the boundary; a
-  GraphQL `errors` array raises `LinearError`; a missing `data` raises `LinearError`; a null issue is
-  reported unresolved without raising; a malformed response raises `LinearError`.
+  GraphQL `errors` array raises `LinearError`; a missing `data` raises `LinearError`; a queried number
+  absent from the filtered nodes is omitted from the ticket map without raising; a malformed response
+  raises `LinearError`.
 - **Fetch test (mocked `urlopen`, no real network).** `test_linear_fetch.py`: identifiers are
   deduplicated before the request; an empty identifier set returns an empty map, makes no request,
   and never reads `LINEAR_API_KEY`; a chunked fetch merges results across chunks and keys them by the
-  queried identifier; an unresolved (`null`) alias propagates as an unresolved identifier; a failing
-  chunk aborts the whole fetch.
+  queried identifier; a queried id absent from the response is omitted from the ticket map (surfaced
+  downstream as not-found); a failing chunk aborts the whole fetch.
 - **Transport test (mocked HTTP, no real network).** `test_linear_client.py`: the Authorization
   header carries the key; a POST with JSON content type; the HTTPS scheme guard rejects an `http://`
   URL; a 3xx redirect raises `LinearError` rather than being followed; the timeout is passed; the
