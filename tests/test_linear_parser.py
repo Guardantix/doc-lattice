@@ -68,6 +68,22 @@ def test_control_chars_stripped_from_url_and_identifier():
     assert "\x1b" not in tickets["PC-1"].url
 
 
+def test_duplicate_state_type_parses():
+    # Linear's "Duplicate" is its own state category, distinct from canceled. It must parse
+    # (not fail the whole audit with exit 2); stale_shipped omits it as terminal.
+    issue = _issue(state_type="duplicate")
+    issue["parent"] = {
+        "identifier": "PC-7",
+        "title": "Parent",
+        "state": {"name": "Dup", "type": "duplicate"},
+    }
+    text = json.dumps({"data": {"i0": issue}})
+    tickets, _ = parse_tickets(text, {"i0": "PC-1"})
+    assert tickets["PC-1"].state.type == "duplicate"
+    assert tickets["PC-1"].parent is not None
+    assert tickets["PC-1"].parent.state.type == "duplicate"
+
+
 def test_graphql_errors_raise():
     text = json.dumps({"errors": [{"message": "rate limited"}]})
     with pytest.raises(LinearError):

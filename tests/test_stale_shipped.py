@@ -56,7 +56,7 @@ def test_grading_by_state_type(state_type, severity):
     assert [f.severity for f in findings] == [severity]
 
 
-@pytest.mark.parametrize("state_type", ["canceled", "triage"])
+@pytest.mark.parametrize("state_type", ["canceled", "triage", "duplicate"])
 def test_terminal_states_omitted(state_type):
     lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale")
     trigger = build_audit_trigger(lattice, None)

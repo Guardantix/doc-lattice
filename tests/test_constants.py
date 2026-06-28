@@ -52,9 +52,15 @@ def test_location_kinds_match_literal():
 
 def test_linear_state_types_match_literal():
     assert frozenset(get_args(LinearStateType)) == VALID_LINEAR_STATE_TYPES
-    assert {"triage", "backlog", "unstarted", "started", "completed", "canceled"} == set(
-        VALID_LINEAR_STATE_TYPES
-    )
+    assert {
+        "triage",
+        "backlog",
+        "unstarted",
+        "started",
+        "completed",
+        "canceled",
+        "duplicate",
+    } == set(VALID_LINEAR_STATE_TYPES)
 
 
 def test_severities_match_literal():

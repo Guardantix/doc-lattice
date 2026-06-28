@@ -78,7 +78,9 @@ and rendering are identical.
 Four immutable types, all network-free once built.
 
 - `TicketState(name: str, type: LinearStateType)`. The Linear workflow state. `type` is one of the
-  six Linear state types and drives grading; `name` is the display label (for example "In Review").
+  seven Linear state categories and drives grading; `name` is the display label (for example "In
+  Review"). Linear exposes `duplicate` as its own state category (distinct from `canceled`), so it is
+  enumerated here and graded as an omitted terminal state.
 - `TicketRef(identifier: str, title: str | None, state: TicketState)`. A lightweight reference used
   for a ticket's parent and children, so context can be shown without a second fetch.
 - `Ticket(identifier, title, url, state: TicketState, parent: TicketRef | None,
@@ -91,7 +93,7 @@ Four immutable types, all network-free once built.
   fields are mutually exclusive, so the model can represent exactly the `--json` shape in section 4.1
   and nothing illegal.
 
-`LinearStateType = Literal["triage", "backlog", "unstarted", "started", "completed", "canceled"]`,
+`LinearStateType = Literal["triage", "backlog", "unstarted", "started", "completed", "canceled", "duplicate"]`,
 `Severity = Literal["DANGER", "WARNING", "INFO", "BLOCKED"]`, and
 `BlockedReason = Literal["malformed", "not-found", "cross-team"]` are added to `constants.py` with the
 existing `Literal` plus `get_args()` plus `frozenset` pattern, and imported wherever those values are
@@ -173,7 +175,7 @@ out into one finding per edge. The severity comes from the implementing ticket's
 | malformed, cross-team, or unresolved (`null`) | BLOCKED | A ticket ref on a drifted node cannot be resolved, so whether shipped work is endangered is undeterminable. The gate fails closed on it. |
 | `started` | WARNING | In-flight work (In Progress or In Review) against a spec that just drifted. |
 | `unstarted`, `backlog` | INFO | Not started; the worker will pick up the current spec. |
-| `canceled`, `triage` | omitted | Not a real risk; produces no finding. |
+| `canceled`, `triage`, `duplicate` | omitted | Not a real risk; produces no finding. |
 
 Consequences worth stating: a node in the trigger map with no tickets produces nothing, because no
 shipped work is endangered. A node whose tickets are all canceled produces nothing. In audit mode a

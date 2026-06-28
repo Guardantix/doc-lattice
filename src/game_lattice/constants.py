@@ -17,7 +17,9 @@ VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
 EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN"]
 VALID_EDGE_STATES: frozenset[str] = frozenset(get_args(EdgeState))
 
-LinearStateType = Literal["triage", "backlog", "unstarted", "started", "completed", "canceled"]
+LinearStateType = Literal[
+    "triage", "backlog", "unstarted", "started", "completed", "canceled", "duplicate"
+]
 VALID_LINEAR_STATE_TYPES: frozenset[str] = frozenset(get_args(LinearStateType))
 
 Severity = Literal["DANGER", "WARNING", "INFO", "BLOCKED"]
