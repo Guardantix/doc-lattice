@@ -10,6 +10,7 @@ VALID_LAYERS: frozenset[str] = frozenset(get_args(Layer))
 
 Authority = Literal["binding", "derived", "exploratory"]
 VALID_AUTHORITIES: frozenset[str] = frozenset(get_args(Authority))
+AUTHORITY_LADDER: tuple[Authority, ...] = ("exploratory", "derived", "binding")
 
 LocationKind = Literal["file", "section"]
 VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
@@ -27,6 +28,9 @@ VALID_SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 
 BlockedReason = Literal["malformed", "not-found", "cross-team"]
 VALID_BLOCKED_REASONS: frozenset[str] = frozenset(get_args(BlockedReason))
+
+SkipReason = Literal["source-unannotated", "target-unannotated"]
+VALID_SKIP_REASONS: frozenset[str] = frozenset(get_args(SkipReason))
 
 # Control-range boundaries for text sanitization. C0 (below 0x20) and DEL (0x7F) are the
 # ASCII controls; C1 (0x80 to 0x9F) are 8-bit controls that still drive terminals (for
