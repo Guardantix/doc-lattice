@@ -47,7 +47,9 @@ writes, and it writes surgically. This slice adds the second writing command, an
 boundary just as sharply so the careful-mutation posture is preserved:
 
 - `init` writes exactly one file, `.game-lattice.yml`, and only when it does not already exist. It
-  never overwrites it, never edits it, and never touches any other file on disk.
+  never overwrites it, never edits it, and never touches any other file on disk. The never-overwrite
+  guarantee is enforced atomically by an exclusive create (section 5), not by a separate existence
+  check, so there is no window in which a concurrently created config could be clobbered.
 - The pre-commit and CI artifacts are codegen: printed to stdout for the user to place, never
   written. This is why the slice can scaffold a repo it knows nothing about without risking a file
   the adopter has hand-tuned.
@@ -100,9 +102,11 @@ the https git form `uvx` needs), referenced by both snippet renderers so the lit
 duplicated.
 
 **Impure layer, `init` command in `cli.py`** (the only new disk-touching code). It computes
-`rev = f"v{__version__}"`, builds the scaffold, writes the config when absent through the existing
-`_atomic_write`, and prints the codegen. It follows the same `ProjectError -> exit 2` handling every
-other command uses.
+`rev = f"v{__version__}"`, builds the scaffold, writes the config through an exclusive create (see
+section 5), and prints the codegen. It follows the same `ProjectError -> exit 2` handling every
+other command uses. It deliberately does not reuse `reconcile`'s `_atomic_write`: that helper
+replaces the target path, which is correct for overwriting a tracked doc but would defeat the
+never-overwrite invariant here. An exclusive create is the right primitive for a create-only write.
 
 This keeps `scaffold` testable with no I/O, exactly as `render` and `reconcile.reconcile` are.
 
@@ -116,9 +120,13 @@ This keeps `scaffold` testable with no I/O, exactly as `render` and `reconcile.r
    containment resolution still happens later when the config is loaded; this is only the early,
    obvious-case check.
 3. Build the scaffold (pure).
-4. Config write to `cwd/.game-lattice.yml`:
-   - If it exists: leave it untouched, note the skip on stderr.
-   - If absent: atomic-write `scaffold.config_text`, note the write on stderr.
+4. Config write to `cwd/.game-lattice.yml` via an exclusive create (`open(path, "x")`, that is
+   `O_CREAT | O_EXCL`). The create is itself the existence check, so there is no time-of-check to
+   time-of-use gap:
+   - If the create succeeds, the file was absent: write `scaffold.config_text`, note the write on
+     stderr.
+   - If it raises `FileExistsError`, a config already exists: leave it untouched, note the skip on
+     stderr.
 5. Print the codegen to stdout: the pre-commit snippet then the CI snippet, each under a `#`-comment
    banner naming its destination file.
 6. Print placement guidance and the tag caveat (section 8) to stderr.
@@ -159,15 +167,17 @@ Added by the user under `repos:` in their `.pre-commit-config.yaml`:
     hooks:
       - id: game-lattice-check
         name: game-lattice check
-        entry: uvx --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice check
+        entry: uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice check
         language: system
         files: \.md$
         pass_filenames: false
 ```
 
 `language: system` runs the entry as given (it needs `uvx` on PATH, which the uv toolchain
-provides). `files: \.md$` triggers the hook when markdown changes; `pass_filenames: false` because
-`check` evaluates the whole lattice, not the individual changed files.
+provides). `--python 3.14` makes `uv` provision the interpreter game-lattice requires
+(`requires-python >= 3.14`), downloading it if absent, so the hook does not depend on the developer
+already having 3.14. `files: \.md$` triggers the hook when markdown changes; `pass_filenames: false`
+because `check` evaluates the whole lattice, not the individual changed files.
 
 ### 6.3 CI workflow (printed)
 
@@ -187,20 +197,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice check
+      - run: uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice check
 ```
 
-`check` exits 0 on a clean lattice, 1 on drift, and 2 on a tool error; the job fails on 1 or 2,
-which is exactly the gate this is meant to provide. Only `check` runs. `linear` is deliberately
-excluded from the generated CI: it needs a token and network, which are out of scope for an
-onboarding default.
+`--python 3.14` makes `uv` provision the interpreter game-lattice requires
+(`requires-python >= 3.14`), downloading it on the runner if absent, so the gate fails on real drift
+rather than on a missing interpreter. `check` exits 0 on a clean lattice, 1 on drift, and 2 on a
+tool error; the job fails on 1 or 2, which is exactly the gate this is meant to provide. Only
+`check` runs. `linear` is deliberately excluded from the generated CI: it needs a token and network,
+which are out of scope for an onboarding default.
 
 ## 7. Invocation model
 
-Both snippets invoke game-lattice through `uvx --from git+<url>@<rev> game-lattice check`. This is
-zero-install: `uv` fetches and runs the pinned revision on demand, adds no dependency to the
-adopter's project, and works identically in pre-commit and GitHub Actions. It fits because `uv` is
-already the toolchain and there is no PyPI release to install from.
+Both snippets invoke game-lattice through `uvx --python 3.14 --from git+<url>@<rev> game-lattice
+check`. This is zero-install: `uv` fetches and runs the pinned revision on demand, provisions the
+required Python 3.14 (downloading it if absent), adds no dependency to the adopter's project, and
+works identically in pre-commit and GitHub Actions. It fits because `uv` is already the toolchain
+and there is no PyPI release to install from. Putting `--python 3.14` on the invocation rather than
+in a separate setup step is what lets the same one-line command serve both the pre-commit hook
+(which has no place for a setup step) and CI uniformly.
 
 ## 8. Release model
 
@@ -250,13 +265,15 @@ future versions need only the matching tag, cut the same way.
   - default `docs_roots` yields `docs` active with the optional keys commented;
   - `--docs-root` overrides produce the listed roots; `--linear-team` produces an active
     `linear_team` line;
-  - `rev` is interpolated into both snippets, alongside the repo URL;
+  - `rev` is interpolated into both snippets, alongside the repo URL and the `--python 3.14` pin;
   - the generated `config_text` round-trips through the real `Config` model.
 - `tests/test_cli.py` (extend, using `tmp_path`):
   - `init` in an empty directory writes `.game-lattice.yml` with the expected content and prints
     both snippets to stdout, exit 0;
-  - `init` with a config already present does not change the file but still prints both snippets,
-    notes the skip on stderr, exit 0;
+  - `init` with a config already present does not change the file (exercising the `FileExistsError`
+    skip branch of the exclusive create, asserted by writing distinct sentinel content first and
+    confirming it survives byte-for-byte) but still prints both snippets, notes the skip on stderr,
+    exit 0;
   - `--docs-root` and `--linear-team` bake their values into the written file;
   - stdout carries both destination banners and the pinned rev, asserted as `f"v{__version__}"`
     (currently `@v0.2.0`) rather than a hardcoded literal, so the test tracks the version source;
