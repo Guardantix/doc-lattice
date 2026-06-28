@@ -91,9 +91,13 @@ class LinearClient:
                 f"Linear HTTP error {exc.code}; if it is a 429 or 5xx wait and re-run, "
                 "or run impact for the offline view"
             ) from exc
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, OSError) as exc:
+            # A connect-phase failure arrives as URLError (urllib wraps it). A body-read
+            # timeout or reset is a bare OSError/TimeoutError raised after open() returns,
+            # which the URLError branch alone would miss and let escape as an internal error.
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             raise LinearError(
-                f"Linear network error: {exc.reason}; check the connection and re-run, "
+                f"Linear network error: {reason}; check the connection and re-run, "
                 "or run impact for the offline view"
             ) from exc
         if len(body) > MAX_RESPONSE_BYTES:

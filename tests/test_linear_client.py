@@ -78,6 +78,30 @@ def test_url_error_maps_to_linear_error(monkeypatch):
         LinearClient(opener=_Boom()).execute("query {}", {})
 
 
+def test_read_timeout_maps_to_linear_error(monkeypatch):
+    # A body-read timeout raises TimeoutError after open() returns, not URLError; it must
+    # still surface as a LinearError with the retry message, not escape as an internal error.
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+
+    class _SlowResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, *_args):
+            raise TimeoutError("read timed out")
+
+    class _SlowOpener:
+        def open(self, req, timeout=None):  # noqa: ARG002
+            return _SlowResp()
+
+    with pytest.raises(LinearError) as exc:
+        LinearClient(opener=_SlowOpener()).execute("query {}", {})
+    assert "secret-key" not in str(exc.value)
+
+
 def test_oversized_response_raises(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
     from game_lattice.linear_client import MAX_RESPONSE_BYTES  # noqa: PLC0415

@@ -127,7 +127,10 @@ def build_query(team: str, numbers: Sequence[int]) -> QueryPlan:
     """
     filter_clause = (
         "filter: { team: { key: { eq: $team } }, number: { in: $numbers } },"
-        f" first: {BATCH_SIZE}"
+        # includeArchived: true so an archived completed or canceled ticket grades correctly
+        # instead of being excluded (the connection defaults it to false) and misreported as
+        # not-found; this tool audits shipped work, which is exactly what gets archived.
+        f" first: {BATCH_SIZE}, includeArchived: true"
     )
     document = (
         "query Audit($team: String!, $numbers: [Float!]!) {\n"

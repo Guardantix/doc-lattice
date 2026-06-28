@@ -104,6 +104,8 @@ def test_build_query_filter_shape():
     # Connection shape, not alias shape
     assert "issues(filter:" in plan.document
     assert "mutation" not in plan.document
+    # Archived issues are included so an archived completed/canceled ticket grades correctly.
+    assert "includeArchived: true" in plan.document
     # Variables carry the team and numbers; neither is interpolated into the document
     assert plan.variables == {"team": "PC", "numbers": [1, 2]}
     assert plan.team == "PC"
