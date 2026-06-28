@@ -192,13 +192,22 @@ set it builds one GraphQL `query` document with one index-named aliased `issue(i
 identifier (`i0: issue(id: $id0)`), sharing a single fragment for the ticket fields including
 `parent` and `children(first: 50)`. The child cap is deliberate and not paginated in this slice;
 children are context, not a gate. Identifier sets larger than a fixed batch size (for example 50)
-are chunked into several documents whose results are merged. Identifiers are passed as GraphQL
-variables, never interpolated into the document text.
+are chunked into several documents whose results are merged. A total distinct-identifier cap bounds
+the whole run, so a malicious doc set listing thousands of `tickets:` cannot drive unbounded
+outbound requests against Linear (section 9); exceeding it is a `LinearError`, not a silent flood.
+Identifiers are passed as GraphQL variables, never interpolated into the document text.
 
-`linear_client.py` is the transport, copied in shape from the proven `gx-linear-skills` client:
-synchronous `urllib.request` POST to `https://api.linear.app/graphql`, the API key read lazily from
-`LINEAR_API_KEY` on each request, the URL scheme validated up front, a bounded timeout, and a capped
-read so an oversized response cannot exhaust memory. HTTP and URL errors map to `LinearError`,
+`linear_client.py` is the transport, copied in shape from the proven `gx-linear-skills` client but
+hardened (see section 9): a synchronous `urllib.request` POST to the hardcoded
+`https://api.linear.app/graphql`, the API key read lazily from `LINEAR_API_KEY` on each request, a
+bounded timeout, and a capped read so an oversized response cannot exhaust memory. Two deliberate
+deviations from the precedent close network attack surface. First, the scheme guard accepts
+`https://` only and rejects `http://`, because the key rides in the `Authorization` header and must
+never cross the wire in cleartext. Second, the request runs through an opener that does not follow
+redirects: `urllib.request.urlopen` follows 3xx by default, which would let a hostile or
+intercepted response steer the credentialed client at an internal address; a redirect is instead
+turned into a `LinearError`. TLS certificate and hostname verification are left at the secure stdlib
+default (no unverified `ssl` context is ever constructed). HTTP and URL errors map to `LinearError`,
 a 429 included: this slice issues a single batched request per chunk and deliberately does not retry
 or back off (a local single-user tool), so a rate limit or transport failure surfaces as a clear
 exit-2 `LinearError` telling the user to retry rather than as hidden retry machinery. If identifiers
@@ -210,10 +219,13 @@ its name ends in `_parser` and `scripts/check_typing_boundaries.py` allows the u
 conversion there. It parses the JSON, rejects a GraphQL `errors` array or a missing `data` object as
 a `LinearError`, and validates each issue node into a typed `Ticket`. Because Linear's schema is not
 ours to pin, ticket models validate the fields we query and ignore unknown fields (pydantic
-`extra="ignore"`), unlike our own frontmatter models, which forbid extras. A missing ticket comes
-back as a `null` alias value, which is the **unresolved** case from section 5.1, distinct from an
-`errors` array; the parser records the unresolved identifier and does not raise. This mirrors the
-local core's decision that a BROKEN edge is a normal reported state rather than a crash.
+`extra="ignore"`), unlike our own frontmatter models, which forbid extras. Free-text string fields
+from the response (titles and state names) are stripped of ASCII control characters here, at the
+boundary, so a hostile response cannot smuggle terminal escape sequences downstream of validation
+(section 9). A missing ticket comes back as a `null` alias value, which is the **unresolved** case
+from section 5.1, distinct from an `errors` array; the parser records the unresolved identifier and
+does not raise. This mirrors the local core's decision that a BROKEN edge is a normal reported state
+rather than a crash.
 
 ## 7. Configuration
 
@@ -226,8 +238,12 @@ linear_team: PC          # optional; when set, validates and scopes referenced t
 
 When `linear_team` is set, an identifier whose team prefix does not match is flagged as a
 cross-team reference (a soft note) rather than silently queried. When it is null, identifiers are
-validated only against the generic shape and queried as written. Credentials never live in config;
-`LINEAR_API_KEY` is read from the environment, per decision 11.
+validated only against the generic shape and queried as written. Because `linear_team` comes from a
+repo-controlled `.game-lattice.yml`, it is never interpolated into a regex; it is itself validated
+against a fixed team-key shape `^[A-Z][A-Z0-9]*$` when first used, and the prefix match is done by
+splitting the identifier on `-` and comparing the segment by string equality (section 9). This keeps
+a crafted `linear_team` from causing catastrophic backtracking or from widening the allowlist.
+Credentials never live in config; `LINEAR_API_KEY` is read from the environment, per decision 11.
 
 ## 8. Error handling
 
@@ -235,8 +251,9 @@ Extends the `ProjectError` hierarchy with one coded error, consistent with the l
 `gx-linear-skills` precedent:
 
 - `LinearError` (code `LINEAR_ERROR`): a missing or empty `LINEAR_API_KEY`, an HTTP or network
-  failure, a GraphQL `errors` array, or an unparseable or malformed response. Every message names
-  the cause and the fix, and never includes the API key or the `Authorization` header.
+  failure, a refused redirect or a non-`https` scheme, an exceeded identifier cap, a GraphQL
+  `errors` array, or an unparseable or malformed response. Every message names the cause and the
+  fix, and never includes the API key or the `Authorization` header.
 
 Exit codes:
 
@@ -256,34 +273,75 @@ No bare `except Exception`. No `datetime.now()` outside `datetime_utils.py`.
 ## 9. Security
 
 This is the first slice with a real security surface, so it carries the dedicated pass the roadmap
-promised. The untrusted inputs are the local frontmatter (its `tickets:` values) and the network
-response.
+promised.
 
-- **Credentials.** `LINEAR_API_KEY` is read from the environment only, lazily, per request. It is
-  never sourced from config, CLI arguments, or files, and never logged, echoed, or placed in any
-  error message, `--json` output, or surfaced Linear error body. No error includes the
-  `Authorization` header.
-- **Read-only.** `linear_query.py` emits only `query` documents. There is no mutation path in this
-  slice, and a test asserts the generated document contains no `mutation`.
-- **Injection safety.** Ticket identifiers travel as GraphQL variables, never interpolated into the
-  document, so a repo-controlled `tickets:` value cannot change query structure.
-- **Identifier validation.** Each identifier is validated in the pure `linear_query` partitioner
-  against `^[A-Z][A-Z0-9]*-\d+$` (narrowed to the `linear_team` prefix when configured), matched as
-  written with no case normalization, before any document is built. A malformed value is returned
-  for reporting and never put on the wire, so the decision of what reaches Linear is pure and
-  unit-tested.
-- **Transport hardening.** HTTPS only, enforced by the URL-scheme guard. A bounded timeout. The
-  transport caps the bytes it reads, so a hostile or oversized response cannot exhaust memory before
-  the parser runs. No retry or backoff is added this slice; a 429 or transport error is a clear
-  exit-2 `LinearError`. Each ticket node is validated by pydantic (`extra="ignore"`, since the
-  schema is Linear's, not ours).
-- **Output rendering.** `linear_render` passes every externally-derived string (ticket titles and
-  identifiers from Linear, plus node ids, refs, and paths) through rich's `escape()`, exactly as the
-  existing commands do, so a ticket title containing rich markup cannot inject console formatting.
+**Threat model.** Three inputs are untrusted. The frontmatter `tickets:` values and the
+`.game-lattice.yml` `linear_team` are repo-controlled: the same threat the local core already names,
+where `check` runs in CI against potentially hostile repository contents, now extended because
+`linear` can run with a credential present. The Linear API response is network-controlled: a hostile
+or intercepted endpoint, or a redirect, is in scope. The asset is the `LINEAR_API_KEY` and the
+internal network the credentialed process can reach.
+
+- **No redirect following (CWE-918, SSRF).** `urllib.request.urlopen` follows 3xx redirects by
+  default. A hostile or man-in-the-middle response could redirect the credentialed client to an
+  internal address such as a cloud metadata service. The transport runs through an opener that
+  refuses redirects (a `HTTPRedirectHandler` whose `redirect_request` returns `None`, or an
+  `OpenerDirector` built without the redirect handler), turning any 3xx into a `LinearError`. This
+  is the OWASP-prescribed SSRF defense for an HTTP client. The endpoint is also a hardcoded
+  constant, never built from input.
+- **HTTPS only, no cleartext credential (CWE-319).** The scheme guard accepts `https://` and rejects
+  `http://`, deviating from the copied precedent, because the key travels in the `Authorization`
+  header. With redirects disabled there is no downgrade path either. TLS certificate and hostname
+  verification stay at the secure stdlib default (PEP 476); no unverified `ssl` context is ever
+  constructed.
+- **Credentials (CWE-200, CWE-532).** `LINEAR_API_KEY` is read from the environment only, lazily, per
+  request. It is never sourced from config, CLI arguments, or files, and never logged, echoed, or
+  placed in any error message, `--json` output, or surfaced Linear error body. The key stays a local
+  in the transport and is never put into an exception's arguments. Surfaced Linear error bodies are
+  length-capped and escaped before printing.
+- **GraphQL injection (CWE-943).** Ticket identifiers travel as GraphQL variables, never interpolated
+  into the document; aliases are index-derived (`i0`, `i1`), never from input. A repo-controlled
+  `tickets:` value cannot change query structure.
+- **Identifier validation (CWE-20, CWE-176).** Each identifier is validated in the pure
+  `linear_query` partitioner against a fixed literal regex using explicit ASCII classes
+  (`^[A-Z][A-Z0-9]*-[0-9]+$`, compiled with `re.ASCII` so Unicode digits and letters cannot slip
+  through), matched as written with no case normalization, before any document is built. A malformed
+  value is returned for reporting and never put on the wire, so the decision of what reaches Linear
+  is pure and unit-tested.
+- **`linear_team` not interpolated into a regex (CWE-1333, ReDoS).** The repo-controlled team key is
+  never spliced into a pattern; it is validated against `^[A-Z][A-Z0-9]*$` and the prefix is matched
+  by splitting the identifier on `-` and comparing for equality, so a crafted value cannot cause
+  catastrophic backtracking or widen the allowlist.
+- **Bounded outbound fan-out (CWE-400, CWE-770).** A total distinct-identifier cap bounds each run,
+  so a doc set listing thousands of `tickets:` cannot drive unbounded requests or burn the user's
+  rate limit; exceeding it is a `LinearError`. The per-response read is byte-capped and
+  `children(first: 50)` is unpaginated, both deliberate resource bounds. No retry or backoff is added
+  this slice, so there is no amplification on a 429.
+- **Unsafe deserialization avoided (CWE-502).** The response is parsed with `json.loads` (no code
+  execution) and validated by pydantic (`extra="ignore"`, since the schema is Linear's, not ours).
+  No new YAML parsing is added; `linear_team` arrives through the local core's `YAML(typ="safe")`
+  config load.
+- **Terminal injection (CWE-150).** Two layers. The boundary parser strips ASCII control characters
+  from network free-text fields, and `linear_render` passes every externally-derived string (ticket
+  titles, identifiers, state names, urls, parent and child titles from Linear, plus node ids, refs,
+  and paths) through rich's `escape()`, as the existing commands do. rich's `escape()` neutralizes
+  `[...]` markup but not raw control bytes, so the parser-level strip is the load-bearing defense and
+  the escape is defense in depth.
 - **Zero secrets in the repo.** Every test mocks the transport: no real network, no real key, only
   synthetic ticket JSON. No fixture, config, or CI file carries a token. The public repo's own CI
   does not run `linear`; `check` remains its CI gate. The pure layers (`stale_shipped`, `tickets`,
   `linear_query`, `linear_render`) touch neither network nor secrets.
+
+**Deployment note (CI trust boundary).** A consuming repo that wires `linear --exit-code` into CI
+must run it only on trusted refs, never on fork-pull-request workflows, because the gate needs
+`LINEAR_API_KEY` in the environment while processing repo-controlled `tickets:` and `linear_team`.
+Exposing the secret to untrusted PR code is a CI misconfiguration the tool cannot prevent; the
+`init` scaffolding (a later spec) will generate a workflow that respects this boundary.
+
+No new path input enters this slice, so the local core's `safe_resolve()` containment is unchanged
+and there is no added traversal surface. There is no SQL, no browser or web surface (so no XSS, CORS,
+or CSP concern), and no secret-dependent comparison (the `seen` hash compare is drift detection, not
+authentication, so timing is not a concern).
 
 ## 10. Testing
 
@@ -297,20 +355,24 @@ Test-driven, per project conventions, tests mirroring sources one to one, all of
     not graded; the deterministic severity-then-node-then-ticket ordering; a node with no tickets
     yields nothing.
   - `test_linear_query.py`: the document is a `query` and never a `mutation`; the valid/invalid
-    partition, with invalid identifiers never reaching the document; identifiers passed as variables,
-    not interpolated; aliases unique; chunking at the batch boundary; dedupe.
+    partition, with invalid identifiers never reaching the document; a non-ASCII-digit identifier is
+    rejected (the `re.ASCII` guard); a crafted `linear_team` is validated by shape and matched by
+    split-and-equality, never spliced into a regex; the total-identifier cap raises `LinearError`;
+    identifiers passed as variables, not interpolated; aliases unique; chunking at the batch
+    boundary; dedupe.
   - `test_tickets.py`: model construction and the state-type literal enforcement.
   - `test_linear_render.py`: severity grouping in the human table; the `--json` shape; a ticket
     title carrying rich markup is escaped; the API key never appears in any output.
 - **Boundary test.** `test_linear_parser.py`: a valid response yields typed `Ticket`s including
-  parent and children; an unknown extra field is ignored, not rejected; a GraphQL `errors` array
-  raises `LinearError`; a missing `data` raises `LinearError`; a null issue is reported unresolved
-  without raising; a malformed response raises `LinearError`.
+  parent and children; an unknown extra field is ignored, not rejected; a title carrying ASCII
+  control characters is stripped at the boundary; a GraphQL `errors` array raises `LinearError`; a
+  missing `data` raises `LinearError`; a null issue is reported unresolved without raising; a
+  malformed response raises `LinearError`.
 - **Transport test (mocked HTTP, no real network).** `test_linear_client.py`: the Authorization
-  header carries the key; a POST with JSON content type; the HTTPS scheme guard; the timeout is
-  passed; the read is byte-capped; `HTTPError` (including 429) and `URLError` map to `LinearError`;
-  the key never appears in any raised message; a missing `LINEAR_API_KEY` raises an actionable
-  `LinearError`.
+  header carries the key; a POST with JSON content type; the HTTPS scheme guard rejects an `http://`
+  URL; a 3xx redirect raises `LinearError` rather than being followed; the timeout is passed; the
+  read is byte-capped; `HTTPError` (including 429) and `URLError` map to `LinearError`; the key never
+  appears in any raised message; a missing `LINEAR_API_KEY` raises an actionable `LinearError`.
 - **CLI tests (mocked fetch).** The `linear` audit table; `--json` shape; `--from` mode; the exit
   codes (0 by default even with findings, 1 on DANGER under `--exit-code`, WARNING also under
   `--warn-exit`, 2 on auth or network error); a lattice with no tickets succeeds with no findings
