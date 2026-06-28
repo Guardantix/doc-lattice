@@ -52,7 +52,7 @@ config -> discovery -> frontmatter parse -> loader.build_lattice -> { check, imp
   editing a nested sub-section propagates impact to dependents of its parent.
 
 **Refs and edge state.** A `derives_from` ref resolves on the trailing segment after the last `#`
-(`art-direction#accent` and bare `accent` resolve to the same id; see `resolve.split_ref`).
+(`art-direction#accent` and bare `accent` resolve to the same id; see `model.split_ref`).
 A ref that resolves to nothing is **not** a load error: it is a normal lattice state
 (`target_id=None`) that `check` reports as `BROKEN`. This is the key modeling decision that
 distinguishes a broken edge (exit 1, drift) from a duplicate id (exit 2, incoherent index).

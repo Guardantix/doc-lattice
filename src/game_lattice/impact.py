@@ -22,7 +22,7 @@ def expand_targets(lattice: Lattice, token: str) -> set[str]:
     if location is None:
         return set()
     if location.kind == "file":
-        return {target_id} | set(lattice.anchors_by_path.get(location.path, frozenset()))
+        return {target_id} | lattice.anchors_by_path.get(location.path, frozenset())
     expanded = {target_id} | set(lattice.ancestors.get(target_id, ()))
     file_id = lattice.file_id_by_path.get(location.path)
     if file_id is not None:

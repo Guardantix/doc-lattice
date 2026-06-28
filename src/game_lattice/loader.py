@@ -70,12 +70,11 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
         )
 
     file_id_by_path = {node.path: node_id for node_id, node in nodes.items()}
-    anchors_by_path = {
-        path: frozenset(
-            id_ for id_, loc in index.items() if loc.kind == "section" and loc.path == path
-        )
-        for path in file_id_by_path
-    }
+    section_ids_by_path = defaultdict(list)
+    for id_, loc in index.items():
+        if loc.kind == "section":
+            section_ids_by_path[loc.path].append(id_)
+    anchors_by_path = {path: frozenset(section_ids_by_path[path]) for path in file_id_by_path}
 
     return Lattice(
         nodes_by_id=nodes,
