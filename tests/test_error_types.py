@@ -1,6 +1,13 @@
 """Tests for error types."""
 
-from game_lattice.error_types import ConfigError, ProjectError, ValidationError
+from game_lattice.error_types import (
+    BrokenRefError,
+    ConfigError,
+    DuplicateIdError,
+    ProjectError,
+    UnreadableDocError,
+    ValidationError,
+)
 
 
 def test_project_error_has_code():
@@ -19,3 +26,14 @@ def test_validation_error_inherits():
     err = ValidationError("bad input")
     assert isinstance(err, ProjectError)
     assert err.code == "VALIDATION_ERROR"
+
+
+def test_new_errors_extend_project_error():
+    for exc in (DuplicateIdError("x"), BrokenRefError("x"), UnreadableDocError("x")):
+        assert isinstance(exc, ProjectError)
+
+
+def test_error_codes():
+    assert DuplicateIdError("x").code == "DUPLICATE_ID"
+    assert BrokenRefError("x").code == "BROKEN_REF"
+    assert UnreadableDocError("x").code == "UNREADABLE_DOC"
