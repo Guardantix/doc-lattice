@@ -38,7 +38,7 @@ uv run ty check src/
 Bootstrap config and a drift gate for a repo whose docs you want to track:
 
 ```bash
-uvx --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice init
+uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice init
 ```
 
 This writes `.game-lattice.yml` (only if absent) and prints a pre-commit hook and

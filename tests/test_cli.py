@@ -352,6 +352,14 @@ def test_init_rejects_control_character_in_flag(tmp_path: Path, monkeypatch):
     assert not (tmp_path / ".game-lattice.yml").exists()
 
 
+def test_init_rejects_markup_metachar_in_docs_root(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "../[/]"])
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert not (tmp_path / ".game-lattice.yml").exists()
+
+
 def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     real_link = os.link

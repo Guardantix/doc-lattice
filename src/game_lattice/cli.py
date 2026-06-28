@@ -294,7 +294,7 @@ def init(
             f"v{__version__} tag is pushed so the pinned snippets resolve."
         )
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise typer.Exit(2) from exc
     raise typer.Exit(0)
 
