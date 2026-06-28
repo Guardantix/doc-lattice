@@ -4,6 +4,7 @@ from game_lattice.error_types import (
     BrokenRefError,
     ConfigError,
     DuplicateIdError,
+    LinearError,
     ProjectError,
     UnreadableDocError,
     ValidationError,
@@ -37,3 +38,10 @@ def test_error_codes():
     assert DuplicateIdError("x").code == "DUPLICATE_ID"
     assert BrokenRefError("x").code == "BROKEN_REF"
     assert UnreadableDocError("x").code == "UNREADABLE_DOC"
+
+
+def test_linear_error_inherits_and_has_code():
+    err = LinearError("network down")
+    assert isinstance(err, ProjectError)
+    assert err.code == "LINEAR_ERROR"
+    assert str(err) == "network down"

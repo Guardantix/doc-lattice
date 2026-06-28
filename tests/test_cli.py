@@ -170,3 +170,104 @@ def test_main_maps_unexpected_error_to_exit_2(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.main()
     assert exc_info.value.code == 2
+
+
+def _fake_fetch(tickets):
+    def fetch(_identifiers, _team, _client=None):
+        return tickets, {}
+
+    return fetch
+
+
+def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
+    from game_lattice.tickets import Ticket, TicketState  # noqa: PLC0415
+
+    ticket = Ticket(
+        identifier="PC-228",
+        title="t",
+        url="https://x/PC-228",
+        state=TicketState(name="Done", type="completed"),
+        parent=None,
+        children=(),
+    )
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["linear", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    danger = [f for f in payload["findings"] if f["severity"] == "DANGER"]
+    assert danger
+    assert danger[0]["ticket_ref"] == "PC-228"
+
+
+def test_linear_exit_code_gates_on_danger(lattice_dir, monkeypatch):
+    from game_lattice.tickets import Ticket, TicketState  # noqa: PLC0415
+
+    ticket = Ticket(
+        identifier="PC-228",
+        title="t",
+        url="https://x/PC-228",
+        state=TicketState(name="Done", type="completed"),
+        parent=None,
+        children=(),
+    )
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
+    monkeypatch.chdir(lattice_dir)
+    assert runner.invoke(app, ["linear"]).exit_code == 0
+    assert runner.invoke(app, ["linear", "--exit-code"]).exit_code == 1
+
+
+def test_linear_warn_exit_gates_on_warning(lattice_dir, monkeypatch):
+    from game_lattice.tickets import Ticket, TicketState  # noqa: PLC0415
+
+    ticket = Ticket(
+        identifier="PC-228",
+        title="t",
+        url="https://x/PC-228",
+        state=TicketState(name="In Progress", type="started"),
+        parent=None,
+        children=(),
+    )
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
+    monkeypatch.chdir(lattice_dir)
+    assert runner.invoke(app, ["linear", "--exit-code"]).exit_code == 0
+    assert runner.invoke(app, ["linear", "--exit-code", "--warn-exit"]).exit_code == 1
+
+
+def test_linear_blocked_ticket_fails_gate(lattice_dir, monkeypatch):
+    # The completed ticket is replaced by a typo: gate must still fail (fail-closed).
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({}))
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["linear", "--exit-code", "--json"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["findings"][0]["severity"] == "BLOCKED"
+
+
+def test_linear_no_tickets_needs_no_key(tmp_path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("---\nid: a\n---\n# A {#s}\nb\n", encoding="utf-8")
+    (docs / "b.md").write_text(
+        "---\nid: b\nderives_from:\n  - ref: a#s\n    seen: staleseenstaleseenstaleseenstale\n"
+        "---\n# B\nb\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["linear", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["findings"] == []
+
+
+def test_linear_from_and_target_conflict_exits_2(lattice_dir, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["linear", "accent", "--from", "accent"])
+    assert result.exit_code == 2
+
+
+def test_linear_unknown_from_exits_2(lattice_dir, monkeypatch):
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({}))
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["linear", "--from", "nonexistent"])
+    assert result.exit_code == 2

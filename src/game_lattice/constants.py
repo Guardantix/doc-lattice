@@ -16,3 +16,22 @@ VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
 
 EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN"]
 VALID_EDGE_STATES: frozenset[str] = frozenset(get_args(EdgeState))
+
+LinearStateType = Literal[
+    "triage", "backlog", "unstarted", "started", "completed", "canceled", "duplicate"
+]
+VALID_LINEAR_STATE_TYPES: frozenset[str] = frozenset(get_args(LinearStateType))
+
+Severity = Literal["DANGER", "WARNING", "INFO", "BLOCKED"]
+VALID_SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
+
+BlockedReason = Literal["malformed", "not-found", "cross-team"]
+VALID_BLOCKED_REASONS: frozenset[str] = frozenset(get_args(BlockedReason))
+
+# Control-range boundaries for text sanitization. C0 (below 0x20) and DEL (0x7F) are the
+# ASCII controls; C1 (0x80 to 0x9F) are 8-bit controls that still drive terminals (for
+# example 0x9B is a single-byte CSI introducer, 0x85 is NEL), so they are stripped too.
+ASCII_PRINTABLE_MIN: int = 0x20
+ASCII_DELETE: int = 0x7F
+C1_CONTROL_MIN: int = 0x80
+C1_CONTROL_MAX: int = 0x9F

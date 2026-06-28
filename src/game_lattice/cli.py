@@ -13,11 +13,14 @@ from .check import check_lattice, has_drift
 from .config import load_config
 from .error_types import ProjectError, UnreadableDocError
 from .impact import impact as impact_walk
+from .linear_fetch import fetch_tickets
+from .linear_render import findings_json, render_findings
 from .model import Lattice
 from .orchestrate import load_lattice
 from .reconcile import apply_reconcile
 from .reconcile import reconcile as plan_reconcile
 from .render import to_dot, to_mermaid
+from .stale_shipped import build_audit_trigger, build_from_trigger, stale_shipped
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 _out = Console()
@@ -177,6 +180,51 @@ def graph(
         raise typer.Exit(2) from exc
     rendered = to_dot(lattice, stale) if fmt == "dot" else to_mermaid(lattice, stale)
     typer.echo(rendered, nl=False)
+
+
+@app.command()
+def linear(  # noqa: PLR0913
+    target: Annotated[
+        str, typer.Argument(help="Narrow the audit to this id and the nodes that derive from it.")
+    ] = "",
+    from_id: Annotated[
+        str | None, typer.Option("--from", help="Forward-looking: impact-walk from this id.")
+    ] = None,
+    exit_code: Annotated[
+        bool, typer.Option("--exit-code", help="Exit 1 on any DANGER or BLOCKED finding.")
+    ] = False,
+    warn_exit: Annotated[
+        bool, typer.Option("--warn-exit", help="With --exit-code, also exit 1 on WARNING.")
+    ] = False,
+    config: ConfigOpt = None,
+    json_out: JsonOpt = False,
+) -> None:
+    """Report tickets shipped against a spec that has since drifted."""
+    if from_id is not None and target:
+        _err.print("[red]error[/red]: pass a positional target or --from, not both")
+        raise typer.Exit(2)
+    try:
+        project = load_config(config, Path.cwd())
+        lattice = load_lattice(project)
+        if from_id is not None:
+            trigger = build_from_trigger(lattice, from_id)
+        else:
+            trigger = build_audit_trigger(lattice, target or None)
+        refs = {ref for node_id in trigger for ref in lattice.nodes_by_id[node_id].tickets}
+        tickets, rejected = fetch_tickets(refs, project.config.linear_team)
+        findings = stale_shipped(lattice, trigger, tickets, rejected)
+    except ProjectError as exc:
+        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        raise typer.Exit(2) from exc
+    if json_out:
+        typer.echo(json.dumps(findings_json(findings)))
+    else:
+        render_findings(_out, findings)
+    if exit_code:
+        gate = {"DANGER", "BLOCKED"} | ({"WARNING"} if warn_exit else set())
+        if any(finding.severity in gate for finding in findings):
+            raise typer.Exit(1)
+    raise typer.Exit(0)
 
 
 def _atomic_write(path: Path, text: str) -> None:

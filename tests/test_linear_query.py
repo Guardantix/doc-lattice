@@ -1,0 +1,119 @@
+"""Tests for the linear query builder and identifier partition."""
+
+import pytest
+
+from game_lattice.error_types import ConfigError, LinearError
+from game_lattice.linear_query import (
+    BATCH_SIZE,
+    MAX_IDENTIFIERS,
+    build_query,
+    chunk_numbers,
+    group_by_team,
+    partition_identifiers,
+)
+
+
+def test_partition_splits_valid_and_malformed():
+    valid, rejected = partition_identifiers(["PC-228", "not-a-ticket", "", "  "], None)
+    assert valid == ["PC-228"]
+    assert rejected == {"not-a-ticket": "malformed", "": "malformed", "  ": "malformed"}
+
+
+def test_partition_dedupes_preserving_order():
+    valid, _ = partition_identifiers(["PC-2", "PC-1", "PC-2"], None)
+    assert valid == ["PC-2", "PC-1"]
+
+
+def test_partition_rejects_non_ascii_digits():
+    # Arabic-Indic digits must not pass the ASCII identifier guard.
+    valid, rejected = partition_identifiers(["PC-٢٣"], None)
+    assert valid == []
+    assert rejected["PC-٢٣"] == "malformed"
+
+
+def test_partition_tags_cross_team_when_team_set():
+    valid, rejected = partition_identifiers(["PC-1", "SEC-9"], "PC")
+    assert valid == ["PC-1"]
+    assert rejected == {"SEC-9": "cross-team"}
+
+
+def test_partition_queries_off_team_when_no_team_set():
+    valid, rejected = partition_identifiers(["SEC-9"], None)
+    assert valid == ["SEC-9"]
+    assert rejected == {}
+
+
+def test_partition_rejects_malformed_team_key():
+    with pytest.raises(ConfigError):
+        partition_identifiers(["PC-1"], "p c")
+
+
+def test_partition_rejects_trailing_newline_team_key():
+    # A trailing newline must not slip past the team-key guard (\Z, not $).
+    with pytest.raises(ConfigError):
+        partition_identifiers(["PC-1"], "PC\n")
+
+
+def test_partition_rejects_trailing_newline_identifier():
+    # A trailing newline must not slip past the identifier guard (\Z, not $).
+    valid, rejected = partition_identifiers(["PC-1\n"], None)
+    assert valid == []
+    assert rejected == {"PC-1\n": "malformed"}
+
+
+def test_partition_rejects_leading_zero_numbers():
+    # Leading zeros are disallowed: "PC-007" would be keyed "PC-7" after int(), so
+    # tickets.get("PC-007") would miss and produce a spurious not-found result.
+    valid, rejected = partition_identifiers(["PC-007", "PC-01"], None)
+    assert valid == []
+    assert rejected["PC-007"] == "malformed"
+    assert rejected["PC-01"] == "malformed"
+    # PC-0 (exactly zero, no leading zero) and PC-7 (no leading zero) remain valid.
+    valid2, rejected2 = partition_identifiers(["PC-0", "PC-7"], None)
+    assert valid2 == ["PC-0", "PC-7"]
+    assert rejected2 == {}
+
+
+def test_partition_cap_raises_one_over_but_not_at_cap():
+    at_cap = [f"PC-{i}" for i in range(MAX_IDENTIFIERS)]
+    valid, _ = partition_identifiers(at_cap, None)
+    assert len(valid) == MAX_IDENTIFIERS
+    over = [f"PC-{i}" for i in range(MAX_IDENTIFIERS + 1)]
+    with pytest.raises(LinearError):
+        partition_identifiers(over, None)
+
+
+def test_group_by_team_preserves_first_seen_order():
+    result = group_by_team(["PC-2", "PC-1", "SEC-9"])
+    assert result == [("PC", [2, 1]), ("SEC", [9])]
+
+
+def test_chunk_numbers_boundary():
+    exactly = list(range(BATCH_SIZE))
+    assert len(chunk_numbers(exactly)) == 1
+    one_more = list(range(BATCH_SIZE + 1))
+    assert len(chunk_numbers(one_more)) == 2
+
+
+def test_chunk_numbers_empty_yields_empty():
+    assert chunk_numbers([]) == []
+
+
+def test_build_query_filter_shape():
+    plan = build_query("PC", [1, 2])
+    # Connection shape, not alias shape
+    assert "issues(filter:" in plan.document
+    assert "mutation" not in plan.document
+    # Archived issues are included so an archived completed/canceled ticket grades correctly.
+    assert "includeArchived: true" in plan.document
+    # Variables carry the team and numbers; neither is interpolated into the document
+    assert plan.variables == {"team": "PC", "numbers": [1, 2]}
+    assert plan.team == "PC"
+    # Document declares both variables
+    assert "$team: String!" in plan.document
+    assert "$numbers: [Float!]!" in plan.document
+    # Filter references both variables by name
+    assert "team: { key: { eq: $team } }" in plan.document
+    assert "number: { in: $numbers }" in plan.document
+    # Fragment carries number as a top-level field for keying results
+    assert "\n  number\n" in plan.document

@@ -42,3 +42,10 @@ class UnreadableDocError(ProjectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="UNREADABLE_DOC")
+
+
+class LinearError(ProjectError):
+    """A Linear network, credential, or response error."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="LINEAR_ERROR")

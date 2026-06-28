@@ -4,14 +4,20 @@ from typing import get_args
 
 from game_lattice.constants import (
     VALID_AUTHORITIES,
+    VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
     VALID_LAYERS,
+    VALID_LINEAR_STATE_TYPES,
     VALID_LOCATION_KINDS,
+    VALID_SEVERITIES,
     VALID_STATUSES,
     Authority,
+    BlockedReason,
     EdgeState,
     Layer,
+    LinearStateType,
     LocationKind,
+    Severity,
     Status,
 )
 
@@ -42,3 +48,26 @@ def test_edge_states_match_literal():
 def test_location_kinds_match_literal():
     assert frozenset(get_args(LocationKind)) == VALID_LOCATION_KINDS
     assert {"file", "section"} == set(VALID_LOCATION_KINDS)
+
+
+def test_linear_state_types_match_literal():
+    assert frozenset(get_args(LinearStateType)) == VALID_LINEAR_STATE_TYPES
+    assert {
+        "triage",
+        "backlog",
+        "unstarted",
+        "started",
+        "completed",
+        "canceled",
+        "duplicate",
+    } == set(VALID_LINEAR_STATE_TYPES)
+
+
+def test_severities_match_literal():
+    assert frozenset(get_args(Severity)) == VALID_SEVERITIES
+    assert {"DANGER", "WARNING", "INFO", "BLOCKED"} == set(VALID_SEVERITIES)
+
+
+def test_blocked_reasons_match_literal():
+    assert frozenset(get_args(BlockedReason)) == VALID_BLOCKED_REASONS
+    assert {"malformed", "not-found", "cross-team"} == set(VALID_BLOCKED_REASONS)
