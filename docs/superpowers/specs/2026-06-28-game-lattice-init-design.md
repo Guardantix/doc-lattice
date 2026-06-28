@@ -52,8 +52,9 @@ boundary just as sharply so the careful-mutation posture is preserved:
 
 - `init` writes exactly one file, `.game-lattice.yml`, and only when it does not already exist. It
   never overwrites it, never edits it, and never touches any other file on disk. The never-overwrite
-  guarantee is enforced atomically by an exclusive create (section 5), not by a separate existence
-  check, so there is no window in which a concurrently created config could be clobbered.
+  guarantee is enforced atomically by a no-overwrite create (section 5), not by a separate existence
+  check, so there is no window in which a concurrently created config could be clobbered, and the
+  same write is crash-safe so a partial config can never be left behind.
 - The pre-commit and CI artifacts are codegen: printed to stdout for the user to place, never
   written. This is why the slice can scaffold a repo it knows nothing about without risking a file
   the adopter has hand-tuned.
@@ -106,11 +107,12 @@ the https git form `uvx` needs), referenced by both snippet renderers so the lit
 duplicated.
 
 **Impure layer, `init` command in `cli.py`** (the only new disk-touching code). It computes
-`rev = f"v{__version__}"`, builds the scaffold, writes the config through an exclusive create (see
-section 5), and prints the codegen. It follows the same `ProjectError -> exit 2` handling every
-other command uses. It deliberately does not reuse `reconcile`'s `_atomic_write`: that helper
-replaces the target path, which is correct for overwriting a tracked doc but would defeat the
-never-overwrite invariant here. An exclusive create is the right primitive for a create-only write.
+`rev = f"v{__version__}"`, builds the scaffold, writes the config through a crash-safe atomic
+create helper (`_atomic_create`, see section 5), and prints the codegen. It follows the same
+`ProjectError -> exit 2` handling every other command uses. It deliberately does not reuse
+`reconcile`'s `_atomic_write`: that helper publishes with a path replace, which is correct for
+overwriting a tracked doc but would clobber an existing config here. `_atomic_create` is its
+create-only counterpart, publishing with a no-overwrite primitive instead of a replace.
 
 This keeps `scaffold` testable with no I/O, exactly as `render` and `reconcile.reconcile` are.
 
@@ -118,19 +120,32 @@ This keeps `scaffold` testable with no I/O, exactly as `render` and `reconcile.r
 
 1. Resolve inputs: `rev = f"v{__version__}"`; `docs_roots = tuple(--docs-root) or ("docs",)`;
    `linear_team` from the flag or `None`.
-2. Validate `--docs-root` values syntactically: reject any entry that is absolute or contains a
-   `..` segment, with the same message style `config._resolve_roots` uses. This is a pure,
-   filesystem-free guard so `init` never writes a config guaranteed to fail loading. Full
-   containment resolution still happens later when the config is loaded; this is only the early,
-   obvious-case check.
-3. Build the scaffold (pure).
-4. Config write to `cwd/.game-lattice.yml` via an exclusive create (`open(path, "x")`, that is
-   `O_CREAT | O_EXCL`). The create is itself the existence check, so there is no time-of-check to
-   time-of-use gap:
-   - If the create succeeds, the file was absent: write `scaffold.config_text`, note the write on
-     stderr.
-   - If it raises `FileExistsError`, a config already exists: leave it untouched, note the skip on
-     stderr.
+2. Validate the flag values, a pure, filesystem-free guard so `init` never writes a config
+   guaranteed to fail loading:
+   - Every `--docs-root` entry is rejected if it is absolute or contains a `..` segment, with the
+     same message style `config._resolve_roots` uses. Full containment resolution still happens later
+     when the config is loaded; this is only the early, obvious-case check.
+   - Every flag value (`--docs-root` and `--linear-team`) is rejected if it is empty or contains a
+     control character (newline, tab, and the rest of the C0 set). Control characters in a path
+     segment or a team slug are always a mistake, and rejecting them up front keeps a stray newline
+     from reshaping the generated YAML. Non-control special characters are not rejected; step 3
+     serializes them safely.
+3. Build the scaffold (pure). The dynamic values (`docs_roots` entries and `linear_team`) are
+   emitted through the YAML serializer, never string-interpolated, so a value like `1.0`, `*ref`, a
+   leading `#`, or an embedded `:` is quoted and typed correctly rather than silently misparsed,
+   commented out, or rejected by the strict `Config` model. See section 4 and section 6.1.
+4. Config write to `cwd/.game-lattice.yml` through `_atomic_create`, which is both no-overwrite and
+   crash-safe. It writes `scaffold.config_text` to a uniquely named temp file in the same directory,
+   flushes and `os.fsync`s it so the bytes are durable, then publishes by `os.link`ing the temp onto
+   the final path and unlinking the temp. `os.link` is atomic and fails with `FileExistsError` if
+   the target already exists, so the final path only ever appears complete, never empty or partial:
+   - If the link succeeds, the file was absent and is now fully written: note the write on stderr.
+   - If the link raises `FileExistsError`, a config already exists: leave it untouched, remove the
+     temp, note the skip on stderr.
+   - On any other error the temp is removed before propagating, so a failed run leaves no final file
+     and no litter, and a rerun starts clean. A crash between the temp write and the link leaves at
+     most an orphaned temp (cleaned best-effort on the next run), never a corrupt config, because the
+     final path is published atomically by the link.
 5. Print the codegen to stdout: the pre-commit snippet then the CI snippet, each under a `#`-comment
    banner naming its destination file.
 6. Print placement guidance and the tag caveat (section 8) to stderr.
@@ -157,6 +172,13 @@ docs_roots:
 
 `--docs-root design --docs-root lore` replaces the `docs_roots` list with `design` and `lore`.
 `--linear-team PC` turns the commented `linear_team` line into an active `linear_team: PC`.
+
+The active block (the `docs_roots` list, and `linear_team` when supplied) is rendered by dumping a
+plain dict through the YAML serializer (`ruamel.yaml`, already a dependency), so every value is
+quoted and typed by the library rather than by hand. The fixed scaffolding around it, the header
+comment and the commented-out example keys, is static text; comments cannot affect parsing, so they
+stay literal. This is what makes a hostile value (`--linear-team "1.0"`, a root containing `:` or a
+leading `#`) come out as a correctly quoted scalar instead of malformed YAML.
 
 The generated text must round-trip through the real `Config` pydantic model. A test loads the
 generated file through `load_config` and asserts the resulting `Config`, so the template can never
@@ -247,21 +269,38 @@ The one real constraint is that the release is atomic: bumping the version, merg
 merge commit are a single "cut the release" step. A half-done release (init merged but no tag, or a
 tag without the version bump) is exactly what produces a broken gate. The slice therefore adds a
 short `RELEASING.md` checklist that makes the tag a non-optional part of shipping `init` and of every
-later version. The code stays version-agnostic: it reads `__version__` and pins `v{__version__}`, so
-future versions need only the matching tag, cut the same way.
+later version. Its closing step is the smoke test named above: after pushing `vX.Y.Z`, run the exact
+generated command (`uvx --python 3.14 --from git+...@vX.Y.Z game-lattice check`) once and confirm it
+resolves before the release is considered done. The code stays version-agnostic: it reads
+`__version__` and pins `v{__version__}`, so future versions need only the matching tag, cut the same
+way.
+
+The residual risk is operational, not in the code: a maintainer could still forget the checklist, or
+tag the wrong commit, and adopters who copied a snippet pinned to a missing tag would see it fail
+before `check` runs. Closing that hole with release automation that creates and verifies the tag in
+CI (an enforced, machine-checked smoke test rather than a human checklist) is deliberately out of
+scope for this slice. It is a release-tooling concern that applies to the whole project, not just
+`init`, and it is recorded as a deferred follow-up (section 11). The `RELEASING.md` checklist with
+its post-tag smoke test is the accepted mitigation until then.
 
 ## 9. Conventions and invariants
 
 - `scaffold.py` is a pure typed module: no `typing.Any`, no `typing.cast` (it is not a `_parser`
-  boundary module). String building only.
+  boundary module). The pre-commit and CI snippets are built from fixed templates; the config's
+  dynamic values are emitted through `ruamel.yaml` (dumping to a string, no I/O), which needs no
+  `Any` or `cast`, so the module stays inside the typing boundary.
+- No user-controlled value reaches the generated config by string interpolation. Flag values are
+  control-character-rejected at validation (section 5 step 2) and YAML-serialized at render
+  (section 6.1), so a hostile scalar cannot deform the output.
 - The repo URL is centralized as one constant and referenced from every renderer that needs it
   (both snippets and the config header); no duplicated literal.
 - No `datetime` use: the artifacts carry no timestamps.
 - Module docstring on `scaffold.py`; Google-style docstrings on `build_scaffold` and the `init`
   command. No em-dashes in docstrings, messages, or comments.
 - Paths: `init` writes the fixed filename `.game-lattice.yml` into the current working directory; it
-  is not a user-provided path, so it does not need `safe_resolve`. The `--docs-root` values are
-  written as text, not resolved at init time; section 5 step 2 gives them a syntactic guard.
+  is not a user-provided path, so it does not need `safe_resolve`. The `--docs-root` values are not
+  resolved against the filesystem at init time; section 5 step 2 guards them syntactically and
+  section 6.1 serializes them safely into the config.
 
 ## 10. Testing
 
@@ -270,18 +309,25 @@ future versions need only the matching tag, cut the same way.
   - `--docs-root` overrides produce the listed roots; `--linear-team` produces an active
     `linear_team` line;
   - `rev` is interpolated into both snippets, alongside the repo URL and the `--python 3.14` pin;
-  - the generated `config_text` round-trips through the real `Config` model.
+  - the generated `config_text` round-trips through the real `Config` model;
+  - hostile scalar round-trips: values that are all-numeric (`1.0`), start with `#`, contain `:` or
+    a YAML indicator character, are emitted so that `load_config` reads back exactly the input
+    string, with no misparse, comment-out, or `extra="forbid"` failure.
 - `tests/test_cli.py` (extend, using `tmp_path`):
   - `init` in an empty directory writes `.game-lattice.yml` with the expected content and prints
     both snippets to stdout, exit 0;
   - `init` with a config already present does not change the file (exercising the `FileExistsError`
-    skip branch of the exclusive create, asserted by writing distinct sentinel content first and
+    skip branch of `_atomic_create`, asserted by writing distinct sentinel content first and
     confirming it survives byte-for-byte) but still prints both snippets, notes the skip on stderr,
     exit 0;
+  - crash safety: a forced failure (for example monkeypatching `os.link` or `os.fsync` to raise)
+    leaves no `.game-lattice.yml` and no leftover temp behind, the command surfaces the error, and a
+    subsequent clean `init` writes the config correctly;
   - `--docs-root` and `--linear-team` bake their values into the written file;
   - stdout carries both destination banners and the pinned rev, asserted as `f"v{__version__}"`
     (currently `@v0.2.0`) rather than a hardcoded literal, so the test tracks the version source;
-  - an absolute or `..`-bearing `--docs-root` is rejected before any write.
+  - an absolute or `..`-bearing `--docs-root`, and a flag value containing a control character, are
+    each rejected before any write.
 - `tests/test_conventions.py` stays green (new module obeys the typing-boundary and docstring
   rules). Coverage stays at or above the existing 80 percent gate.
 
@@ -293,7 +339,7 @@ future versions need only the matching tag, cut the same way.
 | Interactive prompts | declined; non-deterministic, fights the offline/CI posture |
 | `--json`, `--force`, `--config` write target | declined; YAGNI for an onboarding command |
 | Non-GitHub CI providers | out of scope; GitHub Actions only, matching this repo |
-| Automating the `v0.2.0` release tag | declined; the tag is an enforced, atomic manual step with a `RELEASING.md` checklist (section 8) |
+| Automating and CI-verifying the release tag | deferred follow-up; a project-wide release-tooling concern. For this slice the tag is an enforced manual step with a `RELEASING.md` checklist whose closing step is a post-tag smoke test of the pinned ref (section 8) |
 | Authority-ladder validation, display-prefix lint | still deferred by the local-core map; unrelated to init |
 
 ## 12. Acceptance
