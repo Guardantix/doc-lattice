@@ -1,6 +1,8 @@
 """Command-line interface."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Annotated
 
@@ -10,17 +12,20 @@ from rich.markup import escape
 
 from . import __version__
 from .check import check_lattice, has_drift
-from .config import load_config
-from .error_types import ProjectError, UnreadableDocError
+from .config import DEFAULT_CONFIG_NAME, load_config
+from .error_types import ConfigError, ProjectError, UnreadableDocError
 from .impact import impact as impact_walk
 from .linear_fetch import fetch_tickets
+from .linear_query import is_valid_team_key
 from .linear_render import findings_json, render_findings
 from .model import Lattice
 from .orchestrate import load_lattice
 from .reconcile import apply_reconcile
 from .reconcile import reconcile as plan_reconcile
 from .render import to_dot, to_mermaid
+from .scaffold import build_scaffold
 from .stale_shipped import build_audit_trigger, build_from_trigger, stale_shipped
+from .text_utils import strip_control_chars
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 _out = Console()
@@ -63,7 +68,7 @@ def check(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
         lattice = _load(config)
         statuses = check_lattice(lattice)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise typer.Exit(2) from exc
     if json_out:
         payload = {
@@ -97,7 +102,7 @@ def impact(token: str, config: ConfigOpt = None, json_out: JsonOpt = False) -> N
         lattice = _load(config)
         affected = impact_walk(lattice, token)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise typer.Exit(2) from exc
     if json_out:
         payload = {
@@ -158,7 +163,7 @@ def reconcile(
         if not rewrites:
             _out.print("nothing to reconcile")
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise typer.Exit(2) from exc
 
 
@@ -176,7 +181,7 @@ def graph(
             if s.state == "STALE" and s.target_id is not None
         }
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise typer.Exit(2) from exc
     rendered = to_dot(lattice, stale) if fmt == "dot" else to_mermaid(lattice, stale)
     typer.echo(rendered, nl=False)
@@ -214,7 +219,7 @@ def linear(  # noqa: PLR0913
         tickets, rejected = fetch_tickets(refs, project.config.linear_team)
         findings = stale_shipped(lattice, trigger, tickets, rejected)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise typer.Exit(2) from exc
     if json_out:
         typer.echo(json.dumps(findings_json(findings)))
@@ -224,6 +229,85 @@ def linear(  # noqa: PLR0913
         gate = {"DANGER", "BLOCKED"} | ({"WARNING"} if warn_exit else set())
         if any(finding.severity in gate for finding in findings):
             raise typer.Exit(1)
+    raise typer.Exit(0)
+
+
+def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -> None:
+    """Reject flag values that would corrupt the generated config.
+
+    Args:
+        docs_roots: The docs roots from --docs-root (or the default).
+        linear_team: The --linear-team value, or None.
+
+    Raises:
+        ConfigError: If a value is empty or holds a control character, a docs root
+            is absolute or contains a parent reference, or linear_team is not a valid
+            Linear team key (which the linear command would later reject).
+    """
+    values = list(docs_roots)
+    if linear_team is not None:
+        values.append(linear_team)
+    for value in values:
+        if not value or strip_control_chars(value) != value:
+            msg = f"flag value {value!r} is empty or contains a control character"
+            raise ConfigError(msg)
+    for root in docs_roots:
+        if Path(root).is_absolute() or ".." in Path(root).parts:
+            msg = (
+                f"--docs-root {root!r} must be a relative path inside the project, "
+                "without '..' or a leading slash"
+            )
+            raise ConfigError(msg)
+    if linear_team is not None and not is_valid_team_key(linear_team):
+        msg = (
+            f"--linear-team {linear_team!r} must be a Linear team key: uppercase letters "
+            "and digits, starting with a letter, for example ENG. The linear command "
+            "rejects any other value."
+        )
+        raise ConfigError(msg)
+
+
+@app.command()
+def init(
+    docs_root: Annotated[
+        list[str] | None,
+        typer.Option("--docs-root", help="Docs root to write (repeatable). Defaults to docs."),
+    ] = None,
+    linear_team: Annotated[
+        str | None,
+        typer.Option(
+            "--linear-team",
+            help="Linear team key (uppercase, for example ENG) to bake into the config.",
+        ),
+    ] = None,
+) -> None:
+    """Scaffold .game-lattice.yml and print pre-commit and CI codegen."""
+    try:
+        roots = tuple(docs_root) if docs_root else ("docs",)
+        _validate_init_flags(roots, linear_team)
+        scaffold = build_scaffold(roots, linear_team, f"v{__version__}")
+        target = Path.cwd() / DEFAULT_CONFIG_NAME
+        try:
+            _atomic_create(target, scaffold.config_text)
+        except FileExistsError:
+            _err.print(f"{escape(target.name)} already exists, leaving it untouched")
+        except OSError as exc:
+            msg = f"cannot write {target.name}: {exc}"
+            raise ConfigError(msg) from exc
+        else:
+            _err.print(f"wrote {escape(target.name)}")
+        typer.echo("# ===== .pre-commit-config.yaml (add under `repos:`) =====")
+        typer.echo(scaffold.precommit_text)
+        typer.echo("# ===== .github/workflows/game-lattice.yml (new file) =====")
+        typer.echo(scaffold.ci_text)
+        _err.print(
+            "Add the pre-commit block under `repos:`, save the workflow as "
+            ".github/workflows/game-lattice.yml, and make sure the "
+            f"v{__version__} tag is pushed so the pinned snippets resolve."
+        )
+    except ProjectError as exc:
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        raise typer.Exit(2) from exc
     raise typer.Exit(0)
 
 
@@ -237,6 +321,33 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _atomic_create(path: Path, text: str) -> None:
+    """Create path with text, crash-safe and never overwriting an existing file.
+
+    Writes the full text to a unique temp file in the same directory through a
+    buffered file object (so a short write surfaces as an error rather than a
+    truncated file), fsyncs it so the bytes are durable, then publishes by
+    hard-linking the temp onto the final path. os.link is atomic and raises
+    FileExistsError if the target already exists, so the final path only ever
+    appears complete, never empty or partial. The temp is always removed, so a
+    failed run leaves no litter.
+
+    Raises:
+        FileExistsError: If path already exists.
+        OSError: If the write or the link fails for another reason.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def main() -> None:
     """Console-script entry point.
 
@@ -248,8 +359,8 @@ def main() -> None:
     try:
         app()
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {exc} ({exc.code})")
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
         raise SystemExit(2) from exc
     except (OSError, RuntimeError, ValueError) as exc:
-        _err.print(f"[red]internal error[/red]: {type(exc).__name__}: {exc}")
+        _err.print(f"[red]internal error[/red]: {type(exc).__name__}: {escape(str(exc))}")
         raise SystemExit(2) from exc

@@ -40,6 +40,18 @@ class QueryPlan:
     team: str
 
 
+def is_valid_team_key(team: str) -> bool:
+    """Return whether team matches the Linear team-key shape (uppercase alphanumeric).
+
+    Args:
+        team: A candidate Linear team key.
+
+    Returns:
+        True if team is a valid Linear team key, for example "ENG" or "PC".
+    """
+    return bool(_TEAM_RE.match(team))
+
+
 def partition_identifiers(
     identifiers: Iterable[str], linear_team: str | None
 ) -> tuple[list[str], dict[str, BlockedReason]]:
@@ -57,7 +69,7 @@ def partition_identifiers(
         ConfigError: If ``linear_team`` is set but is not a valid team key.
         LinearError: If the distinct identifier count exceeds ``MAX_IDENTIFIERS``.
     """
-    if linear_team is not None and not _TEAM_RE.match(linear_team):
+    if linear_team is not None and not is_valid_team_key(linear_team):
         msg = f"linear_team {linear_team!r} is not a valid team key; fix .game-lattice.yml"
         raise ConfigError(msg)
     distinct = list(dict.fromkeys(identifiers))
