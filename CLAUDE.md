@@ -14,7 +14,7 @@ Dependency management and execution go through `uv` (Python 3.14+).
 
 ```bash
 uv sync --group dev                       # install (incl. dev deps)
-uv run game-lattice --help                # run the CLI (commands: check, impact, reconcile, graph, linear, init)
+uv run game-lattice --help                # run the CLI (commands: check, impact, reconcile, graph, linear, init, lint)
 
 uv run --group dev pytest                 # full suite (enforces coverage >= 80%)
 uv run --group dev pytest tests/test_loader.py::test_duplicate_id_raises   # a single test
@@ -65,6 +65,11 @@ distinguishes a broken edge (exit 1, drift) from a duplicate id (exit 2, incoher
 hex chars (128 bits) and `canonicalize` strips cosmetic differences (line endings, trailing
 whitespace, edge blank lines). `impact` reverse-walks `dependents` transitively (with ancestor
 and enclosing-file expansion) to list everything a change touches.
+
+**Lint** is a pure structural check separate from drift: it flags a `derives_from` edge whose source
+is more authoritative than its target (binding > derived > exploratory), reports edges it cannot rank
+because an endpoint lacks `authority`, and never mutates. It exits 1 on a violation, mirroring `check`.
+Spec: `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`.
 
 **Reconcile is the only mutating command.** It plans new `seen` values from the loaded snapshot,
 then at write time **re-reads each downstream file fresh**, rewrites only the targeted `seen`
