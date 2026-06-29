@@ -404,3 +404,72 @@ def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(os, "link", real_link)
     assert runner.invoke(app, ["init"]).exit_code == 0
     assert (tmp_path / ".game-lattice.yml").exists()
+
+
+def _write_lint_docs(root: Path) -> None:
+    docs = root / "docs"
+    docs.mkdir()
+    # "down" is binding but derives from "up" (derived): a ladder inversion.
+    (docs / "up.md").write_text(
+        "---\nid: up\nauthority: derived\n---\n# Up\nbody\n", encoding="utf-8"
+    )
+    (docs / "down.md").write_text(
+        "---\nid: down\nauthority: binding\nderives_from:\n  - ref: up\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+
+
+def test_lint_exits_1_on_violation(tmp_path: Path, monkeypatch):
+    _write_lint_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["lint"])
+    assert result.exit_code == 1
+    assert "VIOLATION" in result.stdout
+
+
+def test_lint_json_lists_violations(tmp_path: Path, monkeypatch):
+    _write_lint_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["lint", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload["violations"][0]["source_id"] == "down"
+    assert payload["violations"][0]["target_authority"] == "derived"
+    assert payload["skipped"] == []
+
+
+def test_lint_exits_0_and_reports_skips(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # down (binding) derives from up, which has no authority: a skip, not a failure.
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\nbody\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nauthority: binding\nderives_from:\n  - ref: up\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["lint"])
+    assert result.exit_code == 0
+    assert "0 ladder violations" in result.stdout
+    assert "1 edges unranked" in result.stdout
+
+
+def test_lint_json_reports_skips(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\nbody\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nauthority: binding\nderives_from:\n  - ref: up\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["lint", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload["violations"] == []
+    assert payload["skipped"][0]["reason"] == "target-unannotated"
+
+
+def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
+    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["lint"])
+    assert result.exit_code == 2

@@ -62,4 +62,25 @@ def test_snippets_pin_rev_url_and_python():
     assert "pass_filenames: false" in s.precommit_text
     assert "actions/checkout@v4" in s.ci_text
     assert "astral-sh/setup-uv@v6" in s.ci_text
-    assert "linear" not in s.ci_text  # only check runs in the generated CI
+    assert "linear" not in s.ci_text  # the network command never runs in the generated CI
+
+
+def test_generated_gates_run_check_and_lint():
+    s = build_scaffold(("docs",), None, "v0.3.0")
+    assert "id: game-lattice-check" in s.precommit_text
+    assert "id: game-lattice-lint" in s.precommit_text
+    assert "game-lattice check" in s.precommit_text
+    assert "game-lattice lint" in s.precommit_text
+    assert "game-lattice check" in s.ci_text
+    assert "game-lattice lint" in s.ci_text
+
+
+def test_ci_runs_both_commands_in_one_step():
+    # A second GitHub Actions run step would be skipped after check exits nonzero,
+    # so both commands share one step that captures each exit code and fails if
+    # either failed.
+    ci = build_scaffold(("docs",), None, "v0.3.0").ci_text
+    assert ci.count("- run:") == 1
+    assert "rc_check=$?" in ci
+    assert "rc_lint=$?" in ci
+    assert '[ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]' in ci

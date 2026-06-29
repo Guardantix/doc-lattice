@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 from game_lattice.error_types import BrokenRefError
-from game_lattice.model import Lattice, Location, Node
-from game_lattice.resolve import target_content
+from game_lattice.loader import build_lattice
+from game_lattice.model import Lattice, Location, Node, NodeMeta, ParsedDoc
+from game_lattice.resolve import node_for_path, target_content
 
 
 def _lattice() -> Lattice:
@@ -46,3 +47,11 @@ def test_target_content_file_is_whole_body():
 def test_target_content_broken_raises():
     with pytest.raises(BrokenRefError):
         target_content(_lattice(), "missing")
+
+
+def test_node_for_path_returns_owning_node_for_an_anchor():
+    docs = [ParsedDoc(Path("up.md"), NodeMeta(id="up", authority="binding"), "# Up {#sec}\nbody\n")]
+    lat = build_lattice(docs)
+    owner = node_for_path(lat, lat.index["sec"].path)
+    assert owner.id == "up"
+    assert owner.authority == "binding"

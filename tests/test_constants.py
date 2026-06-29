@@ -3,6 +3,7 @@
 from typing import get_args
 
 from game_lattice.constants import (
+    AUTHORITY_LADDER,
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
@@ -10,6 +11,7 @@ from game_lattice.constants import (
     VALID_LINEAR_STATE_TYPES,
     VALID_LOCATION_KINDS,
     VALID_SEVERITIES,
+    VALID_SKIP_REASONS,
     VALID_STATUSES,
     Authority,
     BlockedReason,
@@ -18,6 +20,7 @@ from game_lattice.constants import (
     LinearStateType,
     LocationKind,
     Severity,
+    SkipReason,
     Status,
 )
 
@@ -71,3 +74,16 @@ def test_severities_match_literal():
 def test_blocked_reasons_match_literal():
     assert frozenset(get_args(BlockedReason)) == VALID_BLOCKED_REASONS
     assert {"malformed", "not-found", "cross-team"} == set(VALID_BLOCKED_REASONS)
+
+
+def test_authority_ladder_covers_every_authority():
+    assert frozenset(AUTHORITY_LADDER) == VALID_AUTHORITIES
+
+
+def test_authority_ladder_is_ordered_weak_to_strong():
+    assert AUTHORITY_LADDER == ("exploratory", "derived", "binding")
+
+
+def test_skip_reasons_match_literal():
+    assert frozenset(get_args(SkipReason)) == VALID_SKIP_REASONS
+    assert {"source-unannotated", "target-unannotated"} == set(VALID_SKIP_REASONS)

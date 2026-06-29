@@ -28,9 +28,11 @@ class Scaffold:
     ci_text: str
 
 
-def _check_invocation(rev: str) -> str:
-    """Return the uvx command both gates run, pinned to rev and Python 3.14."""
-    return f"uvx --python {PYTHON_PIN} --from git+{GAME_LATTICE_REPO_URL}@{rev} game-lattice check"
+def _invocation(rev: str, command: str) -> str:
+    """Return the uvx command a gate runs, pinned to rev and Python 3.14."""
+    return (
+        f"uvx --python {PYTHON_PIN} --from git+{GAME_LATTICE_REPO_URL}@{rev} game-lattice {command}"
+    )
 
 
 def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
@@ -62,13 +64,19 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
 
 
 def render_precommit(rev: str) -> str:
-    """Render the repo: local pre-commit hook that runs game-lattice check."""
+    """Render the repo: local pre-commit hooks that run game-lattice check and lint."""
     return (
         "  - repo: local\n"
         "    hooks:\n"
         "      - id: game-lattice-check\n"
         "        name: game-lattice check\n"
-        f"        entry: {_check_invocation(rev)}\n"
+        f"        entry: {_invocation(rev, 'check')}\n"
+        "        language: system\n"
+        "        files: \\.md$\n"
+        "        pass_filenames: false\n"
+        "      - id: game-lattice-lint\n"
+        "        name: game-lattice lint\n"
+        f"        entry: {_invocation(rev, 'lint')}\n"
         "        language: system\n"
         "        files: \\.md$\n"
         "        pass_filenames: false\n"
@@ -76,7 +84,14 @@ def render_precommit(rev: str) -> str:
 
 
 def render_ci(rev: str) -> str:
-    """Render the GitHub Actions workflow that runs game-lattice check."""
+    """Render the GitHub Actions workflow that runs game-lattice check and lint.
+
+    Both commands run in one shell step so a check failure does not skip lint. set +e
+    disables errexit so both exit codes are captured; the final test fails the step if
+    either command failed.
+    """
+    check = _invocation(rev, "check")
+    lint_cmd = _invocation(rev, "lint")
     return (
         "name: game-lattice\n"
         "on:\n"
@@ -91,7 +106,13 @@ def render_ci(rev: str) -> str:
         "    steps:\n"
         "      - uses: actions/checkout@v4\n"
         "      - uses: astral-sh/setup-uv@v6\n"
-        f"      - run: {_check_invocation(rev)}\n"
+        "      - run: |\n"
+        "          set +e\n"
+        f"          {check}\n"
+        "          rc_check=$?\n"
+        f"          {lint_cmd}\n"
+        "          rc_lint=$?\n"
+        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]\n'
     )
 
 

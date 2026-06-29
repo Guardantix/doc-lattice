@@ -18,6 +18,7 @@ from .impact import impact as impact_walk
 from .linear_fetch import fetch_tickets
 from .linear_query import is_valid_team_key
 from .linear_render import findings_json, render_findings
+from .lint import LintResult, lint_lattice
 from .model import Lattice
 from .orchestrate import load_lattice
 from .reconcile import apply_reconcile
@@ -61,6 +62,19 @@ def _load(config: Path | None) -> Lattice:
     return load_lattice(project)
 
 
+def _skip_summary(result: LintResult) -> str:
+    """Render the one-line coverage summary printed after any human lint run."""
+    violations = len(result.violations)
+    unranked = len(result.skipped)
+    targets = sum(1 for s in result.skipped if s.reason == "target-unannotated")
+    sources = sum(1 for s in result.skipped if s.reason == "source-unannotated")
+    label = "violation" if violations == 1 else "violations"
+    line = f"{violations} ladder {label}, {unranked} edges unranked"
+    if unranked:
+        line += f" ({targets} target unannotated, {sources} source unannotated)"
+    return line
+
+
 @app.command()
 def check(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
     """Classify every edge; exit 1 on drift, 2 on tool error."""
@@ -93,6 +107,48 @@ def check(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
                 f"[{color}]{s.state:<13}[/{color}] {escape(s.source_id)} -> {escape(s.target_ref)}"
             )
     raise typer.Exit(1 if has_drift(statuses) else 0)
+
+
+@app.command()
+def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
+    """Validate the authority ladder; exit 1 on a violation, 2 on tool error."""
+    try:
+        lattice = _load(config)
+        result = lint_lattice(lattice)
+    except ProjectError as exc:
+        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        raise typer.Exit(2) from exc
+    if json_out:
+        payload = {
+            "violations": [
+                {
+                    "source_id": v.source_id,
+                    "source_authority": v.source_authority,
+                    "target_id": v.target_id,
+                    "target_ref": v.target_ref,
+                    "target_authority": v.target_authority,
+                }
+                for v in result.violations
+            ],
+            "skipped": [
+                {
+                    "source_id": s.source_id,
+                    "target_ref": s.target_ref,
+                    "target_id": s.target_id,
+                    "reason": s.reason,
+                }
+                for s in result.skipped
+            ],
+        }
+        typer.echo(json.dumps(payload))
+    else:
+        for v in result.violations:
+            _out.print(
+                f"[red]VIOLATION[/red]  {escape(v.source_id)} ({v.source_authority}) -> "
+                f"{escape(v.target_ref)} ({v.target_authority})"
+            )
+        _out.print(_skip_summary(result))
+    raise typer.Exit(1 if result.violations else 0)
 
 
 @app.command()

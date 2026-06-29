@@ -14,7 +14,7 @@ Dependency management and execution go through `uv` (Python 3.14+).
 
 ```bash
 uv sync --group dev                       # install (incl. dev deps)
-uv run game-lattice --help                # run the CLI (commands: check, impact, reconcile, graph, linear, init)
+uv run game-lattice --help                # run the CLI (commands: check, impact, reconcile, graph, linear, init, lint)
 
 uv run --group dev pytest                 # full suite (enforces coverage >= 80%)
 uv run --group dev pytest tests/test_loader.py::test_duplicate_id_raises   # a single test
@@ -66,6 +66,11 @@ hex chars (128 bits) and `canonicalize` strips cosmetic differences (line ending
 whitespace, edge blank lines). `impact` reverse-walks `dependents` transitively (with ancestor
 and enclosing-file expansion) to list everything a change touches.
 
+`lint` is a pure structural check separate from drift: it flags a `derives_from` edge whose source
+is more authoritative than its target (binding > derived > exploratory), reports edges it cannot rank
+because an endpoint lacks `authority`, and never mutates. It exits 1 on a violation, mirroring `check`.
+Spec: `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`.
+
 **Reconcile is the only mutating command.** It plans new `seen` values from the loaded snapshot,
 then at write time **re-reads each downstream file fresh**, rewrites only the targeted `seen`
 scalar(s) through round-trip YAML (preserving body, key order, comments, and any concurrent edit),
@@ -89,7 +94,7 @@ publishes each file via temp -> fsync -> `os.link`, so a partial write never lan
 release tag. Spec: `docs/superpowers/specs/2026-06-28-game-lattice-init-design.md`.
 
 **Pure vs impure split.** All graph and report logic is pure and filesystem-free: `model`,
-`hashing`, `sections`, `resolve`, `loader`, `check`, `impact`, `render`, `reconcile.reconcile`/
+`hashing`, `sections`, `resolve`, `loader`, `check`, `lint`, `impact`, `render`, `reconcile.reconcile`/
 `apply_reconcile` (which returns rewritten text rather than writing it), plus the linear pure core
 (`tickets`, `linear_query`, `stale_shipped`, `linear_render`) and `scaffold`. The untyped-to-typed
 boundary modules are `frontmatter_parser` and `linear_parser`. Only `config`, `discovery`,

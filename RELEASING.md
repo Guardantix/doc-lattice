@@ -29,5 +29,5 @@ version bump) leaves adopters with a gate that fails before `check` runs.
 
    It must resolve and run. If it does not, cut `X.Y.(Z+1)` rather than moving the tag.
 
-The tag must point at a commit that contains both `check` (so the gates run) and
+The tag must point at a commit that contains `check` and `lint` (so the gates run) and
 `init` (so adopters can run `game-lattice init` from the same ref).

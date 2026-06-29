@@ -15,6 +15,9 @@ The spec is the source of truth; this file is the at-a-glance index.
 - **init slice** (PR #4). The `init` command scaffolds `.game-lattice.yml` and prints pre-commit
   and CI codegen for an adopting repo. Shipped as the 0.2.0 release (tag `v0.2.0`). Spec:
   `docs/superpowers/specs/2026-06-28-game-lattice-init-design.md`.
+- **lint slice** (v0.3.0). The `lint` command validates the authority ladder over `derives_from`
+  edges, reports edges it cannot rank, and is wired into the generated pre-commit and CI gates
+  alongside `check`. Spec: `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`.
 
 Acceptance (local-core spec section 13), still met:
 
@@ -28,8 +31,6 @@ Acceptance (local-core spec section 13), still met:
 
 - Release-tag automation. CI that creates and verifies the `vX.Y.Z` tag, replacing the manual
   `RELEASING.md` checklist with a machine-checked smoke test. Recorded by the init spec (section 11).
-- Authority-ladder validation. `authority` is already parsed, stored, and rendered, but the ladder
-  is not policed.
 - Display-prefix lint. An optional future enhancement.
 
 ## Out of scope by design

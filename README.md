@@ -35,16 +35,16 @@ uv run ty check src/
 
 ## Adopting game-lattice in your docs repo
 
-Bootstrap config and a drift gate for a repo whose docs you want to track:
+Bootstrap config and the drift and authority-ladder gates for a repo whose docs you want to track:
 
 ```bash
-uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice init
+uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.3.0 game-lattice init
 ```
 
-This writes `.game-lattice.yml` (only if absent) and prints a pre-commit hook and
-a GitHub Actions workflow that run `game-lattice check` as your drift gate. Paste
-each where the output says. Pass `--docs-root` (repeatable) or `--linear-team` to
-bake those values into the generated config.
+This writes `.game-lattice.yml` (only if absent) and prints pre-commit hooks and
+a GitHub Actions workflow that run `game-lattice check` (drift) and `game-lattice lint`
+(authority ladder) as your gates. Paste each where the output says. Pass `--docs-root`
+(repeatable) or `--linear-team` to bake those values into the generated config.
 
 ## Documentation
 
