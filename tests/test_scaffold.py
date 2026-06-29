@@ -53,26 +53,26 @@ def test_render_config_quotes_hostile_docs_root(root):
 
 
 def test_snippets_pin_rev_url_and_python():
-    s = build_scaffold(("docs",), None, "v0.2.0")
-    for text in (s.precommit_text, s.ci_text):
+    scaffold = build_scaffold(("docs",), None, "v0.2.0")
+    for text in (scaffold.precommit_text, scaffold.ci_text):
         assert "@v0.2.0" in text
         assert GAME_LATTICE_REPO_URL in text
         assert "--python 3.14" in text
-    assert "repo: local" in s.precommit_text
-    assert "pass_filenames: false" in s.precommit_text
-    assert "actions/checkout@v4" in s.ci_text
-    assert "astral-sh/setup-uv@v6" in s.ci_text
-    assert "linear" not in s.ci_text  # the network command never runs in the generated CI
+    assert "repo: local" in scaffold.precommit_text
+    assert "pass_filenames: false" in scaffold.precommit_text
+    assert "actions/checkout@v4" in scaffold.ci_text
+    assert "astral-sh/setup-uv@v6" in scaffold.ci_text
+    assert "linear" not in scaffold.ci_text  # the network command never runs in the generated CI
 
 
 def test_generated_gates_run_check_and_lint():
-    s = build_scaffold(("docs",), None, "v0.3.0")
-    assert "id: game-lattice-check" in s.precommit_text
-    assert "id: game-lattice-lint" in s.precommit_text
-    assert "game-lattice check" in s.precommit_text
-    assert "game-lattice lint" in s.precommit_text
-    assert "game-lattice check" in s.ci_text
-    assert "game-lattice lint" in s.ci_text
+    scaffold = build_scaffold(("docs",), None, "v0.3.0")
+    assert "id: game-lattice-check" in scaffold.precommit_text
+    assert "id: game-lattice-lint" in scaffold.precommit_text
+    assert "game-lattice check" in scaffold.precommit_text
+    assert "game-lattice lint" in scaffold.precommit_text
+    assert "game-lattice check" in scaffold.ci_text
+    assert "game-lattice lint" in scaffold.ci_text
 
 
 def test_ci_runs_both_commands_in_one_step():

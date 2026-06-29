@@ -28,7 +28,7 @@ TYPING_MODULES = {"typing", "typing_extensions"}
 ESCAPE_HATCHES = {"Any", "cast"}
 
 
-def find_any_usage(filepath: Path) -> list[tuple[int, str]]:
+def find_escape_hatch_usage(filepath: Path) -> list[tuple[int, str]]:
     """Return (line, message) pairs for each typing.Any/typing.cast use in the file."""
     try:
         tree = ast.parse(filepath.read_text(encoding="utf-8"), filename=str(filepath))
@@ -72,7 +72,9 @@ def main() -> None:
     for py_file in search_dir.rglob("*.py"):
         if is_boundary_module(py_file.relative_to(search_dir)):
             continue
-        violations.extend(f"  {py_file}:{line} - {msg}" for line, msg in find_any_usage(py_file))
+        violations.extend(
+            f"  {py_file}:{line} - {msg}" for line, msg in find_escape_hatch_usage(py_file)
+        )
     if violations:
         print("FAIL: typing.Any/typing.cast found outside boundary modules:")
         for v in violations:

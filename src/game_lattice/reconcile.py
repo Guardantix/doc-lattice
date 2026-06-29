@@ -48,6 +48,7 @@ def reconcile(
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
         raise ValidationError(f"unknown downstream id {downstream_id!r}; run check to list ids")
     node_ids = sorted(lattice.nodes_by_id) if reconcile_all else [downstream_id]
+    targeting_specific_ref = ref is not None and not reconcile_all
     plan: dict[Path, dict[str, str]] = defaultdict(dict)
     ref_matched = False
     for node_id in node_ids:
@@ -57,7 +58,7 @@ def reconcile(
                 continue
             ref_matched = True
             if edge.target_id is None:
-                if ref is not None and not reconcile_all:
+                if targeting_specific_ref:
                     raise BrokenRefError(
                         f"cannot reconcile broken ref {edge.target_ref!r} on {node_id};"
                         " fix the ref first"
@@ -67,7 +68,7 @@ def reconcile(
             if edge.seen is not None and new_seen == edge.seen:
                 continue
             plan[node.path][edge.target_ref] = new_seen
-    if ref is not None and not reconcile_all and not ref_matched:
+    if targeting_specific_ref and not ref_matched:
         raise ValidationError(
             f"node {downstream_id!r} has no edge matching ref {ref!r}; run check to list its edges"
         )
@@ -121,11 +122,16 @@ def apply_reconcile(current_file_text: str, updates: dict[str, str]) -> tuple[st
         if not isinstance(entry, MutableMapping):
             raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
         ref = entry.get("ref")
-        if ref in updates and entry.get("seen") != updates[ref]:
-            entry["seen"] = updates[ref]
-            applied.add(ref)
+        if ref in updates:
+            new_seen = updates[ref]
+            if entry.get("seen") != new_seen:
+                entry["seen"] = new_seen
+                applied.add(ref)
     if not applied:
         return current_file_text, applied
     buffer = io.StringIO()
     yaml.dump(data, buffer)
+    # ruamel always ends its dump with a newline, so the closing ``---`` lands on its own
+    # line. body has no leading newline (the split joined the post-fence lines), so it is
+    # reattached directly after the fence.
     return f"---\n{buffer.getvalue()}---\n{body}", applied

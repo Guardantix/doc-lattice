@@ -61,7 +61,11 @@ def impact(lattice: Lattice, token: str) -> list[Node]:
                 continue
             affected.add(source_id)
             queue.append(source_id)
+            # An affected node's file has effectively changed, so its own anchored
+            # sections are changed upstreams too. Their ids differ from the file id, so
+            # enqueue them to reach dependents that derive from those sections. This is
+            # expand_targets' file-to-anchors expansion applied mid-walk.
             node = lattice.nodes_by_id.get(source_id)
             if node is not None:
                 queue.extend(lattice.anchors_by_path.get(node.path, frozenset()))
-    return [lattice.nodes_by_id[i] for i in sorted(affected)]
+    return [lattice.nodes_by_id[node_id] for node_id in sorted(affected)]

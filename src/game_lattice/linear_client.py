@@ -85,6 +85,8 @@ class LinearClient:
         )
         try:
             with self._opener.open(request, timeout=self._timeout) as resp:  # ty: ignore[unresolved-attribute]
+                # Read one byte past the cap so an at-the-limit body stays distinguishable from
+                # an over-the-limit one; the len() check below then rejects only the latter.
                 body = resp.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raise LinearError(

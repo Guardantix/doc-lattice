@@ -32,10 +32,17 @@ def _connection(nodes):
     return json.dumps({"data": {"issues": {"nodes": nodes}}})
 
 
+def _echo_issues(variables):
+    """Return a connection echoing one issue per requested number in the team."""
+    team = variables["team"]
+    numbers = variables["numbers"]
+    return _connection([_issue(f"{team}-{n}", n) for n in numbers])
+
+
 def test_empty_identifiers_skip_network(monkeypatch):
     monkeypatch.delenv("LINEAR_API_KEY", raising=False)
 
-    def explode(*_a, **_k):
+    def explode(*_args, **_kwargs):
         raise AssertionError("must not construct a client")
 
     monkeypatch.setattr("game_lattice.linear_fetch.LinearClient", explode)
@@ -58,12 +65,7 @@ def test_missing_node_absent_not_error():
 
 def test_two_teams_two_queries():
     # With linear_team=None, ids spanning two teams trigger one query per team.
-    def body_for(variables):
-        team = variables["team"]
-        numbers = variables["numbers"]
-        return _connection([_issue(f"{team}-{n}", n) for n in numbers])
-
-    client = _RecordingClient(body_for)
+    client = _RecordingClient(_echo_issues)
     tickets, _ = fetch_tickets(["PC-1", "SEC-9"], None, client=client)  # type: ignore
     assert set(tickets) == {"PC-1", "SEC-9"}
     assert client.calls == 2
@@ -71,12 +73,7 @@ def test_two_teams_two_queries():
 
 def test_cross_team_rejected_before_fetch():
     # When linear_team is set, cross-team ids are rejected before any request is issued.
-    def body_for(variables):
-        team = variables["team"]
-        numbers = variables["numbers"]
-        return _connection([_issue(f"{team}-{n}", n) for n in numbers])
-
-    client = _RecordingClient(body_for)
+    client = _RecordingClient(_echo_issues)
     tickets, rejected = fetch_tickets(["PC-1", "SEC-9"], "PC", client=client)  # type: ignore
     assert rejected == {"SEC-9": "cross-team"}
     assert "PC-1" in tickets
@@ -86,13 +83,7 @@ def test_cross_team_rejected_before_fetch():
 def test_chunks_merge(monkeypatch):
     # When the batch size is 1, two ids in the same team require two requests whose results merge.
     monkeypatch.setattr("game_lattice.linear_fetch.BATCH_SIZE", 1)
-
-    def body_for(variables):
-        team = variables["team"]
-        numbers = variables["numbers"]
-        return _connection([_issue(f"{team}-{n}", n) for n in numbers])
-
-    client = _RecordingClient(body_for)
+    client = _RecordingClient(_echo_issues)
     tickets, _ = fetch_tickets(["PC-1", "PC-2"], None, client=client)  # type: ignore
     assert set(tickets) == {"PC-1", "PC-2"}
     assert client.calls == 2

@@ -13,9 +13,9 @@ def utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
 
-def parse_iso(s: str) -> datetime:
+def parse_iso(value: str) -> datetime:
     """Parse an ISO 8601 string to a timezone-aware datetime."""
-    dt = datetime.fromisoformat(s)
+    dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt

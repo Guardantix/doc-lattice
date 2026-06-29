@@ -94,11 +94,7 @@ def stale_shipped(
     findings: list[Finding] = []
     for node_id, drifted_refs in trigger.items():
         node = lattice.nodes_by_id[node_id]
-        seen_refs: set[str] = set()
-        for ref in node.tickets:
-            if ref in seen_refs:
-                continue
-            seen_refs.add(ref)
+        for ref in dict.fromkeys(node.tickets):
             ticket = tickets.get(ref)
             severity: Severity
             reason: BlockedReason | None

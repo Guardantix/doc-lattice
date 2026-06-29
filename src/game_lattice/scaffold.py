@@ -29,7 +29,7 @@ class Scaffold:
 
 
 def _invocation(rev: str, command: str) -> str:
-    """Return the uvx command a gate runs, pinned to rev and Python 3.14."""
+    """Return the uvx command a gate runs, pinned to rev and the PYTHON_PIN interpreter."""
     return (
         f"uvx --python {PYTHON_PIN} --from git+{GAME_LATTICE_REPO_URL}@{rev} game-lattice {command}"
     )
@@ -90,7 +90,7 @@ def render_ci(rev: str) -> str:
     disables errexit so both exit codes are captured; the final test fails the step if
     either command failed.
     """
-    check = _invocation(rev, "check")
+    check_cmd = _invocation(rev, "check")
     lint_cmd = _invocation(rev, "lint")
     return (
         "name: game-lattice\n"
@@ -108,7 +108,7 @@ def render_ci(rev: str) -> str:
         "      - uses: astral-sh/setup-uv@v6\n"
         "      - run: |\n"
         "          set +e\n"
-        f"          {check}\n"
+        f"          {check_cmd}\n"
         "          rc_check=$?\n"
         f"          {lint_cmd}\n"
         "          rc_lint=$?\n"

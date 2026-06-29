@@ -18,7 +18,7 @@ def strip_control_chars(text: str) -> str:
     return "".join(
         ch
         for ch in text
-        if ord(ch) >= ASCII_PRINTABLE_MIN
-        and ord(ch) != ASCII_DELETE
-        and not (C1_CONTROL_MIN <= ord(ch) <= C1_CONTROL_MAX)
+        if (code := ord(ch)) >= ASCII_PRINTABLE_MIN
+        and code != ASCII_DELETE
+        and not (C1_CONTROL_MIN <= code <= C1_CONTROL_MAX)
     )

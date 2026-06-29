@@ -64,13 +64,18 @@ def test_json_shape_for_graded_and_blocked():
     assert blocked["reason"] == "not-found"
 
 
+def _is_control(codepoint: int) -> bool:
+    """True for a C0, DEL, or C1 control byte."""
+    return codepoint < 0x20 or codepoint == 0x7F or 0x80 <= codepoint <= 0x9F
+
+
 @given(st.text())
 def test_render_safe_output_is_control_free(text: str):
     # render_safe is NOT idempotent: rich.markup.escape re-escapes a balanced ``[tag]`` on
     # each pass (render_safe("[/]") != render_safe(render_safe("[/]"))). The universal
     # property is only that no control byte (C0, DEL, or C1) survives.
     once = render_safe(text)
-    assert all(ord(ch) >= 0x20 and ord(ch) != 0x7F and not (0x80 <= ord(ch) <= 0x9F) for ch in once)
+    assert not any(_is_control(ord(ch)) for ch in once)
 
 
 def test_severity_colors_cover_all_severities():

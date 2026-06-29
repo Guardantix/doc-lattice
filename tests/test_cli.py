@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import game_lattice.cli as cli_mod
 from game_lattice import __version__
 from game_lattice.cli import app
+from game_lattice.tickets import Ticket, TicketState
 
 runner = CliRunner()
 
@@ -76,8 +77,8 @@ def test_reconcile_then_check_clean(lattice_dir: Path, monkeypatch):
     assert runner.invoke(app, ["reconcile", "pc-design"]).exit_code == 0
     after = runner.invoke(app, ["check"])
     # gdd's BROKEN ref still drifts, so check is still 1; pc-design itself is clean.
-    pc = runner.invoke(app, ["check", "--json"])
-    payload = json.loads(pc.stdout)
+    pc_check = runner.invoke(app, ["check", "--json"])
+    payload = json.loads(pc_check.stdout)
     pc_states = [e["state"] for e in payload["edges"] if e["source_id"] == "pc-design"]
     assert pc_states == ["OK", "OK"]
     assert after.exit_code == 1
@@ -190,17 +191,19 @@ def _fake_fetch(tickets):
     return fetch
 
 
-def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
-    from game_lattice.tickets import Ticket, TicketState  # noqa: PLC0415
-
-    ticket = Ticket(
+def _ticket(state: TicketState) -> Ticket:
+    return Ticket(
         identifier="PC-228",
         title="t",
         url="https://x/PC-228",
-        state=TicketState(name="Done", type="completed"),
+        state=state,
         parent=None,
         children=(),
     )
+
+
+def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
+    ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["linear", "--json"])
@@ -212,16 +215,7 @@ def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
 
 
 def test_linear_exit_code_gates_on_danger(lattice_dir, monkeypatch):
-    from game_lattice.tickets import Ticket, TicketState  # noqa: PLC0415
-
-    ticket = Ticket(
-        identifier="PC-228",
-        title="t",
-        url="https://x/PC-228",
-        state=TicketState(name="Done", type="completed"),
-        parent=None,
-        children=(),
-    )
+    ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
     assert runner.invoke(app, ["linear"]).exit_code == 0
@@ -229,16 +223,7 @@ def test_linear_exit_code_gates_on_danger(lattice_dir, monkeypatch):
 
 
 def test_linear_warn_exit_gates_on_warning(lattice_dir, monkeypatch):
-    from game_lattice.tickets import Ticket, TicketState  # noqa: PLC0415
-
-    ticket = Ticket(
-        identifier="PC-228",
-        title="t",
-        url="https://x/PC-228",
-        state=TicketState(name="In Progress", type="started"),
-        parent=None,
-        children=(),
-    )
+    ticket = _ticket(TicketState(name="In Progress", type="started"))
     monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
     assert runner.invoke(app, ["linear", "--exit-code"]).exit_code == 0

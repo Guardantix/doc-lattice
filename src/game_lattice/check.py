@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .constants import EdgeState
 from .hashing import content_hash
-from .model import Lattice
+from .model import Edge, Lattice
 from .resolve import target_content
 
 
@@ -33,26 +33,24 @@ def check_lattice(lattice: Lattice) -> list[EdgeStatus]:
     for node_id in sorted(lattice.nodes_by_id):
         node = lattice.nodes_by_id[node_id]
         for edge in node.derives_from:
-            statuses.append(_classify(lattice, node_id, edge.target_ref, edge.target_id, edge.seen))
+            statuses.append(_classify(lattice, node_id, edge))
     return statuses
 
 
-def _classify(
-    lattice: Lattice, source_id: str, target_ref: str, target_id: str | None, seen: str | None
-) -> EdgeStatus:
+def _classify(lattice: Lattice, source_id: str, edge: Edge) -> EdgeStatus:
     """Classify one edge as BROKEN, UNRECONCILED, STALE, or OK.
 
     A broken edge (no resolved target) is BROKEN. Otherwise the live target hash is
     compared against ``seen``: a missing ``seen`` is UNRECONCILED, a mismatch is STALE, and
     a match is OK.
     """
-    if target_id is None:
-        return EdgeStatus(source_id, target_ref, None, "BROKEN", seen, None)
-    actual = content_hash(target_content(lattice, target_id))
-    if seen is None:
-        return EdgeStatus(source_id, target_ref, target_id, "UNRECONCILED", None, actual)
-    state: EdgeState = "OK" if actual == seen else "STALE"
-    return EdgeStatus(source_id, target_ref, target_id, state, seen, actual)
+    if edge.target_id is None:
+        return EdgeStatus(source_id, edge.target_ref, None, "BROKEN", edge.seen, None)
+    actual = content_hash(target_content(lattice, edge.target_id))
+    if edge.seen is None:
+        return EdgeStatus(source_id, edge.target_ref, edge.target_id, "UNRECONCILED", None, actual)
+    state: EdgeState = "OK" if actual == edge.seen else "STALE"
+    return EdgeStatus(source_id, edge.target_ref, edge.target_id, state, edge.seen, actual)
 
 
 def has_drift(statuses: list[EdgeStatus]) -> bool:

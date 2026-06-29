@@ -18,6 +18,8 @@ MAX_IDENTIFIERS = 500
 _IDENTIFIER_RE = re.compile(r"\A[A-Z][A-Z0-9]*-(0|[1-9][0-9]*)\Z", re.ASCII)
 _TEAM_RE = re.compile(r"\A[A-Z][A-Z0-9]*\Z", re.ASCII)
 
+# children(first: 50) caps the child tickets fetched per issue for context only; this 50 is a
+# separate limit from BATCH_SIZE and the two need not stay equal.
 _TICKET_FRAGMENT = """
 fragment T on Issue {
   identifier
@@ -82,9 +84,10 @@ def partition_identifiers(
     valid: list[str] = []
     rejected: dict[str, BlockedReason] = {}
     for ref in distinct:
+        ref_team = ref.split("-", 1)[0]
         if not _IDENTIFIER_RE.match(ref):
             rejected[ref] = "malformed"
-        elif linear_team is not None and ref.split("-", 1)[0] != linear_team:
+        elif linear_team is not None and ref_team != linear_team:
             rejected[ref] = "cross-team"
         else:
             valid.append(ref)
@@ -142,6 +145,9 @@ def build_query(team: str, numbers: Sequence[int]) -> QueryPlan:
         # includeArchived: true so an archived completed or canceled ticket grades correctly
         # instead of being excluded (the connection defaults it to false) and misreported as
         # not-found; this tool audits shipped work, which is exactly what gets archived.
+        # first matches the per-chunk cap, so all of a chunk's numbers return on one page and
+        # no cursor pagination is needed; raising the chunk size without raising this would
+        # silently drop results past the first page.
         f" first: {BATCH_SIZE}, includeArchived: true"
     )
     document = (

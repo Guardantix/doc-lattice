@@ -16,6 +16,17 @@ from game_lattice.orchestrate import load_lattice
 from game_lattice.reconcile import apply_reconcile, reconcile
 
 
+def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
+    for path, updates in plan.items():
+        new_text, _ = apply_reconcile(path.read_text(encoding="utf-8"), updates)
+        path.write_text(new_text, encoding="utf-8")
+
+
+def _planned_refs(plan: dict[Path, dict[str, str]]) -> set[str]:
+    """Collect every target ref across all files in a reconcile plan."""
+    return {ref for updates in plan.values() for ref in updates}
+
+
 def test_apply_reconcile_sets_seen_and_preserves_body():
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\n# Body\nkeep me\n"
     out, applied = apply_reconcile(text, {"a#x": "newhash"})
@@ -68,11 +79,8 @@ def test_apply_reconcile_non_mapping_entry_raises():
 def test_reconcile_clears_drift_for_node(lattice_dir: Path):
     project = load_config(None, lattice_dir)
     lat = load_lattice(project)
-    writes = reconcile(lat, "pc-design", ref=None, reconcile_all=False)
-    # Apply the planned writes to disk.
-    for path, updates in writes.items():
-        new_text, _ = apply_reconcile(path.read_text(encoding="utf-8"), updates)
-        path.write_text(new_text, encoding="utf-8")
+    plan = reconcile(lat, "pc-design", ref=None, reconcile_all=False)
+    _apply_plan(plan)
     # Reload and confirm pc-design no longer drifts.
     relat = load_lattice(load_config(None, lattice_dir))
     pc_states = [s.state for s in check_lattice(relat) if s.source_id == "pc-design"]
@@ -114,7 +122,7 @@ def test_reconcile_node_with_stale_and_broken_reconciles_stale(tmp_path: Path):
     )
     lat = load_lattice(load_config(None, tmp_path))
     plan = reconcile(lat, "d", ref=None, reconcile_all=False)
-    all_refs = {ref for updates in plan.values() for ref in updates}
+    all_refs = _planned_refs(plan)
     assert "up#sec" in all_refs  # the stale edge is reconciled
     assert "ghost" not in all_refs  # the unrelated broken edge is skipped, not raised
 
@@ -131,17 +139,15 @@ def test_reconcile_ref_bare_matches_namespaced(lattice_dir: Path):
     # "accent" (bare) should match the stored ref "art-direction#accent" (namespaced)
     plan = reconcile(lat, "pc-design", ref="accent", reconcile_all=False)
     assert plan, "plan must be non-empty"
-    # The plan is keyed by path; collect all target_refs across all files
-    all_refs = {ref for updates in plan.values() for ref in updates}
+    all_refs = _planned_refs(plan)
     assert "art-direction#accent" in all_refs
 
 
 def test_reconcile_all_skips_broken_and_ok(lattice_dir: Path):
     lat = load_lattice(load_config(None, lattice_dir))
     # Must not raise despite gdd's BROKEN edge
-    plan = reconcile(lat, "", ref=None, reconcile_all=True)
-    # Collect all target_refs across all files in the plan
-    all_refs = {ref for updates in plan.values() for ref in updates}
+    plan = reconcile(lat, "", ref=None, reconcile_all=True)  # id ignored under reconcile_all
+    all_refs = _planned_refs(plan)
     # pc-design's two drifting edges should be in the plan
     assert "art-direction#accent" in all_refs
     assert "art-direction#motion" in all_refs
@@ -187,12 +193,6 @@ def test_reconcile_ref_no_match_raises(lattice_dir: Path):
         reconcile(lat, "pc-design", ref="does-not-exist", reconcile_all=False)
 
 
-def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
-    for path, updates in plan.items():
-        new_text, _ = apply_reconcile(path.read_text(encoding="utf-8"), updates)
-        path.write_text(new_text, encoding="utf-8")
-
-
 def test_reconcile_node_second_run_skips_already_ok_edges(lattice_dir: Path):
     # After a node is reconciled, a second single-node reconcile plans nothing, since
     # restamping an already-OK edge to the same hash is a no-op.
@@ -208,7 +208,7 @@ def test_reconcile_all_skips_already_ok_edge(lattice_dir: Path):
     project = load_config(None, lattice_dir)
     _apply_plan(reconcile(load_lattice(project), "pc-design", ref="accent", reconcile_all=False))
     relat = load_lattice(load_config(None, lattice_dir))
-    plan = reconcile(relat, "", ref=None, reconcile_all=True)
-    refs = {ref for updates in plan.values() for ref in updates}
+    plan = reconcile(relat, "", ref=None, reconcile_all=True)  # id ignored under reconcile_all
+    refs = _planned_refs(plan)
     assert "art-direction#accent" not in refs  # already OK -> skipped
     assert "art-direction#motion" in refs  # still UNRECONCILED -> planned

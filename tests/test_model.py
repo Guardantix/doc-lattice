@@ -60,7 +60,7 @@ def test_nodemeta_parses_edges():
 def test_dataclasses_are_frozen():
     edge = Edge(target_ref="a#b", target_id="b", seen=None)
     with pytest.raises(AttributeError):
-        edge.seen = "x"  # type: ignore
+        edge.seen = "x"  # ty: ignore[invalid-assignment]
 
 
 def test_lattice_holds_maps():

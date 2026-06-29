@@ -109,11 +109,14 @@ These are enforced by tooling (pre-commit, `scripts/`, or `tests/test_convention
 violation fails CI rather than just being a style preference:
 
 - **Untyped-to-typed boundary.** `typing.Any` and `typing.cast` are allowed only in boundary
-  modules, defined by `scripts/check_typing_boundaries.py` as a file whose stem ends in `_boundary`,
-  `_adapter`, `_parser`, `_validator`, `_external`, or `_inbound` (or sits under a directory of that
+  modules, defined by `scripts/check_typing_boundaries.py` as a file whose stem is one of `boundary`,
+  `adapter`, `parser`, `validator`, `external`, or `inbound`, or ends with one of those words
+  prefixed by `_` (for example `frontmatter_parser`) (or sits under a directory of that
   name). The real engine boundaries are `frontmatter_parser.py` (raw YAML to `NodeMeta`) and
   `linear_parser.py` (Linear JSON to `Ticket`). `io_boundary.py` matches the rule and uses `Any` as
   well, but is leftover example scaffolding from the project template, not wired into the engine.
+  Likewise `path_utils.normalize_path` and `path_utils.ensure_dir` are unused template leftovers;
+  only `safe_resolve` is wired in (by `config` and `discovery`).
   Everywhere else, convert at the boundary and pass typed models.
 - **Errors.** All custom exceptions extend `ProjectError` (error_types.py) and carry a `code`; no
   bare `except Exception`/`except BaseException`. Messages name the file and the fix.
@@ -124,7 +127,7 @@ violation fails CI rather than just being a style preference:
   project root via `..`, an absolute path, or a symlink, before any read or write.
 - **No `datetime.now()`/`utcnow()` outside `datetime_utils.py`.**
 - **Version sync.** `__version__` (`src/game_lattice/__init__.py`), the `pyproject.toml` `version`,
-  and the top `## [X.Y.Z]` `CHANGELOG.md` heading must agree. The pure core is `version_check.py`;
+  and the first versioned `## [X.Y.Z]` `CHANGELOG.md` heading must agree (a `## [Unreleased]` block above it is tolerated and skipped, so notes can accumulate there between releases). The pure core is `version_check.py`;
   `scripts/check_version_sync.py` wraps it and runs in pre-commit and CI. On merge to `main` the
   `release` job in `.github/workflows/ci.yml` verifies sync, smoke-tests the commit, and cuts the
   lightweight `vX.Y.Z` tag. Release flow: `RELEASING.md`.

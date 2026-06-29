@@ -21,6 +21,10 @@ if TYPE_CHECKING:
     from game_lattice.constants import BlockedReason, LinearStateType
 
 
+# A wrong seen hash, differing from the real content hash, that forces a STALE edge.
+_STALE_SEEN = "staleseenstaleseenstaleseenstale"
+
+
 def test_state_and_severity_maps_track_their_literals():
     # Tie the grading maps to their Literals: a renamed state member would otherwise leave a
     # stale key that silently grades as None (no finding), and a new severity would KeyError
@@ -66,7 +70,7 @@ def _two_node_lattice(seen: str | None, tickets=("PC-1",)):
     ],
 )
 def test_grading_by_state_type(state_type, severity):
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale")
+    lattice = _two_node_lattice(seen=_STALE_SEEN)
     trigger = build_audit_trigger(lattice, None)
     findings = stale_shipped(lattice, trigger, {"PC-1": _ticket("PC-1", state_type)}, {})
     assert [f.severity for f in findings] == [severity]
@@ -74,14 +78,14 @@ def test_grading_by_state_type(state_type, severity):
 
 @pytest.mark.parametrize("state_type", ["canceled", "triage", "duplicate"])
 def test_terminal_states_omitted(state_type):
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale")
+    lattice = _two_node_lattice(seen=_STALE_SEEN)
     trigger = build_audit_trigger(lattice, None)
     findings = stale_shipped(lattice, trigger, {"PC-1": _ticket("PC-1", state_type)}, {})
     assert findings == []
 
 
 def test_unresolved_is_blocked_not_found():
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale")
+    lattice = _two_node_lattice(seen=_STALE_SEEN)
     trigger = build_audit_trigger(lattice, None)
     findings = stale_shipped(lattice, trigger, {}, {})
     assert findings[0].severity == "BLOCKED"
@@ -89,20 +93,20 @@ def test_unresolved_is_blocked_not_found():
 
 
 def test_rejected_reason_is_carried():
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale", tickets=("SEC-9",))
+    lattice = _two_node_lattice(seen=_STALE_SEEN, tickets=("SEC-9",))
     trigger = build_audit_trigger(lattice, None)
     findings = stale_shipped(lattice, trigger, {}, {"SEC-9": cast("BlockedReason", "cross-team")})
     assert findings[0].reason == "cross-team"
 
 
 def test_node_with_no_tickets_yields_nothing():
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale", tickets=())
+    lattice = _two_node_lattice(seen=_STALE_SEEN, tickets=())
     trigger = build_audit_trigger(lattice, None)
     assert stale_shipped(lattice, trigger, {}, {}) == []
 
 
 def test_duplicate_ref_collapses():
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale", tickets=("PC-1", "PC-1"))
+    lattice = _two_node_lattice(seen=_STALE_SEEN, tickets=("PC-1", "PC-1"))
     trigger = build_audit_trigger(lattice, None)
     findings = stale_shipped(lattice, trigger, {"PC-1": _ticket("PC-1", "completed")}, {})
     assert len(findings) == 1
@@ -120,13 +124,13 @@ def test_ok_edge_is_not_a_trigger():
 def test_target_scoping_includes_the_named_node_itself():
     # impact() returns strict dependents, so scoping to a STALE leaf must still audit it,
     # otherwise a gate narrowed to that node would pass while it ships a stale ticket.
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale")
+    lattice = _two_node_lattice(seen=_STALE_SEEN)
     assert "down" in build_audit_trigger(lattice, "down")
 
 
 def test_target_scoping_includes_dependents():
     # Scoping to an upstream id still reaches its STALE dependents (existing behavior).
-    lattice = _two_node_lattice(seen="staleseenstaleseenstaleseenstale")
+    lattice = _two_node_lattice(seen=_STALE_SEEN)
     assert "down" in build_audit_trigger(lattice, "up")
 
 
@@ -146,7 +150,7 @@ def test_ordering_is_severity_then_node_then_ref():
     a = _node(
         "a",
         "# A\nb\n",
-        derives=[("up#sec", "staleseenstaleseenstaleseenstale")],
+        derives=[("up#sec", _STALE_SEEN)],
         tickets=("PC-2", "PC-1"),
     )
     lattice = build_lattice([up, a])

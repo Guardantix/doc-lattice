@@ -11,6 +11,7 @@ from .error_types import ConfigError, UnreadableDocError
 from .model import NodeMeta
 
 _FENCE = "---"
+_BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 
 
 def split_frontmatter(text: str) -> tuple[str | None, str]:
@@ -24,7 +25,9 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
         closing ``---`` fences (or None if the file does not open with a fence), and
         ``body`` is everything after the closing fence (the whole text if no fence).
     """
-    stripped = text.lstrip("﻿")
+    # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
+    # "---" fence recognized on line 0 instead of being read as having no frontmatter.
+    stripped = text.lstrip(_BOM)
     lines = stripped.split("\n")
     if not lines or lines[0].strip() != _FENCE:
         return None, text

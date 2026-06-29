@@ -36,12 +36,14 @@ def _lattice() -> Lattice:
 
 
 def test_target_content_section():
-    assert "accent body" in target_content(_lattice(), "accent")
-    assert "{#accent}" not in target_content(_lattice(), "accent")
+    content = target_content(_lattice(), "accent")
+    assert "accent body" in content
+    assert "{#accent}" not in content
 
 
 def test_target_content_file_is_whole_body():
-    assert target_content(_lattice(), "doc") == _lattice().nodes_by_id["doc"].body
+    lat = _lattice()
+    assert target_content(lat, "doc") == lat.nodes_by_id["doc"].body
 
 
 def test_target_content_broken_raises():

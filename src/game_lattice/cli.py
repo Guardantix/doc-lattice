@@ -35,6 +35,13 @@ _err = Console(stderr=True)
 ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path to .game-lattice.yml.")]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 
+_STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one trailing space
+
+
+def _print_project_error(exc: ProjectError) -> None:
+    """Render a ProjectError to stderr in the standard one-line format."""
+    _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+
 
 def _version_callback(value: bool) -> None:
     if value:
@@ -66,8 +73,8 @@ def _skip_summary(result: LintResult) -> str:
     """Render the one-line coverage summary printed after any human lint run."""
     violations = len(result.violations)
     unranked = len(result.skipped)
-    targets = sum(1 for s in result.skipped if s.reason == "target-unannotated")
-    sources = sum(1 for s in result.skipped if s.reason == "source-unannotated")
+    targets = sum(1 for skipped in result.skipped if skipped.reason == "target-unannotated")
+    sources = sum(1 for skipped in result.skipped if skipped.reason == "source-unannotated")
     label = "violation" if violations == 1 else "violations"
     line = f"{violations} ladder {label}, {unranked} edges unranked"
     if unranked:
@@ -82,29 +89,30 @@ def check(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
         lattice = _load(config)
         statuses = check_lattice(lattice)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
     if json_out:
         payload = {
             "edges": [
                 {
-                    "source_id": s.source_id,
-                    "target_ref": s.target_ref,
-                    "target_id": s.target_id,
-                    "state": s.state,
-                    "expected": s.expected,
-                    "actual": s.actual,
+                    "source_id": status.source_id,
+                    "target_ref": status.target_ref,
+                    "target_id": status.target_id,
+                    "state": status.state,
+                    "expected": status.expected,
+                    "actual": status.actual,
                 }
-                for s in statuses
+                for status in statuses
             ]
         }
         typer.echo(json.dumps(payload))
     else:
         state_colors = {"OK": "green", "STALE": "yellow", "UNRECONCILED": "yellow", "BROKEN": "red"}
-        for s in statuses:
-            color = state_colors[s.state]
+        for status in statuses:
+            color = state_colors[status.state]
             _out.print(
-                f"[{color}]{s.state:<13}[/{color}] {escape(s.source_id)} -> {escape(s.target_ref)}"
+                f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
+                f"{escape(status.source_id)} -> {escape(status.target_ref)}"
             )
     raise typer.Exit(1 if has_drift(statuses) else 0)
 
@@ -116,36 +124,37 @@ def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
         lattice = _load(config)
         result = lint_lattice(lattice)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
     if json_out:
         payload = {
             "violations": [
                 {
-                    "source_id": v.source_id,
-                    "source_authority": v.source_authority,
-                    "target_id": v.target_id,
-                    "target_ref": v.target_ref,
-                    "target_authority": v.target_authority,
+                    "source_id": violation.source_id,
+                    "source_authority": violation.source_authority,
+                    "target_id": violation.target_id,
+                    "target_ref": violation.target_ref,
+                    "target_authority": violation.target_authority,
                 }
-                for v in result.violations
+                for violation in result.violations
             ],
             "skipped": [
                 {
-                    "source_id": s.source_id,
-                    "target_ref": s.target_ref,
-                    "target_id": s.target_id,
-                    "reason": s.reason,
+                    "source_id": skipped.source_id,
+                    "target_ref": skipped.target_ref,
+                    "target_id": skipped.target_id,
+                    "reason": skipped.reason,
                 }
-                for s in result.skipped
+                for skipped in result.skipped
             ],
         }
         typer.echo(json.dumps(payload))
     else:
-        for v in result.violations:
+        for violation in result.violations:
             _out.print(
-                f"[red]VIOLATION[/red]  {escape(v.source_id)} ({v.source_authority}) -> "
-                f"{escape(v.target_ref)} ({v.target_authority})"
+                f"[red]VIOLATION[/red]  {escape(violation.source_id)} "
+                f"({violation.source_authority}) -> {escape(violation.target_ref)} "
+                f"({violation.target_authority})"
             )
         _out.print(_skip_summary(result))
     raise typer.Exit(1 if result.violations else 0)
@@ -158,20 +167,25 @@ def impact(token: str, config: ConfigOpt = None, json_out: JsonOpt = False) -> N
         lattice = _load(config)
         affected = impact_walk(lattice, token)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
     if json_out:
         payload = {
             "affected": [
-                {"id": n.id, "title": n.title, "path": str(n.path), "tickets": list(n.tickets)}
-                for n in affected
+                {
+                    "id": node.id,
+                    "title": node.title,
+                    "path": str(node.path),
+                    "tickets": list(node.tickets),
+                }
+                for node in affected
             ]
         }
         typer.echo(json.dumps(payload))
     else:
-        for n in affected:
-            tickets = ", ".join(n.tickets) if n.tickets else "-"
-            _out.print(f"{escape(n.id)}  ({escape(str(n.path))})  tickets: {escape(tickets)}")
+        for node in affected:
+            tickets = ", ".join(node.tickets) if node.tickets else "-"
+            _out.print(f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}")
 
 
 @app.command()
@@ -219,7 +233,7 @@ def reconcile(
         if not rewrites:
             _out.print("nothing to reconcile")
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
 
 
@@ -237,7 +251,7 @@ def graph(
             if s.state == "STALE" and s.target_id is not None
         }
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
     rendered = to_dot(lattice, stale) if fmt == "dot" else to_mermaid(lattice, stale)
     typer.echo(rendered, nl=False)
@@ -275,7 +289,7 @@ def linear(  # noqa: PLR0913
         tickets, rejected = fetch_tickets(refs, project.config.linear_team)
         findings = stale_shipped(lattice, trigger, tickets, rejected)
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
     if json_out:
         typer.echo(json.dumps(findings_json(findings)))
@@ -362,7 +376,7 @@ def init(
             f"v{__version__} tag is pushed so the pinned snippets resolve."
         )
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise typer.Exit(2) from exc
     raise typer.Exit(0)
 
@@ -415,7 +429,7 @@ def main() -> None:
     try:
         app()
     except ProjectError as exc:
-        _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+        _print_project_error(exc)
         raise SystemExit(2) from exc
     except (OSError, RuntimeError, ValueError) as exc:
         _err.print(f"[red]internal error[/red]: {type(exc).__name__}: {escape(str(exc))}")

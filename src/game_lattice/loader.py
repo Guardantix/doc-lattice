@@ -33,14 +33,11 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             f"file {doc.path}",
         )
         toc = build_toc(doc.body)
-        total = _line_count(doc.body)
-        anchored = [(i, h) for i, h in enumerate(toc) if h.anchor is not None]
+        total_lines = _line_count(doc.body)
+        anchored = [(i, h, h.anchor) for i, h in enumerate(toc) if h.anchor is not None]
         spans: dict[str, tuple[int, int]] = {}
-        for i, head in anchored:
-            anchor = head.anchor
-            if anchor is None:
-                continue
-            span = section_span(toc, i, total)
+        for i, _head, anchor in anchored:
+            span = section_span(toc, i, total_lines)
             spans[anchor] = span
             _register(
                 anchor,
@@ -104,14 +101,14 @@ def _resolve_edges(doc: ParsedDoc, index: dict[str, Location]) -> list[Edge]:
     """
     deduped: dict[str, Edge] = {}
     for raw in doc.meta.derives_from:
-        tid = split_ref(raw.ref)
-        if tid in deduped:
+        target_id = split_ref(raw.ref)
+        if target_id in deduped:
             warnings.warn(
-                f"node {doc.meta.id!r} derives from {tid!r} more than once;"
+                f"node {doc.meta.id!r} derives from {target_id!r} more than once;"
                 " keeping the last occurrence",
                 stacklevel=2,
             )
-        deduped[tid] = Edge.resolve(raw.ref, raw.seen, index)
+        deduped[target_id] = Edge.resolve(raw.ref, raw.seen, index)
     return list(deduped.values())
 
 
@@ -139,8 +136,14 @@ def _register(
     sources[id_] = where
 
 
+def _span_width(span_and_id: tuple[tuple[int, int], str]) -> int:
+    """Return the line width (end minus start) of a ``(span, id)`` pair, for sorting."""
+    (span_start, span_end), _ = span_and_id
+    return span_end - span_start
+
+
 def _record_ancestors(
-    anchored: list[tuple[int, Heading]],
+    anchored: list[tuple[int, Heading, str]],
     spans: dict[str, tuple[int, int]],
     ancestors: dict[str, tuple[str, ...]],
 ) -> None:
@@ -150,18 +153,17 @@ def _record_ancestors(
     boundary still count as enclosing. Editing a nested section propagates impact to
     dependents of its ancestors, so the order runs outermost first.
     """
-    for _, head in anchored:
-        anchor = head.anchor
-        if anchor is None:
-            continue
+    for _, _head, anchor in anchored:
         start, end = spans[anchor]
         containing: list[tuple[tuple[int, int], str]] = []
-        for _, other in anchored:
-            oid = other.anchor
-            if oid is None or oid == anchor:
+        for _, _other, oid in anchored:
+            if oid == anchor:
                 continue
             ostart, oend = spans[oid]
-            if (ostart < start and oend >= end) or (ostart <= start and oend > end):
+            other_encloses = (ostart < start and oend >= end) or (ostart <= start and oend > end)
+            if other_encloses:
                 containing.append(((ostart, oend), oid))
-        containing.sort(key=lambda item: item[0][1] - item[0][0], reverse=True)
+        # Anchored heading sections nest strictly, so a wider span is always the more
+        # enclosing one; sorting by span width descending yields outermost-to-innermost.
+        containing.sort(key=_span_width, reverse=True)
         ancestors[anchor] = tuple(oid for _, oid in containing)

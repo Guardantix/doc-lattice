@@ -51,16 +51,19 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
         if not config_path.exists():
             msg = f"config file not found: {config_path}"
             raise ConfigError(msg)
-        raw = _read_yaml(config_path)
-        project_root = config_path.resolve().parent
+        source = config_path
     else:
         candidate = cwd / DEFAULT_CONFIG_NAME
-        if candidate.exists():
-            raw = _read_yaml(candidate)
-            project_root = candidate.resolve().parent
-        else:
-            raw = {}
-            project_root = cwd.resolve()
+        source = candidate if candidate.exists() else None
+
+    if source is not None:
+        raw = _read_yaml(source)
+        project_root = source.resolve().parent
+    else:
+        # An explicit --config that is missing is an error (above), but an absent default
+        # config is not: the tool runs zero-config using Config's built-in defaults.
+        raw = {}
+        project_root = cwd.resolve()
 
     try:
         config = Config.model_validate(raw)
@@ -91,9 +94,9 @@ def _resolve_roots(roots: list[str], project_root: Path) -> tuple[Path, ...]:
     resolved: list[Path] = []
     for entry in roots:
         candidate = Path(entry)
-        full = candidate if candidate.is_absolute() else project_root / candidate
+        absolute_path = candidate if candidate.is_absolute() else project_root / candidate
         try:
-            safe = safe_resolve(full, project_root)
+            safe = safe_resolve(absolute_path, project_root)
         except ValueError as exc:
             msg = (
                 f"docs_roots entry {entry!r} resolves outside the project root "

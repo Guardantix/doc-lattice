@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _ANCHOR_RE = re.compile(r"\s*\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}\s*")
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_RE = re.compile(r"^ {0,3}(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,15 +64,20 @@ def build_toc(body: str) -> list[Heading]:
         fence_match = _FENCE_RE.match(line)
         if open_fence is None:
             if fence_match is not None:
-                open_fence = fence_match.group(1)
+                open_fence = fence_match.group("ticks")
                 continue
         else:
-            if (
+            # CommonMark closing-fence rule: a fence closes only on the same fence
+            # character (backtick or tilde), a run at least as long as the opener, and
+            # nothing after it. A shorter run or a trailing info string keeps the block
+            # open, so those lines stay code content and never register as headings.
+            is_closing_fence = (
                 fence_match is not None
-                and fence_match.group(1)[0] == open_fence[0]
-                and len(fence_match.group(1)) >= len(open_fence)
-                and not fence_match.group(2).strip()
-            ):
+                and fence_match.group("ticks")[0] == open_fence[0]
+                and len(fence_match.group("ticks")) >= len(open_fence)
+                and not fence_match.group("info").strip()
+            )
+            if is_closing_fence:
                 open_fence = None
             continue
         match = _HEADING_RE.match(line)

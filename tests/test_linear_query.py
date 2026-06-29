@@ -69,9 +69,9 @@ def test_partition_rejects_leading_zero_numbers():
     assert rejected["PC-007"] == "malformed"
     assert rejected["PC-01"] == "malformed"
     # PC-0 (exactly zero, no leading zero) and PC-7 (no leading zero) remain valid.
-    valid2, rejected2 = partition_identifiers(["PC-0", "PC-7"], None)
-    assert valid2 == ["PC-0", "PC-7"]
-    assert rejected2 == {}
+    valid_no_leading_zero, rejected_no_leading_zero = partition_identifiers(["PC-0", "PC-7"], None)
+    assert valid_no_leading_zero == ["PC-0", "PC-7"]
+    assert rejected_no_leading_zero == {}
 
 
 def test_partition_cap_raises_one_over_but_not_at_cap():

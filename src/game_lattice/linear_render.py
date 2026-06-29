@@ -18,6 +18,8 @@ _SEVERITY_COLORS: dict[Severity, str] = {
     "INFO": "cyan",
 }
 
+_SEVERITY_COLUMN_WIDTH = 8  # widest Severity label ("BLOCKED"/"WARNING") plus one space
+
 
 def render_safe(text: str) -> str:
     """Make any external string safe to print: strip control bytes, then escape markup.
@@ -78,6 +80,6 @@ def render_findings(console: Console, findings: Sequence[Finding]) -> None:
         else:
             detail = render_safe(f"{finding.ticket_ref} ({finding.reason})")
         console.print(
-            f"[{color}]{finding.severity:<8}[/{color}] "
+            f"[{color}]{finding.severity:<{_SEVERITY_COLUMN_WIDTH}}[/{color}] "
             f"{render_safe(finding.node_id)}  {detail}  drift: {refs}"
         )
