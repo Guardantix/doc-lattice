@@ -24,6 +24,7 @@ uv run --group dev ruff check src tests   # lint
 uv run --group dev ruff format src tests  # format (add --check to verify only)
 uv run --group dev ty check src           # type check
 uv run --group dev python scripts/check_typing_boundaries.py src           # boundary rule check
+uv run --group dev python scripts/check_version_sync.py    # version-consistency guard
 ```
 
 A pre-commit hook runs ruff (with `--fix`), ruff-format, `ty`, the typing-boundary check, and
@@ -122,6 +123,11 @@ violation fails CI rather than just being a style preference:
   `config` (docs roots) and `discovery` (each discovered file) reject any path that escapes the
   project root via `..`, an absolute path, or a symlink, before any read or write.
 - **No `datetime.now()`/`utcnow()` outside `datetime_utils.py`.**
+- **Version sync.** `__version__` (`src/game_lattice/__init__.py`), the `pyproject.toml` `version`,
+  and the top `## [X.Y.Z]` `CHANGELOG.md` heading must agree. The pure core is `version_check.py`;
+  `scripts/check_version_sync.py` wraps it and runs in pre-commit and CI. On merge to `main` the
+  `release` job in `.github/workflows/ci.yml` verifies sync, smoke-tests the commit, and cuts the
+  lightweight `vX.Y.Z` tag. Release flow: `RELEASING.md`.
 - ruff line length 100; module docstring on every module; Google-style docstrings on public
   functions; no em-dashes in any drafted content (docstrings, messages, comments).
 

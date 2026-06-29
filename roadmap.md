@@ -18,6 +18,11 @@ The spec is the source of truth; this file is the at-a-glance index.
 - **lint slice** (v0.3.0). The `lint` command validates the authority ladder over `derives_from`
   edges, reports edges it cannot rank, and is wired into the generated pre-commit and CI gates
   alongside `check`. Spec: `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`.
+- **release automation**. The version-sync guard (`scripts/check_version_sync.py`) fails any PR whose
+  `__version__`, `pyproject.toml`, and top `CHANGELOG.md` entry disagree, and a merge-triggered CI
+  `release` job creates and smoke-tests the `vX.Y.Z` tag (running `check`, `lint`, and `init` against
+  the pinned ref), so the tag is a product of a green pipeline. Spec:
+  `docs/superpowers/specs/2026-06-29-game-lattice-release-automation-design.md`.
 
 Acceptance (local-core spec section 13), still met:
 
@@ -29,8 +34,6 @@ Acceptance (local-core spec section 13), still met:
 
 ## Deferred enhancements (no spec yet)
 
-- Release-tag automation. CI that creates and verifies the `vX.Y.Z` tag, replacing the manual
-  `RELEASING.md` checklist with a machine-checked smoke test. Recorded by the init spec (section 11).
 - Display-prefix lint. An optional future enhancement.
 
 ## Out of scope by design
