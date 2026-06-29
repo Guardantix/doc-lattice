@@ -28,8 +28,9 @@ In scope:
   drift blocks a PR before merge, the same way the typing-boundary check does.
 - A merge-triggered `release` job added to the existing `.github/workflows/ci.yml`. It depends on the
   existing checks, runs only on push to `main`, and is idempotent: it creates `vX.Y.Z` only when that
-  tag does not already exist, after a functional smoke test of the exact commit. An ordinary merge
-  whose version is unchanged is a no-op.
+  tag does not already exist, after a functional smoke test of the exact commit. When the tag already
+  exists it is treated as a no-op only after verifying the tag points at a commit of the matching
+  version (a corrupt or stale tag fails the job); an ordinary unchanged-version merge is a no-op.
 - A broadened smoke test: the pinned ref must run `check`, `lint`, and `init`, matching the
   `RELEASING.md` invariant that the tag contain all three.
 - Trimming `RELEASING.md` to the human-judgment steps (bump, lock, changelog, merge) and folding the
@@ -145,16 +146,28 @@ A new `release` job in `.github/workflows/ci.yml`:
 Steps, in order:
 
 1. **Derive the target tag.** Read `v{__version__}` from the checked-out package.
-2. **Idempotency gate.** If the tag already exists on the remote, exit 0 without doing anything. This
-   is what makes every ordinary merge (version unchanged, tag already present) a safe no-op, and makes
-   the job re-runnable.
+2. **Idempotency gate with tag-health check.** If the tag does not exist on the remote, proceed to
+   step 3. If it does exist, peel it to its commit and read that commit's `__version__` with a local
+   `git show vX.Y.Z:src/game_lattice/__init__.py` (no build). Two outcomes:
+   - The tagged commit's version equals `X.Y.Z`: the tag is a healthy existing release. Log the
+     matched version and exit 0 as a no-op. This is the ordinary unchanged-version merge (for example
+     a later docs fix), and is why a healthy tag points at its original release commit, not at HEAD.
+     The job deliberately does not require the tag to point at HEAD.
+   - The tagged commit's version differs from `X.Y.Z`: the tag is corrupt or stale, claiming a version
+     it does not contain. Fail loudly rather than no-op, because adopters pinned to `vX.Y.Z` would
+     otherwise resolve to the wrong code. This is the one preexisting state the gate must not wave
+     through. (The gate cannot distinguish an intentional unchanged-version merge from a forgotten
+     bump, since both look identical; the logged matched version on the no-op path makes a forgotten
+     bump visible without forcing a failure on healthy docs merges.)
 3. **Re-assert version sync.** Run `scripts/check_version_sync.py` again. Defense in depth; the
    `code-quality` job already ran it on this commit, but the release job must not tag on drift.
 4. **Gating smoke against the commit SHA.** Run `uvx --python 3.14 --from git+<repo>@${{ github.sha }}`
    for each of `check`, `lint`, and `init` (the last in a scratch directory). Because the merge commit
    is already public on `main`, this proves the exact commit installs and all three subcommands run
    *before any tag exists*. If it fails, the job fails and no tag is created.
-5. **Create and push the tag.** Annotated `vX.Y.Z` at `github.sha`, pushed with `GITHUB_TOKEN`.
+5. **Create and push the tag.** A lightweight `vX.Y.Z` at `github.sha`, matching the `RELEASING.md`
+   convention. A lightweight tag carries no tagger identity, so it needs no `git config user.*` setup
+   in the runner, and it resolves identically for `uvx ...@vX.Y.Z`. Pushed with `GITHUB_TOKEN`.
 6. **Post-tag confirmation.** A cheap `uvx --from git+<repo>@vX.Y.Z game-lattice --version` to confirm
    the pinned tag string itself resolves. The functional surface was already proven at the SHA in
    step 4; this only confirms ref resolution.
@@ -167,11 +180,14 @@ Steps, in order:
 PR open ──> code-quality runs check_version_sync.py ──> drift blocks the PR
                           │ green
 merge to main ──> code-quality + tests + security-scan ──> release job
-   │ tag vX.Y.Z already exists? ── yes ──> exit 0 (ordinary merge, no-op)
-   │                               no
+   │ tag vX.Y.Z already exists?
+   │   yes ──> tagged commit __version__ == X.Y.Z ?
+   │             yes ──> log matched version, exit 0 (healthy, no-op)
+   │             no  ──> fail loudly (corrupt/stale tag)
+   │   no  ──> proceed:
    ├─ assert version sync (re-check)
    ├─ smoke @SHA: check / lint / init        (gates the tag; fail => no tag)
-   ├─ git tag vX.Y.Z && git push
+   ├─ git tag vX.Y.Z && git push             (lightweight)
    └─ smoke @vX.Y.Z: game-lattice --version  (confirms pinned ref resolves)
 ```
 
@@ -183,8 +199,12 @@ The only state the job creates is the tag, and only on the green path past the S
   and expected value, PR (or commit) blocked.
 - **SHA smoke fails.** The release job fails and no tag is created. There is nothing public to clean
   up; fix forward on a new PR.
-- **Tag already exists.** Treated as success (no-op), never an error, so re-merges and re-runs are
-  safe.
+- **Healthy tag already exists.** The tagged commit's version matches `X.Y.Z`: treated as success
+  (no-op, with the matched version logged), never an error, so re-merges and re-runs are safe.
+- **Corrupt or stale tag already exists.** The tagged commit's version differs from `X.Y.Z`: the job
+  fails loudly rather than no-op, so a tag that resolves to the wrong code cannot pass silently. The
+  job does not move or delete the existing tag (it may be load-bearing for adopters); a human resolves
+  the collision deliberately.
 - **Post-tag confirmation fails.** Loud job failure, but per the `RELEASING.md` rule the tag is not
   moved or deleted; recover by bumping to the next patch. This case is unlikely because the SHA smoke
   already passed; it would indicate transient ref propagation, not broken code.
@@ -233,4 +253,5 @@ The only state the job creates is the tag, and only on the green path past the S
 | Forgotten tag | merge-triggered release job | merging a version-bump PR cuts and pushes `vX.Y.Z` with no human tag step |
 | Version drift | PR-time version-sync guard | a PR whose `__version__`, `pyproject.toml`, and changelog disagree fails `code-quality` |
 | Broken pinned ref | SHA-gated check/lint/init smoke | a commit whose pinned ref cannot run all three never produces a public tag |
+| Corrupt or stale tag | tag-health check on the existing-tag path | a `vX.Y.Z` that points at a non-`X.Y.Z` commit fails the release job instead of passing silently |
 | Manual smoke toil | broadened automated smoke | the `RELEASING.md` checklist drops the manual tag and smoke steps, leaving only the human bump |
