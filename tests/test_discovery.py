@@ -39,6 +39,49 @@ def test_ignore_glob_is_root_anchored(tmp_path: Path):
     assert "chapters/drafts/deep.md" in found  # nested same-named dir is kept
 
 
+def test_discovers_skips_nonexistent_root(tmp_path: Path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "a.md").write_text("a", encoding="utf-8")
+    missing = tmp_path / "does-not-exist"
+    # a missing root is tolerated, not fatal; the real root still resolves
+    found = discover_doc_paths([missing, root], [])
+    assert [p.name for p in found] == ["a.md"]
+
+
+def test_discovers_dedups_overlapping_roots(tmp_path: Path):
+    root = tmp_path / "docs"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    (sub / "x.md").write_text("x", encoding="utf-8")
+    # sub is reachable both as its own root and under root
+    found = discover_doc_paths([root, sub], [])
+    assert [p.name for p in found] == ["x.md"]  # discovered once, not twice
+
+
+def test_discovers_sorted_across_roots(tmp_path: Path):
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "z.md").write_text("z", encoding="utf-8")
+    (root_b / "m.md").write_text("m", encoding="utf-8")
+    # Pass roots opposite to the sorted output so a per-root concatenation
+    # (root_b then root_a) would differ from a globally sorted result.
+    found = discover_doc_paths([root_b, root_a], [])
+    assert found == sorted(found)
+    assert [p.name for p in found] == ["z.md", "m.md"]  # a/z.md sorts before b/m.md
+
+
+def test_discovery_skips_directory_named_md(tmp_path: Path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "real.md").write_text("r", encoding="utf-8")
+    (root / "weird.md").mkdir()  # a directory whose name matches *.md
+    found = discover_doc_paths([root], [])
+    assert [p.name for p in found] == ["real.md"]
+
+
 def test_read_doc_returns_text(tmp_path: Path):
     p = tmp_path / "a.md"
     p.write_text("hello", encoding="utf-8")
@@ -50,6 +93,13 @@ def test_read_doc_non_utf8_raises(tmp_path: Path):
     p.write_bytes(b"\xff\xfe\x00bad")
     with pytest.raises(UnreadableDocError):
         read_doc(p)
+
+
+def test_read_doc_missing_file_raises(tmp_path: Path):
+    p = tmp_path / "nope.md"  # never created -> FileNotFoundError (an OSError)
+    with pytest.raises(UnreadableDocError) as exc:
+        read_doc(p)
+    assert exc.value.code == "UNREADABLE_DOC"
 
 
 def test_discovery_skips_symlink_escaping_root(tmp_path: Path):

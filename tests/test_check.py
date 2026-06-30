@@ -47,6 +47,38 @@ def test_check_populates_expected_and_actual_per_state(lattice_dir: Path):
     assert broken.state == "BROKEN"
     assert broken.target_id is None
     assert broken.actual is None  # nothing to hash for an unresolved target
+    assert broken.expected is None  # fixture's ghost ref was never reconciled
+
+
+def test_check_output_sorted_by_source_then_edge_order(lattice_dir: Path):
+    lat = load_lattice(load_config(None, lattice_dir))
+    order = [(s.source_id, s.target_ref) for s in check_lattice(lat)]
+    # sorted node ids: art-direction (no edges -> absent), gdd, pc-design;
+    # within pc-design the frontmatter order (accent before motion) is preserved.
+    assert order == [
+        ("gdd", "ghost"),
+        ("pc-design", "art-direction#accent"),
+        ("pc-design", "art-direction#motion"),
+    ]
+
+
+def test_broken_edge_preserves_seen_as_expected():
+    docs = [
+        ParsedDoc(
+            Path("down.md"),
+            NodeMeta(
+                id="down",
+                derives_from=[RawEdge(ref="ghost", seen="deadbeefdeadbeefdeadbeefdeadbeef")],
+            ),
+            "body\n",
+        ),
+    ]
+    [status] = check_lattice(build_lattice(docs))
+    assert status.state == "BROKEN"
+    assert status.target_id is None
+    assert status.actual is None
+    # seen survives even though the ref no longer resolves
+    assert status.expected == "deadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def test_has_drift_false_when_all_ok():

@@ -27,6 +27,7 @@ from game_lattice.constants import (
 
 def test_valid_statuses_matches_literal():
     assert frozenset(get_args(Status)) == VALID_STATUSES
+    assert {"active", "inactive"} == set(VALID_STATUSES)
 
 
 def test_invalid_value_not_in_set():
@@ -35,7 +36,7 @@ def test_invalid_value_not_in_set():
 
 def test_layers_match_literal():
     assert frozenset(get_args(Layer)) == VALID_LAYERS
-    assert "design" in VALID_LAYERS
+    assert {"design", "technical", "production"} == set(VALID_LAYERS)
 
 
 def test_authorities_match_literal():

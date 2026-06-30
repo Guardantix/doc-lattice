@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import game_lattice.cli as cli_mod
 from game_lattice import __version__
 from game_lattice.cli import app
+from game_lattice.error_types import ConfigError
 from game_lattice.tickets import Ticket, TicketState
 
 runner = CliRunner()
@@ -33,6 +34,19 @@ def test_check_json_reports_states(lattice_dir: Path, monkeypatch):
     payload = json.loads(result.stdout)
     states = {(e["source_id"], e["target_ref"]): e["state"] for e in payload["edges"]}
     assert states[("gdd", "ghost")] == "BROKEN"
+
+
+def test_check_json_reports_all_states(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check", "--json"])
+    payload = json.loads(result.stdout)
+    states = {(e["source_id"], e["target_ref"]): e for e in payload["edges"]}
+    assert states[("gdd", "ghost")]["state"] == "BROKEN"
+    assert states[("pc-design", "art-direction#accent")]["state"] == "STALE"
+    assert states[("pc-design", "art-direction#motion")]["state"] == "UNRECONCILED"
+    stale = states[("pc-design", "art-direction#accent")]
+    assert stale["target_id"] == "accent"
+    assert stale["expected"] != stale["actual"]
 
 
 def test_check_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
@@ -59,11 +73,41 @@ def test_impact_lists_dependents(lattice_dir: Path, monkeypatch):
     assert "pc-design" in {n["id"] for n in payload["affected"]}
 
 
+def test_impact_human_output_lists_tickets(lattice_dir: Path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")  # absolute path makes the line long; stop rich wrapping it
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["impact", "accent"])
+    assert result.exit_code == 0
+    assert "pc-design" in result.stdout
+    assert "tickets: PC-228" in result.stdout
+
+
+def test_impact_human_output_dash_when_no_tickets(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up {#s}\nb\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#s\n---\n# Down\nb\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["impact", "up"])
+    assert result.exit_code == 0
+    assert "tickets: -" in result.stdout
+
+
 def test_graph_emits_mermaid(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["graph"])
     assert result.exit_code == 0
     assert result.stdout.startswith("graph TD")
+
+
+def test_graph_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
+    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["graph"])
+    assert result.exit_code == 2
 
 
 def test_reconcile_unknown_id_exits_2(lattice_dir: Path, monkeypatch):
@@ -91,6 +135,15 @@ def test_reconcile_all_without_positional_id(lattice_dir: Path, monkeypatch):
     payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
     pc_states = [e["state"] for e in payload["edges"] if e["source_id"] == "pc-design"]
     assert pc_states == ["OK", "OK"]
+
+
+def test_reconcile_all_skips_broken_edge(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    assert runner.invoke(app, ["reconcile", "--all"]).exit_code == 0
+    payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
+    states = {(e["source_id"], e["target_ref"]): e["state"] for e in payload["edges"]}
+    assert states[("gdd", "ghost")] == "BROKEN"
+    assert runner.invoke(app, ["check"]).exit_code == 1
 
 
 def test_reconcile_requires_id_or_all(lattice_dir: Path, monkeypatch):
@@ -163,6 +216,16 @@ def test_reconcile_ref_typo_exits_2(lattice_dir: Path, monkeypatch):
     assert result.exit_code == 2
 
 
+def test_reconcile_ref_selects_single_edge(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    assert runner.invoke(app, ["reconcile", "pc-design", "--ref", "accent"]).exit_code == 0
+    payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
+    edges = [e for e in payload["edges"] if e["source_id"] == "pc-design"]
+    states = {e["target_ref"]: e["state"] for e in edges}
+    assert states["art-direction#accent"] == "OK"
+    assert states["art-direction#motion"] == "UNRECONCILED"
+
+
 def test_reconcile_noop_reports_nothing_to_reconcile(tmp_path: Path, monkeypatch):
     _clean_docs(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -172,16 +235,29 @@ def test_reconcile_noop_reports_nothing_to_reconcile(tmp_path: Path, monkeypatch
     assert "nothing to reconcile" in result.stdout
 
 
-def test_main_maps_unexpected_error_to_exit_2(monkeypatch):
-    # An unexpected (non-ProjectError) failure must not exit 1 and collide with check's
-    # drift code; main() maps it to the tool-error code 2.
+@pytest.mark.parametrize(
+    "exc", [OSError("io"), RuntimeError("loop"), ValueError("bad"), ConfigError("cfg")]
+)
+def test_main_maps_errors_to_exit_2(monkeypatch, exc):
+    # An unexpected (non-ProjectError) failure or a ProjectError must not exit 1 and
+    # collide with check's drift code; main() maps both to the tool-error code 2.
     def boom():
-        raise RuntimeError("symlink loop")
+        raise exc
 
     monkeypatch.setattr(cli_mod, "app", boom)
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SystemExit) as info:
         cli_mod.main()
-    assert exc_info.value.code == 2
+    assert info.value.code == 2
+
+
+def test_main_passes_systemexit_through_unchanged(monkeypatch):
+    def boom():
+        raise SystemExit(1)  # typer's own exit must not be remapped to 2
+
+    monkeypatch.setattr(cli_mod, "app", boom)
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+    assert info.value.code == 1
 
 
 def _fake_fetch(tickets):
@@ -212,6 +288,27 @@ def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
     danger = [f for f in payload["findings"] if f["severity"] == "DANGER"]
     assert danger
     assert danger[0]["ticket_ref"] == "PC-228"
+
+
+def test_linear_positional_target_scopes_audit(lattice_dir, monkeypatch):
+    ticket = _ticket(TicketState(name="Done", type="completed"))
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["linear", "pc-design", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    danger = [f for f in payload["findings"] if f["severity"] == "DANGER"]
+    assert any(f["ticket_ref"] == "PC-228" and f["node_id"] == "pc-design" for f in danger)
+
+
+def test_linear_from_grades_downstream(lattice_dir, monkeypatch):
+    ticket = _ticket(TicketState(name="Done", type="completed"))
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["linear", "--from", "accent", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert any(f["ticket_ref"] == "PC-228" for f in payload["findings"])
 
 
 def test_linear_exit_code_gates_on_danger(lattice_dir, monkeypatch):

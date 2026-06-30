@@ -41,14 +41,24 @@ def test_target_content_section():
     assert "{#accent}" not in content
 
 
+def test_target_content_section_exact_via_build_lattice():
+    body = "# Up {#up-top}\nintro\n\n## Accent {#accent}\naccent body\nmore\n"
+    docs = [ParsedDoc(Path("up.md"), NodeMeta(id="up"), body)]
+    lat = build_lattice(docs)
+    # heading line keeps its text but loses the {#anchor} marker; span runs to EOF
+    assert target_content(lat, "accent") == "## Accent\naccent body\nmore"
+
+
 def test_target_content_file_is_whole_body():
     lat = _lattice()
     assert target_content(lat, "doc") == lat.nodes_by_id["doc"].body
 
 
 def test_target_content_broken_raises():
-    with pytest.raises(BrokenRefError):
+    with pytest.raises(BrokenRefError) as exc:
         target_content(_lattice(), "missing")
+    assert exc.value.code == "BROKEN_REF"
+    assert "missing" in str(exc.value)
 
 
 def test_node_for_path_returns_owning_node_for_an_anchor():
@@ -57,3 +67,10 @@ def test_node_for_path_returns_owning_node_for_an_anchor():
     owner = node_for_path(lat, lat.index["sec"].path)
     assert owner.id == "up"
     assert owner.authority == "binding"
+
+
+def test_node_for_path_unowned_path_raises():
+    with pytest.raises(BrokenRefError) as exc:
+        node_for_path(_lattice(), Path("unknown.md"))
+    assert exc.value.code == "BROKEN_REF"
+    assert "unknown.md" in str(exc.value)

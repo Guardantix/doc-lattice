@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from game_lattice.constants import LinearStateType
-from game_lattice.tickets import Finding, Ticket, TicketState
+from game_lattice.tickets import Finding, Ticket, TicketRef, TicketState
 
 
 def _state(type_: LinearStateType = "completed") -> TicketState:
@@ -76,3 +76,58 @@ def test_blocked_finding_has_reason_and_no_ticket():
     )
     assert finding.reason == "not-found"
     assert finding.ticket is None
+
+
+def test_identifier_is_control_stripped():
+    ticket = Ticket(
+        identifier="PC-\x9b228",  # C1 CSI byte (0x9b) inside the identifier
+        title=None,
+        url="https://x",
+        state=_state(),
+        parent=None,
+        children=(),
+    )
+    assert ticket.identifier == "PC-228"
+
+
+def test_ticketref_control_stripping_and_title_default():
+    ref = TicketRef(identifier="PC-\x1b200", state=_state("started"))
+    assert ref.identifier == "PC-200"  # CleanStr on TicketRef.identifier
+    assert ref.title is None  # CleanOptStr default (None branch)
+    titled = TicketRef(identifier="PC-1", title="Sub\x07task", state=_state("unstarted"))
+    assert titled.title == "Subtask"  # CleanOptStr non-None branch
+
+
+def test_ticket_children_coerce_list_to_tuple():
+    child = TicketRef(identifier="PC-1", title="Sub", state=_state("unstarted"))
+    ticket = Ticket(
+        identifier="PC-228",
+        title="Accent",
+        url="https://x",
+        state=_state(),
+        parent=None,
+        children=[child],  # ty: ignore[invalid-argument-type]
+    )
+    assert ticket.children == (child,)
+    assert isinstance(ticket.children, tuple)
+
+
+def test_pydantic_ticket_models_are_frozen():
+    ticket = Ticket(identifier="PC-1", url="https://x", state=_state())
+    with pytest.raises(ValidationError):
+        ticket.title = "mutated"
+
+
+def test_finding_is_frozen():
+    finding = Finding(
+        severity="INFO",
+        node_id="n",
+        node_title=None,
+        node_path=Path("x.md"),
+        drifted_refs=(),
+        ticket_ref="PC-1",
+        reason=None,
+        ticket=None,
+    )
+    with pytest.raises(AttributeError):
+        finding.severity = "DANGER"  # ty: ignore[invalid-assignment]

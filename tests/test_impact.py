@@ -67,8 +67,10 @@ def test_impact_is_transitive():
 
 def test_impact_unknown_token_raises():
     lat = build_lattice([_doc("a.md", "# A {#a-top}\nx\n", id="a")])
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as exc:
         impact(lat, "nonexistent")
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert "nonexistent" in str(exc.value)
 
 
 def test_impact_known_id_with_no_dependents_is_empty():
@@ -97,3 +99,57 @@ def test_impact_cycle_terminates():
         ]
     )
     assert {n.id for n in impact(lat, "a")} == {"a", "b"}
+
+
+def test_impact_reaches_dependents_of_an_affected_nodes_sections():
+    # 'mid' derives from file 'top' and itself contains section {#mid-sec};
+    # 'deep' derives from that section. Editing 'top' must reach 'deep' because
+    # mid's file (hence mid-sec) is effectively changed by mid being affected.
+    lat = build_lattice(
+        [
+            _doc("top.md", "# Top {#top-h}\nx\n", id="top"),
+            _doc(
+                "mid.md",
+                "# Mid {#mid-h}\n\n## Sec {#mid-sec}\nx\n",
+                id="mid",
+                derives_from=[RawEdge(ref="top")],
+            ),
+            _doc("deep.md", "x\n", id="deep", derives_from=[RawEdge(ref="mid-sec")]),
+        ]
+    )
+    assert {n.id for n in impact(lat, "top")} == {"mid", "deep"}
+
+
+def test_expand_targets_unknown_id_returns_empty():
+    lat = build_lattice([_doc("a.md", "# A {#a-top}\nx\n", id="a")])
+    assert expand_targets(lat, "ghost") == set()
+
+
+def test_expand_targets_file_without_anchors_is_just_its_id():
+    lat = build_lattice([_doc("a.md", "plain body, no headings\n", id="a")])
+    assert expand_targets(lat, "a") == {"a"}
+
+
+def test_impact_results_sorted_by_id():
+    # Three dependents enqueued in non-sorted insertion order; impact promises sorted ids.
+    lat = build_lattice(
+        [
+            _doc("up.md", "# Up {#u}\nx\n", id="up"),
+            _doc("zeta.md", "x\n", id="zeta", derives_from=[RawEdge(ref="u")]),
+            _doc("alpha.md", "x\n", id="alpha", derives_from=[RawEdge(ref="u")]),
+            _doc("mid.md", "x\n", id="mid", derives_from=[RawEdge(ref="u")]),
+        ]
+    )
+    assert [n.id for n in impact(lat, "u")] == ["alpha", "mid", "zeta"]
+
+
+def test_impact_accepts_namespaced_token_like_bare_id():
+    # 'a#sec' and bare 'sec' resolve on the trailing segment, so they must behave alike.
+    lat = build_lattice(
+        [
+            _doc("a.md", "# A {#a-top}\n\n## Sec {#sec}\nx\n", id="a"),
+            _doc("d.md", "x\n", id="d", derives_from=[RawEdge(ref="sec")]),
+        ]
+    )
+    assert expand_targets(lat, "a#sec") == expand_targets(lat, "sec")
+    assert {n.id for n in impact(lat, "a#sec")} == {"d"}

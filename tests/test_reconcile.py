@@ -212,3 +212,62 @@ def test_reconcile_all_skips_already_ok_edge(lattice_dir: Path):
     refs = _planned_refs(plan)
     assert "art-direction#accent" not in refs  # already OK -> skipped
     assert "art-direction#motion" in refs  # still UNRECONCILED -> planned
+
+
+def test_apply_reconcile_no_frontmatter_returns_unchanged():
+    # No opening fence: a concurrent edit stripped the frontmatter entirely.
+    text = "no frontmatter here\njust body\n"
+    out, applied = apply_reconcile(text, {"a#x": "h"})
+    assert out == text
+    assert applied == set()
+
+
+def test_apply_reconcile_empty_frontmatter_returns_unchanged():
+    # An empty fence block (yaml.load -> None) is safe, not a crash.
+    text = "---\n---\nbody\n"
+    out, applied = apply_reconcile(text, {"a#x": "h"})
+    assert out == text
+    assert applied == set()
+
+
+def test_apply_reconcile_non_list_derives_from_raises():
+    # derives_from present but not a list is a distinct error branch from a non-mapping entry.
+    text = "---\nid: d\nderives_from: oops\n---\nbody\n"
+    with pytest.raises(UnreadableDocError) as exc_info:
+        apply_reconcile(text, {"a#x": "h"})
+    assert exc_info.value.code == "UNREADABLE_DOC"
+
+
+def test_reconcile_ref_targeting_ok_edge_plans_nothing(lattice_dir: Path):
+    # Reconcile accent to OK, then re-target it with --ref: the edge matched so this
+    # must return an empty plan, NOT the no-match ValidationError.
+    project = load_config(None, lattice_dir)
+    _apply_plan(reconcile(load_lattice(project), "pc-design", ref="accent", reconcile_all=False))
+    relat = load_lattice(load_config(None, lattice_dir))
+    assert reconcile(relat, "pc-design", ref="accent", reconcile_all=False) == {}
+
+
+def test_reconcile_all_plans_every_drifting_file(tmp_path: Path):
+    # Two distinct drifting downstream nodes must each get their own path key under --all.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up {#sec}\nbody\n", encoding="utf-8")
+    (docs / "d1.md").write_text(
+        "---\nid: d1\nderives_from:\n  - ref: up#sec\n---\n# D1\nx\n", encoding="utf-8"
+    )
+    (docs / "d2.md").write_text(
+        "---\nid: d2\nderives_from:\n  - ref: up#sec\n---\n# D2\ny\n", encoding="utf-8"
+    )
+    lat = load_lattice(load_config(None, tmp_path))
+    plan = reconcile(lat, "", ref=None, reconcile_all=True)
+    assert {p.name for p in plan} == {"d1.md", "d2.md"}
+    assert all("up#sec" in updates for updates in plan.values())
+
+
+def test_reconcile_all_with_ref_filters_without_raising(lattice_dir: Path):
+    # --all with --ref narrows edges across all nodes; the raise guards stay suppressed.
+    lat = load_lattice(load_config(None, lattice_dir))
+    plan = reconcile(lat, "", ref="accent", reconcile_all=True)
+    refs = _planned_refs(plan)
+    assert "art-direction#accent" in refs  # ref-matched edge planned
+    assert "art-direction#motion" not in refs  # filtered out by ref, no raise

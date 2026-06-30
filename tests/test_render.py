@@ -63,3 +63,91 @@ def test_mermaid_sanitizes_node_ids_with_spaces():
     assert 'my_doc["My Doc"]' in out  # id sanitized, title preserved
     assert "    my_doc --> b" in out
     assert "my doc[" not in out  # raw space-bearing id would be invalid mermaid
+
+
+def test_dot_styles_stale_edges():
+    # The DOT dashed-style branch must fire when an edge is stale, mirroring the mermaid
+    # dashed-arrow coverage; otherwise drift is rendered solid.
+    out = to_dot(_lattice(), {("down", "u")})
+    assert '    "up" -> "down" [style=dashed];' in out
+    assert '    "up" -> "down";' not in out  # solid form absent when stale
+
+
+def test_mermaid_escapes_double_quote_in_label():
+    # A double quote in a title must become an apostrophe so the ["..."] label stays
+    # well-formed; mermaid has no backslash escape inside the quotes.
+    lat = build_lattice([ParsedDoc(Path("a.md"), NodeMeta(id="a", title='Say "hi"'), "x\n")])
+    out = to_mermaid(lat, set())
+    assert "a[\"Say 'hi'\"]" in out  # quotes become apostrophes; label stays well-formed
+    assert 'Say "hi"' not in out  # no raw double quote leaks into the bracketed label
+
+
+def test_mermaid_omits_broken_edge_but_keeps_node():
+    # An unresolved derives_from (target_id None) contributes no arrow, but the node that
+    # owns the broken ref is still rendered.
+    lat = build_lattice(
+        [
+            ParsedDoc(
+                Path("g.md"),
+                NodeMeta(id="g", title="G", derives_from=[RawEdge(ref="ghost")]),
+                "x\n",
+            )
+        ]
+    )
+    out = to_mermaid(lat, set())
+    assert 'g["G"]' in out  # broken-ref node still rendered
+    assert "-->" not in out  # the unresolved edge contributes no arrow
+
+
+def test_multiple_section_edges_collapse_with_stale_or():
+    # Two section edges between the same file pair collapse to one edge, drawn dashed if
+    # any contributing edge is stale (stale-OR aggregation).
+    docs = [
+        ParsedDoc(Path("up.md"), NodeMeta(id="up", title="Up"), "# Up {#a}\nx\n## B {#b}\ny\n"),
+        ParsedDoc(
+            Path("down.md"),
+            NodeMeta(id="down", derives_from=[RawEdge(ref="a"), RawEdge(ref="b")]),
+            "x\n",
+        ),
+    ]
+    lat = build_lattice(docs)
+    solid = to_mermaid(lat, set()).splitlines()
+    assert solid.count("    up --> down") == 1  # two section edges collapse to one
+    dashed = to_mermaid(lat, {("down", "b")})  # only the 'b' edge stale
+    assert "    up -.-> down" in dashed  # single collapsed edge is dashed
+    assert "    up --> down" not in dashed
+
+
+def test_empty_lattice_renders_headers_only():
+    # The empty-lattice boundary pins the exact preamble/postamble, notably that DOT still
+    # closes its brace with no nodes or edges.
+    empty = build_lattice([])
+    assert to_mermaid(empty, set()) == "graph TD\n"
+    assert to_dot(empty, set()) == "digraph lattice {\n}\n"
+
+
+def test_label_falls_back_to_id_when_title_missing():
+    # 'down' has no title, so _label falls back to the id verbatim as the bracketed label.
+    out = to_mermaid(_lattice(), set())
+    assert 'down["down"]' in out  # no title -> id used verbatim as the label
+
+
+def test_edges_emitted_in_sorted_order():
+    # _graph_edges returns a sorted list so the diffed output is deterministic; two nodes
+    # deriving from the same upstream emit edges sorted by (upstream, source).
+    docs = [
+        ParsedDoc(Path("u.md"), NodeMeta(id="u"), "# U {#u1}\nx\n"),
+        ParsedDoc(Path("z.md"), NodeMeta(id="z", derives_from=[RawEdge(ref="u1")]), "x\n"),
+        ParsedDoc(Path("a.md"), NodeMeta(id="a", derives_from=[RawEdge(ref="u1")]), "x\n"),
+    ]
+    out = to_mermaid(build_lattice(docs), set())
+    edges = [ln for ln in out.splitlines() if "-->" in ln]
+    assert edges == ["    u --> a", "    u --> z"]  # sorted by (upstream, source)
+
+
+def test_dot_escapes_special_chars_in_node_id():
+    # DOT does not sanitize ids (unlike mermaid), so _dot_escape on the node id is the only
+    # guard keeping a quote-bearing id well-formed.
+    lat = build_lattice([ParsedDoc(Path("a.md"), NodeMeta(id='weird"id', title="T"), "x\n")])
+    out = to_dot(lat, set())
+    assert r'"weird\"id" [label="T"];' in out

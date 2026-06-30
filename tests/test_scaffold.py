@@ -1,6 +1,10 @@
 """Tests for the init scaffold generators."""
 
+import re
+
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from ruamel.yaml import YAML
 
 from game_lattice.config import Config
@@ -28,6 +32,17 @@ def test_render_config_default_has_docs_active_and_keys_commented():
     assert cfg.linear_team is None
 
 
+def test_commented_example_keys_stay_valid_against_config_schema():
+    # The commented keys document the live schema; uncommenting them must still
+    # produce a valid Config (strict + extra='forbid'), or the examples have rotted.
+    lines = render_config(("docs",), None).splitlines()
+    body = [line for line in lines if "configuration. See" not in line]  # drop header
+    cfg = _load("\n".join(re.sub(r"^#\s?", "", line) for line in body))
+    assert cfg.ignore_globs == ["**/superpowers/plans/**"]
+    assert cfg.linear_team == "ENG"
+    assert cfg.binding_layers is None
+
+
 def test_render_config_lists_multiple_roots():
     text = render_config(("design", "lore"), None)
     assert _load(text).docs_roots == ["design", "lore"]
@@ -52,6 +67,21 @@ def test_render_config_quotes_hostile_docs_root(root):
     assert cfg.docs_roots == [root]
 
 
+# control chars are rejected by the cli before render_config sees them, so the
+# round-trip contract only needs to hold for control-free, non-empty text.
+_scalars = st.text(st.characters(blacklist_categories=("Cc", "Cs"))).filter(bool)
+
+
+@given(team=_scalars)
+def test_render_config_round_trips_any_linear_team(team):
+    assert _load(render_config(("docs",), team)).linear_team == team
+
+
+@given(root=_scalars)
+def test_render_config_round_trips_any_docs_root(root):
+    assert _load(render_config((root,), None)).docs_roots == [root]
+
+
 def test_snippets_pin_rev_url_and_python():
     scaffold = build_scaffold(("docs",), None, "v0.2.0")
     for text in (scaffold.precommit_text, scaffold.ci_text):
@@ -63,6 +93,15 @@ def test_snippets_pin_rev_url_and_python():
     assert "actions/checkout@v4" in scaffold.ci_text
     assert "astral-sh/setup-uv@v6" in scaffold.ci_text
     assert "linear" not in scaffold.ci_text  # the network command never runs in the generated CI
+
+
+def test_invocation_installs_from_pinned_git_ref():
+    # uvx only installs from the tag if the full `--from git+<url>@<rev>` shape is
+    # intact; asserting url/rev/python as separate fragments misses a dropped `git+`.
+    scaffold = build_scaffold(("docs",), None, "v0.2.0")
+    for text in (scaffold.precommit_text, scaffold.ci_text):
+        assert f"--from git+{GAME_LATTICE_REPO_URL}@v0.2.0 game-lattice check" in text
+        assert f"--from git+{GAME_LATTICE_REPO_URL}@v0.2.0 game-lattice lint" in text
 
 
 def test_generated_gates_run_check_and_lint():

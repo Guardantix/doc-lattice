@@ -1,5 +1,7 @@
 """Tests for error types."""
 
+import pytest
+
 from game_lattice.error_types import (
     BrokenRefError,
     ConfigError,
@@ -45,3 +47,27 @@ def test_linear_error_inherits_and_has_code():
     assert isinstance(err, ProjectError)
     assert err.code == "LINEAR_ERROR"
     assert str(err) == "network down"
+
+
+def test_project_error_default_code():
+    err = ProjectError("boom")
+    assert str(err) == "boom"
+    assert err.code == "UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    ("factory", "code"),
+    [
+        (ConfigError, "CONFIG_ERROR"),
+        (ValidationError, "VALIDATION_ERROR"),
+        (DuplicateIdError, "DUPLICATE_ID"),
+        (BrokenRefError, "BROKEN_REF"),
+        (UnreadableDocError, "UNREADABLE_DOC"),
+        (LinearError, "LINEAR_ERROR"),
+    ],
+)
+def test_subclass_carries_message_and_code(factory, code):
+    err = factory("file foo.md is bad; do the fix")
+    assert isinstance(err, ProjectError)
+    assert err.code == code
+    assert str(err) == "file foo.md is bad; do the fix"  # message reaches Exception base
