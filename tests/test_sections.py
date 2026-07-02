@@ -153,6 +153,27 @@ def test_build_toc_heading_text_retains_anchor_marker():
     assert toc[0].text == "Accent {#accent}"
 
 
+def test_build_toc_strips_atx_closing_sequence_from_text():
+    # A CommonMark closing '#' run (preceded by whitespace) is not heading content, so it is
+    # dropped from Heading.text; a '#' inside the content is kept.
+    toc = build_toc("# Title #\n## C# guide ##\n")
+    assert [h.text for h in toc] == ["Title", "C# guide"]
+
+
+def test_anchor_ids_matches_github_for_atx_closing_sequence():
+    # GitHub renders '## Save format ##' with anchor 'save-format' (closing '##' discarded);
+    # without stripping the closing run the trailing space would slug to 'save-format-'.
+    toc = build_toc("## Save format ##\nx\n")
+    assert anchor_ids(toc) == ["save-format"]
+
+
+def test_build_toc_keeps_marker_when_closing_sequence_present():
+    # The closing '##' is stripped, but an explicit marker before it survives.
+    toc = build_toc("## Accent {#accent} ##\nx\n")
+    assert toc[0].anchor == "accent"
+    assert toc[0].text == "Accent {#accent}"
+
+
 @pytest.mark.parametrize(
     ("text", "slug"),
     [

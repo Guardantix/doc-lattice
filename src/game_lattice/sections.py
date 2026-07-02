@@ -9,6 +9,10 @@ import re
 from dataclasses import dataclass
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+# CommonMark optional closing sequence of an ATX heading: a trailing run of '#' preceded by
+# whitespace is not part of the heading content, so GitHub discards it before slugging. We
+# strip it so '## Save format ##' slugs to 'save-format', not 'save-format-'.
+_ATX_CLOSING_RE = re.compile(r"\s+#+\s*$")
 _ANCHOR_RE = re.compile(r"\s*\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}\s*")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
 # Verbatim port of github-slugger@2.0.0's strip character class (its regex.js), the set
@@ -29,7 +33,8 @@ _SLUG_STRIP_RE = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class Heading:
-    """One markdown heading. ``line`` is 1-indexed. ``text`` keeps the anchor marker."""
+    """One markdown heading. ``line`` is 1-indexed. ``text`` keeps the anchor marker but has
+    any CommonMark ATX closing ``#`` sequence stripped, matching GitHub's rendered anchor."""
 
     level: int
     text: str
@@ -98,7 +103,7 @@ def build_toc(body: str) -> list[Heading]:
         if match is None:
             continue
         level = len(match.group(1))
-        raw_text = match.group(2)
+        raw_text = _ATX_CLOSING_RE.sub("", match.group(2))
         anchor_match = _ANCHOR_RE.search(raw_text)
         anchor = anchor_match.group(1) if anchor_match else None
         headings.append(Heading(level=level, text=raw_text, anchor=anchor, line=i))
