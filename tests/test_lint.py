@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 from game_lattice.constants import AUTHORITY_LADDER
 from game_lattice.lint import LintResult, lint_lattice
 from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
 
 
 def _doc(id_, authority=None, derives=(), body="x\n"):
@@ -37,7 +37,7 @@ def test_binding_deriving_from_derived_is_a_violation():
     assert len(result.violations) == 1
     v = result.violations[0]
     assert (v.source_id, v.source_authority) == ("down", "binding")
-    assert (v.target_id, v.target_authority) == ("up", "derived")
+    assert (v.target_id, v.target_authority) == (TargetId("up"), "derived")
     assert result.skipped == ()
 
 
@@ -96,7 +96,7 @@ def test_unannotated_target_is_skipped_not_failed():
     assert result.violations == ()
     assert len(result.skipped) == 1
     assert result.skipped[0].reason == "target-unannotated"
-    assert result.skipped[0].target_id == "up"
+    assert result.skipped[0].target_id == TargetId("up")
 
 
 def test_both_endpoints_unannotated_reports_source_first():
@@ -109,7 +109,7 @@ def test_both_endpoints_unannotated_reports_source_first():
     assert len(result.skipped) == 1  # one skip per edge, not two
     assert result.skipped[0].reason == "source-unannotated"
     assert result.skipped[0].source_id == "down"
-    assert result.skipped[0].target_id == "up"
+    assert result.skipped[0].target_id == TargetId("up")
 
 
 def test_broken_edge_is_not_a_violation_and_not_in_skips():
@@ -127,7 +127,7 @@ def test_section_target_violation_uses_owning_file_authority():
     result = lint_lattice(lat)
     assert len(result.violations) == 1
     v = result.violations[0]
-    assert v.target_id == "sec"
+    assert v.target_id == TargetId("up", "sec")
     assert v.target_ref == "up#sec"
     assert v.target_authority == "derived"  # inherited from the owning file "up"
 
@@ -148,7 +148,7 @@ def test_section_target_skipped_when_owning_file_unannotated():
     result = lint_lattice(lat)
     assert result.violations == ()
     assert result.skipped[0].reason == "target-unannotated"
-    assert result.skipped[0].target_id == "sec"
+    assert result.skipped[0].target_id == TargetId("up", "sec")
     assert result.skipped[0].target_ref == "up#sec"  # full ref preserved, not just the id
 
 
@@ -162,7 +162,11 @@ def test_results_are_in_node_id_then_edge_order():
     result = lint_lattice(lat)
     assert isinstance(result, LintResult)
     assert [v.source_id for v in result.violations] == ["a", "a", "b"]
-    assert [v.target_id for v in result.violations] == ["weak1", "weak2", "weak1"]
+    assert [v.target_id for v in result.violations] == [
+        TargetId("weak1"),
+        TargetId("weak2"),
+        TargetId("weak1"),
+    ]
 
 
 def test_skips_are_in_node_id_then_edge_order():
@@ -175,9 +179,9 @@ def test_skips_are_in_node_id_then_edge_order():
     result = lint_lattice(lat)
     assert result.violations == ()
     assert [(s.source_id, s.target_id) for s in result.skipped] == [
-        ("a", "t1"),
-        ("a", "t2"),
-        ("b", "t1"),
+        ("a", TargetId("t1")),
+        ("a", TargetId("t2")),
+        ("b", TargetId("t1")),
     ]
 
 
@@ -190,9 +194,11 @@ def test_single_node_classifies_each_edge_independently():
     )
     result = lint_lattice(lat)
     # binding -> exploratory is the only violation
-    assert [v.target_id for v in result.violations] == ["weak"]
+    assert [v.target_id for v in result.violations] == [TargetId("weak")]
     # "bare" is unannotated -> one skip; "ghost" is broken (continue); "strong" passes
-    assert [(s.target_id, s.reason) for s in result.skipped] == [("bare", "target-unannotated")]
+    assert [(s.target_id, s.reason) for s in result.skipped] == [
+        (TargetId("bare"), "target-unannotated")
+    ]
 
 
 def test_empty_lattice_yields_no_violations_or_skips():

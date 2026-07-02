@@ -27,9 +27,10 @@ consciously reconciles the link.
 
 You annotate docs with two things:
 
-- **Stable ids.** Every tracked file declares an `id` in its frontmatter. Any section can
-  earn its own id by tagging its heading with `{#anchor}`. File ids and section anchors live
-  in one flat namespace.
+- **Stable ids.** Every tracked file declares an `id` in its frontmatter. Sections are addressed
+  by their heading's GitHub slug by default; an explicit `{#anchor}` tag on the heading provides
+  a stable id independent of heading text. Section ids are file-scoped, so the same anchor in
+  two files does not collide with file ids or each other.
 - **`derives_from` edges.** A downstream doc lists the upstream ids it depends on. Each edge
   carries a `seen` hash: a fingerprint of the upstream content at the moment the dependency
   was last reconciled.
@@ -108,9 +109,11 @@ tickets: [PC-228]
 The PC's UI highlights use the accent color.
 ```
 
-The ref `art-direction#accent` resolves on the trailing segment after the last `#`, so it
-points at the `{#accent}` section. The `seen` hash records the accent text pc-design was last
-built against.
+The ref `art-direction#accent` resolves file-scoped: it points at the section in the `art-direction`
+file whose heading carries the `{#accent}` marker. Markers are optional; a heading with no marker is
+addressed by its GitHub slug instead, and the `{#accent}` marker here pins a short stable id
+regardless of the heading's wording. The `seen` hash records the accent text pc-design was last built
+against.
 
 Now someone changes the accent to "cool teal." The `{#accent}` section's content hash no
 longer matches `seen`, so:
@@ -204,11 +207,14 @@ atomically, so a concurrent edit is never clobbered.
 | `layer` | optional | `design`, `technical`, or `production`. |
 | `authority` | optional | `binding`, `derived`, or `exploratory`. Ranked by `lint`. |
 | `derives_from` | downstream files | List of `{ ref, seen }` edges. |
-| `derives_from[].ref` | each edge | The upstream id, bare (`accent`) or namespaced (`art-direction#accent`). |
+| `derives_from[].ref` | each edge | The upstream id: bare (whole-file target, e.g. `art-direction`) or file-scoped (section target, e.g. `art-direction#accent`). |
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
 
-Section ids come from `{#anchor}` tags on markdown headings, e.g. `## Accent Color {#accent}`.
+Section ids are optional: a heading is addressed by its GitHub slug by default (e.g. `## Accent Color`
+resolves to `accent-color`), and an explicit `{#anchor}` marker on the heading wins as an escape hatch for
+a stable id independent of heading text (e.g. `## Accent Color {#accent-hue}`). Section refs are
+file-scoped (`file#anchor`), so the same anchor in two files does not collide.
 
 ## Configuration
 
@@ -234,7 +240,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.4.0 game-lattice init
+uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.5.0 game-lattice init
 ```
 
 This writes `.game-lattice.yml` (only if absent) and prints pre-commit hooks and a GitHub

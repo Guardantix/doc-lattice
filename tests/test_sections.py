@@ -2,7 +2,14 @@
 
 import pytest
 
-from game_lattice.sections import build_toc, section_span, section_text, split_body_lines
+from game_lattice.sections import (
+    anchor_ids,
+    build_toc,
+    github_slug,
+    section_span,
+    section_text,
+    split_body_lines,
+)
 
 DOC = """# Top {#top}
 intro
@@ -144,3 +151,91 @@ def test_build_toc_rejects_invalid_anchor_ids(heading):
 def test_build_toc_heading_text_retains_anchor_marker():
     toc = build_toc("## Accent {#accent}\nbody\n")
     assert toc[0].text == "Accent {#accent}"
+
+
+def test_build_toc_strips_atx_closing_sequence_from_text():
+    # A CommonMark closing '#' run (preceded by whitespace) is not heading content, so it is
+    # dropped from Heading.text; a '#' inside the content is kept.
+    toc = build_toc("# Title #\n## C# guide ##\n")
+    assert [h.text for h in toc] == ["Title", "C# guide"]
+
+
+def test_anchor_ids_matches_github_for_atx_closing_sequence():
+    # GitHub renders '## Save format ##' with anchor 'save-format' (closing '##' discarded);
+    # without stripping the closing run the trailing space would slug to 'save-format-'.
+    toc = build_toc("## Save format ##\nx\n")
+    assert anchor_ids(toc) == ["save-format"]
+
+
+def test_build_toc_keeps_marker_when_closing_sequence_present():
+    # The closing '##' is stripped, but an explicit marker before it survives.
+    toc = build_toc("## Accent {#accent} ##\nx\n")
+    assert toc[0].anchor == "accent"
+    assert toc[0].text == "Accent {#accent}"
+
+
+@pytest.mark.parametrize(
+    ("text", "slug"),
+    [
+        ("Slot table", "slot-table"),
+        ("3.2 Slot table", "32-slot-table"),  # '.' stripped, '3' and '2' join
+        ("5.7 Capability", "57-capability"),
+        ("Hello, World!", "hello-world"),  # punctuation stripped
+        ("A  B", "a--b"),  # runs are NOT collapsed; each space becomes one hyphen
+        ("well-known term", "well-known-term"),  # existing hyphens preserved
+        ("snake_case name", "snake_case-name"),  # underscores preserved
+        ("Fast⚡Mode", "fastmode"),  # emoji/symbol stripped, no adjacent space
+        ("Overview", "overview"),
+    ],
+)
+def test_github_slug_matches_github_rules(text, slug):
+    assert github_slug(text) == slug
+
+
+@pytest.mark.parametrize(
+    ("text", "slug"),
+    [
+        # Category No (superscript / vulgar fraction / circled digit): github-slugger strips
+        # these; a hand-rolled `\w`-based class wrongly keeps them. Values observed from the
+        # real github-slugger@2.0.0 package (see task-1-fix-report.md).
+        ("x²", "x"),  # SUPERSCRIPT TWO
+        ("½ cup", "-cup"),  # VULGAR FRACTION ONE HALF
+        ("① step one", "-step-one"),  # CIRCLED DIGIT ONE
+        # Category Mn (nonspacing combining marks): github-slugger keeps these; a hand-rolled
+        # class wrongly strips them.
+        ("é", "é"),  # e + COMBINING ACUTE ACCENT, unchanged
+        # An emoji (So, stripped) directly followed by VARIATION SELECTOR-16 (Mn, kept): only
+        # the emoji is removed, the selector survives.
+        ("\U0001f44d️", "️"),
+        # Category Pc other than underscore (connector punctuation): github-slugger keeps
+        # these; a hand-rolled class wrongly strips them.
+        ("under‿score", "under‿score"),  # UNDERTIE
+        ("under⁀score", "under⁀score"),  # CHARACTER TIE
+        # Category Lm (modifier letter): github-slugger keeps these.
+        ("aʼb", "aʼb"),  # noqa: RUF001 -- MODIFIER LETTER APOSTROPHE, intentional
+    ],
+)
+def test_github_slug_divergent_unicode_categories(text, slug):
+    assert github_slug(text) == slug
+
+
+def test_anchor_ids_uses_marker_when_present_else_slug():
+    toc = build_toc("# Intro {#custom}\n\n## Slot table\nx\n")
+    assert anchor_ids(toc) == ["custom", "slot-table"]
+
+
+def test_anchor_ids_dedupes_repeated_slugs_in_document_order():
+    toc = build_toc("## Notes\n\n## Notes\n\n## Notes\n")
+    assert anchor_ids(toc) == ["notes", "notes-1", "notes-2"]
+
+
+def test_anchor_ids_marker_heading_reserves_its_github_slug():
+    # GitHub slugs '## Notes {#n}' from its literal, marker-included text to 'notes-n' and
+    # reserves it; a later '## Notes n' then collides and becomes 'notes-n-1'. Reserving the
+    # marker heading's slug keeps game-lattice byte-parity with GitHub in this mixed case.
+    toc = build_toc("## Notes {#n}\n\n## Notes n\nx\n")
+    assert anchor_ids(toc) == ["n", "notes-n-1"]
+
+
+def test_anchor_ids_empty_toc_is_empty():
+    assert anchor_ids([]) == []

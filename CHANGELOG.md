@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] - 2026-07-01
+
+### Added
+
+- GitHub-native heading-slug fallback for anchor resolution: a `derives_from` section ref now
+  resolves against a plain heading with no `{#slug}` marker, computing the same slug GitHub
+  renders for that heading (ported verbatim from `github-slugger@2.0.0` for byte-parity). An
+  explicit `{#marker}` still resolves and takes precedence, remaining the escape hatch for
+  headings whose rendered text diverges from their source (inline links, images).
+
+### Changed
+
+- **Breaking:** section refs must now be namespaced `<file>#<anchor>`; a bare ref resolves only
+  to a file id. A bare anchor ref that previously resolved against the flat anchor namespace
+  (for example a plain `#accent` matching `art-direction#accent`) now reports `BROKEN` instead.
+  Adopters relying on bare-anchor refs must repoint them to the `file#anchor` form.
+
 ## [0.4.0] - 2026-06-29
 
 ### Added

@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from .check import check_lattice
 from .constants import BlockedReason, Severity
 from .impact import expand_targets, impact
-from .model import Lattice
+from .model import Lattice, TargetId
 from .tickets import Finding, Ticket
 
 _STATE_SEVERITY: dict[str, Severity] = {
@@ -41,7 +41,14 @@ def build_audit_trigger(lattice: Lattice, target: str | None) -> dict[str, tuple
         affected = {node.id for node in impact(lattice, target)}
         # impact() returns strict dependents and excludes target itself; add target's own
         # node so a CI gate scoped to a node cannot pass while that node ships a stale ticket.
-        affected |= {tid for tid in expand_targets(lattice, target) if tid in lattice.nodes_by_id}
+        # expand_targets yields TargetIds; bridge whole-file targets back to node ids so the
+        # target's own node is added to `affected`. Without this the filter is always-False
+        # (a TargetId is never a str key) and a scoped audit drops the target's own tickets.
+        affected |= {
+            tid.file_id
+            for tid in expand_targets(lattice, target)
+            if tid.anchor is None and tid.file_id in lattice.nodes_by_id
+        }
         trigger = {node_id: refs for node_id, refs in trigger.items() if node_id in affected}
     return trigger
 
@@ -61,10 +68,14 @@ def build_from_trigger(lattice: Lattice, from_id: str) -> dict[str, tuple[str, .
         ValidationError: If ``from_id`` resolves to no id.
     """
     affected = impact(lattice, from_id)
-    closure: set[str] = set(expand_targets(lattice, from_id))
+    closure: set[TargetId] = set(expand_targets(lattice, from_id))
     for node in affected:
-        closure.add(node.id)
-        closure |= lattice.anchors_by_path.get(node.path, frozenset())
+        # An affected node's whole file is in the closure; use its file target, not the bare
+        # node id, so an edge deriving from the whole file matches `edge.target_id in closure`.
+        closure.add(TargetId(node.id))
+        # An affected node's path is a tracked node, so it keys anchors_by_path by
+        # construction; index direct to fail loud on an incoherent index.
+        closure |= lattice.anchors_by_path[node.path]
     trigger: dict[str, tuple[str, ...]] = {}
     for node in affected:
         refs = tuple(edge.target_ref for edge in node.derives_from if edge.target_id in closure)

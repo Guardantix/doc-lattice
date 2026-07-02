@@ -138,6 +138,18 @@ def test_target_scoping_includes_dependents():
     assert "down" in build_audit_trigger(lattice, "up")
 
 
+def test_from_mode_whole_file_dependent_has_refs():
+    # leaf derives from the WHOLE FILE 'mid' (not a section). After a change to up#sec, mid is
+    # affected, so mid's file target must be in the closure or leaf's justifying ref is dropped.
+    up = _node("up", "# Up {#sec}\nbody\n")
+    mid = _node("mid", "# Mid\nbody\n", derives=[("up#sec", None)])
+    leaf = _node("leaf", "# Leaf\nb\n", derives=[("mid", None)], tickets=("PC-1",))
+    lattice = build_lattice([up, mid, leaf])
+    trigger = build_from_trigger(lattice, "up#sec")
+    assert "leaf" in trigger
+    assert trigger["leaf"] == ("mid",)  # the whole-file ref is the justifying ref
+
+
 def test_from_mode_transitive_dependent_has_refs():
     # up <- mid <- leaf. A change to up must give leaf non-empty drifted_refs.
     up = _node("up", "# Up {#sec}\nbody\n")

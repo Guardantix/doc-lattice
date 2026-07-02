@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from .constants import AUTHORITY_LADDER, Authority, SkipReason
-from .model import Lattice
+from .model import Lattice, TargetId
 from .resolve import node_for_path
 
 
@@ -13,7 +13,7 @@ class LadderViolation:
 
     source_id: str
     source_authority: Authority
-    target_id: str
+    target_id: TargetId
     target_ref: str
     target_authority: Authority
 
@@ -24,7 +24,7 @@ class SkippedEdge:
 
     source_id: str
     target_ref: str
-    target_id: str
+    target_id: TargetId
     reason: SkipReason
 
 
@@ -41,7 +41,7 @@ def _rank(authority: Authority) -> int:
     return AUTHORITY_LADDER.index(authority)
 
 
-def _target_authority(lattice: Lattice, target_id: str) -> Authority | None:
+def _target_authority(lattice: Lattice, target_id: TargetId) -> Authority | None:
     """Return the authority of the file node that owns a resolved target id.
 
     A section anchor inherits the authority of the file that owns it, so both file

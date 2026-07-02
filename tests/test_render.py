@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
 from game_lattice.render import to_dot, to_mermaid
 
 
@@ -11,7 +11,9 @@ def _lattice():
     return build_lattice(
         [
             ParsedDoc(Path("up.md"), NodeMeta(id="up", title="Up"), "# Up {#u}\nx\n"),
-            ParsedDoc(Path("down.md"), NodeMeta(id="down", derives_from=[RawEdge(ref="u")]), "x\n"),
+            ParsedDoc(
+                Path("down.md"), NodeMeta(id="down", derives_from=[RawEdge(ref="up#u")]), "x\n"
+            ),
         ]
     )
 
@@ -25,7 +27,7 @@ def test_mermaid_has_nodes_and_edges():
 
 
 def test_mermaid_styles_stale_edges():
-    out = to_mermaid(_lattice(), {("down", "u")})
+    out = to_mermaid(_lattice(), {("down", TargetId("up", "u"))})
     assert "-.->" in out  # dashed arrow for stale
 
 
@@ -68,7 +70,7 @@ def test_mermaid_sanitizes_node_ids_with_spaces():
 def test_dot_styles_stale_edges():
     # The DOT dashed-style branch must fire when an edge is stale, mirroring the mermaid
     # dashed-arrow coverage; otherwise drift is rendered solid.
-    out = to_dot(_lattice(), {("down", "u")})
+    out = to_dot(_lattice(), {("down", TargetId("up", "u"))})
     assert '    "up" -> "down" [style=dashed];' in out
     assert '    "up" -> "down";' not in out  # solid form absent when stale
 
@@ -106,14 +108,14 @@ def test_multiple_section_edges_collapse_with_stale_or():
         ParsedDoc(Path("up.md"), NodeMeta(id="up", title="Up"), "# Up {#a}\nx\n## B {#b}\ny\n"),
         ParsedDoc(
             Path("down.md"),
-            NodeMeta(id="down", derives_from=[RawEdge(ref="a"), RawEdge(ref="b")]),
+            NodeMeta(id="down", derives_from=[RawEdge(ref="up#a"), RawEdge(ref="up#b")]),
             "x\n",
         ),
     ]
     lat = build_lattice(docs)
     solid = to_mermaid(lat, set()).splitlines()
     assert solid.count("    up --> down") == 1  # two section edges collapse to one
-    dashed = to_mermaid(lat, {("down", "b")})  # only the 'b' edge stale
+    dashed = to_mermaid(lat, {("down", TargetId("up", "b"))})  # only the 'b' edge stale
     assert "    up -.-> down" in dashed  # single collapsed edge is dashed
     assert "    up --> down" not in dashed
 
@@ -137,8 +139,8 @@ def test_edges_emitted_in_sorted_order():
     # deriving from the same upstream emit edges sorted by (upstream, source).
     docs = [
         ParsedDoc(Path("u.md"), NodeMeta(id="u"), "# U {#u1}\nx\n"),
-        ParsedDoc(Path("z.md"), NodeMeta(id="z", derives_from=[RawEdge(ref="u1")]), "x\n"),
-        ParsedDoc(Path("a.md"), NodeMeta(id="a", derives_from=[RawEdge(ref="u1")]), "x\n"),
+        ParsedDoc(Path("z.md"), NodeMeta(id="z", derives_from=[RawEdge(ref="u#u1")]), "x\n"),
+        ParsedDoc(Path("a.md"), NodeMeta(id="a", derives_from=[RawEdge(ref="u#u1")]), "x\n"),
     ]
     out = to_mermaid(build_lattice(docs), set())
     edges = [ln for ln in out.splitlines() if "-->" in ln]

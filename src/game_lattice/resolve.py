@@ -3,16 +3,16 @@
 from pathlib import Path
 
 from .error_types import BrokenRefError
-from .model import Lattice, Node
+from .model import Lattice, Node, TargetId
 from .sections import section_text
 
 
-def target_content(lattice: Lattice, target_id: str) -> str:
+def target_content(lattice: Lattice, target_id: TargetId) -> str:
     """Return the content a target id covers, for hashing.
 
     Args:
         lattice: The built lattice.
-        target_id: A resolved stable id present in ``lattice.index``.
+        target_id: A resolved TargetId present in ``lattice.index``.
 
     Returns:
         The whole node body for a ``file`` location, or the anchored section text for a
@@ -23,7 +23,7 @@ def target_content(lattice: Lattice, target_id: str) -> str:
     """
     location = lattice.index.get(target_id)
     if location is None:
-        msg = f"ref resolves to unknown id {target_id!r}; fix the ref or add the anchor"
+        msg = f"ref resolves to unknown id {target_id.as_ref()!r}; fix the ref or add the anchor"
         raise BrokenRefError(msg)
     node = node_for_path(lattice, location.path)
     if location.kind == "file":

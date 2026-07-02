@@ -45,7 +45,7 @@ def test_check_json_reports_all_states(lattice_dir: Path, monkeypatch):
     assert states[("pc-design", "art-direction#accent")]["state"] == "STALE"
     assert states[("pc-design", "art-direction#motion")]["state"] == "UNRECONCILED"
     stale = states[("pc-design", "art-direction#accent")]
-    assert stale["target_id"] == "accent"
+    assert stale["target_id"] == "art-direction#accent"
     assert stale["expected"] != stale["actual"]
 
 
@@ -68,7 +68,7 @@ def test_check_error_handler_escapes_markup_in_message(tmp_path: Path, monkeypat
 
 def test_impact_lists_dependents(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["impact", "accent", "--json"])
+    result = runner.invoke(app, ["impact", "art-direction#accent", "--json"])
     payload = json.loads(result.stdout)
     assert "pc-design" in {n["id"] for n in payload["affected"]}
 
@@ -76,7 +76,7 @@ def test_impact_lists_dependents(lattice_dir: Path, monkeypatch):
 def test_impact_human_output_lists_tickets(lattice_dir: Path, monkeypatch):
     monkeypatch.setenv("COLUMNS", "200")  # absolute path makes the line long; stop rich wrapping it
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["impact", "accent"])
+    result = runner.invoke(app, ["impact", "art-direction#accent"])
     assert result.exit_code == 0
     assert "pc-design" in result.stdout
     assert "tickets: PC-228" in result.stdout
@@ -218,7 +218,8 @@ def test_reconcile_ref_typo_exits_2(lattice_dir: Path, monkeypatch):
 
 def test_reconcile_ref_selects_single_edge(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    assert runner.invoke(app, ["reconcile", "pc-design", "--ref", "accent"]).exit_code == 0
+    result = runner.invoke(app, ["reconcile", "pc-design", "--ref", "art-direction#accent"])
+    assert result.exit_code == 0
     payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
     edges = [e for e in payload["edges"] if e["source_id"] == "pc-design"]
     states = {e["target_ref"]: e["state"] for e in edges}
@@ -305,7 +306,7 @@ def test_linear_from_grades_downstream(lattice_dir, monkeypatch):
     ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["linear", "--from", "accent", "--json"])
+    result = runner.invoke(app, ["linear", "--from", "art-direction#accent", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert any(f["ticket_ref"] == "PC-228" for f in payload["findings"])

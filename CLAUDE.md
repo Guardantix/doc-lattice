@@ -46,18 +46,22 @@ config -> discovery -> frontmatter parse -> loader.build_lattice -> { check, imp
 **The `Lattice` (model.py) is the central structure** and every command reads from it:
 
 - `nodes_by_id`: each tracked file as a `Node` (frontmatter + verbatim body).
-- `index`: every stable id mapped to a `Location`. File ids and `{#anchor}` section ids share one
-  flat namespace; a collision anywhere is a `DuplicateIdError` (a load failure, exit 2).
+- `index`: every `TargetId` mapped to a `Location`. A file target is `TargetId(file_id)`; a
+  section target is `TargetId(file_id, anchor)`. Section ids are file-scoped, so the same anchor
+  in two files does not collide; a within-file clash is a `DuplicateIdError` (a load failure, exit 2).
 - `dependents`: reverse adjacency (target id -> source ids that derive from it), built from
   resolved edges only.
 - `ancestors`: for a section anchor, the enclosing anchored sections (outermost to innermost), so
   editing a nested sub-section propagates impact to dependents of its parent.
 
-**Refs and edge state.** A `derives_from` ref resolves on the trailing segment after the last `#`
-(`art-direction#accent` and bare `accent` resolve to the same id; see `model.split_ref`).
-A ref that resolves to nothing is **not** a load error: it is a normal lattice state
-(`target_id=None`) that `check` reports as `BROKEN`. This is the key modeling decision that
-distinguishes a broken edge (exit 1, drift) from a duplicate id (exit 2, incoherent index).
+**Refs and edge state.** A `derives_from` ref resolves file-scoped through `model.parse_ref`:
+`save-format#slot-table` parses to `TargetId("save-format", "slot-table")` and resolves against
+that file's headings, while a bare ref (`save-format`) is a whole-file target. A heading is
+addressed by an explicit `{#marker}` when present, otherwise by its GitHub slug (byte-parity with
+GitHub's rendered anchor; see `sections.github_slug`/`anchor_ids`). A ref that resolves to nothing
+is not a load error: it is a normal lattice state (`target_id=None`) that `check` reports as
+`BROKEN`. The same slug in two different files does not collide, because their `TargetId`s differ;
+a within-file clash (a marker equal to a computed slug) is a `DuplicateIdError`.
 
 **Drift detection.** Each edge carries a `seen` hash captured when it was last reconciled.
 `check` classifies every edge as OK / STALE / UNRECONCILED / BROKEN by comparing `seen` against
@@ -123,6 +127,8 @@ violation fails CI rather than just being a style preference:
 - **Paths and containment.** User-provided paths go through `safe_resolve()` (path_utils.py). Both
   `config` (docs roots) and `discovery` (each discovered file) reject any path that escapes the
   project root via `..`, an absolute path, or a symlink, before any read or write.
+- **Node ids.** A frontmatter `id` may not contain `#`; `#` separates a file id from a section
+  anchor in a ref. Enforced by a `NodeMeta` field validator (exit 2, names the id).
 - **No `datetime.now()`/`utcnow()` outside `datetime_utils.py`.**
 - **Version sync.** `__version__` (`src/game_lattice/__init__.py`), the `pyproject.toml` `version`,
   and the first versioned `## [X.Y.Z]` `CHANGELOG.md` heading must agree (a `## [Unreleased]` block above it is tolerated and skipped, so notes can accumulate there between releases). The pure core is `version_check.py`;

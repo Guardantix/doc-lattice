@@ -11,7 +11,7 @@ from ruamel.yaml.error import YAMLError
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
 from .hashing import content_hash
-from .model import Lattice, split_ref
+from .model import Lattice, parse_ref
 from .resolve import target_content
 
 
@@ -24,8 +24,8 @@ def reconcile(
     the lattice is updated; BROKEN and already-OK edges are skipped.  When targeting a
     specific node, all of that node's STALE or UNRECONCILED edges are updated (or just
     the matching edge if ``ref`` is given); an already-OK edge is skipped in both modes,
-    since restamping it to the same hash is a no-op.  The match uses the resolved trailing
-    id so a bare ref and a namespaced ref select the same edge.  A node's BROKEN edge is
+    since restamping it to the same hash is a no-op.  The match uses the parsed TargetId
+    so an identical ref selects the same edge.  A node's BROKEN edge is
     skipped (it does not block the node's reconcilable edges); only a ``--ref`` aimed
     directly at a broken edge is refused, and a ``--ref`` that matches no edge on the node
     is reported rather than silently doing nothing.
@@ -54,7 +54,7 @@ def reconcile(
     for node_id in node_ids:
         node = lattice.nodes_by_id[node_id]
         for edge in node.derives_from:
-            if ref is not None and split_ref(edge.target_ref) != split_ref(ref):
+            if ref is not None and parse_ref(edge.target_ref) != parse_ref(ref):
                 continue
             ref_matched = True
             if edge.target_id is None:

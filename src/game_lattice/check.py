@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .constants import EdgeState
 from .hashing import content_hash
-from .model import Edge, Lattice
+from .model import Edge, Lattice, TargetId
 from .resolve import target_content
 
 
@@ -14,7 +14,7 @@ class EdgeStatus:
 
     source_id: str
     target_ref: str
-    target_id: str | None
+    target_id: TargetId | None
     state: EdgeState
     expected: str | None
     actual: str | None

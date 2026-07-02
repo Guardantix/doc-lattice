@@ -6,6 +6,7 @@ import pytest
 
 from game_lattice.config import load_config
 from game_lattice.error_types import ConfigError, DuplicateIdError, UnreadableDocError
+from game_lattice.model import TargetId
 from game_lattice.orchestrate import load_lattice
 
 
@@ -13,10 +14,10 @@ def test_load_lattice_from_dir(lattice_dir: Path):
     project = load_config(None, lattice_dir)
     lat = load_lattice(project)
     assert set(lat.nodes_by_id) == {"art-direction", "pc-design", "gdd"}
-    assert lat.index["accent"].kind == "section"
+    assert lat.index[TargetId("art-direction", "accent")].kind == "section"
     # pc-design derives from accent and motion
     refs = {e.target_id for e in lat.nodes_by_id["pc-design"].derives_from}
-    assert refs == {"accent", "motion"}
+    assert refs == {TargetId("art-direction", "accent"), TargetId("art-direction", "motion")}
     # gdd's ghost ref is unresolved
     assert lat.nodes_by_id["gdd"].derives_from[0].target_id is None
 

@@ -4,8 +4,8 @@ import warnings
 from collections import defaultdict
 
 from .error_types import DuplicateIdError
-from .model import Edge, Lattice, Location, Node, ParsedDoc, split_ref
-from .sections import Heading, build_toc, section_span, split_body_lines
+from .model import Edge, Lattice, Location, Node, ParsedDoc, TargetId, parse_ref
+from .sections import Heading, anchor_ids, build_toc, section_span, split_body_lines
 
 
 def build_lattice(docs: list[ParsedDoc]) -> Lattice:
@@ -15,18 +15,20 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
         docs: Tracked files with validated frontmatter and bodies.
 
     Returns:
-        A Lattice with the id index, nodes, reverse adjacency, and ancestor map.
+        A Lattice with the TargetId index, nodes, reverse adjacency, and ancestor map.
 
     Raises:
-        DuplicateIdError: If any two ids (file or anchor) collide.
+        DuplicateIdError: If two file ids collide, or two headings in one file resolve to the
+            same anchor id (a marker equal to a computed slug, or two equal markers).
     """
-    index: dict[str, Location] = {}
-    sources: dict[str, str] = {}
-    ancestors: dict[str, tuple[str, ...]] = {}
+    index: dict[TargetId, Location] = {}
+    sources: dict[TargetId, str] = {}
+    ancestors: dict[TargetId, tuple[TargetId, ...]] = {}
 
     for doc in docs:
+        file_id = doc.meta.id
         _register(
-            doc.meta.id,
+            TargetId(file_id),
             Location(path=doc.path, kind="file", span=(1, _line_count(doc.body))),
             index,
             sources,
@@ -34,22 +36,24 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
         )
         toc = build_toc(doc.body)
         total_lines = _line_count(doc.body)
-        anchored = [(i, h, h.anchor) for i, h in enumerate(toc) if h.anchor is not None]
-        spans: dict[str, tuple[int, int]] = {}
-        for i, _head, anchor in anchored:
+        anchored: list[tuple[int, Heading, TargetId]] = []
+        spans: dict[TargetId, tuple[int, int]] = {}
+        for i, (head, anchor) in enumerate(zip(toc, anchor_ids(toc), strict=True)):
+            tid = TargetId(file_id, anchor)
             span = section_span(toc, i, total_lines)
-            spans[anchor] = span
+            spans[tid] = span
+            anchored.append((i, head, tid))
             _register(
-                anchor,
+                tid,
                 Location(path=doc.path, kind="section", span=span),
                 index,
                 sources,
-                f"anchor in {doc.path}",
+                f"anchor {tid.as_ref()!r} in {doc.path}",
             )
         _record_ancestors(anchored, spans, ancestors)
 
     nodes: dict[str, Node] = {}
-    dependents: defaultdict[str, set[str]] = defaultdict(set)
+    dependents: defaultdict[TargetId, set[str]] = defaultdict(set)
     for doc in docs:
         edges = _resolve_edges(doc, index)
         for edge in edges:
@@ -68,9 +72,9 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
 
     file_id_by_path = {node.path: node_id for node_id, node in nodes.items()}
     section_ids_by_path = defaultdict(list)
-    for id_, loc in index.items():
+    for tid, loc in index.items():
         if loc.kind == "section":
-            section_ids_by_path[loc.path].append(id_)
+            section_ids_by_path[loc.path].append(tid)
     anchors_by_path = {path: frozenset(section_ids_by_path[path]) for path in file_id_by_path}
 
     return Lattice(
@@ -83,28 +87,27 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
     )
 
 
-def _resolve_edges(doc: ParsedDoc, index: dict[str, Location]) -> list[Edge]:
+def _resolve_edges(doc: ParsedDoc, index: dict[TargetId, Location]) -> list[Edge]:
     """Resolve a node's derives_from entries to edges, deduped by resolved target.
 
-    Edge identity is ``(source_node_id, resolved_target_id)`` (spec 2.2): a node that
-    lists the same resolved target twice (for example a bare ref and the same id written
-    namespaced) keeps only the last occurrence, last write wins on ``seen``, and a
-    warning is raised. Resolution keys on the trailing id even for a broken ref, so two
-    refs to the same unresolved id collapse to one broken edge.
+    Edge identity is ``(source_node_id, resolved TargetId)``: a node that lists the same
+    resolved target twice keeps only the last occurrence, last write wins on ``seen``, and a
+    warning is raised. Resolution keys on the parsed TargetId even for a broken ref, so two
+    refs to the same unresolved target collapse to one broken edge.
 
     Args:
         doc: The parsed source document.
-        index: The id-to-Location index for resolving refs.
+        index: The TargetId-to-Location index for resolving refs.
 
     Returns:
         The node's edges in first-seen order, one per distinct resolved target.
     """
-    deduped: dict[str, Edge] = {}
+    deduped: dict[TargetId, Edge] = {}
     for raw in doc.meta.derives_from:
-        target_id = split_ref(raw.ref)
+        target_id = parse_ref(raw.ref)
         if target_id in deduped:
             warnings.warn(
-                f"node {doc.meta.id!r} derives from {target_id!r} more than once;"
+                f"node {doc.meta.id!r} derives from {target_id.as_ref()!r} more than once;"
                 " keeping the last occurrence",
                 stacklevel=2,
             )
@@ -118,34 +121,37 @@ def _line_count(body: str) -> int:
 
 
 def _register(
-    id_: str,
+    id_: TargetId,
     location: Location,
-    index: dict[str, Location],
-    sources: dict[str, str],
+    index: dict[TargetId, Location],
+    sources: dict[TargetId, str],
     where: str,
 ) -> None:
-    """Record an id in the shared index, failing if it collides with an existing id.
+    """Record a TargetId in the shared index, failing if it collides with an existing one.
 
     ``sources`` tracks where each id was first seen so a duplicate names both registration
-    sites in the error.
+    sites in the error. A file id and a section id in different files never collide because
+    their TargetIds differ; only a within-file anchor clash or a repeated file id does.
     """
     if id_ in index:
-        msg = f"duplicate id {id_!r}: already registered at {sources[id_]}, again at {where}"
+        msg = (
+            f"duplicate id {id_.as_ref()!r}: already registered at {sources[id_]}, again at {where}"
+        )
         raise DuplicateIdError(msg)
     index[id_] = location
     sources[id_] = where
 
 
-def _span_width(span_and_id: tuple[tuple[int, int], str]) -> int:
+def _span_width(span_and_id: tuple[tuple[int, int], TargetId]) -> int:
     """Return the line width (end minus start) of a ``(span, id)`` pair, for sorting."""
     (span_start, span_end), _ = span_and_id
     return span_end - span_start
 
 
 def _record_ancestors(
-    anchored: list[tuple[int, Heading, str]],
-    spans: dict[str, tuple[int, int]],
-    ancestors: dict[str, tuple[str, ...]],
+    anchored: list[tuple[int, Heading, TargetId]],
+    spans: dict[TargetId, tuple[int, int]],
+    ancestors: dict[TargetId, tuple[TargetId, ...]],
 ) -> None:
     """Record each anchor's enclosing anchored sections, outermost to innermost.
 
@@ -155,7 +161,7 @@ def _record_ancestors(
     """
     for _, _head, anchor in anchored:
         start, end = spans[anchor]
-        containing: list[tuple[tuple[int, int], str]] = []
+        containing: list[tuple[tuple[int, int], TargetId]] = []
         for _, _other, oid in anchored:
             if oid == anchor:
                 continue
@@ -163,7 +169,5 @@ def _record_ancestors(
             other_encloses = (ostart < start and oend >= end) or (ostart <= start and oend > end)
             if other_encloses:
                 containing.append(((ostart, oend), oid))
-        # Anchored heading sections nest strictly, so a wider span is always the more
-        # enclosing one; sorting by span width descending yields outermost-to-innermost.
         containing.sort(key=_span_width, reverse=True)
         ancestors[anchor] = tuple(oid for _, oid in containing)

@@ -89,7 +89,7 @@ def test_has_drift_false_when_all_ok():
         ParsedDoc(Path("up.md"), NodeMeta(id="up"), up_body),
         ParsedDoc(
             Path("down.md"),
-            NodeMeta(id="down", derives_from=[RawEdge(ref="accent", seen=seen)]),
+            NodeMeta(id="down", derives_from=[RawEdge(ref="up#accent", seen=seen)]),
             "x\n",
         ),
     ]

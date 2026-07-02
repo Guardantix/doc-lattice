@@ -134,13 +134,19 @@ def test_reconcile_unknown_id_raises(lattice_dir: Path):
     assert isinstance(exc_info.value, ProjectError)
 
 
-def test_reconcile_ref_bare_matches_namespaced(lattice_dir: Path):
+def test_reconcile_ref_namespaced_matches_stored_ref(lattice_dir: Path):
     lat = load_lattice(load_config(None, lattice_dir))
-    # "accent" (bare) should match the stored ref "art-direction#accent" (namespaced)
-    plan = reconcile(lat, "pc-design", ref="accent", reconcile_all=False)
+    plan = reconcile(lat, "pc-design", ref="art-direction#accent", reconcile_all=False)
     assert plan, "plan must be non-empty"
     all_refs = _planned_refs(plan)
     assert "art-direction#accent" in all_refs
+
+
+def test_reconcile_ref_bare_anchor_no_longer_matches(lattice_dir: Path):
+    # A bare anchor ref does not match the file-scoped stored ref: reported, not a silent no-op.
+    lat = load_lattice(load_config(None, lattice_dir))
+    with pytest.raises(ValidationError):
+        reconcile(lat, "pc-design", ref="accent", reconcile_all=False)
 
 
 def test_reconcile_all_skips_broken_and_ok(lattice_dir: Path):
@@ -206,7 +212,11 @@ def test_reconcile_all_skips_already_ok_edge(lattice_dir: Path):
     # Make pc-design's accent edge OK, leave motion UNRECONCILED, then --all must plan
     # only motion (the OK edge is skipped at reconcile.py's new_seen == seen guard).
     project = load_config(None, lattice_dir)
-    _apply_plan(reconcile(load_lattice(project), "pc-design", ref="accent", reconcile_all=False))
+    _apply_plan(
+        reconcile(
+            load_lattice(project), "pc-design", ref="art-direction#accent", reconcile_all=False
+        )
+    )
     relat = load_lattice(load_config(None, lattice_dir))
     plan = reconcile(relat, "", ref=None, reconcile_all=True)  # id ignored under reconcile_all
     refs = _planned_refs(plan)
@@ -242,9 +252,13 @@ def test_reconcile_ref_targeting_ok_edge_plans_nothing(lattice_dir: Path):
     # Reconcile accent to OK, then re-target it with --ref: the edge matched so this
     # must return an empty plan, NOT the no-match ValidationError.
     project = load_config(None, lattice_dir)
-    _apply_plan(reconcile(load_lattice(project), "pc-design", ref="accent", reconcile_all=False))
+    _apply_plan(
+        reconcile(
+            load_lattice(project), "pc-design", ref="art-direction#accent", reconcile_all=False
+        )
+    )
     relat = load_lattice(load_config(None, lattice_dir))
-    assert reconcile(relat, "pc-design", ref="accent", reconcile_all=False) == {}
+    assert reconcile(relat, "pc-design", ref="art-direction#accent", reconcile_all=False) == {}
 
 
 def test_reconcile_all_plans_every_drifting_file(tmp_path: Path):
@@ -267,7 +281,7 @@ def test_reconcile_all_plans_every_drifting_file(tmp_path: Path):
 def test_reconcile_all_with_ref_filters_without_raising(lattice_dir: Path):
     # --all with --ref narrows edges across all nodes; the raise guards stay suppressed.
     lat = load_lattice(load_config(None, lattice_dir))
-    plan = reconcile(lat, "", ref="accent", reconcile_all=True)
+    plan = reconcile(lat, "", ref="art-direction#accent", reconcile_all=True)
     refs = _planned_refs(plan)
     assert "art-direction#accent" in refs  # ref-matched edge planned
     assert "art-direction#motion" not in refs  # filtered out by ref, no raise

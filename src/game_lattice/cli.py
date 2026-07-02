@@ -97,7 +97,7 @@ def check(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
                 {
                     "source_id": status.source_id,
                     "target_ref": status.target_ref,
-                    "target_id": status.target_id,
+                    "target_id": status.target_id.as_ref() if status.target_id else None,
                     "state": status.state,
                     "expected": status.expected,
                     "actual": status.actual,
@@ -132,7 +132,7 @@ def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
                 {
                     "source_id": violation.source_id,
                     "source_authority": violation.source_authority,
-                    "target_id": violation.target_id,
+                    "target_id": violation.target_id.as_ref(),
                     "target_ref": violation.target_ref,
                     "target_authority": violation.target_authority,
                 }
@@ -142,7 +142,7 @@ def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
                 {
                     "source_id": skipped.source_id,
                     "target_ref": skipped.target_ref,
-                    "target_id": skipped.target_id,
+                    "target_id": skipped.target_id.as_ref(),
                     "reason": skipped.reason,
                 }
                 for skipped in result.skipped

@@ -2,7 +2,7 @@
 
 import re
 
-from .model import Lattice
+from .model import Lattice, TargetId
 
 _MERMAID_ID_RE = re.compile(r"[^A-Za-z0-9_]")
 
@@ -46,7 +46,7 @@ def _mermaid_id(node_id: str) -> str:
 
 
 def _graph_edges(
-    lattice: Lattice, stale_edges: set[tuple[str, str]]
+    lattice: Lattice, stale_edges: set[tuple[str, TargetId]]
 ) -> list[tuple[str, str, bool]]:
     """Collapse resolved edges onto tracked file nodes.
 
@@ -80,7 +80,7 @@ def _graph_edges(
     )
 
 
-def to_mermaid(lattice: Lattice, stale_edges: set[tuple[str, str]]) -> str:
+def to_mermaid(lattice: Lattice, stale_edges: set[tuple[str, TargetId]]) -> str:
     """Render a Mermaid ``graph TD``.
 
     Args:
@@ -100,7 +100,7 @@ def to_mermaid(lattice: Lattice, stale_edges: set[tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def to_dot(lattice: Lattice, stale_edges: set[tuple[str, str]]) -> str:
+def to_dot(lattice: Lattice, stale_edges: set[tuple[str, TargetId]]) -> str:
     """Render a Graphviz DOT digraph.
 
     Args:

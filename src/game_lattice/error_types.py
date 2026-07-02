@@ -24,7 +24,7 @@ class ValidationError(ProjectError):
 
 
 class DuplicateIdError(ProjectError):
-    """Two lattice ids collide in the flat namespace."""
+    """Two file ids collide, or two headings in one file resolve to the same anchor id."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="DUPLICATE_ID")
