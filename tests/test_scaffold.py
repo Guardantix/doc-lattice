@@ -87,7 +87,7 @@ def test_snippets_pin_rev_url_and_python():
     for text in (scaffold.precommit_text, scaffold.ci_text):
         assert "@v0.2.0" in text
         assert GAME_LATTICE_REPO_URL in text
-        assert "--python 3.14" in text
+        assert "--python 3.13" in text
     assert "repo: local" in scaffold.precommit_text
     assert "pass_filenames: false" in scaffold.precommit_text
     assert "actions/checkout@v4" in scaffold.ci_text

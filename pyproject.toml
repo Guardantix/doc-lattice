@@ -7,10 +7,10 @@ packages = ["src/game_lattice"]
 
 [project]
 name = "game-lattice"
-version = "0.5.0"
+version = "0.6.0"
 description = "Traceability engine for game design and production documentation"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 license = "MIT"
 authors = [
     {name = "Rick Passero", email = "24213466+riskandreason@users.noreply.github.com"},

@@ -10,7 +10,7 @@ it as the source of truth when code and intent disagree.
 
 ## Commands
 
-Dependency management and execution go through `uv` (Python 3.14+).
+Dependency management and execution go through `uv` (Python 3.13+).
 
 ```bash
 uv sync --group dev                       # install (incl. dev deps)

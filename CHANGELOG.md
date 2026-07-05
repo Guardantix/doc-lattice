@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-07-05
+
+### Changed
+
+- Lowered the minimum supported Python from 3.14 to 3.13 (`requires-python = ">=3.13"`). 3.13 was
+  already the true floor: the engine's only version-gated dependency is `PurePath.full_match`
+  (added in Python 3.13, used by `ignore_globs` matching), so no engine change was required. CI now
+  runs the test suite on a 3.13 and 3.14 matrix, and `init`'s generated pre-commit and CI gates pin
+  `--python 3.13` so an adopting repo provisions the declared minimum.
+
 ## [0.5.0] - 2026-07-01
 
 ### Added

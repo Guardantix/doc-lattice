@@ -144,7 +144,7 @@ only command that writes to your docs, and it only ever rewrites the `seen` scal
 
 ### Prerequisites
 
-- Python 3.14+
+- Python 3.13+
 - [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 
 ### Install
@@ -240,7 +240,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.5.0 game-lattice init
+uvx --python 3.13 --from git+https://github.com/Guardantix/game-lattice@v0.6.0 game-lattice init
 ```
 
 This writes `.game-lattice.yml` (only if absent) and prints pre-commit hooks and a GitHub

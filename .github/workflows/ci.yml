@@ -37,12 +37,17 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.13', '3.14']
+    env:
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv python install 3.14
+      - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --group dev
       - run: uv run --no-sync pytest
 
@@ -99,10 +104,10 @@ jobs:
         run: |
           ref="git+https://github.com/Guardantix/game-lattice@${GITHUB_SHA}"
           fixture="tests/fixtures/release-smoke/.game-lattice.yml"
-          uvx --python 3.14 --from "${ref}" game-lattice check --config "${fixture}"
-          uvx --python 3.14 --from "${ref}" game-lattice lint --config "${fixture}"
+          uvx --python 3.13 --from "${ref}" game-lattice check --config "${fixture}"
+          uvx --python 3.13 --from "${ref}" game-lattice lint --config "${fixture}"
           workdir="$(mktemp -d)"
-          ( cd "${workdir}" && uvx --python 3.14 --from "${ref}" game-lattice init )
+          ( cd "${workdir}" && uvx --python 3.13 --from "${ref}" game-lattice init )
 
       - name: Create and push the tag
         if: steps.gate.outputs.proceed == 'true'
@@ -117,4 +122,4 @@ jobs:
         env:
           TAG: ${{ steps.target.outputs.tag }}
         run: |
-          uvx --python 3.14 --from "git+https://github.com/Guardantix/game-lattice@${TAG}" game-lattice --version
+          uvx --python 3.13 --from "git+https://github.com/Guardantix/game-lattice@${TAG}" game-lattice --version

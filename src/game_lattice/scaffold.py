@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from ruamel.yaml import YAML
 
 GAME_LATTICE_REPO_URL = "https://github.com/Guardantix/game-lattice"
-PYTHON_PIN = "3.14"
+PYTHON_PIN = "3.13"
 
 _CONFIG_HEADER = f"# game-lattice configuration. See {GAME_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/superpowers/plans/**"\n'
