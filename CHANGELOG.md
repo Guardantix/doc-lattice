@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `check --only STATE` (repeatable, case insensitive) to narrow human and JSON output to specific
   edge states. Filtering is display-only; the exit code still reflects every edge.
 
+### Changed
+
+- Replaced the O(headings^2) ancestor computation in `loader._record_ancestors` with a single
+  document-order stack pass, so lattice builds no longer go quadratic on heading-dense docs.
+  Ancestor maps are unchanged; a differential test verifies parity with the prior implementation.
+
 ## [0.6.0] - 2026-07-05
 
 ### Changed
