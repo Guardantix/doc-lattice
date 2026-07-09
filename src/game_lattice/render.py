@@ -1,4 +1,4 @@
-"""Render the lattice as Mermaid or DOT."""
+"""Render the lattice as Mermaid, DOT, or JSON."""
 
 import re
 
@@ -119,3 +119,34 @@ def to_dot(lattice: Lattice, stale_edges: set[tuple[str, TargetId]]) -> str:
         lines.append(f'    "{_dot_escape(upstream)}" -> "{_dot_escape(source_id)}"{style};')
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+def to_json(lattice: Lattice, stale_edges: set[tuple[str, TargetId]]) -> dict:
+    """Render the lattice as a JSON-serializable node/edge dump.
+
+    Args:
+        lattice: The built lattice.
+        stale_edges: ``(source_id, target_id)`` pairs that are stale.
+
+    Returns:
+        A dict with a ``nodes`` list (one entry per tracked node, sorted by id) and an
+        ``edges`` list holding the same collapsed file-level triples that
+        :func:`to_mermaid` and :func:`to_dot` draw, so the JSON edge set always agrees
+        with the rendered graph (broken edges omitted, section edges collapsed onto
+        their owning file, stale if any contributing edge is stale).
+    """
+    nodes = [
+        {
+            "id": node_id,
+            "title": node.title,
+            "layer": node.layer,
+            "authority": node.authority,
+            "path": str(node.path),
+        }
+        for node_id, node in sorted(lattice.nodes_by_id.items())
+    ]
+    edges = [
+        {"upstream": upstream, "downstream": source_id, "stale": is_stale}
+        for upstream, source_id, is_stale in _graph_edges(lattice, stale_edges)
+    ]
+    return {"nodes": nodes, "edges": edges}

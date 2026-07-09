@@ -13,7 +13,7 @@ from rich.markup import escape
 from . import __version__
 from .check import EdgeStatus, check_lattice, has_drift
 from .config import DEFAULT_CONFIG_NAME, load_config
-from .constants import VALID_EDGE_STATES
+from .constants import VALID_EDGE_STATES, VALID_GRAPH_FORMATS
 from .error_types import ConfigError, ProjectError, UnreadableDocError
 from .impact import impact as impact_walk
 from .linear_fetch import fetch_tickets
@@ -24,7 +24,7 @@ from .model import Lattice
 from .orchestrate import load_lattice
 from .reconcile import apply_reconcile
 from .reconcile import reconcile as plan_reconcile
-from .render import to_dot, to_mermaid
+from .render import to_dot, to_json, to_mermaid
 from .scaffold import build_scaffold
 from .stale_shipped import build_audit_trigger, build_from_trigger, stale_shipped
 from .text_utils import strip_control_chars
@@ -296,10 +296,14 @@ def reconcile(
 
 @app.command()
 def graph(
-    fmt: Annotated[str, typer.Option("--format", help="mermaid or dot.")] = "mermaid",
+    fmt: Annotated[str, typer.Option("--format", help="mermaid, dot, or json.")] = "mermaid",
     config: ConfigOpt = None,
 ) -> None:
-    """Emit the edge graph as Mermaid or DOT."""
+    """Emit the edge graph as Mermaid, DOT, or JSON."""
+    if fmt not in VALID_GRAPH_FORMATS:
+        valid = ", ".join(sorted(VALID_GRAPH_FORMATS))
+        _err.print(f"[red]error[/red]: --format {escape(f'{fmt!r}')} must be one of: {valid}")
+        raise typer.Exit(2)
     try:
         lattice = _load(config)
         stale = {
@@ -310,8 +314,12 @@ def graph(
     except ProjectError as exc:
         _print_project_error(exc)
         raise typer.Exit(2) from exc
-    rendered = to_dot(lattice, stale) if fmt == "dot" else to_mermaid(lattice, stale)
-    typer.echo(rendered, nl=False)
+    if fmt == "json":
+        typer.echo(json.dumps(to_json(lattice, stale)))
+    elif fmt == "dot":
+        typer.echo(to_dot(lattice, stale), nl=False)
+    else:
+        typer.echo(to_mermaid(lattice, stale), nl=False)
 
 
 @app.command()

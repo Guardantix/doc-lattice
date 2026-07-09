@@ -4,7 +4,7 @@ from pathlib import Path
 
 from game_lattice.loader import build_lattice
 from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
-from game_lattice.render import to_dot, to_mermaid
+from game_lattice.render import to_dot, to_json, to_mermaid
 
 
 def _lattice():
@@ -153,3 +153,81 @@ def test_dot_escapes_special_chars_in_node_id():
     lat = build_lattice([ParsedDoc(Path("a.md"), NodeMeta(id='weird"id', title="T"), "x\n")])
     out = to_dot(lat, set())
     assert r'"weird\"id" [label="T"];' in out
+
+
+def test_json_has_nodes_and_edges_sorted_by_id():
+    payload = to_json(_lattice(), set())
+    assert payload["nodes"] == [
+        {"id": "down", "title": None, "layer": None, "authority": None, "path": "down.md"},
+        {"id": "up", "title": "Up", "layer": None, "authority": None, "path": "up.md"},
+    ]
+    assert payload["edges"] == [{"upstream": "up", "downstream": "down", "stale": False}]
+
+
+def test_json_marks_stale_edges():
+    payload = to_json(_lattice(), {("down", TargetId("up", "u"))})
+    assert payload["edges"] == [{"upstream": "up", "downstream": "down", "stale": True}]
+
+
+def test_json_edge_set_matches_mermaid_edge_set():
+    # The JSON edges must be exactly the collapsed file-level triples Mermaid/DOT draw, so
+    # the three renderers never disagree about what the graph looks like.
+    lat = _lattice()
+    stale = {("down", TargetId("up", "u"))}
+    mermaid_edges = {
+        tuple(line.strip().split(" -.-> " if "-.->" in line else " --> "))
+        for line in to_mermaid(lat, stale).splitlines()
+        if "->" in line
+    }
+    json_edges = {(e["upstream"], e["downstream"]) for e in to_json(lat, stale)["edges"]}
+    assert json_edges == mermaid_edges
+
+
+def test_json_omits_broken_edge_but_keeps_node():
+    # An unresolved derives_from (target_id None) contributes no edge, but the node that
+    # owns the broken ref still appears in the node list.
+    lat = build_lattice(
+        [
+            ParsedDoc(
+                Path("g.md"),
+                NodeMeta(id="g", title="G", derives_from=[RawEdge(ref="ghost")]),
+                "x\n",
+            )
+        ]
+    )
+    payload = to_json(lat, set())
+    assert payload["nodes"] == [
+        {"id": "g", "title": "G", "layer": None, "authority": None, "path": "g.md"}
+    ]
+    assert payload["edges"] == []
+
+
+def test_json_collapses_section_edges_with_stale_or():
+    # Two section edges between the same file pair collapse to one edge in JSON too,
+    # marked stale if any contributing edge is stale.
+    docs = [
+        ParsedDoc(Path("up.md"), NodeMeta(id="up", title="Up"), "# Up {#a}\nx\n## B {#b}\ny\n"),
+        ParsedDoc(
+            Path("down.md"),
+            NodeMeta(id="down", derives_from=[RawEdge(ref="up#a"), RawEdge(ref="up#b")]),
+            "x\n",
+        ),
+    ]
+    lat = build_lattice(docs)
+    payload = to_json(lat, {("down", TargetId("up", "b"))})
+    assert payload["edges"] == [{"upstream": "up", "downstream": "down", "stale": True}]
+
+
+def test_json_node_fields_include_layer_authority_and_path():
+    lat = build_lattice(
+        [ParsedDoc(Path("a.md"), NodeMeta(id="a", layer="design", authority="binding"), "x\n")]
+    )
+    payload = to_json(lat, set())
+    assert payload["nodes"] == [
+        {"id": "a", "title": None, "layer": "design", "authority": "binding", "path": "a.md"}
+    ]
+
+
+def test_empty_lattice_renders_json_headers_only():
+    empty = build_lattice([])
+    assert to_json(empty, set()) == {"nodes": [], "edges": []}

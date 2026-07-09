@@ -175,7 +175,7 @@ uv run --group dev ty check src
 | `lint` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
 | `impact TOKEN` | List every downstream doc affected by a change to TOKEN. | 2 on tool error |
 | `reconcile [ID] [--ref REF] [--all]` | Set `seen` to current upstream hashes for the selected edges (the only command that mutates your tracked docs). | 2 on tool error |
-| `graph [--format mermaid\|dot]` | Emit the edge graph as Mermaid or DOT. | 2 on tool error |
+| `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED, 2 on tool error |
 | `init [--docs-root ...] [--linear-team KEY]` | Scaffold `.game-lattice.yml` and print pre-commit and CI codegen. | 2 on tool error |
 
