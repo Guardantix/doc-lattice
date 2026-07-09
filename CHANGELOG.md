@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `graph --format json` emits a node/edge dump (`{"nodes": [...], "edges": [...]}`) for
+  programmatic consumers, with the same collapsed edge set as the Mermaid and DOT renderers.
+
+### Changed
+
+- `graph --format` now rejects any value other than `mermaid`, `dot`, or `json` with an exit
+  2 error naming the valid formats, instead of silently falling back to Mermaid.
+
 ## [0.6.0] - 2026-07-05
 
 ### Changed
