@@ -142,12 +142,6 @@ def _register(
     sources[id_] = where
 
 
-def _span_width(span_and_id: tuple[tuple[int, int], TargetId]) -> int:
-    """Return the line width (end minus start) of a ``(span, id)`` pair, for sorting."""
-    (span_start, span_end), _ = span_and_id
-    return span_end - span_start
-
-
 def _record_ancestors(
     anchored: list[tuple[int, Heading, TargetId]],
     spans: dict[TargetId, tuple[int, int]],
@@ -158,16 +152,16 @@ def _record_ancestors(
     A section encloses another when its span strictly contains the other's; ties on one
     boundary still count as enclosing. Editing a nested section propagates impact to
     dependents of its ancestors, so the order runs outermost first.
+
+    Because ``anchored`` is in document order, span starts strictly increase, so a single
+    stack pass suffices: an anchor still on the stack whose end reaches the current anchor's
+    end encloses it. Popping ends strictly below the current end leaves exactly the ancestor
+    set, bottom-to-top being outermost-to-innermost.
     """
+    stack: list[tuple[int, TargetId]] = []
     for _, _head, anchor in anchored:
-        start, end = spans[anchor]
-        containing: list[tuple[tuple[int, int], TargetId]] = []
-        for _, _other, oid in anchored:
-            if oid == anchor:
-                continue
-            ostart, oend = spans[oid]
-            other_encloses = (ostart < start and oend >= end) or (ostart <= start and oend > end)
-            if other_encloses:
-                containing.append(((ostart, oend), oid))
-        containing.sort(key=_span_width, reverse=True)
-        ancestors[anchor] = tuple(oid for _, oid in containing)
+        _start, end = spans[anchor]
+        while stack and stack[-1][0] < end:
+            stack.pop()
+        ancestors[anchor] = tuple(tid for _, tid in stack)
+        stack.append((end, anchor))

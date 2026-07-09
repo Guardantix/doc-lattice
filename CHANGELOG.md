@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the O(headings^2) ancestor computation in `loader._record_ancestors` with a single
+  document-order stack pass, so lattice builds no longer go quadratic on heading-dense docs.
+  Ancestor maps are unchanged; a differential test verifies parity with the prior implementation.
+
 ### Removed
 
 - Pruned the unused `local_now`, `parse_iso`, and `format_iso` helpers from `datetime_utils.py`;
