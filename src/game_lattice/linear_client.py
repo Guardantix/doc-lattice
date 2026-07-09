@@ -18,8 +18,11 @@ from .error_types import LinearError
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 DEFAULT_TIMEOUT = 30.0
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
-MAX_ATTEMPTS = 3
-BACKOFF_SECONDS = (1.0, 2.0)  # sleep before attempt 2 and attempt 3
+BACKOFF_SECONDS = (1.0, 2.0)  # sleep before each retry after the first attempt
+# One initial attempt plus one retry per backoff slot. Deriving this from the schedule keeps the
+# two constants from drifting: extending BACKOFF_SECONDS raises the attempt count in lockstep, and
+# there is always a slot for every retry, so the schedule lookup can never go out of range.
+MAX_ATTEMPTS = len(BACKOFF_SECONDS) + 1
 RETRY_AFTER_CAP = 30.0
 HTTP_TOO_MANY_REQUESTS = 429
 HTTP_SERVER_ERROR_MIN = 500
@@ -70,7 +73,7 @@ class LinearClient:
         self._opener = opener if opener is not None else urllib.request.build_opener(_NoRedirect)
         self._sleep = sleeper
 
-    def _retry_delay(self, exc: urllib.error.HTTPError, next_attempt: int) -> float:
+    def _retry_delay(self, exc: urllib.error.HTTPError, attempt: int) -> float:
         """Compute the seconds to sleep before the next retry.
 
         Honors a ``Retry-After`` header that parses as a non-negative integer number of
@@ -79,12 +82,13 @@ class LinearClient:
 
         Args:
             exc: The retryable HTTP error whose headers may carry ``Retry-After``.
-            next_attempt: The upcoming attempt number (2 or 3), selecting the schedule slot.
+            attempt: The 1-based number of the attempt that just failed. Its zero-based index
+                selects the schedule slot, so the first failure sleeps ``BACKOFF_SECONDS[0]``.
 
         Returns:
             The delay in seconds.
         """
-        fallback = BACKOFF_SECONDS[next_attempt - 2]
+        fallback = BACKOFF_SECONDS[attempt - 1]
         headers = exc.headers
         if headers is None:
             return fallback
@@ -149,7 +153,7 @@ class LinearClient:
                         f"Linear HTTP error {exc.code} after {MAX_ATTEMPTS} attempts; "
                         "wait and re-run, or run impact for the offline view"
                     ) from exc
-                self._sleep(self._retry_delay(exc, attempt + 1))
+                self._sleep(self._retry_delay(exc, attempt))
                 continue
             except (urllib.error.URLError, OSError) as exc:
                 # A connect-phase failure arrives as URLError (urllib wraps it). A body-read
