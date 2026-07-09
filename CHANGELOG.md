@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Replaced the O(headings^2) ancestor computation in `loader._record_ancestors` with a single
+  document-order stack pass, so lattice builds no longer go quadratic on heading-dense docs.
+  Ancestor maps are unchanged; a differential test verifies parity with the prior implementation.
+
 ## [0.6.0] - 2026-07-05
 
 ### Changed
