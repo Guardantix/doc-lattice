@@ -3,10 +3,13 @@
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from game_lattice.error_types import DuplicateIdError
-from game_lattice.loader import build_lattice
+from game_lattice.loader import _line_count, _record_ancestors, build_lattice
 from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from game_lattice.sections import Heading, anchor_ids, build_toc, section_span
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:
@@ -236,3 +239,88 @@ def test_bare_anchor_ref_is_broken_not_resolved():
     lat = build_lattice(docs)
     assert lat.nodes_by_id["down"].derives_from[0].target_id is None  # BROKEN
     assert lat.nodes_by_id["down"].derives_from[0].target_ref == "accent"
+
+
+# --- ancestor stack-pass differential test (issue #26) -----------------------------------
+
+
+def _span_width_reference(span_and_id: tuple[tuple[int, int], TargetId]) -> int:
+    """Line width of a ``(span, id)`` pair, for the reference sort."""
+    (span_start, span_end), _ = span_and_id
+    return span_end - span_start
+
+
+def _record_ancestors_reference(
+    anchored: list[tuple[int, Heading, TargetId]],
+    spans: dict[TargetId, tuple[int, int]],
+) -> dict[TargetId, tuple[TargetId, ...]]:
+    """Verbatim copy of the pre-issue-26 quadratic ancestor computation.
+
+    Kept as the oracle the stack-pass implementation must match on every generated case.
+    """
+    ancestors: dict[TargetId, tuple[TargetId, ...]] = {}
+    for _, _head, anchor in anchored:
+        start, end = spans[anchor]
+        containing: list[tuple[tuple[int, int], TargetId]] = []
+        for _, _other, oid in anchored:
+            if oid == anchor:
+                continue
+            ostart, oend = spans[oid]
+            other_encloses = (ostart < start and oend >= end) or (ostart <= start and oend > end)
+            if other_encloses:
+                containing.append(((ostart, oend), oid))
+        containing.sort(key=_span_width_reference, reverse=True)
+        ancestors[anchor] = tuple(oid for _, oid in containing)
+    return ancestors
+
+
+def _build_anchored_and_spans(
+    levels: list[int],
+) -> tuple[list[tuple[int, Heading, TargetId]], dict[TargetId, tuple[int, int]]]:
+    """Build real ``anchored``/``spans`` from a list of heading levels.
+
+    Renders a markdown body (one heading per level, each followed by a content line), then
+    runs it through ``build_toc``/``anchor_ids``/``section_span`` exactly as ``build_lattice``
+    does, so the inputs mirror what the loader feeds ``_record_ancestors``.
+    """
+    body_lines: list[str] = []
+    for i, level in enumerate(levels):
+        body_lines.append(f"{'#' * level} Section {i}")
+        body_lines.append(f"content {i}")
+    body = "\n".join(body_lines) + "\n"
+    toc = build_toc(body)
+    total_lines = _line_count(body)
+    anchored: list[tuple[int, Heading, TargetId]] = []
+    spans: dict[TargetId, tuple[int, int]] = {}
+    for i, (head, anchor) in enumerate(zip(toc, anchor_ids(toc), strict=True)):
+        tid = TargetId("f", anchor)
+        spans[tid] = section_span(toc, i, total_lines)
+        anchored.append((i, head, tid))
+    return anchored, spans
+
+
+def _assert_matches_reference(levels: list[int]) -> None:
+    """The stack-pass result equals the quadratic reference for the given heading levels."""
+    anchored, spans = _build_anchored_and_spans(levels)
+    new_ancestors: dict[TargetId, tuple[TargetId, ...]] = {}
+    _record_ancestors(anchored, spans, new_ancestors)
+    assert new_ancestors == _record_ancestors_reference(anchored, spans)
+
+
+@pytest.mark.parametrize(
+    "levels",
+    [
+        pytest.param([1, 2, 3, 4, 5, 6], id="deeply-nested-h1-to-h6"),
+        pytest.param([2, 2, 2, 2], id="flat-siblings-one-level"),
+        pytest.param([1, 2, 3, 1, 2, 3], id="sibling-subtrees"),
+        pytest.param([1, 2], id="last-section-runs-to-eof"),
+        pytest.param([1], id="single-heading"),
+    ],
+)
+def test_ancestors_stack_pass_matches_reference_fixed_cases(levels: list[int]) -> None:
+    _assert_matches_reference(levels)
+
+
+@given(st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=60))
+def test_ancestors_stack_pass_matches_reference_generated(levels: list[int]) -> None:
+    _assert_matches_reference(levels)
