@@ -71,8 +71,9 @@ def impact(lattice: Lattice, token: str, *, max_depth: int | None = None) -> lis
         if max_depth is not None and depth >= max_depth:
             continue
         for source_id in lattice.dependents.get(current, frozenset()):
-            if source_id not in affected:
-                affected[source_id] = depth + 1
+            if source_id in affected:
+                continue
+            affected[source_id] = depth + 1
             # A source node id is a whole-file target; bridge it to a TargetId to keep walking.
             queue.append((TargetId(source_id), depth + 1))
             node = lattice.nodes_by_id[source_id]
