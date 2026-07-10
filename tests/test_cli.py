@@ -55,6 +55,61 @@ def test_check_human_output_is_byte_identical(lattice_dir: Path, monkeypatch):
     )
 
 
+def test_check_github_emits_each_drift_annotation(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check", "--format", "github"])
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        f"::error file={lattice_dir / 'docs/gdd.md'},title=game-lattice BROKEN::"
+        "gdd -> ghost is BROKEN\n"
+        f"::error file={lattice_dir / 'docs/pc-design.md'},title=game-lattice STALE::"
+        "pc-design -> art-direction#accent is STALE\n"
+        f"::error file={lattice_dir / 'docs/pc-design.md'},title=game-lattice UNRECONCILED::"
+        "pc-design -> art-direction#motion is UNRECONCILED\n"
+    )
+
+
+def test_check_github_suppresses_ok_edges(tmp_path: Path, monkeypatch):
+    _clean_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["reconcile", "down"]).exit_code == 0
+
+    result = runner.invoke(app, ["check", "--format", "github"])
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+def test_check_format_json_matches_json_alias(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    alias = runner.invoke(app, ["check", "--json"])
+    explicit = runner.invoke(app, ["check", "--format", "json"])
+
+    assert explicit.exit_code == alias.exit_code == 1
+    assert explicit.stdout == alias.stdout
+
+
+def test_check_rejects_json_github_conflict(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check", "--json", "--format", "github"])
+
+    assert result.exit_code == 2
+    assert "--json" in result.stderr
+    assert "--format github" in result.stderr
+
+
+def test_check_rejects_unknown_format(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check", "--format", "nonsense"])
+
+    assert result.exit_code == 2
+    assert "nonsense" in result.stderr
+    assert "human" in result.stderr
+    assert "json" in result.stderr
+    assert "github" in result.stderr
+
+
 def test_state_colors_cover_every_edge_state():
     assert set(_STATE_COLORS) == set(get_args(EdgeState))
 

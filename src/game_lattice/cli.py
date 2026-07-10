@@ -48,6 +48,7 @@ _STATE_COLORS: dict[EdgeState, str] = {
     "UNRECONCILED": "yellow",
     "BROKEN": "red",
 }
+_VALID_REPORT_FORMATS = frozenset({"human", "json", "github"})
 
 
 def _escape_github_message(value: str) -> str:
@@ -58,6 +59,31 @@ def _escape_github_message(value: str) -> str:
 def _escape_github_property(value: str) -> str:
     """Escape a GitHub workflow-command property value."""
     return _escape_github_message(value).replace(":", "%3A").replace(",", "%2C")
+
+
+def _resolve_report_format(fmt: str, json_out: bool) -> str:
+    """Validate output flags and return the effective report format.
+
+    Args:
+        fmt: Explicit ``--format`` value.
+        json_out: Whether the legacy ``--json`` alias was supplied.
+
+    Returns:
+        ``human``, ``json``, or ``github``.
+
+    Raises:
+        typer.Exit: Exit code 2 for a conflicting or unsupported selection.
+    """
+    if json_out and fmt == "github":
+        _err.print("[red]error[/red]: --json cannot be combined with --format github")
+        raise typer.Exit(2)
+    if json_out:
+        return "json"
+    if fmt not in _VALID_REPORT_FORMATS:
+        valid = ", ".join(sorted(_VALID_REPORT_FORMATS))
+        _err.print(f"[red]error[/red]: --format {escape(f'{fmt!r}')} must be one of: {valid}")
+        raise typer.Exit(2)
+    return fmt
 
 
 def _print_project_error(exc: ProjectError) -> None:
@@ -166,6 +192,7 @@ def _skip_summary(result: LintResult) -> str:
 def check(
     config: ConfigOpt = None,
     json_out: JsonOpt = False,
+    fmt: Annotated[str, typer.Option("--format", help="human, json, or github.")] = "human",
     only: Annotated[
         list[str] | None,
         typer.Option(
@@ -178,12 +205,13 @@ def check(
     ] = None,
 ) -> None:
     """Classify every edge; exit 1 on drift, 2 on tool error."""
+    report_format = _resolve_report_format(fmt, json_out)
     only_states = _parse_only_states(only)
     with _exit_on_project_error():
         lattice = _load(config)
         statuses = check_lattice(lattice)
     displayed = _filter_statuses(statuses, only_states)
-    if json_out:
+    if report_format == "json":
         payload = {
             "edges": [
                 {
@@ -198,6 +226,18 @@ def check(
             ]
         }
         typer.echo(json.dumps(payload))
+    elif report_format == "github":
+        for status in displayed:
+            if status.state == "OK":
+                continue
+            path = lattice.nodes_by_id[status.source_id].path
+            title = _escape_github_property(f"game-lattice {status.state}")
+            message = _escape_github_message(
+                f"{status.source_id} -> {status.target_ref} is {status.state}"
+            )
+            typer.echo(
+                f"::error file={_escape_github_property(str(path))},title={title}::{message}"
+            )
     else:
         for status in displayed:
             color = _STATE_COLORS[status.state]
