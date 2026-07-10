@@ -8,6 +8,8 @@ level, or to end of file.
 import re
 from dataclasses import dataclass
 
+from .hashing import normalize_newlines
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 # CommonMark optional closing sequence of an ATX heading: a trailing run of '#' preceded by
 # whitespace is not part of the heading content, so GitHub discards it before slugging. We
@@ -57,7 +59,7 @@ def split_body_lines(body: str) -> list[str]:
     Returns:
         The lines of ``body``.
     """
-    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = normalize_newlines(body).split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     return lines

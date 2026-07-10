@@ -2,6 +2,7 @@
 
 import pytest
 
+import game_lattice.sections as sections_module
 from game_lattice.sections import (
     anchor_ids,
     build_toc,
@@ -88,6 +89,19 @@ def test_build_toc_ignores_exotic_line_separator():
 
 def test_split_body_lines_normalizes_crlf_and_lone_cr():
     assert split_body_lines("a\r\nb\rc\n") == ["a", "b", "c"]
+
+
+def test_split_body_lines_uses_shared_newline_normalizer(monkeypatch):
+    calls: list[str] = []
+
+    def normalize_newlines(body: str) -> str:
+        calls.append(body)
+        return "normalized\nlines"
+
+    monkeypatch.setattr(sections_module, "normalize_newlines", normalize_newlines)
+
+    assert split_body_lines("raw body") == ["normalized", "lines"]
+    assert calls == ["raw body"]
 
 
 def test_split_body_lines_drops_only_one_trailing_blank():

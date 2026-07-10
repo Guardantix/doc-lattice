@@ -102,6 +102,7 @@ def apply_reconcile(current_file_text: str, updates: dict[str, str]) -> tuple[st
     raw_meta, body = split_frontmatter(current_file_text)
     if raw_meta is None:
         return current_file_text, set()
+    # Round-trip loaders retain document-specific state, so construct one for each call.
     yaml = YAML(typ="rt")
     try:
         data = yaml.load(raw_meta)

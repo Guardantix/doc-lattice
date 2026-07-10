@@ -6,6 +6,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+import game_lattice.loader as loader_module
 from game_lattice.error_types import DuplicateIdError
 from game_lattice.loader import _line_count, _record_ancestors, build_lattice
 from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
@@ -22,6 +23,25 @@ def test_registers_file_and_anchor_ids():
     assert lat.index[TargetId("a")].kind == "file"
     assert lat.index[TargetId("a", "sec")].kind == "section"
     assert lat.index[TargetId("a", "sec")].span == (1, 2)
+
+
+def test_build_lattice_counts_lines_once_per_document(monkeypatch):
+    docs = [
+        _doc("a.md", "# A {#a}\nbody\n", id="a"),
+        _doc("b.md", "# B {#b}\nbody\n", id="b"),
+    ]
+    calls: list[str] = []
+    original_line_count = loader_module._line_count
+
+    def counting_line_count(body: str) -> int:
+        calls.append(body)
+        return original_line_count(body)
+
+    monkeypatch.setattr(loader_module, "_line_count", counting_line_count)
+
+    loader_module.build_lattice(docs)
+
+    assert calls == [doc.body for doc in docs]
 
 
 def test_resolves_edges_and_builds_dependents():

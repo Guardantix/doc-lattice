@@ -27,15 +27,15 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
 
     for doc in docs:
         file_id = doc.meta.id
+        total_lines = _line_count(doc.body)
         _register(
             TargetId(file_id),
-            Location(path=doc.path, kind="file", span=(1, _line_count(doc.body))),
+            Location(path=doc.path, kind="file", span=(1, total_lines)),
             index,
             sources,
             f"file {doc.path}",
         )
         toc = build_toc(doc.body)
-        total_lines = _line_count(doc.body)
         anchored: list[tuple[int, Heading, TargetId]] = []
         spans: dict[TargetId, tuple[int, int]] = {}
         for i, (head, anchor) in enumerate(zip(toc, anchor_ids(toc), strict=True)):

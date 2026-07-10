@@ -6,6 +6,7 @@ import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
+import game_lattice.frontmatter_parser as frontmatter_parser_module
 from game_lattice.error_types import ConfigError, UnreadableDocError
 from game_lattice.frontmatter_parser import parse_meta, split_frontmatter
 
@@ -78,6 +79,24 @@ def test_parse_meta_returns_node():
     assert meta.id == "pc"
 
 
+def test_parse_meta_reuses_safe_yaml_loader(monkeypatch):
+    raw_documents = ["id: first\n", "id: second\n"]
+    original_yaml = frontmatter_parser_module._YAML
+    calls: list[str] = []
+
+    class TrackingYAML:
+        def load(self, raw_meta: str):
+            calls.append(raw_meta)
+            return original_yaml.load(raw_meta)
+
+    monkeypatch.setattr(frontmatter_parser_module, "_YAML", TrackingYAML())
+
+    metas = [parse_meta(raw, Path(f"{index}.md")) for index, raw in enumerate(raw_documents)]
+
+    assert [meta.id for meta in metas if meta is not None] == ["first", "second"]
+    assert calls == raw_documents
+
+
 def test_parse_meta_maps_all_fields():
     raw = (
         "id: pc-design\ntitle: PC Design\nlayer: design\nauthority: derived\n"
@@ -138,3 +157,13 @@ def test_parse_meta_bad_yaml_carries_code_and_names_file():
         parse_meta("id: [unclosed\n", Path("a.md"))
     assert exc.value.code == "UNREADABLE_DOC"
     assert "a.md" in str(exc.value)
+
+
+def test_safe_yaml_loader_resets_version_after_malformed_frontmatter():
+    with pytest.raises(UnreadableDocError):
+        parse_meta("%YAML 1.1\nid: [unclosed\n", Path("broken.md"))
+
+    meta = parse_meta("id: on\n", Path("next.md"))
+
+    assert meta is not None
+    assert meta.id == "on"

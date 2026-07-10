@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import game_lattice.config as config_module
 from game_lattice.config import load_config
 from game_lattice.error_types import ConfigError
 
@@ -23,6 +24,25 @@ def test_loads_and_resolves_roots(tmp_path: Path):
     project = load_config(None, tmp_path)
     assert project.config.ignore_globs == ["**/x/**"]
     assert project.resolved_roots == (tmp_path.resolve() / "design",)
+
+
+def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
+    original_yaml = config_module._YAML
+    calls: list[str] = []
+
+    class TrackingYAML:
+        def load(self, text: str):
+            calls.append(text)
+            return original_yaml.load(text)
+
+    monkeypatch.setattr(config_module, "_YAML", TrackingYAML())
+    projects = [tmp_path / "first", tmp_path / "second"]
+    for project in projects:
+        project.mkdir()
+        (project / ".game-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+        load_config(None, project)
+
+    assert calls == ["docs_roots: [docs]\n", "docs_roots: [docs]\n"]
 
 
 def test_explicit_config_path_loads_and_resolves_roots(tmp_path: Path):
@@ -182,3 +202,29 @@ def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
     assert "cannot parse config" in str(exc.value)
+
+
+def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
+    config_path = tmp_path / ".game-lattice.yml"
+    config_path.write_text("docs_roots: [unclosed\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(None, tmp_path)
+
+    config_path.write_text("docs_roots: [docs]\n", encoding="utf-8")
+
+    project = load_config(None, tmp_path)
+
+    assert project.config.docs_roots == ["docs"]
+
+
+def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
+    first_config = tmp_path / "first.yml"
+    first_config.write_text("%YAML 1.1\n---\ndocs_roots: [docs]\n", encoding="utf-8")
+    second_config = tmp_path / "second.yml"
+    second_config.write_text("docs_roots: [on]\n", encoding="utf-8")
+
+    first_project = load_config(first_config, tmp_path)
+    second_project = load_config(second_config, tmp_path)
+
+    assert first_project.config.docs_roots == ["docs"]
+    assert second_project.config.docs_roots == ["on"]

@@ -11,6 +11,7 @@ from .error_types import ConfigError
 from .path_utils import safe_resolve
 
 DEFAULT_CONFIG_NAME = ".game-lattice.yml"
+_YAML = YAML(typ="safe")
 
 
 class Config(BaseModel):
@@ -76,14 +77,16 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
 
 
 def _read_yaml(path: Path) -> object:
-    yaml = YAML(typ="safe")
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         msg = f"cannot read config {path}: {exc}"
         raise ConfigError(msg) from exc
+    # A YAML directive updates the reusable parser's version. Reset it so each config starts
+    # with default YAML semantics, matching a fresh safe loader.
+    _YAML.version = None
     try:
-        data = yaml.load(text)
+        data = _YAML.load(text)
     except YAMLError as exc:
         msg = f"cannot parse config {path}: {exc}"
         raise ConfigError(msg) from exc
