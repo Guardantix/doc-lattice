@@ -192,6 +192,37 @@ def test_impact_lists_dependents(lattice_dir: Path, monkeypatch):
     assert "pc-design" in {n["id"] for n in payload["affected"]}
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["lint"],
+        ["impact", "art-direction#accent"],
+        ["linear"],
+    ],
+)
+def test_indent_without_json_exits_2_before_project_loading(tmp_path: Path, monkeypatch, args):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, [*args, "--indent", "2"])
+    assert result.exit_code == 2
+    assert "--indent requires --json" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_exit"),
+    [
+        (["lint"], 0),
+        (["impact", "art-direction#accent"], 0),
+    ],
+)
+def test_offline_json_indent_round_trips(lattice_dir: Path, monkeypatch, args, expected_exit):
+    monkeypatch.chdir(lattice_dir)
+    compact = runner.invoke(app, [*args, "--json"])
+    pretty = runner.invoke(app, [*args, "--json", "--indent", "2"])
+    assert compact.exit_code == pretty.exit_code == expected_exit
+    assert json.loads(pretty.stdout) == json.loads(compact.stdout)
+    assert "\n  " in pretty.stdout
+
+
 def _chain_docs(tmp_path: Path) -> Path:
     # a <- b <- c: c derives from b, b derives from a.
     docs = tmp_path / "docs"
@@ -642,6 +673,17 @@ def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
     danger = [f for f in payload["findings"] if f["severity"] == "DANGER"]
     assert danger
     assert danger[0]["ticket_ref"] == "PC-228"
+
+
+def test_linear_json_indent_round_trips(lattice_dir: Path, monkeypatch):
+    ticket = _ticket(TicketState(name="Done", type="completed"))
+    monkeypatch.setattr(cli_mod, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
+    monkeypatch.chdir(lattice_dir)
+    compact = runner.invoke(app, ["linear", "--json"])
+    pretty = runner.invoke(app, ["linear", "--json", "--indent", "2"])
+    assert compact.exit_code == pretty.exit_code == 0
+    assert json.loads(pretty.stdout) == json.loads(compact.stdout)
+    assert '\n  "findings": [\n' in pretty.stdout
 
 
 def test_linear_positional_target_scopes_audit(lattice_dir, monkeypatch):

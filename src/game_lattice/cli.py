@@ -212,8 +212,13 @@ def check(
 
 
 @app.command()
-def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
+def lint(
+    config: ConfigOpt = None,
+    json_out: JsonOpt = False,
+    indent: IndentOpt = None,
+) -> None:
     """Validate the authority ladder; exit 1 on a violation, 2 on tool error."""
+    _validate_indent(indent, json_out=json_out)
     with _exit_on_project_error():
         lattice = _load(config)
         result = lint_lattice(lattice)
@@ -239,7 +244,7 @@ def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
                 for skipped in result.skipped
             ],
         }
-        typer.echo(json.dumps(payload))
+        typer.echo(json.dumps(payload, indent=indent))
     else:
         for violation in result.violations:
             _out.print(
@@ -256,12 +261,14 @@ def impact(
     token: str,
     config: ConfigOpt = None,
     json_out: JsonOpt = False,
+    indent: IndentOpt = None,
     depth: Annotated[
         int | None,
         typer.Option("--depth", min=1, help="Limit the walk to this many hops from the target."),
     ] = None,
 ) -> None:
     """List every downstream doc affected by a change to TOKEN."""
+    _validate_indent(indent, json_out=json_out)
     with _exit_on_project_error():
         lattice = _load(config)
         affected = impact_walk(lattice, token, max_depth=depth)
@@ -278,7 +285,7 @@ def impact(
                 for node, node_depth in affected
             ]
         }
-        typer.echo(json.dumps(payload))
+        typer.echo(json.dumps(payload, indent=indent))
     else:
         for node, _node_depth in affected:
             tickets = ", ".join(node.tickets) if node.tickets else "-"
@@ -448,8 +455,10 @@ def linear(  # noqa: PLR0913
     ] = False,
     config: ConfigOpt = None,
     json_out: JsonOpt = False,
+    indent: IndentOpt = None,
 ) -> None:
     """Report tickets shipped against a spec that has since drifted."""
+    _validate_indent(indent, json_out=json_out)
     if from_id is not None and target:
         _err.print("[red]error[/red]: pass a positional target or --from, not both")
         raise typer.Exit(2)
@@ -464,7 +473,7 @@ def linear(  # noqa: PLR0913
         tickets, rejected = fetch_tickets(refs, project.config.linear_team)
         findings = stale_shipped(lattice, trigger, tickets, rejected)
     if json_out:
-        typer.echo(json.dumps(findings_json(findings)))
+        typer.echo(json.dumps(findings_json(findings), indent=indent))
     else:
         render_findings(_out, findings)
     if exit_code:
