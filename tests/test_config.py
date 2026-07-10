@@ -204,3 +204,16 @@ def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
     assert "cannot parse config" in str(exc.value)
+
+
+def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
+    config_path = tmp_path / ".game-lattice.yml"
+    config_path.write_text("docs_roots: [unclosed\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(None, tmp_path)
+
+    config_path.write_text("docs_roots: [docs]\n", encoding="utf-8")
+
+    project = load_config(None, tmp_path)
+
+    assert project.config.docs_roots == ["docs"]
