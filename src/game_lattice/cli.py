@@ -218,11 +218,19 @@ def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
 
 
 @app.command()
-def impact(token: str, config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
+def impact(
+    token: str,
+    config: ConfigOpt = None,
+    json_out: JsonOpt = False,
+    depth: Annotated[
+        int | None,
+        typer.Option("--depth", min=1, help="Limit the walk to this many hops from the target."),
+    ] = None,
+) -> None:
     """List every downstream doc affected by a change to TOKEN."""
     try:
         lattice = _load(config)
-        affected = impact_walk(lattice, token)
+        affected = impact_walk(lattice, token, max_depth=depth)
     except ProjectError as exc:
         _print_project_error(exc)
         raise typer.Exit(2) from exc
@@ -234,13 +242,14 @@ def impact(token: str, config: ConfigOpt = None, json_out: JsonOpt = False) -> N
                     "title": node.title,
                     "path": str(node.path),
                     "tickets": list(node.tickets),
+                    "depth": node_depth,
                 }
-                for node in affected
+                for node, node_depth in affected
             ]
         }
         typer.echo(json.dumps(payload))
     else:
-        for node in affected:
+        for node, _node_depth in affected:
             tickets = ", ".join(node.tickets) if node.tickets else "-"
             _out.print(f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}")
 

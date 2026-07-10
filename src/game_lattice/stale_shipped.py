@@ -38,7 +38,7 @@ def build_audit_trigger(lattice: Lattice, target: str | None) -> dict[str, tuple
             grouped.setdefault(status.source_id, []).append(status.target_ref)
     trigger = {node_id: tuple(refs) for node_id, refs in grouped.items()}
     if target is not None:
-        affected = {node.id for node in impact(lattice, target)}
+        affected = {node.id for node, _ in impact(lattice, target)}
         # impact() returns strict dependents and excludes target itself; add target's own
         # node so a CI gate scoped to a node cannot pass while that node ships a stale ticket.
         # expand_targets yields TargetIds; bridge whole-file targets back to node ids so the
@@ -67,7 +67,7 @@ def build_from_trigger(lattice: Lattice, from_id: str) -> dict[str, tuple[str, .
     Raises:
         ValidationError: If ``from_id`` resolves to no id.
     """
-    affected = impact(lattice, from_id)
+    affected = [node for node, _ in impact(lattice, from_id)]
     closure: set[TargetId] = set(expand_targets(lattice, from_id))
     for node in affected:
         # An affected node's whole file is in the closure; use its file target, not the bare

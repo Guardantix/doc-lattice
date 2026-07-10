@@ -36,7 +36,7 @@ def test_impact_section_reaches_whole_file_dependents():
             _doc("sub.md", "x\n", id="sub", derives_from=[RawEdge(ref="up#sec")]),
         ]
     )
-    assert {n.id for n in impact(lat, "up#sec")} == {"whole", "sub"}
+    assert {n.id for n, _ in impact(lat, "up#sec")} == {"whole", "sub"}
 
 
 def test_file_token_expands_to_its_anchors():
@@ -58,7 +58,7 @@ def test_impact_includes_parent_dependents_for_nested_edit():
             _doc("d-child.md", "x\n", id="d-child", derives_from=[RawEdge(ref="up#child")]),
         ]
     )
-    affected = {n.id for n in impact(lat, "up#child")}
+    affected = {n.id for n, _ in impact(lat, "up#child")}
     assert affected == {"d-parent", "d-child"}
 
 
@@ -70,7 +70,7 @@ def test_impact_is_transitive():
             _doc("low.md", "x\n", id="low", derives_from=[RawEdge(ref="mid")]),
         ]
     )
-    assert {n.id for n in impact(lat, "up#u")} == {"mid", "low"}
+    assert {n.id for n, _ in impact(lat, "up#u")} == {"mid", "low"}
 
 
 def test_impact_unknown_token_raises():
@@ -95,7 +95,7 @@ def test_impact_diamond_reaches_each_node_once():
             _doc("d.md", "x\n", id="d", derives_from=[RawEdge(ref="a"), RawEdge(ref="a#a-sec")]),
         ]
     )
-    assert [n.id for n in impact(lat, "a")] == ["d"]
+    assert [n.id for n, _ in impact(lat, "a")] == ["d"]
 
 
 def test_impact_cycle_terminates():
@@ -106,7 +106,7 @@ def test_impact_cycle_terminates():
             _doc("b.md", "# B {#b-top}\nx\n", id="b", derives_from=[RawEdge(ref="a")]),
         ]
     )
-    assert {n.id for n in impact(lat, "a")} == {"a", "b"}
+    assert {n.id for n, _ in impact(lat, "a")} == {"a", "b"}
 
 
 def test_impact_reaches_dependents_of_an_affected_nodes_sections():
@@ -125,7 +125,7 @@ def test_impact_reaches_dependents_of_an_affected_nodes_sections():
             _doc("deep.md", "x\n", id="deep", derives_from=[RawEdge(ref="mid#mid-sec")]),
         ]
     )
-    assert {n.id for n in impact(lat, "top")} == {"mid", "deep"}
+    assert {n.id for n, _ in impact(lat, "top")} == {"mid", "deep"}
 
 
 def test_expand_targets_unknown_id_returns_empty():
@@ -148,7 +148,7 @@ def test_impact_results_sorted_by_id():
             _doc("mid.md", "x\n", id="mid", derives_from=[RawEdge(ref="up#u")]),
         ]
     )
-    assert [n.id for n in impact(lat, "up#u")] == ["alpha", "mid", "zeta"]
+    assert [n.id for n, _ in impact(lat, "up#u")] == ["alpha", "mid", "zeta"]
 
 
 def test_bare_anchor_token_is_unknown_but_namespaced_resolves():
@@ -161,4 +161,102 @@ def test_bare_anchor_token_is_unknown_but_namespaced_resolves():
     )
     with pytest.raises(ValidationError):
         impact(lat, "sec")  # bare anchor is not a file id -> unknown
-    assert {n.id for n in impact(lat, "a#sec")} == {"d"}
+    assert {n.id for n, _ in impact(lat, "a#sec")} == {"d"}
+
+
+def _chain_lattice():
+    # a <- b <- c: c derives from b, b derives from a (all whole-file refs).
+    return build_lattice(
+        [
+            _doc("a.md", "# A {#a-top}\nx\n", id="a"),
+            _doc("b.md", "# B {#b-top}\nx\n", id="b", derives_from=[RawEdge(ref="a")]),
+            _doc("c.md", "# C {#c-top}\nx\n", id="c", derives_from=[RawEdge(ref="b")]),
+        ]
+    )
+
+
+def test_impact_unbounded_chain_reports_depths():
+    lat = _chain_lattice()
+    assert impact(lat, "a") == [
+        (lat.nodes_by_id["b"], 1),
+        (lat.nodes_by_id["c"], 2),
+    ]
+
+
+def test_impact_depth_1_reports_only_direct_dependents():
+    lat = _chain_lattice()
+    result = impact(lat, "a", max_depth=1)
+    assert [(n.id, d) for n, d in result] == [("b", 1)]
+
+
+def test_impact_depth_2_reports_two_hops_with_depths():
+    lat = _chain_lattice()
+    result = impact(lat, "a", max_depth=2)
+    assert [(n.id, d) for n, d in result] == [("b", 1), ("c", 2)]
+
+
+def test_impact_depth_records_minimum_over_diamond():
+    # 'top' has two direct dependents 'left' and 'right' (depth 1); 'sink' derives from both
+    # (depth 2) and is reachable by two equal-length paths but recorded once at depth 2.
+    lat = build_lattice(
+        [
+            _doc("top.md", "# Top {#t}\nx\n", id="top"),
+            _doc("left.md", "# Left {#l}\nx\n", id="left", derives_from=[RawEdge(ref="top")]),
+            _doc("right.md", "# Right {#r}\nx\n", id="right", derives_from=[RawEdge(ref="top")]),
+            _doc(
+                "sink.md",
+                "# Sink {#s}\nx\n",
+                id="sink",
+                derives_from=[RawEdge(ref="left"), RawEdge(ref="right")],
+            ),
+        ]
+    )
+    assert [(n.id, d) for n, d in impact(lat, "top")] == [
+        ("left", 1),
+        ("right", 1),
+        ("sink", 2),
+    ]
+    assert [(n.id, d) for n, d in impact(lat, "top", max_depth=1)] == [
+        ("left", 1),
+        ("right", 1),
+    ]
+
+
+def test_impact_depth_shortcut_path_wins_over_long_path():
+    # 'sink' derives from 'top' directly (depth 1) and from 'mid' (depth 2). Minimum depth wins.
+    lat = build_lattice(
+        [
+            _doc("top.md", "# Top {#t}\nx\n", id="top"),
+            _doc("mid.md", "# Mid {#m}\nx\n", id="mid", derives_from=[RawEdge(ref="top")]),
+            _doc(
+                "sink.md",
+                "# Sink {#s}\nx\n",
+                id="sink",
+                derives_from=[RawEdge(ref="top"), RawEdge(ref="mid")],
+            ),
+        ]
+    )
+    depths = {n.id: d for n, d in impact(lat, "top")}
+    assert depths == {"mid": 1, "sink": 1}
+
+
+def test_impact_nested_section_reaches_parent_dependents_at_depth_1():
+    # Editing nested {#child} must still reach the dependent of its parent {#parent} at depth 1,
+    # because ancestor expansion seeds the parent target at depth 0.
+    parent = "# Parent {#parent}\n\n## Child {#child}\nx\n"
+    lat = build_lattice(
+        [
+            _doc("up.md", parent, id="up"),
+            _doc("d-parent.md", "x\n", id="d-parent", derives_from=[RawEdge(ref="up#parent")]),
+            _doc("d-child.md", "x\n", id="d-child", derives_from=[RawEdge(ref="up#child")]),
+        ]
+    )
+    assert [(n.id, d) for n, d in impact(lat, "up#child", max_depth=1)] == [
+        ("d-child", 1),
+        ("d-parent", 1),
+    ]
+
+
+def test_impact_depth_none_matches_unbounded():
+    lat = _chain_lattice()
+    assert impact(lat, "a", max_depth=None) == impact(lat, "a")

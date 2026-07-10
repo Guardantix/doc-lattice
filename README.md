@@ -173,7 +173,7 @@ uv run --group dev ty check src
 |---------|--------------|----------------|
 | `check [--only STATE ...]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN. | 1 on drift, 2 on tool error |
 | `lint` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
-| `impact TOKEN` | List every downstream doc affected by a change to TOKEN. | 2 on tool error |
+| `impact TOKEN [--depth N]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
 | `reconcile [ID] [--ref REF] [--all]` | Set `seen` to current upstream hashes for the selected edges (the only command that mutates your tracked docs). | 2 on tool error |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED, 2 on tool error |
@@ -182,6 +182,11 @@ uv run --group dev ty check src
 Every command except `init` accepts `--config PATH` (path to `.game-lattice.yml`; defaults to
 the file in the current directory). `check`, `lint`, `impact`, and `linear` accept `--json` for
 machine-readable output. Run `uv run game-lattice <command> --help` for the full flag list.
+
+`impact` walks the full transitive closure by default. Pass `--depth N` (N >= 1) to bound the
+walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly from it. Human
+output is unchanged, and each `--json` entry gains a `"depth"` field carrying the minimum number
+of hops at which that doc is reached.
 
 `check` accepts a repeatable `--only STATE` to narrow the display to specific states (case
 insensitive, e.g. `--only stale --only broken`); an unrecognized state exits 2 and names the
