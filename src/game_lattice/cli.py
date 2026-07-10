@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
+import typer.rich_utils
 from rich.console import Console
 from rich.markup import escape
 
@@ -733,14 +734,16 @@ def main() -> None:
     code 2 instead of Python's default 1, which ``check`` reserves to mean "drift
     detected". Intended exits raised by typer (``SystemExit``) propagate unchanged.
     """
-    # Set NO_COLOR before typer/click parse argv: their own rich_utils consoles (used for
-    # --help and parameter-validation errors like a bad --indent) build fresh Console
-    # instances that read this env var, and are otherwise untouched by _disable_color().
-    # Drop FORCE_COLOR too: an ambient force-color signal (set in CI here) otherwise overrides
-    # NO_COLOR and keeps styling on, so an explicit --no-color flag must win over the env var.
+    # Neutralize color before typer/click parse argv: --help and parameter-validation errors
+    # (like a bad --indent) are rendered by typer's own rich_utils console before main_callback
+    # runs, so _disable_color() never reaches them. Setting NO_COLOR handles Rich color, but
+    # typer forces terminal styling whenever GITHUB_ACTIONS/FORCE_COLOR/PY_COLORS is set (as CI
+    # is), which keeps bold/dim escapes on even with NO_COLOR. Setting rich_utils.COLOR_SYSTEM to
+    # None (its documented disable switch, read afresh by each _get_rich_console call) makes those
+    # consoles emit plain text unconditionally, independent of the terminal-forcing env vars.
     if "--no-color" in sys.argv[1:]:
         os.environ["NO_COLOR"] = "1"
-        os.environ.pop("FORCE_COLOR", None)
+        typer.rich_utils.COLOR_SYSTEM = None
     try:
         app()
     except ProjectError as exc:

@@ -189,8 +189,8 @@ with `N` spaces per level. `--indent` without `--json` is a usage error.
 
 Use the global `--no-color` option before the command to disable colored output explicitly, for
 example `game-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
-environment variable; `--no-color` is the command-line equivalent, and it overrides an ambient
-`FORCE_COLOR` so help and usage errors come out unstyled too.
+environment variable; `--no-color` is the command-line equivalent, and it also strips the styling
+from help and usage-error text even when a terminal-forcing variable is set.
 
 `check` and `lint` also accept `--format human|json|github`. `human` is the default, and `json`
 is equivalent to the existing `--json` alias. `github` emits one escaped GitHub Actions `::error`
