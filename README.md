@@ -184,6 +184,13 @@ the file in the current directory). `check`, `lint`, `impact`, `reconcile`, and 
 `--json` for machine-readable output. Run `uv run game-lattice <command> --help` for the full
 flag list.
 
+Pass `--indent N` with `--json` on `check`, `lint`, `impact`, or `linear` to pretty-print the JSON
+with `N` spaces per level. `--indent` without `--json` is a usage error.
+
+Use the global `--no-color` option before the command to disable colored output explicitly, for
+example `game-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
+environment variable; `--no-color` is the command-line equivalent.
+
 `impact` walks the full transitive closure by default. Pass `--depth N` (N >= 1) to bound the
 walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly from it. Human
 output is unchanged, and each `--json` entry gains a `"depth"` field carrying the minimum number

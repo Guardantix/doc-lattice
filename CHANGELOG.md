@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `check`, `lint`, `impact`, and `linear` accept `--indent N` with `--json`, and the global
+  `--no-color` option explicitly disables colored output (#20).
+
 ### Changed
 
 - Centralized CLI `ProjectError` handling behind the shared tool-error exit path (#30).
