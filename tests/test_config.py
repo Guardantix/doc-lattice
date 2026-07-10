@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import game_lattice.config as config_module
 from game_lattice.config import load_config
 from game_lattice.error_types import ConfigError
 
@@ -23,6 +24,27 @@ def test_loads_and_resolves_roots(tmp_path: Path):
     project = load_config(None, tmp_path)
     assert project.config.ignore_globs == ["**/x/**"]
     assert project.resolved_roots == (tmp_path.resolve() / "design",)
+
+
+def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
+    yaml = config_module._YAML
+    yaml_type = type(yaml)
+    calls: list[str] = []
+    original_load = yaml_type.load
+
+    def counting_load(self, text: str):
+        assert self is yaml
+        calls.append(text)
+        return original_load(self, text)
+
+    monkeypatch.setattr(yaml_type, "load", counting_load)
+    projects = [tmp_path / "first", tmp_path / "second"]
+    for project in projects:
+        project.mkdir()
+        (project / ".game-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+        load_config(None, project)
+
+    assert calls == ["docs_roots: [docs]\n", "docs_roots: [docs]\n"]
 
 
 def test_explicit_config_path_loads_and_resolves_roots(tmp_path: Path):
