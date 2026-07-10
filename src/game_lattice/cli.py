@@ -3,6 +3,8 @@
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -42,6 +44,23 @@ _STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one
 def _print_project_error(exc: ProjectError) -> None:
     """Render a ProjectError to stderr in the standard one-line format."""
     _err.print(f"[red]error[/red]: {escape(str(exc))} ({exc.code})")
+
+
+@contextmanager
+def _exit_on_project_error() -> Iterator[None]:
+    """Convert ProjectError into the standard stderr line and tool-error exit 2.
+
+    Yields:
+        Control to CLI command code.
+
+    Raises:
+        typer.Exit: Exit code 2 when command code raises ProjectError.
+    """
+    try:
+        yield
+    except ProjectError as exc:
+        _print_project_error(exc)
+        raise typer.Exit(2) from exc
 
 
 def _parse_only_states(only: list[str] | None) -> frozenset[str] | None:
@@ -141,12 +160,9 @@ def check(
 ) -> None:
     """Classify every edge; exit 1 on drift, 2 on tool error."""
     only_states = _parse_only_states(only)
-    try:
+    with _exit_on_project_error():
         lattice = _load(config)
         statuses = check_lattice(lattice)
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
     displayed = _filter_statuses(statuses, only_states)
     if json_out:
         payload = {
@@ -177,12 +193,9 @@ def check(
 @app.command()
 def lint(config: ConfigOpt = None, json_out: JsonOpt = False) -> None:
     """Validate the authority ladder; exit 1 on a violation, 2 on tool error."""
-    try:
+    with _exit_on_project_error():
         lattice = _load(config)
         result = lint_lattice(lattice)
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
     if json_out:
         payload = {
             "violations": [
@@ -228,12 +241,9 @@ def impact(
     ] = None,
 ) -> None:
     """List every downstream doc affected by a change to TOKEN."""
-    try:
+    with _exit_on_project_error():
         lattice = _load(config)
         affected = impact_walk(lattice, token, max_depth=depth)
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
     if json_out:
         payload = {
             "affected": [
@@ -362,7 +372,7 @@ def reconcile(  # noqa: PLR0913
     if not reconcile_all and not downstream_id:
         _err.print("[red]error[/red]: provide a downstream id or --all")
         raise typer.Exit(2)
-    try:
+    with _exit_on_project_error():
         lattice = _load(config)
         plan = plan_reconcile(lattice, downstream_id, ref=ref, reconcile_all=reconcile_all)
         # Phase 1: compute every rewrite from a fresh read before touching disk, so a
@@ -383,9 +393,6 @@ def reconcile(  # noqa: PLR0913
         # Phase 2: only after all rewrites computed cleanly, write them (skipped
         # entirely for --dry-run) and report the outcome.
         _write_and_report_reconcile(plan, rewrites, dry_run=dry_run, json_out=json_out)
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
 
 
 @app.command()
@@ -398,16 +405,13 @@ def graph(
         valid = ", ".join(sorted(VALID_GRAPH_FORMATS))
         _err.print(f"[red]error[/red]: --format {escape(f'{fmt!r}')} must be one of: {valid}")
         raise typer.Exit(2)
-    try:
+    with _exit_on_project_error():
         lattice = _load(config)
         stale = {
             (s.source_id, s.target_id)
             for s in check_lattice(lattice)
             if s.state == "STALE" and s.target_id is not None
         }
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
     if fmt == "json":
         typer.echo(json.dumps(to_json(lattice, stale)))
     elif fmt == "dot":
@@ -437,7 +441,7 @@ def linear(  # noqa: PLR0913
     if from_id is not None and target:
         _err.print("[red]error[/red]: pass a positional target or --from, not both")
         raise typer.Exit(2)
-    try:
+    with _exit_on_project_error():
         project = load_config(config, Path.cwd())
         lattice = load_lattice(project)
         if from_id is not None:
@@ -447,9 +451,6 @@ def linear(  # noqa: PLR0913
         refs = {ref for node_id in trigger for ref in lattice.nodes_by_id[node_id].tickets}
         tickets, rejected = fetch_tickets(refs, project.config.linear_team)
         findings = stale_shipped(lattice, trigger, tickets, rejected)
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
     if json_out:
         typer.echo(json.dumps(findings_json(findings)))
     else:
@@ -511,7 +512,7 @@ def init(
     ] = None,
 ) -> None:
     """Scaffold .game-lattice.yml and print pre-commit and CI codegen."""
-    try:
+    with _exit_on_project_error():
         roots = tuple(docs_root) if docs_root else ("docs",)
         _validate_init_flags(roots, linear_team)
         scaffold = build_scaffold(roots, linear_team, f"v{__version__}")
@@ -534,9 +535,6 @@ def init(
             ".github/workflows/game-lattice.yml, and make sure the "
             f"v{__version__} tag is pushed so the pinned snippets resolve."
         )
-    except ProjectError as exc:
-        _print_project_error(exc)
-        raise typer.Exit(2) from exc
     raise typer.Exit(0)
 
 

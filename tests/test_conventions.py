@@ -78,6 +78,13 @@ def test_no_broad_except():
         assert not lines, f"{py_file.name} has broad except at lines {lines}"
 
 
+def test_cli_project_error_handlers_stay_centralized():
+    """CLI command ProjectError handling must stay centralized in one helper plus main."""
+    cli_source = (SRC_DIR / "cli.py").read_text(encoding="utf-8")
+
+    assert cli_source.count("except ProjectError") == 2
+
+
 def test_no_raw_authority_strings():
     """Authority values must be imported from constants.py, not inlined as raw literals."""
     for py_file in _source_files():
