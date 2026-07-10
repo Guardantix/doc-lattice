@@ -22,6 +22,11 @@ instance. Their existing parsing functions will call that instance. These are th
 module-level mutable objects. They are intentionally local to their modules, safe to reuse in the
 single-threaded CLI, and do not create a shared cross-module abstraction.
 
+A config file may set a YAML version directive on its reusable parser. `config._read_yaml` will
+reset `_YAML.version` to `None` immediately before every load so one file cannot change the scalar
+semantics of a later file. This retains the singleton while matching a fresh safe loader's default
+version for each independent config.
+
 `sections.split_body_lines` will import and call `hashing.normalize_newlines` before splitting.
 The helper performs the same CRLF replacement followed by lone-CR replacement as the existing
 inline expression, so headings, spans, hashes, and output remain unchanged. `hashing.py` has no
@@ -47,6 +52,7 @@ Add focused tests that fail against the current implementation and prove each in
 - `build_lattice` calls `_line_count` once for each document.
 - `frontmatter_parser.parse_meta` uses its module-level `_YAML` instance across calls.
 - `config._read_yaml` uses its module-level `_YAML` instance across loads.
+- Config loads reset any YAML version directive before parsing the next independent file.
 - `split_body_lines` delegates newline normalization to `hashing.normalize_newlines` through the
   symbol imported by `sections.py`.
 

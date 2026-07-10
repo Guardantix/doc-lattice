@@ -215,3 +215,16 @@ def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
     project = load_config(None, tmp_path)
 
     assert project.config.docs_roots == ["docs"]
+
+
+def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
+    first_config = tmp_path / "first.yml"
+    first_config.write_text("%YAML 1.1\n---\ndocs_roots: [docs]\n", encoding="utf-8")
+    second_config = tmp_path / "second.yml"
+    second_config.write_text("docs_roots: [on]\n", encoding="utf-8")
+
+    first_project = load_config(first_config, tmp_path)
+    second_project = load_config(second_config, tmp_path)
+
+    assert first_project.config.docs_roots == ["docs"]
+    assert second_project.config.docs_roots == ["on"]

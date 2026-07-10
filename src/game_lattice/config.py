@@ -82,6 +82,9 @@ def _read_yaml(path: Path) -> object:
     except (OSError, UnicodeDecodeError) as exc:
         msg = f"cannot read config {path}: {exc}"
         raise ConfigError(msg) from exc
+    # A YAML directive updates the reusable parser's version. Reset it so each config starts
+    # with default YAML semantics, matching a fresh safe loader.
+    _YAML.version = None
     try:
         data = _YAML.load(text)
     except YAMLError as exc:

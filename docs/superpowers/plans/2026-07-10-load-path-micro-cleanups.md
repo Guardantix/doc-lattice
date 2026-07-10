@@ -249,6 +249,9 @@ def _read_yaml(path: Path) -> object:
     except (OSError, UnicodeDecodeError) as exc:
         msg = f"cannot read config {path}: {exc}"
         raise ConfigError(msg) from exc
+    # A YAML directive updates the reusable parser's version. Reset it so each config starts
+    # with default YAML semantics, matching a fresh safe loader.
+    _YAML.version = None
     try:
         data = _YAML.load(text)
 ```
@@ -303,6 +306,66 @@ Expected: PASS, proving the same module singleton remains reusable after a parse
 ```bash
 git add tests/test_config.py
 git commit -m "test: cover config YAML recovery"
+```
+
+- [ ] **Step 9: Write the failing YAML-version isolation regression**
+
+Add this test after `test_safe_yaml_loader_recovers_after_malformed_config`:
+
+```python
+def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
+    first_config = tmp_path / "first.yml"
+    first_config.write_text("%YAML 1.1\n---\ndocs_roots: [docs]\n", encoding="utf-8")
+    second_config = tmp_path / "second.yml"
+    second_config.write_text("docs_roots: [on]\n", encoding="utf-8")
+
+    first_project = load_config(first_config, tmp_path)
+    second_project = load_config(second_config, tmp_path)
+
+    assert first_project.config.docs_roots == ["docs"]
+    assert second_project.config.docs_roots == ["on"]
+```
+
+- [ ] **Step 10: Run the version-isolation test and verify RED**
+
+Run:
+
+```bash
+uv run --group dev pytest \
+  tests/test_config.py::test_safe_yaml_loader_resets_version_between_config_files -v --no-cov
+```
+
+Expected: FAIL because the first file leaves YAML 1.1 active and the second file parses `on` as
+`True`, which strict config validation rejects.
+
+- [ ] **Step 11: Reset the reusable parser's version before each load**
+
+Immediately before `_YAML.load(text)` in `config._read_yaml`, add:
+
+```python
+    # A YAML directive updates the reusable parser's version. Reset it so each config starts
+    # with default YAML semantics, matching a fresh safe loader.
+    _YAML.version = None
+```
+
+- [ ] **Step 12: Run the version-isolation test and verify GREEN**
+
+Run:
+
+```bash
+uv run --group dev pytest \
+  tests/test_config.py::test_safe_yaml_loader_resets_version_between_config_files -v --no-cov
+```
+
+Expected: PASS; the second config uses default YAML semantics and preserves `on` as a string.
+
+- [ ] **Step 13: Commit the YAML-version isolation fix**
+
+```bash
+git add src/game_lattice/config.py tests/test_config.py \
+  docs/superpowers/specs/2026-07-10-load-path-micro-cleanups-design.md \
+  docs/superpowers/plans/2026-07-10-load-path-micro-cleanups.md
+git commit -m "fix: reset config YAML version per load"
 ```
 
 ### Task 4: Centralize Section Newline Normalization
