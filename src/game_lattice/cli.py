@@ -15,7 +15,7 @@ from rich.markup import escape
 from . import __version__
 from .check import EdgeStatus, check_lattice, has_drift
 from .config import DEFAULT_CONFIG_NAME, load_config
-from .constants import VALID_EDGE_STATES, VALID_GRAPH_FORMATS
+from .constants import VALID_EDGE_STATES, VALID_GRAPH_FORMATS, EdgeState
 from .error_types import ConfigError, ProjectError, UnreadableDocError
 from .impact import impact as impact_walk
 from .linear_fetch import fetch_tickets
@@ -24,7 +24,7 @@ from .linear_render import findings_json, render_findings
 from .lint import LintResult, lint_lattice
 from .model import Lattice
 from .orchestrate import load_lattice
-from .reconcile import apply_reconcile
+from .reconcile import plan_rewrites
 from .reconcile import reconcile as plan_reconcile
 from .render import to_dot, to_json, to_mermaid
 from .scaffold import build_scaffold
@@ -39,6 +39,15 @@ ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path to .game-
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 
 _STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one trailing space
+
+# Tied to the EdgeState Literal by test_state_colors_cover_every_edge_state: a new state member
+# without a color here fails that test instead of raising KeyError at render time.
+_STATE_COLORS: dict[EdgeState, str] = {
+    "OK": "green",
+    "STALE": "yellow",
+    "UNRECONCILED": "yellow",
+    "BROKEN": "red",
+}
 
 
 def _print_project_error(exc: ProjectError) -> None:
@@ -180,9 +189,8 @@ def check(
         }
         typer.echo(json.dumps(payload))
     else:
-        state_colors = {"OK": "green", "STALE": "yellow", "UNRECONCILED": "yellow", "BROKEN": "red"}
         for status in displayed:
-            color = state_colors[status.state]
+            color = _STATE_COLORS[status.state]
             _out.print(
                 f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
                 f"{escape(status.source_id)} -> {escape(status.target_ref)}"
@@ -380,16 +388,7 @@ def reconcile(  # noqa: PLR0913
         # earlier file already rewritten (no cross-file half-reconcile). Computed
         # unconditionally (even for --dry-run) so the preview reflects the same
         # fresh-read validation a real run would perform.
-        rewrites: list[Rewrite] = []
-        for path, updates in plan.items():
-            try:
-                fresh = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                msg = f"cannot read {path} to reconcile: {exc}"
-                raise UnreadableDocError(msg) from exc
-            new_text, applied = apply_reconcile(fresh, updates)
-            if applied:
-                rewrites.append((path, new_text, applied))
+        rewrites = plan_rewrites(plan, lambda p: p.read_text(encoding="utf-8"))
         # Phase 2: only after all rewrites computed cleanly, write them (skipped
         # entirely for --dry-run) and report the outcome.
         _write_and_report_reconcile(plan, rewrites, dry_run=dry_run, json_out=json_out)

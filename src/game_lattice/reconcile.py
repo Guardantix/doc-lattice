@@ -2,7 +2,7 @@
 
 import io
 from collections import defaultdict
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -135,3 +135,38 @@ def apply_reconcile(current_file_text: str, updates: dict[str, str]) -> tuple[st
     # line. body has no leading newline (the split joined the post-fence lines), so it is
     # reattached directly after the fence.
     return f"---\n{buffer.getvalue()}---\n{body}", applied
+
+
+def plan_rewrites(
+    plan: dict[Path, dict[str, str]],
+    read_text: Callable[[Path], str],
+) -> list[tuple[Path, str, set[str]]]:
+    """Compute fresh-read reconcile rewrites before any write lands.
+
+    The CLI passes ``lambda p: p.read_text(encoding="utf-8")`` so this pure
+    helper can validate every target file and build every rewrite before the
+    CLI starts its atomic write phase.
+
+    Args:
+        plan: The planned mapping of downstream file path to ``{ref: new_seen}``.
+        read_text: Reader injected by the caller for fresh downstream file text.
+
+    Returns:
+        Rewrite entries ``(path, new_text, applied_refs)`` for files whose fresh
+        content changed. Files whose planned updates are already applied are skipped.
+
+    Raises:
+        UnreadableDocError: If the injected reader cannot read a downstream file, or
+            if the fresh frontmatter cannot be parsed or is malformed.
+    """
+    rewrites: list[tuple[Path, str, set[str]]] = []
+    for path, updates in plan.items():
+        try:
+            fresh = read_text(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            msg = f"cannot read {path} to reconcile: {exc}"
+            raise UnreadableDocError(msg) from exc
+        new_text, applied = apply_reconcile(fresh, updates)
+        if applied:
+            rewrites.append((path, new_text, applied))
+    return rewrites

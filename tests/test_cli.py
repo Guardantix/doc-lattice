@@ -3,13 +3,15 @@
 import json
 import os
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from typer.testing import CliRunner
 
 import game_lattice.cli as cli_mod
 from game_lattice import __version__
-from game_lattice.cli import app
+from game_lattice.cli import _STATE_COLORS, app
+from game_lattice.constants import EdgeState
 from game_lattice.error_types import ConfigError
 from game_lattice.tickets import Ticket, TicketState
 
@@ -26,6 +28,20 @@ def test_check_exits_1_on_drift(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 1
+
+
+def test_check_human_output_is_byte_identical(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check"])
+    assert result.stdout == (
+        "BROKEN        gdd -> ghost\n"
+        "STALE         pc-design -> art-direction#accent\n"
+        "UNRECONCILED  pc-design -> art-direction#motion\n"
+    )
+
+
+def test_state_colors_cover_every_edge_state():
+    assert set(_STATE_COLORS) == set(get_args(EdgeState))
 
 
 def test_check_json_reports_states(lattice_dir: Path, monkeypatch):
