@@ -71,6 +71,7 @@ One JSON document, version 1:
 ```json
 {
   "version": 1,
+  "tool_version": "0.7.0",
   "roots": ["/abs/path/least-recently-used-root", "/abs/path/most-recently-used-root"],
   "entries": {
     "docs/design/save-format.md": {
@@ -100,6 +101,14 @@ One JSON document, version 1:
   therefore independent of `docs_roots` and `ignore_globs`: discovery decides the file set each
   run and the cache is consulted only per discovered file, so config changes need no
   invalidation logic.
+- **`tool_version` records the `game_lattice.__version__` that wrote the file**, and any
+  mismatch discards the cache wholesale, exactly like a `version` mismatch. A content-hash
+  match proves the input bytes are unchanged, not that the derivation logic is unchanged: a
+  release that alters the slugger port, a ruamel-yaml upgrade that shifts YAML semantics, or a
+  pydantic upgrade that changes validation could all make a cached derivation diverge from a
+  fresh parse while `CACHE_VERSION` sits unbumped. Tying invalidation to the release version
+  makes that class of staleness impossible at the cost of one cold rebuild per release.
+  `CACHE_VERSION` remains for intentional schema changes within a development cycle.
 - **`file_sha256` is the full sha256 of the raw file bytes.** It is deliberately not the
   lattice's 32-hex truncated hash of canonicalized text; the name keeps the two from being
   confused. It is the sole authority for entry validity.
@@ -149,12 +158,24 @@ discovered path:
    switch to `cache_trust_stat` starts warm.
 3. **Miss**: run today's full parse path (identical errors, identical warnings), then replace
    the entry: new `file_sha256`, `stats` reset to only the current root, new `node` payload.
+   The miss path calls `derive_file_sections` exactly once, in `orchestrate`, and the one
+   `FileSections` value feeds both the entry payload and `ParsedDoc.sections`, so
+   `build_lattice` never re-derives what the cache is about to store.
+
+Error parity is a hard requirement of the flow: the cached path stats and byte-reads files
+that today's path only opens through `read_doc`, and every filesystem or decode failure on a
+doc (a file deleted between discovery and stat, permissions, invalid UTF-8) must raise
+`UnreadableDocError` with the same message an uncached read would produce. Section 8 restructures
+`read_doc` so both paths share the identical error construction.
 
 At the end of a successful load: the current root moves to the ledger tail, over-cap head roots
 are evicted and scrubbed, and the file is atomically replaced (temp file in the same directory,
 fsync, `os.replace`) if and only if something changed: an entry added or replaced, a stat
-refreshed, or the ledger reordered or scrubbed. A fully warm repeat run performs one cache read
-and zero cache writes. If the load aborts on any error, no cache write happens at all.
+refreshed, or the ledger reordered or scrubbed. A fully warm repeat run from the same root
+performs one cache read and zero cache writes. Two roots alternating runs will each rewrite the
+file to reclaim the ledger tail; that bounded churn (at most one atomic rewrite per run) is
+accepted deliberately, because weakening recency updates would make the LRU evict active
+worktrees. If the load aborts on any error, no cache write happens at all.
 
 Entries whose paths were not discovered this run are kept, not pruned. Pruning by one
 checkout's view would evict entries a sibling worktree on another branch still needs. Growth is
@@ -170,7 +191,8 @@ on the next load.
 - The content hash is the only validity authority. The verify tier proves it per run; the stat
   tier presumes it from an exact `(size, mtime_ns)` match under the documented caveat.
 - Any miss replaces the entry and resets its `stats` to the current root.
-- A `version` mismatch, or any structural invalidity, discards the whole file (section 7).
+- A `version` or `tool_version` mismatch, or any structural invalidity, discards the whole
+  file (section 7).
 - Config changes never require invalidation (relative-path keying, section 4).
 
 ## 7. Failure modes
@@ -186,8 +208,15 @@ on the next load.
 - **Concurrent runs** (several worktrees at once): atomic replace means a reader sees the old
   or the new file, never a torn one. Last writer wins; a lost update is only a future miss.
 
-No new exception types are needed. The cache never raises; config validation reuses
-`ConfigError`.
+No new exception types are needed. The cache never raises on its own behalf; config validation
+reuses `ConfigError`, and doc-level filesystem failures raise the same `UnreadableDocError` as
+an uncached run (section 5).
+
+Threat model: the cache file is same-user local state under the user's cache home and is
+trusted as such, like any other dotfile; same-user tampering is out of scope. What the design
+does defend is the committed config (no path semantics, section 3) and cross-project key
+collisions (content-hash verification, section 4). The default tier re-proves every entry
+against the real file bytes each run, so even a stale or foreign cache can only cost time.
 
 ## 8. Purity boundary and module changes
 
@@ -206,8 +235,18 @@ No new exception types are needed. The cache never raises; config validation reu
   present and derives it otherwise. This is the only pure-layer change and it is a seam, not
   behavior: cached and derived sections are the same values by construction, pinned by a
   property test (section 9).
+- **`discovery.py`**: `read_doc` is split into a byte-reading helper and a decoding helper
+  that construct the `UnreadableDocError` in one place; `read_doc` composes them and keeps its
+  signature, and the cache path calls the same helpers (bytes for hashing, decode only on a
+  miss). Stat failures in the tier checks route through the same error construction. This is
+  what makes the section 5 error-parity requirement hold by construction instead of by
+  duplicated message strings.
 - **`orchestrate.py`**: the branch described in section 5; the no-cache path is unchanged code.
 - **`constants.py`**: `CACHE_VERSION`, `MAX_STAT_ROOTS`, and the cache file name.
+
+`cache.py` resolves the cache home from an environment mapping passed by its caller
+(defaulting to `os.environ`), so tests exercise XDG handling by argument rather than by
+patching global state.
 
 `model`, `sections`, `hashing`, `resolve`, and every command module are otherwise untouched,
 and no pure module gains filesystem access.
@@ -224,15 +263,18 @@ The guarantee in section 1 is enforced by:
   outcome, so the caveat is tested behavior rather than folklore.
 - **Round-trip property test**: for generated bodies, `derive_file_sections` equals the value
   reconstructed from its serialized cache form.
-- **Unit tests**: each corruption mode (truncated file, invalid JSON, wrong version, schema
-  violation, invalid `meta`) recomputes silently; a non-node hit performs no YAML parse
+- **Unit tests**: each corruption mode (truncated file, invalid JSON, wrong `version`, wrong
+  `tool_version`, schema violation, invalid `meta`) recomputes silently; a non-node hit performs no YAML parse
   (counting monkeypatch on the parser); per-root stats isolation across two roots; stats reset
   on content change; ledger LRU order, eviction at the cap, and scrubbing of evicted roots;
   fully warm run writes nothing; an injected write failure warns once and leaves no partial
   file; `cache_key` validation accepts and rejects the right shapes; `cache_trust_stat`
   without `cache_key` is a `ConfigError`; `XDG_CACHE_HOME` absolute, relative, and unset
-  handling; and cached-versus-uncached CLI byte-equality for `check`, `impact`, `graph`, and
-  `lint` on the shared `lattice_dir` fixture.
+  handling; error parity (an invalid-UTF-8 doc and a doc deleted after discovery raise the
+  same `UnreadableDocError` message with a warm cache as without one); and
+  cached-versus-uncached CLI byte-equality for `check`, `impact`, `graph`, and `lint` on the
+  shared `lattice_dir` fixture, plus `reconcile --all` on twin copies of the fixture tree
+  (identical output and identical resulting file bytes, cached versus uncached).
 
 The suite stays above the existing 80 percent coverage gate; new tests mirror sources as
 `tests/test_cache.py` plus additions to the loader, config, and CLI suites.
