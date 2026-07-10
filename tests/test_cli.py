@@ -27,23 +27,30 @@ def test_version_flag():
 
 def test_no_color_suppresses_forced_ansi(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    monkeypatch.setattr(
-        cli_mod,
-        "_out",
-        Console(force_terminal=True, color_system="standard", no_color=False),
-    )
-    colored = runner.invoke(app, ["check"])
-    assert colored.exit_code == 1
-    assert "\x1b[" in colored.stdout
+    original_out = cli_mod._out
+    original_err = cli_mod._err
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_mod, "_err", original_err)
+        patch.setattr(
+            cli_mod,
+            "_out",
+            Console(force_terminal=True, color_system="standard", no_color=False),
+        )
+        colored = runner.invoke(app, ["check"])
+        assert colored.exit_code == 1
+        assert "\x1b[" in colored.stdout
 
-    monkeypatch.setattr(
-        cli_mod,
-        "_out",
-        Console(force_terminal=True, color_system="standard", no_color=False),
-    )
-    plain = runner.invoke(app, ["--no-color", "check"])
-    assert plain.exit_code == 1
-    assert "\x1b[" not in plain.stdout
+        patch.setattr(
+            cli_mod,
+            "_out",
+            Console(force_terminal=True, color_system="standard", no_color=False),
+        )
+        plain = runner.invoke(app, ["--no-color", "check"])
+        assert plain.exit_code == 1
+        assert "\x1b[" not in plain.stdout
+
+    assert cli_mod._out is original_out
+    assert cli_mod._err is original_err
 
 
 def test_global_help_lists_no_color():
