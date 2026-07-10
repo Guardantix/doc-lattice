@@ -56,7 +56,7 @@ def test_build_lattice_counts_lines_once_per_document(monkeypatch):
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_loader.py::test_build_lattice_counts_lines_once_per_document -v
+uv run --group dev pytest tests/test_loader.py::test_build_lattice_counts_lines_once_per_document -v --no-cov
 ```
 
 Expected: FAIL because the observed calls contain each document body twice.
@@ -87,7 +87,7 @@ Keep the existing `section_span(toc, i, total_lines)` call unchanged.
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_loader.py -q
+uv run --group dev pytest tests/test_loader.py -q --no-cov
 ```
 
 Expected: all loader tests PASS.
@@ -145,7 +145,7 @@ Run:
 
 ```bash
 uv run --group dev pytest \
-  tests/test_frontmatter_parser.py::test_parse_meta_reuses_safe_yaml_loader -v
+  tests/test_frontmatter_parser.py::test_parse_meta_reuses_safe_yaml_loader -v --no-cov
 ```
 
 Expected: FAIL with `AttributeError` because `frontmatter_parser._YAML` does not exist.
@@ -172,7 +172,7 @@ Replace the per-call construction and load in `parse_meta` with:
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_frontmatter_parser.py -q
+uv run --group dev pytest tests/test_frontmatter_parser.py -q --no-cov
 ```
 
 Expected: all frontmatter parser tests PASS.
@@ -230,7 +230,7 @@ Patching the defining class lets pytest restore the method without leaving a sha
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_config.py::test_load_config_reuses_safe_yaml_loader -v
+uv run --group dev pytest tests/test_config.py::test_load_config_reuses_safe_yaml_loader -v --no-cov
 ```
 
 Expected: FAIL with `AttributeError` because `config._YAML` does not exist.
@@ -262,7 +262,7 @@ def _read_yaml(path: Path) -> object:
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_config.py -q
+uv run --group dev pytest tests/test_config.py -q --no-cov
 ```
 
 Expected: all config tests PASS.
@@ -345,7 +345,7 @@ Run:
 
 ```bash
 uv run --group dev pytest \
-  tests/test_sections.py::test_split_body_lines_uses_shared_newline_normalizer -v
+  tests/test_sections.py::test_split_body_lines_uses_shared_newline_normalizer -v --no-cov
 ```
 
 Expected: FAIL with `AttributeError` because `sections.normalize_newlines` does not exist.
@@ -369,7 +369,7 @@ Replace the inline replacements inside `split_body_lines` with:
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_sections.py -q
+uv run --group dev pytest tests/test_sections.py -q --no-cov
 ```
 
 Expected: all section tests PASS, including the existing mixed CRLF and lone-CR test.
