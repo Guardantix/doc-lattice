@@ -99,9 +99,10 @@ release tag. Spec: `docs/superpowers/specs/2026-06-28-game-lattice-init-design.m
 
 **Pure vs impure split.** All graph and report logic is pure and filesystem-free: `model`,
 `hashing`, `sections`, `resolve`, `loader`, `check`, `lint`, `impact`, `render`, `reconcile.reconcile`/
-`apply_reconcile` (which returns rewritten text rather than writing it), plus the linear pure core
-(`tickets`, `linear_query`, `stale_shipped`, `linear_render`), `scaffold`, and the release
-version-consistency core `version_check`. The untyped-to-typed
+`apply_reconcile`/`plan_rewrites` (which return planned updates or rewritten text rather than
+writing it), plus the linear pure core (`tickets`, `linear_query`, `stale_shipped`,
+`linear_render`), `scaffold`, and the release version-consistency core `version_check`. The
+untyped-to-typed
 boundary modules are `frontmatter_parser` and `linear_parser`. Only `config`, `discovery`,
 `orchestrate`, and `cli` touch the disk (`cli` performs the reconcile and init writes); `linear_fetch`
 is impure wiring and `linear_client` is the only module that touches the network. This is what lets

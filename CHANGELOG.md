@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Centralized CLI `ProjectError` handling behind the shared tool-error exit path (#30).
+- Moved reconcile phase-1 rewrite planning into the pure reconcile module via an injected reader
+  (#31).
 
 ## [0.7.0] - 2026-07-09
 

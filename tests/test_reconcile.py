@@ -13,7 +13,7 @@ from game_lattice.error_types import (
     ValidationError,
 )
 from game_lattice.orchestrate import load_lattice
-from game_lattice.reconcile import apply_reconcile, reconcile
+from game_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
 
 
 def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
@@ -25,6 +25,53 @@ def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
 def _planned_refs(plan: dict[Path, dict[str, str]]) -> set[str]:
     """Collect every target ref across all files in a reconcile plan."""
     return {ref for updates in plan.values() for ref in updates}
+
+
+def test_plan_rewrites_applies_updates_from_reader():
+    path = Path("downstream.md")
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+
+    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: text)
+
+    assert len(rewrites) == 1
+    rewrite_path, new_text, applied = rewrites[0]
+    assert rewrite_path == path
+    assert "seen: newhash" in new_text
+    assert applied == {"a#x"}
+
+
+def test_plan_rewrites_wraps_reader_error_with_path():
+    path = Path("downstream.md")
+
+    def raise_os_error(_path: Path) -> str:
+        raise OSError("disk vanished")
+
+    with pytest.raises(UnreadableDocError) as exc_info:
+        plan_rewrites({path: {"a#x": "newhash"}}, raise_os_error)
+    assert str(exc_info.value) == "cannot read downstream.md to reconcile: disk vanished"
+
+
+def test_plan_rewrites_skips_file_when_updates_already_applied():
+    path = Path("downstream.md")
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: same\n---\nbody\n"
+
+    assert plan_rewrites({path: {"a#x": "same"}}, lambda _path: text) == []
+
+
+def test_plan_rewrites_preserves_plan_order():
+    first = Path("first.md")
+    second = Path("second.md")
+    text_by_path = {
+        first: "---\nid: one\nderives_from:\n  - ref: up#first\n---\nbody\n",
+        second: "---\nid: two\nderives_from:\n  - ref: up#second\n---\nbody\n",
+    }
+
+    rewrites = plan_rewrites(
+        {first: {"up#first": "hashone"}, second: {"up#second": "hashtwo"}},
+        text_by_path.__getitem__,
+    )
+
+    assert [path for path, _new_text, _applied in rewrites] == [first, second]
 
 
 def test_apply_reconcile_sets_seen_and_preserves_body():

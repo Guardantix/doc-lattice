@@ -24,7 +24,7 @@ from .linear_render import findings_json, render_findings
 from .lint import LintResult, lint_lattice
 from .model import Lattice
 from .orchestrate import load_lattice
-from .reconcile import apply_reconcile
+from .reconcile import plan_rewrites
 from .reconcile import reconcile as plan_reconcile
 from .render import to_dot, to_json, to_mermaid
 from .scaffold import build_scaffold
@@ -380,16 +380,7 @@ def reconcile(  # noqa: PLR0913
         # earlier file already rewritten (no cross-file half-reconcile). Computed
         # unconditionally (even for --dry-run) so the preview reflects the same
         # fresh-read validation a real run would perform.
-        rewrites: list[Rewrite] = []
-        for path, updates in plan.items():
-            try:
-                fresh = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                msg = f"cannot read {path} to reconcile: {exc}"
-                raise UnreadableDocError(msg) from exc
-            new_text, applied = apply_reconcile(fresh, updates)
-            if applied:
-                rewrites.append((path, new_text, applied))
+        rewrites = plan_rewrites(plan, lambda p: p.read_text(encoding="utf-8"))
         # Phase 2: only after all rewrites computed cleanly, write them (skipped
         # entirely for --dry-run) and report the outcome.
         _write_and_report_reconcile(plan, rewrites, dry_run=dry_run, json_out=json_out)
