@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 import game_lattice.cli as cli_mod
@@ -22,6 +23,41 @@ def test_version_flag():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.stdout
+
+
+def test_no_color_suppresses_forced_ansi(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    monkeypatch.setattr(
+        cli_mod,
+        "_out",
+        Console(force_terminal=True, color_system="standard", no_color=False),
+    )
+    colored = runner.invoke(app, ["check"])
+    assert colored.exit_code == 1
+    assert "\x1b[" in colored.stdout
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_out",
+        Console(force_terminal=True, color_system="standard", no_color=False),
+    )
+    plain = runner.invoke(app, ["--no-color", "check"])
+    assert plain.exit_code == 1
+    assert "\x1b[" not in plain.stdout
+
+
+def test_global_help_lists_no_color():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "--no-color" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])
+def test_json_commands_help_lists_indent(command):
+    result = runner.invoke(app, [command, "--help"])
+    assert result.exit_code == 0
+    assert "--indent" in result.stdout
+    assert "requires --json" in result.stdout
 
 
 def test_check_exits_1_on_drift(lattice_dir: Path, monkeypatch):

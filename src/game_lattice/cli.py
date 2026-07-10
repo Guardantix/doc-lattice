@@ -124,6 +124,13 @@ def _filter_statuses(statuses: list[EdgeStatus], only: frozenset[str] | None) ->
     return [status for status in statuses if status.state in only]
 
 
+def _disable_color() -> None:
+    """Replace the CLI consoles with explicit no-color consoles."""
+    global _out, _err  # noqa: PLW0603
+    _out = Console(no_color=True)
+    _err = Console(stderr=True, no_color=True)
+
+
 def _version_callback(value: bool) -> None:
     if value:
         _out.print(__version__)
@@ -132,7 +139,7 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def main_callback(
-    version: Annotated[
+    version: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--version",
@@ -141,8 +148,11 @@ def main_callback(
             help="Show the version and exit.",
         ),
     ] = False,
+    no_color: Annotated[bool, typer.Option("--no-color", help="Disable colored output.")] = False,
 ) -> None:
     """game-lattice: documentation traceability engine."""
+    if no_color:
+        _disable_color()
 
 
 def _load(config: Path | None) -> Lattice:
