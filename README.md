@@ -264,7 +264,9 @@ ladder) as your gates. Paste each where the output says. Pass `--docs-root` (rep
 loaded lattice, then fetches live ticket status over the Linear GraphQL API to report tickets
 that shipped against a spec that has since drifted. It reads `LINEAR_API_KEY` from the
 environment (export it before running; the error points you to `impact` for the offline view),
-and the client is https-only, redirect-refusing, size-capped, and SSRF-hardened. Set the team
+and the client is https-only, redirect-refusing, size-capped, and SSRF-hardened. A transient
+HTTP 429 or 5xx is retried up to three times with a short backoff (honoring `Retry-After` when
+present, capped) before failing, so a passing rate limit does not fail a CI run. Set the team
 the query targets with `linear_team` in `.game-lattice.yml`, or pass `--linear-team` to `init`.
 Every other command runs fully offline.
 

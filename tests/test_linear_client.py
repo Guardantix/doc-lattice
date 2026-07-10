@@ -6,7 +6,7 @@ import urllib.error
 import pytest
 
 from game_lattice.error_types import LinearError
-from game_lattice.linear_client import LinearClient
+from game_lattice.linear_client import MAX_ATTEMPTS, LinearClient
 
 
 class _FakeResp(io.BytesIO):
@@ -28,6 +28,35 @@ class _FakeOpener:
         self.captured = req
         self.timeout = timeout
         return _FakeResp(self.body)
+
+
+class _RecordingSleeper:
+    """A sleeper that records requested delays and never really waits."""
+
+    def __init__(self):
+        self.sleeps = []
+
+    def __call__(self, seconds):
+        self.sleeps.append(seconds)
+
+
+class _SequenceOpener:
+    """Raise a queued sequence of errors in order, then serve a body on success."""
+
+    def __init__(self, errors, body=b'{"data":{}}'):
+        self._errors = list(errors)
+        self.body = body
+        self.calls = 0
+
+    def open(self, req, timeout=None):  # noqa: ARG002
+        self.calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return _FakeResp(self.body)
+
+
+def _http_error(code, headers=None):
+    return urllib.error.HTTPError("https://x", code, "err", headers, None)  # type: ignore
 
 
 def test_rejects_non_https_url():
@@ -81,13 +110,11 @@ def test_surrounding_whitespace_in_key_is_stripped(monkeypatch):
 
 def test_http_error_maps_to_linear_error_without_key(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
-
-    class _Boom:
-        def open(self, req, timeout=None):  # noqa: ARG002
-            raise urllib.error.HTTPError("https://x", 429, "Too Many Requests", {}, None)  # type: ignore
+    sleeper = _RecordingSleeper()
+    opener = _SequenceOpener([_http_error(429) for _ in range(MAX_ATTEMPTS)])
 
     with pytest.raises(LinearError) as exc:
-        LinearClient(opener=_Boom()).execute("query {}", {})
+        LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
     assert "429" in str(exc.value)
     assert "secret-key" not in str(exc.value)
 
@@ -166,3 +193,137 @@ def test_invalid_utf8_body_is_replaced_not_raised(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
     out = LinearClient(opener=_FakeOpener(b'\xff\xfe{"data":{}}')).execute("query {}", {})
     assert "�" in out  # replacement char, no UnicodeDecodeError escaped
+
+
+def test_retries_429_twice_then_succeeds_on_schedule(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    # Empty header mapping exercises the "no Retry-After key" fallback to the schedule.
+    opener = _SequenceOpener(
+        [_http_error(429, {}), _http_error(429, {})], body=b'{"data":{"ok":1}}'
+    )
+    body = LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert body == '{"data":{"ok":1}}'
+    assert opener.calls == 3
+    assert sleeper.sleeps == [1.0, 2.0]
+
+
+def test_retries_429_honors_retry_after_and_caps(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    # First Retry-After of 5s is honored; second of 120s is capped to RETRY_AFTER_CAP (30.0).
+    opener = _SequenceOpener(
+        [_http_error(429, {"Retry-After": "5"}), _http_error(429, {"Retry-After": "120"})],
+    )
+    body = LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert body == '{"data":{}}'
+    assert sleeper.sleeps == [5.0, 30.0]
+
+
+def test_500_three_times_exhausts_with_attempt_count(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    opener = _SequenceOpener([_http_error(500) for _ in range(3)])
+    with pytest.raises(LinearError) as exc:
+        LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert "3 attempts" in str(exc.value)
+    assert "500" in str(exc.value)
+    assert "secret-key" not in str(exc.value)
+    assert opener.calls == 3
+    assert sleeper.sleeps == [1.0, 2.0]
+
+
+def test_retry_after_nonsense_falls_back_to_schedule(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    opener = _SequenceOpener([_http_error(429, {"Retry-After": "nonsense"})])
+    LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert sleeper.sleeps == [1.0]
+
+
+def test_retry_after_http_date_form_is_ignored(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    opener = _SequenceOpener([_http_error(429, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"})])
+    LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert sleeper.sleeps == [1.0]
+
+
+def test_retry_after_negative_falls_back_to_schedule(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    opener = _SequenceOpener([_http_error(429, {"Retry-After": "-5"})])
+    LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert sleeper.sleeps == [1.0]
+
+
+def test_retry_after_none_headers_uses_schedule(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    # hdrs=None means exc.headers is None; the guard must fall back to the schedule.
+    opener = _SequenceOpener([_http_error(500, None)])
+    LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert sleeper.sleeps == [1.0]
+
+
+def test_http_401_does_not_retry(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+    # A second body proves it never reaches a retry: only one error is queued.
+    opener = _SequenceOpener([_http_error(401)])
+    with pytest.raises(LinearError) as exc:
+        LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert "401" in str(exc.value)
+    assert "if it is a 429 or 5xx" in str(exc.value)  # unchanged one-shot message shape
+    assert "attempts" not in str(exc.value)
+    assert opener.calls == 1
+    assert sleeper.sleeps == []
+
+
+def test_url_error_does_not_retry(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+
+    class _Boom:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, req, timeout=None):  # noqa: ARG002
+            self.calls += 1
+            raise urllib.error.URLError("name resolution failed")
+
+    opener = _Boom()
+    with pytest.raises(LinearError) as exc:
+        LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert "name resolution failed" in str(exc.value)
+    assert opener.calls == 1
+    assert sleeper.sleeps == []
+
+
+def test_post_open_oserror_does_not_retry(monkeypatch):
+    monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
+    sleeper = _RecordingSleeper()
+
+    class _SlowResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, *_args):
+            raise TimeoutError("read timed out")
+
+    class _SlowOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, req, timeout=None):  # noqa: ARG002
+            self.calls += 1
+            return _SlowResp()
+
+    opener = _SlowOpener()
+    with pytest.raises(LinearError):
+        LinearClient(opener=opener, sleeper=sleeper).execute("query {}", {})
+    assert opener.calls == 1
+    assert sleeper.sleeps == []

@@ -18,6 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `linear` now retries a transient Linear HTTP 429 or 5xx up to three times with a short backoff
+  (honoring a non-negative integer `Retry-After` header, capped at 30 seconds) before failing, so
+  a passing rate limit no longer fails a CI run. Every other HTTP code and all network errors keep
+  their one-shot behavior.
 - The version-sync guard now also checks the README's pinned `game-lattice@vX.Y.Z` install
   refs against `__version__`, so a stale README pin fails `check_version_sync.py` instead of
   shipping silently.
