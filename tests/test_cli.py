@@ -7,6 +7,7 @@ from typing import get_args
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 from typer.testing import CliRunner
 
 import game_lattice.cli as cli_mod
@@ -58,18 +59,26 @@ def test_no_color_suppresses_forced_ansi(lattice_dir: Path, monkeypatch):
     assert cli_mod._err is original_err
 
 
-def test_global_help_lists_no_color():
+def test_global_help_lists_no_color(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "--no-color" in result.stdout
+    output = Text.from_ansi(result.stdout).plain
+    assert "--no-color" in output
 
 
 @pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])
-def test_json_commands_help_lists_indent(command):
+def test_json_commands_help_lists_indent(command, monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
     result = runner.invoke(app, [command, "--help"])
     assert result.exit_code == 0
-    assert "--indent" in result.stdout
-    assert "requires --json" in result.stdout
+    output = Text.from_ansi(result.stdout).plain
+    assert "--indent" in output
+    assert "requires --json" in output
 
 
 def test_check_exits_1_on_drift(lattice_dir: Path, monkeypatch):
