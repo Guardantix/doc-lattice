@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Centralized CLI `ProjectError` handling behind the shared tool-error exit path (#30).
 - Internal performance: `check` and `reconcile` memoize target-content hashes within each run,
   avoiding repeated section extraction and hashing for edges that share a target (#25).
+- Reduced repeated load-path work by counting document lines once, reusing safe YAML loaders, and
+  sharing newline normalization between section parsing and hashing (#27).
 - Moved reconcile phase-1 rewrite planning into the pure reconcile module via an injected reader
   (#31).
 
