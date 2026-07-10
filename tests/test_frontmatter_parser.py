@@ -82,14 +82,16 @@ def test_parse_meta_returns_node():
 def test_parse_meta_reuses_safe_yaml_loader(monkeypatch):
     raw_documents = ["id: first\n", "id: second\n"]
     yaml = frontmatter_parser_module._YAML
+    yaml_type = type(yaml)
     calls: list[str] = []
-    original_load = yaml.load
+    original_load = yaml_type.load
 
-    def counting_load(raw_meta: str):
+    def counting_load(self, raw_meta: str):
+        assert self is yaml
         calls.append(raw_meta)
-        return original_load(raw_meta)
+        return original_load(self, raw_meta)
 
-    monkeypatch.setattr(yaml, "load", counting_load)
+    monkeypatch.setattr(yaml_type, "load", counting_load)
 
     metas = [parse_meta(raw, Path(f"{index}.md")) for index, raw in enumerate(raw_documents)]
 
