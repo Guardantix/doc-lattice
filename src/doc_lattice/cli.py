@@ -44,7 +44,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 _out = Console()
 _err = Console(stderr=True)
 
-ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path to .game-lattice.yml.")]
+ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path to .doc-lattice.yml.")]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 IndentOpt = Annotated[
     int | None,
@@ -597,7 +597,7 @@ def init(
         ),
     ] = None,
 ) -> None:
-    """Scaffold .game-lattice.yml and print pre-commit and CI codegen."""
+    """Scaffold .doc-lattice.yml and print pre-commit and CI codegen."""
     with _exit_on_project_error():
         roots = tuple(docs_root) if docs_root else ("docs",)
         _validate_init_flags(roots, linear_team)

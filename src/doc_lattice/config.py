@@ -1,4 +1,4 @@
-"""Load and validate .game-lattice.yml, with project-root containment of docs_roots."""
+"""Load and validate .doc-lattice.yml, with project-root containment of docs_roots."""
 
 import re
 from dataclasses import dataclass
@@ -11,7 +11,7 @@ from ruamel.yaml.error import YAMLError
 from .error_types import ConfigError
 from .path_utils import safe_resolve
 
-DEFAULT_CONFIG_NAME = ".game-lattice.yml"
+DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
 _YAML = YAML(typ="safe")
 
 # A cache_key is one safe path segment: it must start with an alphanumeric (rejecting ".",
@@ -21,7 +21,7 @@ _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class Config(BaseModel):
-    """The validated shape of .game-lattice.yml."""
+    """The validated shape of .doc-lattice.yml."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
 

@@ -37,7 +37,7 @@ def _invocation(rev: str, command: str) -> str:
 
 
 def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
-    """Render .game-lattice.yml with active keys serialized and optionals commented.
+    """Render .doc-lattice.yml with active keys serialized and optionals commented.
 
     The active block is dumped through ruamel.yaml so hostile scalars are quoted
     by the library's own emission logic, never by hand or string-interpolated. The

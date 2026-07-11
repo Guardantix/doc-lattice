@@ -84,7 +84,7 @@ def test_ignore_globs_exclude_nodes(tmp_path: Path):
     (docs / "drafts").mkdir(parents=True)
     (docs / "kept.md").write_text("---\nid: kept\n---\n# Kept\n", encoding="utf-8")
     (docs / "drafts" / "wip.md").write_text("---\nid: wip\n---\n# WIP\n", encoding="utf-8")
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         'docs_roots: ["docs"]\nignore_globs: ["drafts/**"]\n', encoding="utf-8"
     )
     project = load_config(None, tmp_path)
@@ -99,7 +99,7 @@ def test_multiple_docs_roots_combine(tmp_path: Path):
     (tmp_path / "production").mkdir()
     (tmp_path / "design" / "a.md").write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
     (tmp_path / "production" / "b.md").write_text("---\nid: b\n---\n# B\n", encoding="utf-8")
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         'docs_roots: ["design", "production"]\n', encoding="utf-8"
     )
     project = load_config(None, tmp_path)
@@ -111,7 +111,7 @@ def _with_cache(tmp_path: Path, *, trust_stat: bool = False) -> Path:
     lines = ["cache_key: testslot"]
     if trust_stat:
         lines.append("cache_trust_stat: true")
-    (tmp_path / ".game-lattice.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return tmp_path
 
 

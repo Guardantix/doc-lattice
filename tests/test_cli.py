@@ -228,11 +228,11 @@ def test_check_github_annotation_keeps_config_subdir_prefix(tmp_path: Path, monk
         "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
-    (project / ".game-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (project / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(
-        app, ["check", "--config", "packages/game/.game-lattice.yml", "--format", "github"]
+        app, ["check", "--config", "packages/game/.doc-lattice.yml", "--format", "github"]
     )
 
     assert result.exit_code == 1
@@ -440,7 +440,7 @@ def test_check_without_only_shows_all_states(lattice_dir: Path, monkeypatch):
 
 
 def test_check_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 2
@@ -569,7 +569,7 @@ def test_graph_emits_mermaid(lattice_dir: Path, monkeypatch):
 
 
 def test_graph_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["graph"])
     assert result.exit_code == 2
@@ -1063,14 +1063,14 @@ def test_linear_unknown_from_exits_2(lattice_dir, monkeypatch):
 
 
 def test_atomic_create_writes_when_absent(tmp_path: Path):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
     cli_mod._atomic_create(target, "hello\n")
     assert target.read_text(encoding="utf-8") == "hello\n"
     assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
 
 
 def test_atomic_create_refuses_existing_and_preserves_it(tmp_path: Path):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
     target.write_text("original\n", encoding="utf-8")
     with pytest.raises(FileExistsError):
         cli_mod._atomic_create(target, "new\n")
@@ -1079,7 +1079,7 @@ def test_atomic_create_refuses_existing_and_preserves_it(tmp_path: Path):
 
 
 def test_atomic_create_leaves_nothing_on_failure(tmp_path: Path, monkeypatch):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
 
     def boom(_src, _dst):
         raise OSError("link failed")
@@ -1092,7 +1092,7 @@ def test_atomic_create_leaves_nothing_on_failure(tmp_path: Path, monkeypatch):
 
 
 def test_atomic_create_writes_large_payload_intact(tmp_path: Path):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
     # A payload larger than any single os.write buffer would publish; the helper
     # must write every byte before linking, never a truncated file.
     payload = "".join(f"line {i}\n" for i in range(20000))
@@ -1105,7 +1105,7 @@ def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    config = (tmp_path / ".game-lattice.yml").read_text(encoding="utf-8")
+    config = (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8")
     assert "docs_roots:" in config
     assert "- docs" in config
     assert ".pre-commit-config.yaml" in result.stdout
@@ -1115,10 +1115,10 @@ def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
 
 def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".game-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    assert (tmp_path / ".game-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
     assert ".github/workflows/game-lattice.yml" in result.stdout
 
 
@@ -1140,14 +1140,14 @@ def test_init_rejects_unsafe_docs_root(tmp_path: Path, monkeypatch, bad):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init", "--docs-root", bad])
     assert result.exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
 def test_init_rejects_control_character_in_flag(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init", "--linear-team", "a\nb"])
     assert result.exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
 def test_init_rejects_invalid_linear_team(tmp_path: Path, monkeypatch):
@@ -1156,7 +1156,7 @@ def test_init_rejects_invalid_linear_team(tmp_path: Path, monkeypatch):
     # refuse it rather than scaffold a config that the linear command rejects.
     result = runner.invoke(app, ["init", "--linear-team", "my-team-slug"])
     assert result.exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
 def test_init_rejects_markup_metachar_in_docs_root(tmp_path: Path, monkeypatch):
@@ -1164,7 +1164,7 @@ def test_init_rejects_markup_metachar_in_docs_root(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["init", "--docs-root", "../[/]"])
     assert result.exit_code == 2
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
 def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
@@ -1176,12 +1176,12 @@ def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(os, "link", boom)
     assert runner.invoke(app, ["init"]).exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
     assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
 
     monkeypatch.setattr(os, "link", real_link)
     assert runner.invoke(app, ["init"]).exit_code == 0
-    assert (tmp_path / ".game-lattice.yml").exists()
+    assert (tmp_path / ".doc-lattice.yml").exists()
 
 
 def _write_lint_docs(root: Path) -> None:
@@ -1313,7 +1313,7 @@ def test_lint_json_reports_skips(tmp_path: Path, monkeypatch):
 
 
 def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 2
@@ -1328,7 +1328,7 @@ def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, a
     # uncached run's stdout and exit code byte-for-byte at the CLI layer.
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     uncached = _run(args, lattice_dir, env)
-    (lattice_dir / ".game-lattice.yml").write_text("cache_key: cli\n", encoding="utf-8")
+    (lattice_dir / ".doc-lattice.yml").write_text("cache_key: cli\n", encoding="utf-8")
     cold = _run(args, lattice_dir, env)  # writes cache
     warm = _run(args, lattice_dir, env)  # reads cache
     assert cold.stdout == uncached.stdout
@@ -1344,7 +1344,7 @@ def test_reconcile_all_cached_matches_uncached_bytes(lattice_dir: Path, tmp_path
     shutil.copytree(lattice_dir, twin)
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     uncached = _run(["reconcile", "--all"], lattice_dir, env)
-    (twin / ".game-lattice.yml").write_text(
+    (twin / ".doc-lattice.yml").write_text(
         "cache_key: recon\ncache_trust_stat: true\n", encoding="utf-8"
     )
     cached = _run(["reconcile", "--all"], twin, env)

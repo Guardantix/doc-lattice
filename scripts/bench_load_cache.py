@@ -45,7 +45,7 @@ def _config(root: Path, *, cache_key: str | None, trust_stat: bool) -> Path:
         lines.append(f"cache_key: {cache_key}")
     if trust_stat:
         lines.append("cache_trust_stat: true")
-    (root / ".game-lattice.yml").write_text(
+    (root / ".doc-lattice.yml").write_text(
         "\n".join(lines) + "\n" if lines else "", encoding="utf-8"
     )
     return root

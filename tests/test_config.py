@@ -18,7 +18,7 @@ def test_absent_config_uses_defaults(tmp_path: Path):
 
 def test_loads_and_resolves_roots(tmp_path: Path):
     (tmp_path / "design").mkdir()
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "docs_roots: [design]\nignore_globs: ['**/x/**']\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)
@@ -39,7 +39,7 @@ def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
     projects = [tmp_path / "first", tmp_path / "second"]
     for project in projects:
         project.mkdir()
-        (project / ".game-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+        (project / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
         load_config(None, project)
 
     assert calls == ["docs_roots: [docs]\n", "docs_roots: [docs]\n"]
@@ -69,14 +69,14 @@ def test_explicit_config_in_subdir_anchors_root_at_its_parent(tmp_path: Path):
 def test_empty_config_file_falls_back_to_defaults(tmp_path: Path):
     # A present-but-empty (comment-only) file yields None from the parser; the None -> {}
     # coalescing means Config falls back to defaults instead of raising.
-    (tmp_path / ".game-lattice.yml").write_text("# only a comment\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("# only a comment\n", encoding="utf-8")
     project = load_config(None, tmp_path)
     assert project.config.docs_roots == ["docs"]
     assert project.resolved_roots == (tmp_path.resolve() / "docs",)
 
 
 def test_multiple_roots_resolved_in_order(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: [c, a, b]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [c, a, b]\n", encoding="utf-8")
     project = load_config(None, tmp_path)
     assert project.resolved_roots == (
         tmp_path.resolve() / "c",
@@ -86,7 +86,7 @@ def test_multiple_roots_resolved_in_order(tmp_path: Path):
 
 
 def test_empty_docs_roots_yields_no_resolved_roots(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: []\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: []\n", encoding="utf-8")
     project = load_config(None, tmp_path)
     assert project.resolved_roots == ()
 
@@ -98,7 +98,7 @@ def test_optional_fields_default_to_none(tmp_path: Path):
 
 
 def test_binding_layers_roundtrips(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "binding_layers: [binding, derived]\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)
@@ -106,14 +106,14 @@ def test_binding_layers_roundtrips(tmp_path: Path):
 
 
 def test_root_escaping_project_is_rejected(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../outside']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../outside']\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert "resolves outside the project root" in str(exc.value)
 
 
 def test_absolute_outside_root_is_rejected(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['/etc']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['/etc']\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert "resolves outside the project root" in str(exc.value)
@@ -138,7 +138,7 @@ def test_symlinked_root_escaping_project_is_rejected(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
     (project / "design").symlink_to(outside, target_is_directory=True)
-    (project / ".game-lattice.yml").write_text("docs_roots: [design]\n", encoding="utf-8")
+    (project / ".doc-lattice.yml").write_text("docs_roots: [design]\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(None, project)
     assert exc.value.code == "CONFIG_ERROR"
@@ -146,7 +146,7 @@ def test_symlinked_root_escaping_project_is_rejected(tmp_path: Path):
 
 
 def test_unknown_key_rejected(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert "invalid config" in str(exc.value)
@@ -163,7 +163,7 @@ def test_unknown_key_rejected(tmp_path: Path):
 )
 def test_strict_config_rejects_wrong_types(tmp_path: Path, body: str):
     # strict=True forbids pydantic from coercing wrong types; each case must surface as ConfigError.
-    (tmp_path / ".game-lattice.yml").write_text(body, encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(body, encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert "invalid config" in str(exc.value)
@@ -177,7 +177,7 @@ def test_missing_explicit_config_path_raises(tmp_path: Path):
 
 def test_non_utf8_config_raises_config_error(tmp_path: Path):
     # A non-UTF-8 file trips the read arm of _read_yaml (UnicodeDecodeError), not the parse arm.
-    (tmp_path / ".game-lattice.yml").write_bytes(b"\xff\xfe docs_roots: [docs]")
+    (tmp_path / ".doc-lattice.yml").write_bytes(b"\xff\xfe docs_roots: [docs]")
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
@@ -197,7 +197,7 @@ def test_config_path_is_a_directory_raises_config_error(tmp_path: Path):
 
 def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
     # A syntactically broken config surfaces as a clean ConfigError, not a raw YAMLError.
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: [unclosed\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [unclosed\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
@@ -205,7 +205,7 @@ def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
 
 
 def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
-    config_path = tmp_path / ".game-lattice.yml"
+    config_path = tmp_path / ".doc-lattice.yml"
     config_path.write_text("docs_roots: [unclosed\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
@@ -232,7 +232,7 @@ def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
 
 @pytest.mark.parametrize("key", ["docs", "my-project.docs_v2", "A", "x" * 64])
 def test_cache_key_accepts_safe_segments(tmp_path: Path, key: str):
-    (tmp_path / ".game-lattice.yml").write_text(f"cache_key: {key}\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(f"cache_key: {key}\n", encoding="utf-8")
     project = load_config(None, tmp_path)
     assert project.config.cache_key == key
 
@@ -242,7 +242,7 @@ def test_cache_key_accepts_safe_segments(tmp_path: Path, key: str):
     ["", ".hidden", "..", "a/b", "with space", "sub/dir", "x" * 65, "-leading", "_leading"],
 )
 def test_cache_key_rejects_unsafe_segments(tmp_path: Path, key: str):
-    (tmp_path / ".game-lattice.yml").write_text(f'cache_key: "{key}"\n', encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(f'cache_key: "{key}"\n', encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
@@ -254,13 +254,13 @@ def test_cache_key_absent_defaults_to_none(tmp_path: Path):
 
 
 def test_trust_stat_without_cache_key_is_config_error(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("cache_trust_stat: true\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("cache_trust_stat: true\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
 
 def test_trust_stat_with_cache_key_is_accepted(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "cache_key: docs\ncache_trust_stat: true\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)

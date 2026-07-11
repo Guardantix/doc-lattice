@@ -72,7 +72,7 @@ def partition_identifiers(
         LinearError: If the distinct identifier count exceeds ``MAX_IDENTIFIERS``.
     """
     if linear_team is not None and not is_valid_team_key(linear_team):
-        msg = f"linear_team {linear_team!r} is not a valid team key; fix .game-lattice.yml"
+        msg = f"linear_team {linear_team!r} is not a valid team key; fix .doc-lattice.yml"
         raise ConfigError(msg)
     distinct = list(dict.fromkeys(identifiers))
     if len(distinct) > MAX_IDENTIFIERS:

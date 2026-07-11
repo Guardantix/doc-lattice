@@ -632,7 +632,7 @@ def test_default_tier_matches_uncached_under_random_edits(tmp_path_factory, edit
     (docs / "b.md").write_text(
         "---\nid: b\nderives_from:\n  - ref: a#a\n---\n# B\nbody b\n", encoding="utf-8"
     )
-    cached_cfg = base / ".game-lattice.yml"
+    cached_cfg = base / ".doc-lattice.yml"
     for counter, edit in enumerate(edits):
         target = docs / "a.md"
         if edit == "body" and target.exists():
@@ -676,7 +676,7 @@ def test_require_verified_load_sees_fresh_content_after_same_stat_rewrite(tmp_pa
     docs.mkdir()
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\naaaa\n", encoding="utf-8")
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "cache_key: rv\ncache_trust_stat: true\n", encoding="utf-8"
     )
     load_lattice(load_config(None, tmp_path))  # warm the cache, populating the stat hint
@@ -705,7 +705,7 @@ def test_trust_stat_serves_unreadable_file_from_cache_a_documented_caveat(tmp_pa
     docs.mkdir()
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\naaaa\n", encoding="utf-8")
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "cache_key: unread\ncache_trust_stat: true\n", encoding="utf-8"
     )
     load_lattice(load_config(None, tmp_path))  # warm the cache, populating the stat hint
@@ -733,7 +733,7 @@ def test_verify_tier_serves_schema_valid_node_corruption_a_documented_limit(tmp_
     docs.mkdir()
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\nreal body\n", encoding="utf-8")
-    (tmp_path / ".game-lattice.yml").write_text("cache_key: corrupt\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: corrupt\n", encoding="utf-8")
     load_lattice(load_config(None, tmp_path))  # warm the cache
     # Tamper with the stored body while leaving file_sha256 (and the on-disk file) intact.
     path = cache_path("corrupt", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
