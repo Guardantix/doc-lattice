@@ -49,6 +49,52 @@ def _ignored(path: Path, root: Path, ignore_globs: Sequence[str]) -> bool:
     return any(rel.full_match(pattern) for pattern in ignore_globs)
 
 
+def _unreadable(path: Path, exc: OSError | UnicodeDecodeError) -> UnreadableDocError:
+    """Build the single UnreadableDocError used by every doc read and stat failure.
+
+    Centralizing the message is what lets the cached load path (byte read, decode, stat)
+    produce byte-identical errors to an uncached read.
+    """
+    return UnreadableDocError(f"cannot read doc {path}: {exc}")
+
+
+def read_doc_bytes(path: Path) -> bytes:
+    """Read a doc's raw bytes.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The file contents as bytes.
+
+    Raises:
+        UnreadableDocError: If the file cannot be read.
+    """
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise _unreadable(path, exc) from exc
+
+
+def decode_doc(path: Path, data: bytes) -> str:
+    """Decode a doc's bytes as UTF-8.
+
+    Args:
+        path: The file the bytes came from, for the error message.
+        data: The raw bytes.
+
+    Returns:
+        The decoded text.
+
+    Raises:
+        UnreadableDocError: If the bytes are not valid UTF-8.
+    """
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _unreadable(path, exc) from exc
+
+
 def read_doc(path: Path) -> str:
     """Read a doc as UTF-8.
 
@@ -61,8 +107,4 @@ def read_doc(path: Path) -> str:
     Raises:
         UnreadableDocError: If the file cannot be read or is not valid UTF-8.
     """
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        msg = f"cannot read doc {path}: {exc}"
-        raise UnreadableDocError(msg) from exc
+    return decode_doc(path, read_doc_bytes(path))

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.discovery import discover_doc_paths, read_doc
+from game_lattice.discovery import decode_doc, discover_doc_paths, read_doc, read_doc_bytes
 from game_lattice.error_types import UnreadableDocError
 
 
@@ -100,6 +100,36 @@ def test_read_doc_missing_file_raises(tmp_path: Path):
     with pytest.raises(UnreadableDocError) as exc:
         read_doc(p)
     assert exc.value.code == "UNREADABLE_DOC"
+
+
+def test_read_doc_bytes_returns_raw_bytes(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_bytes(b"# hi\n")
+    assert read_doc_bytes(doc) == b"# hi\n"
+
+
+def test_read_doc_bytes_missing_file_raises_unreadable(tmp_path: Path):
+    missing = tmp_path / "gone.md"
+    with pytest.raises(UnreadableDocError) as exc:
+        read_doc_bytes(missing)
+    assert exc.value.code == "UNREADABLE_DOC"
+    assert "cannot read doc" in str(exc.value)
+
+
+def test_decode_doc_rejects_non_utf8_with_same_message_as_read_doc(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_bytes(b"\xff\xfe not utf-8\n")
+    with pytest.raises(UnreadableDocError) as via_decode:
+        decode_doc(doc, doc.read_bytes())
+    with pytest.raises(UnreadableDocError) as via_read:
+        read_doc(doc)
+    assert str(via_decode.value) == str(via_read.value)
+
+
+def test_read_doc_composes_helpers(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_text("# hi\n", encoding="utf-8")
+    assert read_doc(doc) == decode_doc(doc, read_doc_bytes(doc))
 
 
 def test_discovery_skips_symlink_escaping_root(tmp_path: Path):
