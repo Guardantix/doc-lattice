@@ -266,6 +266,8 @@ docs_roots:
   - docs                  # roots to scan for tracked .md files (default: ["docs"])
 # ignore_globs:           # paths to skip within those roots
 #   - "**/superpowers/plans/**"
+# cache_key: my-docs      # opt-in incremental load cache slot (see Load cache below)
+# cache_trust_stat: false # opt-in stat fast tier for read-only commands (accepts the mtime caveat)
 # linear_team: ENG        # the Linear team the `linear` query targets
 # binding_layers: null    # accepted but inert today; setting it changes nothing (see below)
 ```
@@ -278,6 +280,30 @@ changes nothing, because no command consults it. Authority ranking currently liv
 `lint` (binding > derived > exploratory); see the
 [lint design spec](docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md) for where that
 ranking is defined.
+
+### Load cache (opt-in)
+
+Large doc sets (thousands of files) can skip re-parsing unchanged docs with an opt-in cache.
+Set `cache_key` to a single safe segment (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`); it names a slot
+under your user cache home at `<cache_home>/game-lattice/<cache_key>/load-cache.json`, where
+`<cache_home>` is `$XDG_CACHE_HOME` (when absolute) or `~/.cache`. The cache lives outside every
+checkout on purpose: because `.game-lattice.yml` is committed, every clone and git worktree of the
+project shares one warm cache with no per-checkout setup, which an in-repo cache could not do.
+
+By default the cache re-reads and re-hashes each file's bytes every run, so its output is always
+byte-identical to an uncached run under any cache state (cold, warm, stale, structurally corrupt, or
+wrong version); only timing differs. A structurally corrupt cache (unreadable, non-JSON, wrong
+version, or schema-invalid) is discarded wholesale and rebuilt; the cache is a trusted single-writer
+file under your own cache home, so it is not hardened against hand-edited tampering that stays
+schema-valid. Setting `cache_trust_stat: true` adds a faster tier for read-only commands that trusts
+a file whose size and modification time are unchanged, accepting that the file is not opened at all:
+a rewrite that preserves both its size and its nanosecond mtime is served stale, and a file made
+unreadable (for example a permissions change, which does not alter size or mtime) is served from
+cache instead of erroring, each until the file is touched. `reconcile` ignores `cache_trust_stat`
+and always verifies content, so it can never
+write frontmatter from stale data. Two projects sharing a `cache_key` stay correct (a content-hash
+hit implies identical bytes); the only cost is overwrite churn, so prefer distinct keys. Delete the
+cache directory to reset it; a tool-version bump discards it automatically.
 
 ## Adopting game-lattice in your docs repo
 

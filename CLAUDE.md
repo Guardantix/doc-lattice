@@ -105,7 +105,8 @@ writing it), the shared `report_render`, plus the linear pure core (`tickets`, `
 `version_check`. The
 untyped-to-typed
 boundary modules are `frontmatter_parser` and `linear_parser`. Only `config`, `discovery`,
-`orchestrate`, and `cli` touch the disk (`cli` performs the reconcile and init writes); `linear_fetch`
+`orchestrate`, `cli`, and `cache` touch the disk (`cli` performs the reconcile and init writes;
+`cache` reads and atomically writes the opt-in load cache under the user cache home); `linear_fetch`
 is impure wiring and `linear_client` is the only module that touches the network. This is what lets
 the graph and report layers be tested against synthetic inputs with no I/O.
 

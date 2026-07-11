@@ -15,6 +15,7 @@ PYTHON_PIN = "3.13"
 
 _CONFIG_HEADER = f"# game-lattice configuration. See {GAME_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/superpowers/plans/**"\n'
+_COMMENTED_CACHE = "# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
 _COMMENTED_LINEAR = "# linear_team: ENG\n"
 _COMMENTED_BINDING = "# binding_layers: null\n"
 
@@ -56,7 +57,7 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
     yaml.indent(mapping=2, sequence=4, offset=2)
     buf = io.StringIO()
     yaml.dump(data, buf)
-    parts = [_CONFIG_HEADER, buf.getvalue(), _COMMENTED_IGNORE]
+    parts = [_CONFIG_HEADER, buf.getvalue(), _COMMENTED_IGNORE, _COMMENTED_CACHE]
     if linear_team is None:
         parts.append(_COMMENTED_LINEAR)
     parts.append(_COMMENTED_BINDING)

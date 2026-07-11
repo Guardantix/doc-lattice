@@ -20,6 +20,11 @@ def _load(text: str) -> Config:
     return Config.model_validate(parsed)
 
 
+def test_render_config_includes_commented_cache_key_example():
+    text = render_config(("docs",), None)
+    assert "# cache_key: my-project-docs" in text
+
+
 def test_render_config_default_has_docs_active_and_keys_commented():
     text = render_config(("docs",), None)
     assert "docs_roots:" in text

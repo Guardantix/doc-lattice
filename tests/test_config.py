@@ -228,3 +228,41 @@ def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
 
     assert first_project.config.docs_roots == ["docs"]
     assert second_project.config.docs_roots == ["on"]
+
+
+@pytest.mark.parametrize("key", ["docs", "my-project.docs_v2", "A", "x" * 64])
+def test_cache_key_accepts_safe_segments(tmp_path: Path, key: str):
+    (tmp_path / ".game-lattice.yml").write_text(f"cache_key: {key}\n", encoding="utf-8")
+    project = load_config(None, tmp_path)
+    assert project.config.cache_key == key
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["", ".hidden", "..", "a/b", "with space", "sub/dir", "x" * 65, "-leading", "_leading"],
+)
+def test_cache_key_rejects_unsafe_segments(tmp_path: Path, key: str):
+    (tmp_path / ".game-lattice.yml").write_text(f'cache_key: "{key}"\n', encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(None, tmp_path)
+
+
+def test_cache_key_absent_defaults_to_none(tmp_path: Path):
+    project = load_config(None, tmp_path)
+    assert project.config.cache_key is None
+    assert project.config.cache_trust_stat is False
+
+
+def test_trust_stat_without_cache_key_is_config_error(tmp_path: Path):
+    (tmp_path / ".game-lattice.yml").write_text("cache_trust_stat: true\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(None, tmp_path)
+
+
+def test_trust_stat_with_cache_key_is_accepted(tmp_path: Path):
+    (tmp_path / ".game-lattice.yml").write_text(
+        "cache_key: docs\ncache_trust_stat: true\n", encoding="utf-8"
+    )
+    project = load_config(None, tmp_path)
+    assert project.config.cache_key == "docs"
+    assert project.config.cache_trust_stat is True

@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.discovery import discover_doc_paths, read_doc
+from game_lattice.discovery import (
+    decode_doc,
+    discover_doc_paths,
+    read_doc,
+    read_doc_bytes,
+    read_doc_bytes_and_stat,
+)
 from game_lattice.error_types import UnreadableDocError
 
 
@@ -100,6 +106,77 @@ def test_read_doc_missing_file_raises(tmp_path: Path):
     with pytest.raises(UnreadableDocError) as exc:
         read_doc(p)
     assert exc.value.code == "UNREADABLE_DOC"
+
+
+def test_read_doc_bytes_returns_raw_bytes(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_bytes(b"# hi\n")
+    assert read_doc_bytes(doc) == b"# hi\n"
+
+
+def test_read_doc_bytes_missing_file_raises_unreadable(tmp_path: Path):
+    missing = tmp_path / "gone.md"
+    with pytest.raises(UnreadableDocError) as exc:
+        read_doc_bytes(missing)
+    assert exc.value.code == "UNREADABLE_DOC"
+    assert "cannot read doc" in str(exc.value)
+
+
+def test_read_doc_bytes_and_stat_returns_bytes_and_matching_stat(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_bytes(b"# hi\n")
+    data, st = read_doc_bytes_and_stat(doc)
+    assert data == b"# hi\n"
+    assert st.st_size == len(data)
+
+
+def test_read_doc_bytes_and_stat_missing_file_raises_unreadable(tmp_path: Path):
+    missing = tmp_path / "gone.md"
+    with pytest.raises(UnreadableDocError) as via_stat:
+        read_doc_bytes_and_stat(missing)
+    with pytest.raises(UnreadableDocError) as via_read:
+        read_doc_bytes(missing)
+    assert str(via_stat.value) == str(via_read.value)
+
+
+def test_decode_doc_rejects_non_utf8_with_same_message_as_read_doc(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_bytes(b"\xff\xfe not utf-8\n")
+    with pytest.raises(UnreadableDocError) as via_decode:
+        decode_doc(doc, doc.read_bytes())
+    with pytest.raises(UnreadableDocError) as via_read:
+        read_doc(doc)
+    assert str(via_decode.value) == str(via_read.value)
+
+
+def test_read_doc_composes_helpers(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_text("# hi\n", encoding="utf-8")
+    assert read_doc(doc) == decode_doc(doc, read_doc_bytes(doc))
+
+
+def test_decode_doc_translates_universal_newlines_like_read_text(tmp_path: Path):
+    # Lone-CR (classic Mac) and CRLF endings must collapse to LF exactly as the historical
+    # Path.read_text(encoding="utf-8") loader did, so cached and uncached loads stay byte-parity.
+    doc = tmp_path / "cr.md"
+    raw = b"---\rid: x\r---\rbody\r\nmore\r\n"
+    doc.write_bytes(raw)
+    assert decode_doc(doc, raw) == doc.read_text(encoding="utf-8")
+    assert decode_doc(doc, raw) == "---\nid: x\n---\nbody\nmore\n"
+
+
+def test_decode_doc_lone_cr_frontmatter_is_still_parsed(tmp_path: Path):
+    # Regression: a lone-CR document with valid frontmatter must not be dropped. Without newline
+    # translation, split_frontmatter sees one line and never matches the opening fence.
+    from game_lattice.frontmatter_parser import parse_meta, split_frontmatter  # noqa: PLC0415
+
+    doc = tmp_path / "cr.md"
+    raw = b"---\rid: cr-node\r---\r# Body\r"
+    text = decode_doc(doc, raw)
+    raw_meta, _body = split_frontmatter(text)
+    meta = parse_meta(raw_meta, doc)
+    assert meta is not None
+    assert meta.id == "cr-node"
 
 
 def test_discovery_skips_symlink_escaping_root(tmp_path: Path):

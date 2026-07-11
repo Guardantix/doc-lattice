@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Opt-in incremental load cache: set `cache_key` in `.game-lattice.yml` to skip re-parsing
+  unchanged docs across runs and git worktrees, with byte-identical output to an uncached run by
+  default; `cache_trust_stat: true` adds a faster stat tier for read-only commands under the
+  documented mtime caveat, and `reconcile` always verifies content (#28).
 - `check`, `lint`, `impact`, and `linear` accept `--indent N` with JSON output (`--json`, or the
   equivalent `--format json` on `check` and `lint`), and the global `--no-color` option and the
   `NO_COLOR` environment variable both explicitly disable colored output, including the styling on

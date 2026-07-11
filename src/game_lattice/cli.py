@@ -237,10 +237,20 @@ def main_callback(
         _disable_color()
 
 
-def _load(config: Path | None) -> Lattice:
-    """Load the lattice from the resolved project config."""
+def _load(config: Path | None, *, require_verified: bool = False) -> Lattice:
+    """Load the lattice from the resolved project config.
+
+    Args:
+        config: Explicit ``--config`` path, or None to discover it from the cwd.
+        require_verified: Force the verify tier for every file, disabling the stat fast
+            tier. Reconcile passes True so its writes never derive from a stat-tier
+            stale read; every other command uses the default.
+
+    Returns:
+        The built Lattice.
+    """
     project = load_config(config, Path.cwd())
-    return load_lattice(project)
+    return load_lattice(project, require_verified=require_verified)
 
 
 @app.command()
@@ -454,7 +464,7 @@ def reconcile(  # noqa: PLR0913
         _err.print("[red]error[/red]: provide a downstream id or --all")
         raise typer.Exit(2)
     with _exit_on_project_error():
-        lattice = _load(config)
+        lattice = _load(config, require_verified=True)
         plan = plan_reconcile(lattice, downstream_id, ref=ref, reconcile_all=reconcile_all)
         # Phase 1: compute every rewrite from a fresh read before touching disk, so a
         # malformed concurrent edit aborts the whole command instead of leaving an

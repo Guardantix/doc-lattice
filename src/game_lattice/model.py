@@ -114,6 +114,23 @@ class Location:
 
 
 @dataclass(frozen=True, slots=True)
+class SectionRecord:
+    """One anchored section: its resolved anchor id and inclusive 1-indexed line span."""
+
+    anchor: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class FileSections:
+    """The section derivation build_lattice consumes: total line count and anchored spans."""
+
+    total_lines: int
+    sections: tuple[SectionRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Node:
     """One tracked file assembled from its frontmatter and body."""
 
@@ -129,11 +146,17 @@ class Node:
 
 @dataclass(frozen=True, slots=True)
 class ParsedDoc:
-    """A discovered file with validated frontmatter and its raw body."""
+    """A discovered file with validated frontmatter and its raw body.
+
+    ``sections`` holds pre-derived section spans when a caller (the load cache) already
+    computed them, so ``build_lattice`` reuses them instead of re-deriving. It is None on
+    the uncached path, where ``build_lattice`` derives sections itself.
+    """
 
     path: Path
     meta: NodeMeta
     body: str
+    sections: "FileSections | None" = None
 
 
 @dataclass(frozen=True, slots=True)

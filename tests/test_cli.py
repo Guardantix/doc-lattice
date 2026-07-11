@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,16 @@ from game_lattice.error_types import ConfigError
 from game_lattice.tickets import Ticket, TicketState
 
 runner = CliRunner()
+
+
+def _run(args: list[str], cwd: Path, env: dict[str, str]):
+    """Invoke the CLI with cwd and env set for the duration of the call, then restore cwd."""
+    old = Path.cwd()
+    os.chdir(cwd)
+    try:
+        return runner.invoke(app, args, env=env)
+    finally:
+        os.chdir(old)
 
 
 def test_escape_github_message_encodes_workflow_command_metacharacters():
@@ -1306,3 +1317,63 @@ def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 2
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["check"], ["lint"], ["impact", "art-direction"], ["graph", "--format", "json"]],
+)
+def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, args):
+    # Cold (cache miss, writes the cache) and warm (cache hit) runs must reproduce the
+    # uncached run's stdout and exit code byte-for-byte at the CLI layer.
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
+    uncached = _run(args, lattice_dir, env)
+    (lattice_dir / ".game-lattice.yml").write_text("cache_key: cli\n", encoding="utf-8")
+    cold = _run(args, lattice_dir, env)  # writes cache
+    warm = _run(args, lattice_dir, env)  # reads cache
+    assert cold.stdout == uncached.stdout
+    assert cold.exit_code == uncached.exit_code
+    assert warm.stdout == uncached.stdout
+    assert warm.exit_code == uncached.exit_code
+
+
+def test_reconcile_all_cached_matches_uncached_bytes(lattice_dir: Path, tmp_path: Path):
+    # Twin copies of the fixture tree: one uncached, one cached under cache_trust_stat.
+    # The resulting file bytes and exit code must match.
+    twin = tmp_path / "twin"
+    shutil.copytree(lattice_dir, twin)
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
+    uncached = _run(["reconcile", "--all"], lattice_dir, env)
+    (twin / ".game-lattice.yml").write_text(
+        "cache_key: recon\ncache_trust_stat: true\n", encoding="utf-8"
+    )
+    cached = _run(["reconcile", "--all"], twin, env)
+    assert cached.exit_code == uncached.exit_code
+    for name in ["pc-design.md", "art-direction.md", "gdd.md"]:
+        assert (twin / "docs" / name).read_bytes() == (lattice_dir / "docs" / name).read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_require_verified"),
+    [
+        (["reconcile", "--all"], True),
+        (["check"], False),
+    ],
+)
+def test_cli_forces_require_verified_only_for_reconcile(
+    lattice_dir: Path, tmp_path: Path, monkeypatch, args, expected_require_verified
+):
+    # Mutant-killer: spy on the load_lattice that cli.py imported into its own namespace,
+    # wrapping the real function so the real command still runs, and record the
+    # require_verified kwarg. reconcile must force the verify tier; check must not.
+    seen: dict[str, bool] = {}
+    real = cli_mod.load_lattice
+
+    def spy(project, *, require_verified=False):
+        seen["require_verified"] = require_verified
+        return real(project, require_verified=require_verified)
+
+    monkeypatch.setattr(cli_mod, "load_lattice", spy)
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
+    _run(args, lattice_dir, env)
+    assert seen["require_verified"] is expected_require_verified
