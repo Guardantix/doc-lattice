@@ -285,7 +285,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.13 --from git+https://github.com/Guardantix/game-lattice@v0.7.0 game-lattice init
+uvx --python 3.13 --from git+https://github.com/Guardantix/game-lattice@v0.8.0 game-lattice init
 ```
 
 This writes `.game-lattice.yml` (only if absent) and prints pre-commit hooks and a GitHub
