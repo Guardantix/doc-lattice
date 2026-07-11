@@ -14,8 +14,8 @@
 
 **File map:**
 
-- `src/game_lattice/cli.py`: validate output selection, escape workflow-command fields, and render check and lint annotations.
-- `src/game_lattice/constants.py`: define the typed report-format domain and runtime validation set.
+- `src/doc_lattice/cli.py`: validate output selection, escape workflow-command fields, and render check and lint annotations.
+- `src/doc_lattice/constants.py`: define the typed report-format domain and runtime validation set.
 - `tests/test_cli.py`: unit-test both escaping rules and exercise every new CLI contract against real loaded lattices.
 - `tests/test_constants.py`: keep the runtime report-format set tied to its `Literal` domain.
 - `README.md`: document both `--format` options, `--json` compatibility, annotations, and unchanged exits.
@@ -27,15 +27,15 @@
 
 - Modify: `tests/test_cli.py`
 - Modify: `tests/test_constants.py`
-- Modify: `src/game_lattice/cli.py`
-- Modify: `src/game_lattice/constants.py`
+- Modify: `src/doc_lattice/cli.py`
+- Modify: `src/doc_lattice/constants.py`
 
 - [ ] **Step 1: Write direct failing tests for both escape rules**
 
-Extend the `game_lattice.cli` import in `tests/test_cli.py` and add:
+Extend the `doc_lattice.cli` import in `tests/test_cli.py` and add:
 
 ```python
-from game_lattice.cli import (
+from doc_lattice.cli import (
     _STATE_COLORS,
     _escape_github_message,
     _escape_github_property,
@@ -74,14 +74,14 @@ exist.
 
 - [ ] **Step 3: Implement the minimal escape helpers and format resolver**
 
-Add the typed domain to `src/game_lattice/constants.py`:
+Add the typed domain to `src/doc_lattice/constants.py`:
 
 ```python
 ReportFormat = Literal["human", "json", "github"]
 VALID_REPORT_FORMATS: frozenset[str] = frozenset(get_args(ReportFormat))
 ```
 
-Import `ReportFormat` and `VALID_REPORT_FORMATS` in `src/game_lattice/cli.py`, then add below
+Import `ReportFormat` and `VALID_REPORT_FORMATS` in `src/doc_lattice/cli.py`, then add below
 `_STATE_COLORS`:
 
 ```python
@@ -138,7 +138,7 @@ Expected: 3 passed.
 - [ ] **Step 5: Commit the first green slice**
 
 ```bash
-git add src/game_lattice/cli.py src/game_lattice/constants.py tests/test_cli.py tests/test_constants.py
+git add src/doc_lattice/cli.py src/doc_lattice/constants.py tests/test_cli.py tests/test_constants.py
 git commit -m "feat: add GitHub annotation escaping"
 ```
 
@@ -147,7 +147,7 @@ git commit -m "feat: add GitHub annotation escaping"
 **Files:**
 
 - Modify: `tests/test_cli.py`
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 
 - [ ] **Step 1: Write failing check CLI tests**
 
@@ -160,11 +160,11 @@ def test_check_github_emits_each_drift_annotation(lattice_dir: Path, monkeypatch
 
     assert result.exit_code == 1
     assert result.stdout == (
-        f"::error file={lattice_dir / 'docs/gdd.md'},title=game-lattice BROKEN::"
+        f"::error file={lattice_dir / 'docs/gdd.md'},title=doc-lattice BROKEN::"
         "gdd -> ghost is BROKEN\n"
-        f"::error file={lattice_dir / 'docs/pc-design.md'},title=game-lattice STALE::"
+        f"::error file={lattice_dir / 'docs/pc-design.md'},title=doc-lattice STALE::"
         "pc-design -> art-direction#accent is STALE\n"
-        f"::error file={lattice_dir / 'docs/pc-design.md'},title=game-lattice UNRECONCILED::"
+        f"::error file={lattice_dir / 'docs/pc-design.md'},title=doc-lattice UNRECONCILED::"
         "pc-design -> art-direction#motion is UNRECONCILED\n"
     )
 
@@ -267,7 +267,7 @@ def check(
             if status.state == "OK":
                 continue
             path = lattice.nodes_by_id[status.source_id].path
-            title = _escape_github_property(f"game-lattice {status.state}")
+            title = _escape_github_property(f"doc-lattice {status.state}")
             message = _escape_github_message(
                 f"{status.source_id} -> {status.target_ref} is {status.state}"
             )
@@ -299,7 +299,7 @@ Expected: all selected tests pass, including pre-existing human byte-identity an
 - [ ] **Step 5: Commit the check slice**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: emit check GitHub annotations"
 ```
 
@@ -308,7 +308,7 @@ git commit -m "feat: emit check GitHub annotations"
 **Files:**
 
 - Modify: `tests/test_cli.py`
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 
 - [ ] **Step 1: Write failing lint CLI tests**
 
@@ -322,7 +322,7 @@ def test_lint_github_emits_each_violation_annotation(tmp_path: Path, monkeypatch
 
     assert result.exit_code == 1
     assert result.stdout == (
-        f"::error file={tmp_path / 'docs/down.md'},title=game-lattice ladder violation::"
+        f"::error file={tmp_path / 'docs/down.md'},title=doc-lattice ladder violation::"
         "down (binding) -> up (derived)\n"
     )
 
@@ -428,7 +428,7 @@ def lint(
     elif report_format == "github":
         for violation in result.violations:
             path = lattice.nodes_by_id[violation.source_id].path
-            title = _escape_github_property("game-lattice ladder violation")
+            title = _escape_github_property("doc-lattice ladder violation")
             message = _escape_github_message(
                 f"{violation.source_id} ({violation.source_authority}) -> "
                 f"{violation.target_ref} ({violation.target_authority})"
@@ -460,7 +460,7 @@ Expected: all CLI tests pass.
 - [ ] **Step 5: Commit the lint slice**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: emit lint GitHub annotations"
 ```
 
@@ -553,7 +553,7 @@ output.
 - [ ] **Step 4: Commit any review fixes**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py README.md CHANGELOG.md
+git add src/doc_lattice/cli.py tests/test_cli.py README.md CHANGELOG.md
 git commit -m "fix: address GitHub annotation review"
 ```
 

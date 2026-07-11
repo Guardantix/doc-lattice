@@ -2,7 +2,7 @@
 
 Status: IMPLEMENTED. This redesign shipped in PR #3 (commit `fd5ba3f`, the linear slice), the
 same change that added this document, so the not-found handling in
-`docs/superpowers/specs/2026-06-27-game-lattice-linear-design.md` sections 5 and 6 already
+`docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md` sections 5 and 6 already
 reflects it. The sections below are kept as the design rationale, not pending work. The shipped
 code went slightly past this draft: one filtered request per `(team, number-chunk)` rather than a
 single multi-alias document, plus `includeArchived: true` and leading-zero rejection in the
@@ -42,7 +42,7 @@ Consequences:
 1. The documented "missing ticket comes back as a null alias" case never happens. Linear
    reports not-found through `errors`, not a null alias.
 2. A single deleted, archived, or valid-format-but-typo'd id makes `parse_tickets` raise
-   `LinearError`, so `game-lattice linear` exits 2 and reports no findings. A drifted doc
+   `LinearError`, so `doc-lattice linear` exits 2 and reports no findings. A drifted doc
    then dodges its own gate by crashing the audit rather than producing the intended
    fail-closed BLOCKED.
 

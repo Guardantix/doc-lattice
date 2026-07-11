@@ -1,4 +1,4 @@
-# game-lattice Release Automation Slice: Design Spec
+# doc-lattice Release Automation Slice: Design Spec
 
 **Date:** 2026-06-29
 **Status:** Design (post brainstorm). Ready for implementation planning.
@@ -6,7 +6,7 @@
 merge-triggered CI job that creates and verifies the `vX.Y.Z` tag so the tag is a product of a green
 pipeline rather than a manual step. No change to any engine command; the only code added to the
 package is a pure version-consistency function. No network at runtime, no secrets, no LLM.
-**Builds on:** `docs/superpowers/specs/2026-06-28-game-lattice-init-design.md` (the init scaffolding
+**Builds on:** `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md` (the init scaffolding
 that pins adopters' codegen to `v{__version__}`, and the release model this slice automates) and
 `RELEASING.md` (the manual checklist this slice replaces in part).
 
@@ -77,13 +77,13 @@ version_check.py     <---  check_version_sync.py   <---  code-quality job step
                                                          release job (tag + smoke)
 ```
 
-`version_check.py` is the only code added under `src/game_lattice`. Everything else is configuration
+`version_check.py` is the only code added under `src/doc_lattice`. Everything else is configuration
 (YAML) and one script that reads files and delegates. The release job calls no package code; it
 shells `uvx` against the public ref, so it tests the same path an adopter walks.
 
 ## 4. The version-consistency core (pure)
 
-`src/game_lattice/version_check.py` exposes one public function:
+`src/doc_lattice/version_check.py` exposes one public function:
 
 ```python
 def check_version_consistency(
@@ -113,7 +113,7 @@ not crash on.
 `scripts/check_version_sync.py` mirrors `scripts/check_typing_boundaries.py`: a module docstring, a
 `main()` that reads inputs and prints, `sys.exit` on the result. It:
 
-- imports the canonical version (`from game_lattice import __version__`),
+- imports the canonical version (`from doc_lattice import __version__`),
 - reads `pyproject.toml` and `CHANGELOG.md` from the repo root (resolved relative to the script
   location, no CWD assumption),
 - calls `check_version_consistency`,
@@ -121,7 +121,7 @@ not crash on.
 
 The script holds no comparison logic; it is the I/O shell over the pure core. It is not unit-tested,
 matching the precedent of `check_typing_boundaries.py` (the logic it wraps is what carries the tests),
-and lives outside the coverage source (`src/game_lattice`).
+and lives outside the coverage source (`src/doc_lattice`).
 
 ## 6. PR-time wiring
 
@@ -148,7 +148,7 @@ Steps, in order:
 1. **Derive the target tag.** Read `v{__version__}` from the checked-out package.
 2. **Idempotency gate with tag-health check.** If the tag does not exist on the remote, proceed to
    step 3. If it does exist, peel it to its commit and read that commit's `__version__` with a local
-   `git show vX.Y.Z:src/game_lattice/__init__.py` (no build). Two outcomes:
+   `git show vX.Y.Z:src/doc_lattice/__init__.py` (no build). Two outcomes:
    - The tagged commit's version equals `X.Y.Z`: the tag is a healthy existing release. Log the
      matched version and exit 0 as a no-op. This is the ordinary unchanged-version merge (for example
      a later docs fix), and is why a healthy tag points at its original release commit, not at HEAD.
@@ -163,7 +163,7 @@ Steps, in order:
    `code-quality` job already ran it on this commit, but the release job must not tag on drift.
 4. **Gating smoke against the commit SHA.** Run `uvx --python 3.14 --from git+<repo>@${{ github.sha }}`
    for each of `check`, `lint`, and `init`. `check` and `lint` run against a checked-in hermetic
-   fixture (`tests/fixtures/release-smoke/.game-lattice.yml`, a clean edge-free lattice) via `--config`,
+   fixture (`tests/fixtures/release-smoke/.doc-lattice.yml`, a clean edge-free lattice) via `--config`,
    not the repository's own `docs/`, so the smoke proves the commands install and run without coupling
    release success to the state of this repo's real lattice (a future STALE or BROKEN edge under
    `docs/` must not redden every release). `init` runs in a scratch directory. Because the merge commit
@@ -172,11 +172,11 @@ Steps, in order:
 5. **Create and push the tag.** A lightweight `vX.Y.Z` at `github.sha`, matching the `RELEASING.md`
    convention. A lightweight tag carries no tagger identity, so it needs no `git config user.*` setup
    in the runner, and it resolves identically for `uvx ...@vX.Y.Z`. Pushed with `GITHUB_TOKEN`.
-6. **Post-tag confirmation.** A cheap `uvx --from git+<repo>@vX.Y.Z game-lattice --version` to confirm
+6. **Post-tag confirmation.** A cheap `uvx --from git+<repo>@vX.Y.Z doc-lattice --version` to confirm
    the pinned tag string itself resolves. The functional surface was already proven at the SHA in
    step 4; this only confirms ref resolution.
 
-`<repo>` is `https://github.com/Guardantix/game-lattice`, the same URL the init scaffold pins.
+`<repo>` is `https://github.com/Guardantix/doc-lattice`, the same URL the init scaffold pins.
 
 ## 8. Data flow and exit behavior
 
@@ -192,7 +192,7 @@ merge to main ──> code-quality + tests + security-scan ──> release job
    ├─ assert version sync (re-check)
    ├─ smoke @SHA: check / lint / init        (gates the tag; fail => no tag)
    ├─ git tag vX.Y.Z && git push             (lightweight)
-   └─ smoke @vX.Y.Z: game-lattice --version  (confirms pinned ref resolves)
+   └─ smoke @vX.Y.Z: doc-lattice --version  (confirms pinned ref resolves)
 ```
 
 The only state the job creates is the tag, and only on the green path past the SHA smoke.
@@ -217,7 +217,7 @@ The only state the job creates is the tag, and only on the green path past the S
 
 ## 10. Conventions and invariants
 
-- `version_check.py` is pure and lives under `src/game_lattice`; no `Any`/`cast` (it is not a boundary
+- `version_check.py` is pure and lives under `src/doc_lattice`; no `Any`/`cast` (it is not a boundary
   module), module docstring, Google-style docstring on the public function, no em-dashes, line length
   100.
 - Custom errors, if any are raised, extend `ProjectError` with a `code`. The pure core prefers

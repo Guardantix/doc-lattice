@@ -1,26 +1,26 @@
-# game-lattice Init Slice: Design Spec
+# doc-lattice Init Slice: Design Spec
 
 **Date:** 2026-06-28
 **Status:** Design (post brainstorm). Ready for implementation planning.
 **Scope:** Onboarding ergonomics. One `init` command that scaffolds the project config and emits
 pre-commit and CI codegen for an adopting repo. No network, no secrets, no LLM. The only new
 disk-touching code is a single config write; the rest is printed.
-**Builds on:** `docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md` (the local
-core) and `docs/superpowers/specs/2026-06-27-game-lattice-linear-design.md` (the linear slice).
+**Builds on:** `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md` (the local
+core) and `docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md` (the linear slice).
 
 This spec turns the deferred `init` item from the local-core deferral map (section 12, "init
 scaffolding, pre-commit and CI codegen") into a buildable design. It does not re-open any locked
 decision from the local core. The local-core spec already states (section 7) that `init` will
-scaffold `.game-lattice.yml` later and that the tool never depends on `init` having run; this slice
+scaffold `.doc-lattice.yml` later and that the tool never depends on `init` having run; this slice
 realizes that promise without changing how config is read.
 
 ## 1. Scope
 
 In scope:
 
-- A single `init` command that bootstraps a repo adopting game-lattice.
-- It writes one file, `.game-lattice.yml`, when absent, and prints two codegen artifacts: a
-  pre-commit hook and a GitHub Actions workflow, each of which runs `game-lattice check` as the
+- A single `init` command that bootstraps a repo adopting doc-lattice.
+- It writes one file, `.doc-lattice.yml`, when absent, and prints two codegen artifacts: a
+  pre-commit hook and a GitHub Actions workflow, each of which runs `doc-lattice check` as the
   drift gate.
 - The config write is deterministic and templated, with two optional flags (`--docs-root`,
   repeatable, and `--linear-team`) that bake values into the generated file.
@@ -46,11 +46,11 @@ Explicitly out of scope, deferred or declined (see section 11):
 
 ## 2. The mutation boundary
 
-game-lattice keeps mutation narrow and deliberate. Today `reconcile` is the only command that
+doc-lattice keeps mutation narrow and deliberate. Today `reconcile` is the only command that
 writes, and it writes surgically. This slice adds the second writing command, and draws its
 boundary just as sharply so the careful-mutation posture is preserved:
 
-- `init` writes exactly one file, `.game-lattice.yml`, and only when it does not already exist. It
+- `init` writes exactly one file, `.doc-lattice.yml`, and only when it does not already exist. It
   never overwrites it, never edits it, and never touches any other file on disk. The never-overwrite
   guarantee is enforced atomically by a no-overwrite create (section 5), not by a separate existence
   check, so there is no window in which a concurrently created config could be clobbered, and the
@@ -64,9 +64,9 @@ boundary just as sharply so the careful-mutation posture is preserved:
 ## 3. Operating model and command surface
 
 ```
-game-lattice init                                # write .game-lattice.yml (if absent), print codegen
-game-lattice init --docs-root design --docs-root lore   # repeatable; sets docs_roots
-game-lattice init --linear-team PC               # bakes linear_team into the written config
+doc-lattice init                                # write .doc-lattice.yml (if absent), print codegen
+doc-lattice init --docs-root design --docs-root lore   # repeatable; sets docs_roots
+doc-lattice init --linear-team PC               # bakes linear_team into the written config
 ```
 
 There is no `--json`, no `--force`, no `--config`, and no interactive prompt. The command's
@@ -79,7 +79,7 @@ Streams are split so a captured run yields only the artifacts:
 - stderr carries narration: whether the config was written or skipped, where to paste each snippet,
   and the tag prerequisite from section 8.
 
-So `game-lattice init > setup.yml` captures exactly the two snippets and nothing else.
+So `doc-lattice init > setup.yml` captures exactly the two snippets and nothing else.
 
 ## 4. Architecture
 
@@ -91,7 +91,7 @@ It generates three strings from typed inputs and returns them as a frozen value:
 ```python
 @dataclass(frozen=True, slots=True)
 class Scaffold:
-    config_text: str       # .game-lattice.yml
+    config_text: str       # .doc-lattice.yml
     precommit_text: str    # the repo: local hook snippet
     ci_text: str           # the GitHub Actions workflow
 
@@ -102,7 +102,7 @@ def build_scaffold(
 
 `rev` is injected by the caller, never read inside the module, so `scaffold` stays pure and is
 tested against arbitrary revs. The repository URL is a single module constant
-`GAME_LATTICE_REPO_URL = "https://github.com/Guardantix/game-lattice"` (the SSH remote rewritten to
+`DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"` (the SSH remote rewritten to
 the https git form `uvx` needs), referenced by both snippet renderers so the literal is never
 duplicated.
 
@@ -134,7 +134,7 @@ This keeps `scaffold` testable with no I/O, exactly as `render` and `reconcile.r
    emitted through the YAML serializer, never string-interpolated, so a value like `1.0`, `*ref`, a
    leading `#`, or an embedded `:` is quoted and typed correctly rather than silently misparsed,
    commented out, or rejected by the strict `Config` model. See section 4 and section 6.1.
-4. Config write to `cwd/.game-lattice.yml` through `_atomic_create`, which is both no-overwrite and
+4. Config write to `cwd/.doc-lattice.yml` through `_atomic_create`, which is both no-overwrite and
    crash-safe. It writes `scaffold.config_text` to a uniquely named temp file in the same directory,
    flushes and `os.fsync`s it so the bytes are durable, then publishes by `os.link`ing the temp onto
    the final path and unlinking the temp. `os.link` is atomic and fails with `FileExistsError` if
@@ -155,13 +155,13 @@ This keeps `scaffold` testable with no I/O, exactly as `render` and `reconcile.r
 
 ## 6. The three artifacts
 
-### 6.1 `.game-lattice.yml` (written)
+### 6.1 `.doc-lattice.yml` (written)
 
 The active keys reflect the flags; the remaining optional keys appear as commented examples the
 user can uncomment. With no flags:
 
 ```yaml
-# game-lattice configuration. See https://github.com/Guardantix/game-lattice
+# doc-lattice configuration. See https://github.com/Guardantix/doc-lattice
 docs_roots:
   - docs
 # ignore_globs:
@@ -191,26 +191,26 @@ Added by the user under `repos:` in their `.pre-commit-config.yaml`:
 ```yaml
   - repo: local
     hooks:
-      - id: game-lattice-check
-        name: game-lattice check
-        entry: uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice check
+      - id: doc-lattice-check
+        name: doc-lattice check
+        entry: uvx --python 3.14 --from git+https://github.com/Guardantix/doc-lattice@v0.2.0 doc-lattice check
         language: system
         files: \.md$
         pass_filenames: false
 ```
 
 `language: system` runs the entry as given (it needs `uvx` on PATH, which the uv toolchain
-provides). `--python 3.14` makes `uv` provision the interpreter game-lattice requires
+provides). `--python 3.14` makes `uv` provision the interpreter doc-lattice requires
 (`requires-python >= 3.14`), downloading it if absent, so the hook does not depend on the developer
 already having 3.14. `files: \.md$` triggers the hook when markdown changes; `pass_filenames: false`
 because `check` evaluates the whole lattice, not the individual changed files.
 
 ### 6.3 CI workflow (printed)
 
-Saved by the user as `.github/workflows/game-lattice.yml`:
+Saved by the user as `.github/workflows/doc-lattice.yml`:
 
 ```yaml
-name: game-lattice
+name: doc-lattice
 on:
   push:
     branches: [main]
@@ -223,10 +223,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice check
+      - run: uvx --python 3.14 --from git+https://github.com/Guardantix/doc-lattice@v0.2.0 doc-lattice check
 ```
 
-`--python 3.14` makes `uv` provision the interpreter game-lattice requires
+`--python 3.14` makes `uv` provision the interpreter doc-lattice requires
 (`requires-python >= 3.14`), downloading it on the runner if absent, so the gate fails on real drift
 rather than on a missing interpreter. `check` exits 0 on a clean lattice, 1 on drift, and 2 on a
 tool error; the job fails on 1 or 2, which is exactly the gate this is meant to provide. Only
@@ -235,7 +235,7 @@ which are out of scope for an onboarding default.
 
 ## 7. Invocation model
 
-Both snippets invoke game-lattice through `uvx --python 3.14 --from git+<url>@<rev> game-lattice
+Both snippets invoke doc-lattice through `uvx --python 3.14 --from git+<url>@<rev> doc-lattice
 check`. This is zero-install: `uv` fetches and runs the pinned revision on demand, provisions the
 required Python 3.14 (downloading it if absent), adds no dependency to the adopter's project, and
 works identically in pre-commit and GitHub Actions. It fits because `uv` is already the toolchain
@@ -248,7 +248,7 @@ in a separate setup step is what lets the same one-line command serve both the p
 The snippets pin `@v{__version__}`. `init` ships as version 0.2.0, so they pin `@v0.2.0`. That tag
 must contain the init commit, because it serves two roles at once: it is the revision the generated
 gates resolve to run `check`, and it is the revision the onboarding docs tell adopters to run `init`
-itself from (`uvx --from git+...@v0.2.0 game-lattice init`). A tag pointing at an init-less commit
+itself from (`uvx --from git+...@v0.2.0 doc-lattice init`). A tag pointing at an init-less commit
 would satisfy the first role but break the second.
 
 There is no chicken-and-egg here, because a git tag is created after the commit it names, and `init`
@@ -270,7 +270,7 @@ merge commit are a single "cut the release" step. A half-done release (init merg
 tag without the version bump) is exactly what produces a broken gate. The slice therefore adds a
 short `RELEASING.md` checklist that makes the tag a non-optional part of shipping `init` and of every
 later version. Its closing step is the smoke test named above: after pushing `vX.Y.Z`, run the exact
-generated command (`uvx --python 3.14 --from git+...@vX.Y.Z game-lattice check`) once and confirm it
+generated command (`uvx --python 3.14 --from git+...@vX.Y.Z doc-lattice check`) once and confirm it
 resolves before the release is considered done. The code stays version-agnostic: it reads
 `__version__` and pins `v{__version__}`, so future versions need only the matching tag, cut the same
 way.
@@ -297,7 +297,7 @@ its post-tag smoke test is the accepted mitigation until then.
 - No `datetime` use: the artifacts carry no timestamps.
 - Module docstring on `scaffold.py`; Google-style docstrings on `build_scaffold` and the `init`
   command. No em-dashes in docstrings, messages, or comments.
-- Paths: `init` writes the fixed filename `.game-lattice.yml` into the current working directory; it
+- Paths: `init` writes the fixed filename `.doc-lattice.yml` into the current working directory; it
   is not a user-provided path, so it does not need `safe_resolve`. The `--docs-root` values are not
   resolved against the filesystem at init time; section 5 step 2 guards them syntactically and
   section 6.1 serializes them safely into the config.
@@ -314,14 +314,14 @@ its post-tag smoke test is the accepted mitigation until then.
     a YAML indicator character, are emitted so that `load_config` reads back exactly the input
     string, with no misparse, comment-out, or `extra="forbid"` failure.
 - `tests/test_cli.py` (extend, using `tmp_path`):
-  - `init` in an empty directory writes `.game-lattice.yml` with the expected content and prints
+  - `init` in an empty directory writes `.doc-lattice.yml` with the expected content and prints
     both snippets to stdout, exit 0;
   - `init` with a config already present does not change the file (exercising the `FileExistsError`
     skip branch of `_atomic_create`, asserted by writing distinct sentinel content first and
     confirming it survives byte-for-byte) but still prints both snippets, notes the skip on stderr,
     exit 0;
   - crash safety: a forced failure (for example monkeypatching `os.link` or `os.fsync` to raise)
-    leaves no `.game-lattice.yml` and no leftover temp behind, the command surfaces the error, and a
+    leaves no `.doc-lattice.yml` and no leftover temp behind, the command surfaces the error, and a
     subsequent clean `init` writes the config correctly;
   - `--docs-root` and `--linear-team` bake their values into the written file;
   - stdout carries both destination banners and the pinned rev, asserted as `f"v{__version__}"`
@@ -346,6 +346,6 @@ its post-tag smoke test is the accepted mitigation until then.
 
 | Goal | Solved by | Verifiable when |
 |---|---|---|
-| Onboarding a repo | `init` writes a valid config and prints both gate snippets | a fresh directory gains a loadable `.game-lattice.yml` and copy-paste pre-commit and CI in one command |
+| Onboarding a repo | `init` writes a valid config and prints both gate snippets | a fresh directory gains a loadable `.doc-lattice.yml` and copy-paste pre-commit and CI in one command |
 | Safe re-run | skip-and-continue on an existing config | re-running `init` never alters a hand-tuned config yet still prints the codegen |
 | Reproducible gate | `uvx ... @v{__version__}` pinning | the generated pre-commit and CI both pin the same version that generated them |

@@ -1,14 +1,14 @@
-# game-lattice Init Slice Implementation Plan
+# doc-lattice Init Slice Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `game-lattice init` command that scaffolds `.game-lattice.yml` and prints pre-commit and CI codegen for a repo adopting game-lattice, then ship it as the 0.2.0 release.
+**Goal:** Add a `doc-lattice init` command that scaffolds `.doc-lattice.yml` and prints pre-commit and CI codegen for a repo adopting doc-lattice, then ship it as the 0.2.0 release.
 
 **Architecture:** A new pure, filesystem-free module `scaffold.py` builds three strings (the config text and two codegen snippets) from typed inputs. A single `init` command in `cli.py` is the only new disk-touching code: it validates flags, builds the scaffold, writes the config through a crash-safe no-overwrite helper (`_atomic_create`), and prints the snippets. This extends the existing pure-core / impure-edge split exactly as `render` and `reconcile` already do.
 
 **Tech Stack:** Python 3.14+, `typer` (CLI), `pydantic` (the `Config` model), `ruamel.yaml` (config serialization), `uv` (toolchain), `pytest` (tests). All already in the project.
 
-**Source spec:** `docs/superpowers/specs/2026-06-28-game-lattice-init-design.md` is the source of truth.
+**Source spec:** `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md` is the source of truth.
 
 ## Global Constraints
 
@@ -21,17 +21,17 @@ Every task's requirements implicitly include these (copied from the spec and CLA
 - Constants use the `Literal` + `get_args()` + `frozenset` pattern in `constants.py`; do not duplicate a string literal that should be a named constant.
 - Coverage stays at or above the 80 percent gate (`fail_under = 80`).
 - A pre-commit hook runs ruff (`--fix`), ruff-format, `ty`, the typing-boundary check, and detect-secrets on every commit, and blocks direct commits to `main`. Work happens on the `feat/init` branch. If a hook auto-fixes a file, re-stage and re-commit.
-- Test files mirror sources (`src/game_lattice/foo.py` -> `tests/test_foo.py`) and use `tmp_path` for filesystem work.
+- Test files mirror sources (`src/doc_lattice/foo.py` -> `tests/test_foo.py`) and use `tmp_path` for filesystem work.
 
 ## File Structure
 
 | File | Disposition | Responsibility |
 |---|---|---|
-| `src/game_lattice/scaffold.py` | Create | Pure generators: `Scaffold` value, `build_scaffold`, `render_config`, `render_precommit`, `render_ci`, the repo URL constant. No I/O. |
+| `src/doc_lattice/scaffold.py` | Create | Pure generators: `Scaffold` value, `build_scaffold`, `render_config`, `render_precommit`, `render_ci`, the repo URL constant. No I/O. |
 | `tests/test_scaffold.py` | Create | Pure tests for `scaffold.py`, including hostile-scalar round-trips through the real `Config` model. |
-| `src/game_lattice/cli.py` | Modify | Add `_atomic_create` helper, `_validate_init_flags`, and the `init` command. Add imports. |
+| `src/doc_lattice/cli.py` | Modify | Add `_atomic_create` helper, `_validate_init_flags`, and the `init` command. Add imports. |
 | `tests/test_cli.py` | Modify | Add `_atomic_create` unit tests and `init` command tests. |
-| `src/game_lattice/__init__.py` | Modify | Bump `__version__` to `0.2.0`. |
+| `src/doc_lattice/__init__.py` | Modify | Bump `__version__` to `0.2.0`. |
 | `pyproject.toml` | Modify | Bump `version` to `0.2.0`. |
 | `uv.lock` | Modify | Refreshed by `uv lock` after the version bump. |
 | `CHANGELOG.md` | Modify | Add the `## [0.2.0]` release entry. |
@@ -44,13 +44,13 @@ Every task's requirements implicitly include these (copied from the spec and CLA
 ### Task 1: Pure `scaffold.py` module
 
 **Files:**
-- Create: `src/game_lattice/scaffold.py`
+- Create: `src/doc_lattice/scaffold.py`
 - Test: `tests/test_scaffold.py`
 
 **Interfaces:**
-- Consumes: `game_lattice.config.Config` (in tests only, for round-trip validation); `ruamel.yaml.YAML`.
+- Consumes: `doc_lattice.config.Config` (in tests only, for round-trip validation); `ruamel.yaml.YAML`.
 - Produces:
-  - `GAME_LATTICE_REPO_URL: str` = `"https://github.com/Guardantix/game-lattice"`
+  - `DOC_LATTICE_REPO_URL: str` = `"https://github.com/Guardantix/doc-lattice"`
   - `class Scaffold` (frozen dataclass) with `config_text: str`, `precommit_text: str`, `ci_text: str`
   - `render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str`
   - `render_precommit(rev: str) -> str`
@@ -67,9 +67,9 @@ Create `tests/test_scaffold.py`:
 import pytest
 from ruamel.yaml import YAML
 
-from game_lattice.config import Config
-from game_lattice.scaffold import (
-    GAME_LATTICE_REPO_URL,
+from doc_lattice.config import Config
+from doc_lattice.scaffold import (
+    DOC_LATTICE_REPO_URL,
     build_scaffold,
     render_config,
 )
@@ -120,7 +120,7 @@ def test_snippets_pin_rev_url_and_python():
     s = build_scaffold(("docs",), None, "v0.2.0")
     for text in (s.precommit_text, s.ci_text):
         assert "@v0.2.0" in text
-        assert GAME_LATTICE_REPO_URL in text
+        assert DOC_LATTICE_REPO_URL in text
         assert "--python 3.14" in text
     assert "repo: local" in s.precommit_text
     assert "pass_filenames: false" in s.precommit_text
@@ -132,11 +132,11 @@ def test_snippets_pin_rev_url_and_python():
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run --group dev pytest tests/test_scaffold.py -q`
-Expected: FAIL with `ModuleNotFoundError: No module named 'game_lattice.scaffold'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'doc_lattice.scaffold'`.
 
 - [ ] **Step 3: Write the implementation**
 
-Create `src/game_lattice/scaffold.py`:
+Create `src/doc_lattice/scaffold.py`:
 
 ```python
 """Generate the config and codegen artifacts for the init command.
@@ -151,10 +151,10 @@ from dataclasses import dataclass
 
 from ruamel.yaml import YAML
 
-GAME_LATTICE_REPO_URL = "https://github.com/Guardantix/game-lattice"
+DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
 PYTHON_PIN = "3.14"
 
-_CONFIG_HEADER = f"# game-lattice configuration. See {GAME_LATTICE_REPO_URL}\n"
+_CONFIG_HEADER = f"# doc-lattice configuration. See {DOC_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/superpowers/plans/**"\n'
 _COMMENTED_LINEAR = "# linear_team: my-team-slug\n"
 _COMMENTED_BINDING = "# binding_layers: null\n"
@@ -172,13 +172,13 @@ class Scaffold:
 def _check_invocation(rev: str) -> str:
     """Return the uvx command both gates run, pinned to rev and Python 3.14."""
     return (
-        f"uvx --python {PYTHON_PIN} --from git+{GAME_LATTICE_REPO_URL}@{rev} "
-        "game-lattice check"
+        f"uvx --python {PYTHON_PIN} --from git+{DOC_LATTICE_REPO_URL}@{rev} "
+        "doc-lattice check"
     )
 
 
 def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
-    """Render .game-lattice.yml with active keys serialized and optionals commented.
+    """Render .doc-lattice.yml with active keys serialized and optionals commented.
 
     The active block is dumped through ruamel.yaml so every value is quoted and
     typed by the library, never string-interpolated. The header comment and the
@@ -206,12 +206,12 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
 
 
 def render_precommit(rev: str) -> str:
-    """Render the repo: local pre-commit hook that runs game-lattice check."""
+    """Render the repo: local pre-commit hook that runs doc-lattice check."""
     return (
         "  - repo: local\n"
         "    hooks:\n"
-        "      - id: game-lattice-check\n"
-        "        name: game-lattice check\n"
+        "      - id: doc-lattice-check\n"
+        "        name: doc-lattice check\n"
         f"        entry: {_check_invocation(rev)}\n"
         "        language: system\n"
         "        files: \\.md$\n"
@@ -220,9 +220,9 @@ def render_precommit(rev: str) -> str:
 
 
 def render_ci(rev: str) -> str:
-    """Render the GitHub Actions workflow that runs game-lattice check."""
+    """Render the GitHub Actions workflow that runs doc-lattice check."""
     return (
-        "name: game-lattice\n"
+        "name: doc-lattice\n"
         "on:\n"
         "  push:\n"
         "    branches: [main]\n"
@@ -266,13 +266,13 @@ Expected: PASS (all tests green).
 
 - [ ] **Step 5: Lint, type, and boundary check the new module**
 
-Run: `uv run --group dev ruff check src/game_lattice/scaffold.py tests/test_scaffold.py && uv run --group dev ty check src && uv run --group dev python scripts/check_typing_boundaries.py src`
+Run: `uv run --group dev ruff check src/doc_lattice/scaffold.py tests/test_scaffold.py && uv run --group dev ty check src && uv run --group dev python scripts/check_typing_boundaries.py src`
 Expected: ruff clean, `ty` clean, boundary check prints `PASS`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/scaffold.py tests/test_scaffold.py
+git add src/doc_lattice/scaffold.py tests/test_scaffold.py
 git commit -m "feat: add scaffold module for init codegen"
 ```
 
@@ -281,7 +281,7 @@ git commit -m "feat: add scaffold module for init codegen"
 ### Task 2: Crash-safe `_atomic_create` write helper
 
 **Files:**
-- Modify: `src/game_lattice/cli.py` (add helper + imports near the existing `_atomic_write`)
+- Modify: `src/doc_lattice/cli.py` (add helper + imports near the existing `_atomic_write`)
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
@@ -303,14 +303,14 @@ Append to `tests/test_cli.py`:
 
 ```python
 def test_atomic_create_writes_when_absent(tmp_path: Path):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
     cli_mod._atomic_create(target, "hello\n")
     assert target.read_text(encoding="utf-8") == "hello\n"
     assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
 
 
 def test_atomic_create_refuses_existing_and_preserves_it(tmp_path: Path):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
     target.write_text("original\n", encoding="utf-8")
     with pytest.raises(FileExistsError):
         cli_mod._atomic_create(target, "new\n")
@@ -319,7 +319,7 @@ def test_atomic_create_refuses_existing_and_preserves_it(tmp_path: Path):
 
 
 def test_atomic_create_leaves_nothing_on_failure(tmp_path: Path, monkeypatch):
-    target = tmp_path / ".game-lattice.yml"
+    target = tmp_path / ".doc-lattice.yml"
 
     def boom(_src, _dst):
         raise OSError("link failed")
@@ -334,11 +334,11 @@ def test_atomic_create_leaves_nothing_on_failure(tmp_path: Path, monkeypatch):
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `uv run --group dev pytest tests/test_cli.py -k atomic_create -q`
-Expected: FAIL with `AttributeError: module 'game_lattice.cli' has no attribute '_atomic_create'`.
+Expected: FAIL with `AttributeError: module 'doc_lattice.cli' has no attribute '_atomic_create'`.
 
 - [ ] **Step 4: Write the implementation**
 
-In `src/game_lattice/cli.py`, add `import os` and `import tempfile` to the top import block (alongside `import json`). Then add this helper directly below the existing `_atomic_write` function (near the end of the file):
+In `src/doc_lattice/cli.py`, add `import os` and `import tempfile` to the top import block (alongside `import json`). Then add this helper directly below the existing `_atomic_write` function (near the end of the file):
 
 ```python
 def _atomic_create(path: Path, text: str) -> None:
@@ -375,7 +375,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: add crash-safe _atomic_create write helper"
 ```
 
@@ -384,16 +384,16 @@ git commit -m "feat: add crash-safe _atomic_create write helper"
 ### Task 3: The `init` command
 
 **Files:**
-- Modify: `src/game_lattice/cli.py` (imports, `_validate_init_flags`, the `init` command)
+- Modify: `src/doc_lattice/cli.py` (imports, `_validate_init_flags`, the `init` command)
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: `scaffold.build_scaffold` (Task 1); `cli._atomic_create` (Task 2); `config.DEFAULT_CONFIG_NAME`; `error_types.ConfigError`; `text_utils.strip_control_chars`; `game_lattice.__version__`.
-- Produces: the `init` Typer command (`game-lattice init [--docs-root ...] [--linear-team ...]`) and `cli._validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -> None`.
+- Consumes: `scaffold.build_scaffold` (Task 1); `cli._atomic_create` (Task 2); `config.DEFAULT_CONFIG_NAME`; `error_types.ConfigError`; `text_utils.strip_control_chars`; `doc_lattice.__version__`.
+- Produces: the `init` Typer command (`doc-lattice init [--docs-root ...] [--linear-team ...]`) and `cli._validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -> None`.
 
 - [ ] **Step 1: Wire up the imports**
 
-In `src/game_lattice/cli.py`, update three existing import lines:
+In `src/doc_lattice/cli.py`, update three existing import lines:
 
 Change `from .config import load_config` to:
 
@@ -423,25 +423,25 @@ def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    config = (tmp_path / ".game-lattice.yml").read_text(encoding="utf-8")
+    config = (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8")
     assert "docs_roots:" in config
     assert "- docs" in config
     assert ".pre-commit-config.yaml" in result.stdout
-    assert ".github/workflows/game-lattice.yml" in result.stdout
+    assert ".github/workflows/doc-lattice.yml" in result.stdout
     assert f"@v{__version__}" in result.stdout
 
 
 def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".game-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    assert (tmp_path / ".game-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
-    assert ".github/workflows/game-lattice.yml" in result.stdout
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
+    assert ".github/workflows/doc-lattice.yml" in result.stdout
 
 
 def test_init_bakes_flag_values(tmp_path: Path, monkeypatch):
-    from game_lattice.config import load_config  # noqa: PLC0415
+    from doc_lattice.config import load_config  # noqa: PLC0415
 
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
@@ -458,14 +458,14 @@ def test_init_rejects_unsafe_docs_root(tmp_path: Path, monkeypatch, bad):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init", "--docs-root", bad])
     assert result.exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
 def test_init_rejects_control_character_in_flag(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init", "--linear-team", "a\nb"])
     assert result.exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
 def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
@@ -477,12 +477,12 @@ def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(os, "link", boom)
     assert runner.invoke(app, ["init"]).exit_code == 2
-    assert not (tmp_path / ".game-lattice.yml").exists()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
     assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
 
     monkeypatch.setattr(os, "link", real_link)
     assert runner.invoke(app, ["init"]).exit_code == 0
-    assert (tmp_path / ".game-lattice.yml").exists()
+    assert (tmp_path / ".doc-lattice.yml").exists()
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -492,7 +492,7 @@ Expected: FAIL (no `init` command; typer reports a usage error / exit 2 mismatch
 
 - [ ] **Step 4: Write the validation helper**
 
-In `src/game_lattice/cli.py`, add this helper above the `init` command (near the other module-level helpers):
+In `src/doc_lattice/cli.py`, add this helper above the `init` command (near the other module-level helpers):
 
 ```python
 def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -> None:
@@ -524,7 +524,7 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
 
 - [ ] **Step 5: Write the `init` command**
 
-In `src/game_lattice/cli.py`, add the command alongside the other `@app.command()` functions (for example after `linear`, before the `_atomic_write`/`_atomic_create` helpers):
+In `src/doc_lattice/cli.py`, add the command alongside the other `@app.command()` functions (for example after `linear`, before the `_atomic_write`/`_atomic_create` helpers):
 
 ```python
 @app.command()
@@ -538,7 +538,7 @@ def init(
         typer.Option("--linear-team", help="Linear team slug to bake into the config."),
     ] = None,
 ) -> None:
-    """Scaffold .game-lattice.yml and print pre-commit and CI codegen."""
+    """Scaffold .doc-lattice.yml and print pre-commit and CI codegen."""
     try:
         roots = tuple(docs_root) if docs_root else ("docs",)
         _validate_init_flags(roots, linear_team)
@@ -555,11 +555,11 @@ def init(
             _err.print(f"wrote {escape(target.name)}")
         typer.echo("# ===== .pre-commit-config.yaml (add under `repos:`) =====")
         typer.echo(scaffold.precommit_text)
-        typer.echo("# ===== .github/workflows/game-lattice.yml (new file) =====")
+        typer.echo("# ===== .github/workflows/doc-lattice.yml (new file) =====")
         typer.echo(scaffold.ci_text)
         _err.print(
             "Add the pre-commit block under `repos:`, save the workflow as "
-            ".github/workflows/game-lattice.yml, and make sure the "
+            ".github/workflows/doc-lattice.yml, and make sure the "
             f"v{__version__} tag is pushed so the pinned snippets resolve."
         )
     except ProjectError as exc:
@@ -586,7 +586,7 @@ Expected: PASS, coverage at or above 80 percent.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: add init command"
 ```
 
@@ -595,7 +595,7 @@ git commit -m "feat: add init command"
 ### Task 4: Release mechanics (version 0.2.0)
 
 **Files:**
-- Modify: `src/game_lattice/__init__.py`, `pyproject.toml`, `uv.lock`, `CHANGELOG.md`
+- Modify: `src/doc_lattice/__init__.py`, `pyproject.toml`, `uv.lock`, `CHANGELOG.md`
 - Create: `RELEASING.md`
 
 **Interfaces:**
@@ -603,7 +603,7 @@ git commit -m "feat: add init command"
 
 - [ ] **Step 1: Bump `__version__`**
 
-In `src/game_lattice/__init__.py`, change the version line to:
+In `src/doc_lattice/__init__.py`, change the version line to:
 
 ```python
 __version__ = "0.2.0"
@@ -620,13 +620,13 @@ version = "0.2.0"
 - [ ] ~~**Step 3: Bump the gx marker**~~ (REMOVED: spec error)
 
 `.gx-new-version` records the version of the gx-new scaffolding tool, not the
-game-lattice package version. It is gitignored and is not part of a release, so it is
+doc-lattice package version. It is gitignored and is not part of a release, so it is
 never bumped or committed. The version bump is the two locations in Steps 1 and 2.
 
 - [ ] **Step 4: Refresh the lockfile**
 
 Run: `uv lock`
-Expected: `uv.lock` updates the `game-lattice` entry to `0.2.0`. Then confirm the locked sync still works:
+Expected: `uv.lock` updates the `doc-lattice` entry to `0.2.0`. Then confirm the locked sync still works:
 Run: `uv sync --locked --group dev`
 Expected: succeeds (no "lockfile out of date" error).
 
@@ -639,7 +639,7 @@ In `CHANGELOG.md`, insert this block directly above the existing `## [0.1.0] - 2
 
 ### Added
 
-- `init` command: scaffolds `.game-lattice.yml` and prints pre-commit and CI codegen for an adopting repo.
+- `init` command: scaffolds `.doc-lattice.yml` and prints pre-commit and CI codegen for an adopting repo.
 - `RELEASING.md`: release checklist that makes the version tag an atomic part of cutting a release.
 
 ```
@@ -649,9 +649,9 @@ In `CHANGELOG.md`, insert this block directly above the existing `## [0.1.0] - 2
 Create `RELEASING.md`:
 
 ```markdown
-# Releasing game-lattice
+# Releasing doc-lattice
 
-game-lattice is distributed from git, not from PyPI. The `init` command prints
+doc-lattice is distributed from git, not from PyPI. The `init` command prints
 pre-commit and CI snippets that pin `uvx --from git+...@vX.Y.Z`, so a release is
 only complete once the matching tag exists and resolves. Cutting a release is one
 atomic step: a half-done release (code merged but no tag, or a tag without the
@@ -660,7 +660,7 @@ version bump) leaves adopters with a gate that fails before `check` runs.
 ## Checklist
 
 1. Bump the version to the new `X.Y.Z` in both locations:
-   - `src/game_lattice/__init__.py` (`__version__`)
+   - `src/doc_lattice/__init__.py` (`__version__`)
    - `pyproject.toml` (`version`)
 2. Run `uv lock` and commit the refreshed `uv.lock`.
 3. Add a `## [X.Y.Z]` section to `CHANGELOG.md`.
@@ -675,18 +675,18 @@ version bump) leaves adopters with a gate that fails before `check` runs.
 6. Smoke-test the pinned ref before the release is done:
 
    ```bash
-   uvx --python 3.14 --from git+https://github.com/Guardantix/game-lattice@vX.Y.Z game-lattice check
+   uvx --python 3.14 --from git+https://github.com/Guardantix/doc-lattice@vX.Y.Z doc-lattice check
    ```
 
    It must resolve and run. If it does not, cut `X.Y.(Z+1)` rather than moving the tag.
 
 The tag must point at a commit that contains both `check` (so the gates run) and
-`init` (so adopters can run `game-lattice init` from the same ref).
+`init` (so adopters can run `doc-lattice init` from the same ref).
 ```
 
 - [ ] **Step 7: Verify the version is live and the suite is green**
 
-Run: `uv run game-lattice --version`
+Run: `uv run doc-lattice --version`
 Expected: prints `0.2.0`.
 Run: `uv run --group dev pytest -q`
 Expected: PASS, coverage at or above 80 percent.
@@ -694,7 +694,7 @@ Expected: PASS, coverage at or above 80 percent.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/game_lattice/__init__.py pyproject.toml uv.lock CHANGELOG.md RELEASING.md
+git add src/doc_lattice/__init__.py pyproject.toml uv.lock CHANGELOG.md RELEASING.md
 git commit -m "chore: release 0.2.0 with init command and RELEASING checklist"
 ```
 
@@ -713,16 +713,16 @@ git commit -m "chore: release 0.2.0 with init command and RELEASING checklist"
 In `README.md`, insert this section directly below the `## Quick Start` block (after the `### Type check` subsection ends, before `## Documentation`):
 
 ```markdown
-## Adopting game-lattice in your docs repo
+## Adopting doc-lattice in your docs repo
 
 Bootstrap config and a drift gate for a repo whose docs you want to track:
 
 ```bash
-uvx --from git+https://github.com/Guardantix/game-lattice@v0.2.0 game-lattice init
+uvx --from git+https://github.com/Guardantix/doc-lattice@v0.2.0 doc-lattice init
 ```
 
-This writes `.game-lattice.yml` (only if absent) and prints a pre-commit hook and
-a GitHub Actions workflow that run `game-lattice check` as your drift gate. Paste
+This writes `.doc-lattice.yml` (only if absent) and prints a pre-commit hook and
+a GitHub Actions workflow that run `doc-lattice check` as your drift gate. Paste
 each where the output says. Pass `--docs-root` (repeatable) or `--linear-team` to
 bake those values into the generated config.
 ```
@@ -732,23 +732,23 @@ bake those values into the generated config.
 Replace the entire contents of `roadmap.md` with:
 
 ```markdown
-# game-lattice Roadmap
+# doc-lattice Roadmap
 
 Forward-looking slices, derived from the local-core design spec's deferral map
-(`docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md`, section 12).
+(`docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`, section 12).
 The spec is the source of truth; this file is the at-a-glance index.
 
 ## Shipped
 
 - **local-core (v1)** (PR #1). The deterministic local engine: lattice parse, the id-indexed edge
   graph derived on demand, and the `impact`, `check`, `reconcile`, and `graph` commands. No network,
-  no secrets, no LLM. Spec: `docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md`.
+  no secrets, no LLM. Spec: `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`.
 - **linear slice** (PR #3). The `linear` command resolves referenced tickets to live status and
   reports shipped-against-stale-spec drift. The first network-touching slice. Spec:
-  `docs/superpowers/specs/2026-06-27-game-lattice-linear-design.md`.
-- **init slice** (this PR). The `init` command scaffolds `.game-lattice.yml` and prints pre-commit
+  `docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md`.
+- **init slice** (this PR). The `init` command scaffolds `.doc-lattice.yml` and prints pre-commit
   and CI codegen for an adopting repo. Shipped as the 0.2.0 release. Spec:
-  `docs/superpowers/specs/2026-06-28-game-lattice-init-design.md`.
+  `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md`.
 
 Acceptance (local-core spec section 13), still met:
 
@@ -813,13 +813,13 @@ Expected: ruff clean, format clean, `ty` clean, boundary check `PASS`, full suit
 
 ```bash
 cd "$(mktemp -d)"
-uv run --directory "$OLDPWD" game-lattice init
-ls -a            # .game-lattice.yml exists
-uv run --directory "$OLDPWD" game-lattice init   # second run: prints "already exists", still emits codegen, exit 0
+uv run --directory "$OLDPWD" doc-lattice init
+ls -a            # .doc-lattice.yml exists
+uv run --directory "$OLDPWD" doc-lattice init   # second run: prints "already exists", still emits codegen, exit 0
 cd "$OLDPWD"
 ```
 
-Expected: first run writes `.game-lattice.yml` and prints both snippets; second run leaves it untouched and still prints. Both exit 0.
+Expected: first run writes `.doc-lattice.yml` and prints both snippets; second run leaves it untouched and still prints. Both exit 0.
 
 - [ ] **Step 3: Confirm the branch history**
 

@@ -1,4 +1,4 @@
-# game-lattice GitHub-Slug Anchors: Design Spec
+# doc-lattice GitHub-Slug Anchors: Design Spec
 
 **Date:** 2026-07-01
 **Status:** Design (post brainstorm). Ready for implementation planning.
@@ -7,7 +7,7 @@ ref resolves against a plain heading with no `{#slug}` marker, make section reso
 and keep explicit markers as a precedence-winning escape hatch. No network, no secrets, no new
 command, no change to drift or hashing semantics beyond what falls out of resolution. The change is
 internal to the load and resolve pipeline plus the report layers that read resolved ids.
-**Builds on:** `docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md` (the local core,
+**Builds on:** `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md` (the local core,
 which defines the flat id index, `split_ref`, `Edge.resolve`, and section spans this slice reworks).
 **Issue:** GitHub issue #14, "Resolve derives_from anchors from GitHub-native heading slugs (retire
 the literal {#slug} marker)", including the ChatGPT Codex design-review comment.
@@ -45,7 +45,7 @@ Explicitly out of scope, deferred, or declined (see section 11):
   equal their heading slugs (`save-format#slot-table` versus the real `save-format#32-slot-table`), so
   the adopter must remove its 7 markers and repoint its 9 section refs to real slugs. That is a
   separate consuming-repo chore, not part of this tool change, and this spec does not pin Mainspring's
-  literal strings into game-lattice's tests.
+  literal strings into doc-lattice's tests.
 - An alias system that preserves short semantic refs like `#ui` or `#slot-table` after marker
   removal. Rejected: it is a different feature and would re-couple the tool to a consumer's naming.
 - Full inline-markdown rendering before slugging. `github_slug` operates on raw heading source text,

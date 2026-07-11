@@ -34,7 +34,7 @@ logic remains unchanged.
 
 ## Testing
 
-Tests patch `game_lattice.resolve.content_hash`, the lookup location used by the helper, with a
+Tests patch `doc_lattice.resolve.content_hash`, the lookup location used by the helper, with a
 counting wrapper. The helper unit test proves one calculation per target per cache. The `check` and
 `reconcile_all=True` tests each create at least three edges sharing one target and assert exactly
 one invocation per distinct target. Existing test cases verify unchanged user-visible behavior; the

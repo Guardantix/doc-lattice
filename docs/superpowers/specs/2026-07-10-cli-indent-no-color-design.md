@@ -13,7 +13,7 @@ color, while preserving byte-identical command behavior when neither new option 
 
 `--indent` applies only to `check`, `lint`, `impact`, and `linear`, as prescribed by issue #20.
 It does not change `reconcile --json` or `graph --format json`. `--no-color` is a global option and
-therefore appears before the subcommand, for example `game-lattice --no-color check`.
+therefore appears before the subcommand, for example `doc-lattice --no-color check`.
 
 ## Architecture
 

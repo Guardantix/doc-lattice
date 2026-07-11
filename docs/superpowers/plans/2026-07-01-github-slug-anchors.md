@@ -31,7 +31,7 @@ Every task's requirements implicitly include these (copied from the spec and `CL
 
 ## File Structure
 
-Source files touched (all under `src/game_lattice/`):
+Source files touched (all under `src/doc_lattice/`):
 
 | File | Responsibility change |
 | --- | --- |
@@ -59,7 +59,7 @@ Test files touched: `test_sections.py` (ADD), `test_model.py`, `test_loader.py`,
 Pure, additive, fully green on its own. No consumer wired yet.
 
 **Files:**
-- Modify: `src/game_lattice/sections.py`
+- Modify: `src/doc_lattice/sections.py`
 - Test: `tests/test_sections.py`
 
 **Interfaces:**
@@ -70,7 +70,7 @@ Pure, additive, fully green on its own. No consumer wired yet.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to the end of `tests/test_sections.py`, and add `anchor_ids, github_slug` to the existing `from game_lattice.sections import ...` line:
+Add to the end of `tests/test_sections.py`, and add `anchor_ids, github_slug` to the existing `from doc_lattice.sections import ...` line:
 
 ```python
 @pytest.mark.parametrize(
@@ -104,7 +104,7 @@ def test_anchor_ids_dedupes_repeated_slugs_in_document_order():
 def test_anchor_ids_marker_heading_reserves_its_github_slug():
     # GitHub slugs '## Notes {#n}' from its literal, marker-included text to 'notes-n' and
     # reserves it; a later '## Notes n' then collides and becomes 'notes-n-1'. Reserving the
-    # marker heading's slug keeps game-lattice byte-parity with GitHub in this mixed case.
+    # marker heading's slug keeps doc-lattice byte-parity with GitHub in this mixed case.
     toc = build_toc("## Notes {#n}\n\n## Notes n\nx\n")
     assert anchor_ids(toc) == ["n", "notes-n-1"]
 
@@ -201,11 +201,11 @@ Expected: PASS (new tests plus all existing `build_toc`/`section_*` tests, which
 
 - [ ] **Step 5: Lint, type-check, commit**
 
-Run: `uv run --group dev ruff format src/game_lattice/sections.py tests/test_sections.py && uv run --group dev ruff check src tests && uv run --group dev ty check src`
+Run: `uv run --group dev ruff format src/doc_lattice/sections.py tests/test_sections.py && uv run --group dev ruff check src tests && uv run --group dev ty check src`
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/sections.py tests/test_sections.py
+git add src/doc_lattice/sections.py tests/test_sections.py
 git commit -m "feat: github_slug and document-order anchor_ids in sections"
 ```
 
@@ -216,7 +216,7 @@ git commit -m "feat: github_slug and document-order anchor_ids in sections"
 Additive: `TargetId`, `parse_ref`, `as_ref`, and the `#`-in-id guard are new. `split_ref`, `Edge`, and the `Lattice` map types are left ALONE in this task (they migrate in Task 3), so the suite stays green.
 
 **Files:**
-- Modify: `src/game_lattice/model.py`
+- Modify: `src/doc_lattice/model.py`
 - Test: `tests/test_model.py`
 
 **Interfaces:**
@@ -227,7 +227,7 @@ Additive: `TargetId`, `parse_ref`, `as_ref`, and the `#`-in-id guard are new. `s
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_model.py` (add `TargetId, parse_ref` to the `from game_lattice.model import (...)` block; keep the existing `split_ref` import for now):
+Add to `tests/test_model.py` (add `TargetId, parse_ref` to the `from doc_lattice.model import (...)` block; keep the existing `split_ref` import for now):
 
 ```python
 def test_parse_ref_namespaced_is_file_scoped():
@@ -335,11 +335,11 @@ Expected: PASS (new tests plus all existing `split_ref`/`Edge`/`NodeMeta` tests,
 
 - [ ] **Step 5: Lint, type-check, commit**
 
-Run: `uv run --group dev ruff format src/game_lattice/model.py tests/test_model.py && uv run --group dev ruff check src tests && uv run --group dev ty check src`
+Run: `uv run --group dev ruff format src/doc_lattice/model.py tests/test_model.py && uv run --group dev ruff check src tests && uv run --group dev ty check src`
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/model.py tests/test_model.py
+git add src/doc_lattice/model.py tests/test_model.py
 git commit -m "feat: TargetId, parse_ref, and node-id hash guard"
 ```
 
@@ -364,7 +364,7 @@ This is one atomic, cohesive change: re-keying the `Lattice` on `TargetId` force
 
 - [ ] **Step 1: Write the four new-behavior tests**
 
-In `tests/test_loader.py` (add `from game_lattice.model import TargetId` to imports) add:
+In `tests/test_loader.py` (add `from doc_lattice.model import TargetId` to imports) add:
 
 ```python
 def test_same_slug_in_two_files_does_not_collide():
@@ -1023,7 +1023,7 @@ Update the calls:
 
 - [ ] **Step 16: Update `test_impact.py`**
 
-Add `from game_lattice.model import TargetId`. Every bare-anchor ref and token must be namespaced, and `expand_targets` results wrapped in `TargetId`:
+Add `from doc_lattice.model import TargetId`. Every bare-anchor ref and token must be namespaced, and `expand_targets` results wrapped in `TargetId`:
 
 - `test_section_token_expands_to_ancestors_and_file`: token `"child"` -> `"a#child"`; result `{"child", "parent", "a"}` -> `{TargetId("a", "child"), TargetId("a", "parent"), TargetId("a")}`.
 - `test_impact_section_reaches_whole_file_dependents`: `RawEdge(ref="up")` stays (whole-file, valid); `RawEdge(ref="sec")` -> `RawEdge(ref="up#sec")`; `impact(lat, "sec")` -> `impact(lat, "up#sec")`.
@@ -1056,7 +1056,7 @@ def test_bare_anchor_token_is_unknown_but_namespaced_resolves():
 
 - [ ] **Step 17: Update `test_render.py`**
 
-Add `from game_lattice.model import TargetId`. Namespace the bare-anchor refs and TargetId-wrap the stale-edge tuples:
+Add `from doc_lattice.model import TargetId`. Namespace the bare-anchor refs and TargetId-wrap the stale-edge tuples:
 
 - `_lattice()`: `RawEdge(ref="u")` -> `RawEdge(ref="up#u")`.
 - `test_mermaid_styles_stale_edges`: `{("down", "u")}` -> `{("down", TargetId("up", "u"))}`.
@@ -1097,7 +1097,7 @@ def test_reconcile_ref_bare_anchor_no_longer_matches(lattice_dir: Path):
 
 - [ ] **Step 19: Update `test_orchestrate.py`**
 
-Add `from game_lattice.model import TargetId`. In `test_load_lattice_from_dir`:
+Add `from doc_lattice.model import TargetId`. In `test_load_lattice_from_dir`:
 
 ```python
     assert lat.index[TargetId("art-direction", "accent")].kind == "section"
@@ -1107,7 +1107,7 @@ Add `from game_lattice.model import TargetId`. In `test_load_lattice_from_dir`:
 
 - [ ] **Step 20: Update `test_lint.py`**
 
-Add `from game_lattice.model import TargetId`. Wrap every `target_id` string comparison in `TargetId` (file targets have no anchor; `sec` is a section in `up`):
+Add `from doc_lattice.model import TargetId`. Wrap every `target_id` string comparison in `TargetId` (file targets have no anchor; `sec` is a section in `up`):
 
 - `test_binding_deriving_from_derived_is_a_violation`: `(v.target_id, v.target_authority) == ("up", "derived")` -> `(v.target_id, v.target_authority) == (TargetId("up"), "derived")`.
 - `test_unannotated_target_is_skipped_not_failed`: `result.skipped[0].target_id == "up"` -> `== TargetId("up")`.
@@ -1147,7 +1147,7 @@ Expected: all clean. If `ty` flags a residual `str` id anywhere, fix that call s
 - [ ] **Step 24: Commit**
 
 ```bash
-git add src/game_lattice tests
+git add src/doc_lattice tests
 git commit -m "feat: file-scoped anchor resolution via typed TargetId"
 ```
 
@@ -1160,7 +1160,7 @@ No code; align the prose with the shipped behavior.
 **Files:**
 - Modify: `CLAUDE.md`
 - Modify: `README.md`
-- Modify: `src/game_lattice/error_types.py`
+- Modify: `src/doc_lattice/error_types.py`
 
 - [ ] **Step 1: Update `error_types.py` `DuplicateIdError` docstring**
 
@@ -1209,11 +1209,11 @@ Run: `uv run --group dev python scripts/check_version_sync.py`
 Expected: PASS (docs-only change does not affect version sync).
 
 Confirm no em-dashes were introduced:
-Run: `grep -nP "\x{2014}" CLAUDE.md README.md src/game_lattice/error_types.py || echo "no em-dashes"`
+Run: `grep -nP "\x{2014}" CLAUDE.md README.md src/doc_lattice/error_types.py || echo "no em-dashes"`
 Expected: `no em-dashes`.
 
 ```bash
-git add CLAUDE.md README.md src/game_lattice/error_types.py
+git add CLAUDE.md README.md src/doc_lattice/error_types.py
 git commit -m "docs: document file-scoped GitHub-slug anchor resolution"
 ```
 

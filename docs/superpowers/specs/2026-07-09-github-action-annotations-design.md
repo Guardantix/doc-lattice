@@ -26,7 +26,7 @@ This design implements GitHub issue #18.
 
 ## Current Architecture
 
-`src/game_lattice/cli.py` still owns human and JSON rendering for both commands. The rendering
+`src/doc_lattice/cli.py` still owns human and JSON rendering for both commands. The rendering
 extraction anticipated by issue #29 has not landed on `main`, so the issue's prescribed placement
 in `cli.py` matches the current architecture. `check_lattice` and `lint_lattice` remain pure and
 unchanged. Both commands already retain the loaded `Lattice`, which provides the source path through
@@ -93,7 +93,7 @@ The fixed workflow-command syntax remains literal.
 For `check`, the annotation shape is:
 
 ```text
-::error file={path},title=game-lattice {state}::{source_id} -> {target_ref} is {state}
+::error file={path},title=doc-lattice {state}::{source_id} -> {target_ref} is {state}
 ```
 
 The command renders only the already display-filtered statuses, preserving `--only` semantics, and
@@ -102,7 +102,7 @@ then suppresses `OK`. Gate exit status still uses the full unfiltered status lis
 For `lint`, the annotation shape is:
 
 ```text
-::error file={path},title=game-lattice ladder violation::{source_id} ({source_authority}) -> {target_ref} ({target_authority})
+::error file={path},title=doc-lattice ladder violation::{source_id} ({source_authority}) -> {target_ref} ({target_authority})
 ```
 
 Only `result.violations` is rendered. The human-only skip summary remains absent from GitHub output.

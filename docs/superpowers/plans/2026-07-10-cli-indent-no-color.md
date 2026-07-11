@@ -18,7 +18,7 @@ renderers remain unchanged.
 
 | File | Responsibility |
 | --- | --- |
-| `src/game_lattice/cli.py` | Define both options, validate JSON indentation, and configure consoles. |
+| `src/doc_lattice/cli.py` | Define both options, validate JSON indentation, and configure consoles. |
 | `tests/test_cli.py` | Prove formatted JSON, misuse errors, help text, color suppression, and defaults. |
 | `README.md` | Document the two flags and the `NO_COLOR` environment variable. |
 | `CHANGELOG.md` | Record issue #20 under `[Unreleased]`. |
@@ -27,7 +27,7 @@ renderers remain unchanged.
 
 **Files:**
 - Modify: `tests/test_cli.py`
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 
 - [ ] **Step 1: Write failing `check` indentation tests**
 
@@ -111,7 +111,7 @@ Expected: all selected indentation tests pass, including the compact-payload equ
 - [ ] **Step 5: Commit the first TDD slice**
 
 ```bash
-git add tests/test_cli.py src/game_lattice/cli.py
+git add tests/test_cli.py src/doc_lattice/cli.py
 git commit -m "feat(cli): indent check JSON output"
 ```
 
@@ -119,7 +119,7 @@ git commit -m "feat(cli): indent check JSON output"
 
 **Files:**
 - Modify: `tests/test_cli.py`
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 
 - [ ] **Step 1: Write failing remaining-command tests**
 
@@ -215,7 +215,7 @@ Expected: every indentation test passes for all four commands.
 - [ ] **Step 5: Commit the completed indentation feature**
 
 ```bash
-git add tests/test_cli.py src/game_lattice/cli.py
+git add tests/test_cli.py src/doc_lattice/cli.py
 git commit -m "feat(cli): indent JSON reports"
 ```
 
@@ -223,7 +223,7 @@ git commit -m "feat(cli): indent JSON reports"
 
 **Files:**
 - Modify: `tests/test_cli.py`
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 
 - [ ] **Step 1: Write failing color and help tests**
 
@@ -297,7 +297,7 @@ def main_callback(
         bool, typer.Option("--no-color", help="Disable colored output.")
     ] = False,
 ) -> None:
-    """game-lattice: documentation traceability engine."""
+    """doc-lattice: documentation traceability engine."""
     if no_color:
         _disable_color()
 ```
@@ -315,7 +315,7 @@ Expected: every selected test passes; the existing default human output remains 
 - [ ] **Step 5: Commit the color-control slice**
 
 ```bash
-git add tests/test_cli.py src/game_lattice/cli.py
+git add tests/test_cli.py src/doc_lattice/cli.py
 git commit -m "feat(cli): add explicit no-color output"
 ```
 
@@ -334,7 +334,7 @@ Pass `--indent N` with `--json` on `check`, `lint`, `impact`, or `linear` to pre
 with `N` spaces per level. `--indent` without `--json` is a usage error.
 
 Use the global `--no-color` option before the command to disable colored output explicitly, for
-example `game-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
+example `doc-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
 environment variable; `--no-color` is the command-line equivalent.
 ```
 
@@ -401,7 +401,7 @@ its root cause using a new failing regression test before production changes, th
 - [ ] **Step 4: Commit any review fixes**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py README.md CHANGELOG.md
+git add src/doc_lattice/cli.py tests/test_cli.py README.md CHANGELOG.md
 git commit -m "fix: address CLI option review findings"
 ```
 

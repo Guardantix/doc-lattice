@@ -16,9 +16,9 @@
 - Modify: `tests/test_check.py`
 - Modify: `tests/test_lint.py`
 - Modify: `tests/test_impact.py`
-- Modify: `src/game_lattice/check.py`
-- Modify: `src/game_lattice/lint.py`
-- Modify: `src/game_lattice/impact.py`
+- Modify: `src/doc_lattice/check.py`
+- Modify: `src/doc_lattice/lint.py`
+- Modify: `src/doc_lattice/impact.py`
 
 - [x] **Step 1: Write failing exact-payload tests**
 
@@ -44,7 +44,7 @@ Expected: all selected tests pass.
 
 **Files:**
 - Create: `tests/test_report_render.py`
-- Create: `src/game_lattice/report_render.py`
+- Create: `src/doc_lattice/report_render.py`
 - Modify: `tests/test_cli.py`
 
 - [x] **Step 1: Write failing renderer tests**
@@ -70,7 +70,7 @@ Expected: all selected tests pass.
 ### Task 3: CLI wiring and documentation
 
 **Files:**
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 - Modify: `CHANGELOG.md`
 
 - [x] **Step 1: Rewire output dispatch**

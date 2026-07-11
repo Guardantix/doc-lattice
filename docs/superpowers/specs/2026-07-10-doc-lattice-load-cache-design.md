@@ -47,7 +47,7 @@ Out of scope: watch mode, a daemon, cross-machine cache sharing, and everything 
 
 ## 2. Config surface
 
-Two new optional keys in `Config` (`.game-lattice.yml`):
+Two new optional keys in `Config` (`.doc-lattice.yml`):
 
 - `cache_key: str | null = null`. Absent or null disables caching entirely; the load path is
   bit-for-bit today's. When set, it names the cache slot under the user-level cache home
@@ -70,18 +70,18 @@ violates the binding design's rule that the derived graph is never committed and
 constant rebase churn. The cache therefore lives outside every checkout:
 
 ```
-<cache_home>/game-lattice/<cache_key>/load-cache.json
+<cache_home>/doc-lattice/<cache_key>/load-cache.json
 ```
 
 where `<cache_home>` is `$XDG_CACHE_HOME` when that variable is set to an absolute path
 (a relative value is ignored, per the XDG base directory spec), and `~/.cache` otherwise.
-The directory is created on first write. Because `.game-lattice.yml` is committed, every
+The directory is created on first write. Because `.doc-lattice.yml` is committed, every
 clone and every worktree of the project shares one warm cache with zero per-checkout setup.
 
 This supersedes the issue's `safe_resolve` containment bullet with a stricter rule:
 the config carries no path semantics at all. `cache_key` is one validated segment, so
 containment holds by construction and a hostile config can write nothing outside
-`<cache_home>/game-lattice/`.
+`<cache_home>/doc-lattice/`.
 
 Two different projects configured with the same `cache_key` remain correct: a content-hash hit
 implies identical bytes and therefore identical derivations, and stat records are looked up per
@@ -124,7 +124,7 @@ One JSON document, version 1:
   therefore independent of `docs_roots` and `ignore_globs`: discovery decides the file set each
   run and the cache is consulted only per discovered file, so config changes need no
   invalidation logic.
-- **`tool_version` records the `game_lattice.__version__` that wrote the file**, and any
+- **`tool_version` records the `doc_lattice.__version__` that wrote the file**, and any
   mismatch discards the cache wholesale, exactly like a `version` mismatch. A content-hash
   match proves the input bytes are unchanged, not that the derivation logic is unchanged: a
   release that alters the slugger port, a ruamel-yaml upgrade that shifts YAML semantics, or a

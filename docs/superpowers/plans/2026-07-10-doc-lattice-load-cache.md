@@ -25,16 +25,16 @@ Every task's requirements implicitly include these (values copied verbatim from 
 
 ## File Structure
 
-- `src/game_lattice/constants.py` (modify): add `CACHE_VERSION`, `MAX_STAT_ROOTS`, `CACHE_FILE_NAME`.
-- `src/game_lattice/model.py` (modify): add frozen dataclasses `SectionRecord` and `FileSections`; add `ParsedDoc.sections: FileSections | None = None`.
-- `src/game_lattice/loader.py` (modify): extract `derive_file_sections(body) -> FileSections`; `build_lattice` consumes `doc.sections` when present, derives it otherwise.
-- `src/game_lattice/discovery.py` (modify): split `read_doc` into `read_doc_bytes` + `decode_doc` sharing one `UnreadableDocError` construction; `read_doc` composes them.
-- `src/game_lattice/config.py` (modify): add `cache_key` and `cache_trust_stat` fields and their validators.
-- `src/game_lattice/cache.py` (create): the only cache-touching module. Schema pydantic models, cache-path resolution from an env mapping, read/validate, tier selection (`lookup`/`record_miss`), and atomic write (`finalize`). Wired only from `orchestrate.py`.
-- `src/game_lattice/orchestrate.py` (modify): the cached branch and a `require_verified` flag.
-- `src/game_lattice/cli.py` (modify): `reconcile` loads with `require_verified=True`.
+- `src/doc_lattice/constants.py` (modify): add `CACHE_VERSION`, `MAX_STAT_ROOTS`, `CACHE_FILE_NAME`.
+- `src/doc_lattice/model.py` (modify): add frozen dataclasses `SectionRecord` and `FileSections`; add `ParsedDoc.sections: FileSections | None = None`.
+- `src/doc_lattice/loader.py` (modify): extract `derive_file_sections(body) -> FileSections`; `build_lattice` consumes `doc.sections` when present, derives it otherwise.
+- `src/doc_lattice/discovery.py` (modify): split `read_doc` into `read_doc_bytes` + `decode_doc` sharing one `UnreadableDocError` construction; `read_doc` composes them.
+- `src/doc_lattice/config.py` (modify): add `cache_key` and `cache_trust_stat` fields and their validators.
+- `src/doc_lattice/cache.py` (create): the only cache-touching module. Schema pydantic models, cache-path resolution from an env mapping, read/validate, tier selection (`lookup`/`record_miss`), and atomic write (`finalize`). Wired only from `orchestrate.py`.
+- `src/doc_lattice/orchestrate.py` (modify): the cached branch and a `require_verified` flag.
+- `src/doc_lattice/cli.py` (modify): `reconcile` loads with `require_verified=True`.
 - `scripts/bench_load_cache.py` (create): dev-only benchmark, not shipped.
-- Docs: `README.md`, `CHANGELOG.md`, `src/game_lattice/scaffold.py`, `CLAUDE.md`.
+- Docs: `README.md`, `CHANGELOG.md`, `src/doc_lattice/scaffold.py`, `CLAUDE.md`.
 - Tests: `tests/test_cache.py` (create) plus additions to `tests/test_config.py`, `tests/test_loader.py`, `tests/test_discovery.py`, `tests/test_orchestrate.py`, `tests/test_cli.py`, `tests/test_scaffold.py`.
 
 ---
@@ -44,8 +44,8 @@ Every task's requirements implicitly include these (values copied verbatim from 
 Extract the inline TOC/anchor/span derivation from `build_lattice` into a pure, reusable `derive_file_sections`, and let `build_lattice` accept pre-derived sections. This is a behavior-preserving seam: cached and derived sections must be identical. No cache code yet.
 
 **Files:**
-- Modify: `src/game_lattice/model.py`
-- Modify: `src/game_lattice/loader.py`
+- Modify: `src/doc_lattice/model.py`
+- Modify: `src/doc_lattice/loader.py`
 - Test: `tests/test_loader.py`
 
 **Interfaces:**
@@ -62,8 +62,8 @@ Extract the inline TOC/anchor/span derivation from `build_lattice` into a pure, 
 Add to `tests/test_loader.py`:
 
 ```python
-from game_lattice.loader import build_lattice, derive_file_sections
-from game_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord, TargetId
+from doc_lattice.loader import build_lattice, derive_file_sections
+from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord, TargetId
 
 
 def _meta(node_id: str) -> NodeMeta:
@@ -94,7 +94,7 @@ def test_build_lattice_uses_supplied_sections_equal_to_derived():
 
 def test_supplied_sections_survive_a_within_file_anchor_clash():
     # A marker equal to a computed slug must still raise DuplicateIdError from cached sections.
-    from game_lattice.error_types import DuplicateIdError
+    from doc_lattice.error_types import DuplicateIdError
 
     body = "# Accent {#accent}\n\n## Accent\n"
     doc = ParsedDoc(
@@ -113,7 +113,7 @@ Expected: FAIL with `ImportError`/`AttributeError` (no `derive_file_sections`, n
 
 - [ ] **Step 3: Add the dataclasses to `model.py`**
 
-In `src/game_lattice/model.py`, after the `Location` dataclass (before `Node`), add:
+In `src/doc_lattice/model.py`, after the `Location` dataclass (before `Node`), add:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -153,7 +153,7 @@ class ParsedDoc:
 
 - [ ] **Step 4: Extract `derive_file_sections` and rewire `build_lattice` in `loader.py`**
 
-In `src/game_lattice/loader.py`, update the imports:
+In `src/doc_lattice/loader.py`, update the imports:
 
 ```python
 from .model import Edge, FileSections, Lattice, Location, Node, ParsedDoc, SectionRecord, TargetId, parse_ref
@@ -300,7 +300,7 @@ Run: `uv run --group dev ruff format src tests && uv run --group dev ruff check 
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/model.py src/game_lattice/loader.py tests/test_loader.py
+git add src/doc_lattice/model.py src/doc_lattice/loader.py tests/test_loader.py
 git commit -m "refactor: extract derive_file_sections seam for the load cache"
 ```
 
@@ -311,7 +311,7 @@ git commit -m "refactor: extract derive_file_sections seam for the load cache"
 Add the two opt-in config fields and their validators. No cache behavior yet; this only widens `Config`.
 
 **Files:**
-- Modify: `src/game_lattice/config.py`
+- Modify: `src/doc_lattice/config.py`
 - Test: `tests/test_config.py`
 
 **Interfaces:**
@@ -327,7 +327,7 @@ import pytest
 
 @pytest.mark.parametrize("key", ["docs", "my-project.docs_v2", "A", "x" * 64])
 def test_cache_key_accepts_safe_segments(tmp_path: Path, key: str):
-    (tmp_path / ".game-lattice.yml").write_text(f"cache_key: {key}\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(f"cache_key: {key}\n", encoding="utf-8")
     project = load_config(None, tmp_path)
     assert project.config.cache_key == key
 
@@ -337,7 +337,7 @@ def test_cache_key_accepts_safe_segments(tmp_path: Path, key: str):
     ["", ".hidden", "..", "a/b", "with space", "sub/dir", "x" * 65, "-leading", "_leading"],
 )
 def test_cache_key_rejects_unsafe_segments(tmp_path: Path, key: str):
-    (tmp_path / ".game-lattice.yml").write_text(f'cache_key: "{key}"\n', encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(f'cache_key: "{key}"\n', encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
@@ -349,13 +349,13 @@ def test_cache_key_absent_defaults_to_none(tmp_path: Path):
 
 
 def test_trust_stat_without_cache_key_is_config_error(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("cache_trust_stat: true\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("cache_trust_stat: true\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
 
 def test_trust_stat_with_cache_key_is_accepted(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "cache_key: docs\ncache_trust_stat: true\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)
@@ -370,7 +370,7 @@ Expected: FAIL (unknown key `cache_key` is rejected by `extra="forbid"`, so even
 
 - [ ] **Step 3: Add the fields and validators to `config.py`**
 
-In `src/game_lattice/config.py`, update the imports:
+In `src/doc_lattice/config.py`, update the imports:
 
 ```python
 import re
@@ -428,7 +428,7 @@ Expected: PASS (new and existing).
 Run: `uv run --group dev ruff format src tests && uv run --group dev ruff check src tests && uv run --group dev ty check src`
 
 ```bash
-git add src/game_lattice/config.py tests/test_config.py
+git add src/doc_lattice/config.py tests/test_config.py
 git commit -m "feat: add cache_key and cache_trust_stat config keys"
 ```
 
@@ -439,7 +439,7 @@ git commit -m "feat: add cache_key and cache_trust_stat config keys"
 Restructure `discovery.read_doc` so the cache's byte-read (for hashing) and decode (on a miss) route through the same `UnreadableDocError` construction as an uncached read, making section-5 error parity hold by construction.
 
 **Files:**
-- Modify: `src/game_lattice/discovery.py`
+- Modify: `src/doc_lattice/discovery.py`
 - Test: `tests/test_discovery.py`
 
 **Interfaces:**
@@ -453,8 +453,8 @@ Restructure `discovery.read_doc` so the cache's byte-read (for hashing) and deco
 Add to `tests/test_discovery.py`:
 
 ```python
-from game_lattice.discovery import decode_doc, read_doc, read_doc_bytes
-from game_lattice.error_types import UnreadableDocError
+from doc_lattice.discovery import decode_doc, read_doc, read_doc_bytes
+from doc_lattice.error_types import UnreadableDocError
 
 
 def test_read_doc_bytes_returns_raw_bytes(tmp_path: Path):
@@ -496,7 +496,7 @@ Expected: FAIL with `ImportError` (`read_doc_bytes`, `decode_doc` do not exist).
 
 - [ ] **Step 3: Rewrite the read path in `discovery.py`**
 
-Replace the `read_doc` function at the bottom of `src/game_lattice/discovery.py` with:
+Replace the `read_doc` function at the bottom of `src/doc_lattice/discovery.py` with:
 
 ```python
 def _unreadable(path: Path, exc: OSError | UnicodeDecodeError) -> UnreadableDocError:
@@ -570,7 +570,7 @@ Expected: PASS (new and existing; `read_doc`'s external behavior is unchanged).
 Run: `uv run --group dev ruff format src tests && uv run --group dev ruff check src tests && uv run --group dev ty check src`
 
 ```bash
-git add src/game_lattice/discovery.py tests/test_discovery.py
+git add src/doc_lattice/discovery.py tests/test_discovery.py
 git commit -m "refactor: split read_doc into byte and decode helpers sharing one error"
 ```
 
@@ -581,8 +581,8 @@ git commit -m "refactor: split read_doc into byte and decode helpers sharing one
 Create `cache.py` with the schema pydantic models, the three constants, and the env-driven cache-path resolution. Cover serialization round-trip and XDG handling. No load wiring yet.
 
 **Files:**
-- Modify: `src/game_lattice/constants.py`
-- Create: `src/game_lattice/cache.py`
+- Modify: `src/doc_lattice/constants.py`
+- Create: `src/doc_lattice/cache.py`
 - Test: `tests/test_cache.py`
 
 **Interfaces:**
@@ -597,7 +597,7 @@ Create `cache.py` with the schema pydantic models, the three constants, and the 
 
 - [ ] **Step 1: Add the constants**
 
-In `src/game_lattice/constants.py`, append (after the control-range constants):
+In `src/doc_lattice/constants.py`, append (after the control-range constants):
 
 ```python
 # Load cache (opt-in incremental cache). CACHE_VERSION bumps on an intentional schema change;
@@ -619,8 +619,8 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice import __version__
-from game_lattice.cache import (
+from doc_lattice import __version__
+from doc_lattice.cache import (
     CacheFile,
     Entry,
     NodePayload,
@@ -629,8 +629,8 @@ from game_lattice.cache import (
     cache_home,
     cache_path,
 )
-from game_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION
-from game_lattice.model import NodeMeta
+from doc_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION
+from doc_lattice.model import NodeMeta
 
 
 def _sample_cache_file() -> CacheFile:
@@ -684,17 +684,17 @@ def test_cache_home_falls_back_to_home_dot_cache_when_xdg_unset():
 
 def test_cache_path_composes_slot_and_file_name():
     path = cache_path("my-docs", {"XDG_CACHE_HOME": "/c", "HOME": "/home/u"})
-    assert path == Path("/c") / "game-lattice" / "my-docs" / CACHE_FILE_NAME
+    assert path == Path("/c") / "doc-lattice" / "my-docs" / CACHE_FILE_NAME
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `uv run --group dev pytest tests/test_cache.py -v`
-Expected: FAIL with `ModuleNotFoundError: game_lattice.cache`.
+Expected: FAIL with `ModuleNotFoundError: doc_lattice.cache`.
 
 - [ ] **Step 4: Create `cache.py` with models and path resolution**
 
-Create `src/game_lattice/cache.py`:
+Create `src/doc_lattice/cache.py`:
 
 ```python
 """The opt-in incremental load cache: read, tier selection, and atomic write.
@@ -791,9 +791,9 @@ def cache_path(cache_key: str, env: Mapping[str, str]) -> Path:
         env: The environment mapping used to resolve the cache home.
 
     Returns:
-        ``<cache_home>/game-lattice/<cache_key>/load-cache.json``.
+        ``<cache_home>/doc-lattice/<cache_key>/load-cache.json``.
     """
-    return cache_home(env) / "game-lattice" / cache_key / CACHE_FILE_NAME
+    return cache_home(env) / "doc-lattice" / cache_key / CACHE_FILE_NAME
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -807,7 +807,7 @@ Run: `uv run --group dev python scripts/check_typing_boundaries.py src && uv run
 Expected: `PASS: typing.Any/typing.cast restricted to boundary modules` and clean lint/types (`cache.py` uses no `Any`/`cast`).
 
 ```bash
-git add src/game_lattice/constants.py src/game_lattice/cache.py tests/test_cache.py
+git add src/doc_lattice/constants.py src/doc_lattice/cache.py tests/test_cache.py
 git commit -m "feat: add load cache schema models and path resolution"
 ```
 
@@ -818,7 +818,7 @@ git commit -m "feat: add load cache schema models and path resolution"
 Add the `LoadCache` class and its `open` constructor: read the cache file, validate it, and enforce version and tool-version match. Any failure yields an empty in-memory cache. This task adds only construction and the empty-state behavior; `lookup`/`record_miss`/`finalize` come next.
 
 **Files:**
-- Modify: `src/game_lattice/cache.py`
+- Modify: `src/doc_lattice/cache.py`
 - Test: `tests/test_cache.py`
 
 **Interfaces:**
@@ -833,7 +833,7 @@ Add the `LoadCache` class and its `open` constructor: read the cache file, valid
 Add to `tests/test_cache.py`:
 
 ```python
-from game_lattice.cache import LoadCache
+from doc_lattice.cache import LoadCache
 
 
 def _write_cache(path: Path, cache_file: CacheFile) -> None:
@@ -911,7 +911,7 @@ Expected: FAIL with `ImportError`/`AttributeError` (`LoadCache` does not exist).
 
 - [ ] **Step 3: Implement `LoadCache.open` in `cache.py`**
 
-Add these imports at the top of `src/game_lattice/cache.py`:
+Add these imports at the top of `src/doc_lattice/cache.py`:
 
 ```python
 import json
@@ -1035,7 +1035,7 @@ Run: `uv run --group dev python scripts/check_typing_boundaries.py src && uv run
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/cache.py tests/test_cache.py
+git add src/doc_lattice/cache.py tests/test_cache.py
 git commit -m "feat: add LoadCache.open with empty-on-failure validation"
 ```
 
@@ -1046,7 +1046,7 @@ git commit -m "feat: add LoadCache.open with empty-on-failure validation"
 Implement the stat tier, the verify tier, and miss recording. `lookup` returns a hit (reconstructed `ParsedDoc`, or None for a cached non-node) or a miss carrying the bytes it already read; `record_miss` replaces the entry from a fresh parse.
 
 **Files:**
-- Modify: `src/game_lattice/cache.py`
+- Modify: `src/doc_lattice/cache.py`
 - Test: `tests/test_cache.py`
 
 **Interfaces:**
@@ -1068,9 +1068,9 @@ Add to `tests/test_cache.py`:
 ```python
 import hashlib
 
-from game_lattice.cache import CacheHit, CacheMiss, Entry, NodePayload, SectionRecordModel, StatRecord
-from game_lattice.error_types import UnreadableDocError
-from game_lattice.model import FileSections, ParsedDoc, SectionRecord
+from doc_lattice.cache import CacheHit, CacheMiss, Entry, NodePayload, SectionRecordModel, StatRecord
+from doc_lattice.error_types import UnreadableDocError
+from doc_lattice.model import FileSections, ParsedDoc, SectionRecord
 
 
 def _doc_bytes(text: str) -> bytes:
@@ -1243,7 +1243,7 @@ Expected: FAIL with `ImportError` (`CacheHit`, `CacheMiss` do not exist) / `Attr
 
 - [ ] **Step 3: Implement `lookup` and `record_miss`**
 
-In `src/game_lattice/cache.py`, add imports:
+In `src/doc_lattice/cache.py`, add imports:
 
 ```python
 import hashlib
@@ -1386,7 +1386,7 @@ Run: `uv run --group dev python scripts/check_typing_boundaries.py src && uv run
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/cache.py tests/test_cache.py
+git add src/doc_lattice/cache.py tests/test_cache.py
 git commit -m "feat: add LoadCache tier selection and miss recording"
 ```
 
@@ -1397,7 +1397,7 @@ git commit -m "feat: add LoadCache tier selection and miss recording"
 Implement the write path: move the current root to the ledger tail, withdraw its presence claim from undiscovered entries, evict over-cap head roots and scrub their stats, drop unclaimed entries, and write atomically only if the serialized cache changed. A write failure emits one direct stderr diagnostic and never raises.
 
 **Files:**
-- Modify: `src/game_lattice/cache.py`
+- Modify: `src/doc_lattice/cache.py`
 - Test: `tests/test_cache.py`
 
 **Interfaces:**
@@ -1416,7 +1416,7 @@ Implement the write path: move the current root to the ledger tail, withdraw its
 Add to `tests/test_cache.py`:
 
 ```python
-from game_lattice.constants import MAX_STAT_ROOTS
+from doc_lattice.constants import MAX_STAT_ROOTS
 
 
 def _load_written(tmp_path: Path) -> CacheFile:
@@ -1532,7 +1532,7 @@ def test_finalize_write_failure_emits_one_stderr_line_and_does_not_raise(tmp_pat
         "# A\n",
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
     )
-    import game_lattice.cache as cache_module
+    import doc_lattice.cache as cache_module
 
     def _boom(*args, **kwargs):
         raise OSError("disk full")
@@ -1555,7 +1555,7 @@ Expected: FAIL with `AttributeError: 'LoadCache' object has no attribute 'finali
 
 - [ ] **Step 3: Implement `finalize` and the atomic writer**
 
-In `src/game_lattice/cache.py`, add imports:
+In `src/doc_lattice/cache.py`, add imports:
 
 ```python
 import os
@@ -1642,7 +1642,7 @@ Add these methods to `LoadCache`:
             os.replace(tmp, self._path)
             tmp = None
         except OSError as exc:
-            sys.stderr.write(f"game-lattice: could not write load cache at {self._path}: {exc}\n")
+            sys.stderr.write(f"doc-lattice: could not write load cache at {self._path}: {exc}\n")
         finally:
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
@@ -1659,7 +1659,7 @@ Run: `uv run --group dev pytest tests/test_cache.py -v && uv run --group dev pyt
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/cache.py tests/test_cache.py
+git add src/doc_lattice/cache.py tests/test_cache.py
 git commit -m "feat: add LoadCache finalize with LRU reclamation and atomic write"
 ```
 
@@ -1670,7 +1670,7 @@ git commit -m "feat: add LoadCache finalize with LRU reclamation and atomic writ
 Add the cached branch and the `require_verified` flag. With `cache_key` unset the load path is bit-for-bit today's; with it set, each discovered file goes through the tiers and the cache is written after a successful `build_lattice`. This task also adds the determinism property test that enforces the section-1 guarantee.
 
 **Files:**
-- Modify: `src/game_lattice/orchestrate.py`
+- Modify: `src/doc_lattice/orchestrate.py`
 - Test: `tests/test_orchestrate.py`, `tests/test_cache.py`
 
 **Interfaces:**
@@ -1689,7 +1689,7 @@ def _with_cache(tmp_path: Path, *, trust_stat: bool = False) -> Path:
     lines = ["cache_key: testslot"]
     if trust_stat:
         lines.append("cache_trust_stat: true")
-    (tmp_path / ".game-lattice.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return tmp_path
 
 
@@ -1717,9 +1717,9 @@ Add the big determinism property test to `tests/test_cache.py`:
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from game_lattice.check import check_lattice, statuses_json
-from game_lattice.config import load_config
-from game_lattice.orchestrate import load_lattice
+from doc_lattice.check import check_lattice, statuses_json
+from doc_lattice.config import load_config
+from doc_lattice.orchestrate import load_lattice
 
 
 def _run_check(project) -> str:
@@ -1745,7 +1745,7 @@ def test_default_tier_matches_uncached_under_random_edits(tmp_path_factory, edit
     (docs / "b.md").write_text(
         "---\nid: b\nderives_from:\n  - ref: a#a\n---\n# B\nbody b\n", encoding="utf-8"
     )
-    cached_cfg = base / ".game-lattice.yml"
+    cached_cfg = base / ".doc-lattice.yml"
     counter = 0
     for edit in edits:
         target = docs / "a.md"
@@ -1792,7 +1792,7 @@ Expected: FAIL (cached branch not implemented; `load_lattice` ignores `cache_key
 
 - [ ] **Step 3: Rewrite `orchestrate.py` with the cached branch**
 
-Replace the whole body of `src/game_lattice/orchestrate.py` with:
+Replace the whole body of `src/doc_lattice/orchestrate.py` with:
 
 ```python
 """Wire config, discovery, parsing, and loading into a Lattice."""
@@ -1886,7 +1886,7 @@ Run: `env -u FORCE_COLOR uv run --group dev pytest && uv run --group dev python 
 Expected: all pass; coverage above 80 percent.
 
 ```bash
-git add src/game_lattice/orchestrate.py tests/test_orchestrate.py tests/test_cache.py
+git add src/doc_lattice/orchestrate.py tests/test_orchestrate.py tests/test_cache.py
 git commit -m "feat: wire the incremental load cache into load_lattice"
 ```
 
@@ -1897,7 +1897,7 @@ git commit -m "feat: wire the incremental load cache into load_lattice"
 Make `reconcile` load with `require_verified=True` so a stat-tier stale read can never seed a write, and pin cached-versus-uncached byte-equality for every command at the CLI layer.
 
 **Files:**
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 - Test: `tests/test_cli.py`, `tests/test_cache.py`
 
 **Interfaces:**
@@ -1913,7 +1913,7 @@ import shutil
 
 from typer.testing import CliRunner
 
-from game_lattice.cli import app
+from doc_lattice.cli import app
 
 runner = CliRunner()
 
@@ -1936,7 +1936,7 @@ def _run(args, cwd, env):
 def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, args):
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     uncached = _run(args, lattice_dir, env)
-    (lattice_dir / ".game-lattice.yml").write_text("cache_key: cli\n", encoding="utf-8")
+    (lattice_dir / ".doc-lattice.yml").write_text("cache_key: cli\n", encoding="utf-8")
     cold = _run(args, lattice_dir, env)  # writes cache
     warm = _run(args, lattice_dir, env)  # reads cache
     assert cold.stdout == uncached.stdout
@@ -1952,7 +1952,7 @@ def test_reconcile_all_cached_matches_uncached_bytes(lattice_dir: Path, tmp_path
     shutil.copytree(lattice_dir, twin)
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     uncached = _run(["reconcile", "--all"], lattice_dir, env)
-    (twin / ".game-lattice.yml").write_text(
+    (twin / ".doc-lattice.yml").write_text(
         "cache_key: recon\ncache_trust_stat: true\n", encoding="utf-8"
     )
     cached = _run(["reconcile", "--all"], twin, env)
@@ -1972,11 +1972,11 @@ def test_require_verified_load_sees_fresh_content_after_same_stat_rewrite(tmp_pa
     docs.mkdir()
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\naaaa\n", encoding="utf-8")
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "cache_key: rv\ncache_trust_stat: true\n", encoding="utf-8"
     )
-    from game_lattice.config import load_config
-    from game_lattice.orchestrate import load_lattice
+    from doc_lattice.config import load_config
+    from doc_lattice.orchestrate import load_lattice
 
     load_lattice(load_config(None, tmp_path))  # warm the cache
     st = doc.stat()
@@ -1996,7 +1996,7 @@ Expected: FAIL (`reconcile` does not pass `require_verified`, so the same-stat r
 
 - [ ] **Step 3: Thread `require_verified` through the CLI in `cli.py`**
 
-In `src/game_lattice/cli.py`, change `_load`:
+In `src/doc_lattice/cli.py`, change `_load`:
 
 ```python
 def _load(config: Path | None, *, require_verified: bool = False) -> Lattice:
@@ -2022,7 +2022,7 @@ Run: `env -u FORCE_COLOR uv run --group dev pytest && uv run --group dev ruff fo
 Expected: all clean.
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py tests/test_cache.py
+git add src/doc_lattice/cli.py tests/test_cli.py tests/test_cache.py
 git commit -m "feat: force the verify tier for reconcile and pin cached CLI parity"
 ```
 
@@ -2035,7 +2035,7 @@ Update the README, CHANGELOG, `init` config scaffold, and CLAUDE.md so the featu
 **Files:**
 - Modify: `README.md`
 - Modify: `CHANGELOG.md`
-- Modify: `src/game_lattice/scaffold.py`
+- Modify: `src/doc_lattice/scaffold.py`
 - Modify: `CLAUDE.md`
 - Test: `tests/test_scaffold.py`
 
@@ -2061,7 +2061,7 @@ Expected: FAIL (no cache_key line in the template).
 
 - [ ] **Step 3: Add the commented example to `scaffold.py`**
 
-In `src/game_lattice/scaffold.py`, add a constant near the other commented blocks:
+In `src/doc_lattice/scaffold.py`, add a constant near the other commented blocks:
 
 ```python
 _COMMENTED_CACHE = "# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
@@ -2087,7 +2087,7 @@ Expected: PASS.
 In `README.md`, extend the config block in the `## Configuration` section to show the new keys, and add a subsection after the `binding_layers` paragraph. Replace the example config block with:
 
 ```yaml
-# game-lattice configuration
+# doc-lattice configuration
 docs_roots:
   - docs                  # roots to scan for tracked .md files (default: ["docs"])
 # ignore_globs:           # paths to skip within those roots
@@ -2098,16 +2098,16 @@ docs_roots:
 # binding_layers: null    # accepted but inert today; setting it changes nothing (see below)
 ```
 
-Add this subsection (after the `binding_layers` paragraph, before `## Adopting game-lattice in your docs repo`):
+Add this subsection (after the `binding_layers` paragraph, before `## Adopting doc-lattice in your docs repo`):
 
 ```markdown
 ### Load cache (opt-in)
 
 Large doc sets (thousands of files) can skip re-parsing unchanged docs with an opt-in cache.
 Set `cache_key` to a single safe segment (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`); it names a slot
-under your user cache home at `<cache_home>/game-lattice/<cache_key>/load-cache.json`, where
+under your user cache home at `<cache_home>/doc-lattice/<cache_key>/load-cache.json`, where
 `<cache_home>` is `$XDG_CACHE_HOME` (when absolute) or `~/.cache`. The cache lives outside every
-checkout on purpose: because `.game-lattice.yml` is committed, every clone and git worktree of the
+checkout on purpose: because `.doc-lattice.yml` is committed, every clone and git worktree of the
 project shares one warm cache with no per-checkout setup, which an in-repo cache could not do.
 
 By default the cache re-reads and re-hashes each file's bytes every run, so its output is always
@@ -2126,7 +2126,7 @@ cache directory to reset it; a tool-version bump discards it automatically.
 In `CHANGELOG.md`, under `## [Unreleased]` in the `### Added` list, add:
 
 ```markdown
-- Opt-in incremental load cache: set `cache_key` in `.game-lattice.yml` to skip re-parsing
+- Opt-in incremental load cache: set `cache_key` in `.doc-lattice.yml` to skip re-parsing
   unchanged docs across runs and git worktrees, with byte-identical output to an uncached run by
   default; `cache_trust_stat: true` adds a faster stat tier for read-only commands under the
   documented mtime caveat, and `reconcile` always verifies content (#28).
@@ -2148,7 +2148,7 @@ Run: `uv run --group dev pytest tests/test_scaffold.py -v && uv run --group dev 
 Expected: PASS and clean. Manually confirm no em-dashes were introduced in the edited docs.
 
 ```bash
-git add README.md CHANGELOG.md src/game_lattice/scaffold.py CLAUDE.md tests/test_scaffold.py
+git add README.md CHANGELOG.md src/doc_lattice/scaffold.py CLAUDE.md tests/test_scaffold.py
 git commit -m "docs: document the opt-in load cache and add the init template line"
 ```
 
@@ -2184,8 +2184,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from game_lattice.config import load_config
-from game_lattice.orchestrate import load_lattice
+from doc_lattice.config import load_config
+from doc_lattice.orchestrate import load_lattice
 
 _HEADINGS_PER_DOC = 6
 _EDGES_PER_DOC = 3
@@ -2212,7 +2212,7 @@ def _config(root: Path, *, cache_key: str | None, trust_stat: bool) -> Path:
         lines.append(f"cache_key: {cache_key}")
     if trust_stat:
         lines.append("cache_trust_stat: true")
-    (root / ".game-lattice.yml").write_text("\n".join(lines) + "\n" if lines else "", encoding="utf-8")
+    (root / ".doc-lattice.yml").write_text("\n".join(lines) + "\n" if lines else "", encoding="utf-8")
     return root
 
 
@@ -2239,7 +2239,7 @@ def _bench_size(count: int) -> None:
 
         _config(root, cache_key="bench", trust_stat=False)
         # Cold: remove any cache, single timed run including the write.
-        cache_dir = base / "xdg" / "game-lattice" / "bench"
+        cache_dir = base / "xdg" / "doc-lattice" / "bench"
         if cache_dir.exists():
             for entry in cache_dir.iterdir():
                 entry.unlink()
@@ -2314,7 +2314,7 @@ One follow-up the executor should watch: in Task 6 `_stat_tier` imports the priv
 
 ## Execution Handoff
 
-**Plan complete and saved to `docs/superpowers/plans/2026-07-10-game-lattice-load-cache.md`. Two execution options:**
+**Plan complete and saved to `docs/superpowers/plans/2026-07-10-doc-lattice-load-cache.md`. Two execution options:**
 
 **1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
 

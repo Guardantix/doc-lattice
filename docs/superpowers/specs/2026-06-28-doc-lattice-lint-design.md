@@ -1,4 +1,4 @@
-# game-lattice Lint Slice: Design Spec
+# doc-lattice Lint Slice: Design Spec
 
 **Date:** 2026-06-28
 **Status:** Design (post brainstorm, post adversarial review). Ready for implementation planning.
@@ -7,9 +7,9 @@ authority ladder, the codegen update that makes the gate real for adopters, and 
 that ships them. No network, no secrets, no LLM, no mutation in the command itself. The command reads
 the already-loaded lattice and reports; the only disk and codegen changes live in the existing `init`
 scaffolding path.
-**Builds on:** `docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md` (the local
+**Builds on:** `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md` (the local
 core, which parses and stores `authority`) and
-`docs/superpowers/specs/2026-06-28-game-lattice-init-design.md` (the init scaffolding and release
+`docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md` (the init scaffolding and release
 model this slice extends).
 
 This spec turns the deferred "Authority-ladder validation" item from the local-core deferral map
@@ -30,7 +30,7 @@ In scope:
 - Skip observability. Edges the ladder cannot judge (an endpoint without `authority`) are reported,
   not silently dropped, so a clean result is distinguishable from an unjudged corpus.
 - Codegen wiring. Update the `init` scaffolding (`scaffold.py` and its tests) so the generated
-  pre-commit hook and CI workflow run both `game-lattice check` and `game-lattice lint`. Adopters then
+  pre-commit hook and CI workflow run both `doc-lattice check` and `doc-lattice lint`. Adopters then
   run the ladder check automatically; it enforces every detectable inversion (both endpoints
   annotated) and prints its skip coverage, rather than living only as a manual command.
 - Shipping this as the 0.3.0 release (section 9): the generated snippets pin a release tag, and that
@@ -257,11 +257,11 @@ A fully clean, fully annotated run emits `{"violations": [], "skipped": []}`.
 ## 8. Scaffold and codegen wiring
 
 `scaffold.py` stays pure (every function returns text built from typed inputs). Today it pins one
-invocation, `game-lattice check`, into the generated pre-commit hook and CI workflow. This slice
+invocation, `doc-lattice check`, into the generated pre-commit hook and CI workflow. This slice
 generalizes the invocation so both gates run `check` and `lint`:
 
-- The pre-commit output gains a second `repo: local` hook, `game-lattice-lint`, mirroring the existing
-  `game-lattice-check` hook (same `uvx --from git+...@<rev>` entry, same `files: \.md$`,
+- The pre-commit output gains a second `repo: local` hook, `doc-lattice-lint`, mirroring the existing
+  `doc-lattice-check` hook (same `uvx --from git+...@<rev>` entry, same `files: \.md$`,
   `pass_filenames: false`), so a commit that inverts the ladder is blocked locally. pre-commit runs
   every hook and reports all failures (absent `fail_fast`), so the two hooks never mask each other.
 - The CI workflow runs both commands in a single shell `- run:` step that captures each exit code,
@@ -283,14 +283,14 @@ The generated snippets pin `v{__version__}`, and `RELEASING.md` already requires
 the commands the gates run. Because the gates now run `lint`, the pinned tag must contain `lint`, so
 this slice ships as the 0.3.0 release in one atomic step, following the existing checklist:
 
-- Bump the version to `0.3.0` in both locations (`src/game_lattice/__init__.py` and `pyproject.toml`),
+- Bump the version to `0.3.0` in both locations (`src/doc_lattice/__init__.py` and `pyproject.toml`),
   run `uv lock`, and add a `## [0.3.0]` section to `CHANGELOG.md`.
 - After merge, tag the merge commit `v0.3.0`, push it, and smoke-test the pinned ref. The smoke test
-  runs both `game-lattice check` and `game-lattice lint` from `git+...@v0.3.0`, since both are now
+  runs both `doc-lattice check` and `doc-lattice lint` from `git+...@v0.3.0`, since both are now
   generated gates.
 - Update the `RELEASING.md` invariant line so the tag must contain `check`, `init`, and `lint`.
 
-A half-done release (codegen emitting `game-lattice lint` but a tag without the command) would leave
+A half-done release (codegen emitting `doc-lattice lint` but a tag without the command) would leave
 adopters with a gate that errors on an unknown command. The atomic-release rule already guards exactly
 this; the slice extends its statement to cover `lint`.
 
@@ -314,7 +314,7 @@ local core makes for a broken edge. A skip is likewise a normal state, never an 
 
 ## 12. Testing
 
-`tests/test_lint.py` mirrors `src/game_lattice/lint.py`. The pure tests build synthetic `Lattice`
+`tests/test_lint.py` mirrors `src/doc_lattice/lint.py`. The pure tests build synthetic `Lattice`
 objects directly (no I/O), covering:
 
 - Each violation case: `binding` from `derived`, `binding` from `exploratory`, `derived` from

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rename the project from game-lattice to doc-lattice across package, CLI, config file, cache, repo URL, docs, and prose, shipping as v0.9.0.
+**Goal:** Rename the project from doc-lattice to doc-lattice across package, CLI, config file, cache, repo URL, docs, and prose, shipping as v0.9.0.
 
 **Architecture:** One branch (`rename/doc-lattice`, already exists with the approved spec committed) carrying the whole rename in reviewable commits. Each task flips one coherent surface and leaves the full quality gate green. The GitHub repo rename happens only at cutover, after the PR is green and merge-ready. Spec: `docs/superpowers/specs/2026-07-11-doc-lattice-rename-design.md` (binding).
 
@@ -17,15 +17,15 @@
 - ruff line length 100; module docstring on every module; no em-dashes in any drafted content (docstrings, messages, comments, docs).
 - No Claude attribution anywhere in commit messages or the PR.
 - Version sync triple: `src/doc_lattice/__init__.py` `__version__`, pyproject `version`, first versioned CHANGELOG heading. `version_check` also verifies README `doc-lattice@vX.Y.Z` pins match `__version__`. Version stays 0.8.0 until Task 6.
-- The grep sweep target (Task 7): `grep -rIn 'game[-_]lattice\|GAME_LATTICE' .` (excluding `.git`) returns hits only in `CHANGELOG.md` history (entries 0.8.0 and older) and `docs/superpowers/specs/2026-07-11-doc-lattice-rename-design.md`.
+- The grep sweep target (Task 7): `grep -rIn 'game[-_]lattice\|DOC_LATTICE' .` (excluding `.git`) returns hits only in `CHANGELOG.md` history (entries 0.8.0 and older) and `docs/superpowers/specs/2026-07-11-doc-lattice-rename-design.md`.
 
 ---
 
 ### Task 1: Package, entry point, and pyproject rename
 
 **Files:**
-- Move: `src/game_lattice/` -> `src/doc_lattice/` (git mv, all 30 modules)
-- Modify: every file under `src/`, `tests/`, `scripts/` importing `game_lattice`; `pyproject.toml`; `.github/workflows/ci.yml` (underscore forms only); `src/doc_lattice/__init__.py` docstring; `uv.lock` (regenerated)
+- Move: `src/doc_lattice/` -> `src/doc_lattice/` (git mv, all 30 modules)
+- Modify: every file under `src/`, `tests/`, `scripts/` importing `doc_lattice`; `pyproject.toml`; `.github/workflows/ci.yml` (underscore forms only); `src/doc_lattice/__init__.py` docstring; `uv.lock` (regenerated)
 - Test: whole suite
 
 **Interfaces:**
@@ -35,11 +35,11 @@
 - [ ] **Step 1: Move the package and rewrite all underscore references**
 
 ```bash
-git mv src/game_lattice src/doc_lattice
-grep -rl 'game_lattice' src tests scripts .github pyproject.toml | xargs sed -i 's/game_lattice/doc_lattice/g'
+git mv src/doc_lattice src/doc_lattice
+grep -rl 'doc_lattice' src tests scripts .github pyproject.toml | xargs sed -i 's/doc_lattice/doc_lattice/g'
 ```
 
-This covers imports, `--cov=game_lattice`, coverage `source`, `packages = ["src/game_lattice"]`, `tests/test_conventions.py` `SRC_DIR`, the two `import game_lattice` lines in `.github/workflows/ci.yml` (version echo and `git show "${TAG}:src/game_lattice/__init__.py"`), and the `game_lattice.__version__` mentions in `version_check.py` docstrings/messages.
+This covers imports, `--cov=doc_lattice`, coverage `source`, `packages = ["src/doc_lattice"]`, `tests/test_conventions.py` `SRC_DIR`, the two `import doc_lattice` lines in `.github/workflows/ci.yml` (version echo and `git show "${TAG}:src/doc_lattice/__init__.py"`), and the `doc_lattice.__version__` mentions in `version_check.py` docstrings/messages.
 
 - [ ] **Step 2: Rename the distribution, entry point, and Homepage in pyproject.toml**
 
@@ -83,27 +83,27 @@ uv run --group dev python scripts/check_version_sync.py
 uv run doc-lattice --help
 ```
 
-Expected: all pass (723 tests); `doc-lattice --help` prints the command list. `uv run game-lattice` now fails with "command not found" (verify once; that is the intended break).
+Expected: all pass (723 tests); `doc-lattice --help` prints the command list. `uv run doc-lattice` now fails with "command not found" (verify once; that is the intended break).
 
 - [ ] **Step 6: Verify no underscore stragglers and commit**
 
 ```bash
-grep -rn 'game_lattice' src tests scripts .github pyproject.toml uv.lock
+grep -rn 'doc_lattice' src tests scripts .github pyproject.toml uv.lock
 ```
 
 Expected: no output.
 
 ```bash
 git add -A
-git commit -m "refactor!: rename package game_lattice to doc_lattice"
+git commit -m "refactor!: rename package doc_lattice to doc_lattice"
 ```
 
 ---
 
-### Task 2: Config filename clean break (.game-lattice.yml -> .doc-lattice.yml)
+### Task 2: Config filename clean break (.doc-lattice.yml -> .doc-lattice.yml)
 
 **Files:**
-- Move: `tests/fixtures/release-smoke/.game-lattice.yml` -> `tests/fixtures/release-smoke/.doc-lattice.yml`
+- Move: `tests/fixtures/release-smoke/.doc-lattice.yml` -> `tests/fixtures/release-smoke/.doc-lattice.yml`
 - Modify: `src/doc_lattice/config.py` (module docstring, `DEFAULT_CONFIG_NAME`, `ProjectConfig` docstring), `src/doc_lattice/cli.py` (ConfigOpt help, init docstring), `src/doc_lattice/linear_query.py` (team-key error message), `src/doc_lattice/scaffold.py` (render_config docstring), `scripts/bench_load_cache.py`, `.github/workflows/ci.yml` (fixture path), every test asserting the filename
 - Test: `tests/test_config.py`, `tests/test_cli.py`, `tests/test_scaffold.py`, `tests/test_linear_query.py`
 
@@ -114,8 +114,8 @@ git commit -m "refactor!: rename package game_lattice to doc_lattice"
 - [ ] **Step 1: Flip the fixture and all test expectations first**
 
 ```bash
-git mv tests/fixtures/release-smoke/.game-lattice.yml tests/fixtures/release-smoke/.doc-lattice.yml
-grep -rl '\.game-lattice\.yml' tests | xargs sed -i 's/\.game-lattice\.yml/.doc-lattice.yml/g'
+git mv tests/fixtures/release-smoke/.doc-lattice.yml tests/fixtures/release-smoke/.doc-lattice.yml
+grep -rl '\.doc-lattice\.yml' tests | xargs sed -i 's/\.doc-lattice\.yml/.doc-lattice.yml/g'
 ```
 
 - [ ] **Step 2: Run the affected suites to verify they fail**
@@ -124,12 +124,12 @@ grep -rl '\.game-lattice\.yml' tests | xargs sed -i 's/\.game-lattice\.yml/.doc-
 env -u FORCE_COLOR uv run --group dev pytest tests/test_config.py tests/test_cli.py tests/test_scaffold.py -q
 ```
 
-Expected: FAILURES (tests now expect `.doc-lattice.yml` while the source still says `.game-lattice.yml`). If everything passes, the tests never pinned the filename; stop and inspect before proceeding.
+Expected: FAILURES (tests now expect `.doc-lattice.yml` while the source still says `.doc-lattice.yml`). If everything passes, the tests never pinned the filename; stop and inspect before proceeding.
 
 - [ ] **Step 3: Flip the source, scripts, and CI**
 
 ```bash
-grep -rl '\.game-lattice\.yml' src scripts .github | xargs sed -i 's/\.game-lattice\.yml/.doc-lattice.yml/g'
+grep -rl '\.doc-lattice\.yml' src scripts .github | xargs sed -i 's/\.doc-lattice\.yml/.doc-lattice.yml/g'
 ```
 
 Covers `DEFAULT_CONFIG_NAME`, both config.py docstrings, the cli.py help string `"Path to .doc-lattice.yml."`, the init command docstring, the linear_query message `"... fix .doc-lattice.yml"`, scaffold's render_config docstring, `scripts/bench_load_cache.py`, and the ci.yml `fixture=` path.
@@ -138,7 +138,7 @@ Covers `DEFAULT_CONFIG_NAME`, both config.py docstrings, the cli.py help string 
 
 ```bash
 env -u FORCE_COLOR uv run --group dev pytest -q
-grep -rn '\.game-lattice\.yml' src tests scripts .github
+grep -rn '\.doc-lattice\.yml' src tests scripts .github
 ```
 
 Expected: all pass; grep empty.
@@ -155,7 +155,7 @@ git commit -m "feat!: recognize only .doc-lattice.yml as the config file"
 ### Task 3: Repo URL, scaffold codegen, cache path, and remaining source identity strings
 
 **Files:**
-- Modify: `src/doc_lattice/scaffold.py` (`GAME_LATTICE_REPO_URL` -> `DOC_LATTICE_REPO_URL`, header comment, `_invocation`), `src/doc_lattice/cache.py` (path segment, stderr prefix, docstring), `src/doc_lattice/cli.py` (root docstring, annotation titles, init codegen headers naming `.github/workflows/doc-lattice.yml`), `src/doc_lattice/linear_client.py` (User-Agent), `src/doc_lattice/version_check.py` (`_PINNED_REF` regex and messages), `.github/workflows/ci.yml` (release smoke `ref=` URL, `uvx ... doc-lattice` invocations, pinned-ref confirm step), `scripts/bench_load_cache.py` (cache dir segment), matching tests
+- Modify: `src/doc_lattice/scaffold.py` (`DOC_LATTICE_REPO_URL` -> `DOC_LATTICE_REPO_URL`, header comment, `_invocation`), `src/doc_lattice/cache.py` (path segment, stderr prefix, docstring), `src/doc_lattice/cli.py` (root docstring, annotation titles, init codegen headers naming `.github/workflows/doc-lattice.yml`), `src/doc_lattice/linear_client.py` (User-Agent), `src/doc_lattice/version_check.py` (`_PINNED_REF` regex and messages), `.github/workflows/ci.yml` (release smoke `ref=` URL, `uvx ... doc-lattice` invocations, pinned-ref confirm step), `scripts/bench_load_cache.py` (cache dir segment), matching tests
 - Test: `tests/test_scaffold.py`, `tests/test_cache.py`, `tests/test_cli.py`, `tests/test_linear_client.py`, `tests/test_version_check.py`
 
 **Interfaces:**
@@ -165,7 +165,7 @@ git commit -m "feat!: recognize only .doc-lattice.yml as the config file"
 - [ ] **Step 1: Flip test expectations first**
 
 ```bash
-grep -rl 'GAME_LATTICE\|game-lattice' tests | xargs sed -i -e 's/GAME_LATTICE/DOC_LATTICE/g' -e 's/game-lattice/doc-lattice/g'
+grep -rl 'DOC_LATTICE\|doc-lattice' tests | xargs sed -i -e 's/DOC_LATTICE/DOC_LATTICE/g' -e 's/doc-lattice/doc-lattice/g'
 ```
 
 - [ ] **Step 2: Run affected suites to verify they fail**
@@ -179,7 +179,7 @@ Expected: FAILURES, including an ImportError in test_scaffold (`DOC_LATTICE_REPO
 - [ ] **Step 3: Flip the source, CI, and bench script**
 
 ```bash
-grep -rl 'GAME_LATTICE\|game-lattice' src scripts .github | xargs sed -i -e 's/GAME_LATTICE/DOC_LATTICE/g' -e 's/game-lattice/doc-lattice/g'
+grep -rl 'DOC_LATTICE\|doc-lattice' src scripts .github | xargs sed -i -e 's/DOC_LATTICE/DOC_LATTICE/g' -e 's/doc-lattice/doc-lattice/g'
 ```
 
 Key resulting lines to spot-check by eye:
@@ -194,10 +194,10 @@ Key resulting lines to spot-check by eye:
 
 ```bash
 env -u FORCE_COLOR uv run --group dev pytest -q
-grep -rn 'game[-_]lattice\|GAME_LATTICE' src tests scripts .github
+grep -rn 'game[-_]lattice\|DOC_LATTICE' src tests scripts .github
 ```
 
-Expected: all pass; grep empty. (README still pins `game-lattice@v0.8.0` and `_PINNED_REF` now matches only `doc-lattice@`, so the README check finds zero pins, which `version_check` treats as nothing to verify; the pins are restored to matching form in Task 4.)
+Expected: all pass; grep empty. (README still pins `doc-lattice@v0.8.0` and `_PINNED_REF` now matches only `doc-lattice@`, so the README check finds zero pins, which `version_check` treats as nothing to verify; the pins are restored to matching form in Task 4.)
 
 - [ ] **Step 5: Verify the version-sync guard still passes, then commit**
 
@@ -222,7 +222,7 @@ git commit -m "feat!: move repo URL, scaffold codegen, and cache path to doc-lat
 - [ ] **Step 1: Mechanical rename in the six prose files**
 
 ```bash
-sed -i -e 's/game_lattice/doc_lattice/g' -e 's/game-lattice/doc-lattice/g' README.md ARCHITECTURE.md CLAUDE.md RELEASING.md roadmap.md build-log.md
+sed -i -e 's/doc_lattice/doc_lattice/g' -e 's/doc-lattice/doc-lattice/g' README.md ARCHITECTURE.md CLAUDE.md RELEASING.md roadmap.md build-log.md
 ```
 
 - [ ] **Step 2: Generalize the positioning sentences by hand**
@@ -255,7 +255,7 @@ git commit -m "docs: rebrand top-level prose to doc-lattice and generalize posit
 ### Task 5: Rename and update docs/superpowers specs and plans
 
 **Files:**
-- Move: the 13 files under `docs/superpowers/{specs,plans}/` whose names contain `game-lattice`, each to the same name with `doc-lattice`
+- Move: the 13 files under `docs/superpowers/{specs,plans}/` whose names contain `doc-lattice`, each to the same name with `doc-lattice`
 - Modify: content of all files under `docs/superpowers/` EXCEPT `specs/2026-07-11-doc-lattice-rename-design.md` (it deliberately names the old identity)
 - Test: grep only (docs task; the suite does not read these files)
 
@@ -267,14 +267,14 @@ git commit -m "docs: rebrand top-level prose to doc-lattice and generalize posit
 
 ```bash
 cd docs/superpowers
-for f in specs/*game-lattice* plans/*game-lattice*; do git mv "$f" "${f//game-lattice/doc-lattice}"; done
+for f in specs/*doc-lattice* plans/*doc-lattice*; do git mv "$f" "${f//doc-lattice/doc-lattice}"; done
 cd ../..
 ```
 
 - [ ] **Step 2: Rewrite content, sparing the rename spec**
 
 ```bash
-grep -rl 'game[-_]lattice\|GAME_LATTICE' docs/superpowers | grep -v '2026-07-11-doc-lattice-rename-design.md' | xargs sed -i -e 's/GAME_LATTICE/DOC_LATTICE/g' -e 's/game_lattice/doc_lattice/g' -e 's/game-lattice/doc-lattice/g'
+grep -rl 'game[-_]lattice\|DOC_LATTICE' docs/superpowers | grep -v '2026-07-11-doc-lattice-rename-design.md' | xargs sed -i -e 's/DOC_LATTICE/DOC_LATTICE/g' -e 's/doc_lattice/doc_lattice/g' -e 's/doc-lattice/doc-lattice/g'
 ```
 
 - [ ] **Step 3: Verify cross-references resolve**
@@ -324,7 +324,7 @@ Insert directly under the `# Changelog` preamble (above `## [0.8.0]`), exactly:
 
 ### Changed
 
-- **BREAKING:** the project is renamed from game-lattice to doc-lattice. The engine was never
+- **BREAKING:** the project is renamed from doc-lattice to doc-lattice. The engine was never
   game-specific; the name now matches its general purpose. In one release this renames the
   repository (https://github.com/Guardantix/doc-lattice, with GitHub redirects from the old
   URL), the distribution and package (`doc-lattice` / `doc_lattice`), the CLI executable
@@ -336,14 +336,14 @@ Insert directly under the `# Changelog` preamble (above `## [0.8.0]`), exactly:
 ### Migration (v0.8.x to v0.9.0)
 
 Nothing breaks until you bump your pin: checked-in gates pin a tag
-(`uvx --from git+.../game-lattice@v0.8.0 game-lattice ...`) and GitHub's rename redirect keeps
+(`uvx --from git+.../doc-lattice@v0.8.0 doc-lattice ...`) and GitHub's rename redirect keeps
 that resolving indefinitely. Upgrading the pin to v0.9.0 requires, in one commit:
 
-1. Rename `.game-lattice.yml` to `.doc-lattice.yml` (contents unchanged).
+1. Rename `.doc-lattice.yml` to `.doc-lattice.yml` (contents unchanged).
 2. Regenerate the checked-in pre-commit hook and CI workflow (re-run `doc-lattice init`
    codegen, or by hand update the repo URL, the `@v0.9.0` pin, and the executable name
-   `game-lattice` to `doc-lattice` in each invocation).
-3. Any Python code importing `game_lattice` switches to `doc_lattice` (the package is not on
+   `doc-lattice` to `doc-lattice` in each invocation).
+3. Any Python code importing `doc_lattice` switches to `doc_lattice` (the package is not on
    PyPI and no import consumers are known; listed for completeness).
 ```
 
@@ -402,7 +402,7 @@ Expected: check and lint exit 0 on the fixture; init writes `.doc-lattice.yml` w
 - [ ] **Step 3: The final grep sweep**
 
 ```bash
-grep -rIn 'game[-_]lattice\|GAME_LATTICE' . --exclude-dir=.git --exclude-dir=.venv | grep -v '^\./CHANGELOG\.md' | grep -v '^\./docs/superpowers/specs/2026-07-11-doc-lattice-rename-design\.md'
+grep -rIn 'game[-_]lattice\|DOC_LATTICE' . --exclude-dir=.git --exclude-dir=.venv | grep -v '^\./CHANGELOG\.md' | grep -v '^\./docs/superpowers/specs/2026-07-11-doc-lattice-rename-design\.md'
 ```
 
 Expected: no output. Every CHANGELOG hit must sit inside the 0.9.0 migration text or an entry for 0.8.0 or older (eyeball `grep -n 'game' CHANGELOG.md` to confirm).
@@ -411,7 +411,7 @@ Expected: no output. Every CHANGELOG hit must sit inside the 0.9.0 migration tex
 
 ```bash
 git push -u origin rename/doc-lattice
-gh pr create --title "feat!: rename game-lattice to doc-lattice" --body "$(cat <<'EOF'
+gh pr create --title "feat!: rename doc-lattice to doc-lattice" --body "$(cat <<'EOF'
 Renames the project to doc-lattice per docs/superpowers/specs/2026-07-11-doc-lattice-rename-design.md.
 
 Breaking (details and migration checklist in the 0.9.0 CHANGELOG entry):
@@ -448,7 +448,7 @@ Expected: all checks pass. Do not proceed to Task 8 otherwise.
 
 - [ ] **Step 1: Confirm with the owner before renaming the repo**
 
-The repo rename is an external mutation a PR revert cannot undo. Confirm the owner is ready for cutover + merge now. Rollback while unmerged: `gh repo rename game-lattice` restores the old name; nothing on `main` references the new one.
+The repo rename is an external mutation a PR revert cannot undo. Confirm the owner is ready for cutover + merge now. Rollback while unmerged: `gh repo rename doc-lattice` restores the old name; nothing on `main` references the new one.
 
 - [ ] **Step 2: Rename the repo and update the remote**
 
@@ -456,7 +456,7 @@ The repo rename is an external mutation a PR revert cannot undo. Confirm the own
 gh repo rename doc-lattice --yes
 git remote set-url origin git@github.com:Guardantix/doc-lattice.git
 git ls-remote https://github.com/Guardantix/doc-lattice.git HEAD
-git ls-remote https://github.com/Guardantix/game-lattice.git HEAD
+git ls-remote https://github.com/Guardantix/doc-lattice.git HEAD
 ```
 
 Expected: both ls-remote calls print the same HEAD sha (new name live, redirect intact).
@@ -480,7 +480,7 @@ Expected: release job green (version sync, uvx smoke from the new URL, tag push,
 
 ```bash
 uvx --python 3.13 --from git+https://github.com/Guardantix/doc-lattice@v0.9.0 doc-lattice --version
-uvx --python 3.13 --from git+https://github.com/Guardantix/game-lattice@v0.8.0 game-lattice --version
+uvx --python 3.13 --from git+https://github.com/Guardantix/doc-lattice@v0.8.0 doc-lattice --version
 ```
 
 Expected: `0.9.0` from the new name, and `0.8.0` from the old name via redirect (proves existing adopter pins keep working).
@@ -490,7 +490,7 @@ Expected: `0.9.0` from the new name, and `0.8.0` from the old name via redirect 
 ### Task 9: Local environment and memory migration (after merge)
 
 **Files:**
-- External: `~/workspace/repos/tooling/game-lattice` -> `~/workspace/repos/tooling/doc-lattice`; Claude memory dir `~/.claude/projects/-home-guardantix-workspace-repos-tooling-game-lattice/` -> `...-doc-lattice/`
+- External: `~/workspace/repos/tooling/doc-lattice` -> `~/workspace/repos/tooling/doc-lattice`; Claude memory dir `~/.claude/projects/-home-guardantix-workspace-repos-tooling-doc-lattice/` -> `...-doc-lattice/`
 
 **Interfaces:**
 - Consumes: merged main.
@@ -504,14 +504,14 @@ git checkout main && git pull --ff-only && git fetch --tags && git remote prune 
 
 - [ ] **Step 2: Update project memory content**
 
-Update `~/.claude/projects/-home-guardantix-workspace-repos-tooling-game-lattice/memory/`: add a `doc-lattice-rename-status` memory (rename shipped as v0.9.0, PR number, cutover done) and update `MEMORY.md`. Stale per-slice status memories keep their history; only correct anything the rename falsified.
+Update `~/.claude/projects/-home-guardantix-workspace-repos-tooling-doc-lattice/memory/`: add a `doc-lattice-rename-status` memory (rename shipped as v0.9.0, PR number, cutover done) and update `MEMORY.md`. Stale per-slice status memories keep their history; only correct anything the rename falsified.
 
 - [ ] **Step 3: Rename the working directory and migrate memory (final act; kills the session cwd)**
 
 ```bash
-mv ~/workspace/repos/tooling/game-lattice ~/workspace/repos/tooling/doc-lattice
+mv ~/workspace/repos/tooling/doc-lattice ~/workspace/repos/tooling/doc-lattice
 mkdir -p ~/.claude/projects/-home-guardantix-workspace-repos-tooling-doc-lattice
-cp -a ~/.claude/projects/-home-guardantix-workspace-repos-tooling-game-lattice/memory \
+cp -a ~/.claude/projects/-home-guardantix-workspace-repos-tooling-doc-lattice/memory \
       ~/.claude/projects/-home-guardantix-workspace-repos-tooling-doc-lattice/memory
 ```
 

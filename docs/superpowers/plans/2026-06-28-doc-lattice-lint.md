@@ -1,4 +1,4 @@
-# game-lattice Lint Slice Implementation Plan
+# doc-lattice Lint Slice Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14+, `uv`, `typer`, `rich`, `pydantic`, `ruamel.yaml`, `pytest`, `ruff`, `ty`.
 
-**Spec:** `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`
+**Spec:** `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`
 
 ## Global Constraints
 
@@ -29,7 +29,7 @@ Every task implicitly includes these. Exact values copied from the spec and `CLA
 ### Task 1: Constants for the authority ladder and skip reasons
 
 **Files:**
-- Modify: `src/game_lattice/constants.py`
+- Modify: `src/doc_lattice/constants.py`
 - Test: `tests/test_constants.py`
 
 **Interfaces:**
@@ -40,7 +40,7 @@ Every task implicitly includes these. Exact values copied from the spec and `CLA
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_constants.py`. Extend the existing import block to also import `AUTHORITY_LADDER`, `SkipReason`, and `VALID_SKIP_REASONS` from `game_lattice.constants`, then add:
+Add to `tests/test_constants.py`. Extend the existing import block to also import `AUTHORITY_LADDER`, `SkipReason`, and `VALID_SKIP_REASONS` from `doc_lattice.constants`, then add:
 
 ```python
 def test_authority_ladder_covers_every_authority():
@@ -65,7 +65,7 @@ Expected: FAIL with `ImportError` (cannot import `AUTHORITY_LADDER` / `SkipReaso
 
 - [ ] **Step 3: Add the constants**
 
-In `src/game_lattice/constants.py`, directly under the existing `Authority` / `VALID_AUTHORITIES` lines, add the ladder; and add the skip-reason literal in the constants block near the other literals:
+In `src/doc_lattice/constants.py`, directly under the existing `Authority` / `VALID_AUTHORITIES` lines, add the ladder; and add the skip-reason literal in the constants block near the other literals:
 
 ```python
 Authority = Literal["binding", "derived", "exploratory"]
@@ -86,7 +86,7 @@ Expected: PASS (all constant tests green).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/constants.py tests/test_constants.py
+git add src/doc_lattice/constants.py tests/test_constants.py
 git commit -m "feat: add AUTHORITY_LADDER and SkipReason constants"
 ```
 
@@ -95,7 +95,7 @@ git commit -m "feat: add AUTHORITY_LADDER and SkipReason constants"
 ### Task 2: Expose `node_for_path` for reuse by lint
 
 **Files:**
-- Modify: `src/game_lattice/resolve.py`
+- Modify: `src/doc_lattice/resolve.py`
 - Test: `tests/test_resolve.py`
 
 **Interfaces:**
@@ -110,7 +110,7 @@ Add to `tests/test_resolve.py` (it already imports `build_lattice`, `ParsedDoc`,
 
 ```python
 def test_node_for_path_returns_owning_node_for_an_anchor():
-    from game_lattice.resolve import node_for_path
+    from doc_lattice.resolve import node_for_path
 
     docs = [ParsedDoc(Path("up.md"), NodeMeta(id="up", authority="binding"), "# Up {#sec}\nbody\n")]
     lat = build_lattice(docs)
@@ -126,7 +126,7 @@ Expected: FAIL with `ImportError` (cannot import `node_for_path`).
 
 - [ ] **Step 3: Rename the helper to a public name**
 
-In `src/game_lattice/resolve.py`, rename `_node_for_path` to `node_for_path` and update its one caller. The function body is unchanged except the name and docstring:
+In `src/doc_lattice/resolve.py`, rename `_node_for_path` to `node_for_path` and update its one caller. The function body is unchanged except the name and docstring:
 
 ```python
 def target_content(lattice: Lattice, target_id: str) -> str:
@@ -163,7 +163,7 @@ Expected: PASS (the new test and every existing resolve test).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/resolve.py tests/test_resolve.py
+git add src/doc_lattice/resolve.py tests/test_resolve.py
 git commit -m "refactor: expose node_for_path for reuse"
 ```
 
@@ -172,7 +172,7 @@ git commit -m "refactor: expose node_for_path for reuse"
 ### Task 3: The pure lint core (`lint.py`)
 
 **Files:**
-- Create: `src/game_lattice/lint.py`
+- Create: `src/doc_lattice/lint.py`
 - Test: `tests/test_lint.py`
 
 **Interfaces:**
@@ -192,9 +192,9 @@ Create `tests/test_lint.py` with the full pure suite. Each `Lattice` is built wi
 
 from pathlib import Path
 
-from game_lattice.lint import LintResult, lint_lattice
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.lint import LintResult, lint_lattice
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
 
 
 def _doc(id_, authority=None, derives=(), body="x\n"):
@@ -340,11 +340,11 @@ def test_results_are_in_node_id_then_edge_order():
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run --group dev pytest tests/test_lint.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'game_lattice.lint'`.
+Expected: FAIL with `ModuleNotFoundError: No module named 'doc_lattice.lint'`.
 
 - [ ] **Step 3: Write the lint module**
 
-Create `src/game_lattice/lint.py`:
+Create `src/doc_lattice/lint.py`:
 
 ```python
 """Validate the authority ladder over derives_from edges. Pure: no I/O."""
@@ -459,7 +459,7 @@ Expected: both clean (no `Any`/`cast` in `lint.py`, types resolve).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/lint.py tests/test_lint.py
+git add src/doc_lattice/lint.py tests/test_lint.py
 git commit -m "feat: authority-ladder lint core"
 ```
 
@@ -468,7 +468,7 @@ git commit -m "feat: authority-ladder lint core"
 ### Task 4: The `lint` CLI command
 
 **Files:**
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
@@ -543,7 +543,7 @@ def test_lint_json_reports_skips(tmp_path: Path, monkeypatch):
 
 
 def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 2
@@ -556,7 +556,7 @@ Expected: FAIL (the `lint` command does not exist, so typer reports no such comm
 
 - [ ] **Step 3: Add the imports and the command**
 
-In `src/game_lattice/cli.py`, add to the imports near the other intra-package imports:
+In `src/doc_lattice/cli.py`, add to the imports near the other intra-package imports:
 
 ```python
 from .lint import LintResult, lint_lattice
@@ -631,7 +631,7 @@ Expected: PASS (all five lint CLI tests green).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: lint command"
 ```
 
@@ -640,12 +640,12 @@ git commit -m "feat: lint command"
 ### Task 5: Wire `lint` into the generated gates
 
 **Files:**
-- Modify: `src/game_lattice/scaffold.py`
+- Modify: `src/doc_lattice/scaffold.py`
 - Test: `tests/test_scaffold.py`
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: generated pre-commit text with two hooks (`game-lattice-check`, `game-lattice-lint`); generated CI text running both commands in one aggregating shell step. `_check_invocation` becomes `_invocation(rev, command)`.
+- Produces: generated pre-commit text with two hooks (`doc-lattice-check`, `doc-lattice-lint`); generated CI text running both commands in one aggregating shell step. `_check_invocation` becomes `_invocation(rev, command)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -654,12 +654,12 @@ Add to `tests/test_scaffold.py`:
 ```python
 def test_generated_gates_run_check_and_lint():
     s = build_scaffold(("docs",), None, "v0.3.0")
-    assert "id: game-lattice-check" in s.precommit_text
-    assert "id: game-lattice-lint" in s.precommit_text
-    assert "game-lattice check" in s.precommit_text
-    assert "game-lattice lint" in s.precommit_text
-    assert "game-lattice check" in s.ci_text
-    assert "game-lattice lint" in s.ci_text
+    assert "id: doc-lattice-check" in s.precommit_text
+    assert "id: doc-lattice-lint" in s.precommit_text
+    assert "doc-lattice check" in s.precommit_text
+    assert "doc-lattice lint" in s.precommit_text
+    assert "doc-lattice check" in s.ci_text
+    assert "doc-lattice lint" in s.ci_text
 
 
 def test_ci_runs_both_commands_in_one_step():
@@ -681,31 +681,31 @@ Also update the existing `test_snippets_pin_rev_url_and_python`: change its fina
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run --group dev pytest tests/test_scaffold.py -v`
-Expected: FAIL on `test_generated_gates_run_check_and_lint` and `test_ci_runs_both_commands_in_one_step` (no `game-lattice-lint`, no `rc_check`).
+Expected: FAIL on `test_generated_gates_run_check_and_lint` and `test_ci_runs_both_commands_in_one_step` (no `doc-lattice-lint`, no `rc_check`).
 
 - [ ] **Step 3: Generalize the invocation and render both gates**
 
-In `src/game_lattice/scaffold.py`, replace `_check_invocation` with a command-parameterized `_invocation`, and rewrite `render_precommit` and `render_ci`:
+In `src/doc_lattice/scaffold.py`, replace `_check_invocation` with a command-parameterized `_invocation`, and rewrite `render_precommit` and `render_ci`:
 
 ```python
 def _invocation(rev: str, command: str) -> str:
     """Return the uvx command a gate runs, pinned to rev and Python 3.14."""
-    return f"uvx --python {PYTHON_PIN} --from git+{GAME_LATTICE_REPO_URL}@{rev} game-lattice {command}"
+    return f"uvx --python {PYTHON_PIN} --from git+{DOC_LATTICE_REPO_URL}@{rev} doc-lattice {command}"
 
 
 def render_precommit(rev: str) -> str:
-    """Render the repo: local pre-commit hooks that run game-lattice check and lint."""
+    """Render the repo: local pre-commit hooks that run doc-lattice check and lint."""
     return (
         "  - repo: local\n"
         "    hooks:\n"
-        "      - id: game-lattice-check\n"
-        "        name: game-lattice check\n"
+        "      - id: doc-lattice-check\n"
+        "        name: doc-lattice check\n"
         f"        entry: {_invocation(rev, 'check')}\n"
         "        language: system\n"
         "        files: \\.md$\n"
         "        pass_filenames: false\n"
-        "      - id: game-lattice-lint\n"
-        "        name: game-lattice lint\n"
+        "      - id: doc-lattice-lint\n"
+        "        name: doc-lattice lint\n"
         f"        entry: {_invocation(rev, 'lint')}\n"
         "        language: system\n"
         "        files: \\.md$\n"
@@ -714,7 +714,7 @@ def render_precommit(rev: str) -> str:
 
 
 def render_ci(rev: str) -> str:
-    """Render the GitHub Actions workflow that runs game-lattice check and lint.
+    """Render the GitHub Actions workflow that runs doc-lattice check and lint.
 
     Both commands run in one shell step so a check failure does not skip lint. set +e
     disables errexit so both exit codes are captured; the final test fails the step if
@@ -723,7 +723,7 @@ def render_ci(rev: str) -> str:
     check = _invocation(rev, "check")
     lint_cmd = _invocation(rev, "lint")
     return (
-        "name: game-lattice\n"
+        "name: doc-lattice\n"
         "on:\n"
         "  push:\n"
         "    branches: [main]\n"
@@ -754,7 +754,7 @@ Expected: PASS (new and existing scaffold tests green).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/scaffold.py tests/test_scaffold.py
+git add src/doc_lattice/scaffold.py tests/test_scaffold.py
 git commit -m "feat: generated gates run check and lint"
 ```
 
@@ -763,7 +763,7 @@ git commit -m "feat: generated gates run check and lint"
 ### Task 6: Cut the 0.3.0 release
 
 **Files:**
-- Modify: `src/game_lattice/__init__.py`
+- Modify: `src/doc_lattice/__init__.py`
 - Modify: `pyproject.toml:10`
 - Modify: `CHANGELOG.md`
 - Modify: `RELEASING.md:32-33`
@@ -777,7 +777,7 @@ The version-pinned tests read `__version__` dynamically (`test_cli.py:335` asser
 
 - [ ] **Step 1: Bump the version in both locations**
 
-In `src/game_lattice/__init__.py`:
+In `src/doc_lattice/__init__.py`:
 
 ```python
 __version__ = "0.3.0"
@@ -804,7 +804,7 @@ In `CHANGELOG.md`, add a new section above `## [0.2.0] - 2026-06-28`:
 ### Added
 
 - `lint` command: validates the authority ladder over `derives_from` edges and reports edges it cannot rank.
-- Generated pre-commit and CI now run both `game-lattice check` and `game-lattice lint`.
+- Generated pre-commit and CI now run both `doc-lattice check` and `doc-lattice lint`.
 ```
 
 - [ ] **Step 4: Extend the release invariant**
@@ -813,7 +813,7 @@ In `RELEASING.md`, update the closing paragraph (lines 32-33) so the tag must co
 
 ```markdown
 The tag must point at a commit that contains `check` and `lint` (so the gates run) and
-`init` (so adopters can run `game-lattice init` from the same ref).
+`init` (so adopters can run `doc-lattice init` from the same ref).
 ```
 
 - [ ] **Step 5: Run the full suite to confirm nothing regressed**
@@ -824,7 +824,7 @@ Expected: PASS, coverage at or above 80 percent.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/__init__.py pyproject.toml uv.lock CHANGELOG.md RELEASING.md
+git add src/doc_lattice/__init__.py pyproject.toml uv.lock CHANGELOG.md RELEASING.md
 git commit -m "chore: release 0.3.0"
 ```
 
@@ -849,7 +849,7 @@ In `roadmap.md`, under `## Shipped`, add after the init entry:
 ```markdown
 - **lint slice** (v0.3.0). The `lint` command validates the authority ladder over `derives_from`
   edges, reports edges it cannot rank, and is wired into the generated pre-commit and CI gates
-  alongside `check`. Spec: `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`.
+  alongside `check`. Spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
 ```
 
 Remove the `Authority-ladder validation.` bullet from `## Deferred enhancements (no spec yet)`.
@@ -859,7 +859,7 @@ Remove the `Authority-ladder validation.` bullet from `## Deferred enhancements 
 In `CLAUDE.md`, update the commands comment so `lint` appears:
 
 ```bash
-uv run game-lattice --help                # run the CLI (commands: check, impact, reconcile, graph, linear, init, lint)
+uv run doc-lattice --help                # run the CLI (commands: check, impact, reconcile, graph, linear, init, lint)
 ```
 
 Add a sentence to the architecture section near the `check`/`reconcile` description, for example after the drift-detection paragraph:
@@ -868,7 +868,7 @@ Add a sentence to the architecture section near the `check`/`reconcile` descript
 `lint` is a pure structural check separate from drift: it flags a `derives_from` edge whose source
 is more authoritative than its target (binding > derived > exploratory), reports edges it cannot rank
 because an endpoint lacks `authority`, and never mutates. It exits 1 on a violation, mirroring `check`.
-Spec: `docs/superpowers/specs/2026-06-28-game-lattice-lint-design.md`.
+Spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
 ```
 
 - [ ] **Step 3: Verify the full suite and lint still pass**

@@ -1,14 +1,14 @@
-# game-lattice Linear Slice Implementation Plan
+# doc-lattice Linear Slice Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `game-lattice linear` command that resolves the `PC-*` tickets referenced in lattice frontmatter to live Linear status and reports shipped-against-stale-spec drift.
+**Goal:** Add a `doc-lattice linear` command that resolves the `PC-*` tickets referenced in lattice frontmatter to live Linear status and reports shipped-against-stale-spec drift.
 
 **Architecture:** A pure-core, impure-edge slice. The network is sealed into a transport (`linear_client`), a boundary parser (`linear_parser`), and thin wiring (`linear_fetch`); the entire stale-shipped analysis (`stale_shipped`) is a pure join over a `Mapping[identifier, Ticket]`, reusing the existing `check` and `impact` modules unchanged. `linear` is the only network-touching command; `check`, `impact`, `graph`, and `reconcile` stay byte-for-byte offline.
 
 **Tech Stack:** Python 3.14, typer, rich, pydantic v2, stdlib `urllib.request` (no new HTTP dependency), hypothesis (dev). uv for dependency management and execution.
 
-**Binding spec:** `docs/superpowers/specs/2026-06-27-game-lattice-linear-design.md`. When code and this plan disagree with the spec, the spec wins.
+**Binding spec:** `docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md`. When code and this plan disagree with the spec, the spec wins.
 
 ## Global Constraints
 
@@ -26,7 +26,7 @@
 
 ## File Structure
 
-New source modules under `src/game_lattice/`:
+New source modules under `src/doc_lattice/`:
 
 | Module | Responsibility | Pure? |
 |---|---|---|
@@ -48,8 +48,8 @@ Tests mirror sources one to one: `tests/test_<module>.py` for each new module, p
 ## Task 1: Constants and the LinearError type
 
 **Files:**
-- Modify: `src/game_lattice/constants.py`
-- Modify: `src/game_lattice/error_types.py`
+- Modify: `src/doc_lattice/constants.py`
+- Modify: `src/doc_lattice/error_types.py`
 - Test: `tests/test_constants.py`, `tests/test_error_types.py`
 
 **Interfaces:**
@@ -57,10 +57,10 @@ Tests mirror sources one to one: `tests/test_<module>.py` for each new module, p
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_constants.py` (add the new names to the existing import from `game_lattice.constants`):
+Append to `tests/test_constants.py` (add the new names to the existing import from `doc_lattice.constants`):
 
 ```python
-from game_lattice.constants import (
+from doc_lattice.constants import (
     VALID_BLOCKED_REASONS,
     VALID_LINEAR_STATE_TYPES,
     VALID_SEVERITIES,
@@ -90,7 +90,7 @@ def test_blocked_reasons_match_literal():
 Append to `tests/test_error_types.py` (add `LinearError` to the import):
 
 ```python
-from game_lattice.error_types import LinearError
+from doc_lattice.error_types import LinearError
 
 
 def test_linear_error_inherits_and_has_code():
@@ -107,7 +107,7 @@ Expected: FAIL with ImportError (the new names do not exist yet).
 
 - [ ] **Step 3: Add the constants and the error**
 
-Append to `src/game_lattice/constants.py`:
+Append to `src/doc_lattice/constants.py`:
 
 ```python
 LinearStateType = Literal["triage", "backlog", "unstarted", "started", "completed", "canceled"]
@@ -120,7 +120,7 @@ BlockedReason = Literal["malformed", "not-found", "cross-team"]
 VALID_BLOCKED_REASONS: frozenset[str] = frozenset(get_args(BlockedReason))
 ```
 
-Append to `src/game_lattice/error_types.py`:
+Append to `src/doc_lattice/error_types.py`:
 
 ```python
 class LinearError(ProjectError):
@@ -138,7 +138,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/constants.py src/game_lattice/error_types.py tests/test_constants.py tests/test_error_types.py
+git add src/doc_lattice/constants.py src/doc_lattice/error_types.py tests/test_constants.py tests/test_error_types.py
 git commit -m "feat: add linear constants and LinearError"
 ```
 
@@ -147,7 +147,7 @@ git commit -m "feat: add linear constants and LinearError"
 ## Task 2: Control-character stripping helper
 
 **Files:**
-- Create: `src/game_lattice/text_utils.py`
+- Create: `src/doc_lattice/text_utils.py`
 - Test: `tests/test_text_utils.py`
 
 **Interfaces:**
@@ -163,7 +163,7 @@ Create `tests/test_text_utils.py`:
 from hypothesis import given
 from hypothesis import strategies as st
 
-from game_lattice.text_utils import strip_control_chars
+from doc_lattice.text_utils import strip_control_chars
 
 
 def test_strips_escape_and_controls():
@@ -193,7 +193,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the helper**
 
-Create `src/game_lattice/text_utils.py`:
+Create `src/doc_lattice/text_utils.py`:
 
 ```python
 """Small pure text helpers shared across the linear slice."""
@@ -220,7 +220,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/text_utils.py tests/test_text_utils.py
+git add src/doc_lattice/text_utils.py tests/test_text_utils.py
 git commit -m "feat: add strip_control_chars text helper"
 ```
 
@@ -229,7 +229,7 @@ git commit -m "feat: add strip_control_chars text helper"
 ## Task 3: Ticket domain types
 
 **Files:**
-- Create: `src/game_lattice/tickets.py`
+- Create: `src/doc_lattice/tickets.py`
 - Test: `tests/test_tickets.py`
 
 **Interfaces:**
@@ -252,7 +252,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from game_lattice.tickets import Finding, Ticket, TicketRef, TicketState
+from doc_lattice.tickets import Finding, Ticket, TicketRef, TicketState
 
 
 def _state(type_: str = "completed") -> TicketState:
@@ -331,7 +331,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the types**
 
-Create `src/game_lattice/tickets.py`:
+Create `src/doc_lattice/tickets.py`:
 
 ```python
 """Domain types for resolved Linear tickets and the findings they produce."""
@@ -410,7 +410,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/tickets.py tests/test_tickets.py
+git add src/doc_lattice/tickets.py tests/test_tickets.py
 git commit -m "feat: add ticket and finding domain types"
 ```
 
@@ -419,7 +419,7 @@ git commit -m "feat: add ticket and finding domain types"
 ## Task 4: Query builder, identifier partition, and chunking
 
 **Files:**
-- Create: `src/game_lattice/linear_query.py`
+- Create: `src/doc_lattice/linear_query.py`
 - Test: `tests/test_linear_query.py`
 
 **Interfaces:**
@@ -440,8 +440,8 @@ Create `tests/test_linear_query.py`:
 
 import pytest
 
-from game_lattice.error_types import ConfigError, LinearError
-from game_lattice.linear_query import (
+from doc_lattice.error_types import ConfigError, LinearError
+from doc_lattice.linear_query import (
     BATCH_SIZE,
     MAX_IDENTIFIERS,
     build_query,
@@ -519,7 +519,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the query builder**
 
-Create `src/game_lattice/linear_query.py`:
+Create `src/doc_lattice/linear_query.py`:
 
 ```python
 """Pure construction of the batched Linear GraphQL query and identifier partition."""
@@ -576,7 +576,7 @@ def partition_identifiers(
         LinearError: If the distinct identifier count exceeds ``MAX_IDENTIFIERS``.
     """
     if linear_team is not None and not _TEAM_RE.match(linear_team):
-        msg = f"linear_team {linear_team!r} is not a valid team key; fix .game-lattice.yml"
+        msg = f"linear_team {linear_team!r} is not a valid team key; fix .doc-lattice.yml"
         raise ConfigError(msg)
     distinct = list(dict.fromkeys(identifiers))
     if len(distinct) > MAX_IDENTIFIERS:
@@ -644,7 +644,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/linear_query.py tests/test_linear_query.py
+git add src/doc_lattice/linear_query.py tests/test_linear_query.py
 git commit -m "feat: add linear query builder and identifier partition"
 ```
 
@@ -653,7 +653,7 @@ git commit -m "feat: add linear query builder and identifier partition"
 ## Task 5: Transport client
 
 **Files:**
-- Create: `src/game_lattice/linear_client.py`
+- Create: `src/doc_lattice/linear_client.py`
 - Test: `tests/test_linear_client.py`
 
 **Interfaces:**
@@ -675,8 +675,8 @@ import urllib.error
 
 import pytest
 
-from game_lattice.error_types import LinearError
-from game_lattice.linear_client import LinearClient
+from doc_lattice.error_types import LinearError
+from doc_lattice.linear_client import LinearClient
 
 
 class _FakeResp(io.BytesIO):
@@ -750,7 +750,7 @@ def test_url_error_maps_to_linear_error(monkeypatch):
 
 def test_oversized_response_raises(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
-    from game_lattice.linear_client import MAX_RESPONSE_BYTES
+    from doc_lattice.linear_client import MAX_RESPONSE_BYTES
 
     opener = _FakeOpener(b"x" * (MAX_RESPONSE_BYTES + 1))
     with pytest.raises(LinearError):
@@ -758,7 +758,7 @@ def test_oversized_response_raises(monkeypatch):
 
 
 def test_no_redirect_handler_returns_none():
-    from game_lattice.linear_client import _NoRedirect
+    from doc_lattice.linear_client import _NoRedirect
 
     handler = _NoRedirect()
     assert handler.redirect_request(None, None, 302, "Found", {}, "http://evil") is None
@@ -771,7 +771,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the transport**
 
-Create `src/game_lattice/linear_client.py`:
+Create `src/doc_lattice/linear_client.py`:
 
 ```python
 """Synchronous Linear GraphQL transport over stdlib urllib, hardened against SSRF."""
@@ -855,7 +855,7 @@ class LinearClient:
             headers={
                 "Authorization": api_key,
                 "Content-Type": "application/json",
-                "User-Agent": f"game-lattice/{__version__}",
+                "User-Agent": f"doc-lattice/{__version__}",
             },
             method="POST",
         )
@@ -879,7 +879,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/linear_client.py tests/test_linear_client.py
+git add src/doc_lattice/linear_client.py tests/test_linear_client.py
 git commit -m "feat: add hardened linear transport client"
 ```
 
@@ -888,7 +888,7 @@ git commit -m "feat: add hardened linear transport client"
 ## Task 6: Response parser (boundary)
 
 **Files:**
-- Create: `src/game_lattice/linear_parser.py`
+- Create: `src/doc_lattice/linear_parser.py`
 - Test: `tests/test_linear_parser.py`
 
 **Interfaces:**
@@ -907,8 +907,8 @@ import json
 
 import pytest
 
-from game_lattice.error_types import LinearError
-from game_lattice.linear_parser import parse_tickets
+from doc_lattice.error_types import LinearError
+from doc_lattice.linear_parser import parse_tickets
 
 
 def _issue(identifier="PC-1", state_type="completed"):
@@ -992,7 +992,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the parser**
 
-Create `src/game_lattice/linear_parser.py`:
+Create `src/doc_lattice/linear_parser.py`:
 
 ```python
 """Boundary: validate a raw Linear GraphQL response into typed tickets.
@@ -1094,7 +1094,7 @@ Run: `uv run --group dev python scripts/check_typing_boundaries.py src`
 Expected: passes (`Any` appears only in `linear_parser.py`).
 
 ```bash
-git add src/game_lattice/linear_parser.py tests/test_linear_parser.py
+git add src/doc_lattice/linear_parser.py tests/test_linear_parser.py
 git commit -m "feat: add linear response parser boundary"
 ```
 
@@ -1103,7 +1103,7 @@ git commit -m "feat: add linear response parser boundary"
 ## Task 7: Fetch wiring
 
 **Files:**
-- Create: `src/game_lattice/linear_fetch.py`
+- Create: `src/doc_lattice/linear_fetch.py`
 - Test: `tests/test_linear_fetch.py`
 
 **Interfaces:**
@@ -1119,7 +1119,7 @@ Create `tests/test_linear_fetch.py`:
 
 import json
 
-from game_lattice.linear_fetch import fetch_tickets
+from doc_lattice.linear_fetch import fetch_tickets
 
 
 class _RecordingClient:
@@ -1149,7 +1149,7 @@ def test_empty_identifiers_skip_network(monkeypatch):
     def explode(*_a, **_k):
         raise AssertionError("must not construct a client")
 
-    monkeypatch.setattr("game_lattice.linear_fetch.LinearClient", explode)
+    monkeypatch.setattr("doc_lattice.linear_fetch.LinearClient", explode)
     tickets, rejected = fetch_tickets(["not-a-ticket"], None)
     assert tickets == {}
     assert rejected == {"not-a-ticket": "malformed"}
@@ -1165,7 +1165,7 @@ def test_dedup_and_keying():
 
 
 def test_chunks_merge(monkeypatch):
-    monkeypatch.setattr("game_lattice.linear_fetch.BATCH_SIZE", 1)
+    monkeypatch.setattr("doc_lattice.linear_fetch.BATCH_SIZE", 1)
     client = _RecordingClient(lambda v: json.dumps(
         {"data": {f"i{i}": _issue(ident) for i, ident in enumerate(v.values())}}
     ))
@@ -1187,7 +1187,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the fetch wiring**
 
-Create `src/game_lattice/linear_fetch.py`:
+Create `src/doc_lattice/linear_fetch.py`:
 
 ```python
 """Impure wiring: turn referenced identifiers into a resolved ticket map."""
@@ -1239,7 +1239,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/linear_fetch.py tests/test_linear_fetch.py
+git add src/doc_lattice/linear_fetch.py tests/test_linear_fetch.py
 git commit -m "feat: add linear fetch wiring with empty-set skip"
 ```
 
@@ -1248,7 +1248,7 @@ git commit -m "feat: add linear fetch wiring with empty-set skip"
 ## Task 8: The stale-shipped join
 
 **Files:**
-- Create: `src/game_lattice/stale_shipped.py`
+- Create: `src/doc_lattice/stale_shipped.py`
 - Test: `tests/test_stale_shipped.py`
 
 **Interfaces:**
@@ -1269,10 +1269,10 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
-from game_lattice.stale_shipped import build_audit_trigger, build_from_trigger, stale_shipped
-from game_lattice.tickets import Ticket, TicketState
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.stale_shipped import build_audit_trigger, build_from_trigger, stale_shipped
+from doc_lattice.tickets import Ticket, TicketState
 
 
 def _ticket(identifier: str, state_type: str) -> Ticket:
@@ -1391,7 +1391,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the join**
 
-Create `src/game_lattice/stale_shipped.py`:
+Create `src/doc_lattice/stale_shipped.py`:
 
 ```python
 """Pure join: grade a trigger node's tickets into ordered stale-shipped findings."""
@@ -1535,7 +1535,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/stale_shipped.py tests/test_stale_shipped.py
+git add src/doc_lattice/stale_shipped.py tests/test_stale_shipped.py
 git commit -m "feat: add stale-shipped join and trigger builders"
 ```
 
@@ -1544,7 +1544,7 @@ git commit -m "feat: add stale-shipped join and trigger builders"
 ## Task 9: Renderer
 
 **Files:**
-- Create: `src/game_lattice/linear_render.py`
+- Create: `src/doc_lattice/linear_render.py`
 - Test: `tests/test_linear_render.py`
 
 **Interfaces:**
@@ -1568,8 +1568,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 from rich.console import Console
 
-from game_lattice.linear_render import findings_json, render_findings, render_safe
-from game_lattice.tickets import Finding, Ticket, TicketState
+from doc_lattice.linear_render import findings_json, render_findings, render_safe
+from doc_lattice.tickets import Finding, Ticket, TicketState
 
 
 def _ticket():
@@ -1652,7 +1652,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement the renderer**
 
-Create `src/game_lattice/linear_render.py`:
+Create `src/doc_lattice/linear_render.py`:
 
 ```python
 """Render stale-shipped findings as a severity-grouped table or a JSON payload."""
@@ -1755,7 +1755,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/linear_render.py tests/test_linear_render.py
+git add src/doc_lattice/linear_render.py tests/test_linear_render.py
 git commit -m "feat: add linear findings renderer"
 ```
 
@@ -1764,7 +1764,7 @@ git commit -m "feat: add linear findings renderer"
 ## Task 10: The `linear` CLI command
 
 **Files:**
-- Modify: `src/game_lattice/cli.py`
+- Modify: `src/doc_lattice/cli.py`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
@@ -1784,7 +1784,7 @@ def _fake_fetch(tickets):
 
 
 def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
-    from game_lattice.tickets import Ticket, TicketState
+    from doc_lattice.tickets import Ticket, TicketState
 
     ticket = Ticket(
         identifier="PC-228", title="t", url="https://x/PC-228",
@@ -1800,7 +1800,7 @@ def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
 
 
 def test_linear_exit_code_gates_on_danger(lattice_dir, monkeypatch):
-    from game_lattice.tickets import Ticket, TicketState
+    from doc_lattice.tickets import Ticket, TicketState
 
     ticket = Ticket(
         identifier="PC-228", title="t", url="https://x/PC-228",
@@ -1858,7 +1858,7 @@ Expected: FAIL (the `linear` command does not exist).
 
 - [ ] **Step 3: Implement the command**
 
-Add these imports near the other `from .` imports at the top of `src/game_lattice/cli.py`:
+Add these imports near the other `from .` imports at the top of `src/doc_lattice/cli.py`:
 
 ```python
 from .linear_fetch import fetch_tickets
@@ -1920,7 +1920,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: add linear command wiring stale-shipped report"
 ```
 
@@ -1948,7 +1948,7 @@ Expected: all pass. If ruff-format reports changes, run `uv run --group dev ruff
 
 - [ ] **Step 3: Smoke-test the CLI help**
 
-Run: `uv run game-lattice linear --help`
+Run: `uv run doc-lattice linear --help`
 Expected: the command's help, listing `--from`, `--exit-code`, `--warn-exit`, `--json`, `--config`.
 
 - [ ] **Step 4: Commit any formatting fixups**

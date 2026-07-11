@@ -18,15 +18,15 @@ These apply to every task. Each task's requirements implicitly include this sect
 - **`typing.Any` / `typing.cast` are forbidden** outside `*_boundary` / `*_parser` style modules. `version_check.py` is a normal pure module, so it must not use them.
 - **Custom exceptions extend `ProjectError`** with a `code` (error_types.py). The pure core here raises nothing: a source it cannot parse is reported as a mismatch message, not an exception. No bare `except Exception`.
 - **No `datetime.now()`** anywhere in new code.
-- **Coverage gate is 80%** over `src/game_lattice` (`pyproject.toml [tool.coverage]`). `version_check.py` lives in that source tree, so it must be fully tested.
+- **Coverage gate is 80%** over `src/doc_lattice` (`pyproject.toml [tool.coverage]`). `version_check.py` lives in that source tree, so it must be fully tested.
 - **ruff per-file ignores:** `src/**` enforces `T20` (no `print`), `ANN` (annotations), `PTH`, `S`, `PLR`. `scripts/**` ignores `T201` (so `print` is allowed) and `S`. `tests/**` ignores `S101`, `T201`, `ANN`, `PLR2004`.
 - **Branch:** all work lands on the existing `release-automation` branch. The pre-commit `no-commit-to-branch` hook blocks `main`.
 - **Do not bump `__version__`.** It stays at `0.3.0` for this slice (see Task 4 rationale).
-- Repo URL (used verbatim in the workflow): `https://github.com/Guardantix/game-lattice`.
+- Repo URL (used verbatim in the workflow): `https://github.com/Guardantix/doc-lattice`.
 
 ## File Structure
 
-- Create `src/game_lattice/version_check.py` - pure version-consistency core (no I/O).
+- Create `src/doc_lattice/version_check.py` - pure version-consistency core (no I/O).
 - Create `tests/test_version_check.py` - unit tests for the core.
 - Create `scripts/check_version_sync.py` - thin I/O wrapper over the core, run by pre-commit and CI.
 - Modify `.pre-commit-config.yaml` - add a local `check-version-sync` hook.
@@ -41,7 +41,7 @@ These apply to every task. Each task's requirements implicitly include this sect
 ### Task 1: Pure version-consistency core
 
 **Files:**
-- Create: `src/game_lattice/version_check.py`
+- Create: `src/doc_lattice/version_check.py`
 - Test: `tests/test_version_check.py`
 
 **Interfaces:**
@@ -55,9 +55,9 @@ Create `tests/test_version_check.py`:
 ```python
 """Tests for version_check."""
 
-from game_lattice.version_check import check_version_consistency
+from doc_lattice.version_check import check_version_consistency
 
-_PYPROJECT = '[project]\nname = "game-lattice"\nversion = "0.4.0"\n'
+_PYPROJECT = '[project]\nname = "doc-lattice"\nversion = "0.4.0"\n'
 _CHANGELOG = "# Changelog\n\n## [0.4.0] - 2026-07-01\n\n### Added\n\n- thing\n"
 
 
@@ -66,7 +66,7 @@ def test_all_sources_agree_returns_empty():
 
 
 def test_pyproject_disagrees_is_reported():
-    pyproject = '[project]\nname = "game-lattice"\nversion = "0.3.0"\n'
+    pyproject = '[project]\nname = "doc-lattice"\nversion = "0.3.0"\n'
     messages = check_version_consistency("0.4.0", pyproject, _CHANGELOG)
     assert len(messages) == 1
     assert "pyproject.toml" in messages[0]
@@ -93,7 +93,7 @@ def test_unreleased_heading_is_skipped():
 
 
 def test_missing_pyproject_version_is_a_mismatch():
-    pyproject = '[project]\nname = "game-lattice"\n'
+    pyproject = '[project]\nname = "doc-lattice"\n'
     messages = check_version_consistency("0.4.0", pyproject, _CHANGELOG)
     assert len(messages) == 1
     assert "pyproject.toml" in messages[0]
@@ -116,11 +116,11 @@ def test_changelog_without_version_heading_is_a_mismatch():
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run --no-sync --group dev pytest tests/test_version_check.py -v`
-Expected: collection/import error or FAIL, "No module named 'game_lattice.version_check'" (the module does not exist yet).
+Expected: collection/import error or FAIL, "No module named 'doc_lattice.version_check'" (the module does not exist yet).
 
 - [ ] **Step 3: Write the implementation**
 
-Create `src/game_lattice/version_check.py`:
+Create `src/doc_lattice/version_check.py`:
 
 ```python
 """Check that the package version agrees across its declared sources."""
@@ -160,7 +160,7 @@ def check_version_consistency(
     """Return a message for each version source that disagrees with init_version.
 
     Args:
-        init_version: The canonical package version, ``game_lattice.__version__``.
+        init_version: The canonical package version, ``doc_lattice.__version__``.
         pyproject_text: The full text of ``pyproject.toml``.
         changelog_text: The full text of ``CHANGELOG.md``.
 
@@ -174,7 +174,7 @@ def check_version_consistency(
     if pyproject_version != init_version:
         messages.append(
             f"pyproject.toml version is {pyproject_version!r}, expected {init_version!r}; "
-            f"set [project] version to match game_lattice.__version__."
+            f"set [project] version to match doc_lattice.__version__."
         )
     changelog_version = _changelog_version(changelog_text)
     if changelog_version != init_version:
@@ -192,13 +192,13 @@ Expected: PASS, all 8 tests green.
 
 - [ ] **Step 5: Lint, format, and type-check the new files**
 
-Run: `uv run --no-sync ruff check src/game_lattice/version_check.py tests/test_version_check.py && uv run --no-sync ruff format --check src/game_lattice/version_check.py tests/test_version_check.py && uv run --no-sync ty check src/game_lattice/version_check.py`
-Expected: all pass, no findings. If `ruff format --check` reports a diff, run `uv run --no-sync ruff format src/game_lattice/version_check.py tests/test_version_check.py` and re-run.
+Run: `uv run --no-sync ruff check src/doc_lattice/version_check.py tests/test_version_check.py && uv run --no-sync ruff format --check src/doc_lattice/version_check.py tests/test_version_check.py && uv run --no-sync ty check src/doc_lattice/version_check.py`
+Expected: all pass, no findings. If `ruff format --check` reports a diff, run `uv run --no-sync ruff format src/doc_lattice/version_check.py tests/test_version_check.py` and re-run.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/version_check.py tests/test_version_check.py
+git add src/doc_lattice/version_check.py tests/test_version_check.py
 git commit -m "feat: pure version-consistency core"
 ```
 
@@ -212,7 +212,7 @@ git commit -m "feat: pure version-consistency core"
 - Modify: `.github/workflows/ci.yml` (add a step at the end of the `code-quality` job)
 
 **Interfaces:**
-- Consumes: `game_lattice.__version__` and `game_lattice.version_check.check_version_consistency` (Task 1).
+- Consumes: `doc_lattice.__version__` and `doc_lattice.version_check.check_version_consistency` (Task 1).
 - Produces: a `scripts/check_version_sync.py` with a `main() -> None` entry point that exits 1 on any mismatch, 0 otherwise. No new Python symbols other tasks depend on.
 
 - [ ] **Step 1: Write the script**
@@ -226,8 +226,8 @@ Create `scripts/check_version_sync.py`:
 import sys
 from pathlib import Path
 
-from game_lattice import __version__
-from game_lattice.version_check import check_version_consistency
+from doc_lattice import __version__
+from doc_lattice.version_check import check_version_consistency
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -257,7 +257,7 @@ Run a one-off check that a wrong version is reported (this does not modify any f
 
 ```bash
 uv run --no-sync python -c "
-from game_lattice.version_check import check_version_consistency
+from doc_lattice.version_check import check_version_consistency
 from pathlib import Path
 py = Path('pyproject.toml').read_text(encoding='utf-8')
 cl = Path('CHANGELOG.md').read_text(encoding='utf-8')
@@ -319,7 +319,7 @@ git commit -m "feat: version-sync guard in pre-commit and CI"
 - Modify: `.github/workflows/ci.yml` (append the `release` job after the `tests` job)
 
 **Interfaces:**
-- Consumes: `scripts/check_version_sync.py` (Task 2), `game_lattice.__version__`, the `check` / `lint` / `init` CLI subcommands (already shipped).
+- Consumes: `scripts/check_version_sync.py` (Task 2), `doc_lattice.__version__`, the `check` / `lint` / `init` CLI subcommands (already shipped).
 - Produces: a `release` job. No Python symbols.
 
 - [ ] **Step 1: Append the release job**
@@ -347,7 +347,7 @@ In `.github/workflows/ci.yml`, after the final `tests` job (at the end of the fi
       - name: Determine target tag
         id: target
         run: |
-          version="$(uv run --no-sync python -c 'import game_lattice; print(game_lattice.__version__)')"
+          version="$(uv run --no-sync python -c 'import doc_lattice; print(doc_lattice.__version__)')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
@@ -358,7 +358,7 @@ In `.github/workflows/ci.yml`, after the final `tests` job (at the end of the fi
           version='${{ steps.target.outputs.version }}'
           git fetch --tags --force
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            tagged="$(git show "${tag}:src/game_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
+            tagged="$(git show "${tag}:src/doc_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
             if [ "${tagged}" = "${version}" ]; then
               echo "Tag ${tag} already exists at version ${version}; no-op."
               echo "proceed=false" >> "$GITHUB_OUTPUT"
@@ -377,11 +377,11 @@ In `.github/workflows/ci.yml`, after the final `tests` job (at the end of the fi
       - name: Smoke-test the commit
         if: steps.gate.outputs.proceed == 'true'
         run: |
-          ref="git+https://github.com/Guardantix/game-lattice@${{ github.sha }}"
-          uvx --python 3.14 --from "${ref}" game-lattice check
-          uvx --python 3.14 --from "${ref}" game-lattice lint
+          ref="git+https://github.com/Guardantix/doc-lattice@${{ github.sha }}"
+          uvx --python 3.14 --from "${ref}" doc-lattice check
+          uvx --python 3.14 --from "${ref}" doc-lattice lint
           workdir="$(mktemp -d)"
-          ( cd "${workdir}" && uvx --python 3.14 --from "${ref}" game-lattice init )
+          ( cd "${workdir}" && uvx --python 3.14 --from "${ref}" doc-lattice init )
 
       - name: Create and push the tag
         if: steps.gate.outputs.proceed == 'true'
@@ -394,7 +394,7 @@ In `.github/workflows/ci.yml`, after the final `tests` job (at the end of the fi
         if: steps.gate.outputs.proceed == 'true'
         run: |
           tag='${{ steps.target.outputs.tag }}'
-          uvx --python 3.14 --from "git+https://github.com/Guardantix/game-lattice@${tag}" game-lattice --version
+          uvx --python 3.14 --from "git+https://github.com/Guardantix/doc-lattice@${tag}" doc-lattice --version
 ```
 
 - [ ] **Step 2: Validate the workflow YAML parses**
@@ -404,12 +404,12 @@ Expected: `yaml ok`.
 
 - [ ] **Step 3: Test the tag-health extraction logic locally (no-op path)**
 
-The gate's core is `git show <tag>:src/game_lattice/__init__.py` plus a `sed` extraction. Run it against the real `v0.3.0` tag to prove the healthy no-op path:
+The gate's core is `git show <tag>:src/doc_lattice/__init__.py` plus a `sed` extraction. Run it against the real `v0.3.0` tag to prove the healthy no-op path:
 
 ```bash
 tag=v0.3.0
 version="${tag#v}"
-tagged="$(git show "${tag}:src/game_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
+tagged="$(git show "${tag}:src/doc_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
 if [ "${tagged}" = "${version}" ]; then echo "GATE: healthy existing tag -> proceed=false (no-op)"; else echo "GATE: MISMATCH (${tagged} != ${version})"; fi
 ```
 Expected: `GATE: healthy existing tag -> proceed=false (no-op)`.
@@ -447,9 +447,9 @@ Rationale for not bumping the version: leaving `__version__` at `0.3.0` means th
 Overwrite `RELEASING.md` with:
 
 ```markdown
-# Releasing game-lattice
+# Releasing doc-lattice
 
-game-lattice is distributed from git, not from PyPI. The `init` command prints
+doc-lattice is distributed from git, not from PyPI. The `init` command prints
 pre-commit and CI snippets that pin `uvx --from git+...@vX.Y.Z`, so a release is
 only complete once the matching tag exists and resolves. The version bump is the
 human step; CI cuts and verifies the tag on merge, so a half-done release (code
@@ -458,7 +458,7 @@ merged but no tag, or a tag without the version bump) cannot land.
 ## Checklist
 
 1. Bump the version to the new `X.Y.Z` in both locations:
-   - `src/game_lattice/__init__.py` (`__version__`)
+   - `src/doc_lattice/__init__.py` (`__version__`)
    - `pyproject.toml` (`version`)
 2. Run `uv lock` and commit the refreshed `uv.lock`.
 3. Add a `## [X.Y.Z]` section to `CHANGELOG.md` (rename the `## [Unreleased]`
@@ -480,7 +480,7 @@ If the release job fails after the tag is pushed, do not move the tag: cut
 old one.
 
 The tag must point at a commit that contains `check`, `lint`, and `init`, so the
-gates run and adopters can run `game-lattice init` from the same ref. The release
+gates run and adopters can run `doc-lattice init` from the same ref. The release
 job's smoke step enforces exactly this before the tag is created.
 ```
 
@@ -493,7 +493,7 @@ In the `## Shipped` list, add this entry after the `lint slice` bullet:
   `__version__`, `pyproject.toml`, and top `CHANGELOG.md` entry disagree, and a merge-triggered CI
   `release` job creates and smoke-tests the `vX.Y.Z` tag (running `check`, `lint`, and `init` against
   the pinned ref), so the tag is a product of a green pipeline. Spec:
-  `docs/superpowers/specs/2026-06-29-game-lattice-release-automation-design.md`.
+  `docs/superpowers/specs/2026-06-29-doc-lattice-release-automation-design.md`.
 ```
 
 Then, in `## Deferred enhancements (no spec yet)`, delete the `Release-tag automation.` bullet (the two lines beginning `- Release-tag automation.`), leaving only the `Display-prefix lint.` bullet.
@@ -509,7 +509,7 @@ uv run --group dev python scripts/check_version_sync.py    # version-consistency
 Then, in `## Project-specific invariants`, add this bullet after the `No datetime.now()` bullet:
 
 ```markdown
-- **Version sync.** `__version__` (`src/game_lattice/__init__.py`), the `pyproject.toml` `version`,
+- **Version sync.** `__version__` (`src/doc_lattice/__init__.py`), the `pyproject.toml` `version`,
   and the top `## [X.Y.Z]` `CHANGELOG.md` heading must agree. The pure core is `version_check.py`;
   `scripts/check_version_sync.py` wraps it and runs in pre-commit and CI. On merge to `main` the
   `release` job in `.github/workflows/ci.yml` verifies sync, smoke-tests the commit, and cuts the
@@ -570,4 +570,4 @@ No spec section is unimplemented.
 
 **2. Placeholder scan**: every step contains exact file paths, full code or YAML, exact commands, and expected output. No "TBD", "add error handling", or "similar to Task N".
 
-**3. Type consistency**: `check_version_consistency(init_version, pyproject_text, changelog_text) -> list[str]` is defined in Task 1 and consumed with the same name and argument order by `scripts/check_version_sync.py` in Task 2. `__version__` is imported from `game_lattice` in both Task 2 (script) and Task 3 (workflow `python -c`). The gate output key `proceed` is written and read consistently within Task 3. The `${{ steps.target.outputs.tag }}` / `version` references match the step `id: target` outputs.
+**3. Type consistency**: `check_version_consistency(init_version, pyproject_text, changelog_text) -> list[str]` is defined in Task 1 and consumed with the same name and argument order by `scripts/check_version_sync.py` in Task 2. `__version__` is imported from `doc_lattice` in both Task 2 (script) and Task 3 (workflow `python -c`). The gate output key `proceed` is written and read consistently within Task 3. The `${{ steps.target.outputs.tag }}` / `version` references match the step `id: target` outputs.

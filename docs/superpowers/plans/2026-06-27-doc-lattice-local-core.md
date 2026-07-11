@@ -1,8 +1,8 @@
-# game-lattice Local Core Implementation Plan
+# doc-lattice Local Core Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the deterministic local engine of game-lattice: parse lattice frontmatter and anchored sections from a doc set, derive an id-indexed edge graph on demand, and expose the `impact`, `check`, `reconcile`, and `graph` commands.
+**Goal:** Build the deterministic local engine of doc-lattice: parse lattice frontmatter and anchored sections from a doc set, derive an id-indexed edge graph on demand, and expose the `impact`, `check`, `reconcile`, and `graph` commands.
 
 **Architecture:** A pure pipeline (config to discovery to parse to a `Lattice` of nodes, an id index, and reverse adjacency) feeds four read-mostly commands. Untyped YAML is converted to typed models only in boundary-named modules. The single mutating command, `reconcile`, edits the `seen` scalar in place against a fresh read at write time. No network, no secrets, no LLM.
 
@@ -16,11 +16,11 @@
 - All custom exceptions extend `ProjectError`. No bare `except Exception`/`except BaseException`. Error messages name the file and the fix.
 - No `datetime.now()` outside `datetime_utils.py`. No hardcoded secrets. User-provided paths go through `safe_resolve()`.
 - Constants use the `Literal` + `get_args()` + `frozenset` pattern in `constants.py`; import elsewhere.
-- Tests use pytest, mirror source files (`src/game_lattice/foo.py` -> `tests/test_foo.py`), use `tmp_path` for filesystem tests. Coverage gate is 80 percent (`fail_under = 80`).
+- Tests use pytest, mirror source files (`src/doc_lattice/foo.py` -> `tests/test_foo.py`), use `tmp_path` for filesystem tests. Coverage gate is 80 percent (`fail_under = 80`).
 - Commit after every task. Conventional commit messages, no attribution trailers.
 - `seen` hash = `sha256(canonical_utf8)` truncated to 32 hex chars (128 bits).
 
-**Spec:** `docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md`. Every task's requirements implicitly include this section.
+**Spec:** `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`. Every task's requirements implicitly include this section.
 
 ---
 
@@ -56,8 +56,8 @@ These names and signatures are fixed. Later tasks rely on them verbatim.
 ## Task 1: Constants and error types
 
 **Files:**
-- Modify: `src/game_lattice/constants.py`
-- Modify: `src/game_lattice/error_types.py`
+- Modify: `src/doc_lattice/constants.py`
+- Modify: `src/doc_lattice/error_types.py`
 - Test: `tests/test_constants.py`, `tests/test_error_types.py`
 
 **Interfaces:**
@@ -68,7 +68,7 @@ These names and signatures are fixed. Later tasks rely on them verbatim.
 Append to `tests/test_constants.py`:
 
 ```python
-from game_lattice.constants import (
+from doc_lattice.constants import (
     VALID_AUTHORITIES,
     VALID_EDGE_STATES,
     VALID_LAYERS,
@@ -96,7 +96,7 @@ def test_edge_states_match_literal():
 Append to `tests/test_error_types.py`:
 
 ```python
-from game_lattice.error_types import (
+from doc_lattice.error_types import (
     BrokenRefError,
     DuplicateIdError,
     ProjectError,
@@ -122,7 +122,7 @@ Expected: FAIL with ImportError on the new names.
 
 - [ ] **Step 3: Implement**
 
-Append to `src/game_lattice/constants.py`:
+Append to `src/doc_lattice/constants.py`:
 
 ```python
 Layer = Literal["design", "technical", "production"]
@@ -138,7 +138,7 @@ EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN"]
 VALID_EDGE_STATES: frozenset[str] = frozenset(get_args(EdgeState))
 ```
 
-Append to `src/game_lattice/error_types.py`:
+Append to `src/doc_lattice/error_types.py`:
 
 ```python
 class DuplicateIdError(ProjectError):
@@ -170,7 +170,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/constants.py src/game_lattice/error_types.py tests/test_constants.py tests/test_error_types.py
+git add src/doc_lattice/constants.py src/doc_lattice/error_types.py tests/test_constants.py tests/test_error_types.py
 git commit -m "feat: add lattice constants and error types"
 ```
 
@@ -179,7 +179,7 @@ git commit -m "feat: add lattice constants and error types"
 ## Task 2: Domain model
 
 **Files:**
-- Create: `src/game_lattice/model.py`
+- Create: `src/doc_lattice/model.py`
 - Test: `tests/test_model.py`
 
 **Interfaces:**
@@ -198,7 +198,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from game_lattice.model import Edge, Lattice, Location, Node, NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.model import Edge, Lattice, Location, Node, NodeMeta, ParsedDoc, RawEdge
 
 
 def test_nodemeta_validates_and_defaults():
@@ -244,11 +244,11 @@ def test_lattice_holds_maps():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run --group dev pytest tests/test_model.py -v`
-Expected: FAIL with ModuleNotFoundError for `game_lattice.model`.
+Expected: FAIL with ModuleNotFoundError for `doc_lattice.model`.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/model.py`:
+Create `src/doc_lattice/model.py`:
 
 ```python
 """Domain types for the lattice graph."""
@@ -347,7 +347,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/model.py tests/test_model.py
+git add src/doc_lattice/model.py tests/test_model.py
 git commit -m "feat: add lattice domain model"
 ```
 
@@ -356,7 +356,7 @@ git commit -m "feat: add lattice domain model"
 ## Task 3: Hashing
 
 **Files:**
-- Create: `src/game_lattice/hashing.py`
+- Create: `src/doc_lattice/hashing.py`
 - Test: `tests/test_hashing.py`
 
 **Interfaces:**
@@ -372,7 +372,7 @@ Create `tests/test_hashing.py`:
 from hypothesis import given
 from hypothesis import strategies as st
 
-from game_lattice.hashing import canonicalize, content_hash
+from doc_lattice.hashing import canonicalize, content_hash
 
 
 def test_canonicalize_strips_trailing_ws_and_blank_edges():
@@ -416,7 +416,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/hashing.py`:
+Create `src/doc_lattice/hashing.py`:
 
 ```python
 """Canonicalize section content and compute its content hash."""
@@ -468,7 +468,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/hashing.py tests/test_hashing.py
+git add src/doc_lattice/hashing.py tests/test_hashing.py
 git commit -m "feat: add content hashing"
 ```
 
@@ -477,7 +477,7 @@ git commit -m "feat: add content hashing"
 ## Task 4: Section extraction
 
 **Files:**
-- Create: `src/game_lattice/sections.py`
+- Create: `src/doc_lattice/sections.py`
 - Test: `tests/test_sections.py`
 
 **Interfaces:**
@@ -490,7 +490,7 @@ Create `tests/test_sections.py`:
 ```python
 """Tests for section extraction."""
 
-from game_lattice.sections import build_toc, section_span, section_text
+from doc_lattice.sections import build_toc, section_span, section_text
 
 DOC = """# Top {#top}
 intro
@@ -548,7 +548,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/sections.py`:
+Create `src/doc_lattice/sections.py`:
 
 ```python
 """Heading-TOC and anchored-section extraction.
@@ -646,7 +646,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/sections.py tests/test_sections.py
+git add src/doc_lattice/sections.py tests/test_sections.py
 git commit -m "feat: add heading-TOC and section extraction"
 ```
 
@@ -655,7 +655,7 @@ git commit -m "feat: add heading-TOC and section extraction"
 ## Task 5: Ref resolution and content lookup
 
 **Files:**
-- Create: `src/game_lattice/resolve.py`
+- Create: `src/doc_lattice/resolve.py`
 - Test: `tests/test_resolve.py`
 
 **Interfaces:**
@@ -673,9 +673,9 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.error_types import BrokenRefError
-from game_lattice.model import Lattice, Location, Node
-from game_lattice.resolve import split_ref, target_content
+from doc_lattice.error_types import BrokenRefError
+from doc_lattice.model import Lattice, Location, Node
+from doc_lattice.resolve import split_ref, target_content
 
 
 def test_split_ref_keys_on_trailing_id():
@@ -722,7 +722,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/resolve.py`:
+Create `src/doc_lattice/resolve.py`:
 
 ```python
 """Resolve refs to ids and fetch the current content a target id covers."""
@@ -786,7 +786,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/resolve.py tests/test_resolve.py
+git add src/doc_lattice/resolve.py tests/test_resolve.py
 git commit -m "feat: add ref resolution and content lookup"
 ```
 
@@ -795,7 +795,7 @@ git commit -m "feat: add ref resolution and content lookup"
 ## Task 6: Loader (build_lattice)
 
 **Files:**
-- Create: `src/game_lattice/loader.py`
+- Create: `src/doc_lattice/loader.py`
 - Test: `tests/test_loader.py`
 
 **Interfaces:**
@@ -815,9 +815,9 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.error_types import DuplicateIdError
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.error_types import DuplicateIdError
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:
@@ -877,7 +877,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/loader.py`:
+Create `src/doc_lattice/loader.py`:
 
 ```python
 """Assemble parsed docs into a Lattice. Pure: no filesystem access."""
@@ -988,7 +988,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/loader.py tests/test_loader.py
+git add src/doc_lattice/loader.py tests/test_loader.py
 git commit -m "feat: add lattice loader with id index and reverse adjacency"
 ```
 
@@ -997,7 +997,7 @@ git commit -m "feat: add lattice loader with id index and reverse adjacency"
 ## Task 7: Config
 
 **Files:**
-- Create: `src/game_lattice/config.py`
+- Create: `src/doc_lattice/config.py`
 - Modify: `pyproject.toml` (add `ruamel.yaml` dependency)
 - Test: `tests/test_config.py`
 
@@ -1032,8 +1032,8 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.config import load_config
-from game_lattice.error_types import ConfigError
+from doc_lattice.config import load_config
+from doc_lattice.error_types import ConfigError
 
 
 def test_absent_config_uses_defaults(tmp_path: Path):
@@ -1045,7 +1045,7 @@ def test_absent_config_uses_defaults(tmp_path: Path):
 
 def test_loads_and_resolves_roots(tmp_path: Path):
     (tmp_path / "design").mkdir()
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "docs_roots: [design]\nignore_globs: ['**/x/**']\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)
@@ -1054,13 +1054,13 @@ def test_loads_and_resolves_roots(tmp_path: Path):
 
 
 def test_root_escaping_project_is_rejected(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../outside']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../outside']\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
 
 def test_absolute_outside_root_is_rejected(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text(
+    (tmp_path / ".doc-lattice.yml").write_text(
         "docs_roots: ['/etc']\n", encoding="utf-8"
     )
     with pytest.raises(ConfigError):
@@ -1068,7 +1068,7 @@ def test_absolute_outside_root_is_rejected(tmp_path: Path):
 
 
 def test_unknown_key_rejected(tmp_path: Path):
-    (tmp_path / ".game-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
@@ -1085,10 +1085,10 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 4: Implement**
 
-Create `src/game_lattice/config.py`:
+Create `src/doc_lattice/config.py`:
 
 ```python
-"""Load and validate .game-lattice.yml, with project-root containment of docs_roots."""
+"""Load and validate .doc-lattice.yml, with project-root containment of docs_roots."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -1100,11 +1100,11 @@ from ruamel.yaml.error import YAMLError
 from .error_types import ConfigError
 from .path_utils import safe_resolve
 
-DEFAULT_CONFIG_NAME = ".game-lattice.yml"
+DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
 
 
 class Config(BaseModel):
-    """The validated shape of .game-lattice.yml."""
+    """The validated shape of .doc-lattice.yml."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -1202,7 +1202,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add pyproject.toml uv.lock src/game_lattice/config.py tests/test_config.py
+git add pyproject.toml uv.lock src/doc_lattice/config.py tests/test_config.py
 git commit -m "feat: add config loading with project-root containment"
 ```
 
@@ -1211,7 +1211,7 @@ git commit -m "feat: add config loading with project-root containment"
 ## Task 8: Frontmatter parser
 
 **Files:**
-- Create: `src/game_lattice/frontmatter_parser.py`
+- Create: `src/doc_lattice/frontmatter_parser.py`
 - Test: `tests/test_frontmatter_parser.py`
 
 **Interfaces:**
@@ -1231,8 +1231,8 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.error_types import ConfigError, UnreadableDocError
-from game_lattice.frontmatter_parser import parse_meta, split_frontmatter
+from doc_lattice.error_types import ConfigError, UnreadableDocError
+from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
@@ -1282,7 +1282,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/frontmatter_parser.py`:
+Create `src/doc_lattice/frontmatter_parser.py`:
 
 ```python
 """Boundary module: split and validate untyped YAML frontmatter into typed NodeMeta."""
@@ -1367,7 +1367,7 @@ Expected: `PASS: typing.Any/typing.cast restricted to boundary modules`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/frontmatter_parser.py tests/test_frontmatter_parser.py
+git add src/doc_lattice/frontmatter_parser.py tests/test_frontmatter_parser.py
 git commit -m "feat: add frontmatter parser boundary module"
 ```
 
@@ -1376,7 +1376,7 @@ git commit -m "feat: add frontmatter parser boundary module"
 ## Task 9: Discovery
 
 **Files:**
-- Create: `src/game_lattice/discovery.py`
+- Create: `src/doc_lattice/discovery.py`
 - Test: `tests/test_discovery.py`
 
 **Interfaces:**
@@ -1394,8 +1394,8 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.discovery import discover_doc_paths, read_doc
-from game_lattice.error_types import UnreadableDocError
+from doc_lattice.discovery import discover_doc_paths, read_doc
+from doc_lattice.error_types import UnreadableDocError
 
 
 def test_discovers_markdown_sorted(tmp_path: Path):
@@ -1437,7 +1437,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/discovery.py`:
+Create `src/doc_lattice/discovery.py`:
 
 ```python
 """Discover candidate markdown docs under contained roots, and read them as UTF-8."""
@@ -1503,7 +1503,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/discovery.py tests/test_discovery.py
+git add src/doc_lattice/discovery.py tests/test_discovery.py
 git commit -m "feat: add doc discovery and reading"
 ```
 
@@ -1512,7 +1512,7 @@ git commit -m "feat: add doc discovery and reading"
 ## Task 10: Orchestrate (load_lattice) and shared fixture
 
 **Files:**
-- Create: `src/game_lattice/orchestrate.py`
+- Create: `src/doc_lattice/orchestrate.py`
 - Modify: `tests/conftest.py` (add a `lattice_dir` fixture)
 - Test: `tests/test_orchestrate.py`
 
@@ -1567,8 +1567,8 @@ Create `tests/test_orchestrate.py`:
 
 from pathlib import Path
 
-from game_lattice.config import load_config
-from game_lattice.orchestrate import load_lattice
+from doc_lattice.config import load_config
+from doc_lattice.orchestrate import load_lattice
 
 
 def test_load_lattice_from_dir(lattice_dir: Path):
@@ -1599,7 +1599,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 4: Implement**
 
-Create `src/game_lattice/orchestrate.py`:
+Create `src/doc_lattice/orchestrate.py`:
 
 ```python
 """Wire config, discovery, parsing, and loading into a Lattice."""
@@ -1639,7 +1639,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/orchestrate.py tests/conftest.py tests/test_orchestrate.py
+git add src/doc_lattice/orchestrate.py tests/conftest.py tests/test_orchestrate.py
 git commit -m "feat: add load_lattice orchestration and shared fixture"
 ```
 
@@ -1648,7 +1648,7 @@ git commit -m "feat: add load_lattice orchestration and shared fixture"
 ## Task 11: Check
 
 **Files:**
-- Create: `src/game_lattice/check.py`
+- Create: `src/doc_lattice/check.py`
 - Test: `tests/test_check.py`
 
 **Interfaces:**
@@ -1666,9 +1666,9 @@ Create `tests/test_check.py`:
 
 from pathlib import Path
 
-from game_lattice.check import check_lattice, has_drift
-from game_lattice.config import load_config
-from game_lattice.orchestrate import load_lattice
+from doc_lattice.check import check_lattice, has_drift
+from doc_lattice.config import load_config
+from doc_lattice.orchestrate import load_lattice
 
 
 def test_check_classifies_each_state(lattice_dir: Path):
@@ -1687,10 +1687,10 @@ def test_has_drift_true_when_any_non_ok(lattice_dir: Path):
 
 
 def test_has_drift_false_when_all_ok():
-    from game_lattice.loader import build_lattice
-    from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
-    from game_lattice.hashing import content_hash
-    from game_lattice.sections import build_toc, section_span, section_text
+    from doc_lattice.loader import build_lattice
+    from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+    from doc_lattice.hashing import content_hash
+    from doc_lattice.sections import build_toc, section_span, section_text
 
     up_body = "# Up {#accent}\naccent\n"
     span = section_span(build_toc(up_body), 0, len(up_body.splitlines()))
@@ -1711,7 +1711,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/check.py`:
+Create `src/doc_lattice/check.py`:
 
 ```python
 """Classify every derives_from edge against its locked seen hash."""
@@ -1785,7 +1785,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/check.py tests/test_check.py
+git add src/doc_lattice/check.py tests/test_check.py
 git commit -m "feat: add edge drift check"
 ```
 
@@ -1794,7 +1794,7 @@ git commit -m "feat: add edge drift check"
 ## Task 12: Impact
 
 **Files:**
-- Create: `src/game_lattice/impact.py`
+- Create: `src/doc_lattice/impact.py`
 - Test: `tests/test_impact.py`
 
 **Interfaces:**
@@ -1812,9 +1812,9 @@ Create `tests/test_impact.py`:
 
 from pathlib import Path
 
-from game_lattice.impact import expand_targets, impact
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.impact import expand_targets, impact
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:
@@ -1860,7 +1860,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/impact.py`:
+Create `src/doc_lattice/impact.py`:
 
 ```python
 """Reverse-walk the lattice to find every doc affected by a change to a target."""
@@ -1934,7 +1934,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/impact.py tests/test_impact.py
+git add src/doc_lattice/impact.py tests/test_impact.py
 git commit -m "feat: add impact reverse-walk with ancestor expansion"
 ```
 
@@ -1943,7 +1943,7 @@ git commit -m "feat: add impact reverse-walk with ancestor expansion"
 ## Task 13: Reconcile
 
 **Files:**
-- Create: `src/game_lattice/reconcile.py`
+- Create: `src/doc_lattice/reconcile.py`
 - Test: `tests/test_reconcile.py`
 
 **Interfaces:**
@@ -1963,11 +1963,11 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.check import check_lattice, has_drift
-from game_lattice.config import load_config
-from game_lattice.error_types import BrokenRefError
-from game_lattice.orchestrate import load_lattice
-from game_lattice.reconcile import apply_reconcile, reconcile
+from doc_lattice.check import check_lattice, has_drift
+from doc_lattice.config import load_config
+from doc_lattice.error_types import BrokenRefError
+from doc_lattice.orchestrate import load_lattice
+from doc_lattice.reconcile import apply_reconcile, reconcile
 
 
 def test_apply_reconcile_sets_seen_and_preserves_body():
@@ -2022,7 +2022,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/reconcile.py`:
+Create `src/doc_lattice/reconcile.py`:
 
 ```python
 """Reconcile edges: recompute upstream hashes and rewrite seen scalars in place."""
@@ -2105,7 +2105,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/reconcile.py tests/test_reconcile.py
+git add src/doc_lattice/reconcile.py tests/test_reconcile.py
 git commit -m "feat: add reconcile with in-place fresh-read rewrite"
 ```
 
@@ -2114,7 +2114,7 @@ git commit -m "feat: add reconcile with in-place fresh-read rewrite"
 ## Task 14: Render
 
 **Files:**
-- Create: `src/game_lattice/render.py`
+- Create: `src/doc_lattice/render.py`
 - Test: `tests/test_render.py`
 
 **Interfaces:**
@@ -2130,9 +2130,9 @@ Create `tests/test_render.py`:
 
 from pathlib import Path
 
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
-from game_lattice.render import to_dot, to_mermaid
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.render import to_dot, to_mermaid
 
 
 def _lattice():
@@ -2168,7 +2168,7 @@ Expected: FAIL with ModuleNotFoundError.
 
 - [ ] **Step 3: Implement**
 
-Create `src/game_lattice/render.py`:
+Create `src/doc_lattice/render.py`:
 
 ```python
 """Render the lattice as Mermaid or DOT."""
@@ -2235,7 +2235,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/game_lattice/render.py tests/test_render.py
+git add src/doc_lattice/render.py tests/test_render.py
 git commit -m "feat: add Mermaid and DOT rendering"
 ```
 
@@ -2244,7 +2244,7 @@ git commit -m "feat: add Mermaid and DOT rendering"
 ## Task 15: CLI
 
 **Files:**
-- Modify: `src/game_lattice/cli.py` (remove the scaffold `hello` command, add the four commands)
+- Modify: `src/doc_lattice/cli.py` (remove the scaffold `hello` command, add the four commands)
 - Modify: `tests/test_cli.py` (replace the `hello` test)
 
 **Interfaces:**
@@ -2265,7 +2265,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from game_lattice.cli import app
+from doc_lattice.cli import app
 
 runner = CliRunner()
 
@@ -2285,7 +2285,7 @@ def test_check_json_reports_states(lattice_dir: Path, monkeypatch):
 
 
 def test_check_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".game-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 2
@@ -2324,7 +2324,7 @@ Expected: FAIL (no such commands / import errors).
 
 - [ ] **Step 3: Implement**
 
-Replace the contents of `src/game_lattice/cli.py` with:
+Replace the contents of `src/doc_lattice/cli.py` with:
 
 ```python
 """Command-line interface."""
@@ -2349,7 +2349,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 _out = Console()
 _err = Console(stderr=True)
 
-ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path to .game-lattice.yml.")]
+ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path to .doc-lattice.yml.")]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 
 
@@ -2367,7 +2367,7 @@ def main_callback(
                      help="Show the version and exit."),
     ] = False,
 ) -> None:
-    """game-lattice: documentation traceability engine."""
+    """doc-lattice: documentation traceability engine."""
 
 
 def _load(config: Path | None):
@@ -2492,7 +2492,7 @@ Expected: clean (fix any reported issues).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/game_lattice/cli.py tests/test_cli.py
+git add src/doc_lattice/cli.py tests/test_cli.py
 git commit -m "feat: wire impact, check, reconcile, and graph CLI commands"
 ```
 

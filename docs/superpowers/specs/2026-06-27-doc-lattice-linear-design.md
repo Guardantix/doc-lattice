@@ -1,11 +1,11 @@
-# game-lattice Linear Slice: Design Spec
+# doc-lattice Linear Slice: Design Spec
 
 **Date:** 2026-06-27
 **Status:** Design (post brainstorm). Ready for implementation planning.
 **Scope:** The first network-touching slice. Resolve referenced Linear tickets to live status
 and surface shipped-against-stale-spec drift. No mutations, no committed status, no LLM.
-**Source decision record:** `~/.claude/LCARS/decisions/2026-06-27-game-lattice-doc-traceability.md`
-**Builds on:** `docs/superpowers/specs/2026-06-27-game-lattice-local-core-design.md` (the local core).
+**Source decision record:** `~/.claude/LCARS/decisions/2026-06-27-doc-lattice-doc-traceability.md`
+**Builds on:** `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md` (the local core).
 
 This spec turns the deferred `linear` item from the local-core deferral map (section 12) into a
 buildable design. It does not re-open any locked decision from the decision record. Decision 6
@@ -37,7 +37,7 @@ Explicitly out of scope, deferred to a later spec or enhancement (see section 13
 
 ## 2. The determinism boundary
 
-game-lattice's identity is deterministic and offline. This slice introduces network and
+doc-lattice's identity is deterministic and offline. This slice introduces network and
 credentials for the first time, so the boundary is drawn sharply and stated as an invariant:
 
 - `linear` is the only command that touches the network. `check`, `impact`, `graph`, and
@@ -51,12 +51,12 @@ credentials for the first time, so the boundary is drawn sharply and stated as a
 ## 3. Operating model and command surface
 
 ```
-game-lattice linear [TARGET]          # whole-lattice audit; optional id narrows to one subtree
-game-lattice linear --from <id>       # forward-looking: impact-walk from a doc about to change
-game-lattice linear ... --json        # machine-readable findings, consistent with check and impact
-game-lattice linear ... --exit-code   # opt-in gate: any DANGER or BLOCKED finding exits 1
-game-lattice linear ... --warn-exit   # with --exit-code, WARNING findings also exit 1
-game-lattice linear ... --config PATH # same config override as the other commands
+doc-lattice linear [TARGET]          # whole-lattice audit; optional id narrows to one subtree
+doc-lattice linear --from <id>       # forward-looking: impact-walk from a doc about to change
+doc-lattice linear ... --json        # machine-readable findings, consistent with check and impact
+doc-lattice linear ... --exit-code   # opt-in gate: any DANGER or BLOCKED finding exits 1
+doc-lattice linear ... --warn-exit   # with --exit-code, WARNING findings also exit 1
+doc-lattice linear ... --config PATH # same config override as the other commands
 ```
 
 The two modes differ only in which downstream nodes are eligible to produce findings. The grading
@@ -306,7 +306,7 @@ finding with `reason="cross-team"` that fails `--exit-code`. This matters becaus
 repo-controlled and the command runs with a credential; silently dropping an off-team ref would let a
 drifted doc dodge its own gate. When `linear_team` is null there is no team boundary to enforce, so
 identifiers are validated only against the generic shape and queried as written. Because
-`linear_team` comes from a repo-controlled `.game-lattice.yml`, it is never interpolated into a
+`linear_team` comes from a repo-controlled `.doc-lattice.yml`, it is never interpolated into a
 regex; it is itself validated against a fixed team-key shape `\A[A-Z][A-Z0-9]*\Z` when first used, and
 the prefix match is done by splitting the identifier on `-` and comparing the segment by string
 equality (section 9). This keeps a crafted `linear_team` from causing catastrophic backtracking or
@@ -344,7 +344,7 @@ This is the first slice with a real security surface, so it carries the dedicate
 promised.
 
 **Threat model.** Three inputs are untrusted. The frontmatter `tickets:` values and the
-`.game-lattice.yml` `linear_team` are repo-controlled: the same threat the local core already names,
+`.doc-lattice.yml` `linear_team` are repo-controlled: the same threat the local core already names,
 where `check` runs in CI against potentially hostile repository contents, now extended because
 `linear` can run with a credential present. The Linear API response is network-controlled: a hostile
 or intercepted endpoint, or a redirect, is in scope. The asset is the `LINEAR_API_KEY` and the

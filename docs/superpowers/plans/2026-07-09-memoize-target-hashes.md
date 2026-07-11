@@ -18,9 +18,9 @@ deduplication.
 
 | File | Change |
 | --- | --- |
-| `src/game_lattice/resolve.py` | Add pure `cached_target_hash` with caller-owned cache. |
-| `src/game_lattice/check.py` | Allocate one cache per `check_lattice` call and thread it to `_classify`. |
-| `src/game_lattice/reconcile.py` | Allocate one cache per `reconcile` call and use it for hash lookups. |
+| `src/doc_lattice/resolve.py` | Add pure `cached_target_hash` with caller-owned cache. |
+| `src/doc_lattice/check.py` | Allocate one cache per `check_lattice` call and thread it to `_classify`. |
+| `src/doc_lattice/reconcile.py` | Allocate one cache per `reconcile` call and use it for hash lookups. |
 | `tests/test_resolve.py` | Verify a cache has one calculation per distinct `TargetId`. |
 | `tests/test_check.py` | Verify three or more shared edges invoke the helper's hash function once. |
 | `tests/test_reconcile.py` | Verify `reconcile_all=True` invokes the helper's hash function once. |
@@ -30,11 +30,11 @@ deduplication.
 
 **Files:**
 - Modify: `tests/test_resolve.py`
-- Modify: `src/game_lattice/resolve.py`
+- Modify: `src/doc_lattice/resolve.py`
 
 - [ ] **Step 1: Write the failing helper test**
 
-Import `game_lattice.resolve as resolve` and `cached_target_hash`. Add a test that creates the
+Import `doc_lattice.resolve as resolve` and `cached_target_hash`. Add a test that creates the
 existing `_lattice()`, wraps `resolve.content_hash` with a counter using `monkeypatch`, calls
 `cached_target_hash` twice for `TargetId("doc", "accent")` and once for `TargetId("doc")`, and
 asserts equal repeated results plus exactly two underlying hash calls.
@@ -72,13 +72,13 @@ Expected: one test passes.
 **Files:**
 - Modify: `tests/test_check.py`
 - Modify: `tests/test_reconcile.py`
-- Modify: `src/game_lattice/check.py`
-- Modify: `src/game_lattice/reconcile.py`
+- Modify: `src/doc_lattice/check.py`
+- Modify: `src/doc_lattice/reconcile.py`
 
 - [ ] **Step 1: Write failing caller tests**
 
 In each test module, create a synthetic lattice with a single upstream section and at least three
-downstream edges referencing it. Monkeypatch `game_lattice.resolve.content_hash` with a counting
+downstream edges referencing it. Monkeypatch `doc_lattice.resolve.content_hash` with a counting
 wrapper around the original. For `check_lattice`, assert the number of statuses and exactly one
 hash invocation. For `reconcile(..., "", ref=None, reconcile_all=True)`, assert the plan has the
 three downstream refs and exactly one hash invocation.

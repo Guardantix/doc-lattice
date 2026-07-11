@@ -19,14 +19,14 @@ section newline handling to the hashing helper, and preserve per-call round-trip
 
 **Files:**
 - Modify: `tests/test_loader.py:3-25`
-- Modify: `src/game_lattice/loader.py:28-43`
+- Modify: `src/doc_lattice/loader.py:28-43`
 
 - [ ] **Step 1: Write the failing call-count test**
 
 Add the module import after the third-party imports in `tests/test_loader.py`:
 
 ```python
-import game_lattice.loader as loader_module
+import doc_lattice.loader as loader_module
 ```
 
 Add this test after `test_registers_file_and_anchor_ids`:
@@ -63,7 +63,7 @@ Expected: FAIL because the observed calls contain each document body twice.
 
 - [ ] **Step 3: Hoist the per-document line count**
 
-Change the opening of the document loop in `src/game_lattice/loader.py` to:
+Change the opening of the document loop in `src/doc_lattice/loader.py` to:
 
 ```python
     for doc in docs:
@@ -95,7 +95,7 @@ Expected: all loader tests PASS.
 - [ ] **Step 5: Commit the loader cycle**
 
 ```bash
-git add tests/test_loader.py src/game_lattice/loader.py
+git add tests/test_loader.py src/doc_lattice/loader.py
 git commit -m "perf: count document lines once"
 ```
 
@@ -103,14 +103,14 @@ git commit -m "perf: count document lines once"
 
 **Files:**
 - Modify: `tests/test_frontmatter_parser.py:3-12`
-- Modify: `src/game_lattice/frontmatter_parser.py:13-60`
+- Modify: `src/doc_lattice/frontmatter_parser.py:13-60`
 
 - [ ] **Step 1: Write the failing singleton-use test**
 
 Add this module import after the third-party imports in `tests/test_frontmatter_parser.py`:
 
 ```python
-import game_lattice.frontmatter_parser as frontmatter_parser_module
+import doc_lattice.frontmatter_parser as frontmatter_parser_module
 ```
 
 Add this test after `test_parse_meta_returns_node`:
@@ -150,7 +150,7 @@ Expected: FAIL with `AttributeError` because `frontmatter_parser._YAML` does not
 
 - [ ] **Step 3: Add and use the safe YAML singleton**
 
-Add the singleton beside the existing module constants in `src/game_lattice/frontmatter_parser.py`:
+Add the singleton beside the existing module constants in `src/doc_lattice/frontmatter_parser.py`:
 
 ```python
 _FENCE = "---"
@@ -178,7 +178,7 @@ Expected: all frontmatter parser tests PASS.
 - [ ] **Step 5: Commit the frontmatter cycle**
 
 ```bash
-git add tests/test_frontmatter_parser.py src/game_lattice/frontmatter_parser.py
+git add tests/test_frontmatter_parser.py src/doc_lattice/frontmatter_parser.py
 git commit -m "perf: reuse frontmatter YAML loader"
 ```
 
@@ -235,7 +235,7 @@ Expected: PASS; the next document uses default YAML semantics and preserves `on`
 - [ ] **Step 10: Commit the frontmatter version-isolation fix**
 
 ```bash
-git add src/game_lattice/frontmatter_parser.py tests/test_frontmatter_parser.py \
+git add src/doc_lattice/frontmatter_parser.py tests/test_frontmatter_parser.py \
   docs/superpowers/specs/2026-07-10-load-path-micro-cleanups-design.md \
   docs/superpowers/plans/2026-07-10-load-path-micro-cleanups.md
 git commit -m "fix: reset frontmatter YAML version per load"
@@ -245,14 +245,14 @@ git commit -m "fix: reset frontmatter YAML version per load"
 
 **Files:**
 - Modify: `tests/test_config.py:3-25`
-- Modify: `src/game_lattice/config.py:13-90`
+- Modify: `src/doc_lattice/config.py:13-90`
 
 - [ ] **Step 1: Write the failing singleton-use test**
 
 Add this module import after the third-party imports in `tests/test_config.py`:
 
 ```python
-import game_lattice.config as config_module
+import doc_lattice.config as config_module
 ```
 
 Add this test after `test_loads_and_resolves_roots`:
@@ -271,7 +271,7 @@ def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
     projects = [tmp_path / "first", tmp_path / "second"]
     for project in projects:
         project.mkdir()
-        (project / ".game-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+        (project / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
         load_config(None, project)
 
     assert calls == ["docs_roots: [docs]\n", "docs_roots: [docs]\n"]
@@ -292,10 +292,10 @@ Expected: FAIL with `AttributeError` because `config._YAML` does not exist.
 
 - [ ] **Step 3: Add and use the safe YAML singleton**
 
-Add the singleton below `DEFAULT_CONFIG_NAME` in `src/game_lattice/config.py`:
+Add the singleton below `DEFAULT_CONFIG_NAME` in `src/doc_lattice/config.py`:
 
 ```python
-DEFAULT_CONFIG_NAME = ".game-lattice.yml"
+DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
 _YAML = YAML(typ="safe")
 ```
 
@@ -325,7 +325,7 @@ Expected: all config tests PASS.
 - [ ] **Step 5: Commit the config cycle**
 
 ```bash
-git add tests/test_config.py src/game_lattice/config.py
+git add tests/test_config.py src/doc_lattice/config.py
 git commit -m "perf: reuse config YAML loader"
 ```
 
@@ -335,7 +335,7 @@ Add this test after the malformed-YAML test in `tests/test_config.py`:
 
 ```python
 def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
-    config_path = tmp_path / ".game-lattice.yml"
+    config_path = tmp_path / ".doc-lattice.yml"
     config_path.write_text("docs_roots: [unclosed\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
@@ -418,7 +418,7 @@ Expected: PASS; the second config uses default YAML semantics and preserves `on`
 - [ ] **Step 13: Commit the YAML-version isolation fix**
 
 ```bash
-git add src/game_lattice/config.py tests/test_config.py \
+git add src/doc_lattice/config.py tests/test_config.py \
   docs/superpowers/specs/2026-07-10-load-path-micro-cleanups-design.md \
   docs/superpowers/plans/2026-07-10-load-path-micro-cleanups.md
 git commit -m "fix: reset config YAML version per load"
@@ -428,14 +428,14 @@ git commit -m "fix: reset config YAML version per load"
 
 **Files:**
 - Modify: `tests/test_sections.py:3-12`
-- Modify: `src/game_lattice/sections.py:8-11,45-63`
+- Modify: `src/doc_lattice/sections.py:8-11,45-63`
 
 - [ ] **Step 1: Write the failing delegation test**
 
 Add this module import after `import pytest` in `tests/test_sections.py`:
 
 ```python
-import game_lattice.sections as sections_module
+import doc_lattice.sections as sections_module
 ```
 
 Add this test after `test_split_body_lines_normalizes_crlf_and_lone_cr`:
@@ -467,7 +467,7 @@ Expected: FAIL with `AttributeError` because `sections.normalize_newlines` does 
 
 - [ ] **Step 3: Delegate to the hashing helper**
 
-Add the package import after the standard-library imports in `src/game_lattice/sections.py`:
+Add the package import after the standard-library imports in `src/doc_lattice/sections.py`:
 
 ```python
 from .hashing import normalize_newlines
@@ -492,14 +492,14 @@ Expected: all section tests PASS, including the existing mixed CRLF and lone-CR 
 - [ ] **Step 5: Commit the newline cycle**
 
 ```bash
-git add tests/test_sections.py src/game_lattice/sections.py
+git add tests/test_sections.py src/doc_lattice/sections.py
 git commit -m "refactor: centralize section newline normalization"
 ```
 
 ### Task 5: Document Round-Trip YAML Lifetime and the Cleanup
 
 **Files:**
-- Modify: `src/game_lattice/reconcile.py:102-107`
+- Modify: `src/doc_lattice/reconcile.py:102-107`
 - Modify: `CHANGELOG.md:7-25`
 
 - [ ] **Step 1: Document the per-call round-trip loader invariant**
@@ -529,7 +529,7 @@ Run:
 
 ```bash
 rg -n '_YAML = YAML\(typ="safe"\)|YAML\(typ="rt"\)|normalize_newlines|total_lines' \
-  src/game_lattice/{config,frontmatter_parser,reconcile,sections,loader}.py
+  src/doc_lattice/{config,frontmatter_parser,reconcile,sections,loader}.py
 ```
 
 Expected:
@@ -553,14 +553,14 @@ Expected: both commands exit 0 with no formatting errors.
 - [ ] **Step 5: Commit the invariant comment and changelog**
 
 ```bash
-git add src/game_lattice/reconcile.py CHANGELOG.md
+git add src/doc_lattice/reconcile.py CHANGELOG.md
 git commit -m "docs: record load-path cleanup"
 ```
 
 ### Task 6: Run the Complete Required Verification
 
 **Files:**
-- Verify: `src/game_lattice/`
+- Verify: `src/doc_lattice/`
 - Verify: `tests/`
 - Verify: `scripts/check_typing_boundaries.py`
 
@@ -672,8 +672,8 @@ Expected: every command exits 0.
 If review produced valid findings, stage only their root-cause fixes and commit:
 
 ```bash
-git add CHANGELOG.md src/game_lattice/config.py src/game_lattice/frontmatter_parser.py \
-  src/game_lattice/loader.py src/game_lattice/reconcile.py src/game_lattice/sections.py \
+git add CHANGELOG.md src/doc_lattice/config.py src/doc_lattice/frontmatter_parser.py \
+  src/doc_lattice/loader.py src/doc_lattice/reconcile.py src/doc_lattice/sections.py \
   tests/test_config.py tests/test_frontmatter_parser.py tests/test_loader.py tests/test_sections.py
 git commit -m "fix: address load-path cleanup review"
 ```

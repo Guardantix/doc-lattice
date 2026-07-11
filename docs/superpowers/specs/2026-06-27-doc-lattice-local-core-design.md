@@ -1,9 +1,9 @@
-# game-lattice Local Core: Design Spec
+# doc-lattice Local Core: Design Spec
 
 **Date:** 2026-06-27
 **Status:** Design (post design-review pass). Ready for implementation planning.
 **Scope:** The deterministic local engine only. No network, no secrets, no LLM in the hot path.
-**Source decision record:** `~/.claude/LCARS/decisions/2026-06-27-game-lattice-doc-traceability.md`
+**Source decision record:** `~/.claude/LCARS/decisions/2026-06-27-doc-lattice-doc-traceability.md`
 
 This spec turns the approved decision record into a buildable design for the first
 implementation slice. It does not re-open any locked decision from that record. Where the
@@ -96,7 +96,7 @@ boundary-named modules, because `scripts/check_typing_boundaries.py` permits `An
 
 | Module | Purpose | Pure? |
 |---|---|---|
-| `config.py` | Find and load `.game-lattice.yml`, validate into a typed `Config` | impure I/O, typed |
+| `config.py` | Find and load `.doc-lattice.yml`, validate into a typed `Config` | impure I/O, typed |
 | `discovery.py` | Walk docs roots, apply ignore globs, return safe paths; read UTF-8 text | impure I/O |
 | `frontmatter_parser.py` | Split a file into `(raw_meta, body)`, parse raw YAML, validate into `NodeMeta` | boundary |
 | `sections.py` | Heading TOC plus anchored-section extraction (adapted from `binding_slicer`) | pure |
@@ -124,7 +124,7 @@ immediately before writing, and writes atomically.
 `orchestrate.load_lattice(config)` does the following:
 
 1. Each configured docs root is first resolved against the project root (the directory holding
-   `.game-lattice.yml`, or the current working directory when config is absent) and must stay
+   `.doc-lattice.yml`, or the current working directory when config is absent) and must stay
    inside it; a root that escapes via `..`, a symlink, or an absolute path outside the project
    is rejected with a `ConfigError` before any file is touched. This stops a repo-controlled
    config from steering reads or `reconcile` writes outside the worktree, which matters because
@@ -270,7 +270,7 @@ distinctly (dashed) so the graph doubles as a drift snapshot. Only tracked nodes
 
 ## 7. Configuration
 
-`.game-lattice.yml`, read directly by the tool. The deferred `init` command will scaffold it
+`.doc-lattice.yml`, read directly by the tool. The deferred `init` command will scaffold it
 later; the tool does not depend on `init` having run.
 
 ```yaml
@@ -313,7 +313,7 @@ network and no secret material.
 - YAML is parsed in a safe mode so no arbitrary Python objects are constructed and YAML
   anchor or alias expansion cannot execute code. Validation into pydantic follows.
 - Configured `docs_roots` must resolve inside the project root, so a repo-controlled
-  `.game-lattice.yml` cannot steer reads or `reconcile` writes outside the worktree. This
+  `.doc-lattice.yml` cannot steer reads or `reconcile` writes outside the worktree. This
   matters in CI, where `check` runs against potentially untrusted repository contents.
 - Every doc path passes through `safe_resolve()` against its docs root, so traversal and
   symlink escape outside the root are refused before any read.
