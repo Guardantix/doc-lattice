@@ -71,7 +71,7 @@ def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
         raw_meta, body = split_frontmatter(text)
         meta = parse_meta(raw_meta, path)
         sections = derive_file_sections(body) if meta is not None else None
-        cache.record_miss(rel_key, path, result.data, meta, body, sections)
+        cache.record_miss(rel_key, result.data, meta, body, sections, result.stat)
         if meta is not None:
             parsed.append(ParsedDoc(path=path, meta=meta, body=body, sections=sections))
     lattice = build_lattice(parsed)

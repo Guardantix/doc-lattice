@@ -1,5 +1,6 @@
 """Discover candidate markdown docs under contained roots, and read them as UTF-8."""
 
+import os
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -74,6 +75,31 @@ def read_doc_bytes(path: Path) -> bytes:
         return path.read_bytes()
     except OSError as exc:
         raise _unreadable(path, exc) from exc
+
+
+def read_doc_bytes_and_stat(path: Path) -> tuple[bytes, os.stat_result]:
+    """Read a doc's raw bytes and the stat of the same open handle.
+
+    Opening once and stat-ing the open descriptor keeps the returned stat consistent with the
+    exact bytes read, so a rewrite racing a separate stat cannot record a stat hint that does
+    not correspond to the hashed content.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        A tuple of the file contents and the ``os.stat_result`` of the open handle.
+
+    Raises:
+        UnreadableDocError: If the file cannot be read.
+    """
+    try:
+        with path.open("rb") as handle:
+            st = os.fstat(handle.fileno())
+            data = handle.read()
+    except OSError as exc:
+        raise _unreadable(path, exc) from exc
+    return data, st
 
 
 def decode_doc(path: Path, data: bytes) -> str:

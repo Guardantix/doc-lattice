@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import __version__
 from .constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
-from .discovery import read_doc_bytes
+from .discovery import read_doc_bytes_and_stat
 from .model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
 
@@ -114,9 +114,15 @@ class CacheHit:
 
 @dataclass(frozen=True, slots=True)
 class CacheMiss:
-    """A miss. ``data`` is the raw bytes already read, for the caller to decode and parse."""
+    """A miss. ``data`` is the raw bytes already read, for the caller to decode and parse.
+
+    ``stat`` is the ``os.stat_result`` captured from the same open handle as ``data``, so a
+    caller that later records the miss threads a stat hint that corresponds exactly to the
+    hashed bytes rather than one taken from a separate, possibly racy, stat call.
+    """
 
     data: bytes
+    stat: os.stat_result
 
 
 class LoadCache:
@@ -216,11 +222,11 @@ class LoadCache:
             hit = self._stat_tier(entry, path)
             if hit is not None:
                 return hit
-        data = read_doc_bytes(path)
+        data, st = read_doc_bytes_and_stat(path)
         if entry is not None and entry.file_sha256 == hashlib.sha256(data).hexdigest():
-            self._refresh_stat(entry, path)
+            self._refresh_stat(entry, st)
             return CacheHit(doc=self._reconstruct(entry, path))
-        return CacheMiss(data=data)
+        return CacheMiss(data=data, stat=st)
 
     def _stat_tier(self, entry: Entry, path: Path) -> CacheHit | None:
         """Return a CacheHit if the current root's stat hint matches, else None."""
@@ -237,12 +243,12 @@ class LoadCache:
             return None
         return CacheHit(doc=self._reconstruct(entry, path))
 
-    def _refresh_stat(self, entry: Entry, path: Path) -> None:
-        """Insert or refresh the current root's stat hint on a verify-tier hit (best-effort)."""
-        try:
-            st = path.stat()
-        except OSError:
-            return
+    def _refresh_stat(self, entry: Entry, st: os.stat_result) -> None:
+        """Insert or refresh the current root's stat hint on a verify-tier hit.
+
+        ``st`` is the stat already captured alongside the bytes that produced the verify hit
+        (see ``read_doc_bytes_and_stat``), so no separate stat call is needed or made here.
+        """
         entry.stats[self._current_root] = StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
 
     @staticmethod
@@ -260,21 +266,22 @@ class LoadCache:
     def record_miss(  # noqa: PLR0913
         self,
         rel_key: str,
-        path: Path,
         data: bytes,
         meta: NodeMeta | None,
         body: str,
         sections: FileSections | None,
+        st: os.stat_result,
     ) -> None:
         """Replace an entry from a fresh parse: new hash, stats reset to the current root.
 
         Args:
             rel_key: The entry key (POSIX path relative to the project root).
-            path: The absolute file path, stat-ed for the fresh stat hint.
             data: The raw file bytes hashed for ``file_sha256``.
             meta: The validated NodeMeta, or None for a discovered non-node file.
             body: The verbatim body (unused when ``meta`` is None).
             sections: The pre-derived sections (present when ``meta`` is not None).
+            st: The stat captured alongside ``data`` (see ``read_doc_bytes_and_stat``), stored
+                as the fresh stat hint for the current root.
         """
         node: NodePayload | None = None
         if meta is not None and sections is not None:
@@ -287,13 +294,9 @@ class LoadCache:
                     for r in sections.sections
                 ],
             )
-        stats: dict[str, StatRecord] = {}
-        try:
-            st = path.stat()
-        except OSError:
-            pass
-        else:
-            stats[self._current_root] = StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
+        stats: dict[str, StatRecord] = {
+            self._current_root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
+        }
         self._entries[rel_key] = Entry(
             file_sha256=hashlib.sha256(data).hexdigest(), stats=stats, node=node
         )

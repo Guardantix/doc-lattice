@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import types
 from pathlib import Path
 
 import pytest
@@ -338,6 +339,71 @@ def test_lookup_deleted_file_raises_unreadable(tmp_path: Path):
         cache.lookup("docs/gone.md", doc)
 
 
+def test_verify_hit_stat_refresh_uses_the_stat_captured_with_the_read(tmp_path: Path, monkeypatch):
+    # TOCTOU regression: the stat threaded into _refresh_stat must be the one captured by the
+    # same read that produced the hashed bytes, not a fresh path.stat(). We monkeypatch
+    # read_doc_bytes_and_stat (as cache.py imports it) to return the real bytes paired with a
+    # sentinel stat whose size/mtime differ from the real file's. If lookup or _refresh_stat
+    # re-stats the path instead of using the threaded value, the stored StatRecord will show
+    # the real file's stat, not the sentinel, and this assertion fails.
+    text = "---\nid: a\n---\n# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    real_bytes = _doc_bytes(text)
+    real_st = doc.stat()
+    sentinel = types.SimpleNamespace(
+        st_size=real_st.st_size + 1000, st_mtime_ns=real_st.st_mtime_ns + 999_999_999
+    )
+
+    import game_lattice.cache as cache_module  # noqa: PLC0415
+
+    monkeypatch.setattr(cache_module, "read_doc_bytes_and_stat", lambda _p: (real_bytes, sentinel))
+
+    cache = _open(tmp_path)
+    node = NodePayload(
+        meta=NodeMeta.model_validate({"id": "a"}), body="# A\n", total_lines=1, sections=[]
+    )
+    cache._entries["docs/a.md"] = _entry_for(text, cache._current_root, node=node)
+    result = cache.lookup("docs/a.md", doc)
+    assert isinstance(result, CacheHit)
+    stored = cache._entries["docs/a.md"].stats[cache._current_root]
+    assert stored == StatRecord(size=sentinel.st_size, mtime_ns=sentinel.st_mtime_ns)
+
+
+def test_miss_carries_and_records_the_stat_captured_with_the_read(tmp_path: Path, monkeypatch):
+    # Same TOCTOU concern on the miss path: CacheMiss.stat and record_miss must both use the
+    # stat captured with the read, not a fresh path.stat() taken later.
+    text = "---\nid: a\n---\n# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    real_bytes = _doc_bytes(text)
+    real_st = doc.stat()
+    sentinel = types.SimpleNamespace(
+        st_size=real_st.st_size + 2000, st_mtime_ns=real_st.st_mtime_ns + 888_888_888
+    )
+
+    import game_lattice.cache as cache_module  # noqa: PLC0415
+
+    monkeypatch.setattr(cache_module, "read_doc_bytes_and_stat", lambda _p: (real_bytes, sentinel))
+
+    cache = _open(tmp_path)
+    result = cache.lookup("docs/a.md", doc)  # no matching entry: a miss
+    assert isinstance(result, CacheMiss)
+    assert result.stat is sentinel
+    cache.record_miss(
+        "docs/a.md",
+        result.data,
+        NodeMeta.model_validate({"id": "a"}),
+        "# A\n",
+        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+        result.stat,
+    )
+    stored = cache._entries["docs/a.md"].stats[cache._current_root]
+    assert stored == StatRecord(size=sentinel.st_size, mtime_ns=sentinel.st_mtime_ns)
+
+
 def test_record_miss_resets_stats_to_current_root(tmp_path: Path):
     text = "---\nid: a\n---\n# A\n"
     doc = tmp_path / "docs" / "a.md"
@@ -351,11 +417,11 @@ def test_record_miss_resets_stats_to_current_root(tmp_path: Path):
     )
     cache.record_miss(
         "docs/a.md",
-        doc,
         _doc_bytes(text),
         NodeMeta.model_validate({"id": "a"}),
         "# A\n",
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+        doc.stat(),
     )
     entry = cache._entries["docs/a.md"]
     assert entry.file_sha256 == hashlib.sha256(_doc_bytes(text)).hexdigest()
@@ -370,7 +436,7 @@ def test_record_miss_non_node_stores_null_node(tmp_path: Path):
     doc.parent.mkdir(parents=True)
     doc.write_text(text, encoding="utf-8")
     cache = _open(tmp_path)
-    cache.record_miss("docs/plain.md", doc, _doc_bytes(text), None, text, None)
+    cache.record_miss("docs/plain.md", _doc_bytes(text), None, text, None, doc.stat())
     assert cache._entries["docs/plain.md"].node is None
 
 
@@ -386,11 +452,11 @@ def test_finalize_writes_current_root_at_ledger_tail(tmp_path: Path):
     cache = _open(tmp_path)
     cache.record_miss(
         "docs/a.md",
-        doc,
         b"---\nid: a\n---\n# A\n",
         NodeMeta.model_validate({"id": "a"}),
         "# A\n",
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+        doc.stat(),
     )
     cache.finalize({"docs/a.md"})
     written = _load_written(tmp_path)
@@ -407,11 +473,11 @@ def test_fully_warm_same_root_run_writes_nothing(tmp_path: Path):
     first = _open(tmp_path)
     first.record_miss(
         "docs/a.md",
-        doc,
         text.encode(),
         NodeMeta.model_validate({"id": "a"}),
         "# A\n",
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+        doc.stat(),
     )
     first.finalize({"docs/a.md"})
     path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
@@ -483,11 +549,11 @@ def test_finalize_write_failure_emits_one_stderr_line_and_does_not_raise(
     cache = _open(tmp_path)
     cache.record_miss(
         "docs/a.md",
-        doc,
         b"---\nid: a\n---\n# A\n",
         NodeMeta.model_validate({"id": "a"}),
         "# A\n",
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+        doc.stat(),
     )
     import game_lattice.cache as cache_module  # noqa: PLC0415
 

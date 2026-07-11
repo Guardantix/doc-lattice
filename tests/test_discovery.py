@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.discovery import decode_doc, discover_doc_paths, read_doc, read_doc_bytes
+from game_lattice.discovery import (
+    decode_doc,
+    discover_doc_paths,
+    read_doc,
+    read_doc_bytes,
+    read_doc_bytes_and_stat,
+)
 from game_lattice.error_types import UnreadableDocError
 
 
@@ -114,6 +120,23 @@ def test_read_doc_bytes_missing_file_raises_unreadable(tmp_path: Path):
         read_doc_bytes(missing)
     assert exc.value.code == "UNREADABLE_DOC"
     assert "cannot read doc" in str(exc.value)
+
+
+def test_read_doc_bytes_and_stat_returns_bytes_and_matching_stat(tmp_path: Path):
+    doc = tmp_path / "a.md"
+    doc.write_bytes(b"# hi\n")
+    data, st = read_doc_bytes_and_stat(doc)
+    assert data == b"# hi\n"
+    assert st.st_size == len(data)
+
+
+def test_read_doc_bytes_and_stat_missing_file_raises_unreadable(tmp_path: Path):
+    missing = tmp_path / "gone.md"
+    with pytest.raises(UnreadableDocError) as via_stat:
+        read_doc_bytes_and_stat(missing)
+    with pytest.raises(UnreadableDocError) as via_read:
+        read_doc_bytes(missing)
+    assert str(via_stat.value) == str(via_read.value)
 
 
 def test_decode_doc_rejects_non_utf8_with_same_message_as_read_doc(tmp_path: Path):
