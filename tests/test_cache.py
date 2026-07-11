@@ -576,6 +576,39 @@ def test_finalize_write_failure_emits_one_stderr_line_and_does_not_raise(
     assert leftovers == []
 
 
+def test_finalize_write_failure_does_not_raise_when_temp_cleanup_also_fails(
+    tmp_path, capsys, monkeypatch
+):
+    # Both the atomic replace and the finally-block cleanup fail. The cleanup OSError must not
+    # escape the cache error handler and change the command's exit code.
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
+    cache = _open(tmp_path)
+    cache.record_miss(
+        "docs/a.md",
+        b"---\nid: a\n---\n# A\n",
+        NodeMeta.model_validate({"id": "a"}),
+        "# A\n",
+        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+        doc.stat(),
+    )
+    import game_lattice.cache as cache_module  # noqa: PLC0415
+
+    def _boom_replace(*args, **kwargs):  # noqa: ARG001
+        raise OSError("disk full")
+
+    def _boom_unlink(*args, **kwargs):  # noqa: ARG001
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(cache_module.os, "replace", _boom_replace)
+    monkeypatch.setattr(cache_module.Path, "unlink", _boom_unlink)
+    cache.finalize({"docs/a.md"})  # must not raise despite the failed cleanup
+    captured = capsys.readouterr()
+    assert captured.err.count("\n") == 1
+    assert "cache" in captured.err.lower()
+
+
 def _run_check(project) -> str:
     return json.dumps(statuses_json(check_lattice(load_lattice(project))))
 
@@ -660,3 +693,55 @@ def test_require_verified_load_sees_fresh_content_after_same_stat_rewrite(tmp_pa
     # require_verified disables the stat tier, forcing a content re-read: fresh bytes.
     verified = load_lattice(load_config(None, tmp_path), require_verified=True)
     assert "bbbb" in verified.nodes_by_id["a"].body
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses file read permissions")
+def test_trust_stat_serves_unreadable_file_from_cache_a_documented_caveat(tmp_path, monkeypatch):
+    # Documented (spec section 1/5): under trust_stat a file made unreadable without changing its
+    # size or mtime_ns is served from cache, where the default (verify) tier re-reads and so
+    # raises the same UnreadableDocError an uncached run would. Pins both halves of that caveat.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    doc = docs / "a.md"
+    doc.write_text("---\nid: a\n---\n# A\naaaa\n", encoding="utf-8")
+    (tmp_path / ".game-lattice.yml").write_text(
+        "cache_key: unread\ncache_trust_stat: true\n", encoding="utf-8"
+    )
+    load_lattice(load_config(None, tmp_path))  # warm the cache, populating the stat hint
+    st = doc.stat()
+    doc.chmod(0o000)  # unreadable; chmod bumps only ctime, so size and mtime_ns are unchanged
+    try:
+        assert doc.stat().st_mtime_ns == st.st_mtime_ns  # precondition: mtime really unchanged
+        # trust_stat serves the cached node without opening the file: no error.
+        served = load_lattice(load_config(None, tmp_path))
+        assert "aaaa" in served.nodes_by_id["a"].body
+        # The verify tier re-reads and surfaces the read failure, matching an uncached run.
+        with pytest.raises(UnreadableDocError):
+            load_lattice(load_config(None, tmp_path), require_verified=True)
+    finally:
+        doc.chmod(0o644)
+
+
+def test_verify_tier_serves_schema_valid_node_corruption_a_documented_limit(tmp_path, monkeypatch):
+    # Documented (spec section 1/7): the verify tier proves the file bytes match file_sha256 but
+    # cannot re-confirm the stored node without re-parsing. A hand-edited, still-schema-valid node
+    # whose file_sha256 still matches the real file is therefore served even in the default tier.
+    # This pins the integrity boundary: the cache is a trusted single-writer artifact.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    doc = docs / "a.md"
+    doc.write_text("---\nid: a\n---\n# A\nreal body\n", encoding="utf-8")
+    (tmp_path / ".game-lattice.yml").write_text("cache_key: corrupt\n", encoding="utf-8")
+    load_lattice(load_config(None, tmp_path))  # warm the cache
+    # Tamper with the stored body while leaving file_sha256 (and the on-disk file) intact.
+    path = cache_path("corrupt", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
+    loaded = CacheFile.model_validate_json(path.read_text(encoding="utf-8"))
+    entry = loaded.entries["docs/a.md"]
+    assert entry.node is not None
+    entry.node.body = "# A\nTAMPERED body\n"
+    path.write_text(loaded.model_dump_json(), encoding="utf-8")
+    # The default (verify) tier serves the tampered node: hash matches, node is trusted as-is.
+    served = load_lattice(load_config(None, tmp_path))
+    assert "TAMPERED" in served.nodes_by_id["a"].body

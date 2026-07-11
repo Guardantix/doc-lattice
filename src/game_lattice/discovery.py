@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .error_types import UnreadableDocError
+from .hashing import normalize_newlines
 from .path_utils import safe_resolve
 
 
@@ -103,22 +104,30 @@ def read_doc_bytes_and_stat(path: Path) -> tuple[bytes, os.stat_result]:
 
 
 def decode_doc(path: Path, data: bytes) -> str:
-    """Decode a doc's bytes as UTF-8.
+    """Decode a doc's bytes as UTF-8 with universal-newline translation.
+
+    Translates ``\\r\\n`` and lone ``\\r`` to ``\\n`` so the result matches what the historical
+    loader produced via ``Path.read_text(encoding="utf-8")`` (default ``newline=None``). Without
+    this, a lone-``\\r`` (classic Mac) document keeps its carriage returns, ``split_frontmatter``
+    (which splits only on ``\\n``) sees the whole file as one line and its opening fence is never
+    matched, and the node is silently dropped from the lattice in both the cached and uncached
+    paths. Keeping the translation here preserves byte-parity with that historical read.
 
     Args:
         path: The file the bytes came from, for the error message.
         data: The raw bytes.
 
     Returns:
-        The decoded text.
+        The decoded text with line endings normalized to ``\\n``.
 
     Raises:
         UnreadableDocError: If the bytes are not valid UTF-8.
     """
     try:
-        return data.decode("utf-8")
+        text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _unreadable(path, exc) from exc
+    return normalize_newlines(text)
 
 
 def read_doc(path: Path) -> str:

@@ -6,6 +6,7 @@ and verify-tier hits, and writes atomically after a successful load. It never ra
 behalf: a read failure yields an empty cache and a write failure emits one stderr diagnostic.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -368,7 +369,7 @@ class LoadCache:
                 dir=self._path.parent, prefix=CACHE_FILE_NAME, suffix=".tmp"
             )
             tmp = Path(tmp_name)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -378,7 +379,12 @@ class LoadCache:
             sys.stderr.write(f"game-lattice: could not write load cache at {self._path}: {exc}\n")
         finally:
             if tmp is not None:
-                tmp.unlink(missing_ok=True)
+                # The cleanup unlink must never escape: a write failure already emitted its one
+                # diagnostic, and an OSError here (missing_ok only swallows FileNotFoundError)
+                # would propagate past the handler and change the command's exit code, which the
+                # cache contract forbids. A leaked temp is reclaimed on the next successful write.
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _read(path: Path) -> CacheFile | None:

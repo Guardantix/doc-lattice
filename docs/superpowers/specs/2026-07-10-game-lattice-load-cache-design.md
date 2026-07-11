@@ -14,18 +14,30 @@ original corpus size. This spec adds that cache for adopters whose doc sets have
 thousands, as a pure accelerator with an absolute correctness guarantee:
 
 > Under the default tier configuration (`cache_trust_stat` absent or false): for every
-> command, under any cache state (`cache_key` unset, cold, warm, stale, corrupt, wrong
-> version), stdout, stderr, exit code, and any file mutations are byte-identical to an
-> uncached run. Only timing and the contents of the cache file may differ.
+> command, under any cache state (`cache_key` unset, cold, warm, stale, structurally corrupt,
+> wrong version), stdout, stderr, exit code, and any file mutations are byte-identical to an
+> uncached run. Only timing and the contents of the cache file may differ. "Structurally
+> corrupt" means any state a read reveals: a missing, unreadable, non-JSON, wrong-version, or
+> schema-invalid file, each of which discards the whole cache to empty (section 7). It does not
+> cover a cache file hand-edited into a still-valid schema whose stored derivation was altered to
+> disagree with its own `file_sha256`; the verify tier proves the current bytes match that hash
+> but cannot re-confirm the stored node without re-parsing, which is the cost the cache exists to
+> avoid. The cache is a trusted, single-writer, atomically written local artifact and schema
+> validation is its integrity boundary, exactly as reconstructing it from scratch is a `rm` away.
 >
 > Under `cache_trust_stat: true`, file mutations keep the full guarantee unconditionally
-> (`reconcile` always verifies content, section 5), and read-only command output keeps it
-> except in exactly one documented case: a file rewritten so that both its size and its
-> `mtime_ns` are unchanged is served stale until it is touched or misses.
+> (`reconcile` always verifies content, section 5), and read-only command output keeps it except
+> where a file's content or readability changes without changing its `(size, mtime_ns)` pair,
+> which the tier trusts wholesale. Two such cases exist, each served from cache until the file is
+> touched or misses: a rewrite that preserves both size and `mtime_ns` is served with stale
+> content, and a file made unreadable (for example a permissions or ACL change, which leaves size
+> and `mtime_ns` untouched) is served from cache rather than raising the `UnreadableDocError` an
+> uncached read would.
 
 `cache_trust_stat` is therefore not a hidden weakening of the contract; it is the contract's
-one explicit, opt-in narrowing, it can never alter what the tool writes to disk, and the issue
-sketch anticipated it as "accepting the standard mtime caveat and documenting it".
+explicit, opt-in narrowing to "trust an unchanged `(size, mtime_ns)`", it can never alter what the
+tool writes to disk, and the issue sketch anticipated it as "accepting the standard mtime caveat
+and documenting it".
 
 The single stated output exception is one diagnostic line on stderr when the cache file itself
 cannot be written (section 7), which exists only when the cache is broken and never changes
@@ -160,10 +172,15 @@ discovered path:
 
 1. **Stat tier**, only when `cache_trust_stat: true` and only for read-only commands: if
    `stats[current_root]` exists and matches the file's `(st_size, st_mtime_ns)`, use the entry
-   without opening the file. The body comes from the entry. This tier carries the standard
-   mtime caveat: a rewrite that preserves size and `mtime_ns` serves stale data until the file
-   is touched. That caveat is why the tier is opt-in, why the default tier exists, and why the
-   section 1 guarantee names it as the contract's one narrowing. `reconcile` never takes this
+   without opening the file. The body comes from the entry. Because the file is never opened, this
+   tier trusts an unchanged `(size, mtime_ns)` wholesale and carries the section 1 caveat in both
+   its forms: a rewrite that preserves size and `mtime_ns` serves stale content, and a file that
+   became unreadable without changing size or `mtime_ns` (a permissions or ACL change bumps only
+   `ctime`) is served from cache rather than raising `UnreadableDocError`; each holds until the
+   file is touched or misses. The one place the tier still opens nothing but does stat is a raced
+   `path.stat()` failure, which is surfaced as the same `UnreadableDocError` an uncached read
+   would raise. That caveat is why the tier is opt-in, why the default tier exists, and why the
+   section 1 guarantee names it as the contract's narrowing. `reconcile` never takes this
    tier: it plans the `seen` values it writes from the loaded snapshot, so a stale load would
    mutate frontmatter from stale content. The load entry point takes a flag (set only by the
    `reconcile` CLI path) that forces tier 2 regardless of config.

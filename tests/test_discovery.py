@@ -155,6 +155,30 @@ def test_read_doc_composes_helpers(tmp_path: Path):
     assert read_doc(doc) == decode_doc(doc, read_doc_bytes(doc))
 
 
+def test_decode_doc_translates_universal_newlines_like_read_text(tmp_path: Path):
+    # Lone-CR (classic Mac) and CRLF endings must collapse to LF exactly as the historical
+    # Path.read_text(encoding="utf-8") loader did, so cached and uncached loads stay byte-parity.
+    doc = tmp_path / "cr.md"
+    raw = b"---\rid: x\r---\rbody\r\nmore\r\n"
+    doc.write_bytes(raw)
+    assert decode_doc(doc, raw) == doc.read_text(encoding="utf-8")
+    assert decode_doc(doc, raw) == "---\nid: x\n---\nbody\nmore\n"
+
+
+def test_decode_doc_lone_cr_frontmatter_is_still_parsed(tmp_path: Path):
+    # Regression: a lone-CR document with valid frontmatter must not be dropped. Without newline
+    # translation, split_frontmatter sees one line and never matches the opening fence.
+    from game_lattice.frontmatter_parser import parse_meta, split_frontmatter  # noqa: PLC0415
+
+    doc = tmp_path / "cr.md"
+    raw = b"---\rid: cr-node\r---\r# Body\r"
+    text = decode_doc(doc, raw)
+    raw_meta, _body = split_frontmatter(text)
+    meta = parse_meta(raw_meta, doc)
+    assert meta is not None
+    assert meta.id == "cr-node"
+
+
 def test_discovery_skips_symlink_escaping_root(tmp_path: Path):
     root = tmp_path / "docs"
     root.mkdir()
