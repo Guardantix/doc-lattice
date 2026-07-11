@@ -19,7 +19,7 @@ from game_lattice.cache import (
     cache_home,
     cache_path,
 )
-from game_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION
+from game_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
 from game_lattice.error_types import UnreadableDocError
 from game_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
@@ -366,3 +366,134 @@ def test_record_miss_non_node_stores_null_node(tmp_path: Path):
     cache = _open(tmp_path)
     cache.record_miss("docs/plain.md", doc, _doc_bytes(text), None, text, None)
     assert cache._entries["docs/plain.md"].node is None
+
+
+def _load_written(tmp_path: Path) -> CacheFile:
+    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
+    return CacheFile.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def test_finalize_writes_current_root_at_ledger_tail(tmp_path: Path):
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
+    cache = _open(tmp_path)
+    cache.record_miss(
+        "docs/a.md",
+        doc,
+        b"---\nid: a\n---\n# A\n",
+        NodeMeta.model_validate({"id": "a"}),
+        "# A\n",
+        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+    )
+    cache.finalize({"docs/a.md"})
+    written = _load_written(tmp_path)
+    assert written.roots[-1] == str(tmp_path.resolve())
+    assert "docs/a.md" in written.entries
+
+
+def test_fully_warm_same_root_run_writes_nothing(tmp_path: Path):
+    text = "---\nid: a\n---\n# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    # Prime the cache with a real run.
+    first = _open(tmp_path)
+    first.record_miss(
+        "docs/a.md",
+        doc,
+        text.encode(),
+        NodeMeta.model_validate({"id": "a"}),
+        "# A\n",
+        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+    )
+    first.finalize({"docs/a.md"})
+    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
+    before = path.read_bytes()
+    mtime_before = path.stat().st_mtime_ns
+    # A second warm run from the same root: verify-tier hit, no changes, no write.
+    second = _open(tmp_path)
+    assert isinstance(second.lookup("docs/a.md", doc), CacheHit)
+    second.finalize({"docs/a.md"})
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime_before
+
+
+def test_presence_reclamation_drops_entry_no_root_claims(tmp_path: Path):
+    cache = _open(tmp_path)
+    cache._entries["docs/old.md"] = Entry(
+        file_sha256="a" * 64,
+        stats={cache._current_root: StatRecord(size=1, mtime_ns=1)},
+        node=None,
+    )
+    cache.finalize(set())  # nothing discovered this run
+    written = _load_written(tmp_path)
+    assert "docs/old.md" not in written.entries
+
+
+def test_presence_reclamation_keeps_entry_a_second_root_claims(tmp_path: Path):
+    cache = _open(tmp_path)
+    other_root = "/some/other/root"
+    cache._roots.append(other_root)
+    cache._entries["docs/shared.md"] = Entry(
+        file_sha256="a" * 64,
+        stats={
+            cache._current_root: StatRecord(size=1, mtime_ns=1),
+            other_root: StatRecord(size=1, mtime_ns=1),
+        },
+        node=None,
+    )
+    cache.finalize(set())  # this root did not discover it, but the other root still claims it
+    written = _load_written(tmp_path)
+    assert "docs/shared.md" in written.entries
+    assert cache._current_root not in written.entries["docs/shared.md"].stats
+    assert other_root in written.entries["docs/shared.md"].stats
+
+
+def test_ledger_evicts_over_cap_head_roots_and_scrubs_their_stats(tmp_path: Path):
+    cache = _open(tmp_path)
+    # Fill the ledger with MAX_STAT_ROOTS old roots plus an entry they all claim.
+    old_roots = [f"/root/{i}" for i in range(MAX_STAT_ROOTS)]
+    cache._roots.extend(old_roots)
+    cache._entries["docs/x.md"] = Entry(
+        file_sha256="a" * 64,
+        stats={r: StatRecord(size=1, mtime_ns=1) for r in old_roots}
+        | {cache._current_root: StatRecord(size=1, mtime_ns=1)},
+        node=None,
+    )
+    cache.finalize({"docs/x.md"})
+    written = _load_written(tmp_path)
+    assert len(written.roots) == MAX_STAT_ROOTS
+    assert old_roots[0] not in written.roots  # head evicted
+    assert old_roots[0] not in written.entries["docs/x.md"].stats  # its stat scrubbed
+
+
+def test_finalize_write_failure_emits_one_stderr_line_and_does_not_raise(
+    tmp_path, capsys, monkeypatch
+):
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
+    cache = _open(tmp_path)
+    cache.record_miss(
+        "docs/a.md",
+        doc,
+        b"---\nid: a\n---\n# A\n",
+        NodeMeta.model_validate({"id": "a"}),
+        "# A\n",
+        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+    )
+    import game_lattice.cache as cache_module  # noqa: PLC0415
+
+    def _boom(*args, **kwargs):  # noqa: ARG001
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cache_module.os, "replace", _boom)
+    cache.finalize({"docs/a.md"})  # must not raise
+    captured = capsys.readouterr()
+    assert captured.err.count("\n") == 1
+    assert "cache" in captured.err.lower()
+    # No partial file left behind.
+    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
+    leftovers = list(path.parent.glob("*.tmp"))
+    assert leftovers == []

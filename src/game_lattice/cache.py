@@ -8,6 +8,9 @@ behalf: a read failure yields an empty cache and a write failure emits one stder
 
 import hashlib
 import json
+import os
+import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import __version__
-from .constants import CACHE_FILE_NAME, CACHE_VERSION
+from .constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
 from .discovery import read_doc_bytes
 from .model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
@@ -294,6 +297,85 @@ class LoadCache:
         self._entries[rel_key] = Entry(
             file_sha256=hashlib.sha256(data).hexdigest(), stats=stats, node=node
         )
+
+    def finalize(self, discovered: set[str]) -> None:
+        """Reclaim, bound, and persist the cache after a successful load.
+
+        Moves the current root to the ledger tail, withdraws its claim on files it did not
+        discover this run, evicts over-cap head roots and scrubs their stats, drops entries no
+        live root claims, and writes atomically only if the serialized cache changed.
+
+        Args:
+            discovered: The set of entry keys (POSIX paths relative to the project root) seen
+                this run.
+        """
+        self._touch_current_root()
+        self._withdraw_undiscovered_claims(discovered)
+        self._evict_over_cap_roots()
+        self._drop_unclaimed_entries()
+        final = CacheFile(
+            version=CACHE_VERSION,
+            tool_version=__version__,
+            roots=self._roots,
+            entries=self._entries,
+        )
+        if final.model_dump(mode="json") == self._original:
+            return
+        self._write(final)
+
+    def _touch_current_root(self) -> None:
+        """Move the current root to the ledger tail (most recently used)."""
+        if self._current_root in self._roots:
+            self._roots.remove(self._current_root)
+        self._roots.append(self._current_root)
+
+    def _withdraw_undiscovered_claims(self, discovered: set[str]) -> None:
+        """Remove the current root's stat key from every entry it did not discover this run."""
+        for rel_key, entry in self._entries.items():
+            if rel_key not in discovered:
+                entry.stats.pop(self._current_root, None)
+
+    def _evict_over_cap_roots(self) -> None:
+        """Evict head roots beyond MAX_STAT_ROOTS and scrub their keys from every entry."""
+        if len(self._roots) <= MAX_STAT_ROOTS:
+            return
+        evicted = set(self._roots[:-MAX_STAT_ROOTS])
+        self._roots = self._roots[-MAX_STAT_ROOTS:]
+        for entry in self._entries.values():
+            for root in evicted:
+                entry.stats.pop(root, None)
+
+    def _drop_unclaimed_entries(self) -> None:
+        """Drop any entry whose stats map is empty (no live root claims it)."""
+        self._entries = {key: entry for key, entry in self._entries.items() if entry.stats}
+
+    def _write(self, cache_file: CacheFile) -> None:
+        """Atomically replace the cache file, emitting one stderr diagnostic on failure.
+
+        Writes through a temp file in the same directory, fsyncs, then ``os.replace``. Any
+        OSError (unwritable directory, failed write or replace) is reported on stderr with a
+        single line and swallowed, so a broken cache never changes a command's result or exit
+        code. The temp file is always removed.
+        """
+        text = cache_file.model_dump_json()
+        tmp: Path | None = None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self._path.parent, prefix=CACHE_FILE_NAME, suffix=".tmp"
+            )
+            tmp = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._path)  # noqa: PTH105 (tests monkeypatch os.replace directly)
+            tmp = None
+        except OSError as exc:
+            sys.stderr.write(f"game-lattice: could not write load cache at {self._path}: {exc}\n")
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _read(path: Path) -> CacheFile | None:
