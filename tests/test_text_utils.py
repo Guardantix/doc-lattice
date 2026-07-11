@@ -3,7 +3,7 @@
 from hypothesis import given
 from hypothesis import strategies as st
 
-from game_lattice.text_utils import strip_control_chars
+from doc_lattice.text_utils import strip_control_chars
 
 
 def test_strips_escape_and_controls():

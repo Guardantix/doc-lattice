@@ -2,7 +2,7 @@
 
 import pytest
 
-from game_lattice.error_types import (
+from doc_lattice.error_types import (
     BrokenRefError,
     ConfigError,
     DuplicateIdError,

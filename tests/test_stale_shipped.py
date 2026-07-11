@@ -7,22 +7,22 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from game_lattice.check import check_lattice
-from game_lattice.constants import VALID_LINEAR_STATE_TYPES, VALID_SEVERITIES
-from game_lattice.error_types import ValidationError
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
-from game_lattice.stale_shipped import (
+from doc_lattice.check import check_lattice
+from doc_lattice.constants import VALID_LINEAR_STATE_TYPES, VALID_SEVERITIES
+from doc_lattice.error_types import ValidationError
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.stale_shipped import (
     _SEVERITY_RANK,
     _STATE_SEVERITY,
     build_audit_trigger,
     build_from_trigger,
     stale_shipped,
 )
-from game_lattice.tickets import Ticket, TicketState
+from doc_lattice.tickets import Ticket, TicketState
 
 if TYPE_CHECKING:
-    from game_lattice.constants import BlockedReason, LinearStateType
+    from doc_lattice.constants import BlockedReason, LinearStateType
 
 
 # A wrong seen hash, differing from the real content hash, that forces a STALE edge.

@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.discovery import (
+from doc_lattice.discovery import (
     decode_doc,
     discover_doc_paths,
     read_doc,
     read_doc_bytes,
     read_doc_bytes_and_stat,
 )
-from game_lattice.error_types import UnreadableDocError
+from doc_lattice.error_types import UnreadableDocError
 
 
 def test_discovers_markdown_sorted(tmp_path: Path):
@@ -168,7 +168,7 @@ def test_decode_doc_translates_universal_newlines_like_read_text(tmp_path: Path)
 def test_decode_doc_lone_cr_frontmatter_is_still_parsed(tmp_path: Path):
     # Regression: a lone-CR document with valid frontmatter must not be dropped. Without newline
     # translation, split_frontmatter sees one line and never matches the opening fence.
-    from game_lattice.frontmatter_parser import parse_meta, split_frontmatter  # noqa: PLC0415
+    from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter  # noqa: PLC0415
 
     doc = tmp_path / "cr.md"
     raw = b"---\rid: cr-node\r---\r# Body\r"

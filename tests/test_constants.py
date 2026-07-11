@@ -2,7 +2,7 @@
 
 from typing import get_args
 
-from game_lattice.constants import (
+from doc_lattice.constants import (
     AUTHORITY_LADDER,
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,

@@ -4,8 +4,8 @@
 import sys
 from pathlib import Path
 
-from game_lattice import __version__
-from game_lattice.version_check import check_version_consistency
+from doc_lattice import __version__
+from doc_lattice.version_check import check_version_consistency
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 

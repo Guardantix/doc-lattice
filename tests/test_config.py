@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-import game_lattice.config as config_module
-from game_lattice.config import load_config
-from game_lattice.error_types import ConfigError
+import doc_lattice.config as config_module
+from doc_lattice.config import load_config
+from doc_lattice.error_types import ConfigError
 
 
 def test_absent_config_uses_defaults(tmp_path: Path):

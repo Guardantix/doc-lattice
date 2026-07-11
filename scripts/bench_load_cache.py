@@ -13,8 +13,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from game_lattice.config import load_config
-from game_lattice.orchestrate import load_lattice
+from doc_lattice.config import load_config
+from doc_lattice.orchestrate import load_lattice
 
 _HEADINGS_PER_DOC = 6
 _EDGES_PER_DOC = 3

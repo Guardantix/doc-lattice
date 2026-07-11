@@ -3,12 +3,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/game_lattice"]
+packages = ["src/doc_lattice"]
 
 [project]
-name = "game-lattice"
+name = "doc-lattice"
 version = "0.8.0"
-description = "Traceability engine for game design and production documentation"
+description = "Traceability engine for design and production documentation"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
@@ -34,23 +34,23 @@ dev = [
 ]
 
 [project.scripts]
-game-lattice = "game_lattice.cli:main"
+doc-lattice = "doc_lattice.cli:main"
 
 # --- urls start ---
 [project.urls]
-Homepage = "https://github.com/Guardantix/game-lattice"
+Homepage = "https://github.com/Guardantix/doc-lattice"
 # --- urls end ---
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
-    "--cov=game_lattice", "--cov-branch", "--cov-report=term-missing",
+    "--cov=doc_lattice", "--cov-branch", "--cov-report=term-missing",
     "--strict-markers", "--strict-config", "-ra",
 ]
 
 [tool.coverage.run]
-source = ["src/game_lattice"]
+source = ["src/doc_lattice"]
 branch = true
 
 [tool.coverage.report]

@@ -78,7 +78,7 @@ def check_version_consistency(
     """Return a message for each version source that disagrees with init_version.
 
     Args:
-        init_version: The canonical package version, ``game_lattice.__version__``.
+        init_version: The canonical package version, ``doc_lattice.__version__``.
         pyproject_text: The full text of ``pyproject.toml``.
         changelog_text: The full text of ``CHANGELOG.md``.
         readme_text: The full text of ``README.md``.
@@ -96,7 +96,7 @@ def check_version_consistency(
     if pyproject_version != init_version:
         messages.append(
             f"pyproject.toml version is {pyproject_version!r}, expected {init_version!r}; "
-            f"set [project] version to match game_lattice.__version__."
+            f"set [project] version to match doc_lattice.__version__."
         )
     changelog_version = _changelog_version(changelog_text)
     if changelog_version != init_version:

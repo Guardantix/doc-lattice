@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from game_lattice.datetime_utils import utc_now
+from doc_lattice.datetime_utils import utc_now
 
 
 def test_utc_now_is_aware():

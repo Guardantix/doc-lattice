@@ -4,11 +4,11 @@ import ast
 import inspect
 from pathlib import Path
 
-from game_lattice import error_types
-from game_lattice.constants import VALID_AUTHORITIES, VALID_STATUSES
-from game_lattice.error_types import ProjectError
+from doc_lattice import error_types
+from doc_lattice.constants import VALID_AUTHORITIES, VALID_STATUSES
+from doc_lattice.error_types import ProjectError
 
-SRC_DIR = Path(__file__).parent.parent / "src" / "game_lattice"
+SRC_DIR = Path(__file__).parent.parent / "src" / "doc_lattice"
 
 
 def _source_files() -> list[Path]:

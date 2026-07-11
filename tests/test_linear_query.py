@@ -2,8 +2,8 @@
 
 import pytest
 
-from game_lattice.error_types import ConfigError, LinearError
-from game_lattice.linear_query import (
+from doc_lattice.error_types import ConfigError, LinearError
+from doc_lattice.linear_query import (
     BATCH_SIZE,
     MAX_IDENTIFIERS,
     build_query,

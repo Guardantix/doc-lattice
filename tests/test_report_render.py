@@ -6,11 +6,11 @@ from typing import get_args
 
 from rich.console import Console
 
-from game_lattice.check import EdgeStatus
-from game_lattice.constants import EdgeState
-from game_lattice.lint import LadderViolation, LintResult, SkippedEdge
-from game_lattice.model import Node, TargetId
-from game_lattice.report_render import (
+from doc_lattice.check import EdgeStatus
+from doc_lattice.constants import EdgeState
+from doc_lattice.lint import LadderViolation, LintResult, SkippedEdge
+from doc_lattice.model import Node, TargetId
+from doc_lattice.report_render import (
     _STATE_COLORS,
     render_impact,
     render_lint,

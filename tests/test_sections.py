@@ -2,8 +2,8 @@
 
 import pytest
 
-import game_lattice.sections as sections_module
-from game_lattice.sections import (
+import doc_lattice.sections as sections_module
+from doc_lattice.sections import (
     anchor_ids,
     build_toc,
     github_slug,

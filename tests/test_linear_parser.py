@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from game_lattice.error_types import LinearError
-from game_lattice.linear_parser import parse_tickets
+from doc_lattice.error_types import LinearError
+from doc_lattice.linear_parser import parse_tickets
 
 
 def _issue(identifier="PC-1", state_type="completed", number=1):

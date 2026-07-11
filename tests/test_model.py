@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from game_lattice.model import (
+from doc_lattice.model import (
     Edge,
     Lattice,
     Location,

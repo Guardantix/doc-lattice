@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from game_lattice.constants import LinearStateType
-from game_lattice.tickets import Finding, Ticket, TicketRef, TicketState
+from doc_lattice.constants import LinearStateType
+from doc_lattice.tickets import Finding, Ticket, TicketRef, TicketState
 
 
 def _state(type_: LinearStateType = "completed") -> TicketState:

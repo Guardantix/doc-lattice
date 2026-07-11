@@ -12,15 +12,15 @@ from rich.console import Console
 from rich.text import Text
 from typer.testing import CliRunner
 
-import game_lattice.cli as cli_mod
-from game_lattice import __version__
-from game_lattice.cli import (
+import doc_lattice.cli as cli_mod
+from doc_lattice import __version__
+from doc_lattice.cli import (
     _escape_github_message,
     _escape_github_property,
     app,
 )
-from game_lattice.error_types import ConfigError
-from game_lattice.tickets import Ticket, TicketState
+from doc_lattice.error_types import ConfigError
+from doc_lattice.tickets import Ticket, TicketState
 
 runner = CliRunner()
 
@@ -88,7 +88,7 @@ def _run_cli_subprocess(argv: list[str], env: dict[str, str]) -> subprocess.Comp
     script = (
         "import sys\n"
         f"sys.argv = {argv!r}\n"
-        "from game_lattice.cli import main\n"
+        "from doc_lattice.cli import main\n"
         "try:\n    main()\nexcept SystemExit:\n    pass\n"
     )
     return subprocess.run(  # noqa: S603 - fixed argv and generated script, no untrusted input
@@ -1123,7 +1123,7 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
 
 
 def test_init_bakes_flag_values(tmp_path: Path, monkeypatch):
-    from game_lattice.config import load_config  # noqa: PLC0415
+    from doc_lattice.config import load_config  # noqa: PLC0415
 
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(

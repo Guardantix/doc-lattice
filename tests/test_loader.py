@@ -6,10 +6,10 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-import game_lattice.loader as loader_module
-from game_lattice.error_types import DuplicateIdError
-from game_lattice.loader import _line_count, _record_ancestors, build_lattice, derive_file_sections
-from game_lattice.model import (
+import doc_lattice.loader as loader_module
+from doc_lattice.error_types import DuplicateIdError
+from doc_lattice.loader import _line_count, _record_ancestors, build_lattice, derive_file_sections
+from doc_lattice.model import (
     FileSections,
     NodeMeta,
     ParsedDoc,
@@ -17,7 +17,7 @@ from game_lattice.model import (
     SectionRecord,
     TargetId,
 )
-from game_lattice.sections import anchor_ids, build_toc, section_span
+from doc_lattice.sections import anchor_ids, build_toc, section_span
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:

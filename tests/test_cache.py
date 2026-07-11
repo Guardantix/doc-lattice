@@ -10,8 +10,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from game_lattice import __version__
-from game_lattice.cache import (
+from doc_lattice import __version__
+from doc_lattice.cache import (
     CacheFile,
     CacheHit,
     CacheMiss,
@@ -23,12 +23,12 @@ from game_lattice.cache import (
     cache_home,
     cache_path,
 )
-from game_lattice.check import check_lattice, statuses_json
-from game_lattice.config import load_config
-from game_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
-from game_lattice.error_types import UnreadableDocError
-from game_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
-from game_lattice.orchestrate import load_lattice
+from doc_lattice.check import check_lattice, statuses_json
+from doc_lattice.config import load_config
+from doc_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
+from doc_lattice.error_types import UnreadableDocError
+from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
+from doc_lattice.orchestrate import load_lattice
 
 
 def _sample_cache_file() -> CacheFile:
@@ -361,7 +361,7 @@ def test_verify_hit_stat_refresh_uses_the_stat_captured_with_the_read(tmp_path: 
         st_size=real_st.st_size + 1000, st_mtime_ns=real_st.st_mtime_ns + 999_999_999
     )
 
-    import game_lattice.cache as cache_module  # noqa: PLC0415
+    import doc_lattice.cache as cache_module  # noqa: PLC0415
 
     monkeypatch.setattr(cache_module, "read_doc_bytes_and_stat", lambda _p: (real_bytes, sentinel))
 
@@ -389,7 +389,7 @@ def test_miss_carries_and_records_the_stat_captured_with_the_read(tmp_path: Path
         st_size=real_st.st_size + 2000, st_mtime_ns=real_st.st_mtime_ns + 888_888_888
     )
 
-    import game_lattice.cache as cache_module  # noqa: PLC0415
+    import doc_lattice.cache as cache_module  # noqa: PLC0415
 
     monkeypatch.setattr(cache_module, "read_doc_bytes_and_stat", lambda _p: (real_bytes, sentinel))
 
@@ -560,7 +560,7 @@ def test_finalize_write_failure_emits_one_stderr_line_and_does_not_raise(
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
         doc.stat(),
     )
-    import game_lattice.cache as cache_module  # noqa: PLC0415
+    import doc_lattice.cache as cache_module  # noqa: PLC0415
 
     def _boom(*args, **kwargs):  # noqa: ARG001
         raise OSError("disk full")
@@ -593,7 +593,7 @@ def test_finalize_write_failure_does_not_raise_when_temp_cleanup_also_fails(
         FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
         doc.stat(),
     )
-    import game_lattice.cache as cache_module  # noqa: PLC0415
+    import doc_lattice.cache as cache_module  # noqa: PLC0415
 
     def _boom_replace(*args, **kwargs):  # noqa: ARG001
         raise OSError("disk full")

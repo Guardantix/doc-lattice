@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-from game_lattice.check import EdgeStatus, check_lattice, has_drift, statuses_json
-from game_lattice.config import load_config
-from game_lattice.hashing import content_hash
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
-from game_lattice.orchestrate import load_lattice
-from game_lattice.resolve import target_content
-from game_lattice.sections import build_toc, section_span, section_text
+from doc_lattice.check import EdgeStatus, check_lattice, has_drift, statuses_json
+from doc_lattice.config import load_config
+from doc_lattice.hashing import content_hash
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.orchestrate import load_lattice
+from doc_lattice.resolve import target_content
+from doc_lattice.sections import build_toc, section_span, section_text
 
 
 def test_statuses_json_returns_exact_payload_shape():
@@ -143,7 +143,7 @@ def test_check_memoizes_shared_target_hash(monkeypatch):
         calls += 1
         return content_hash(content)
 
-    monkeypatch.setattr("game_lattice.resolve.content_hash", counting_content_hash)
+    monkeypatch.setattr("doc_lattice.resolve.content_hash", counting_content_hash)
 
     statuses = check_lattice(lattice)
     target_id = TargetId("up", "sec")

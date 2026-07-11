@@ -5,8 +5,8 @@ import urllib.error
 
 import pytest
 
-from game_lattice.error_types import LinearError
-from game_lattice.linear_client import MAX_ATTEMPTS, LinearClient
+from doc_lattice.error_types import LinearError
+from doc_lattice.linear_client import MAX_ATTEMPTS, LinearClient
 
 
 class _FakeResp(io.BytesIO):
@@ -159,7 +159,7 @@ def test_read_timeout_maps_to_linear_error(monkeypatch):
 
 def test_oversized_response_raises(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
-    from game_lattice.linear_client import MAX_RESPONSE_BYTES  # noqa: PLC0415
+    from doc_lattice.linear_client import MAX_RESPONSE_BYTES  # noqa: PLC0415
 
     opener = _FakeOpener(b"x" * (MAX_RESPONSE_BYTES + 1))
     with pytest.raises(LinearError):
@@ -168,7 +168,7 @@ def test_oversized_response_raises(monkeypatch):
 
 def test_response_exactly_at_cap_is_accepted(monkeypatch):
     monkeypatch.setenv("LINEAR_API_KEY", "secret-key")
-    from game_lattice.linear_client import MAX_RESPONSE_BYTES  # noqa: PLC0415
+    from doc_lattice.linear_client import MAX_RESPONSE_BYTES  # noqa: PLC0415
 
     body = b"x" * MAX_RESPONSE_BYTES
     out = LinearClient(opener=_FakeOpener(body)).execute("query {}", {})
@@ -176,14 +176,14 @@ def test_response_exactly_at_cap_is_accepted(monkeypatch):
 
 
 def test_no_redirect_handler_returns_none():
-    from game_lattice.linear_client import _NoRedirect  # noqa: PLC0415
+    from doc_lattice.linear_client import _NoRedirect  # noqa: PLC0415
 
     handler = _NoRedirect()
     assert handler.redirect_request(None, None, 302, "Found", {}, "http://evil") is None
 
 
 def test_default_opener_installs_no_redirect_handler():
-    from game_lattice.linear_client import _NoRedirect  # noqa: PLC0415
+    from doc_lattice.linear_client import _NoRedirect  # noqa: PLC0415
 
     client = LinearClient()  # no opener -> default build_opener(_NoRedirect)
     assert any(isinstance(h, _NoRedirect) for h in client._opener.handlers)  # type: ignore

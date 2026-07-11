@@ -8,14 +8,14 @@ from hypothesis import given
 from hypothesis import strategies as st
 from rich.console import Console
 
-from game_lattice.constants import VALID_SEVERITIES
-from game_lattice.linear_render import (
+from doc_lattice.constants import VALID_SEVERITIES
+from doc_lattice.linear_render import (
     _SEVERITY_COLORS,
     findings_json,
     render_findings,
     render_safe,
 )
-from game_lattice.tickets import Finding, Ticket, TicketState
+from doc_lattice.tickets import Finding, Ticket, TicketState
 
 
 def _ticket():

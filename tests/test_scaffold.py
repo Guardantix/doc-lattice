@@ -7,8 +7,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 from ruamel.yaml import YAML
 
-from game_lattice.config import Config
-from game_lattice.scaffold import (
+from doc_lattice.config import Config
+from doc_lattice.scaffold import (
     GAME_LATTICE_REPO_URL,
     build_scaffold,
     render_config,

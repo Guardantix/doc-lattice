@@ -76,7 +76,7 @@ jobs:
       - name: Determine target tag
         id: target
         run: |
-          version="$(uv run --no-sync python -c 'import game_lattice; print(game_lattice.__version__)')"
+          version="$(uv run --no-sync python -c 'import doc_lattice; print(doc_lattice.__version__)')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
@@ -88,7 +88,7 @@ jobs:
         run: |
           git fetch --tags --force
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            tagged="$(git show "${TAG}:src/game_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
+            tagged="$(git show "${TAG}:src/doc_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
             if [ "${tagged}" = "${VERSION}" ]; then
               echo "Tag ${TAG} already exists at version ${VERSION}; no-op."
               echo "proceed=false" >> "$GITHUB_OUTPUT"

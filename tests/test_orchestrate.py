@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice import orchestrate
-from game_lattice.cache import cache_path
-from game_lattice.config import load_config
-from game_lattice.error_types import ConfigError, DuplicateIdError, UnreadableDocError
-from game_lattice.model import TargetId
-from game_lattice.orchestrate import load_lattice
+from doc_lattice import orchestrate
+from doc_lattice.cache import cache_path
+from doc_lattice.config import load_config
+from doc_lattice.error_types import ConfigError, DuplicateIdError, UnreadableDocError
+from doc_lattice.model import TargetId
+from doc_lattice.orchestrate import load_lattice
 
 
 def test_load_lattice_from_dir(lattice_dir: Path):

@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
-from game_lattice.render import to_dot, to_json, to_mermaid
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.render import to_dot, to_json, to_mermaid
 
 
 def _lattice():

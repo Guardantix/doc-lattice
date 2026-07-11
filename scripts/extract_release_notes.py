@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from game_lattice.version_check import changelog_section
+from doc_lattice.version_check import changelog_section
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 

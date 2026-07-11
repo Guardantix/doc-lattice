@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.error_types import ValidationError
-from game_lattice.impact import expand_targets, impact, impact_json
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.error_types import ValidationError
+from doc_lattice.impact import expand_targets, impact, impact_json
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:

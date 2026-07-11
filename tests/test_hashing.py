@@ -3,7 +3,7 @@
 from hypothesis import given
 from hypothesis import strategies as st
 
-from game_lattice.hashing import canonicalize, content_hash
+from doc_lattice.hashing import canonicalize, content_hash
 
 
 def test_canonicalize_strips_trailing_ws_and_blank_edges():

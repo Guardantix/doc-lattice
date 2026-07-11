@@ -4,19 +4,19 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.check import check_lattice
-from game_lattice.config import load_config
-from game_lattice.error_types import (
+from doc_lattice.check import check_lattice
+from doc_lattice.config import load_config
+from doc_lattice.error_types import (
     BrokenRefError,
     ProjectError,
     UnreadableDocError,
     ValidationError,
 )
-from game_lattice.hashing import content_hash
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge
-from game_lattice.orchestrate import load_lattice
-from game_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
+from doc_lattice.hashing import content_hash
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.orchestrate import load_lattice
+from doc_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
 
 
 def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
@@ -234,7 +234,7 @@ def test_reconcile_all_memoizes_shared_target_hash(monkeypatch):
         calls += 1
         return content_hash(content)
 
-    monkeypatch.setattr("game_lattice.resolve.content_hash", counting_content_hash)
+    monkeypatch.setattr("doc_lattice.resolve.content_hash", counting_content_hash)
 
     plan = reconcile(lattice, "", ref=None, reconcile_all=True)
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from game_lattice.path_utils import safe_resolve
+from doc_lattice.path_utils import safe_resolve
 
 
 def test_safe_resolve_within_root(tmp_path):

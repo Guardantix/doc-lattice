@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from game_lattice.error_types import BrokenRefError
-from game_lattice.hashing import content_hash
-from game_lattice.loader import build_lattice
-from game_lattice.model import Lattice, Location, Node, NodeMeta, ParsedDoc, TargetId
-from game_lattice.resolve import cached_target_hash, node_for_path, target_content
+from doc_lattice.error_types import BrokenRefError
+from doc_lattice.hashing import content_hash
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import Lattice, Location, Node, NodeMeta, ParsedDoc, TargetId
+from doc_lattice.resolve import cached_target_hash, node_for_path, target_content
 
 
 def _lattice() -> Lattice:
@@ -63,7 +63,7 @@ def test_cached_target_hash_hashes_each_target_once(monkeypatch: pytest.MonkeyPa
         calls += 1
         return content_hash(content)
 
-    monkeypatch.setattr("game_lattice.resolve.content_hash", counting_content_hash)
+    monkeypatch.setattr("doc_lattice.resolve.content_hash", counting_content_hash)
 
     lattice = _lattice()
     cache: dict[TargetId, str] = {}

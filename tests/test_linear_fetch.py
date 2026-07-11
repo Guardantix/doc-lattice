@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from game_lattice.error_types import LinearError
-from game_lattice.linear_fetch import fetch_tickets
+from doc_lattice.error_types import LinearError
+from doc_lattice.linear_fetch import fetch_tickets
 
 
 class _RecordingClient:
@@ -50,7 +50,7 @@ def test_empty_identifiers_skip_network(monkeypatch):
     def explode(*_args, **_kwargs):
         raise AssertionError("must not construct a client")
 
-    monkeypatch.setattr("game_lattice.linear_fetch.LinearClient", explode)
+    monkeypatch.setattr("doc_lattice.linear_fetch.LinearClient", explode)
     tickets, rejected = fetch_tickets(["not-a-ticket"], None)
     assert tickets == {}
     assert rejected == {"not-a-ticket": "malformed"}
@@ -87,7 +87,7 @@ def test_cross_team_rejected_before_fetch():
 
 def test_chunks_merge(monkeypatch):
     # When the batch size is 1, two ids in the same team require two requests whose results merge.
-    monkeypatch.setattr("game_lattice.linear_fetch.BATCH_SIZE", 1)
+    monkeypatch.setattr("doc_lattice.linear_fetch.BATCH_SIZE", 1)
     client = _RecordingClient(_echo_issues)
     tickets, _ = fetch_tickets(["PC-1", "PC-2"], None, client=client)  # type: ignore
     assert set(tickets) == {"PC-1", "PC-2"}
@@ -107,7 +107,7 @@ def test_default_client_constructed_and_used(monkeypatch):
             self.calls += 1
             return _echo_issues(variables)
 
-    monkeypatch.setattr("game_lattice.linear_fetch.LinearClient", _FakeClient)
+    monkeypatch.setattr("doc_lattice.linear_fetch.LinearClient", _FakeClient)
     tickets, rejected = fetch_tickets(["PC-1"], None)  # no client kwarg
     assert len(built) == 1
     assert built[0].calls == 1
@@ -129,7 +129,7 @@ def test_transport_error_propagates():
 
 def test_malformed_body_propagates_and_aborts(monkeypatch):
     # First chunk parses fine; the second returns a GraphQL errors envelope -> whole fetch fails.
-    monkeypatch.setattr("game_lattice.linear_fetch.BATCH_SIZE", 1)
+    monkeypatch.setattr("doc_lattice.linear_fetch.BATCH_SIZE", 1)
     bodies = iter([_connection([_issue("PC-1", 1)]), '{"errors": [{"message": "boom"}]}'])
     client = _RecordingClient(lambda _v: next(bodies))
     with pytest.raises(LinearError) as exc:
@@ -139,7 +139,7 @@ def test_malformed_body_propagates_and_aborts(monkeypatch):
 
 def test_each_chunk_carries_exactly_its_numbers(monkeypatch):
     # With batch size 1, each request must carry exactly one of the two same-team numbers.
-    monkeypatch.setattr("game_lattice.linear_fetch.BATCH_SIZE", 1)
+    monkeypatch.setattr("doc_lattice.linear_fetch.BATCH_SIZE", 1)
     client = _RecordingClient(_echo_issues)
     fetch_tickets(["PC-1", "PC-2"], None, client=client)  # type: ignore
     assert [v["team"] for v in client.seen_vars] == ["PC", "PC"]

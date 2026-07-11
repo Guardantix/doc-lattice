@@ -1,6 +1,6 @@
 """Tests for version_check."""
 
-from game_lattice.version_check import changelog_section, check_version_consistency
+from doc_lattice.version_check import changelog_section, check_version_consistency
 
 _PYPROJECT = '[project]\nname = "game-lattice"\nversion = "0.4.0"\n'
 _CHANGELOG = "# Changelog\n\n## [0.4.0] - 2026-07-01\n\n### Added\n\n- thing\n"

@@ -5,16 +5,16 @@ from pathlib import Path
 from hypothesis import given
 from hypothesis import strategies as st
 
-from game_lattice.constants import AUTHORITY_LADDER
-from game_lattice.lint import (
+from doc_lattice.constants import AUTHORITY_LADDER
+from doc_lattice.lint import (
     LadderViolation,
     LintResult,
     SkippedEdge,
     lint_json,
     lint_lattice,
 )
-from game_lattice.loader import build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
 
 
 def _doc(id_, authority=None, derives=(), body="x\n"):

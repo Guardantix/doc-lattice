@@ -6,9 +6,9 @@ import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
-import game_lattice.frontmatter_parser as frontmatter_parser_module
-from game_lattice.error_types import ConfigError, UnreadableDocError
-from game_lattice.frontmatter_parser import parse_meta, split_frontmatter
+import doc_lattice.frontmatter_parser as frontmatter_parser_module
+from doc_lattice.error_types import ConfigError, UnreadableDocError
+from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
