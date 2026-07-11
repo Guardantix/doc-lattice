@@ -4,8 +4,42 @@ import warnings
 from collections import defaultdict
 
 from .error_types import DuplicateIdError
-from .model import Edge, Lattice, Location, Node, ParsedDoc, TargetId, parse_ref
-from .sections import Heading, anchor_ids, build_toc, section_span, split_body_lines
+from .model import (
+    Edge,
+    FileSections,
+    Lattice,
+    Location,
+    Node,
+    ParsedDoc,
+    SectionRecord,
+    TargetId,
+    parse_ref,
+)
+from .sections import anchor_ids, build_toc, section_span, split_body_lines
+
+
+def derive_file_sections(body: str) -> FileSections:
+    """Derive a document's total line count and anchored section spans.
+
+    This is the single derivation the load cache stores and replays: the TOC, its
+    de-duped anchor ids, and each heading's inclusive line span, so ``build_lattice``
+    consumes the same values whether it derives them or reads them from the cache.
+
+    Args:
+        body: The verbatim document body after the frontmatter fence.
+
+    Returns:
+        A FileSections with the 1-based total line count and one SectionRecord per
+        heading, in document order.
+    """
+    total_lines = _line_count(body)
+    toc = build_toc(body)
+    records = tuple(
+        SectionRecord(anchor=anchor, start=span[0], end=span[1])
+        for i, anchor in enumerate(anchor_ids(toc))
+        for span in (section_span(toc, i, total_lines),)
+    )
+    return FileSections(total_lines=total_lines, sections=records)
 
 
 def build_lattice(docs: list[ParsedDoc]) -> Lattice:
@@ -27,7 +61,8 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
 
     for doc in docs:
         file_id = doc.meta.id
-        total_lines = _line_count(doc.body)
+        file_sections = doc.sections if doc.sections is not None else derive_file_sections(doc.body)
+        total_lines = file_sections.total_lines
         _register(
             TargetId(file_id),
             Location(path=doc.path, kind="file", span=(1, total_lines)),
@@ -35,14 +70,13 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             sources,
             f"file {doc.path}",
         )
-        toc = build_toc(doc.body)
-        anchored: list[tuple[int, Heading, TargetId]] = []
+        anchored: list[TargetId] = []
         spans: dict[TargetId, tuple[int, int]] = {}
-        for i, (head, anchor) in enumerate(zip(toc, anchor_ids(toc), strict=True)):
-            tid = TargetId(file_id, anchor)
-            span = section_span(toc, i, total_lines)
+        for record in file_sections.sections:
+            tid = TargetId(file_id, record.anchor)
+            span = (record.start, record.end)
             spans[tid] = span
-            anchored.append((i, head, tid))
+            anchored.append(tid)
             _register(
                 tid,
                 Location(path=doc.path, kind="section", span=span),
@@ -143,7 +177,7 @@ def _register(
 
 
 def _record_ancestors(
-    anchored: list[tuple[int, Heading, TargetId]],
+    anchored: list[TargetId],
     spans: dict[TargetId, tuple[int, int]],
     ancestors: dict[TargetId, tuple[TargetId, ...]],
 ) -> None:
@@ -159,7 +193,7 @@ def _record_ancestors(
     set, bottom-to-top being outermost-to-innermost.
     """
     stack: list[tuple[int, TargetId]] = []
-    for _, _head, anchor in anchored:
+    for anchor in anchored:
         _start, end = spans[anchor]
         while stack and stack[-1][0] < end:
             stack.pop()

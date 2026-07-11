@@ -3,18 +3,61 @@
 from pathlib import Path
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import game_lattice.loader as loader_module
 from game_lattice.error_types import DuplicateIdError
-from game_lattice.loader import _line_count, _record_ancestors, build_lattice
-from game_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
-from game_lattice.sections import Heading, anchor_ids, build_toc, section_span
+from game_lattice.loader import _line_count, _record_ancestors, build_lattice, derive_file_sections
+from game_lattice.model import (
+    FileSections,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    SectionRecord,
+    TargetId,
+)
+from game_lattice.sections import anchor_ids, build_toc, section_span
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:
     return ParsedDoc(path=Path(path), meta=NodeMeta(**meta), body=body)
+
+
+def _meta(node_id: str) -> NodeMeta:
+    return NodeMeta.model_validate({"id": node_id})
+
+
+def test_derive_file_sections_matches_inline_derivation():
+    body = "# Top {#top}\n\n## Accent {#accent}\naccent body\n\n## Motion\nmotion body\n"
+    fs = derive_file_sections(body)
+    assert isinstance(fs, FileSections)
+    assert fs.total_lines == 7
+    anchors = [rec.anchor for rec in fs.sections]
+    assert anchors == ["top", "accent", "motion"]
+    accent = next(rec for rec in fs.sections if rec.anchor == "accent")
+    assert (accent.start, accent.end) == (3, 5)
+
+
+def test_build_lattice_uses_supplied_sections_equal_to_derived():
+    body = "# Top {#top}\n\n## Accent {#accent}\naccent body\n\n## Motion\nmotion body\n"
+    derived = ParsedDoc(path=Path("docs/a.md"), meta=_meta("a"), body=body)
+    supplied = ParsedDoc(
+        path=Path("docs/a.md"), meta=_meta("a"), body=body, sections=derive_file_sections(body)
+    )
+    from_derived = build_lattice([derived])
+    from_supplied = build_lattice([supplied])
+    assert from_derived == from_supplied
+
+
+def test_supplied_sections_survive_a_within_file_anchor_clash():
+    # A marker equal to a computed slug must still raise DuplicateIdError from cached sections.
+    body = "# Accent {#accent}\n\n## Accent\n"
+    doc = ParsedDoc(
+        path=Path("docs/a.md"), meta=_meta("a"), body=body, sections=derive_file_sections(body)
+    )
+    with pytest.raises(DuplicateIdError):
+        build_lattice([doc])
 
 
 def test_registers_file_and_anchor_ids():
@@ -271,7 +314,7 @@ def _span_width_reference(span_and_id: tuple[tuple[int, int], TargetId]) -> int:
 
 
 def _record_ancestors_reference(
-    anchored: list[tuple[int, Heading, TargetId]],
+    anchored: list[TargetId],
     spans: dict[TargetId, tuple[int, int]],
 ) -> dict[TargetId, tuple[TargetId, ...]]:
     """Verbatim copy of the pre-issue-26 quadratic ancestor computation.
@@ -279,10 +322,10 @@ def _record_ancestors_reference(
     Kept as the oracle the stack-pass implementation must match on every generated case.
     """
     ancestors: dict[TargetId, tuple[TargetId, ...]] = {}
-    for _, _head, anchor in anchored:
+    for anchor in anchored:
         start, end = spans[anchor]
         containing: list[tuple[tuple[int, int], TargetId]] = []
-        for _, _other, oid in anchored:
+        for oid in anchored:
             if oid == anchor:
                 continue
             ostart, oend = spans[oid]
@@ -296,7 +339,7 @@ def _record_ancestors_reference(
 
 def _build_anchored_and_spans(
     levels: list[int],
-) -> tuple[list[tuple[int, Heading, TargetId]], dict[TargetId, tuple[int, int]]]:
+) -> tuple[list[TargetId], dict[TargetId, tuple[int, int]]]:
     """Build real ``anchored``/``spans`` from a list of heading levels.
 
     Renders a markdown body (one heading per level, each followed by a content line), then
@@ -310,12 +353,12 @@ def _build_anchored_and_spans(
     body = "\n".join(body_lines) + "\n"
     toc = build_toc(body)
     total_lines = _line_count(body)
-    anchored: list[tuple[int, Heading, TargetId]] = []
+    anchored: list[TargetId] = []
     spans: dict[TargetId, tuple[int, int]] = {}
-    for i, (head, anchor) in enumerate(zip(toc, anchor_ids(toc), strict=True)):
+    for i, anchor in enumerate(anchor_ids(toc)):
         tid = TargetId("f", anchor)
         spans[tid] = section_span(toc, i, total_lines)
-        anchored.append((i, head, tid))
+        anchored.append(tid)
     return anchored, spans
 
 
@@ -344,3 +387,35 @@ def test_ancestors_stack_pass_matches_reference_fixed_cases(levels: list[int]) -
 @given(st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=60))
 def test_ancestors_stack_pass_matches_reference_generated(levels: list[int]) -> None:
     _assert_matches_reference(levels)
+
+
+# --- FileSections cache serialization round-trip (load cache seam) -----------------------
+
+
+@st.composite
+def _markdown_body(draw) -> str:
+    lines = draw(
+        st.lists(
+            st.one_of(
+                st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40),
+                st.builds(
+                    lambda n, t: "#" * n + " " + t, st.integers(1, 6), st.text("abc ", max_size=10)
+                ),
+            ),
+            max_size=25,
+        )
+    )
+    return "\n".join(lines)
+
+
+@settings(max_examples=200)
+@given(_markdown_body())
+def test_file_sections_survive_serialization_round_trip(body: str):
+    # A FileSections rebuilt from its plain (anchor, start, end) tuples equals the original,
+    # which is exactly what the cache stores and reloads.
+    original = derive_file_sections(body)
+    rebuilt = FileSections(
+        total_lines=original.total_lines,
+        sections=tuple(SectionRecord(r.anchor, r.start, r.end) for r in original.sections),
+    )
+    assert rebuilt == original
