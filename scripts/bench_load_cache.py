@@ -3,9 +3,8 @@
 
 Generates a synthetic corpus at 1k and 5k docs and reports the median of 5 runs of
 load_lattice wall time in four states: uncached, cold cache (including the write), warm
-verify tier, and warm stat tier. Also reports the cache file size and the share of warm-run
-time spent in json.loads. Acceptance: warm verify tier is at least 3x faster than uncached at
-5k docs.
+verify tier, and warm stat tier. Also reports the cache file size. Acceptance: warm verify
+tier is at least 3x faster than uncached at 5k docs.
 """
 
 import os

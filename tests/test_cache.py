@@ -82,6 +82,11 @@ def test_cache_home_falls_back_to_home_dot_cache_when_xdg_unset():
     assert home == Path("/home/u/.cache")
 
 
+def test_cache_home_falls_back_to_home_cache_dir_when_home_and_xdg_unset():
+    home = cache_home({})
+    assert home == Path.home() / ".cache"
+
+
 def test_cache_path_composes_slot_and_file_name():
     path = cache_path("my-docs", {"XDG_CACHE_HOME": "/c", "HOME": "/home/u"})
     assert path == Path("/c") / "game-lattice" / "my-docs" / CACHE_FILE_NAME
