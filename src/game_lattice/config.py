@@ -1,9 +1,10 @@
 """Load and validate .game-lattice.yml, with project-root containment of docs_roots."""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -12,6 +13,11 @@ from .path_utils import safe_resolve
 
 DEFAULT_CONFIG_NAME = ".game-lattice.yml"
 _YAML = YAML(typ="safe")
+
+# A cache_key is one safe path segment: it must start with an alphanumeric (rejecting ".",
+# "..", and hidden-directory names) and thereafter allow only word, dot, and hyphen, so it can
+# never express a separator or a traversal. Length capped at 64 characters total.
+_CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class Config(BaseModel):
@@ -23,6 +29,31 @@ class Config(BaseModel):
     ignore_globs: list[str] = Field(default_factory=list)
     linear_team: str | None = None
     binding_layers: list[str] | None = None
+    cache_key: str | None = None
+    cache_trust_stat: bool = False
+
+    @field_validator("cache_key")
+    @classmethod
+    def _validate_cache_key(cls, value: str | None) -> str | None:
+        """Reject a cache_key that is not a single safe path segment."""
+        if value is not None and _CACHE_KEY_RE.fullmatch(value) is None:
+            msg = (
+                f"cache_key {value!r} must be one safe path segment matching "
+                r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (no separators or traversal)"
+            )
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _trust_stat_requires_cache_key(self) -> "Config":
+        """Setting cache_trust_stat without cache_key is a configuration error."""
+        if self.cache_trust_stat and self.cache_key is None:
+            msg = (
+                "cache_trust_stat requires cache_key to be set; set cache_key or remove "
+                "cache_trust_stat"
+            )
+            raise ValueError(msg)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
