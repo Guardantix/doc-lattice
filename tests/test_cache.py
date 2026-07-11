@@ -1,5 +1,6 @@
 """Tests for the opt-in incremental load cache."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import pytest
 from game_lattice import __version__
 from game_lattice.cache import (
     CacheFile,
+    CacheHit,
+    CacheMiss,
     Entry,
     LoadCache,
     NodePayload,
@@ -17,7 +20,8 @@ from game_lattice.cache import (
     cache_path,
 )
 from game_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION
-from game_lattice.model import NodeMeta
+from game_lattice.error_types import UnreadableDocError
+from game_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
 
 def _sample_cache_file() -> CacheFile:
@@ -149,3 +153,166 @@ def test_open_invalid_meta_is_empty(tmp_path: Path):
     payload["entries"]["docs/a.md"]["node"]["meta"]["id"] = "bad#id"  # '#' is rejected by NodeMeta
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert _open(tmp_path).is_empty
+
+
+def _doc_bytes(text: str) -> bytes:
+    return text.encode("utf-8")
+
+
+def _entry_for(text: str, root: str, *, node: NodePayload | None) -> Entry:
+    return Entry(
+        file_sha256=hashlib.sha256(_doc_bytes(text)).hexdigest(),
+        stats={root: StatRecord(size=len(_doc_bytes(text)), mtime_ns=0)},
+        node=node,
+    )
+
+
+def test_verify_tier_hit_reconstructs_parsed_doc(tmp_path: Path):
+    text = "---\nid: a\n---\n# A {#a-top}\nbody\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    cache = _open(tmp_path)
+    node = NodePayload(
+        meta=NodeMeta.model_validate({"id": "a"}),
+        body="# A {#a-top}\nbody\n",
+        total_lines=2,
+        sections=[SectionRecordModel(anchor="a-top", start=1, end=2)],
+    )
+    cache._entries["docs/a.md"] = _entry_for(text, cache._current_root, node=node)
+    result = cache.lookup("docs/a.md", doc)
+    assert isinstance(result, CacheHit)
+    assert isinstance(result.doc, ParsedDoc)
+    assert result.doc.meta.id == "a"
+    assert result.doc.sections == FileSections(
+        total_lines=2, sections=(SectionRecord("a-top", 1, 2),)
+    )
+
+
+def test_verify_tier_non_node_hit_returns_none_doc(tmp_path: Path):
+    text = "# plain\n"
+    doc = tmp_path / "docs" / "plain.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    cache = _open(tmp_path)
+    cache._entries["docs/plain.md"] = _entry_for(text, cache._current_root, node=None)
+    result = cache.lookup("docs/plain.md", doc)
+    assert isinstance(result, CacheHit)
+    assert result.doc is None
+
+
+def test_content_change_is_a_miss_carrying_current_bytes(tmp_path: Path):
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("changed\n", encoding="utf-8")
+    cache = _open(tmp_path)
+    cache._entries["docs/a.md"] = _entry_for("original\n", cache._current_root, node=None)
+    result = cache.lookup("docs/a.md", doc)
+    assert isinstance(result, CacheMiss)
+    assert result.data == b"changed\n"
+
+
+def test_absent_entry_is_a_miss(tmp_path: Path):
+    doc = tmp_path / "docs" / "new.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("new\n", encoding="utf-8")
+    cache = _open(tmp_path)
+    result = cache.lookup("docs/new.md", doc)
+    assert isinstance(result, CacheMiss)
+
+
+def test_stat_tier_hit_skips_reading_the_file(tmp_path: Path):
+    text = "# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    st = doc.stat()
+    cache = _open(tmp_path, trust_stat=True)
+    entry = Entry(
+        file_sha256="deadbeef" * 8,  # deliberately wrong; stat tier must not hash
+        stats={cache._current_root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)},
+        node=None,
+    )
+    cache._entries["docs/a.md"] = entry
+    result = cache.lookup("docs/a.md", doc)
+    assert isinstance(result, CacheHit)
+    assert result.doc is None
+
+
+def test_stat_tier_disabled_without_trust_stat_falls_to_verify(tmp_path: Path):
+    text = "# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    st = doc.stat()
+    cache = _open(tmp_path, trust_stat=False)
+    cache._entries["docs/a.md"] = Entry(
+        file_sha256="deadbeef" * 8,  # wrong hash; verify tier will miss
+        stats={cache._current_root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)},
+        node=None,
+    )
+    result = cache.lookup("docs/a.md", doc)
+    assert isinstance(result, CacheMiss)
+
+
+def test_require_verified_disables_stat_tier(tmp_path: Path):
+    text = "# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    st = doc.stat()
+    cache = _open(tmp_path, trust_stat=True, require_verified=True)
+    cache._entries["docs/a.md"] = Entry(
+        file_sha256="deadbeef" * 8,
+        stats={cache._current_root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)},
+        node=None,
+    )
+    assert isinstance(cache.lookup("docs/a.md", doc), CacheMiss)
+
+
+def test_lookup_deleted_file_raises_unreadable(tmp_path: Path):
+    doc = tmp_path / "docs" / "gone.md"
+    cache = _open(tmp_path, trust_stat=True)
+    cache._entries["docs/gone.md"] = Entry(
+        file_sha256="a" * 64,
+        stats={cache._current_root: StatRecord(size=1, mtime_ns=1)},
+        node=None,
+    )
+    with pytest.raises(UnreadableDocError):
+        cache.lookup("docs/gone.md", doc)
+
+
+def test_record_miss_resets_stats_to_current_root(tmp_path: Path):
+    text = "---\nid: a\n---\n# A\n"
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    cache = _open(tmp_path)
+    cache._entries["docs/a.md"] = Entry(
+        file_sha256="old" + "0" * 61,
+        stats={"/some/other/root": StatRecord(size=1, mtime_ns=1)},
+        node=None,
+    )
+    cache.record_miss(
+        "docs/a.md",
+        doc,
+        _doc_bytes(text),
+        NodeMeta.model_validate({"id": "a"}),
+        "# A\n",
+        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
+    )
+    entry = cache._entries["docs/a.md"]
+    assert entry.file_sha256 == hashlib.sha256(_doc_bytes(text)).hexdigest()
+    assert set(entry.stats) == {cache._current_root}
+    assert entry.node is not None
+    assert entry.node.meta.id == "a"
+
+
+def test_record_miss_non_node_stores_null_node(tmp_path: Path):
+    text = "# plain\n"
+    doc = tmp_path / "docs" / "plain.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(text, encoding="utf-8")
+    cache = _open(tmp_path)
+    cache.record_miss("docs/plain.md", doc, _doc_bytes(text), None, text, None)
+    assert cache._entries["docs/plain.md"].node is None

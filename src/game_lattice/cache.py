@@ -6,15 +6,18 @@ and verify-tier hits, and writes atomically after a successful load. It never ra
 behalf: a read failure yields an empty cache and a write failure emits one stderr diagnostic.
 """
 
+import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import __version__
 from .constants import CACHE_FILE_NAME, CACHE_VERSION
-from .model import NodeMeta
+from .discovery import read_doc_bytes
+from .model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
 
 class StatRecord(BaseModel):
@@ -99,6 +102,20 @@ def cache_path(cache_key: str, env: Mapping[str, str]) -> Path:
     return cache_home(env) / "game-lattice" / cache_key / CACHE_FILE_NAME
 
 
+@dataclass(frozen=True, slots=True)
+class CacheHit:
+    """A tier hit. ``doc`` is the reconstructed ParsedDoc, or None for a cached non-node."""
+
+    doc: ParsedDoc | None
+
+
+@dataclass(frozen=True, slots=True)
+class CacheMiss:
+    """A miss. ``data`` is the raw bytes already read, for the caller to decode and parse."""
+
+    data: bytes
+
+
 class LoadCache:
     """Mutable in-memory cache state for one load run, backed by a single JSON file.
 
@@ -174,6 +191,108 @@ class LoadCache:
             entries=entries,
             roots=roots,
             original=original,
+        )
+
+    def lookup(self, rel_key: str, path: Path) -> CacheHit | CacheMiss:
+        """Resolve one discovered file through the stat and verify tiers.
+
+        Args:
+            rel_key: The file's POSIX path relative to the project root (the entry key).
+            path: The absolute path to the file on disk.
+
+        Returns:
+            A CacheHit reusing the cached derivation, or a CacheMiss carrying the freshly
+            read bytes when the entry is absent, drifted, or unverifiable.
+
+        Raises:
+            UnreadableDocError: If the file cannot be read or stat-ed, with the same message
+                an uncached read would produce.
+        """
+        entry = self._entries.get(rel_key)
+        if entry is not None and self._trust_stat:
+            hit = self._stat_tier(entry, path)
+            if hit is not None:
+                return hit
+        data = read_doc_bytes(path)
+        if entry is not None and entry.file_sha256 == hashlib.sha256(data).hexdigest():
+            self._refresh_stat(entry, path)
+            return CacheHit(doc=self._reconstruct(entry, path))
+        return CacheMiss(data=data)
+
+    def _stat_tier(self, entry: Entry, path: Path) -> CacheHit | None:
+        """Return a CacheHit if the current root's stat hint matches, else None."""
+        record = entry.stats.get(self._current_root)
+        if record is None:
+            return None
+        try:
+            st = path.stat()
+        except OSError as exc:
+            from .discovery import _unreadable  # noqa: PLC0415
+
+            raise _unreadable(path, exc) from exc
+        if record.size != st.st_size or record.mtime_ns != st.st_mtime_ns:
+            return None
+        return CacheHit(doc=self._reconstruct(entry, path))
+
+    def _refresh_stat(self, entry: Entry, path: Path) -> None:
+        """Insert or refresh the current root's stat hint on a verify-tier hit (best-effort)."""
+        try:
+            st = path.stat()
+        except OSError:
+            return
+        entry.stats[self._current_root] = StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
+
+    @staticmethod
+    def _reconstruct(entry: Entry, path: Path) -> ParsedDoc | None:
+        """Rebuild a ParsedDoc from a cached node payload, or None for a cached non-node."""
+        node = entry.node
+        if node is None:
+            return None
+        sections = FileSections(
+            total_lines=node.total_lines,
+            sections=tuple(SectionRecord(r.anchor, r.start, r.end) for r in node.sections),
+        )
+        return ParsedDoc(path=path, meta=node.meta, body=node.body, sections=sections)
+
+    def record_miss(  # noqa: PLR0913
+        self,
+        rel_key: str,
+        path: Path,
+        data: bytes,
+        meta: NodeMeta | None,
+        body: str,
+        sections: FileSections | None,
+    ) -> None:
+        """Replace an entry from a fresh parse: new hash, stats reset to the current root.
+
+        Args:
+            rel_key: The entry key (POSIX path relative to the project root).
+            path: The absolute file path, stat-ed for the fresh stat hint.
+            data: The raw file bytes hashed for ``file_sha256``.
+            meta: The validated NodeMeta, or None for a discovered non-node file.
+            body: The verbatim body (unused when ``meta`` is None).
+            sections: The pre-derived sections (present when ``meta`` is not None).
+        """
+        node: NodePayload | None = None
+        if meta is not None and sections is not None:
+            node = NodePayload(
+                meta=meta,
+                body=body,
+                total_lines=sections.total_lines,
+                sections=[
+                    SectionRecordModel(anchor=r.anchor, start=r.start, end=r.end)
+                    for r in sections.sections
+                ],
+            )
+        stats: dict[str, StatRecord] = {}
+        try:
+            st = path.stat()
+        except OSError:
+            pass
+        else:
+            stats[self._current_root] = StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
+        self._entries[rel_key] = Entry(
+            file_sha256=hashlib.sha256(data).hexdigest(), stats=stats, node=node
         )
 
     @staticmethod
