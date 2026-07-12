@@ -61,6 +61,11 @@ jobs:
     needs: [code-quality, tests, security-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      create_tag: ${{ steps.gate.outputs.create_tag }}
+      version: ${{ steps.target.outputs.version }}
+      tag: ${{ steps.target.outputs.tag }}
     permissions:
       contents: write
     steps:
@@ -89,15 +94,22 @@ jobs:
           git fetch --tags --force
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             tagged="$(git show "${TAG}:src/doc_lattice/__init__.py" | sed -n 's/^__version__ = "\(.*\)"/\1/p')"
-            if [ "${tagged}" = "${VERSION}" ]; then
-              echo "Tag ${TAG} already exists at version ${VERSION}; no-op."
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "::error::Tag ${TAG} exists but points at version '${tagged}', not ${VERSION}."
+            tagged_sha="$(git rev-list -n 1 "${TAG}")"
+            if [ "${tagged}" != "${VERSION}" ]; then
+              echo "::error::Tag ${TAG} points at version '${tagged}', not ${VERSION}."
               exit 1
+            elif [ "${tagged_sha}" = "${GITHUB_SHA}" ]; then
+              echo "Tag ${TAG} already identifies this commit; retrying release work."
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              echo "create_tag=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Tag ${TAG} already exists at version ${VERSION}; ordinary no-op."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              echo "create_tag=false" >> "$GITHUB_OUTPUT"
             fi
           else
             echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "create_tag=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Re-assert version sync
@@ -115,7 +127,7 @@ jobs:
           ( cd "${workdir}" && uvx --python 3.13 --from "${ref}" doc-lattice init )
 
       - name: Create and push the tag
-        if: steps.gate.outputs.proceed == 'true'
+        if: steps.gate.outputs.create_tag == 'true'
         env:
           TAG: ${{ steps.target.outputs.tag }}
         run: |
@@ -129,8 +141,12 @@ jobs:
           VERSION: ${{ steps.target.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          uv run --no-sync python scripts/extract_release_notes.py "${VERSION}" > release-notes.md
-          gh release create "${TAG}" --title "${TAG}" --notes-file release-notes.md --verify-tag
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} already exists; leaving it unchanged."
+          else
+            uv run --no-sync python scripts/extract_release_notes.py "${VERSION}" > release-notes.md
+            gh release create "${TAG}" --title "${TAG}" --notes-file release-notes.md --verify-tag
+          fi
 
       - name: Confirm pinned ref resolves
         if: steps.gate.outputs.proceed == 'true'
@@ -138,3 +154,25 @@ jobs:
           TAG: ${{ steps.target.outputs.tag }}
         run: |
           uvx --python 3.13 --from "git+https://github.com/Guardantix/doc-lattice@${TAG}" doc-lattice --version
+
+  publish:
+    name: Publish to PyPI
+    needs: release
+    if: needs.release.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Build distributions
+        run: uv build
+      - name: Validate distributions
+        run: uvx --from twine twine check dist/*
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
