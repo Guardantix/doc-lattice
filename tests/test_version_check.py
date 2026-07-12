@@ -4,10 +4,7 @@ from doc_lattice.version_check import changelog_section, check_version_consisten
 
 _PYPROJECT = '[project]\nname = "doc-lattice"\nversion = "0.4.0"\n'
 _CHANGELOG = "# Changelog\n\n## [0.4.0] - 2026-07-01\n\n### Added\n\n- thing\n"
-_README = (
-    "# doc-lattice\n\n"
-    "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.4.0 doc-lattice --help\n"
-)
+_README = "# doc-lattice\n\nuvx --from doc-lattice==0.4.0 doc-lattice --help\n"
 
 
 def test_all_sources_agree_returns_empty():
@@ -57,7 +54,7 @@ def test_first_version_heading_wins_over_later_ones():
     # Make pyproject agree with 0.3.0 so ONLY the changelog can disagree; if the
     # function wrongly picked the bottom heading (0.3.0), this would be [].
     pyproject_030 = '[project]\nname = "doc-lattice"\nversion = "0.3.0"\n'
-    readme_030 = "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.3.0 doc-lattice\n"
+    readme_030 = "uvx --from doc-lattice==0.3.0 doc-lattice\n"
     messages = check_version_consistency("0.3.0", pyproject_030, changelog, readme_030)
     assert len(messages) == 1
     assert "CHANGELOG.md" in messages[0]
@@ -100,13 +97,18 @@ def test_changelog_without_version_heading_is_a_mismatch():
     assert "CHANGELOG.md" in messages[0]
 
 
-def test_readme_pin_matches_is_consistent():
+def test_readme_pypi_pin_matches_is_consistent():
+    readme = "uvx --from doc-lattice==0.4.0 doc-lattice\n"
+    assert check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, readme) == []
+
+
+def test_readme_tagged_git_pin_matches_is_consistent():
     readme = "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.4.0 doc-lattice\n"
     assert check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, readme) == []
 
 
-def test_readme_stale_pin_is_reported():
-    readme = "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.3.0 doc-lattice\n"
+def test_readme_stale_pypi_pin_is_reported():
+    readme = "uvx --from doc-lattice==0.3.0 doc-lattice\n"
     messages = check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, readme)
     assert len(messages) == 1
     assert "README.md" in messages[0]
@@ -114,10 +116,19 @@ def test_readme_stale_pin_is_reported():
     assert "0.4.0" in messages[0]
 
 
-def test_readme_two_occurrences_of_same_stale_version_yield_one_message():
+def test_readme_stale_tagged_git_pin_is_reported():
+    readme = "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.3.0 doc-lattice\n"
+    messages = check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, readme)
+    assert len(messages) == 1
+    assert "README.md" in messages[0]
+    assert "0.3.0" in messages[0]
+
+
+def test_readme_duplicate_stale_version_across_pin_syntaxes_yields_one_message():
     readme = (
-        "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.3.0 doc-lattice init\n"
-        "uvx --from git+https://github.com/Guardantix/doc-lattice@v0.3.0 doc-lattice --help\n"
+        "uvx --from doc-lattice==0.3.0 doc-lattice init\n"
+        "uvx --from git+https://github.com/Guardantix/"
+        "doc-lattice@v0.3.0 doc-lattice --help\n"
     )
     messages = check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, readme)
     assert len(messages) == 1

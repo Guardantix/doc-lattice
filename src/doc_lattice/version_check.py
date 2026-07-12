@@ -4,7 +4,7 @@ import re
 import tomllib
 
 _VERSION_HEADING = re.compile(r"^##\s*\[(?P<version>\d+\.\d+\.\d+)\]", re.MULTILINE)
-_PINNED_REF = re.compile(r"doc-lattice@v(?P<version>\d+\.\d+\.\d+)")
+_PINNED_REF = re.compile(r"doc-lattice(?:==|@v)(?P<version>\d+\.\d+\.\d+)")
 _ANY_HEADING = re.compile(r"^##\s*\[", re.MULTILINE)
 
 
@@ -87,9 +87,9 @@ def check_version_consistency(
         One message per disagreeing source, naming the file and the expected value.
         An empty list means every source matches ``init_version``. A source that
         cannot be parsed is reported as a mismatch rather than raising. Each distinct
-        stale ``doc-lattice@vX.Y.Z`` pin found in the README produces one message,
-        no matter how many times that stale version occurs; a README with no pinned
-        refs is consistent.
+        stale ``doc-lattice==X.Y.Z`` or ``doc-lattice@vX.Y.Z`` pin found in the
+        README produces one message, no matter how many times that stale version
+        occurs; a README with no pinned refs is consistent.
     """
     messages: list[str] = []
     pyproject_version = _pyproject_version(pyproject_text)
@@ -106,7 +106,7 @@ def check_version_consistency(
         )
     for stale_version in _stale_pinned_refs(readme_text, init_version):
         messages.append(
-            f"README.md pins doc-lattice@v{stale_version}, expected v{init_version}; "
-            f"update the pinned install refs."
+            f"README.md pins doc-lattice version {stale_version}, "
+            f"expected {init_version}; update the pinned install refs."
         )
     return messages
