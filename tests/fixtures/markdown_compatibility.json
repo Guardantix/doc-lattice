@@ -77,5 +77,14 @@
     ],
     "anchor_ids": ["top-level"],
     "spans": [[6, 6]]
+  },
+  {
+    "name": "four_space_fence_is_indented_code",
+    "body": "    ```\n# Visible\n    ```\n",
+    "headings": [
+      {"level": 1, "text": "Visible", "anchor": null, "line": 2}
+    ],
+    "anchor_ids": ["visible"],
+    "spans": [[2, 3]]
   }
 ]

@@ -2,14 +2,18 @@
 
 The supported Markdown subset is top-level, column-zero ATX headings plus CommonMark
 backtick and tilde fences. ``markdown-it-py==4.2.0`` owns heading and fence recognition;
-the line-skip fallback only avoids building tokens for content doc-lattice does not use.
+the local state adapter builds only the source maps those rules require.
 """
 
 import re
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_block import fence as parse_fence
+from markdown_it.rules_block import heading as parse_heading
 from markdown_it.rules_block.state_block import StateBlock
+from markdown_it.token import Token
+from markdown_it.utils import EnvType
 
 from ._github_slugger_data import SLUG_STRIP_PATTERN
 from .hashing import normalize_newlines
@@ -19,6 +23,7 @@ SLUG_COMPAT_VERSION = "github-slugger@2.0.0"
 
 _ANCHOR_RE = re.compile(r"(?:^|\s+)\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}(?:\s*$|\s+(?=#+\s*$))")
 _SLUG_STRIP_RE = re.compile(SLUG_STRIP_PATTERN)
+_HEADING_TOKEN_COUNT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,21 +36,69 @@ class Heading:
     line: int
 
 
-def _skip_line(state: StateBlock, start_line: int, _end_line: int, silent: bool) -> bool:
-    if not silent:
-        state.line = start_line + 1
-    return True
+class _SourceMapState(StateBlock):
+    """Minimal line-map state for markdown-it-py's pinned block rules.
+
+    ``StateBlock`` scans every source character to support every CommonMark container.
+    Doc-lattice supports only top-level ATX headings and fences, so this adapter builds
+    the same fields by scanning line starts and indentation only. Recognition stays in
+    markdown-it-py's unmodified ``heading`` and ``fence`` rules.
+    """
+
+    def __init__(self, src: str, md: MarkdownIt, env: EnvType, tokens: list[Token]) -> None:
+        self.src = src
+        self.md = md
+        self.env = env
+        self.tokens = tokens
+        self.bMarks: list[int] = []
+        self.eMarks: list[int] = []
+        self.tShift: list[int] = []
+        self.sCount: list[int] = []
+        self.bsCount: list[int] = []
+        self.blkIndent = 0
+        self.line = 0
+        self.lineMax = 0
+        self.tight = False
+        self.ddIndent = -1
+        self.listIndent = -1
+        self.parentType = "root"
+        self.level = 0
+        self.result = ""
+
+        source_lines = src.split("\n")
+        if source_lines and source_lines[-1] == "":
+            source_lines.pop()
+        start = 0
+        for source_line in source_lines:
+            indent = 0
+            expanded_indent = 0
+            for character in source_line:
+                if character not in (" ", "\t"):
+                    break
+                indent += 1
+                if character == "\t":
+                    expanded_indent += 4 - expanded_indent % 4
+                else:
+                    expanded_indent += 1
+            end = start + len(source_line)
+            self.bMarks.append(start)
+            self.eMarks.append(end)
+            self.tShift.append(indent)
+            self.sCount.append(expanded_indent)
+            self.bsCount.append(0)
+            start = end + 1
+
+        length = len(src)
+        self.bMarks.append(length)
+        self.eMarks.append(length)
+        self.tShift.append(0)
+        self.sCount.append(0)
+        self.bsCount.append(0)
+        self.lineMax = len(self.bMarks) - 1
+        self._code_enabled = True
 
 
-def _make_parser() -> MarkdownIt:
-    parser = MarkdownIt("zero")
-    parser.core.ruler.enableOnly(["normalize", "block"])
-    parser.block.ruler.enableOnly(["fence", "heading", "paragraph"])
-    parser.block.ruler.at("paragraph", _skip_line)
-    return parser
-
-
-_PARSER = _make_parser()
+_PARSER = MarkdownIt("commonmark")
 
 
 def extract_headings(body: str) -> list[Heading]:
@@ -61,31 +114,44 @@ def extract_headings(body: str) -> list[Heading]:
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
     """
-    normalized = normalize_newlines(body)
-    lines = normalized.split("\n")
-    tokens = _PARSER.parse(normalized)
+    normalized = normalize_newlines(body).replace("\0", "\ufffd")
+    tokens: list[Token] = []
+    state = _SourceMapState(normalized, _PARSER, {}, tokens)
     headings: list[Heading] = []
-    for index, token in enumerate(tokens):
-        if token.type != "heading_open" or token.level != 0:
+    line = 0
+    while line < state.lineMax:
+        position = state.bMarks[line] + state.tShift[line]
+        if position >= state.eMarks[line]:
+            line += 1
             continue
-        if not token.markup or set(token.markup) != {"#"} or token.map is None:
+        marker = state.src[position]
+        if marker in ("`", "~") and parse_fence(state, line, state.lineMax, False):
+            line = state.line
+            tokens.clear()
             continue
-        source_line = token.map[0]
-        if source_line >= len(lines) or not lines[source_line].startswith("#"):
+        if marker != "#" or not parse_heading(state, line, state.lineMax, False):
+            line += 1
             continue
-        if index + 1 >= len(tokens) or tokens[index + 1].type != "inline":
+        if (
+            len(tokens) != _HEADING_TOKEN_COUNT
+            or tokens[0].type != "heading_open"
+            or tokens[1].type != "inline"
+        ):
             msg = f"{MARKDOWN_COMPAT_VERSION} returned a malformed heading token pair"
             raise RuntimeError(msg)
-        text = tokens[index + 1].content
-        anchor_match = _ANCHOR_RE.search(text)
-        headings.append(
-            Heading(
-                level=len(token.markup),
-                text=text,
-                anchor=anchor_match.group(1) if anchor_match else None,
-                line=source_line + 1,
+        if state.tShift[line] == 0:
+            text = tokens[1].content
+            anchor_match = _ANCHOR_RE.search(text)
+            headings.append(
+                Heading(
+                    level=len(tokens[0].markup),
+                    text=text,
+                    anchor=anchor_match.group(1) if anchor_match else None,
+                    line=line + 1,
+                )
             )
-        )
+        line = state.line
+        tokens.clear()
     return headings
 
 
