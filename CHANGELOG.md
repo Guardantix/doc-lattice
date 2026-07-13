@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Internal: the load cache module is now a phase-separated `doc_lattice/cache/` package
+  (schema/codec, store, lookup, run state). No user-facing behavior change; the cache file
+  format is unchanged.
+
 ## [1.0.1] - 2026-07-13
 
 ### Fixed

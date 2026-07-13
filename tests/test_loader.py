@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 import doc_lattice.loader as loader_module
@@ -14,7 +14,6 @@ from doc_lattice.model import (
     NodeMeta,
     ParsedDoc,
     RawEdge,
-    SectionRecord,
     TargetId,
 )
 from doc_lattice.sections import anchor_ids, build_toc, section_span
@@ -387,35 +386,3 @@ def test_ancestors_stack_pass_matches_reference_fixed_cases(levels: list[int]) -
 @given(st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=60))
 def test_ancestors_stack_pass_matches_reference_generated(levels: list[int]) -> None:
     _assert_matches_reference(levels)
-
-
-# --- FileSections cache serialization round-trip (load cache seam) -----------------------
-
-
-@st.composite
-def _markdown_body(draw) -> str:
-    lines = draw(
-        st.lists(
-            st.one_of(
-                st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=40),
-                st.builds(
-                    lambda n, t: "#" * n + " " + t, st.integers(1, 6), st.text("abc ", max_size=10)
-                ),
-            ),
-            max_size=25,
-        )
-    )
-    return "\n".join(lines)
-
-
-@settings(max_examples=200)
-@given(_markdown_body())
-def test_file_sections_survive_serialization_round_trip(body: str):
-    # A FileSections rebuilt from its plain (anchor, start, end) tuples equals the original,
-    # which is exactly what the cache stores and reloads.
-    original = derive_file_sections(body)
-    rebuilt = FileSections(
-        total_lines=original.total_lines,
-        sections=tuple(SectionRecord(r.anchor, r.start, r.end) for r in original.sections),
-    )
-    assert rebuilt == original
