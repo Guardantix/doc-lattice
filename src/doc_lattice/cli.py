@@ -33,7 +33,7 @@ from .lint import lint_json, lint_lattice
 from .model import Lattice
 from .orchestrate import load_lattice
 from .path_utils import safe_resolve
-from .reconcile import plan_rewrites
+from .reconcile import Rewrite, plan_rewrites
 from .reconcile import reconcile as plan_reconcile
 from .render import to_dot, to_json, to_mermaid
 from .report_render import render_impact, render_lint, render_statuses
@@ -356,9 +356,6 @@ def impact(
         render_impact(_out, affected)
 
 
-Rewrite = tuple[Path, str, set[str]]
-
-
 def _reconcile_json_payload(
     plan: dict[Path, dict[str, str]], rewrites: list[Rewrite], *, dry_run: bool
 ) -> str:
@@ -375,16 +372,20 @@ def _reconcile_json_payload(
     """
     entries = sorted(
         (
-            {"path": str(path), "ref": target_ref, "new_seen": plan[path][target_ref]}
-            for path, _new_text, applied in rewrites
-            for target_ref in applied
+            {
+                "path": str(rewrite.path),
+                "ref": target_ref,
+                "new_seen": plan[rewrite.path][target_ref],
+            }
+            for rewrite in rewrites
+            for target_ref in rewrite.applied
         ),
         key=lambda entry: (entry["path"], entry["ref"]),
     )
     return json.dumps({"dry_run": dry_run, "reconciled": entries})
 
 
-def _print_reconcile_lines(path: Path, applied: set[str], *, dry_run: bool) -> None:
+def _print_reconcile_lines(path: Path, applied: frozenset[str], *, dry_run: bool) -> None:
     """Print one file's human-readable reconcile confirmation lines.
 
     Args:
@@ -438,20 +439,20 @@ def _write_and_report_reconcile(
     """
     report_progress = not dry_run and not json_out
     if not dry_run:
-        for path, new_text, applied in rewrites:
+        for rewrite in rewrites:
             try:
-                _atomic_write(write_paths[path], new_text)
+                _atomic_write(write_paths[rewrite.path], rewrite.after.decode("utf-8"))
             except OSError as exc:
-                msg = f"cannot write {path}: {exc}"
+                msg = f"cannot write {rewrite.path}: {exc}"
                 raise UnreadableDocError(msg) from exc
             if report_progress:
-                _print_reconcile_lines(path, applied, dry_run=False)
+                _print_reconcile_lines(rewrite.path, rewrite.applied, dry_run=False)
     if json_out:
         typer.echo(_reconcile_json_payload(plan, rewrites, dry_run=dry_run))
         return
     if dry_run:
-        for path, _new_text, applied in rewrites:
-            _print_reconcile_lines(path, applied, dry_run=True)
+        for rewrite in rewrites:
+            _print_reconcile_lines(rewrite.path, rewrite.applied, dry_run=True)
     if not rewrites:
         _out.print("nothing to reconcile")
 
@@ -489,7 +490,7 @@ def reconcile(  # noqa: PLR0913
         # malformed concurrent edit aborts the whole command before any mutation.
         # Computed unconditionally (even for --dry-run) so the preview reflects the
         # same fresh-read validation a real run would perform.
-        rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_text(encoding="utf-8"))
+        rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_bytes())
         # Phase 2: only after all rewrites computed cleanly, write them (skipped
         # entirely for --dry-run) and report the outcome.
         _write_and_report_reconcile(plan, rewrites, write_paths, dry_run=dry_run, json_out=json_out)

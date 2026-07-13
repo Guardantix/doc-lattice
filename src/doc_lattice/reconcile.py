@@ -3,6 +3,7 @@
 import io
 from collections import defaultdict
 from collections.abc import Callable, MutableMapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -12,6 +13,23 @@ from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
 from .model import Lattice, TargetId, parse_ref
 from .resolve import cached_target_hash
+
+
+@dataclass(frozen=True, slots=True)
+class Rewrite:
+    """Describe one exact-byte reconcile rewrite.
+
+    Attributes:
+        path: Document identity path for the rewrite.
+        before: Exact source bytes read before planning the rewrite.
+        after: UTF-8 replacement bytes with planned updates applied.
+        applied: Refs whose seen scalar changed.
+    """
+
+    path: Path
+    before: bytes
+    after: bytes
+    applied: frozenset[str]
 
 
 def reconcile(
@@ -148,34 +166,34 @@ def apply_reconcile(
 
 def plan_rewrites(
     plan: dict[Path, dict[str, str]],
-    read_text: Callable[[Path], str],
-) -> list[tuple[Path, str, set[str]]]:
-    """Compute fresh-read reconcile rewrites before any write lands.
+    read_bytes: Callable[[Path], bytes],
+) -> list[Rewrite]:
+    """Compute exact-byte fresh-read reconcile rewrites before any write lands.
 
-    The CLI passes ``lambda p: p.read_text(encoding="utf-8")`` so this pure
-    helper can validate every target file and build every rewrite before the
-    CLI starts its atomic write phase.
+    The injected reader retains the exact source bytes for later fingerprinting and
+    restoration while UTF-8 text is decoded only for ``apply_reconcile``.
 
     Args:
         plan: The planned mapping of downstream file path to ``{ref: new_seen}``.
-        read_text: Reader injected by the caller for fresh downstream file text.
+        read_bytes: Reader injected by the caller for fresh downstream file bytes.
 
     Returns:
-        Rewrite entries ``(path, new_text, applied_refs)`` for files whose fresh
-        content changed. Files whose planned updates are already applied are skipped.
+        Rewrite records for files whose fresh content changed. Files whose planned
+        updates are already applied are skipped.
 
     Raises:
         UnreadableDocError: If the injected reader cannot read a downstream file, or
             if the fresh frontmatter cannot be parsed or is malformed.
     """
-    rewrites: list[tuple[Path, str, set[str]]] = []
+    rewrites: list[Rewrite] = []
     for path, updates in plan.items():
         try:
-            fresh = read_text(path)
+            before = read_bytes(path)
+            fresh = before.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             msg = f"cannot read {path} to reconcile: {exc}"
             raise UnreadableDocError(msg) from exc
         new_text, applied = apply_reconcile(fresh, updates, path)
         if applied:
-            rewrites.append((path, new_text, applied))
+            rewrites.append(Rewrite(path, before, new_text.encode("utf-8"), frozenset(applied)))
     return rewrites
