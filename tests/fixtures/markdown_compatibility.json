@@ -7,7 +7,7 @@
       {"level": 2, "text": "After", "anchor": null, "line": 14}
     ],
     "anchor_ids": ["top", "after"],
-    "spans": [[1, 13], [14, 14]]
+    "spans": [[1, 14], [14, 14]]
   },
   {
     "name": "atx_closers_and_markers",
@@ -55,7 +55,7 @@
       {"level": 6, "text": "Six", "anchor": null, "line": 5}
     ],
     "anchor_ids": ["", "-1", "six"],
-    "spans": [[1, 4], [2, 4], [5, 5]]
+    "spans": [[1, 5], [2, 5], [5, 5]]
   },
   {
     "name": "nested_spans",

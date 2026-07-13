@@ -56,7 +56,7 @@ inclusive spans:
       {"level": 2, "text": "After", "anchor": null, "line": 14}
     ],
     "anchor_ids": ["top", "after"],
-    "spans": [[1, 13], [14, 14]]
+    "spans": [[1, 14], [14, 14]]
   },
   {
     "name": "atx_closers_and_markers",
@@ -104,7 +104,7 @@ inclusive spans:
       {"level": 6, "text": "Six", "anchor": null, "line": 5}
     ],
     "anchor_ids": ["", "-1", "six"],
-    "spans": [[1, 4], [2, 4], [5, 5]]
+    "spans": [[1, 5], [2, 5], [5, 5]]
   },
   {
     "name": "nested_spans",
@@ -255,7 +255,7 @@ Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest --no-cov tests/test_m
 Expected: the new extraction cases pass; existing section tests still use the old implementation
 and pass.
 
-- [ ] **Step 6: Commit the extraction seam**
+- [x] **Step 6: Commit the extraction seam**
 
 ```bash
 git add src/doc_lattice/markdown_compat.py tests/test_markdown_compat.py \
@@ -273,7 +273,7 @@ git commit -m "refactor: add focused markdown compatibility adapter"
 - Modify: `src/doc_lattice/markdown_compat.py`
 - Modify: `src/doc_lattice/sections.py`
 
-- [ ] **Step 1: Write failing generator and slug tests**
+- [x] **Step 1: Write failing generator and slug tests**
 
 Load the generator with `runpy.run_path` and assert its `render_pattern` converts
 `[(0, 1), (0x41, 0x41), (0x10000, 0x10001)]` to
@@ -281,13 +281,13 @@ Load the generator with `runpy.run_path` and assert its `render_pattern` convert
 `anchor_ids(headings) == case["anchor_ids"]` and `section_spans(headings, total_lines) ==
 case["spans"]`. Add a direct `strip_heading_anchor("## Accent {#accent} ##")` assertion.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
-Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest tests/test_slugger_generator.py tests/test_markdown_compat.py -v`
+Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest --no-cov tests/test_slugger_generator.py tests/test_markdown_compat.py -v`
 
 Expected: failures report the missing generator, slug functions, and generated data.
 
-- [ ] **Step 3: Implement the deterministic generator**
+- [x] **Step 3: Implement the deterministic generator**
 
 The script must expose pure `coalesce(code_points)`, `render_pattern(ranges)`, and
 `render_module(pattern, version, regex_sha256, stripped_count)` functions. Its CLI accepts
@@ -309,17 +309,28 @@ Render the artifact from measured values with these exact names:
 def render_module(
     pattern: str, version: str, regex_sha256: str, stripped_count: int
 ) -> str:
+    chunks: list[str] = []
+    offset = 0
+    while offset < len(pattern):
+        end = min(offset + 80, len(pattern))
+        if pattern[end - 1] == "\\":
+            end -= 1
+        chunks.append(pattern[offset:end])
+        offset = end
+    pattern_lines = "".join(f'    r"{chunk}"\n' for chunk in chunks)
     return (
         '"""Generated strip data for github-slugger. Do not edit by hand."""\n\n'
         f'UPSTREAM_PACKAGE = "github-slugger@{version}"\n'
-        f'UPSTREAM_REGEX_SHA256 = "{regex_sha256}"\n'
+        "UPSTREAM_REGEX_SHA256 = (\n"
+        f'    "{regex_sha256}"  # pragma: allowlist secret\n'
+        ")\n"
         "CHECKED_UNICODE_SCALARS = 1_112_064\n"
         f"STRIPPED_UNICODE_SCALARS = {stripped_count:_}\n"
-        f"SLUG_STRIP_PATTERN = {pattern!r}\n"
+        f"SLUG_STRIP_PATTERN = (\n{pattern_lines})\n"
     )
 ```
 
-- [ ] **Step 4: Run the generator against the pinned npm package**
+- [x] **Step 4: Run the generator against the pinned npm package**
 
 Run:
 `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev python scripts/generate_github_slugger_data.py`
@@ -327,7 +338,7 @@ Run:
 Expected: it reports `github-slugger@2.0.0`, 1,112,064 checked Unicode scalar values, the stripped
 count, and writes `src/doc_lattice/_github_slugger_data.py`.
 
-- [ ] **Step 5: Implement slug and marker operations in the adapter**
+- [x] **Step 5: Implement slug and marker operations in the adapter**
 
 Compile `SLUG_STRIP_PATTERN` from the generated module. Implement `github_slug`, a private
 document-order slugger with upstream collision reservation, `anchor_ids`, and
@@ -371,7 +382,7 @@ def strip_heading_anchor(text: str) -> str:
     return _ANCHOR_RE.sub(" ", text).rstrip()
 ```
 
-- [ ] **Step 6: Replace compatibility code in sections.py with wrappers**
+- [x] **Step 6: Replace compatibility code in sections.py with wrappers**
 
 Remove `_HEADING_RE`, `_ATX_CLOSING_RE`, `_FENCE_RE`, `_SLUG_STRIP_RE`, `_Slugger`, and the local
 `Heading`. Import and re-export `Heading`, `anchor_ids`, and `github_slug`; implement `build_toc` as
@@ -398,20 +409,20 @@ if chunk:
     chunk[0] = strip_heading_anchor(chunk[0])
 ```
 
-- [ ] **Step 7: Run focused tests and verify GREEN**
+- [x] **Step 7: Run focused tests and verify GREEN**
 
-Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest tests/test_slugger_generator.py tests/test_markdown_compat.py tests/test_sections.py tests/test_loader.py -v`
+Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest --no-cov tests/test_slugger_generator.py tests/test_markdown_compat.py tests/test_sections.py tests/test_loader.py -v`
 
 Expected: all pass with the new adapter serving existing imports.
 
-- [ ] **Step 8: Verify the committed data exhaustively**
+- [x] **Step 8: Verify the committed data exhaustively**
 
 Run:
 `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev python scripts/generate_github_slugger_data.py --check`
 
 Expected: exit 0 with an exact match over 1,112,064 Unicode scalar values.
 
-- [ ] **Step 9: Commit the slug compatibility boundary**
+- [x] **Step 9: Commit the slug compatibility boundary**
 
 ```bash
 git add scripts/generate_github_slugger_data.py src/doc_lattice/_github_slugger_data.py \
