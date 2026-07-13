@@ -1062,6 +1062,29 @@ def test_linear_unknown_from_exits_2(lattice_dir, monkeypatch):
     assert result.exit_code == 2
 
 
+def test_atomic_write_replace_failure_preserves_destination_and_cleans_temp(
+    tmp_path: Path, monkeypatch
+):
+    target = tmp_path / "document.md"
+    tmp = target.with_suffix(".md.tmp")
+    target.write_text("original\n", encoding="utf-8")
+    replace_error = OSError("replace failed")
+
+    def fail_replace(source: Path, destination: Path):
+        assert source == tmp
+        assert destination == target
+        assert source.read_text(encoding="utf-8") == "replacement\n"
+        raise replace_error
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed") as exc_info:
+        cli_mod._atomic_write(target, "replacement\n")
+
+    assert exc_info.value is replace_error
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert not tmp.exists()
+
+
 def test_atomic_create_writes_when_absent(tmp_path: Path):
     target = tmp_path / ".doc-lattice.yml"
     cli_mod._atomic_create(target, "hello\n")
