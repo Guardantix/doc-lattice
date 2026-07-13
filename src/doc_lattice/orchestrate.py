@@ -52,13 +52,14 @@ def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
     assert config.cache_key is not None  # noqa: S101
     path = cache_path(config.cache_key, os.environ)
     snapshot = store.load(path)
-    current_root = str(project.project_root.resolve())
+    resolved_root = project.project_root.resolve()
+    current_root = str(resolved_root)
     state = RunState.begin(snapshot.cache, current_root)
     effective_trust = config.cache_trust_stat and not require_verified
     policy = LookupPolicy(current_root=current_root, trust_stat=effective_trust)
     parsed: list[ParsedDoc] = []
     for doc_path in discover_doc_paths(project.resolved_roots, config.ignore_globs):
-        rel_key = doc_path.relative_to(project.project_root).as_posix()
+        rel_key = doc_path.relative_to(resolved_root).as_posix()
         result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
