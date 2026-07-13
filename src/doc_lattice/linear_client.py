@@ -29,6 +29,13 @@ HTTP_SERVER_ERROR_MIN = 500
 HTTP_SERVER_ERROR_MAX = 599
 
 
+def _is_retryable_http_status(status_code: int) -> bool:
+    return (
+        status_code == HTTP_TOO_MANY_REQUESTS
+        or HTTP_SERVER_ERROR_MIN <= status_code <= HTTP_SERVER_ERROR_MAX
+    )
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """A redirect handler that refuses every redirect.
 
@@ -140,9 +147,7 @@ class LinearClient:
                     # from an over-the-limit one; the len() check below rejects only the latter.
                     body = resp.read(MAX_RESPONSE_BYTES + 1)
             except urllib.error.HTTPError as exc:
-                if exc.code != HTTP_TOO_MANY_REQUESTS and not (
-                    HTTP_SERVER_ERROR_MIN <= exc.code <= HTTP_SERVER_ERROR_MAX
-                ):
+                if not _is_retryable_http_status(exc.code):
                     # A non-transient HTTP code keeps its one-shot behavior and message.
                     raise LinearError(
                         f"Linear HTTP error {exc.code}; if it is a 429 or 5xx wait and re-run, "

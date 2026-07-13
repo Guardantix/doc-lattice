@@ -284,8 +284,9 @@ class LoadCache:
             st: The stat captured alongside ``data`` (see ``read_doc_bytes_and_stat``), stored
                 as the fresh stat hint for the current root.
         """
+        has_node_payload = meta is not None and sections is not None
         node: NodePayload | None = None
-        if meta is not None and sections is not None:
+        if has_node_payload:
             node = NodePayload(
                 meta=meta,
                 body=body,
