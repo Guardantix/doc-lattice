@@ -81,10 +81,18 @@ serves the engine and never imports the loader or parser layers.
   `LookupPolicy`, `CacheHit`, and `CacheMiss`. It stats and reads docs (via
   `discovery.read_doc_bytes_and_stat`) but never touches `RunState`.
 
-- **`__init__.py`.** Re-exports the public names (`CacheHit`, `CacheMiss`, `LookupPolicy`,
-  `RunState`, `StoreSnapshot`, `cache_path`, `make_entry`), so existing imports such as
-  `from doc_lattice.cache import cache_path` in `tests/test_orchestrate.py` keep working.
-  `orchestrate` imports the `store` and `lookup` submodules directly for their functions.
+- **`__init__.py`.** Re-exports the complete surviving surface of today's `cache.py`, not just
+  what `orchestrate` needs: the five schema models (`CacheFile`, `Entry`, `NodePayload`,
+  `SectionRecordModel`, `StatRecord`), `cache_home`, `cache_path`, and the new names
+  (`CacheHit`, `CacheMiss`, `LookupPolicy`, `RunState`, `StoreSnapshot`, `make_entry`). Every
+  import of a surviving name from `doc_lattice.cache` (as in `tests/test_orchestrate.py` and
+  today's `tests/test_cache.py`) keeps working unchanged. `orchestrate` imports the `store` and
+  `lookup` submodules directly for their functions.
+
+  To be explicit about the contract: `doc_lattice.cache` is an internal module of a CLI tool
+  (no `__all__`, no documented Python API), so its import surface is not a compatibility
+  promise. The removals of `LoadCache` and `is_empty` are deliberate and get no deprecation
+  shim; every name that survives the refactor stays importable from `doc_lattice.cache`.
 
 Deletions: the `LoadCache` class, and its `is_empty` property (test-only today, no production
 caller; the new tests assert on `RunState` and `StoreSnapshot` directly). The in-method lazy
@@ -197,6 +205,10 @@ Bit-for-bit equivalences the implementation must hold:
 - No new exception types. The package stays free of `typing.Any` and `cast` (`json.loads`
   output flows straight into `model_validate` inside `store.py`), so the typing-boundary check
   passes unchanged.
+- Scope of the contract: "no user-facing behavior change" means CLI stdout, stderr, exit codes,
+  file mutations, and the cache file format. The Python import surface is internal (section 2);
+  within it, every surviving name remains importable from `doc_lattice.cache` via the facade,
+  and only `LoadCache` and `is_empty` are removed, deliberately.
 
 ## 6. Testing
 
@@ -220,7 +232,9 @@ Tests mirror the new modules as flat files, matching the repo's flat `tests/` di
   per-root stats isolation across two roots, presence reclamation across roots, error parity,
   the hypothesis edit-sequence property test, and cached-versus-uncached CLI byte-equality.
   These migrate mostly unchanged since they already exercise the flow through `orchestrate` and
-  the CLI.
+  the CLI. It also gains a facade compatibility test asserting that every surviving legacy name
+  (the five schema models, `cache_home`, `cache_path`) still imports from `doc_lattice.cache`,
+  so the per-module test migration cannot silently shrink the facade.
 
 Existing tests are migrated to the module that now owns the behavior, not duplicated. Coverage
 stays at or above the current level (99.40 percent); the pure modules should reach 100 percent
