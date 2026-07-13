@@ -47,8 +47,8 @@ def discover_doc_paths(roots: Sequence[Path], ignore_globs: Sequence[str]) -> li
 
 
 def _ignored(path: Path, root: Path, ignore_globs: Sequence[str]) -> bool:
-    rel = path.relative_to(root)
-    return any(rel.full_match(pattern) for pattern in ignore_globs)
+    relative_path = path.relative_to(root)
+    return any(relative_path.full_match(ignore_glob) for ignore_glob in ignore_globs)
 
 
 def _unreadable(path: Path, exc: OSError | UnicodeDecodeError) -> UnreadableDocError:

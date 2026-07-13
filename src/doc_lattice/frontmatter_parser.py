@@ -32,10 +32,10 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
     lines = stripped.split("\n")
     if not lines or lines[0].strip() != _FENCE:
         return None, text
-    for i in range(1, len(lines)):
-        if lines[i].strip() == _FENCE:
-            raw_meta = "\n".join(lines[1:i])
-            body = "\n".join(lines[i + 1 :])
+    for closing_fence_index, line in enumerate(lines[1:], start=1):
+        if line.strip() == _FENCE:
+            raw_meta = "\n".join(lines[1:closing_fence_index])
+            body = "\n".join(lines[closing_fence_index + 1 :])
             return raw_meta + "\n" if raw_meta else "", body
     return None, text
 

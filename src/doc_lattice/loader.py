@@ -34,12 +34,11 @@ def derive_file_sections(body: str) -> FileSections:
     """
     total_lines = _line_count(body)
     toc = build_toc(body)
-    records = tuple(
-        SectionRecord(anchor=anchor, start=span[0], end=span[1])
-        for i, anchor in enumerate(anchor_ids(toc))
-        for span in (section_span(toc, i, total_lines),)
-    )
-    return FileSections(total_lines=total_lines, sections=records)
+    records: list[SectionRecord] = []
+    for heading_index, anchor in enumerate(anchor_ids(toc)):
+        start_line, end_line = section_span(toc, heading_index, total_lines)
+        records.append(SectionRecord(anchor=anchor, start=start_line, end=end_line))
+    return FileSections(total_lines=total_lines, sections=tuple(records))
 
 
 def build_lattice(docs: list[ParsedDoc]) -> Lattice:
@@ -194,8 +193,8 @@ def _record_ancestors(
     """
     stack: list[tuple[int, TargetId]] = []
     for anchor in anchored:
-        _start, end = spans[anchor]
-        while stack and stack[-1][0] < end:
+        current_end = spans[anchor][1]
+        while stack and stack[-1][0] < current_end:
             stack.pop()
-        ancestors[anchor] = tuple(tid for _, tid in stack)
-        stack.append((end, anchor))
+        ancestors[anchor] = tuple(ancestor_id for _, ancestor_id in stack)
+        stack.append((current_end, anchor))

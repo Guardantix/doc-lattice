@@ -76,6 +76,6 @@ def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
         console: Destination console.
         affected: Affected nodes paired with their minimum impact depths.
     """
-    for node, _node_depth in affected:
+    for node, _impact_depth_not_shown in affected:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
         console.print(f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}")

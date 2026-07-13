@@ -83,14 +83,14 @@ def partition_identifiers(
         raise LinearError(msg)
     valid: list[str] = []
     rejected: dict[str, BlockedReason] = {}
-    for ref in distinct:
-        ref_team = ref.split("-", 1)[0]
-        if not _IDENTIFIER_RE.match(ref):
-            rejected[ref] = "malformed"
-        elif linear_team is not None and ref_team != linear_team:
-            rejected[ref] = "cross-team"
+    for identifier in distinct:
+        identifier_team = identifier.split("-", 1)[0]
+        if not _IDENTIFIER_RE.match(identifier):
+            rejected[identifier] = "malformed"
+        elif linear_team is not None and identifier_team != linear_team:
+            rejected[identifier] = "cross-team"
         else:
-            valid.append(ref)
+            valid.append(identifier)
     return valid, rejected
 
 
@@ -106,8 +106,8 @@ def group_by_team(identifiers: Sequence[str]) -> list[tuple[str, list[int]]]:
     """
     groups: dict[str, list[int]] = {}
     for identifier in identifiers:
-        team, num = identifier.split("-", 1)
-        groups.setdefault(team, []).append(int(num))
+        team_key, issue_number = identifier.split("-", 1)
+        groups.setdefault(team_key, []).append(int(issue_number))
     return list(groups.items())
 
 
