@@ -5,6 +5,7 @@ import pytest
 from doc_lattice.error_types import ConfigError, LinearError
 from doc_lattice.linear_query import (
     BATCH_SIZE,
+    CHILD_TICKET_LIMIT,
     MAX_IDENTIFIERS,
     build_query,
     chunk_numbers,
@@ -150,8 +151,15 @@ def test_build_query_filter_shape():
 
 def test_build_query_caps_first_at_batch_size():
     plan = build_query("PC", [1, 2])
+    issues_line = next(
+        line for line in plan.document.splitlines() if line.strip().startswith("issues(")
+    )
+    children_line = next(
+        line for line in plan.document.splitlines() if line.strip().startswith("children(")
+    )
     # first must equal BATCH_SIZE so a full chunk returns on one page (no pagination).
-    assert f"first: {BATCH_SIZE}" in plan.document
+    assert f"first: {BATCH_SIZE}" in issues_line
+    assert f"children(first: {CHILD_TICKET_LIMIT})" in children_line
 
 
 @pytest.mark.parametrize(
