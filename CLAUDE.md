@@ -5,8 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 doc-lattice is a deterministic, offline traceability engine for design and production docs.
 It parses lattice frontmatter and anchored sections from a markdown doc set, derives an id-indexed
 edge graph, and reports staleness between upstream and downstream documents.
-The binding design is `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`; treat
-it as the source of truth when code and intent disagree.
+
+When documentation sources conflict, current code, current supported documentation, later accepted
+decisions, and changelog migrations supersede historical design and implementation documents.
+Files under `docs/superpowers/specs/` and `docs/superpowers/plans/` preserve historical context;
+they are not the current source of truth.
 
 ## Commands
 
@@ -61,26 +64,33 @@ addressed by an explicit `{#marker}` when present, otherwise by its GitHub slug 
 GitHub's rendered anchor; see `sections.github_slug`/`anchor_ids`). A ref that resolves to nothing
 is not a load error: it is a normal lattice state (`target_id=None`) that `check` reports as
 `BROKEN`. The same slug in two different files does not collide, because their `TargetId`s differ;
-a within-file clash (a marker equal to a computed slug) is a `DuplicateIdError`.
+a within-file clash (two equal markers or a marker equal to a computed slug) is a
+`DuplicateIdError`. A file id equal to an anchor in another file also does not collide.
 
 **Drift detection.** Each edge carries a `seen` hash captured when it was last reconciled.
 `check` classifies every edge as OK / STALE / UNRECONCILED / BROKEN by comparing `seen` against
 `content_hash(target_content(...))`, where the hash is `sha256(canonicalize(text))` truncated to 32
-hex chars (128 bits) and `canonicalize` strips cosmetic differences (line endings, trailing
-whitespace, edge blank lines). `impact` reverse-walks `dependents` transitively (with ancestor
-and enclosing-file expansion) to list everything a change touches.
+hex chars (128 bits). Canonicalization normalizes line endings, strips trailing whitespace per line,
+and trims leading and trailing blank lines, while preserving internal line breaks and blank lines;
+paragraph reflow therefore changes the hash. `impact` reverse-walks `dependents` transitively (with
+ancestor and enclosing-file expansion) to list everything a change touches.
 
 `lint` is a pure structural check separate from drift: it flags a `derives_from` edge whose source
 is more authoritative than its target (binding > derived > exploratory), reports edges it cannot rank
 because an endpoint lacks `authority`, and never mutates. It exits 1 on a violation, mirroring `check`.
-Spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
+Historical spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
 
 **Reconcile is the only mutating command.** It plans new `seen` values from the loaded snapshot,
 then at write time **re-reads each downstream file fresh**, rewrites only the targeted `seen`
-scalar(s) through round-trip YAML (preserving body, key order, comments, and any concurrent edit),
-and writes atomically. `--ref` selects on resolved identity; `--all` clears only STALE/UNRECONCILED
-edges (it skips BROKEN and already-OK). A node's BROKEN edge is skipped, not fatal, so it never
-blocks the node's reconcilable edges; only a `--ref` aimed directly at a broken edge is refused.
+scalar(s) through round-trip YAML (preserving body, key order, comments, and edits present at that
+fresh read), and validates every rewrite before mutation. An edit racing after validation may be
+overwritten. It then atomically replaces each file, but the multi-file run is not transactional: a
+later replacement failure leaves earlier replacements in place. `--ref` selects on resolved
+identity; `--all` clears only STALE/UNRECONCILED edges (it skips
+BROKEN and already-OK), and `--all --ref REF` narrows that selection across every downstream node
+without treating no matches as an error. A node's BROKEN edge is skipped, not fatal, so it never
+blocks the node's reconcilable edges; only a single-node `--ref` aimed directly at a broken edge is
+refused.
 
 **The `linear` slice is the only network-touching command.** It builds a trigger map from the
 loaded lattice, then fetches live ticket status over GraphQL: `linear_query` constructs the batched
@@ -89,14 +99,19 @@ POST (the only module that reads `LINEAR_API_KEY`, lazily; https-only, redirect-
 size-capped, SSRF-hardened), `linear_parser` validates the JSON envelope into typed `Ticket`s (a
 boundary module), and `stale_shipped` joins lattice plus tickets into graded `Finding`s (pure),
 rendered by `linear_render`. A ticket the filter does not return is absence, not an error, and
-grades as a BLOCKED `not-found`. Spec: `docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md`.
+grades as a BLOCKED `not-found`. Ticket ids are uppercase ASCII `TEAM-NUMBER`, with `0` or a decimal
+without leading zeros, and one run accepts at most 500 distinct refs. A transient HTTP 429 or 5xx
+gets two retries (three total attempts), using 1- and 2-second fallback delays or a capped
+non-negative integer `Retry-After`. Historical spec:
+`docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md`.
 
 **The `init` slice scaffolds an adopting repo and never loads the lattice.** `scaffold.py` is pure
 (`render_config`/`render_precommit`/`render_ci`/`build_scaffold` return text); `cli._atomic_create`
 publishes each file via temp -> fsync -> `os.link`, so a partial write never lands. `init` writes
 `.doc-lattice.yml` only if absent and always prints pre-commit and CI codegen pinned to Python 3.13
 and the exact PyPI requirement `doc-lattice==X.Y.Z`. Git commit sources are only fallbacks for
-testing unreleased code. Spec: `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md`.
+testing unreleased code. Historical spec:
+`docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md`.
 
 **Pure vs impure split.** All graph and report logic is pure and filesystem-free: `model`,
 `hashing`, `sections`, `resolve`, `loader`, `check`, `lint`, `impact`, `render`, `reconcile.reconcile`/
@@ -107,14 +122,17 @@ writing it), the shared `report_render`, plus the linear pure core (`tickets`, `
 `RunState`). The untyped-to-typed boundary modules are `frontmatter_parser` and `linear_parser`.
 High-level filesystem I/O is owned by `config`, `discovery`, `orchestrate`, and `cli` (`cli`
 performs the reconcile and init writes). The `path_utils.safe_resolve()` helper used by config and
-discovery is filesystem-aware path resolution: it calls `Path.resolve()`, which follows symlinks.
+discovery, plus `cli` before reconcile writes, is filesystem-aware path resolution: it calls
+`Path.resolve()`, which follows symlinks.
 The cache package splits by phase: `cache/schema.py` (models and codec) and `cache/state.py`
 (run-local `RunState`) are pure in this architecture's I/O-boundary sense; `RunState` is mutable,
 deterministic, and filesystem-free. In contrast, `cache/store.py` (reads and atomically writes the
 opt-in load cache under the user cache home) and `cache/lookup.py` (doc reads and stats for tier
-selection) are impure. `linear_fetch` is impure wiring and `linear_client` is the only module that
-touches the network. This is what lets the graph and report layers be tested against synthetic
-inputs with no I/O.
+selection) are impure. `doc_lattice.cache` is an internal convenience facade, not a supported
+external Python compatibility promise; keep production lifecycle wiring through the phase owners
+in `orchestrate._load_cached`. `linear_fetch` is impure wiring and `linear_client` is the only
+module that touches the network. This is what lets the graph and report layers be tested against
+synthetic inputs with no I/O.
 
 ## Project-specific invariants
 
@@ -127,20 +145,25 @@ violation fails CI rather than just being a style preference:
   prefixed by `_` (for example `frontmatter_parser`) (or sits under a directory of that
   name). The real engine boundaries are `frontmatter_parser.py` (raw YAML to `NodeMeta`) and
   `linear_parser.py` (Linear JSON to `Ticket`). In `path_utils.py`, only `safe_resolve` is wired in
-  (by `config` and `discovery`).
+  (by `config`, `discovery`, and `cli` for reconcile write-path validation).
   Everywhere else, convert at the boundary and pass typed models.
 - **Errors.** All custom exceptions extend `ProjectError` (error_types.py) and carry a `code`; no
   bare `except Exception`/`except BaseException`. Messages name the file and the fix.
 - **Constants.** Use the `Literal` + `get_args()` + `frozenset` pattern in `constants.py` and import
   them; do not write raw string literals that duplicate a constant value.
-- **Paths and containment.** User-provided paths go through `safe_resolve()` (path_utils.py). Both
-  `config` (docs roots) and `discovery` (each discovered file) reject any path that escapes the
-  project root via `..`, an absolute path, or a symlink, before any read or write.
+- **Paths and containment.** User-provided paths go through `safe_resolve()` (path_utils.py).
+  `config` rejects docs roots outside the project root. `discovery` allows project-internal
+  document symlinks, skips external targets with a warning, and deduplicates resolved aliases while
+  retaining the first unresolved path as document identity. Before reconcile writes, `cli`
+  re-resolves each identity path and rejects a destination outside the project root.
 - **Node ids.** A frontmatter `id` may not contain `#`; `#` separates a file id from a section
   anchor in a ref. Enforced by a `NodeMeta` field validator (exit 2, names the id).
 - **No `datetime.now()`/`utcnow()` outside `datetime_utils.py`.**
 - **Version sync.** `__version__` (`src/doc_lattice/__init__.py`), the `pyproject.toml` `version`,
-  and the first versioned `## [X.Y.Z]` `CHANGELOG.md` heading must agree (a `## [Unreleased]` block above it is tolerated and skipped, so notes can accumulate there between releases). The pure core is `version_check.py`;
+  the first versioned `## [X.Y.Z]` `CHANGELOG.md` heading, and every exact README pin in either
+  `doc-lattice==X.Y.Z` or `doc-lattice@vX.Y.Z` form must agree (a `## [Unreleased]` block above the
+  versioned changelog heading is tolerated and skipped, so notes can accumulate there between
+  releases). The pure core is `version_check.py`;
   `scripts/check_version_sync.py` wraps it and runs in pre-commit and CI. On merge to `main` the
   `release` job in `.github/workflows/ci.yml` verifies sync, smoke-tests the commit, creates the
   lightweight `vX.Y.Z` tag, and publishes its GitHub Release. The unprivileged `build-release` job

@@ -267,7 +267,8 @@ def test_github_slug_matches_github_rules(text, slug):
     [
         # Category No (superscript / vulgar fraction / circled digit): github-slugger strips
         # these; a hand-rolled `\w`-based class wrongly keeps them. Values observed from the
-        # real github-slugger@2.0.0 package (see task-1-fix-report.md).
+        # github-slugger@2.0.0. Verified codepoint-for-codepoint over Unicode scalar values;
+        # repeat that parity check when updating the ported table.
         ("x²", "x"),  # SUPERSCRIPT TWO
         ("½ cup", "-cup"),  # VULGAR FRACTION ONE HALF
         ("① step one", "-step-one"),  # CIRCLED DIGIT ONE
