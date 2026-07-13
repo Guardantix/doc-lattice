@@ -97,6 +97,36 @@ def test_atomic_replace_bytes_replaces_target_and_cleans_stage(tmp_path: Path):
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
 
 
+def test_atomic_replace_bytes_cleans_stage_when_replacement_fails(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"original")
+    prefix = ".doc.md.replace."
+    replacement_attempts: list[Path] = []
+    sync_observations: list[bool] = []
+
+    def _observe_sync(parent: Path) -> None:
+        assert parent == destination.parent
+        sync_observations.append(bool(list(parent.glob(f"{prefix}*.tmp"))))
+
+    def _fail_replacement(staged: Path, target: Path) -> None:
+        assert target == destination
+        assert staged.read_bytes() == b"replacement"
+        replacement_attempts.append(staged)
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(persistence, "sync_directory", _observe_sync)
+    monkeypatch.setattr(persistence, "replace_staged", _fail_replacement)
+
+    with pytest.raises(OSError, match="replace failed"):
+        atomic_replace_bytes(destination, b"replacement", prefix=prefix)
+
+    assert len(replacement_attempts) == 1
+    assert destination.read_bytes() == b"original"
+    assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
+    assert sync_observations[0] is True
+    assert sync_observations[-1] is False
+
+
 def test_atomic_create_bytes_refuses_existing_target_and_cleans_stage(tmp_path: Path):
     destination = tmp_path / "doc.md"
     destination.write_bytes(b"original")
