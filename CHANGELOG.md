@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] - 2026-07-13
+
+### Fixed
+
+- `graph` Mermaid output now assigns each node a collision-free identifier. Distinct node ids
+  that sanitized to the same Mermaid-safe token previously merged into one graph node.
+- Heading anchor parsing now recognizes `{#marker}` only as a trailing heading marker
+  (optionally followed by an ATX closing `#` sequence). An anchor-like token in the middle of
+  heading text is no longer mistaken for the heading's explicit anchor.
+
 ## [1.0.0] - 2026-07-12
 
 ### Added
