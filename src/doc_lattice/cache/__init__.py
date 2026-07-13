@@ -16,63 +16,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import ValidationError
 
 from .. import __version__
 from ..constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
 from ..discovery import read_doc_bytes_and_stat
-from ..model import FileSections, NodeMeta, ParsedDoc, SectionRecord
-
-
-class StatRecord(BaseModel):
-    """One checkout's stat hint for a file: byte size and nanosecond mtime."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    size: int
-    mtime_ns: int
-
-
-class SectionRecordModel(BaseModel):
-    """The serialized form of one anchored section span."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    anchor: str
-    start: int
-    end: int
-
-
-class NodePayload(BaseModel):
-    """The cached derivation of a lattice node: validated meta, body, and section spans."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    meta: NodeMeta
-    body: str
-    total_lines: int
-    sections: list[SectionRecordModel]
-
-
-class Entry(BaseModel):
-    """One cached file: its content hash, per-root stat hints, and node payload (or null)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    file_sha256: str
-    stats: dict[str, StatRecord]
-    node: NodePayload | None
-
-
-class CacheFile(BaseModel):
-    """The whole cache document, version 1."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    version: int
-    tool_version: str
-    roots: list[str]
-    entries: dict[str, Entry]
+from ..model import FileSections, NodeMeta, ParsedDoc
+from .schema import (  # noqa: F401 (models re-exported for doc_lattice.cache importers)
+    CacheFile,
+    Entry,
+    NodePayload,
+    SectionRecordModel,
+    StatRecord,
+    make_entry,
+    reconstruct_doc,
+    stat_record,
+)
 
 
 def cache_home(env: Mapping[str, str]) -> Path:
@@ -226,7 +185,7 @@ class LoadCache:
         data, st = read_doc_bytes_and_stat(path)
         if entry is not None and entry.file_sha256 == hashlib.sha256(data).hexdigest():
             self._refresh_stat(entry, st)
-            return CacheHit(doc=self._reconstruct(entry, path))
+            return CacheHit(doc=reconstruct_doc(entry, path))
         return CacheMiss(data=data, stat=st)
 
     def _stat_tier(self, entry: Entry, path: Path) -> CacheHit | None:
@@ -242,7 +201,7 @@ class LoadCache:
             raise _unreadable(path, exc) from exc
         if record.size != st.st_size or record.mtime_ns != st.st_mtime_ns:
             return None
-        return CacheHit(doc=self._reconstruct(entry, path))
+        return CacheHit(doc=reconstruct_doc(entry, path))
 
     def _refresh_stat(self, entry: Entry, st: os.stat_result) -> None:
         """Insert or refresh the current root's stat hint on a verify-tier hit.
@@ -250,19 +209,7 @@ class LoadCache:
         ``st`` is the stat already captured alongside the bytes that produced the verify hit
         (see ``read_doc_bytes_and_stat``), so no separate stat call is needed or made here.
         """
-        entry.stats[self._current_root] = StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
-
-    @staticmethod
-    def _reconstruct(entry: Entry, path: Path) -> ParsedDoc | None:
-        """Rebuild a ParsedDoc from a cached node payload, or None for a cached non-node."""
-        node = entry.node
-        if node is None:
-            return None
-        sections = FileSections(
-            total_lines=node.total_lines,
-            sections=tuple(SectionRecord(r.anchor, r.start, r.end) for r in node.sections),
-        )
-        return ParsedDoc(path=path, meta=node.meta, body=node.body, sections=sections)
+        entry.stats[self._current_root] = stat_record(st)
 
     def record_miss(  # noqa: PLR0913
         self,
@@ -284,24 +231,7 @@ class LoadCache:
             st: The stat captured alongside ``data`` (see ``read_doc_bytes_and_stat``), stored
                 as the fresh stat hint for the current root.
         """
-        has_node_payload = meta is not None and sections is not None
-        node: NodePayload | None = None
-        if has_node_payload:
-            node = NodePayload(
-                meta=meta,
-                body=body,
-                total_lines=sections.total_lines,
-                sections=[
-                    SectionRecordModel(anchor=r.anchor, start=r.start, end=r.end)
-                    for r in sections.sections
-                ],
-            )
-        stats: dict[str, StatRecord] = {
-            self._current_root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
-        }
-        self._entries[rel_key] = Entry(
-            file_sha256=hashlib.sha256(data).hexdigest(), stats=stats, node=node
-        )
+        self._entries[rel_key] = make_entry(data, meta, body, sections, st, self._current_root)
 
     def finalize(self, discovered: set[str]) -> None:
         """Reclaim, bound, and persist the cache after a successful load.

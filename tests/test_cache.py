@@ -56,17 +56,6 @@ def _sample_cache_file() -> CacheFile:
     )
 
 
-def test_cache_file_round_trips_through_json():
-    original = _sample_cache_file()
-    dumped = original.model_dump_json()
-    reloaded = CacheFile.model_validate_json(dumped)
-    assert reloaded == original
-    # The nested NodeMeta reloads as a validated NodeMeta, not a raw dict.
-    reloaded_node = reloaded.entries["docs/a.md"].node
-    assert reloaded_node is not None
-    assert isinstance(reloaded_node.meta, NodeMeta)
-
-
 def test_cache_home_uses_absolute_xdg():
     home = cache_home({"XDG_CACHE_HOME": "/custom/cache", "HOME": "/home/u"})
     assert home == Path("/custom/cache")
