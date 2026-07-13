@@ -1,28 +1,37 @@
 # doc-lattice Roadmap
 
-Forward-looking slices, derived from the local-core design spec's deferral map
-(`docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`, section 12).
-The spec is the source of truth; this file is the at-a-glance index.
+Forward-looking slices plus shipped behavior. Historical specs and plans under
+`docs/superpowers/` explain how slices were designed and implemented, but current code and
+supported documentation supersede them when behavior has changed.
 
 ## Shipped
 
 - **local-core (v1)** (PR #1). The deterministic local engine: lattice parse, the id-indexed edge
   graph derived on demand, and the `impact`, `check`, `reconcile`, and `graph` commands. No network,
-  no secrets, no LLM. Spec: `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`.
+  no secrets, no LLM. Historical spec:
+  `docs/superpowers/specs/2026-06-27-doc-lattice-local-core-design.md`.
 - **linear slice** (PR #3). The `linear` command resolves referenced tickets to live status and
-  reports shipped-against-stale-spec drift. The first network-touching slice. Spec:
+  reports shipped-against-stale-spec drift. The first network-touching slice. Historical spec:
   `docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md`.
 - **init slice** (PR #4). The `init` command scaffolds `.doc-lattice.yml` and prints pre-commit
-  and CI codegen for an adopting repo. Shipped as the 0.2.0 release (tag `v0.2.0`). Spec:
+  and CI codegen for an adopting repo. Shipped as the 0.2.0 release (tag `v0.2.0`). Historical spec:
   `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md`.
 - **lint slice** (v0.3.0). The `lint` command validates the authority ladder over `derives_from`
   edges, reports edges it cannot rank, and is wired into the generated pre-commit and CI gates
-  alongside `check`. Spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
-- **release automation** (PR #8). The version-sync guard (`scripts/check_version_sync.py`) fails any PR whose
-  `__version__`, `pyproject.toml`, and top `CHANGELOG.md` entry disagree, and a merge-triggered CI
-  `release` job creates and smoke-tests the `vX.Y.Z` tag (running `check`, `lint`, and `init` against
-  the pinned ref), so the tag is a product of a green pipeline. Spec:
-  `docs/superpowers/specs/2026-06-29-doc-lattice-release-automation-design.md`.
+  alongside `check`. Historical spec:
+  `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
+- **release automation and PyPI publishing** (v1.0.0). The version-sync guard covers
+  `__version__`, `pyproject.toml`, the top versioned changelog entry, and exact README pins. A
+  merge-triggered release job validates or creates the `vX.Y.Z` tag; an unprivileged job builds
+  and validates distributions from that exact tag; an OIDC-only job publishes the transferred
+  artifact to PyPI without checking out repository code. Historical specs:
+  `docs/superpowers/specs/2026-06-29-doc-lattice-release-automation-design.md` and
+  `docs/superpowers/specs/2026-07-12-pypi-publishing-design.md`.
+- **incremental load cache (v0.8.0)**. An opt-in `cache_key` shares parsed document derivations
+  across runs and worktrees. The default verify tier re-reads and hashes document bytes, while
+  `cache_trust_stat: true` enables the faster size/mtime tier for read-only commands under its
+  documented caveat. Reconcile always uses verified loads before planning writes. Historical spec:
+  `docs/superpowers/specs/2026-07-10-doc-lattice-load-cache-design.md`.
 
 Acceptance (local-core spec section 13), still met:
 
@@ -38,7 +47,5 @@ Acceptance (local-core spec section 13), still met:
 
 ## Out of scope by design
 
-- Gitignored performance cache. Not needed at the intended corpus size; the graph is always derived
-  on demand, never committed.
 - `split` command. Splitting a document is a manual or Claude-driven edit. "Execution has no command"
   by design; stable ids and `impact` make a split safe without dedicated tooling.

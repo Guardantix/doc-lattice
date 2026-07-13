@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Empty ATX headings such as `#` and `##   ` are now recognized and receive the same empty GitHub
+  slug that `github-slugger` generates.
+- Document symlinks whose targets remain inside the project root are now supported. Aliases to the
+  same resolved document are loaded once, while external targets are skipped with a warning and
+  reconcile revalidates containment before writing.
+
 ### Changed
 
 - Internal: the load cache module is now a phase-separated `doc_lattice/cache/` package

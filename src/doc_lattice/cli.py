@@ -486,10 +486,9 @@ def reconcile(  # noqa: PLR0913
         plan = plan_reconcile(lattice, downstream_id, ref=ref, reconcile_all=reconcile_all)
         write_paths = _resolve_reconcile_write_paths(plan, project.project_root)
         # Phase 1: compute every rewrite from a fresh read before touching disk, so a
-        # malformed concurrent edit aborts the whole command instead of leaving an
-        # earlier file already rewritten (no cross-file half-reconcile). Computed
-        # unconditionally (even for --dry-run) so the preview reflects the same
-        # fresh-read validation a real run would perform.
+        # malformed concurrent edit aborts the whole command before any mutation.
+        # Computed unconditionally (even for --dry-run) so the preview reflects the
+        # same fresh-read validation a real run would perform.
         rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_text(encoding="utf-8"))
         # Phase 2: only after all rewrites computed cleanly, write them (skipped
         # entirely for --dry-run) and report the outcome.

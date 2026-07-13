@@ -75,13 +75,14 @@ leading and trailing blank lines, so those cosmetic edits never trip drift. Inte
 whitespace is preserved, so rewrapping a paragraph (which moves its line breaks) does count
 as a change.
 
-### A broken ref is a state, not a crash
+### Broken refs and tool errors
 
-The only thing that makes loading the lattice *fail* is a duplicate id, which makes the
-index incoherent (exit 2). A ref that points at nothing is a normal, reportable lattice
-state: `check` calls it BROKEN and exits 1. That is the core distinction the tool is built
-on: **exit 1 means "the graph is coherent but drifting," exit 2 means "the index itself is
-broken."**
+A ref that points at nothing is a normal, reportable lattice state: `check` calls it BROKEN
+and exits 1. Invalid config or lattice frontmatter, unreadable or non-UTF-8 documents,
+containment failures, and incoherent ids are tool errors that exit 2. An index is incoherent
+when two files repeat a file id or two headings in one file resolve to the same file-scoped
+anchor. Equal anchors in different files, and a file id equal to another file's anchor, remain
+distinct `TargetId(file_id, anchor)` keys and do not collide.
 
 ### The authority ladder
 
@@ -256,10 +257,15 @@ OK` on a drifting lattice still exits 1.
 - **`reconcile --all`**: clear every STALE/UNRECONCILED edge in the lattice. Skips BROKEN and
   already-OK edges, and skips a node's broken edge rather than failing the node, so one dangling
   ref never blocks the rest.
+- **`reconcile --all --ref REF`**: reconcile matching drifting edges across every downstream
+  node. Nonmatching, BROKEN, and already-OK edges are skipped; unlike the single-node form, no
+  match is a successful no-op.
 
 `reconcile` re-reads each downstream file fresh at write time, rewrites only the targeted `seen`
-scalar through round-trip YAML (preserving your body, key order, and comments), and writes
-atomically, so a concurrent edit is never clobbered.
+scalar through round-trip YAML (preserving your body, key order, and comments), and validates all
+rewrites before mutation. Edits present during that fresh-read validation are preserved, but an
+edit racing after validation may be overwritten. It atomically replaces each file, but a
+multi-file run is not transactional: if a later replacement fails, earlier replacements remain.
 
 Add `--dry-run` to any of the selectors above to preview the plan without writing: it prints
 `would reconcile FILE: REF` per edge that would change (`nothing to reconcile` if none would),
@@ -281,10 +287,13 @@ writes complete.
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
 
-Section ids are optional: a heading is addressed by its GitHub slug by default (e.g. `## Error Handling`
-resolves to `error-handling`), and an explicit `{#anchor}` marker on the heading wins as an escape hatch
-for a stable id independent of heading text (e.g. `## Error Handling {#errors}`). Section refs are
-file-scoped (`file#anchor`), so the same anchor in two files does not collide.
+Section ids are optional: a heading is addressed by its GitHub slug by default (e.g.
+`## Error Handling` resolves to `error-handling`). An explicit marker must be the trailing heading
+token and match `{#[A-Za-z0-9][A-Za-z0-9_-]*}`; a whitespace-separated ATX closing sequence may
+follow it (e.g. `## Error Handling {#errors} ##`). A valid marker supplies the stable anchor
+independent of heading text. Invalid or nontrailing marker-like text is ordinary heading content,
+so the heading falls back to its generated GitHub slug. Section refs are file-scoped
+(`file#anchor`), so the same anchor in two files does not collide.
 
 ## Configuration
 
@@ -303,14 +312,22 @@ docs_roots:
 # binding_layers: null    # accepted but inert today; setting it changes nothing (see below)
 ```
 
-All `docs_roots` must resolve inside the project root; an entry that escapes via `..`, an
-absolute path, or a symlink is rejected before any read.
+The project root is the resolved parent of the selected config file, including an explicit
+`--config PATH`, or the resolved current directory in zero-config mode. Relative `docs_roots`
+entries are interpreted from that project root. Every root must resolve inside it; an entry that
+escapes via `..`, an absolute path, or a symlink is rejected before any read.
+
+Discovered document symlinks are resolved separately. A symlink whose target stays inside the
+project root is allowed, while one targeting anything outside is skipped with a warning. If
+multiple roots or symlink aliases resolve to the same document, it is loaded once under the first
+unresolved path discovered. Reconcile re-resolves that identity path before writing so a retargeted
+symlink cannot escape the project root.
 
 `binding_layers` is accepted in the config for forward compatibility but is inert today: setting it
 changes nothing, because no command consults it. Authority ranking currently lives entirely in
-`lint` (binding > derived > exploratory); see the
-[lint design spec](docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md) for where that
-ranking is defined.
+`lint` (binding > derived > exploratory); the
+[lint design spec](docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md) preserves
+historical design context for that ranking.
 
 ### Load cache (opt-in)
 
@@ -331,10 +348,15 @@ a file whose size and modification time are unchanged, accepting that the file i
 a rewrite that preserves both its size and its nanosecond mtime is served stale, and a file made
 unreadable (for example a permissions change, which does not alter size or mtime) is served from
 cache instead of erroring, each until the file is touched. `reconcile` ignores `cache_trust_stat`
-and always verifies content, so it can never
-write frontmatter from stale data. Two projects sharing a `cache_key` stay correct (a content-hash
+and always verifies content, so it can never write frontmatter from stale data.
+`cache_trust_stat: true` requires `cache_key`; otherwise config loading is a tool error and exits 2.
+Two projects sharing a `cache_key` stay correct (a content-hash
 hit implies identical bytes); the only cost is overwrite churn, so prefer distinct keys. Delete the
 cache directory to reset it; a tool-version bump discards it automatically.
+
+Any cache read failure, including an unreadable, invalid, or stale cache file, silently falls back
+to rebuilding from documents. A cache write failure emits one stderr diagnostic and is otherwise
+ignored: it does not change command results or exit codes.
 
 ## Adopting doc-lattice in your docs repo
 
@@ -361,10 +383,15 @@ loaded lattice, then fetches live ticket status over the Linear GraphQL API to r
 that shipped against a spec that has since drifted. It reads `LINEAR_API_KEY` from the
 environment (export it before running; the error points you to `impact` for the offline view),
 and the client is https-only, redirect-refusing, size-capped, and SSRF-hardened. A transient
-HTTP 429 or 5xx is retried up to three times with a short backoff (honoring `Retry-After` when
-present, capped) before failing, so a passing rate limit does not fail a CI run. Set the team
-the query targets with `linear_team` in `.doc-lattice.yml`, or pass `--linear-team` to `init`.
-Every other command runs fully offline.
+HTTP 429 or 5xx gets two retries, for three total attempts. Without a usable `Retry-After`, retries
+wait 1 second and then 2 seconds. A non-negative integer `Retry-After` is honored up to the
+30-second cap; negative, date-form, and invalid values use the fallback delay.
+
+Canonical ticket ids are uppercase ASCII `TEAM-NUMBER`: `TEAM` starts with an uppercase letter
+and continues with uppercase letters or digits, while `NUMBER` is `0` or a decimal with no leading
+zeros. One `linear` run accepts at most 500 distinct ticket refs after its positional or `--from`
+scope is applied. Set the team the query targets with `linear_team` in `.doc-lattice.yml`, or pass
+`--linear-team` to `init`. Every other command runs fully offline.
 
 ## Exit codes
 
@@ -372,7 +399,7 @@ Every other command runs fully offline.
 |------|---------|
 | `0` | Success; no drift or violations. |
 | `1` | The lattice is coherent but a gate failed: drift (`check`), an authority inversion (`lint`), or (with `--exit-code`) a DANGER/BLOCKED `linear` finding. |
-| `2` | Tool error: the index is incoherent (e.g. a duplicate id), config is invalid, or a path escapes the project root. |
+| `2` | Tool error: invalid config/frontmatter, unreadable or non-UTF-8 input, incoherent ids, or a containment failure. |
 
 ## Troubleshooting
 
@@ -380,10 +407,10 @@ Every other command runs fully offline.
 (`export LINEAR_API_KEY=lin_api_...`) before running `linear`, or run `impact` instead: `impact` is
 the fully offline view of the same downstream reach and needs no key.
 
-**Linear returns HTTP 429 or 5xx.** These are transient. The client already retries a bounded
-number of times with a short backoff (honoring `Retry-After` when present, capped), so a passing
-rate limit does not fail the run on its own. If it still fails after those retries, the error tells
-you to wait and re-run; `impact` stays available offline in the meantime.
+**Linear returns HTTP 429 or 5xx.** These are transient. The client makes at most three attempts,
+using the 1- and 2-second fallback delays or a capped, non-negative integer `Retry-After`. If it
+still fails, the error tells you to wait and re-run; `impact` stays available offline in the
+meantime.
 
 **A `linear` finding is BLOCKED `not-found`.** A ticket the Linear filter does not return is treated
 as absence, not an error: it grades as a BLOCKED `not-found` finding rather than crashing the
@@ -391,8 +418,9 @@ command. Confirm the ticket id exists and that `linear_team` targets the right t
 
 **`duplicate id ...` exits 2.** A duplicate id makes the index incoherent, so loading the lattice
 fails with exit 2 (a tool error, distinct from the exit 1 that `check` and `lint` use for drift).
-The message names both registration sites so you can find the clash: either two files share an `id`,
-or a heading's `{#marker}` collides with another heading's computed slug in the same file.
+The message names both registration sites so you can find the clash: either two files share an
+`id`, or two headings in one file resolve to the same anchor through equal markers or a marker/slug
+collision. Equal anchors in different files do not collide.
 
 ## Documentation
 
@@ -403,25 +431,32 @@ or a heading's `{#marker}` collides with another heading's computed slug in the 
 | [roadmap.md](roadmap.md) | Shipped slices and what is deferred |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [RELEASING.md](RELEASING.md) | Release checklist and version-tag procedure |
-| [build-log.md](build-log.md) | Development timeline |
-| [docs/superpowers/specs/](docs/superpowers/specs/) | The binding design specs (source of truth) |
+| [build-log.md](build-log.md) | Historical development timeline |
+| [docs/superpowers/specs/](docs/superpowers/specs/) | Historical design context; current code and supported docs supersede conflicts |
+| [docs/superpowers/plans/](docs/superpowers/plans/) | Historical implementation context, not current user-facing documentation |
 
 ## Project structure
 
 ```
 doc-lattice/
-├── src/doc_lattice/      # the engine: a pure graph/report core behind a thin impure shell
-├── tests/                # test suite (mirrors sources; property-based hashing invariants)
-├── scripts/              # CI guards (typing boundary, version sync)
-├── docs/superpowers/     # design specs and plans
-└── pyproject.toml        # project configuration
+├── src/doc_lattice/         # the engine: a pure graph/report core behind a thin impure shell
+│   └── cache/               # phase-separated incremental load cache
+│       ├── schema.py        # filesystem-free models and codec
+│       ├── state.py         # filesystem-free run-local state
+│       ├── lookup.py        # document reads and stats for cache-tier selection
+│       └── store.py         # cache-file reads and atomic writes
+├── tests/                   # test suite (mirrors sources; property-based hashing invariants)
+├── scripts/                 # CI guards (typing boundary, version sync)
+├── docs/superpowers/        # historical design and implementation context
+└── pyproject.toml           # project configuration
 ```
 
 The engine is a pure pipeline (`config -> discovery -> frontmatter parse -> build_lattice`
 feeding `{ check, impact, reconcile, graph, lint, linear }`) where all graph and report logic
-is filesystem-free. Only `config`, `discovery`, `orchestrate`, and `cli` touch the disk, and
-only `linear_client` touches the network. See [ARCHITECTURE.md](ARCHITECTURE.md) for the
-decisions behind that split.
+is filesystem-free. `config`, `discovery`, `orchestrate`, and `cli` own high-level filesystem
+work; cache I/O is split between document-reading `cache/lookup.py` and cache-file-owning
+`cache/store.py`. Only `linear_client` touches the network. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the decisions behind that split.
 
 ## License
 
