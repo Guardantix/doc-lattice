@@ -108,6 +108,32 @@ def test_multiple_docs_roots_combine(tmp_path: Path):
     assert set(lat.nodes_by_id) == {"a", "b"}
 
 
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["uncached", "cached"])
+def test_load_lattice_deduplicates_in_project_symlink_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cache_enabled: bool
+):
+    project_root = tmp_path / "repo"
+    docs = project_root / "docs"
+    shared = project_root / "shared"
+    docs.mkdir(parents=True)
+    shared.mkdir()
+    target = shared / "spec.md"
+    target.write_text("---\nid: linked\n---\n# Linked\n", encoding="utf-8")
+    link = docs / "linked.md"
+    link.symlink_to(Path("../shared/spec.md"))
+
+    config_lines = ['docs_roots: ["docs", "shared"]']
+    if cache_enabled:
+        config_lines.append("cache_key: symlink-test")
+    (project_root / ".doc-lattice.yml").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+
+    lattice = load_lattice(load_config(None, project_root))
+
+    assert set(lattice.nodes_by_id) == {"linked"}
+    assert lattice.nodes_by_id["linked"].path == link
+
+
 def _with_cache(tmp_path: Path, *, trust_stat: bool = False) -> Path:
     lines = ["cache_key: testslot"]
     if trust_stat:

@@ -10,7 +10,11 @@ from .hashing import normalize_newlines
 from .path_utils import safe_resolve
 
 
-def discover_doc_paths(roots: Sequence[Path], ignore_globs: Sequence[str]) -> list[Path]:
+def discover_doc_paths(
+    roots: Sequence[Path],
+    ignore_globs: Sequence[str],
+    project_root: Path,
+) -> list[Path]:
     """Return every ``.md`` path under the roots, minus ignored matches, sorted.
 
     Args:
@@ -18,23 +22,27 @@ def discover_doc_paths(roots: Sequence[Path], ignore_globs: Sequence[str]) -> li
         ignore_globs: Glob patterns matched against each file's path relative to its
             root, anchored at the root. ``drafts/*.md`` skips only top-level drafts, not
             a same-named subdirectory; use ``**`` to match at any depth.
+        project_root: Boundary that resolved document paths must remain inside.
 
     Returns:
-        A sorted, de-duplicated list of markdown file paths. A file that resolves outside
-        the project root (via a symlink or absolute path) is skipped with a warning rather
-        than read, so a silently missing doc does not masquerade as a broken ref later.
+        A sorted list of markdown file paths, de-duplicated by resolved target while
+        retaining the first configured root's unresolved path as document identity. A
+        file that resolves outside the project root (via a symlink or absolute path) is
+        skipped with a warning rather than read, so a silently missing doc does not
+        masquerade as a broken ref later.
     """
     found: set[Path] = set()
+    resolved_targets: set[Path] = set()
     for root in roots:
         if not root.exists():
             continue
-        for path in root.rglob("*.md"):
+        for path in sorted(root.rglob("*.md")):
             if not path.is_file():
                 continue
             if _ignored(path, root, ignore_globs):
                 continue
             try:
-                safe_resolve(path, root)
+                resolved = safe_resolve(path, project_root)
             except ValueError:
                 warnings.warn(
                     f"skipping {path}: it escapes the project root via a symlink or "
@@ -42,6 +50,9 @@ def discover_doc_paths(roots: Sequence[Path], ignore_globs: Sequence[str]) -> li
                     stacklevel=2,
                 )
                 continue
+            if resolved in resolved_targets:
+                continue
+            resolved_targets.add(resolved)
             found.add(path)
     return sorted(found)
 

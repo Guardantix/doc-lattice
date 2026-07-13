@@ -20,7 +20,7 @@ def test_discovers_markdown_sorted(tmp_path: Path):
     (root / "b.md").write_text("b", encoding="utf-8")
     (root / "a.md").write_text("a", encoding="utf-8")
     (root / "note.txt").write_text("x", encoding="utf-8")
-    found = discover_doc_paths([root], [])
+    found = discover_doc_paths([root], [], tmp_path)
     assert [p.name for p in found] == ["a.md", "b.md"]
 
 
@@ -29,7 +29,7 @@ def test_ignore_globs_exclude(tmp_path: Path):
     (root / "archive").mkdir(parents=True)
     (root / "keep.md").write_text("k", encoding="utf-8")
     (root / "archive" / "old.md").write_text("o", encoding="utf-8")
-    found = discover_doc_paths([root], ["**/archive/**"])
+    found = discover_doc_paths([root], ["**/archive/**"], tmp_path)
     assert [p.name for p in found] == ["keep.md"]
 
 
@@ -40,7 +40,10 @@ def test_ignore_glob_is_root_anchored(tmp_path: Path):
     (root / "chapters" / "drafts").mkdir(parents=True)
     (root / "drafts" / "top.md").write_text("x", encoding="utf-8")
     (root / "chapters" / "drafts" / "deep.md").write_text("y", encoding="utf-8")
-    found = {p.relative_to(root).as_posix() for p in discover_doc_paths([root], ["drafts/*.md"])}
+    found = {
+        path.relative_to(root).as_posix()
+        for path in discover_doc_paths([root], ["drafts/*.md"], tmp_path)
+    }
     assert "drafts/top.md" not in found  # top-level drafts excluded
     assert "chapters/drafts/deep.md" in found  # nested same-named dir is kept
 
@@ -51,7 +54,7 @@ def test_discovers_skips_nonexistent_root(tmp_path: Path):
     (root / "a.md").write_text("a", encoding="utf-8")
     missing = tmp_path / "does-not-exist"
     # a missing root is tolerated, not fatal; the real root still resolves
-    found = discover_doc_paths([missing, root], [])
+    found = discover_doc_paths([missing, root], [], tmp_path)
     assert [p.name for p in found] == ["a.md"]
 
 
@@ -61,7 +64,7 @@ def test_discovers_dedups_overlapping_roots(tmp_path: Path):
     sub.mkdir(parents=True)
     (sub / "x.md").write_text("x", encoding="utf-8")
     # sub is reachable both as its own root and under root
-    found = discover_doc_paths([root, sub], [])
+    found = discover_doc_paths([root, sub], [], tmp_path)
     assert [p.name for p in found] == ["x.md"]  # discovered once, not twice
 
 
@@ -74,7 +77,7 @@ def test_discovers_sorted_across_roots(tmp_path: Path):
     (root_b / "m.md").write_text("m", encoding="utf-8")
     # Pass roots opposite to the sorted output so a per-root concatenation
     # (root_b then root_a) would differ from a globally sorted result.
-    found = discover_doc_paths([root_b, root_a], [])
+    found = discover_doc_paths([root_b, root_a], [], tmp_path)
     assert found == sorted(found)
     assert [p.name for p in found] == ["z.md", "m.md"]  # a/z.md sorts before b/m.md
 
@@ -84,7 +87,7 @@ def test_discovery_skips_directory_named_md(tmp_path: Path):
     root.mkdir()
     (root / "real.md").write_text("r", encoding="utf-8")
     (root / "weird.md").mkdir()  # a directory whose name matches *.md
-    found = discover_doc_paths([root], [])
+    found = discover_doc_paths([root], [], tmp_path)
     assert [p.name for p in found] == ["real.md"]
 
 
@@ -179,9 +182,24 @@ def test_decode_doc_lone_cr_frontmatter_is_still_parsed(tmp_path: Path):
     assert meta.id == "cr-node"
 
 
-def test_discovery_skips_symlink_escaping_root(tmp_path: Path):
-    root = tmp_path / "docs"
-    root.mkdir()
+def test_discovery_allows_symlink_target_inside_project(tmp_path: Path):
+    project_root = tmp_path / "repo"
+    docs = project_root / "docs"
+    shared = project_root / "shared"
+    docs.mkdir(parents=True)
+    shared.mkdir()
+    target = shared / "spec.md"
+    target.write_text("shared content", encoding="utf-8")
+    link = docs / "linked.md"
+    link.symlink_to(Path("../shared/spec.md"))
+
+    assert discover_doc_paths([docs], [], project_root) == [link]
+
+
+def test_discovery_skips_symlink_escaping_project(tmp_path: Path):
+    project_root = tmp_path / "repo"
+    root = project_root / "docs"
+    root.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     secret = outside / "secret.md"
@@ -189,7 +207,7 @@ def test_discovery_skips_symlink_escaping_root(tmp_path: Path):
     (root / "leak.md").symlink_to(secret)
     (root / "keep.md").write_text("safe content", encoding="utf-8")
     with pytest.warns(UserWarning, match="escapes the project root"):
-        found = discover_doc_paths([root], [])
-    names = [p.name for p in found]
+        found = discover_doc_paths([root], [], project_root)
+    names = [path.name for path in found]
     assert "keep.md" in names
     assert "leak.md" not in names  # skipped, but loudly (not silently)

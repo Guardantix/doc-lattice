@@ -34,7 +34,9 @@ def load_lattice(project: ProjectConfig, *, require_verified: bool = False) -> L
 def _load_uncached(project: ProjectConfig) -> Lattice:
     """Today's cache-free load path, unchanged."""
     parsed: list[ParsedDoc] = []
-    for path in discover_doc_paths(project.resolved_roots, project.config.ignore_globs):
+    for path in discover_doc_paths(
+        project.resolved_roots, project.config.ignore_globs, project.project_root
+    ):
         text = read_doc(path)
         raw_meta, body = split_frontmatter(text)
         meta = parse_meta(raw_meta, path)
@@ -58,7 +60,9 @@ def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
     effective_trust = config.cache_trust_stat and not require_verified
     policy = LookupPolicy(current_root=current_root, trust_stat=effective_trust)
     parsed: list[ParsedDoc] = []
-    for doc_path in discover_doc_paths(project.resolved_roots, config.ignore_globs):
+    for doc_path in discover_doc_paths(
+        project.resolved_roots, config.ignore_globs, project.project_root
+    ):
         rel_key = doc_path.relative_to(resolved_root).as_posix()
         result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):

@@ -32,6 +32,7 @@ from .linear_render import findings_json, render_findings
 from .lint import lint_json, lint_lattice
 from .model import Lattice
 from .orchestrate import load_lattice
+from .path_utils import safe_resolve
 from .reconcile import plan_rewrites
 from .reconcile import reconcile as plan_reconcile
 from .render import to_dot, to_json, to_mermaid
@@ -396,9 +397,24 @@ def _print_reconcile_lines(path: Path, applied: set[str], *, dry_run: bool) -> N
         _out.print(f"{verb} {escape(path.name)}: {escape(target_ref)}")
 
 
+def _resolve_reconcile_write_paths(
+    plan: dict[Path, dict[str, str]], project_root: Path
+) -> dict[Path, Path]:
+    """Map document identity paths to contained, resolved write destinations."""
+    write_paths: dict[Path, Path] = {}
+    for path in plan:
+        try:
+            write_paths[path] = safe_resolve(path, project_root)
+        except ValueError as exc:
+            msg = f"cannot write {path}: it escapes the project root"
+            raise UnreadableDocError(msg) from exc
+    return write_paths
+
+
 def _write_and_report_reconcile(
     plan: dict[Path, dict[str, str]],
     rewrites: list[Rewrite],
+    write_paths: dict[Path, Path],
     *,
     dry_run: bool,
     json_out: bool,
@@ -413,6 +429,7 @@ def _write_and_report_reconcile(
     Args:
         plan: The full planned mapping of path to ``{ref: new_seen}``.
         rewrites: The rewrites actually applied (fresh-read, non-empty ``applied`` set).
+        write_paths: Resolved, project-contained write destination for each document path.
         dry_run: Whether this is a preview (no writes of any kind).
         json_out: Whether to emit the machine-readable payload instead of human lines.
 
@@ -423,7 +440,7 @@ def _write_and_report_reconcile(
     if not dry_run:
         for path, new_text, applied in rewrites:
             try:
-                _atomic_write(path, new_text)
+                _atomic_write(write_paths[path], new_text)
             except OSError as exc:
                 msg = f"cannot write {path}: {exc}"
                 raise UnreadableDocError(msg) from exc
@@ -464,17 +481,19 @@ def reconcile(  # noqa: PLR0913
         _err.print("[red]error[/red]: provide a downstream id or --all")
         raise typer.Exit(2)
     with _exit_on_project_error():
-        lattice = _load(config, require_verified=True)
+        project = load_config(config, Path.cwd())
+        lattice = load_lattice(project, require_verified=True)
         plan = plan_reconcile(lattice, downstream_id, ref=ref, reconcile_all=reconcile_all)
+        write_paths = _resolve_reconcile_write_paths(plan, project.project_root)
         # Phase 1: compute every rewrite from a fresh read before touching disk, so a
         # malformed concurrent edit aborts the whole command instead of leaving an
         # earlier file already rewritten (no cross-file half-reconcile). Computed
         # unconditionally (even for --dry-run) so the preview reflects the same
         # fresh-read validation a real run would perform.
-        rewrites = plan_rewrites(plan, lambda p: p.read_text(encoding="utf-8"))
+        rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_text(encoding="utf-8"))
         # Phase 2: only after all rewrites computed cleanly, write them (skipped
         # entirely for --dry-run) and report the outcome.
-        _write_and_report_reconcile(plan, rewrites, dry_run=dry_run, json_out=json_out)
+        _write_and_report_reconcile(plan, rewrites, write_paths, dry_run=dry_run, json_out=json_out)
 
 
 @app.command()

@@ -593,6 +593,34 @@ def test_reconcile_then_check_clean(lattice_dir: Path, monkeypatch):
     assert after.exit_code == 1
 
 
+def test_reconcile_writes_through_in_project_symlink(tmp_path: Path, monkeypatch):
+    project_root = tmp_path / "repo"
+    docs = project_root / "docs"
+    shared = project_root / "shared"
+    docs.mkdir(parents=True)
+    shared.mkdir()
+    (project_root / ".doc-lattice.yml").write_text('docs_roots: ["docs"]\n', encoding="utf-8")
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up {#sec}\nupstream\n", encoding="utf-8")
+    target = shared / "down.md"
+    target.write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#sec\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    link = docs / "down.md"
+    link.symlink_to(Path("../shared/down.md"))
+    before = target.read_text(encoding="utf-8")
+    monkeypatch.chdir(project_root)
+
+    result = runner.invoke(app, ["reconcile", "down"])
+
+    assert result.exit_code == 0
+    assert link.is_symlink()
+    rewritten = target.read_text(encoding="utf-8")
+    assert rewritten != before
+    assert "seen:" in rewritten
+    assert link.read_text(encoding="utf-8") == rewritten
+
+
 def test_reconcile_all_without_positional_id(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["reconcile", "--all"])
