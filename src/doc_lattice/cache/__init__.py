@@ -1,6 +1,10 @@
-"""Expose schema, store, lookup, and state cache lifecycle phases.
+"""The opt-in incremental load cache, split by lifecycle phase.
 
-``orchestrate._load_cached`` is the sole production wiring and transaction boundary.
+``schema`` holds the persistence models and codec, ``store`` owns the cache file on disk,
+``lookup`` resolves one discovered doc to a hit or a miss without mutating anything, and
+``state`` holds the run-local document between load and save. This module re-exports the
+public surface; ``orchestrate._load_cached`` is the only production wiring point and owns the
+transaction boundary (persist only after ``build_lattice`` succeeds).
 """
 
 from .lookup import CacheHit, CacheMiss, LookupPolicy
