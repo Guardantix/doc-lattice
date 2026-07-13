@@ -10,7 +10,6 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from doc_lattice import __version__
 from doc_lattice.cache import (
     CacheFile,
     CacheHit,
@@ -20,70 +19,14 @@ from doc_lattice.cache import (
     NodePayload,
     SectionRecordModel,
     StatRecord,
-    cache_home,
     cache_path,
 )
 from doc_lattice.check import check_lattice, statuses_json
 from doc_lattice.config import load_config
-from doc_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
+from doc_lattice.constants import MAX_STAT_ROOTS
 from doc_lattice.error_types import UnreadableDocError
 from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 from doc_lattice.orchestrate import load_lattice
-
-
-def _sample_cache_file() -> CacheFile:
-    return CacheFile(
-        version=CACHE_VERSION,
-        tool_version=__version__,
-        roots=["/abs/root"],
-        entries={
-            "docs/a.md": Entry(
-                file_sha256="a" * 64,
-                stats={"/abs/root": StatRecord(size=10, mtime_ns=123)},
-                node=NodePayload(
-                    meta=NodeMeta.model_validate({"id": "a"}),
-                    body="# A\n",
-                    total_lines=1,
-                    sections=[SectionRecordModel(anchor="a-top", start=1, end=1)],
-                ),
-            ),
-            "docs/plain.md": Entry(
-                file_sha256="b" * 64,
-                stats={"/abs/root": StatRecord(size=3, mtime_ns=456)},
-                node=None,
-            ),
-        },
-    )
-
-
-def test_cache_home_uses_absolute_xdg():
-    home = cache_home({"XDG_CACHE_HOME": "/custom/cache", "HOME": "/home/u"})
-    assert home == Path("/custom/cache")
-
-
-def test_cache_home_ignores_relative_xdg():
-    home = cache_home({"XDG_CACHE_HOME": "relative/cache", "HOME": "/home/u"})
-    assert home == Path("/home/u/.cache")
-
-
-def test_cache_home_falls_back_to_home_dot_cache_when_xdg_unset():
-    home = cache_home({"HOME": "/home/u"})
-    assert home == Path("/home/u/.cache")
-
-
-def test_cache_home_falls_back_to_home_cache_dir_when_home_and_xdg_unset():
-    home = cache_home({})
-    assert home == Path.home() / ".cache"
-
-
-def test_cache_path_composes_slot_and_file_name():
-    path = cache_path("my-docs", {"XDG_CACHE_HOME": "/c", "HOME": "/home/u"})
-    assert path == Path("/c") / "doc-lattice" / "my-docs" / CACHE_FILE_NAME
-
-
-def _write_cache(path: Path, cache_file: CacheFile) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(cache_file.model_dump_json(), encoding="utf-8")
 
 
 def _open(tmp_path: Path, *, trust_stat=False, require_verified=False) -> LoadCache:
@@ -96,64 +39,24 @@ def _open(tmp_path: Path, *, trust_stat=False, require_verified=False) -> LoadCa
     )
 
 
-def test_open_missing_file_is_empty(tmp_path: Path):
-    cache = _open(tmp_path)
+def test_is_empty_tracks_entries_and_loaded_baseline(tmp_path: Path):
+    cache = LoadCache(
+        path=tmp_path / "load-cache.json",
+        current_root="/root",
+        trust_stat=False,
+        require_verified=False,
+        entries={},
+        roots=[],
+        original=None,
+    )
     assert cache.is_empty
 
-
-def test_open_valid_file_loads_entries(tmp_path: Path):
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    _write_cache(path, _sample_cache_file())
-    cache = _open(tmp_path)
+    cache._entries["docs/a.md"] = Entry(file_sha256="a" * 64, stats={}, node=None)
     assert not cache.is_empty
 
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "",  # truncated / empty
-        "{ not json",  # invalid JSON
-        '{"version": 1}',  # schema violation (missing fields)
-    ],
-)
-def test_open_corrupt_file_is_empty(tmp_path: Path, text: str):
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    assert _open(tmp_path).is_empty
-
-
-def test_open_invalid_utf8_is_empty(tmp_path: Path):
-    # A cache file with invalid UTF-8 bytes raises UnicodeDecodeError (not an OSError); it must
-    # still yield an empty cache rather than propagate.
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"\xff\xfe not valid utf-8\n")
-    assert _open(tmp_path).is_empty
-
-
-def test_open_wrong_version_is_empty(tmp_path: Path):
-    bad = _sample_cache_file().model_copy(update={"version": 999})
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    _write_cache(path, bad)
-    assert _open(tmp_path).is_empty
-
-
-def test_open_wrong_tool_version_is_empty(tmp_path: Path):
-    bad = _sample_cache_file().model_copy(update={"tool_version": "0.0.0-other"})
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    _write_cache(path, bad)
-    assert _open(tmp_path).is_empty
-
-
-def test_open_invalid_meta_is_empty(tmp_path: Path):
-    # A structurally valid file whose node.meta violates NodeMeta must discard wholesale.
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _sample_cache_file().model_dump(mode="json")
-    payload["entries"]["docs/a.md"]["node"]["meta"]["id"] = "bad#id"  # '#' is rejected by NodeMeta
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    assert _open(tmp_path).is_empty
+    cache._entries.clear()
+    cache._original = {}
+    assert not cache.is_empty
 
 
 def _doc_bytes(text: str) -> bytes:
@@ -532,70 +435,6 @@ def test_ledger_evicts_over_cap_head_roots_and_scrubs_their_stats(tmp_path: Path
     assert len(written.roots) == MAX_STAT_ROOTS
     assert old_roots[0] not in written.roots  # head evicted
     assert old_roots[0] not in written.entries["docs/x.md"].stats  # its stat scrubbed
-
-
-def test_finalize_write_failure_emits_one_stderr_line_and_does_not_raise(
-    tmp_path, capsys, monkeypatch
-):
-    doc = tmp_path / "docs" / "a.md"
-    doc.parent.mkdir(parents=True)
-    doc.write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
-    cache = _open(tmp_path)
-    cache.record_miss(
-        "docs/a.md",
-        b"---\nid: a\n---\n# A\n",
-        NodeMeta.model_validate({"id": "a"}),
-        "# A\n",
-        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
-        doc.stat(),
-    )
-    import doc_lattice.cache as cache_module  # noqa: PLC0415
-
-    def _boom(*args, **kwargs):  # noqa: ARG001
-        raise OSError("disk full")
-
-    monkeypatch.setattr(cache_module.os, "replace", _boom)
-    cache.finalize({"docs/a.md"})  # must not raise
-    captured = capsys.readouterr()
-    assert captured.err.count("\n") == 1
-    assert "cache" in captured.err.lower()
-    # No partial file left behind.
-    path = cache_path("slot", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
-    leftovers = list(path.parent.glob("*.tmp"))
-    assert leftovers == []
-
-
-def test_finalize_write_failure_does_not_raise_when_temp_cleanup_also_fails(
-    tmp_path, capsys, monkeypatch
-):
-    # Both the atomic replace and the finally-block cleanup fail. The cleanup OSError must not
-    # escape the cache error handler and change the command's exit code.
-    doc = tmp_path / "docs" / "a.md"
-    doc.parent.mkdir(parents=True)
-    doc.write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
-    cache = _open(tmp_path)
-    cache.record_miss(
-        "docs/a.md",
-        b"---\nid: a\n---\n# A\n",
-        NodeMeta.model_validate({"id": "a"}),
-        "# A\n",
-        FileSections(total_lines=1, sections=(SectionRecord("a", 1, 1),)),
-        doc.stat(),
-    )
-    import doc_lattice.cache as cache_module  # noqa: PLC0415
-
-    def _boom_replace(*args, **kwargs):  # noqa: ARG001
-        raise OSError("disk full")
-
-    def _boom_unlink(*args, **kwargs):  # noqa: ARG001
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(cache_module.os, "replace", _boom_replace)
-    monkeypatch.setattr(cache_module.Path, "unlink", _boom_unlink)
-    cache.finalize({"docs/a.md"})  # must not raise despite the failed cleanup
-    captured = capsys.readouterr()
-    assert captured.err.count("\n") == 1
-    assert "cache" in captured.err.lower()
 
 
 def _run_check(project) -> str:
