@@ -14,7 +14,7 @@ from doc_lattice.error_types import (
 )
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId, parse_ref
 from doc_lattice.orchestrate import load_lattice
 from doc_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
 
@@ -190,6 +190,22 @@ def test_reconcile_ref_namespaced_matches_stored_ref(lattice_dir: Path):
     assert plan, "plan must be non-empty"
     all_refs = _planned_refs(plan)
     assert "art-direction#accent" in all_refs
+
+
+def test_reconcile_ref_reuses_resolved_edge_target_ids(monkeypatch, lattice_dir: Path):
+    lat = load_lattice(load_config(None, lattice_dir))
+    calls = 0
+
+    def counting_parse_ref(ref: str) -> TargetId:
+        nonlocal calls
+        calls += 1
+        return parse_ref(ref)
+
+    monkeypatch.setattr("doc_lattice.reconcile.parse_ref", counting_parse_ref)
+
+    reconcile(lat, "pc-design", ref="art-direction#motion", reconcile_all=False)
+
+    assert calls == 1
 
 
 def test_reconcile_ref_bare_anchor_no_longer_matches(lattice_dir: Path):

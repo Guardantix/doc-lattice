@@ -8,6 +8,7 @@ from .constants import BlockedReason
 from .error_types import ConfigError, LinearError
 
 BATCH_SIZE = 50
+CHILD_TICKET_LIMIT = 50
 MAX_IDENTIFIERS = 500
 
 # Anchored with \A...\Z, not ^...$: in Python ``$`` also matches just before a trailing
@@ -18,18 +19,18 @@ MAX_IDENTIFIERS = 500
 _IDENTIFIER_RE = re.compile(r"\A[A-Z][A-Z0-9]*-(0|[1-9][0-9]*)\Z", re.ASCII)
 _TEAM_RE = re.compile(r"\A[A-Z][A-Z0-9]*\Z", re.ASCII)
 
-# children(first: 50) caps the child tickets fetched per issue for context only; this 50 is a
-# separate limit from BATCH_SIZE and the two need not stay equal.
-_TICKET_FRAGMENT = """
-fragment T on Issue {
+# CHILD_TICKET_LIMIT caps child tickets fetched per issue for context only. It is deliberately
+# independent of BATCH_SIZE, and the two need not stay equal.
+_TICKET_FRAGMENT = f"""
+fragment T on Issue {{
   identifier
   number
   title
   url
-  state { name type }
-  parent { identifier title state { name type } }
-  children(first: 50) { nodes { identifier title state { name type } } }
-}
+  state {{ name type }}
+  parent {{ identifier title state {{ name type }} }}
+  children(first: {CHILD_TICKET_LIMIT}) {{ nodes {{ identifier title state {{ name type }} }} }}
+}}
 """
 
 

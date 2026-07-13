@@ -47,6 +47,7 @@ def reconcile(
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
         raise ValidationError(f"unknown downstream id {downstream_id!r}; run check to list ids")
     node_ids = sorted(lattice.nodes_by_id) if reconcile_all else [downstream_id]
+    requested_target_id = parse_ref(ref) if ref is not None else None
     targeting_specific_ref = ref is not None and not reconcile_all
     plan: dict[Path, dict[str, str]] = defaultdict(dict)
     cache: dict[TargetId, str] = {}
@@ -54,8 +55,12 @@ def reconcile(
     for node_id in node_ids:
         node = lattice.nodes_by_id[node_id]
         for edge in node.derives_from:
-            if ref is not None and parse_ref(edge.target_ref) != parse_ref(ref):
-                continue
+            if requested_target_id is not None:
+                edge_target_id = (
+                    edge.target_id if edge.target_id is not None else parse_ref(edge.target_ref)
+                )
+                if edge_target_id != requested_target_id:
+                    continue
             ref_matched = True
             if edge.target_id is None:
                 if targeting_specific_ref:
