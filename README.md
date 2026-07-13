@@ -371,6 +371,8 @@ This writes `.doc-lattice.yml` (only if absent) and prints pre-commit hooks and 
 Actions workflow that run `doc-lattice check` (drift) and `doc-lattice lint` (authority
 ladder) as your gates. Paste each where the output says. Pass `--docs-root` (repeatable) or
 `--linear-team` to bake those values into the generated config.
+The generated gates remain fully offline: they run only `check` and `lint` and do not require or
+receive `LINEAR_API_KEY`.
 
 To test an unreleased commit, replace the PyPI requirement with a Git source such as
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should
@@ -386,6 +388,11 @@ and the client is https-only, redirect-refusing, size-capped, and SSRF-hardened.
 HTTP 429 or 5xx gets two retries, for three total attempts. Without a usable `Retry-After`, retries
 wait 1 second and then 2 seconds. A non-negative integer `Retry-After` is honored up to the
 30-second cap; negative, date-form, and invalid values use the fallback delay.
+
+> **Security note:** If `linear --exit-code` is used in CI, run it only on trusted refs and never
+> in a fork pull-request job. The command processes repository-controlled `tickets` and
+> `linear_team` while `LINEAR_API_KEY` is present. Fork pull-request workflows should use the
+> offline `check`, `lint`, and `impact` commands instead.
 
 Canonical ticket ids are uppercase ASCII `TEAM-NUMBER`: `TEAM` starts with an uppercase letter
 and continues with uppercase letters or digits, while `NUMBER` is `0` or a decimal with no leading
@@ -404,8 +411,9 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 ## Troubleshooting
 
 **`LINEAR_API_KEY is not set`.** Only the `linear` command needs a key. Export a Linear API key
-(`export LINEAR_API_KEY=lin_api_...`) before running `linear`, or run `impact` instead: `impact` is
-the fully offline view of the same downstream reach and needs no key.
+(`export LINEAR_API_KEY=lin_api_...`) before running `linear`, or, when live Linear status is
+unnecessary, run `impact` instead: `impact` is the fully offline view of the same downstream reach
+and needs no key.
 
 **Linear returns HTTP 429 or 5xx.** These are transient. The client makes at most three attempts,
 using the 1- and 2-second fallback delays or a capped, non-negative integer `Retry-After`. If it
