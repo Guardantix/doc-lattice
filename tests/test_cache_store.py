@@ -149,7 +149,28 @@ def test_save_differing_baseline_writes(tmp_path: Path):
     assert written == final
 
 
-def test_save_replace_failure_emits_one_stderr_line_and_removes_partial(
+def test_save_delegates_atomic_persistence_with_cache_prefix(tmp_path: Path, monkeypatch):
+    import doc_lattice.cache.store as store_module  # noqa: PLC0415
+
+    final = _sample_cache_file()
+    path = tmp_path / "new" / CACHE_FILE_NAME
+    captured: list[tuple[Path, bytes, str]] = []
+
+    def _capture(target: Path, data: bytes, *, prefix: str) -> None:
+        captured.append((target, data, prefix))
+
+    monkeypatch.setattr(store_module, "atomic_replace_bytes", _capture)
+
+    save_if_changed(path, final, None)
+
+    assert len(captured) == 1
+    target, data, prefix = captured[0]
+    assert target == path
+    assert CacheFile.model_validate_json(data) == final
+    assert prefix == f"{CACHE_FILE_NAME}."
+
+
+def test_save_persistence_failure_emits_one_stderr_line_and_is_swallowed(
     tmp_path: Path, capsys, monkeypatch
 ):
     import doc_lattice.cache.store as store_module  # noqa: PLC0415
@@ -159,32 +180,10 @@ def test_save_replace_failure_emits_one_stderr_line_and_removes_partial(
     def _boom(*args, **kwargs):  # noqa: ARG001
         raise OSError("disk full")
 
-    monkeypatch.setattr(store_module.os, "replace", _boom)
-    save_if_changed(path, _sample_cache_file(), None)
+    monkeypatch.setattr(store_module, "atomic_replace_bytes", _boom)
+    result = save_if_changed(path, _sample_cache_file(), None)
 
     captured = capsys.readouterr()
-    assert captured.err.count("\n") == 1
-    assert "cache" in captured.err.lower()
-    assert list(path.parent.glob("*.tmp")) == []
-
-
-def test_save_cleanup_failure_is_swallowed_after_replace_failure(
-    tmp_path: Path, capsys, monkeypatch
-):
-    import doc_lattice.cache.store as store_module  # noqa: PLC0415
-
-    path = tmp_path / "failed" / CACHE_FILE_NAME
-
-    def _boom_replace(*args, **kwargs):  # noqa: ARG001
-        raise OSError("disk full")
-
-    def _boom_unlink(*args, **kwargs):  # noqa: ARG001
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(store_module.os, "replace", _boom_replace)
-    monkeypatch.setattr(store_module.Path, "unlink", _boom_unlink)
-    save_if_changed(path, _sample_cache_file(), None)
-
-    captured = capsys.readouterr()
+    assert result is None
     assert captured.err.count("\n") == 1
     assert "cache" in captured.err.lower()
