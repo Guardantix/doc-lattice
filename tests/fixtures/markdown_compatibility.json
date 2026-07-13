@@ -1,0 +1,81 @@
+[
+  {
+    "name": "fences",
+    "body": "# Top\n```python\n## Hidden\n``\n### Hidden too\n``` trailing\n#### Still hidden\n```\n~~~\n##### Tilde hidden\n```\n###### Still tilde hidden\n~~~\n## After\n",
+    "headings": [
+      {"level": 1, "text": "Top", "anchor": null, "line": 1},
+      {"level": 2, "text": "After", "anchor": null, "line": 14}
+    ],
+    "anchor_ids": ["top", "after"],
+    "spans": [[1, 13], [14, 14]]
+  },
+  {
+    "name": "atx_closers_and_markers",
+    "body": "# C# guide ##\n## Accent {#accent} ###\n### Use `{#id}` in examples\n#### Example {#bad}##\n",
+    "headings": [
+      {"level": 1, "text": "C# guide", "anchor": null, "line": 1},
+      {"level": 2, "text": "Accent {#accent}", "anchor": "accent", "line": 2},
+      {"level": 3, "text": "Use `{#id}` in examples", "anchor": null, "line": 3},
+      {"level": 4, "text": "Example {#bad}##", "anchor": null, "line": 4}
+    ],
+    "anchor_ids": ["c-guide", "accent", "use-id-in-examples", "example-bad"],
+    "spans": [[1, 4], [2, 4], [3, 4], [4, 4]]
+  },
+  {
+    "name": "duplicate_slugs_and_marker_reservation",
+    "body": "## Notes\n## Notes\n## Notes {#n}\n## Notes n\n## Notes-1\n",
+    "headings": [
+      {"level": 2, "text": "Notes", "anchor": null, "line": 1},
+      {"level": 2, "text": "Notes", "anchor": null, "line": 2},
+      {"level": 2, "text": "Notes {#n}", "anchor": "n", "line": 3},
+      {"level": 2, "text": "Notes n", "anchor": null, "line": 4},
+      {"level": 2, "text": "Notes-1", "anchor": null, "line": 5}
+    ],
+    "anchor_ids": ["notes", "notes-1", "n", "notes-n-1", "notes-1-1"],
+    "spans": [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]]
+  },
+  {
+    "name": "unicode_and_empty_slugs",
+    "body": "## Привет 你好\n## é under‿score\n## ⚡\n## Привет 你好\n",
+    "headings": [
+      {"level": 2, "text": "Привет 你好", "anchor": null, "line": 1},
+      {"level": 2, "text": "é under‿score", "anchor": null, "line": 2},
+      {"level": 2, "text": "⚡", "anchor": null, "line": 3},
+      {"level": 2, "text": "Привет 你好", "anchor": null, "line": 4}
+    ],
+    "anchor_ids": ["привет-你好", "é-under‿score", "", "привет-你好-1"],
+    "spans": [[1, 1], [2, 2], [3, 3], [4, 4]]
+  },
+  {
+    "name": "empty_and_rejected_headings",
+    "body": "#\n##   \n#not-heading\n####### Too deep\n###### Six\n",
+    "headings": [
+      {"level": 1, "text": "", "anchor": null, "line": 1},
+      {"level": 2, "text": "", "anchor": null, "line": 2},
+      {"level": 6, "text": "Six", "anchor": null, "line": 5}
+    ],
+    "anchor_ids": ["", "-1", "six"],
+    "spans": [[1, 4], [2, 4], [5, 5]]
+  },
+  {
+    "name": "nested_spans",
+    "body": "# Top {#top}\nintro\n## Child {#child}\nbody\n### Nested {#nested}\nbody\n## Peer {#peer}\nbody\n",
+    "headings": [
+      {"level": 1, "text": "Top {#top}", "anchor": "top", "line": 1},
+      {"level": 2, "text": "Child {#child}", "anchor": "child", "line": 3},
+      {"level": 3, "text": "Nested {#nested}", "anchor": "nested", "line": 5},
+      {"level": 2, "text": "Peer {#peer}", "anchor": "peer", "line": 7}
+    ],
+    "anchor_ids": ["top", "child", "nested", "peer"],
+    "spans": [[1, 8], [3, 6], [5, 6], [7, 8]]
+  },
+  {
+    "name": "excluded_heading_forms",
+    "body": "Setext\n======\n> # Quoted\n- ## Listed\n   ### Indented\n# Top level\n",
+    "headings": [
+      {"level": 1, "text": "Top level", "anchor": null, "line": 6}
+    ],
+    "anchor_ids": ["top-level"],
+    "spans": [[6, 6]]
+  }
+]

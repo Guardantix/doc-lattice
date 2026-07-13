@@ -41,7 +41,7 @@ uv, Ruff, ty.
 - Create: `tests/test_markdown_compat.py`
 - Create: `src/doc_lattice/markdown_compat.py`
 
-- [ ] **Step 1: Add the golden fixture**
+- [x] **Step 1: Add the golden fixture**
 
 Create a JSON array with these named cases and exact expected `Heading` records, anchor ids, and
 inclusive spans:
@@ -130,7 +130,7 @@ inclusive spans:
 ]
 ```
 
-- [ ] **Step 2: Write the extraction-only golden test**
+- [x] **Step 2: Write the extraction-only golden test**
 
 ```python
 import json
@@ -153,13 +153,13 @@ def test_extract_headings_matches_golden_fixture(case: dict[str, object]) -> Non
     assert [asdict(heading) for heading in extract_headings(str(case["body"]))] == case["headings"]
 ```
 
-- [ ] **Step 3: Run the test and verify RED**
+- [x] **Step 3: Run the test and verify RED**
 
 Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest tests/test_markdown_compat.py -v`
 
 Expected: collection fails with `ModuleNotFoundError: No module named 'doc_lattice.markdown_compat'`.
 
-- [ ] **Step 4: Implement focused extraction**
+- [x] **Step 4: Implement focused extraction**
 
 Create `markdown_compat.py` with the version constants, `Heading`, a module-level parser configured
 with only `normalize`, `block`, `fence`, `heading`, and a one-line fallback replacing `paragraph`,
@@ -248,9 +248,9 @@ def extract_headings(body: str) -> list[Heading]:
 
 Malformed token pairs raise `RuntimeError` naming `MARKDOWN_COMPAT_VERSION`.
 
-- [ ] **Step 5: Run the extraction test and existing section tests**
+- [x] **Step 5: Run the extraction test and existing section tests**
 
-Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest tests/test_markdown_compat.py tests/test_sections.py -v`
+Run: `UV_CACHE_DIR=/tmp/uv-cache uv run --group dev pytest --no-cov tests/test_markdown_compat.py tests/test_sections.py -v`
 
 Expected: the new extraction cases pass; existing section tests still use the old implementation
 and pass.
