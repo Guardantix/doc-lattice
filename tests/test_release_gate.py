@@ -44,7 +44,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _run_gate(
-    repo: Path, *, tag: str, version: str, sha: str
+    repo: Path, *, tag: str, version: str, sha: str, before: str | None = None
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     output = repo / "github-output.txt"
     env = os.environ | {
@@ -53,6 +53,8 @@ def _run_gate(
         "GITHUB_SHA": sha,
         "GITHUB_OUTPUT": str(output),
     }
+    if before is not None:
+        env["GITHUB_BEFORE"] = before
     result = subprocess.run(  # noqa: S603 - controlled script and arguments
         (sys.executable, str(_GATE)),
         cwd=repo,
@@ -104,55 +106,69 @@ def test_existing_tag_at_older_commit_is_ordinary_noop(repo: Path):
     assert outputs == ["proceed=false", "create_tag=false"]
 
 
-def test_absent_tag_with_same_version_in_parent_is_ordinary_noop(repo: Path):
+def test_absent_tag_with_same_version_before_push_is_ordinary_noop(repo: Path):
     _write_version(repo, "1.0.0")
-    _commit(repo, "release version without tag")
+    before = _commit(repo, "release version without tag")
     (repo / "README.md").write_text("later change\n", encoding="utf-8")
     sha = _commit(repo, "later change")
 
-    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha)
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
 
     assert result.returncode == 0
     assert outputs == ["proceed=false", "create_tag=false"]
 
 
-def test_absent_tag_with_different_version_in_parent_is_new_release(repo: Path):
+def test_absent_tag_with_different_version_before_push_is_new_release(repo: Path):
     _write_version(repo, "0.9.0")
-    _commit(repo, "old version")
+    before = _commit(repo, "old version")
     _write_version(repo, "1.0.0")
     sha = _commit(repo, "release version")
 
-    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha)
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
 
     assert result.returncode == 0
     assert outputs == ["proceed=true", "create_tag=true"]
 
 
-def test_absent_tag_with_no_version_file_in_parent_is_new_release(repo: Path):
+def test_absent_tag_with_bump_earlier_in_push_releases_final_commit(repo: Path):
+    _write_version(repo, "0.9.0")
+    before = _commit(repo, "old version")
+    _write_version(repo, "1.0.0")
+    _commit(repo, "release version")
+    (repo / "README.md").write_text("follow-up\n", encoding="utf-8")
+    sha = _commit(repo, "follow-up on the same push")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=true", "create_tag=true"]
+
+
+def test_absent_tag_with_no_version_file_before_push_is_new_release(repo: Path):
     (repo / "README.md").write_text("before package\n", encoding="utf-8")
-    _commit(repo, "before package")
+    before = _commit(repo, "before package")
     _write_version(repo, "1.0.0")
     sha = _commit(repo, "release version")
 
-    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha)
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
 
     assert result.returncode == 0
     assert outputs == ["proceed=true", "create_tag=true"]
 
 
-def test_malformed_first_parent_version_source_fails(repo: Path):
+def test_malformed_pre_push_version_source_fails(repo: Path):
     path = repo / _VERSION_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("VERSION = unknown\n", encoding="utf-8")
-    _commit(repo, "malformed parent source")
+    before = _commit(repo, "malformed pre-push source")
     _write_version(repo, "1.0.0")
     sha = _commit(repo, "introduce valid release version")
 
-    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha)
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
 
     assert result.returncode != 0
     assert (
-        "::error::first-parent source has a malformed version declaration "
+        "::error::pre-push source has a malformed version declaration "
         "in src/doc_lattice/__init__.py"
     ) in result.stdout
     assert outputs == []

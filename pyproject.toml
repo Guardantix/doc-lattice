@@ -13,6 +13,10 @@ include = [
     "/README.md",
     "/pyproject.toml",
 ]
+exclude = [
+    "/tests/test_release_gate.py",
+    "/tests/test_release_workflow.py",
+]
 
 [project]
 name = "doc-lattice"

@@ -88,6 +88,7 @@ jobs:
       - name: Tag-health gate
         id: gate
         env:
+          GITHUB_BEFORE: ${{ github.event.before }}
           TAG: ${{ steps.target.outputs.tag }}
           VERSION: ${{ steps.target.outputs.version }}
         run: |

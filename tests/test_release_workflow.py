@@ -31,6 +31,7 @@ def test_release_exposes_publish_coordination_outputs():
 def test_release_gate_invokes_testable_script_with_runner_environment():
     gate = _named_step(_WORKFLOW["jobs"]["release"], "Tag-health gate")
     assert gate["env"] == {
+        "GITHUB_BEFORE": "${{ github.event.before }}",
         "TAG": "${{ steps.target.outputs.tag }}",
         "VERSION": "${{ steps.target.outputs.version }}",
     }

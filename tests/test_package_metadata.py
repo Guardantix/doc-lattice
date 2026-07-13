@@ -20,6 +20,13 @@ def _assert_sdist_members(members, expected_prefix):
     names = [member.name for member in members]
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     assert duplicates == [], f"duplicate sdist members: {duplicates}"
+    repository_only_tests = {
+        f"{expected_prefix}/tests/test_release_gate.py",
+        f"{expected_prefix}/tests/test_release_workflow.py",
+    }
+    assert repository_only_tests.isdisjoint(names), (
+        f"repository-only tests included: {sorted(repository_only_tests.intersection(names))}"
+    )
 
     root_files = set()
     unexpected_paths = []
@@ -73,6 +80,10 @@ def test_sdist_has_an_explicit_minimal_include_set():
         "/LICENSE",
         "/README.md",
         "/pyproject.toml",
+    ]
+    assert sdist["exclude"] == [
+        "/tests/test_release_gate.py",
+        "/tests/test_release_workflow.py",
     ]
 
 

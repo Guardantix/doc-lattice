@@ -38,9 +38,10 @@ The command must print the released version.
   retry neither re-uploads existing PyPI files nor fails because they already exist.
 - A commit with an unchanged version whose tag points to an older commit is a no-op.
 - A matching tag that points to a source with a different version fails the release.
-- When the tag is absent, only the commit that introduces that version may create it. A missing
-  version file in its first parent can identify the package and version introduction.
-- Malformed current, parent, or tagged version declarations fail closed. Unexpected Git or
+- When the tag is absent, a push whose pre-push source declares a different version may create it.
+  The version bump may appear anywhere in a multi-commit push; the tag identifies the final landed
+  commit. A missing version file in the pre-push source can identify the package introduction.
+- Malformed current, pre-push, or tagged version declarations fail closed. Unexpected Git or
   source-reading failures also fail closed; they are never treated as permission to publish.
 
 If any release step fails, rerun the same workflow. Never move a release tag or delete or

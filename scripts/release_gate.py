@@ -92,19 +92,18 @@ def main() -> int:
             detail = tag_check.stderr.strip() or "unknown error"
             raise GateError(f"could not inspect tag {tag}: {detail}")
 
-        parent_ref = f"{current_sha}^"
-        _resolve_commit(parent_ref)
-        parent_version = _version_at(parent_ref, "first-parent source", may_be_missing=True)
-        if parent_version == version:
+        before_sha = _resolve_commit(_required_environment("GITHUB_BEFORE"))
+        before_version = _version_at(before_sha, "pre-push source", may_be_missing=True)
+        if before_version == version:
             print(
-                f"Tag {tag} is absent but the first parent already declares {version}; "
+                f"Tag {tag} is absent but the pre-push source already declares {version}; "
                 "ordinary no-op."
             )
             _write_decision(github_output, proceed=False, create_tag=False)
         else:
-            previous = parent_version if parent_version is not None else "no version"
+            previous = before_version if before_version is not None else "no version"
             print(
-                f"Tag {tag} is absent and the first parent declares {previous}; "
+                f"Tag {tag} is absent and the pre-push source declares {previous}; "
                 "starting release work."
             )
             _write_decision(github_output, proceed=True, create_tag=True)
