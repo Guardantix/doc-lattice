@@ -21,9 +21,9 @@ def _lattice():
 def test_mermaid_has_nodes_and_edges():
     out = to_mermaid(_lattice(), set())
     assert out.startswith("graph TD")
-    assert "up" in out
-    assert "down" in out
-    assert "-->" in out
+    assert 'n0["down"]' in out
+    assert 'n1["Up"]' in out
+    assert "n1 --> n0" in out
 
 
 def test_mermaid_styles_stale_edges():
@@ -39,10 +39,10 @@ def test_dot_is_digraph():
 
 def test_section_edge_drawn_from_owning_file_not_bare_anchor():
     # 'down' derives from section anchor 'u', which lives in file 'up'. The edge must
-    # connect the tracked file node 'up', not the bare anchor 'u' (spec 6.4).
+    # connect the generated ids for the tracked files, not a third id for anchor 'u' (spec 6.4).
     lines = to_mermaid(_lattice(), set()).splitlines()
-    assert "    up --> down" in lines
-    assert "    u --> down" not in lines
+    assert "    n1 --> n0" in lines
+    assert len([line for line in lines if "-->" in line]) == 1
 
 
 def test_dot_escapes_backslash_and_quote_in_label():
@@ -54,7 +54,7 @@ def test_dot_escapes_backslash_and_quote_in_label():
     assert r'"a" [label="C:\\path \"x\""];' in out
 
 
-def test_mermaid_sanitizes_node_ids_with_spaces():
+def test_mermaid_uses_generated_ids_for_node_ids_with_spaces():
     lat = build_lattice(
         [
             ParsedDoc(Path("a.md"), NodeMeta(id="my doc", title="My Doc"), "# A {#sec}\nx\n"),
@@ -62,9 +62,24 @@ def test_mermaid_sanitizes_node_ids_with_spaces():
         ]
     )
     out = to_mermaid(lat, set())
-    assert 'my_doc["My Doc"]' in out  # id sanitized, title preserved
-    assert "    my_doc --> b" in out
+    assert 'n1["My Doc"]' in out  # generated id is safe, title preserved
+    assert "    n1 --> n0" in out
     assert "my doc[" not in out  # raw space-bearing id would be invalid mermaid
+
+
+def test_mermaid_uses_distinct_generated_ids_for_colliding_node_ids():
+    lat = build_lattice(
+        [
+            ParsedDoc(Path("hyphen.md"), NodeMeta(id="a-b"), "x\n"),
+            ParsedDoc(
+                Path("underscore.md"),
+                NodeMeta(id="a_b", derives_from=[RawEdge(ref="a-b")]),
+                "x\n",
+            ),
+        ]
+    )
+
+    assert to_mermaid(lat, set()) == ('graph TD\n    n0["a-b"]\n    n1["a_b"]\n    n0 --> n1\n')
 
 
 def test_dot_styles_stale_edges():
@@ -80,7 +95,7 @@ def test_mermaid_escapes_double_quote_in_label():
     # well-formed; mermaid has no backslash escape inside the quotes.
     lat = build_lattice([ParsedDoc(Path("a.md"), NodeMeta(id="a", title='Say "hi"'), "x\n")])
     out = to_mermaid(lat, set())
-    assert "a[\"Say 'hi'\"]" in out  # quotes become apostrophes; label stays well-formed
+    assert "n0[\"Say 'hi'\"]" in out  # quotes become apostrophes; label stays well-formed
     assert 'Say "hi"' not in out  # no raw double quote leaks into the bracketed label
 
 
@@ -97,7 +112,7 @@ def test_mermaid_omits_broken_edge_but_keeps_node():
         ]
     )
     out = to_mermaid(lat, set())
-    assert 'g["G"]' in out  # broken-ref node still rendered
+    assert 'n0["G"]' in out  # broken-ref node still rendered
     assert "-->" not in out  # the unresolved edge contributes no arrow
 
 
@@ -114,10 +129,10 @@ def test_multiple_section_edges_collapse_with_stale_or():
     ]
     lat = build_lattice(docs)
     solid = to_mermaid(lat, set()).splitlines()
-    assert solid.count("    up --> down") == 1  # two section edges collapse to one
+    assert solid.count("    n1 --> n0") == 1  # two section edges collapse to one
     dashed = to_mermaid(lat, {("down", TargetId("up", "b"))})  # only the 'b' edge stale
-    assert "    up -.-> down" in dashed  # single collapsed edge is dashed
-    assert "    up --> down" not in dashed
+    assert "    n1 -.-> n0" in dashed  # single collapsed edge is dashed
+    assert "    n1 --> n0" not in dashed
 
 
 def test_empty_lattice_renders_headers_only():
@@ -131,7 +146,7 @@ def test_empty_lattice_renders_headers_only():
 def test_label_falls_back_to_id_when_title_missing():
     # 'down' has no title, so _label falls back to the id verbatim as the bracketed label.
     out = to_mermaid(_lattice(), set())
-    assert 'down["down"]' in out  # no title -> id used verbatim as the label
+    assert 'n0["down"]' in out  # no title -> id used verbatim as the label
 
 
 def test_edges_emitted_in_sorted_order():
@@ -144,7 +159,7 @@ def test_edges_emitted_in_sorted_order():
     ]
     out = to_mermaid(build_lattice(docs), set())
     edges = [ln for ln in out.splitlines() if "-->" in ln]
-    assert edges == ["    u --> a", "    u --> z"]  # sorted by (upstream, source)
+    assert edges == ["    n1 --> n0", "    n1 --> n2"]  # sorted by raw (upstream, source)
 
 
 def test_dot_escapes_special_chars_in_node_id():
@@ -179,7 +194,11 @@ def test_json_edge_set_matches_mermaid_edge_set():
         for line in to_mermaid(lat, stale).splitlines()
         if "->" in line
     }
-    json_edges = {(e["upstream"], e["downstream"]) for e in to_json(lat, stale)["edges"]}
+    payload = to_json(lat, stale)
+    mermaid_id = {node["id"]: f"n{index}" for index, node in enumerate(payload["nodes"])}
+    json_edges = {
+        (mermaid_id[e["upstream"]], mermaid_id[e["downstream"]]) for e in payload["edges"]
+    }
     assert json_edges == mermaid_edges
 
 

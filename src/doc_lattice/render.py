@@ -1,10 +1,6 @@
 """Render the lattice as Mermaid, DOT, or JSON."""
 
-import re
-
 from .model import Lattice, TargetId
-
-_MERMAID_ID_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
 def _label(lattice: Lattice, node_id: str) -> str:
@@ -33,16 +29,6 @@ def _mermaid_escape(text: str) -> str:
     with an apostrophe so the label stays well-formed.
     """
     return text.replace('"', "'")
-
-
-def _mermaid_id(node_id: str) -> str:
-    """Return a Mermaid-safe node identifier (its title carries the readable name).
-
-    Mermaid rejects ids with spaces or reserved characters, so any character outside
-    ``[A-Za-z0-9_]`` is replaced with ``_``. The human-readable name is preserved in the
-    node's bracketed label.
-    """
-    return _MERMAID_ID_RE.sub("_", node_id)
 
 
 def _graph_edges(
@@ -90,13 +76,16 @@ def to_mermaid(lattice: Lattice, stale_edges: set[tuple[str, TargetId]]) -> str:
     Returns:
         Mermaid source. Edges run upstream (target) to downstream (source).
     """
+    mermaid_ids = {
+        node_id: f"n{index}" for index, node_id in enumerate(sorted(lattice.nodes_by_id))
+    }
     lines = ["graph TD"]
-    for node_id in sorted(lattice.nodes_by_id):
+    for node_id, mermaid_id in mermaid_ids.items():
         label = _mermaid_escape(_label(lattice, node_id))
-        lines.append(f'    {_mermaid_id(node_id)}["{label}"]')
+        lines.append(f'    {mermaid_id}["{label}"]')
     for upstream, source_id, is_stale in _graph_edges(lattice, stale_edges):
         arrow = "-.->" if is_stale else "-->"
-        lines.append(f"    {_mermaid_id(upstream)} {arrow} {_mermaid_id(source_id)}")
+        lines.append(f"    {mermaid_ids[upstream]} {arrow} {mermaid_ids[source_id]}")
     return "\n".join(lines) + "\n"
 
 

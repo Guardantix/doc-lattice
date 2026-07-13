@@ -829,11 +829,11 @@ def test_graph_json_edge_set_matches_mermaid(lattice_dir: Path, monkeypatch):
         if "->" in line
     }
     payload = json.loads(runner.invoke(app, ["graph", "--format", "json"]).stdout)
-    # Mermaid sanitizes ids (hyphens become underscores) for its own id syntax; normalize
-    # before comparing so this checks edge-set agreement, not id spelling.
+    # Mermaid assigns collision-free ids from the same sorted node order as JSON; translate
+    # JSON's raw ids before comparing so this checks semantic edge-set agreement.
+    mermaid_id = {node["id"]: f"n{index}" for index, node in enumerate(payload["nodes"])}
     json_edges = {
-        (e["upstream"].replace("-", "_"), e["downstream"].replace("-", "_"))
-        for e in payload["edges"]
+        (mermaid_id[e["upstream"]], mermaid_id[e["downstream"]]) for e in payload["edges"]
     }
     assert json_edges == mermaid_edges
 
