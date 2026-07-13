@@ -126,14 +126,14 @@ def section_spans(headings: list[Heading], total_lines: int) -> list[tuple[int, 
         section runs from its heading through the line before the next heading of equal
         or higher level, or to ``total_lines``.
     """
-    spans = [(heading.line, total_lines) for heading in headings]
+    end_lines = [total_lines] * len(headings)
     stack: list[tuple[int, int]] = []
     for idx, heading in enumerate(headings):
         while stack and stack[-1][1] >= heading.level:
             previous_idx, _ = stack.pop()
-            spans[previous_idx] = (spans[previous_idx][0], heading.line - 1)
+            end_lines[previous_idx] = heading.line - 1
         stack.append((idx, heading.level))
-    return spans
+    return [(heading.line, end_line) for heading, end_line in zip(headings, end_lines, strict=True)]
 
 
 def section_span(headings: list[Heading], idx: int, total_lines: int) -> tuple[int, int]:
@@ -148,7 +148,17 @@ def section_span(headings: list[Heading], idx: int, total_lines: int) -> tuple[i
         ``(start, end)`` from the heading line through the line before the next heading
         of equal or higher level, or to ``total_lines``.
     """
-    return section_spans(headings, total_lines)[idx]
+    head = headings[idx]
+    end = total_lines
+    start_idx = idx + 1
+    if start_idx < 0:
+        start_idx += len(headings)
+    for next_idx in range(start_idx, len(headings)):
+        nxt = headings[next_idx]
+        if nxt.level <= head.level:
+            end = nxt.line - 1
+            break
+    return (head.line, end)
 
 
 def section_text(body: str, span: tuple[int, int]) -> str:
