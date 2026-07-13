@@ -4,6 +4,7 @@ import pytest
 
 import doc_lattice.sections as sections_module
 from doc_lattice.sections import (
+    Heading,
     anchor_ids,
     build_toc,
     github_slug,
@@ -41,6 +42,15 @@ def test_build_toc_anchorless_heading():
     toc = build_toc("## Plain Heading\nbody\n")
     assert toc[0].anchor is None
     assert toc[0].text == "Plain Heading"
+
+
+@pytest.mark.parametrize(("body", "level"), [("#", 1), ("##   ", 2)])
+def test_build_toc_accepts_empty_atx_heading(body, level):
+    assert build_toc(body) == [Heading(level=level, text="", anchor=None, line=1)]
+
+
+def test_build_toc_rejects_spaceless_heading_text():
+    assert build_toc("#not head") == []
 
 
 def test_section_span_stops_at_same_or_higher_level():

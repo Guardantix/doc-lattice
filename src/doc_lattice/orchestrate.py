@@ -2,7 +2,7 @@
 
 import os
 
-from .cache import CacheHit, LoadCache
+from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
 from .config import ProjectConfig
 from .discovery import decode_doc, discover_doc_paths, read_doc
 from .frontmatter_parser import parse_meta, split_frontmatter
@@ -48,32 +48,34 @@ def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
     """The incremental load path. Writes the cache only after a successful build."""
     config = project.config
     # ty cannot narrow cache_key: str | None from the caller's is-None branch across the call;
-    # this assert documents and enforces that invariant for LoadCache.open's str parameter.
+    # this assert documents and enforces that invariant for cache_path's str parameter.
     assert config.cache_key is not None  # noqa: S101
-    cache = LoadCache.open(
-        cache_key=config.cache_key,
-        project_root=project.project_root,
-        env=os.environ,
-        trust_stat=config.cache_trust_stat,
-        require_verified=require_verified,
-    )
+    path = cache_path(config.cache_key, os.environ)
+    snapshot = store.load(path)
+    resolved_root = project.project_root.resolve()
+    current_root = str(resolved_root)
+    state = RunState.begin(snapshot.cache, current_root)
+    effective_trust = config.cache_trust_stat and not require_verified
+    policy = LookupPolicy(current_root=current_root, trust_stat=effective_trust)
     parsed: list[ParsedDoc] = []
-    discovered: set[str] = set()
-    for path in discover_doc_paths(project.resolved_roots, config.ignore_globs):
-        rel_key = path.relative_to(project.project_root).as_posix()
-        discovered.add(rel_key)
-        result = cache.lookup(rel_key, path)
+    for doc_path in discover_doc_paths(project.resolved_roots, config.ignore_globs):
+        rel_key = doc_path.relative_to(resolved_root).as_posix()
+        result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):
+            state.claim(rel_key, result.refreshed_stat)
             if result.doc is not None:
                 parsed.append(result.doc)
             continue
-        text = decode_doc(path, result.data)
+        text = decode_doc(doc_path, result.data)
         raw_meta, body = split_frontmatter(text)
-        meta = parse_meta(raw_meta, path)
+        meta = parse_meta(raw_meta, doc_path)
         sections = derive_file_sections(body) if meta is not None else None
-        cache.record_miss(rel_key, result.data, meta, body, sections, result.stat)
+        state.replace(
+            rel_key,
+            make_entry(result.data, meta, body, sections, result.stat, current_root),
+        )
         if meta is not None:
-            parsed.append(ParsedDoc(path=path, meta=meta, body=body, sections=sections))
+            parsed.append(ParsedDoc(path=doc_path, meta=meta, body=body, sections=sections))
     lattice = build_lattice(parsed)
-    cache.finalize(discovered)
+    store.save_if_changed(path, state.complete(), snapshot.baseline)
     return lattice

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .hashing import normalize_newlines
 
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+_HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
 # CommonMark optional closing sequence of an ATX heading: a trailing run of '#' preceded by
 # whitespace is not part of the heading content, so GitHub discards it before slugging. We
 # strip it so '## Save format ##' slugs to 'save-format', not 'save-format-'.
@@ -107,7 +107,7 @@ def build_toc(body: str) -> list[Heading]:
         if match is None:
             continue
         level = len(match.group(1))
-        raw_text = _ATX_CLOSING_RE.sub("", match.group(2))
+        raw_text = _ATX_CLOSING_RE.sub("", match.group(2) or "")
         anchor_match = _ANCHOR_RE.search(raw_text)
         anchor = anchor_match.group(1) if anchor_match else None
         headings.append(Heading(level=level, text=raw_text, anchor=anchor, line=i))

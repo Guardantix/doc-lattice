@@ -1,6 +1,7 @@
 """Tests for load_lattice wiring."""
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,21 @@ def test_cached_cold_run_writes_the_cache_file(lattice_dir: Path, monkeypatch, t
     assert not cache_path("testslot", os.environ).exists()
     load_lattice(load_config(None, lattice_dir))
     assert cache_path("testslot", os.environ).exists()
+
+
+def test_cached_load_uses_resolved_project_root(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    project_dir = tmp_path / "project"
+    docs = project_dir / "docs"
+    docs.mkdir(parents=True)
+    (docs / "node.md").write_text("---\nid: node\n---\n# Node\n", encoding="utf-8")
+    _with_cache(project_dir)
+
+    project = load_config(None, project_dir)
+    monkeypatch.chdir(tmp_path)
+    project = replace(project, project_root=Path("project"))
+
+    assert set(load_lattice(project).nodes_by_id) == {"node"}
 
 
 def test_warm_cached_run_reparses_nothing(lattice_dir: Path, monkeypatch, tmp_path):

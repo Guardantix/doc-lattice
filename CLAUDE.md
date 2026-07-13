@@ -103,13 +103,18 @@ testing unreleased code. Spec: `docs/superpowers/specs/2026-06-28-doc-lattice-in
 `apply_reconcile`/`plan_rewrites` (which return planned updates or rewritten text rather than
 writing it), the shared `report_render`, plus the linear pure core (`tickets`, `linear_query`,
 `stale_shipped`, `linear_render`), `scaffold`, and the release version-consistency core
-`version_check`. The
-untyped-to-typed
-boundary modules are `frontmatter_parser` and `linear_parser`. Only `config`, `discovery`,
-`orchestrate`, `cli`, and `cache` touch the disk (`cli` performs the reconcile and init writes;
-`cache` reads and atomically writes the opt-in load cache under the user cache home); `linear_fetch`
-is impure wiring and `linear_client` is the only module that touches the network. This is what lets
-the graph and report layers be tested against synthetic inputs with no I/O.
+`version_check`, plus `cache/schema.py` (models and codec) and `cache/state.py` (run-local
+`RunState`). The untyped-to-typed boundary modules are `frontmatter_parser` and `linear_parser`.
+High-level filesystem I/O is owned by `config`, `discovery`, `orchestrate`, and `cli` (`cli`
+performs the reconcile and init writes). The `path_utils.safe_resolve()` helper used by config and
+discovery is filesystem-aware path resolution: it calls `Path.resolve()`, which follows symlinks.
+The cache package splits by phase: `cache/schema.py` (models and codec) and `cache/state.py`
+(run-local `RunState`) are pure in this architecture's I/O-boundary sense; `RunState` is mutable,
+deterministic, and filesystem-free. In contrast, `cache/store.py` (reads and atomically writes the
+opt-in load cache under the user cache home) and `cache/lookup.py` (doc reads and stats for tier
+selection) are impure. `linear_fetch` is impure wiring and `linear_client` is the only module that
+touches the network. This is what lets the graph and report layers be tested against synthetic
+inputs with no I/O.
 
 ## Project-specific invariants
 
