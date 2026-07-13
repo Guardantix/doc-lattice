@@ -18,10 +18,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import __version__
-from .constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
-from .discovery import read_doc_bytes_and_stat
-from .model import FileSections, NodeMeta, ParsedDoc, SectionRecord
+from .. import __version__
+from ..constants import CACHE_FILE_NAME, CACHE_VERSION, MAX_STAT_ROOTS
+from ..discovery import read_doc_bytes_and_stat
+from ..model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
 
 class StatRecord(BaseModel):
@@ -237,7 +237,7 @@ class LoadCache:
         try:
             st = path.stat()
         except OSError as exc:
-            from .discovery import _unreadable  # noqa: PLC0415
+            from ..discovery import _unreadable  # noqa: PLC0415
 
             raise _unreadable(path, exc) from exc
         if record.size != st.st_size or record.mtime_ns != st.st_mtime_ns:
