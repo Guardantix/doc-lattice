@@ -389,10 +389,10 @@ HTTP 429 or 5xx gets two retries, for three total attempts. Without a usable `Re
 wait 1 second and then 2 seconds. A non-negative integer `Retry-After` is honored up to the
 30-second cap; negative, date-form, and invalid values use the fallback delay.
 
-> **Security note:** If `linear --exit-code` is used in CI, run it only on trusted refs and never
-> in a fork pull-request job. The command processes repository-controlled `tickets` and
-> `linear_team` while `LINEAR_API_KEY` is present. Fork pull-request workflows should use the
-> offline `check`, `lint`, and `impact` commands instead.
+> **Security note:** If `linear` is used in CI, run it only on trusted refs and never in a fork
+> pull-request job, whether or not `--exit-code` is used. The command processes
+> repository-controlled `tickets` and `linear_team` while `LINEAR_API_KEY` is present. Fork
+> pull-request workflows should use the offline `check`, `lint`, and `impact` commands instead.
 
 Canonical ticket ids are uppercase ASCII `TEAM-NUMBER`: `TEAM` starts with an uppercase letter
 and continues with uppercase letters or digits, while `NUMBER` is `0` or a decimal with no leading
