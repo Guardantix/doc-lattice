@@ -82,7 +82,7 @@ serves the engine and never imports the loader or parser layers.
   `discovery.read_doc_bytes_and_stat`) but never touches `RunState`.
 
 - **`__init__.py`.** Re-exports the public names (`CacheHit`, `CacheMiss`, `LookupPolicy`,
-  `RunState`, `StoreSnapshot`, `cache_path`), so existing imports such as
+  `RunState`, `StoreSnapshot`, `cache_path`, `make_entry`), so existing imports such as
   `from doc_lattice.cache import cache_path` in `tests/test_orchestrate.py` keep working.
   `orchestrate` imports the `store` and `lookup` submodules directly for their functions.
 
@@ -250,9 +250,9 @@ manual before-and-after check that a cold-then-warm run produces a byte-identica
    dependency direction (the cache importing loader and parser layers, or taking them as
    callables) and blur "orchestrate is the single wiring point". The transaction boundary stays
    visible at the one existing wiring point.
-3. **A `CacheSession` facade enforcing phase order.** Rejected as an extra abstraction the
-   two-phase surface (`RunState.begin` to `complete`) does not need; misuse is structurally
-   awkward in the one call site that exists.
+3. **A `CacheSession` facade enforcing phase order.** Rejected as an extra abstraction: only
+   one call site exists (`_load_cached`), so runtime phase-order enforcement protects nothing
+   the plain `RunState.begin` to `complete` surface does not already make obvious.
 4. **Single-file restructure without a package.** Rejected: the pure and impure halves stay
    invisible at module level, which is how this repo documents and audits purity, and the
    mirrored per-module test layout presumes modules to mirror.
