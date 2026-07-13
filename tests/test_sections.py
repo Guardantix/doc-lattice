@@ -167,6 +167,25 @@ def test_build_toc_heading_text_retains_anchor_marker():
     assert toc[0].text == "Accent {#accent}"
 
 
+def test_build_toc_ignores_nontrailing_anchor_marker():
+    toc = build_toc("## Use `{#id}` in examples\nbody line\n")
+
+    assert toc[0].anchor is None
+    assert toc[0].text == "Use `{#id}` in examples"
+
+
+def test_build_toc_does_not_accept_unspaced_hashes_after_anchor_marker():
+    toc = build_toc("## Example {#id}##\nbody line\n")
+
+    assert toc[0].anchor is None
+
+
+def test_section_text_preserves_nontrailing_anchor_marker():
+    body = "## Use `{#id}` in examples\nbody line\n"
+
+    assert section_text(body, (1, 2)) == "## Use `{#id}` in examples\nbody line"
+
+
 def test_build_toc_strips_atx_closing_sequence_from_text():
     # A CommonMark closing '#' run (preceded by whitespace) is not heading content, so it is
     # dropped from Heading.text; a '#' inside the content is kept.
@@ -186,6 +205,12 @@ def test_build_toc_keeps_marker_when_closing_sequence_present():
     toc = build_toc("## Accent {#accent} ##\nx\n")
     assert toc[0].anchor == "accent"
     assert toc[0].text == "Accent {#accent}"
+
+
+def test_section_text_strips_marker_before_atx_closing_sequence():
+    body = "## Accent {#accent} ##\nx\n"
+
+    assert section_text(body, (1, 2)) == "## Accent ##\nx"
 
 
 @pytest.mark.parametrize(

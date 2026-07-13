@@ -15,7 +15,9 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 # whitespace is not part of the heading content, so GitHub discards it before slugging. We
 # strip it so '## Save format ##' slugs to 'save-format', not 'save-format-'.
 _ATX_CLOSING_RE = re.compile(r"\s+#+\s*$")
-_ANCHOR_RE = re.compile(r"\s*\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}\s*")
+# An explicit anchor is a trailing heading marker. A CommonMark ATX closing sequence may
+# follow it in the raw heading line, but arbitrary heading content may not.
+_ANCHOR_RE = re.compile(r"(?:^|\s+)\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}(?:\s*$|\s+(?=#+\s*$))")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
 # Verbatim port of github-slugger@2.0.0's strip character class (its regex.js), the set
 # of characters it replaces with the empty string before turning spaces into hyphens; see
