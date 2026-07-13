@@ -2,7 +2,8 @@
 
 The supported Markdown subset is top-level, column-zero ATX headings plus CommonMark
 backtick and tilde fences. ``markdown-it-py==4.2.0`` owns heading and fence recognition;
-the local state adapter builds only the source maps those rules require.
+the local state adapter builds only the source maps those rules require. Generated data preserves
+``github-slugger@2.0.0`` lowercase and strip behavior under JavaScript Unicode 17.0.
 """
 
 import re
@@ -15,13 +16,20 @@ from markdown_it.rules_block.state_block import StateBlock
 from markdown_it.token import Token
 from markdown_it.utils import EnvType
 
-from ._github_slugger_data import SLUG_STRIP_PATTERN
+from ._github_slugger_data import (
+    JAVASCRIPT_UNICODE_VERSION,
+    LOWERCASE_PATCH_PATTERN,
+    LOWERCASE_PATCH_TRANSLATION,
+    SLUG_STRIP_PATTERN,
+)
 from .hashing import normalize_newlines
 
 MARKDOWN_COMPAT_VERSION = "markdown-it-py==4.2.0"
 SLUG_COMPAT_VERSION = "github-slugger@2.0.0"
+SLUG_UNICODE_VERSION = JAVASCRIPT_UNICODE_VERSION
 
 _ANCHOR_RE = re.compile(r"(?:^|\s+)\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}(?:\s*$|\s+(?=#+\s*$))")
+_LOWERCASE_PATCH_RE = re.compile(LOWERCASE_PATCH_PATTERN)
 _SLUG_STRIP_RE = re.compile(SLUG_STRIP_PATTERN)
 _HEADING_TOKEN_COUNT = 3
 
@@ -162,9 +170,12 @@ def github_slug(text: str) -> str:
         text: Raw heading content.
 
     Returns:
-        The lowercased, stripped, and space-replaced upstream-compatible slug.
+        The JavaScript Unicode 17 lowercased, stripped, and space-replaced compatible slug.
     """
-    return _SLUG_STRIP_RE.sub("", text.lower()).replace(" ", "-")
+    lowercase = text.lower()
+    if not lowercase.isascii() and _LOWERCASE_PATCH_RE.search(lowercase):
+        lowercase = lowercase.translate(LOWERCASE_PATCH_TRANSLATION)
+    return _SLUG_STRIP_RE.sub("", lowercase).replace(" ", "-")
 
 
 class _Slugger:

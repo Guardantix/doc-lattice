@@ -301,7 +301,8 @@ backtick and tilde fences suppress headings inside them. Setext headings, headin
 or list items, and indented headings are not addressable. Inline Markdown remains part of the raw
 heading text used for slugging. Heading and fence recognition is pinned to
 `markdown-it-py==4.2.0`; generated slugs and document-order duplicate suffixes target
-`github-slugger@2.0.0`.
+`github-slugger@2.0.0` under JavaScript Unicode 17.0. Generated lowercase patches bridge the
+minimum supported Python 3.13 Unicode 15.1 table to that target.
 
 ## Configuration
 
@@ -457,7 +458,7 @@ collision. Equal anchors in different files do not collide.
 doc-lattice/
 ├── src/doc_lattice/         # the engine: a pure graph/report core behind a thin impure shell
 │   ├── markdown_compat.py      # pinned heading and GitHub-slug compatibility adapter
-│   ├── _github_slugger_data.py # generated slug-strip compatibility data
+│   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
 │   └── cache/               # phase-separated incremental load cache
 │       ├── schema.py        # filesystem-free models and codec
 │       ├── state.py         # filesystem-free run-local state

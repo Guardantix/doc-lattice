@@ -90,19 +90,22 @@ parsing, anchor, and slug behavior behind one module boundary.
 
 `src/doc_lattice/_github_slugger_data.py` is generated and must not be hand-edited. It contains the
 Python regular-expression pattern derived mechanically from the strip behavior of
-`github-slugger@2.0.0` and records the exact upstream version and integrity metadata in its header.
-`markdown_compat.py` compiles that generated pattern.
+`github-slugger@2.0.0`, plus lowercase patches between the minimum Python 3.13 Unicode 15.1 table
+and JavaScript Unicode 17.0. It records the exact upstream and Unicode versions and integrity
+metadata in its header. `markdown_compat.py` compiles the generated patterns.
 
 `scripts/generate_github_slugger_data.py` is the maintenance entry point. It installs or reads the
 exact pinned npm package in a temporary working directory, asks Node to evaluate the upstream regex
-over every Unicode scalar value, coalesces the stripped code points into ranges, and renders the
-Python artifact deterministically. `--check` compares a fresh rendering with the committed file.
-The script also reports the upstream package version and an exhaustive scalar-value count so an
-update cannot be mistaken for a hand-edited approximation. Node and npm are maintenance-time tools
-only; neither is a runtime nor Python development dependency.
+and actual `slug()` operation over every Unicode scalar value, and checks contextual lowercase
+examples. It compares the JavaScript lowercase map with `python3.13`, coalesces the stripped and
+patch code points into ranges, and renders the Python artifact deterministically. `--check`
+compares a fresh rendering with the committed file. The script reports both Unicode versions,
+1,112,064 checked scalars, and 1,112,067 upstream slug operations. Node, npm, and a Python 3.13
+executable are maintenance-time tools only; none becomes an additional runtime dependency.
 
-Tests cover the official operation with representative upstream fixtures and divergent Unicode
-categories. The exhaustive generator check is run and recorded during this change. A future slugger
+Tests cover the official operation with representative upstream fixtures, contextual Greek case
+mapping, and scalars that differ between the supported Python and JavaScript Unicode tables. The
+exhaustive generator check is run and recorded during this change. A future slugger or Unicode
 upgrade changes the version constant and regenerates the artifact through the same command.
 
 ## 5. Data flow and compatibility
@@ -156,8 +159,8 @@ the median of seven warmed `derive_file_sections` calls and reports document byt
 count, sample timings, and median milliseconds. It accepts an optional baseline so maintainers can
 fail the benchmark when the candidate median exceeds the baseline by more than 20 percent.
 
-On the committed 736,570-byte, 41,354-line corpus, main measured a median 88.568 ms and the
-completed adapter measured 97.259 ms with the same executable. The 9.813 percent regression passes
+On the committed 736,570-byte, 41,354-line corpus, main measured a median 93.993 ms and the
+completed adapter measured 100.277 ms with the same executable. The 6.685 percent regression passes
 the fixed 20 percent threshold. A focused parse using the generic upstream `StateBlock` measured
 171.370 ms and was rejected. Building only the source maps required by the unmodified heading and
 fence rules removed that regression. Timings are pull-request evidence, not a hardware-dependent CI

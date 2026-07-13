@@ -3,6 +3,18 @@
 from pathlib import Path
 from runpy import run_path
 
+from doc_lattice._github_slugger_data import (
+    CHECKED_SLUG_OPERATIONS,
+    CHECKED_UNICODE_SCALARS,
+    JAVASCRIPT_UNICODE_VERSION,
+    LOWERCASE_PATCH_MAPPINGS,
+    LOWERCASE_PATCH_TRANSLATION,
+    PYTHON_BASELINE_UNICODE_VERSION,
+    UPSTREAM_LOWERCASE_MAPPINGS,
+    UPSTREAM_PACKAGE,
+)
+from doc_lattice.markdown_compat import SLUG_COMPAT_VERSION, SLUG_UNICODE_VERSION
+
 
 def test_render_pattern_uses_python_unicode_escapes() -> None:
     generator = run_path(
@@ -15,18 +27,61 @@ def test_render_pattern_uses_python_unicode_escapes() -> None:
     )
 
 
-def test_render_module_wraps_generated_pattern_for_lint() -> None:
+def test_render_module_includes_lowercase_data_and_wraps_for_lint() -> None:
     generator = run_path(
         str(Path(__file__).parents[1] / "scripts" / "generate_github_slugger_data.py")
     )
     render_module = generator["render_module"]
+    metadata_type = generator["ArtifactMetadata"]
     pattern = "[" + r"\u0000" * 50 + "]"
 
-    rendered = render_module(pattern, "2.0.0", "a" * 64, 50)
+    rendered = render_module(
+        pattern,
+        [(0x0130, (0x0069, 0x0307)), (0xA7CB, (0x0264,))],
+        metadata_type(
+            version="2.0.0",
+            regex_sha256="a" * 64,
+            stripped_count=50,
+            javascript_unicode="17.0",
+            python_baseline_unicode="15.1.0",
+            upstream_lowercase_count=1_488,
+            slug_operation_count=1_112_067,
+        ),
+    )
     namespace: dict[str, object] = {}
     exec(rendered, namespace)  # noqa: S102 -- generated module behavior is the subject
 
     assert max(map(len, rendered.splitlines())) <= 100
     assert namespace["SLUG_STRIP_PATTERN"] == pattern
+    assert namespace["JAVASCRIPT_UNICODE_VERSION"] == "17.0"
+    assert namespace["PYTHON_BASELINE_UNICODE_VERSION"] == "15.1.0"
+    assert namespace["LOWERCASE_PATCH_TRANSLATION"] == {
+        0xA7CB: "\u0264",
+        0x0130: "i\u0307",
+    }
+    assert namespace["LOWERCASE_PATCH_PATTERN"] == r"[\u0130\uA7CB]"
+    assert namespace["UPSTREAM_LOWERCASE_MAPPINGS"] == 1_488
+    assert namespace["CHECKED_SLUG_OPERATIONS"] == 1_112_067
     hash_line = next(line for line in rendered.splitlines() if '"' + "a" * 64 + '"' in line)
     assert hash_line.endswith("# pragma: allowlist secret")
+
+
+def test_generated_provenance_matches_runtime_version_pins() -> None:
+    generator = run_path(
+        str(Path(__file__).parents[1] / "scripts" / "generate_github_slugger_data.py")
+    )
+
+    assert (
+        UPSTREAM_PACKAGE
+        == SLUG_COMPAT_VERSION
+        == (f"github-slugger@{generator['UPSTREAM_VERSION']}")
+    )
+    assert (
+        JAVASCRIPT_UNICODE_VERSION
+        == SLUG_UNICODE_VERSION
+        == (generator["UPSTREAM_JAVASCRIPT_UNICODE"])
+    )
+    assert generator["PYTHON_BASELINE_UNICODE"] == PYTHON_BASELINE_UNICODE_VERSION
+    assert len(LOWERCASE_PATCH_TRANSLATION) == LOWERCASE_PATCH_MAPPINGS
+    assert UPSTREAM_LOWERCASE_MAPPINGS > LOWERCASE_PATCH_MAPPINGS
+    assert CHECKED_SLUG_OPERATIONS > CHECKED_UNICODE_SCALARS

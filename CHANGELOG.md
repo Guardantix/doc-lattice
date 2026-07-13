@@ -18,7 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Internal: Markdown heading recognition and GitHub-compatible slug generation now pass through a
   documented adapter pinned to `markdown-it-py==4.2.0` and `github-slugger@2.0.0`. The slug-strip
-  data is generated from upstream, while section ids, spans, and the cache format are unchanged.
+  and JavaScript Unicode 17 lowercase compatibility data is generated from upstream. Section spans
+  and the cache format are unchanged; rare headings whose lowercase mapping was absent from Python
+  Unicode 15.1 now receive the upstream-compatible section id.
 - Internal: the load cache module is now a phase-separated `doc_lattice/cache/` package
   (schema/codec, store, lookup, run state). No user-facing behavior change; the cache file
   format is unchanged.

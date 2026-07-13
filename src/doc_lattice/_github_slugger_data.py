@@ -1,11 +1,77 @@
-"""Generated strip data for github-slugger. Do not edit by hand."""
+"""Generated compatibility data for github-slugger. Do not edit by hand."""
 
 UPSTREAM_PACKAGE = "github-slugger@2.0.0"
+JAVASCRIPT_UNICODE_VERSION = "17.0"
+PYTHON_BASELINE_UNICODE_VERSION = "15.1.0"
 UPSTREAM_REGEX_SHA256 = (
     "3bcbb3836a4e76f0f343c34d223ddd9eac83cc73a4e2c7a1118ef0829bc9129b"  # pragma: allowlist secret
 )
 CHECKED_UNICODE_SCALARS = 1_112_064
 STRIPPED_UNICODE_SCALARS = 977_500
+UPSTREAM_LOWERCASE_MAPPINGS = 1_488
+LOWERCASE_PATCH_MAPPINGS = 55
+CHECKED_SLUG_OPERATIONS = 1_112_067
+LOWERCASE_PATCH_TRANSLATION = {
+    0x001C89: "\u1c8a",
+    0x00A7CB: "\u0264",
+    0x00A7CC: "\ua7cd",
+    0x00A7CE: "\ua7cf",
+    0x00A7D2: "\ua7d3",
+    0x00A7D4: "\ua7d5",
+    0x00A7DA: "\ua7db",
+    0x00A7DC: "\u019b",
+    0x010D50: "\U00010d70",
+    0x010D51: "\U00010d71",
+    0x010D52: "\U00010d72",
+    0x010D53: "\U00010d73",
+    0x010D54: "\U00010d74",
+    0x010D55: "\U00010d75",
+    0x010D56: "\U00010d76",
+    0x010D57: "\U00010d77",
+    0x010D58: "\U00010d78",
+    0x010D59: "\U00010d79",
+    0x010D5A: "\U00010d7a",
+    0x010D5B: "\U00010d7b",
+    0x010D5C: "\U00010d7c",
+    0x010D5D: "\U00010d7d",
+    0x010D5E: "\U00010d7e",
+    0x010D5F: "\U00010d7f",
+    0x010D60: "\U00010d80",
+    0x010D61: "\U00010d81",
+    0x010D62: "\U00010d82",
+    0x010D63: "\U00010d83",
+    0x010D64: "\U00010d84",
+    0x010D65: "\U00010d85",
+    0x016EA0: "\U00016ebb",
+    0x016EA1: "\U00016ebc",
+    0x016EA2: "\U00016ebd",
+    0x016EA3: "\U00016ebe",
+    0x016EA4: "\U00016ebf",
+    0x016EA5: "\U00016ec0",
+    0x016EA6: "\U00016ec1",
+    0x016EA7: "\U00016ec2",
+    0x016EA8: "\U00016ec3",
+    0x016EA9: "\U00016ec4",
+    0x016EAA: "\U00016ec5",
+    0x016EAB: "\U00016ec6",
+    0x016EAC: "\U00016ec7",
+    0x016EAD: "\U00016ec8",
+    0x016EAE: "\U00016ec9",
+    0x016EAF: "\U00016eca",
+    0x016EB0: "\U00016ecb",
+    0x016EB1: "\U00016ecc",
+    0x016EB2: "\U00016ecd",
+    0x016EB3: "\U00016ece",
+    0x016EB4: "\U00016ecf",
+    0x016EB5: "\U00016ed0",
+    0x016EB6: "\U00016ed1",
+    0x016EB7: "\U00016ed2",
+    0x016EB8: "\U00016ed3",
+}
+LOWERCASE_PATCH_PATTERN = (
+    r"[\u1C89\uA7CB-\uA7CC\uA7CE\uA7D2\uA7D4\uA7DA\uA7DC\U00010D50-\U00010D65\U00016EA"
+    r"0-\U00016EB8]"
+)
 SLUG_STRIP_PATTERN = (
     r"[\u0000-\u001F\u0021-\u002C\u002E-\u002F\u003A-\u0040\u005B-\u005E\u0060\u007B-"
     r"\u00A9\u00AB-\u00B4\u00B6-\u00B9\u00BB-\u00BF\u00D7\u00F7\u02C2-\u02C5\u02D2-\u0"

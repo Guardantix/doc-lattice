@@ -86,5 +86,36 @@
     ],
     "anchor_ids": ["visible"],
     "spans": [[2, 3]]
+  },
+  {
+    "name": "indented_fence_opener_and_closer",
+    "body": "# Before\n   ```python\n## Hidden\n  ```\n## After\n",
+    "headings": [
+      {"level": 1, "text": "Before", "anchor": null, "line": 1},
+      {"level": 2, "text": "After", "anchor": null, "line": 5}
+    ],
+    "anchor_ids": ["before", "after"],
+    "spans": [[1, 5], [5, 5]]
+  },
+  {
+    "name": "unclosed_fence",
+    "body": "# Before\n~~~\n## Hidden\n",
+    "headings": [
+      {"level": 1, "text": "Before", "anchor": null, "line": 1}
+    ],
+    "anchor_ids": ["before"],
+    "spans": [[1, 3]]
+  },
+  {
+    "name": "duplicate_explicit_and_marker_slug_collisions",
+    "body": "## First {#same}\n## Second {#same}\n## Third\n## Other {#third}\n",
+    "headings": [
+      {"level": 2, "text": "First {#same}", "anchor": "same", "line": 1},
+      {"level": 2, "text": "Second {#same}", "anchor": "same", "line": 2},
+      {"level": 2, "text": "Third", "anchor": null, "line": 3},
+      {"level": 2, "text": "Other {#third}", "anchor": "third", "line": 4}
+    ],
+    "anchor_ids": ["same", "same", "third", "third"],
+    "spans": [[1, 1], [2, 2], [3, 3], [4, 4]]
   }
 ]

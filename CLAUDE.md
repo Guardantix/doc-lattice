@@ -64,13 +64,19 @@ config -> discovery -> frontmatter parse -> loader.build_lattice -> { check, imp
 that file's headings, while a bare ref (`save-format`) is a whole-file target. A heading is
 addressed by an explicit `{#marker}` when present, otherwise by its GitHub slug (byte-parity with
 GitHub's rendered anchor; see `markdown_compat.github_slug`/`anchor_ids`). Heading and fence
-recognition is owned by `markdown_compat.py` against `markdown-it-py==4.2.0`; slug-strip data in
-`_github_slugger_data.py` is generated from `github-slugger@2.0.0` and must not be hand-edited.
-Regenerate and verify it through `scripts/generate_github_slugger_data.py`. A ref that resolves to
-nothing is not a load error: it is a normal lattice state (`target_id=None`) that `check` reports as
+recognition is owned by `markdown_compat.py` against `markdown-it-py==4.2.0`; slug data in
+`_github_slugger_data.py` is generated from `github-slugger@2.0.0` under JavaScript Unicode 17.0
+and must not be hand-edited. It also patches the minimum Python 3.13 Unicode 15.1 lowercase table.
+Regenerate and verify it through `scripts/generate_github_slugger_data.py`; maintenance requires a
+Unicode 17 Node runtime and `python3.13`. A ref that resolves to nothing is not a load error: it is a
+normal lattice state (`target_id=None`) that `check` reports as
 `BROKEN`. The same slug in two different files does not collide, because their `TargetId`s differ;
 a within-file clash (two equal markers or a marker equal to a computed slug) is a
 `DuplicateIdError`. A file id equal to an anchor in another file also does not collide.
+
+Before declaring support for a Python runtime whose `unicodedata.unidata_version` exceeds the
+pinned JavaScript Unicode target, update that target, regenerate the artifact, and rerun the slug
+compatibility and benchmark gates.
 
 **Drift detection.** Each edge carries a `seen` hash captured when it was last reconciled.
 `check` classifies every edge as OK / STALE / UNRECONCILED / BROKEN by comparing `seen` against

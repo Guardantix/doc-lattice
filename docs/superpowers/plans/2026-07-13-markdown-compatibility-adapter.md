@@ -12,7 +12,7 @@ load performance.
 a minimal adapter-owned source map, while `markdown_compat.py` exposes the narrow
 heading/anchor/slug interface consumed by `sections.py`. A maintenance script evaluates
 `github-slugger@2.0.0` over all Unicode scalar values and deterministically generates the Python
-slug-strip pattern.
+slug compatibility data.
 
 **Tech Stack:** Python 3.13+, markdown-it-py 4.2.0, pytest, Node/npm for maintenance verification,
 uv, Ruff, ty.
@@ -22,7 +22,7 @@ uv, Ruff, ty.
 ## File map
 
 - Create `src/doc_lattice/markdown_compat.py`: the documented parser, marker, and slug adapter.
-- Create `src/doc_lattice/_github_slugger_data.py`: deterministic generated slug-strip data.
+- Create `src/doc_lattice/_github_slugger_data.py`: deterministic generated slug compatibility data.
 - Modify `src/doc_lattice/sections.py`: keep span/text utilities and delegate compatibility work.
 - Create `scripts/generate_github_slugger_data.py`: generate or check the pinned slug artifact.
 - Create `scripts/bench_sections.py`: reproducible large-document section benchmark.
@@ -344,6 +344,12 @@ Run:
 Expected: it reports `github-slugger@2.0.0`, 1,112,064 checked Unicode scalar values, the stripped
 count, and writes `src/doc_lattice/_github_slugger_data.py`.
 
+Implementation note: review found that regex parity alone did not cover JavaScript/Python Unicode
+lowercase differences. The completed generator also checks 1,112,067 calls to the actual upstream
+`slug()` operation under JavaScript Unicode 17.0, compares lowercase mappings against the minimum
+Python 3.13 Unicode 15.1 table, and generates the 55 required post-lowercase patches. The CLI's
+`--python-baseline` defaults to `python3.13`.
+
 - [x] **Step 5: Implement slug and marker operations in the adapter**
 
 Compile `SLUG_STRIP_PATTERN` from the generated module. Implement `github_slug`, a private
@@ -513,8 +519,8 @@ Python executable and default corpus. Record both medians, then run the candidat
 
 Expected: candidate median is no more than 20 percent above main and the threshold run exits 0.
 
-Recorded result on the 736,570-byte, 41,354-line default corpus: main median 88.568 ms, candidate
-median 97.259 ms, regression 9.813 percent, threshold passed.
+Recorded result on the 736,570-byte, 41,354-line default corpus: main median 93.993 ms, candidate
+median 100.277 ms, regression 6.685 percent, threshold passed.
 
 - [x] **Step 5: Commit benchmark**
 
@@ -566,7 +572,7 @@ Inspect the adapter imports, JSON fixture case names, generated header and check
 version text, cold/warm test output, and benchmark threshold output. Each of issue #88's six
 acceptance criteria must have direct evidence before publishing.
 
-- [ ] **Step 5: Commit documentation and final cleanup**
+- [x] **Step 5: Commit documentation and final cleanup**
 
 ```bash
 git add README.md CLAUDE.md CHANGELOG.md docs/superpowers/specs \
@@ -580,7 +586,7 @@ git commit -m "docs: define markdown compatibility contract"
 - Read: `.github/pull_request_template.md`
 - Read: all branch changes against `origin/main`
 
-- [ ] **Step 1: Use the requesting-code-review workflow**
+- [x] **Step 1: Use the requesting-code-review workflow**
 
 Review the complete diff against the issue and inspect any findings before publication. Apply
 needed fixes with a failing regression test first, then repeat the full relevant verification.
