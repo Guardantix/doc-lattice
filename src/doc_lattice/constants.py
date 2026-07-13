@@ -54,3 +54,7 @@ C1_CONTROL_MAX: int = 0x9F
 CACHE_VERSION: int = 3
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
+
+# Reconcile transaction journal schema and project-root artifact name.
+RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
+RECONCILE_JOURNAL_VERSION: int = 1
