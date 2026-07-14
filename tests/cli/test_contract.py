@@ -249,6 +249,19 @@ def test_main_maps_errors_to_exit_2(monkeypatch, exc):
     assert info.value.code == 2
 
 
+def test_main_maps_non_callable_app_to_internal_error(monkeypatch, capsys):
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(cli_mod, "app", object())
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2
+    assert capsys.readouterr().err == (
+        "internal error: RuntimeError: CLI application is not callable\n"
+    )
+
+
 def test_main_renders_internal_error_when_cwd_capture_fails(monkeypatch, capsys):
     class FailingCwdPath:
         def __new__(cls, value: str = ".") -> Path:

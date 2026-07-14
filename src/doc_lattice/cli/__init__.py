@@ -64,6 +64,9 @@ def main() -> None:
 
     application = _load_app()
     try:
+        if not callable(application):
+            msg = "CLI application is not callable"
+            raise RuntimeError(msg)
         application()
     except ProjectError as exc:
         print_project_error(diagnostic_runtime(no_color=no_color), exc)
