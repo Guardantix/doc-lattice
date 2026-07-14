@@ -7,7 +7,6 @@ from typing import Annotated
 import typer
 from rich.markup import escape
 
-from ...constants import VALID_BASIC_OUTPUT_FORMATS
 from ...error_types import UnreadableDocError
 from ...path_utils import safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
@@ -21,7 +20,7 @@ from ...reconcile_transaction import (
 )
 from ..errors import EXIT_TOOL_ERROR, exit_on_project_error
 from ..options import ConfigOpt, JsonOpt
-from ..output import select_output, write_text
+from ..output import write_text
 from ..runtime import CliRuntime, get_runtime
 
 
@@ -143,12 +142,6 @@ def register_reconcile(app: typer.Typer) -> None:
         With --recover, performs only recovery or cleanup and never plans a batch.
         """
         runtime = get_runtime(ctx)
-        selection = select_output(
-            runtime,
-            fmt="human",
-            json_alias=json_out,
-            valid=VALID_BASIC_OUTPUT_FORMATS,
-        )
         if recover and (downstream_id or reconcile_all or ref is not None or dry_run):
             runtime.stderr.print(
                 "[red]error[/red]: --recover cannot be combined with a downstream id, "
@@ -164,11 +157,7 @@ def register_reconcile(app: typer.Typer) -> None:
             if recover:
                 with reconcile_lock(project.project_root) as lock:
                     recovery = recover_transaction(project.project_root, lock=lock)
-                _report_recovery(
-                    runtime,
-                    recovery,
-                    json_out=selection.format == "json",
-                )
+                _report_recovery(runtime, recovery, json_out=json_out)
                 return
 
             with reconcile_lock(project.project_root) as lock:
@@ -204,5 +193,5 @@ def register_reconcile(app: typer.Typer) -> None:
                 plan,
                 rewrites,
                 dry_run=dry_run,
-                json_out=selection.format == "json",
+                json_out=json_out,
             )

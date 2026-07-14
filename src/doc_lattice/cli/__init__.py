@@ -2,7 +2,7 @@
 
 import os
 import sys
-from typing import TYPE_CHECKING, Protocol, TypeIs
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import typer
@@ -12,15 +12,7 @@ if TYPE_CHECKING:
 __all__ = ["app", "main"]
 
 
-class _CliApplication(Protocol):
-    def __call__(self) -> object: ...
-
-
-def _is_application(value: object) -> TypeIs[_CliApplication]:
-    return callable(value)
-
-
-def _load_app() -> object:
+def _load_app() -> "typer.Typer":
     cached = globals().get("app")
     if cached is not None:
         return cached
@@ -56,7 +48,6 @@ def main() -> None:
 
     Raises:
         SystemExit: With exit code 2 for mapped project or internal errors.
-        RuntimeError: If the cached application replacement is not callable.
     """
     no_color = "--no-color" in sys.argv[1:] or os.environ.get("NO_COLOR", "") != ""
     if no_color:
@@ -72,10 +63,6 @@ def main() -> None:
     from .runtime import diagnostic_runtime  # noqa: PLC0415
 
     application = _load_app()
-    if not _is_application(application):
-        msg = "CLI application is not callable"
-        raise RuntimeError(msg)
-
     try:
         application()
     except ProjectError as exc:

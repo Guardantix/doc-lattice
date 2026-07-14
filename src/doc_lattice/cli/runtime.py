@@ -121,13 +121,16 @@ def default_runtime(*, no_color: bool) -> CliRuntime:
 
 
 def diagnostic_runtime(*, no_color: bool) -> CliRuntime:
-    """Create cwd-independent state for rendering an entry-point diagnostic.
+    """Create a runtime without calling ``Path.cwd()`` for entry-point diagnostics.
+
+    This factory remains safe when the current working directory is inaccessible because
+    it does not resolve the relative path.
 
     Args:
         no_color: Whether the invocation disabled color.
 
     Returns:
-        A new runtime bound to the current streams and an inert relative cwd.
+        A new runtime bound to the current streams and a relative ``.`` cwd.
     """
     return _create_runtime(cwd=Path(), no_color=no_color)
 
