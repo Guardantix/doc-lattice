@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -83,6 +84,16 @@ def stage_bytes(destination: Path, data: bytes, *, prefix: str) -> Path:
     Raises:
         OSError: If staging or synchronization fails.
     """
+    try:
+        destination_stat = destination.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        destination_mode = None
+    else:
+        destination_mode = (
+            stat.S_IMODE(destination_stat.st_mode)
+            if stat.S_ISREG(destination_stat.st_mode)
+            else None
+        )
     fd, tmp_name = tempfile.mkstemp(
         dir=destination.parent,
         prefix=prefix,
@@ -93,6 +104,8 @@ def stage_bytes(destination: Path, data: bytes, *, prefix: str) -> Path:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
+            if destination_mode is not None:
+                os.fchmod(handle.fileno(), destination_mode)
             os.fsync(handle.fileno())
         sync_directory(destination.parent)
     except OSError as primary:
@@ -112,7 +125,7 @@ def replace_staged(staged: Path, destination: Path) -> None:
         ValueError: If the staged file is not in the destination directory.
         OSError: If replacement or directory synchronization fails.
     """
-    if staged.parent.absolute() != destination.parent.absolute():
+    if staged.parent.resolve() != destination.parent.resolve():
         msg = "staged and destination paths must be in the same directory"
         raise ValueError(msg)
     os.replace(staged, destination)  # noqa: PTH105 (required atomic replacement primitive)

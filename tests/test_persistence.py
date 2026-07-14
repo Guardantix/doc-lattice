@@ -1,6 +1,7 @@
 """Tests for shared durable filesystem persistence primitives."""
 
 import hashlib
+import stat
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,22 @@ def test_replace_staged_refuses_different_directories_without_mutation(tmp_path:
     assert destination.read_bytes() == b"original"
 
 
+def test_replace_staged_accepts_symlink_alias_of_destination_directory(tmp_path: Path):
+    destination_directory = tmp_path / "destination"
+    destination_directory.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(destination_directory, target_is_directory=True)
+    staged = alias / "doc.md.tmp"
+    destination = destination_directory / "doc.md"
+    staged.write_bytes(b"new")
+    destination.write_bytes(b"original")
+
+    replace_staged(staged, destination)
+
+    assert destination.read_bytes() == b"new"
+    assert not staged.exists()
+
+
 def test_atomic_replace_bytes_replaces_target_and_cleans_stage(tmp_path: Path):
     destination = tmp_path / "doc.md"
     destination.write_bytes(b"old")
@@ -175,6 +192,24 @@ def test_atomic_replace_bytes_replaces_target_and_cleans_stage(tmp_path: Path):
 
     assert destination.read_bytes() == b"new"
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
+
+
+def test_atomic_replace_bytes_preserves_existing_destination_mode(tmp_path: Path):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old")
+    destination.chmod(0o754)
+
+    atomic_replace_bytes(destination, b"new", prefix=".doc.md.replace.")
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o754
+
+
+def test_atomic_replace_bytes_keeps_absent_destination_private(tmp_path: Path):
+    destination = tmp_path / "new.md"
+
+    atomic_replace_bytes(destination, b"new", prefix=".new.md.replace.")
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
 def test_atomic_replace_bytes_supports_relative_destination(tmp_path: Path, monkeypatch):
