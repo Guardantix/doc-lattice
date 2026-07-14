@@ -9,7 +9,7 @@ from ...impact import impact as impact_walk
 from ...impact import impact_json
 from ...report_render import render_impact
 from ..errors import exit_on_project_error
-from ..options import ConfigOpt, IndentOpt, JsonOpt
+from ..options import BasicFormatOpt, ConfigOpt, IndentOpt
 from ..output import select_output, write_json
 from ..runtime import get_runtime
 
@@ -26,7 +26,7 @@ def register_impact(app: typer.Typer) -> None:
         ctx: typer.Context,
         token: str,
         config: ConfigOpt = None,
-        json_out: JsonOpt = False,
+        fmt: BasicFormatOpt = "human",
         indent: IndentOpt = None,
         depth: Annotated[
             int | None,
@@ -44,8 +44,7 @@ def register_impact(app: typer.Typer) -> None:
         runtime = get_runtime(ctx)
         selection = select_output(
             runtime,
-            fmt="human",
-            json_alias=json_out,
+            fmt=fmt,
             valid=VALID_BASIC_OUTPUT_FORMATS,
             indent=indent,
         )

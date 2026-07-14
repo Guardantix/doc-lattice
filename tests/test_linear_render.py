@@ -170,7 +170,7 @@ def test_render_does_not_let_state_name_inject_markup():
 
 def test_render_findings_empty_prints_placeholder():
     # The empty early-return all-clear branch is never hit by the CLI tests (every empty
-    # result routes through --json/findings_json), so pin the human-facing message here.
+    # result routes through --format json/findings_json), so pin the human-facing message here.
     output = io.StringIO()
     console = Console(file=output, width=200)
     render_findings(console, [])
@@ -179,7 +179,7 @@ def test_render_findings_empty_prints_placeholder():
 
 def test_render_findings_blocked_shows_reason_not_state():
     # A ticketless (BLOCKED) finding takes the else-branch: "{ticket_ref} ({reason})", with no
-    # "[state]" label. The CLI blocked path uses --json, so this format is otherwise unrendered.
+    # "[state]" label. The CLI blocked path uses --format json, so this is otherwise unrendered.
     output = io.StringIO()
     console = Console(file=output, width=200)
     render_findings(console, [_blocked()])

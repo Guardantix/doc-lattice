@@ -34,7 +34,7 @@ def render_safe(text: str) -> str:
 
 
 def findings_json(findings: Sequence[Finding]) -> dict:
-    """Build the ``--json`` payload.
+    """Build the JSON payload.
 
     Args:
         findings: The ordered findings.

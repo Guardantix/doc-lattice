@@ -220,11 +220,11 @@ its independent transaction boundary.
 
 **Date:** 2026-07-14
 **Status:** Accepted
-**Context:** The 1.x commands expose structured output through different selectors.
-Removing `--json` during 1.x or warning on stderr would break scripts, but carrying
-both selectors indefinitely would preserve an inconsistent interface.
-**Decision:** `--json` remains silent throughout 1.x. Selector availability is fixed
-by command and release as follows:
+**Context:** The 1.x commands exposed structured output through different selectors.
+Removing `--json` during 1.x or warning on stderr would have broken scripts, but carrying
+both selectors indefinitely would have preserved an inconsistent interface.
+**Decision:** `--json` remained silent throughout 1.x and is removed in 2.0. Selector
+availability was fixed by command and release as follows:
 
 | Release | Commands | Structured-output selection |
 |---------|----------|-----------------------------|
@@ -238,13 +238,13 @@ by command and release as follows:
 | 2.0 | `init` | Remains excluded from structured-output selection |
 
 In 2.0, `--json` is therefore removed from `check`, `lint`, `impact`, `reconcile`,
-and `linear`; `graph` never accepts that alias. Where supported, `--indent` is valid
+and `linear`; `graph` never accepted that alias. Where supported, `--indent` is valid
 only when the effective format is JSON.
-**Consequences:** The CLI package refactor preserves current byte-exact output. The
-silent 1.x alias remains behaviorally compatible and emits no deprecation warning.
-The cost is that selector inconsistency remains through 1.x, and the migration notice
-is documentation-only because stderr cannot carry a compatibility-safe warning. This
-decision does not newly freeze every 1.x output schema.
+**Consequences:** The CLI package refactor preserved current byte-exact output through
+1.x. The silent 1.x alias was behaviorally compatible and emitted no deprecation warning.
+The cost was that selector inconsistency persisted through 1.x, and the migration notice
+was documentation-only because stderr could not carry a compatibility-safe warning. This
+decision did not freeze every 1.x output schema.
 
 ### AD-11: Linear is a read-only, opt-in network boundary
 

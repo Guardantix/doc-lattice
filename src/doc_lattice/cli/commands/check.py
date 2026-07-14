@@ -9,7 +9,7 @@ from ...check import EdgeStatus, check_lattice, has_drift, statuses_json
 from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
-from ..options import ConfigOpt, IndentOpt, JsonOpt
+from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
 from ..output import github_annotation, select_output, write_json, write_text
 from ..runtime import CliRuntime, get_runtime
 
@@ -43,12 +43,11 @@ def register_check(app: typer.Typer) -> None:
     """
 
     @app.command()
-    def check(  # noqa: PLR0913
+    def check(
         ctx: typer.Context,
         config: ConfigOpt = None,
-        json_out: JsonOpt = False,
         indent: IndentOpt = None,
-        fmt: Annotated[str, typer.Option("--format", help="human, json, or github.")] = "human",
+        fmt: ReportFormatOpt = "human",
         only: Annotated[
             list[str] | None,
             typer.Option(
@@ -65,7 +64,6 @@ def register_check(app: typer.Typer) -> None:
         selection = select_output(
             runtime,
             fmt=fmt,
-            json_alias=json_out,
             valid=VALID_REPORT_FORMATS,
             indent=indent,
         )

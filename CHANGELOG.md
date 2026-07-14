@@ -24,8 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   owns history and migrations, and roadmap.md contains future direction only.
 - Internal: `doc_lattice.cli` is now a package with a frozen per-invocation runtime, focused
   command adapters, centralized output and error handling, and command-mirrored CLI tests. Runtime
-  behavior is unchanged. The silent 1.x `--json` compatibility alias and its 2.0 removal in favor
-  of consistent `--format` selection are now documented.
+  behavior is unchanged.
 - Internal: Markdown heading recognition and GitHub-compatible slug generation now pass through a
   documented adapter pinned to `markdown-it-py==4.2.0` and `github-slugger@2.0.0`. The slug-strip
   and JavaScript Unicode 17 lowercase and contextual-casing compatibility data is generated from
@@ -47,6 +46,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **BREAKING (2.0):** Removed the unsupported `binding_layers` configuration key. Migration:
   delete the key from 1.x configs; there is no replacement, and `lint`'s fixed authority ladder
   is unchanged. Strict configuration now rejects the key.
+- **BREAKING (2.0):** Removed the silent `--json` alias from `check`, `lint`, `impact`,
+  `reconcile`, and `linear`; `impact`, `reconcile`, and `linear` now accept `--format human|json`.
+  Migration: replace `--json` with `--format json`. `--indent` now requires an effective
+  `--format json`, and the former `--json`/`--format github` conflict rule is gone along with
+  the alias.
 - Internal: removed the singular `section_span` helper in favor of the existing `section_spans`
   API.
 - Deleted completed design specs and implementation plans after recording their durable Linear,

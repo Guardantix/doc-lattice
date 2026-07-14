@@ -24,14 +24,14 @@ def _chain_docs(tmp_path: Path) -> Path:
 
 def test_impact_lists_dependents(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["impact", "art-direction#accent", "--json"])
+    result = runner.invoke(app, ["impact", "art-direction#accent", "--format", "json"])
     payload = json.loads(result.stdout)
     assert "pc-design" in {n["id"] for n in payload["affected"]}
 
 
 def test_impact_json_includes_depth(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["impact", "art-direction#accent", "--json"])
+    result = runner.invoke(app, ["impact", "art-direction#accent", "--format", "json"])
     payload = json.loads(result.stdout)
     entry = next(n for n in payload["affected"] if n["id"] == "pc-design")
     assert entry["depth"] == 1
@@ -39,7 +39,7 @@ def test_impact_json_includes_depth(lattice_dir: Path, monkeypatch):
 
 def test_impact_depth_flag_bounds_the_walk(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(_chain_docs(tmp_path))
-    result = runner.invoke(app, ["impact", "a", "--json", "--depth", "1"])
+    result = runner.invoke(app, ["impact", "a", "--format", "json", "--depth", "1"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert [(n["id"], n["depth"]) for n in payload["affected"]] == [("b", 1)]
@@ -47,7 +47,7 @@ def test_impact_depth_flag_bounds_the_walk(tmp_path: Path, monkeypatch):
 
 def test_impact_depth_2_reaches_second_hop(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(_chain_docs(tmp_path))
-    result = runner.invoke(app, ["impact", "a", "--json", "--depth", "2"])
+    result = runner.invoke(app, ["impact", "a", "--format", "json", "--depth", "2"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert [(n["id"], n["depth"]) for n in payload["affected"]] == [("b", 1), ("c", 2)]

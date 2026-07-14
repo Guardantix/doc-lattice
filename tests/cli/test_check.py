@@ -102,18 +102,9 @@ def test_check_github_suppresses_ok_edges(tmp_path: Path, monkeypatch):
     assert result.stdout == ""
 
 
-def test_check_format_json_matches_json_alias(lattice_dir: Path, monkeypatch):
-    monkeypatch.chdir(lattice_dir)
-    alias = runner.invoke(app, ["check", "--json"])
-    explicit = runner.invoke(app, ["check", "--format", "json"])
-
-    assert explicit.exit_code == alias.exit_code == 1
-    assert explicit.stdout == alias.stdout
-
-
 def test_check_json_reports_states(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["check", "--json"])
+    result = runner.invoke(app, ["check", "--format", "json"])
     payload = json.loads(result.stdout)
     states = {(e["source_id"], e["target_ref"]): e["state"] for e in payload["edges"]}
     assert states[("gdd", "ghost")] == "BROKEN"
@@ -121,7 +112,7 @@ def test_check_json_reports_states(lattice_dir: Path, monkeypatch):
 
 def test_check_json_reports_all_states(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["check", "--json"])
+    result = runner.invoke(app, ["check", "--format", "json"])
     payload = json.loads(result.stdout)
     states = {(e["source_id"], e["target_ref"]): e for e in payload["edges"]}
     assert states[("gdd", "ghost")]["state"] == "BROKEN"
@@ -134,8 +125,8 @@ def test_check_json_reports_all_states(lattice_dir: Path, monkeypatch):
 
 def test_check_json_indent_round_trips_to_compact_payload(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    compact = runner.invoke(app, ["check", "--json"])
-    pretty = runner.invoke(app, ["check", "--json", "--indent", "2"])
+    compact = runner.invoke(app, ["check", "--format", "json"])
+    pretty = runner.invoke(app, ["check", "--format", "json", "--indent", "2"])
     assert compact.exit_code == pretty.exit_code == 1
     assert json.loads(pretty.stdout) == json.loads(compact.stdout)
     assert '\n  "edges": [\n' in pretty.stdout
@@ -143,41 +134,31 @@ def test_check_json_indent_round_trips_to_compact_payload(lattice_dir: Path, mon
 
 def test_check_json_zero_indent_round_trips_to_compact_payload(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    compact = runner.invoke(app, ["check", "--json"])
-    zero_indent = runner.invoke(app, ["check", "--json", "--indent", "0"])
+    compact = runner.invoke(app, ["check", "--format", "json"])
+    zero_indent = runner.invoke(app, ["check", "--format", "json", "--indent", "0"])
     assert compact.exit_code == zero_indent.exit_code == 1
     assert json.loads(zero_indent.stdout) == json.loads(compact.stdout)
     assert '\n"edges": [\n' in zero_indent.stdout
 
 
-def test_check_format_json_accepts_indent(lattice_dir: Path, monkeypatch):
-    # --format json is the documented equivalent of --json, so --indent must be honored with it.
-    monkeypatch.chdir(lattice_dir)
-    via_flag = runner.invoke(app, ["check", "--json", "--indent", "2"])
-    via_format = runner.invoke(app, ["check", "--format", "json", "--indent", "2"])
-    assert via_flag.exit_code == via_format.exit_code == 1
-    assert via_format.stdout == via_flag.stdout
-    assert '\n  "edges": [\n' in via_format.stdout
-
-
-def test_check_indent_without_json_exits_2(lattice_dir: Path, monkeypatch):
+def test_check_indent_without_format_json_exits_2(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check", "--indent", "2"])
     assert result.exit_code == 2
-    assert "--indent requires --json" in result.stderr
+    assert "--indent requires --format json" in result.stderr
 
 
 def test_check_indent_validation_precedes_project_loading(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["check", "--config", "missing.yml", "--indent", "0"])
     assert result.exit_code == 2
-    assert "--indent requires --json" in result.stderr
+    assert "--indent requires --format json" in result.stderr
     assert "config file not found" not in result.stderr
 
 
 def test_check_negative_indent_is_rejected(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["check", "--json", "--indent", "-1"])
+    result = runner.invoke(app, ["check", "--format", "json", "--indent", "-1"])
     assert result.exit_code == 2
 
 
@@ -191,7 +172,7 @@ def test_check_only_filters_human_output(lattice_dir: Path, monkeypatch):
 
 def test_check_only_filters_json_output(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["check", "--json", "--only", "STALE"])
+    result = runner.invoke(app, ["check", "--format", "json", "--only", "STALE"])
     payload = json.loads(result.stdout)
     assert payload["edges"]
     assert all(edge["state"] == "STALE" for edge in payload["edges"])
@@ -231,7 +212,9 @@ def test_check_only_ok_still_exits_1_on_drift(lattice_dir: Path, monkeypatch):
 
 def test_check_only_repeated_flags_combine(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["check", "--json", "--only", "STALE", "--only", "BROKEN"])
+    result = runner.invoke(
+        app, ["check", "--format", "json", "--only", "STALE", "--only", "BROKEN"]
+    )
     payload = json.loads(result.stdout)
     states = {edge["state"] for edge in payload["edges"]}
     assert states == {"STALE", "BROKEN"}
@@ -239,7 +222,7 @@ def test_check_only_repeated_flags_combine(lattice_dir: Path, monkeypatch):
 
 def test_check_without_only_shows_all_states(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["check", "--json"])
+    result = runner.invoke(app, ["check", "--format", "json"])
     payload = json.loads(result.stdout)
     states = {edge["state"] for edge in payload["edges"]}
     assert states == {"STALE", "UNRECONCILED", "BROKEN"}

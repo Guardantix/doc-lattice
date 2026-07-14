@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 from rich.markup import escape
 
+from ...constants import VALID_BASIC_OUTPUT_FORMATS
 from ...error_types import UnreadableDocError
 from ...path_utils import safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
@@ -19,8 +20,8 @@ from ...reconcile_transaction import (
     recover_transaction,
 )
 from ..errors import EXIT_TOOL_ERROR, exit_on_project_error
-from ..options import ConfigOpt, JsonOpt
-from ..output import write_text
+from ..options import BasicFormatOpt, ConfigOpt
+from ..output import select_output, write_text
 from ..runtime import CliRuntime, get_runtime
 
 
@@ -134,7 +135,7 @@ def register_reconcile(app: typer.Typer) -> None:
             typer.Option("--recover", help="Recover or clean up a prior transaction, then exit."),
         ] = False,
         config: ConfigOpt = None,
-        json_out: JsonOpt = False,
+        fmt: BasicFormatOpt = "human",
     ) -> None:
         """Set seen to current upstream hashes for the selected edges.
 
@@ -142,6 +143,8 @@ def register_reconcile(app: typer.Typer) -> None:
         With --recover, performs only recovery or cleanup and never plans a batch.
         """
         runtime = get_runtime(ctx)
+        selection = select_output(runtime, fmt=fmt, valid=VALID_BASIC_OUTPUT_FORMATS)
+        json_out = selection.format == "json"
         if recover and (downstream_id or reconcile_all or ref is not None or dry_run):
             runtime.stderr.print(
                 "[red]error[/red]: --recover cannot be combined with a downstream id, "

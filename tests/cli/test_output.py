@@ -52,11 +52,10 @@ def runtime(tmp_path: Path) -> CliRuntime:
     )
 
 
-def test_json_alias_resolves_after_explicit_format_validation(runtime: CliRuntime):
+def test_explicit_json_format_resolves(runtime: CliRuntime):
     selection = select_output(
         runtime,
-        fmt="human",
-        json_alias=True,
+        fmt="json",
         valid=VALID_REPORT_FORMATS,
         indent=2,
     )
@@ -65,12 +64,11 @@ def test_json_alias_resolves_after_explicit_format_validation(runtime: CliRuntim
     assert selection.indent == 2
 
 
-def test_unknown_format_wins_over_json_alias(runtime: CliRuntime):
+def test_unknown_format_is_rejected(runtime: CliRuntime):
     with pytest.raises(typer.Exit) as raised:
         select_output(
             runtime,
             fmt="yaml",
-            json_alias=True,
             valid=VALID_REPORT_FORMATS,
         )
 
@@ -78,38 +76,23 @@ def test_unknown_format_wins_over_json_alias(runtime: CliRuntime):
     assert "--format 'yaml' must be one of" in _contents(runtime.stderr)
 
 
-def test_json_alias_conflicts_with_github_format(runtime: CliRuntime):
-    with pytest.raises(typer.Exit) as raised:
-        select_output(
-            runtime,
-            fmt="github",
-            json_alias=True,
-            valid=VALID_REPORT_FORMATS,
-        )
-
-    assert raised.value.exit_code == 2
-    assert _contents(runtime.stderr) == "error: --json cannot be combined with --format github\n"
-
-
 def test_indent_requires_effective_json(runtime: CliRuntime):
     with pytest.raises(typer.Exit) as raised:
         select_output(
             runtime,
             fmt="human",
-            json_alias=False,
             valid=VALID_REPORT_FORMATS,
             indent=2,
         )
 
     assert raised.value.exit_code == 2
-    assert _contents(runtime.stderr) == "error: --indent requires --json\n"
+    assert _contents(runtime.stderr) == "error: --indent requires --format json\n"
 
 
 def test_zero_indent_is_supported_for_effective_json(runtime: CliRuntime):
     selection = select_output(
         runtime,
         fmt="json",
-        json_alias=False,
         valid=VALID_REPORT_FORMATS,
         indent=0,
     )

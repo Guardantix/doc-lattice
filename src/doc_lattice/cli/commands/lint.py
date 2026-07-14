@@ -1,14 +1,12 @@
 """Typer adapter for authority-ladder linting."""
 
-from typing import Annotated
-
 import typer
 
 from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
-from ..options import ConfigOpt, IndentOpt, JsonOpt
+from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
 from ..output import github_annotation, select_output, write_json, write_text
 from ..runtime import get_runtime
 
@@ -24,16 +22,14 @@ def register_lint(app: typer.Typer) -> None:
     def lint(
         ctx: typer.Context,
         config: ConfigOpt = None,
-        json_out: JsonOpt = False,
         indent: IndentOpt = None,
-        fmt: Annotated[str, typer.Option("--format", help="human, json, or github.")] = "human",
+        fmt: ReportFormatOpt = "human",
     ) -> None:
         """Validate the authority ladder; exit 1 on a violation, 2 on tool error."""
         runtime = get_runtime(ctx)
         selection = select_output(
             runtime,
             fmt=fmt,
-            json_alias=json_out,
             valid=VALID_REPORT_FORMATS,
             indent=indent,
         )

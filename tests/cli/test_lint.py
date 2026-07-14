@@ -24,11 +24,11 @@ def _write_lint_docs(root: Path) -> None:
 
 def test_lint_format_json_accepts_indent(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    via_flag = runner.invoke(app, ["lint", "--json", "--indent", "2"])
-    via_format = runner.invoke(app, ["lint", "--format", "json", "--indent", "2"])
-    assert via_flag.exit_code == via_format.exit_code
-    assert via_format.stdout == via_flag.stdout
-    assert json.loads(via_format.stdout) == json.loads(via_flag.stdout)
+    compact = runner.invoke(app, ["lint", "--format", "json"])
+    pretty = runner.invoke(app, ["lint", "--format", "json", "--indent", "2"])
+    assert compact.exit_code == pretty.exit_code
+    assert json.loads(pretty.stdout) == json.loads(compact.stdout)
+    assert "\n  " in pretty.stdout
 
 
 def test_lint_exits_1_on_violation(tmp_path: Path, monkeypatch):
@@ -95,20 +95,10 @@ def test_lint_github_suppresses_skipped_edges(tmp_path: Path, monkeypatch):
     assert result.stdout == ""
 
 
-def test_lint_format_json_matches_json_alias(tmp_path: Path, monkeypatch):
-    _write_lint_docs(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    alias = runner.invoke(app, ["lint", "--json"])
-    explicit = runner.invoke(app, ["lint", "--format", "json"])
-
-    assert explicit.exit_code == alias.exit_code == 1
-    assert explicit.stdout == alias.stdout
-
-
 def test_lint_json_lists_violations(tmp_path: Path, monkeypatch):
     _write_lint_docs(tmp_path)
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["lint", "--json"])
+    result = runner.invoke(app, ["lint", "--format", "json"])
     payload = json.loads(result.stdout)
     assert payload["violations"][0]["source_id"] == "down"
     assert payload["violations"][0]["target_authority"] == "derived"
@@ -140,7 +130,7 @@ def test_lint_json_reports_skips(tmp_path: Path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["lint", "--json"])
+    result = runner.invoke(app, ["lint", "--format", "json"])
     payload = json.loads(result.stdout)
     assert payload["violations"] == []
     assert payload["skipped"][0]["reason"] == "target-unannotated"

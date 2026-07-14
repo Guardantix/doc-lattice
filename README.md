@@ -209,10 +209,10 @@ uv run --group dev ty check src
 |---------|--------------|----------------|
 | `check [--only STATE ...] [--format human\|json\|github]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN. | 1 on drift, 2 on tool error |
 | `lint [--format human\|json\|github]` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
-| `impact TOKEN [--depth N]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
-| `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
+| `impact TOKEN [--depth N] [--format human\|json]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
+| `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
-| `linear [TARGET] [--from ID] [--exit-code] [--warn-exit]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
+| `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
 | `init [--docs-root ...] [--linear-team KEY]` | Scaffold `.doc-lattice.yml` and print `.gitignore`, pre-commit, and CI guidance. | 2 on tool error |
 
 Only `check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
@@ -223,45 +223,33 @@ WARNING as well.
 
 Every command except `init` accepts `--config PATH` (path to `.doc-lattice.yml`; defaults to
 the file in the current directory). `check`, `lint`, `impact`, `reconcile`, and `linear` accept
-`--json` for machine-readable output. Run `uv run doc-lattice <command> --help` for the full
-flag list.
+`--format json` for machine-readable output. Run `uv run doc-lattice <command> --help` for the
+full flag list.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
-JSON with `N` spaces per level. JSON output is selected by `--json`, or the equivalent
-`--format json` on `check` and `lint`; `--indent` without JSON output is a usage error.
+JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
+without an effective `--format json` is a usage error.
 
 Use the global `--no-color` option before the command to disable colored output explicitly, for
 example `doc-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
 environment variable; `--no-color` is the command-line equivalent. Either one also strips the
 styling from help and usage-error text even when a terminal-forcing variable is set.
 
-`check` and `lint` also accept `--format human|json|github`. `human` is the default, and `json`
-is equivalent to the existing `--json` alias. `github` emits one escaped GitHub Actions `::error`
-workflow command per drift finding or ladder violation, each with a repo-relative file path, so
-findings attach inline to the offending doc in the pull-request diff. Output selection never
-changes gate exit codes. Do not combine `--json` with `--format github`.
+`check` and `lint` also accept `--format human|json|github`. `human` is the default. `github`
+emits one escaped GitHub Actions `::error` workflow command per drift finding or ladder
+violation, each with a repo-relative file path, so findings attach inline to the offending doc
+in the pull-request diff. Output selection never changes gate exit codes.
 
-Structured-output compatibility is command-specific. `--json` remains silent throughout 1.x, with
-no deprecation warning on stderr. The selector matrix is:
-
-| Release | Commands | Selection |
-|---------|----------|-----------|
-| 1.x | `check`, `lint` | `--format human\|json\|github`, plus silent `--json` alias |
-| 1.x | `graph` | `--format mermaid\|dot\|json`; no `--json` alias |
-| 1.x | `impact`, `reconcile`, `linear` | Human default; only silent `--json` selector |
-| 1.x | `init` | Deliberately excluded from structured-output selection |
-| 2.0 | `check`, `lint` | `--format human\|json\|github`; no `--json` alias |
-| 2.0 | `graph` | `--format mermaid\|dot\|json`; no `--json` alias |
-| 2.0 | `impact`, `reconcile`, `linear` | `--format human\|json`; no `--json` alias |
-| 2.0 | `init` | Remains excluded from structured-output selection |
-
-Where supported, `--indent` continues to require an effective JSON format. The 2.0 changes remove
-`--json` from `check`, `lint`, `impact`, `reconcile`, and `linear`; `graph` never accepts that
-alias.
+Structured output is always selected with `--format`; only the accepted values vary by command.
+`check` and `lint` accept `--format human|json|github`, `graph` accepts `--format
+mermaid|dot|json`, `impact`, `reconcile`, and `linear` accept `--format human|json`, and `init`
+is deliberately excluded from structured-output selection. Where supported, `--indent` requires an effective `--format json`.
+The 1.x silent `--json` alias was removed in 2.0; see [CHANGELOG.md](CHANGELOG.md) for the
+migration.
 
 `impact` walks the full transitive closure by default. Pass `--depth N` (N >= 1) to bound the
 walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly from it. Human
-output is unchanged, and each `--json` entry gains a `"depth"` field carrying the minimum number
+output is unchanged, and each JSON entry gains a `"depth"` field carrying the minimum number
 of hops at which that doc is reached.
 
 `check` accepts a repeatable `--only STATE` to narrow the display to specific states (case
@@ -284,7 +272,7 @@ Normal reconcile needs either a downstream id or `--all` (running it with neithe
   match is a successful no-op.
 - **`reconcile --recover`**: perform recovery or cleanup for an outstanding transaction and exit
   without loading the lattice or planning a new batch. It cannot be combined with a downstream id,
-  `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--json` is supported.
+  `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--format json` is supported.
 
 `reconcile` re-reads each downstream file fresh at write time, rewrites only the targeted `seen`
 scalar through round-trip YAML (preserving your body, key order, and comments), and retains the
@@ -313,9 +301,9 @@ Add `--dry-run` to any normal selector above to preview the plan without writing
 and remains byte-, namespace-, and cache-read-only. It does not create, rewrite, recover, or remove
 the journal or staged images, and it does not persist the optional load cache. If an outstanding
 journal exists, dry-run exits 2, names it, and tells you to run `reconcile --recover` first without
-loading the lattice. Combine a safe dry-run with `--json` for a machine-readable plan:
+loading the lattice. Combine a safe dry-run with `--format json` for a machine-readable plan:
 `{"dry_run": true, "reconciled": [{"path": ..., "ref": ..., "new_seen": ...}]}`, sorted by path
-then ref. A real run with `--json` emits the same shape with `"dry_run": false`, after the
+then ref. A real run with `--format json` emits the same shape with `"dry_run": false`, after the
 durable commit, artifact cleanup, and lock release complete. Failed real batches emit no human
 `reconciled` lines and no JSON success payload. A source conflict names the changed destination and
 says whether rollback completed; an I/O or durability failure names the failed operation and says
@@ -346,7 +334,7 @@ After an interrupted run, use this workflow:
 2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`; a valid
    `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
    reports `nothing to recover: JOURNAL`. All three outcomes exit 0.
-3. For machine-readable recovery, add `--json`. The complete stdout object contains exactly
+3. For machine-readable recovery, add `--format json`. The complete stdout object contains exactly
    `action` and `journal`, with no additional keys, for example
    `{"action": "none", "journal": "PATH"}`. `action` is `none`, `rolled_back`, or
    `cleaned_committed`.

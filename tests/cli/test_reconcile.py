@@ -98,7 +98,7 @@ def test_reconcile_then_check_clean(lattice_dir: Path, monkeypatch):
     assert runner.invoke(app, ["reconcile", "pc-design"]).exit_code == 0
     after = runner.invoke(app, ["check"])
     # gdd's BROKEN ref still drifts, so check is still 1; pc-design itself is clean.
-    pc_check = runner.invoke(app, ["check", "--json"])
+    pc_check = runner.invoke(app, ["check", "--format", "json"])
     payload = json.loads(pc_check.stdout)
     pc_states = [e["state"] for e in payload["edges"] if e["source_id"] == "pc-design"]
     assert pc_states == ["OK", "OK"]
@@ -137,7 +137,7 @@ def test_reconcile_all_without_positional_id(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["reconcile", "--all"])
     assert result.exit_code == 0
-    payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
+    payload = json.loads(runner.invoke(app, ["check", "--format", "json"]).stdout)
     pc_states = [e["state"] for e in payload["edges"] if e["source_id"] == "pc-design"]
     assert pc_states == ["OK", "OK"]
 
@@ -145,7 +145,7 @@ def test_reconcile_all_without_positional_id(lattice_dir: Path, monkeypatch):
 def test_reconcile_all_skips_broken_edge(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     assert runner.invoke(app, ["reconcile", "--all"]).exit_code == 0
-    payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
+    payload = json.loads(runner.invoke(app, ["check", "--format", "json"]).stdout)
     states = {(e["source_id"], e["target_ref"]): e["state"] for e in payload["edges"]}
     assert states[("gdd", "ghost")] == "BROKEN"
     assert runner.invoke(app, ["check"]).exit_code == 1
@@ -169,7 +169,7 @@ def test_reconcile_recover_without_journal_reports_none_human(lattice_dir: Path,
 
 def test_reconcile_recover_without_journal_reports_exact_json(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
 
     assert result.exit_code == 0
     assert result.stderr == ""
@@ -226,7 +226,7 @@ def test_reconcile_recover_cleans_committed_without_planning(tmp_path: Path, mon
         pytest.fail("recovery-only mode loaded or planned a lattice")
 
     monkeypatch.setattr(runtime_module, "load_lattice", fail_if_loaded)
-    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {
@@ -284,7 +284,7 @@ def test_reconcile_dry_run_refuses_journal_without_mutating_or_loading(
 @pytest.mark.parametrize(
     "args",
     [
-        ["reconcile", "--recover", "--json"],
+        ["reconcile", "--recover", "--format", "json"],
         ["reconcile", "--all"],
         ["reconcile", "--all", "--dry-run"],
     ],
@@ -401,7 +401,7 @@ def test_reconcile_lock_setup_failure_is_typed_without_internal_error_or_mutatio
         )
     monkeypatch.chdir(lattice_dir)
 
-    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
 
     assert result.exit_code == 2
     assert result.stdout == ""
@@ -454,7 +454,7 @@ def test_reconcile_concurrent_edit_is_preserved_without_success_report(
     monkeypatch.setattr(reconcile_command, "commit_rewrites", edit_then_commit)
     args = ["reconcile", "pc-design"]
     if json_out:
-        args.append("--json")
+        args.extend(["--format", "json"])
     result = runner.invoke(app, args)
 
     assert result.exit_code == 2
@@ -502,7 +502,7 @@ def test_reconcile_midbatch_persistence_failure_rolls_back_without_success(
 
 def test_reconcile_success_cleans_transaction_artifacts(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["reconcile", "--all", "--json"])
+    result = runner.invoke(app, ["reconcile", "--all", "--format", "json"])
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)["reconciled"]
@@ -526,9 +526,9 @@ def test_reconcile_lock_exit_failure_publishes_no_success(
 
     monkeypatch.setattr(reconcile_command, "reconcile_lock", fail_after_lock_body)
     monkeypatch.chdir(lattice_dir)
-    args = ["reconcile", "--recover", "--json"]
+    args = ["reconcile", "--recover", "--format", "json"]
     if mode == "reconcile":
-        args = ["reconcile", "--all", "--json"]
+        args = ["reconcile", "--all", "--format", "json"]
 
     result = runner.invoke(app, args)
 
@@ -604,7 +604,7 @@ def test_reconcile_dry_run_composes_with_ref(lattice_dir: Path, monkeypatch):
 
 def test_reconcile_dry_run_json_payload(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["reconcile", "--all", "--dry-run", "--json"])
+    result = runner.invoke(app, ["reconcile", "--all", "--dry-run", "--format", "json"])
     assert result.exit_code == 0
     assert result.stdout.count("\n") == 1  # single-line JSON
     payload = json.loads(result.stdout)
@@ -625,14 +625,14 @@ def test_reconcile_dry_run_json_leaves_files_unchanged(lattice_dir: Path, monkey
     monkeypatch.chdir(lattice_dir)
     pc_path = lattice_dir / "docs" / "pc-design.md"
     before = pc_path.read_text(encoding="utf-8")
-    result = runner.invoke(app, ["reconcile", "--all", "--dry-run", "--json"])
+    result = runner.invoke(app, ["reconcile", "--all", "--dry-run", "--format", "json"])
     assert result.exit_code == 0
     assert pc_path.read_text(encoding="utf-8") == before
 
 
 def test_reconcile_real_run_json_payload(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["reconcile", "--all", "--json"])
+    result = runner.invoke(app, ["reconcile", "--all", "--format", "json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["dry_run"] is False
@@ -642,7 +642,7 @@ def test_reconcile_real_run_json_payload(lattice_dir: Path, monkeypatch):
         ("pc-design.md", "art-direction#motion"),
     }
     # the real run actually wrote: check now reports both edges OK.
-    check_payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
+    check_payload = json.loads(runner.invoke(app, ["check", "--format", "json"]).stdout)
     pc_states = [e["state"] for e in check_payload["edges"] if e["source_id"] == "pc-design"]
     assert pc_states == ["OK", "OK"]
 
@@ -658,7 +658,7 @@ def test_reconcile_dry_run_after_clean_reports_nothing_to_reconcile(lattice_dir:
 def test_reconcile_json_after_clean_reports_empty_list(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     assert runner.invoke(app, ["reconcile", "--all"]).exit_code == 0  # real run clears drift
-    result = runner.invoke(app, ["reconcile", "--all", "--json"])
+    result = runner.invoke(app, ["reconcile", "--all", "--format", "json"])
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"dry_run": False, "reconciled": []}
 
@@ -673,7 +673,7 @@ def test_reconcile_ref_selects_single_edge(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["reconcile", "pc-design", "--ref", "art-direction#accent"])
     assert result.exit_code == 0
-    payload = json.loads(runner.invoke(app, ["check", "--json"]).stdout)
+    payload = json.loads(runner.invoke(app, ["check", "--format", "json"]).stdout)
     edges = [e for e in payload["edges"] if e["source_id"] == "pc-design"]
     states = {e["target_ref"]: e["state"] for e in edges}
     assert states["art-direction#accent"] == "OK"

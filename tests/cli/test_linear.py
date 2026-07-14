@@ -32,7 +32,7 @@ def test_linear_audit_json_reports_danger(lattice_dir, monkeypatch):
     ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(linear_command, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["linear", "--json"])
+    result = runner.invoke(app, ["linear", "--format", "json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     danger = [f for f in payload["findings"] if f["severity"] == "DANGER"]
@@ -44,8 +44,8 @@ def test_linear_json_indent_round_trips(lattice_dir: Path, monkeypatch):
     ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(linear_command, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
-    compact = runner.invoke(app, ["linear", "--json"])
-    pretty = runner.invoke(app, ["linear", "--json", "--indent", "2"])
+    compact = runner.invoke(app, ["linear", "--format", "json"])
+    pretty = runner.invoke(app, ["linear", "--format", "json", "--indent", "2"])
     assert compact.exit_code == pretty.exit_code == 0
     assert json.loads(pretty.stdout) == json.loads(compact.stdout)
     assert '\n  "findings": [\n' in pretty.stdout
@@ -55,7 +55,7 @@ def test_linear_positional_target_scopes_audit(lattice_dir, monkeypatch):
     ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(linear_command, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["linear", "pc-design", "--json"])
+    result = runner.invoke(app, ["linear", "pc-design", "--format", "json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     danger = [f for f in payload["findings"] if f["severity"] == "DANGER"]
@@ -66,7 +66,7 @@ def test_linear_from_grades_downstream(lattice_dir, monkeypatch):
     ticket = _ticket(TicketState(name="Done", type="completed"))
     monkeypatch.setattr(linear_command, "fetch_tickets", _fake_fetch({"PC-228": ticket}))
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["linear", "--from", "art-direction#accent", "--json"])
+    result = runner.invoke(app, ["linear", "--from", "art-direction#accent", "--format", "json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert any(f["ticket_ref"] == "PC-228" for f in payload["findings"])
@@ -92,7 +92,7 @@ def test_linear_blocked_ticket_fails_gate(lattice_dir, monkeypatch):
     # The completed ticket is replaced by a typo: gate must still fail (fail-closed).
     monkeypatch.setattr(linear_command, "fetch_tickets", _fake_fetch({}))
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, ["linear", "--exit-code", "--json"])
+    result = runner.invoke(app, ["linear", "--exit-code", "--format", "json"])
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["findings"][0]["severity"] == "BLOCKED"
@@ -109,7 +109,7 @@ def test_linear_no_tickets_needs_no_key(tmp_path, monkeypatch):
     )
     monkeypatch.delenv("LINEAR_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["linear", "--json"])
+    result = runner.invoke(app, ["linear", "--format", "json"])
     assert result.exit_code == 0
     assert json.loads(result.stdout)["findings"] == []
 

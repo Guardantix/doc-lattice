@@ -31,7 +31,6 @@ def register_graph(app: typer.Typer) -> None:
         selection = select_output(
             runtime,
             fmt=fmt,
-            json_alias=False,
             valid=VALID_GRAPH_FORMATS,
         )
         with exit_on_project_error(runtime):

@@ -32,19 +32,14 @@ def select_output(
     runtime: CliRuntime,
     *,
     fmt: str,
-    json_alias: bool,
     valid: frozenset[str],
     indent: int | None = None,
 ) -> OutputSelection:
     """Validate output flags and return their effective selection.
 
-    Explicit format validation precedes resolution of the legacy JSON alias so an
-    invalid format can never be hidden by ``--json``.
-
     Args:
         runtime: Active invocation state.
         fmt: Explicit or implicit format value.
-        json_alias: Whether the legacy ``--json`` option was passed.
         valid: Formats accepted by the command.
         indent: Requested JSON indentation, including zero.
 
@@ -52,16 +47,13 @@ def select_output(
         The validated effective format and indentation.
 
     Raises:
-        typer.Exit: Exit code 2 for unsupported or conflicting output flags.
+        typer.Exit: Exit code 2 for an unsupported format or misused ``--indent``.
     """
     if fmt not in valid:
         _reject_bad_format(runtime, fmt, valid)
-    if json_alias and fmt == "github":
-        runtime.stderr.print("[red]error[/red]: --json cannot be combined with --format github")
-        raise typer.Exit(EXIT_TOOL_ERROR)
-    effective = "json" if json_alias else fmt
+    effective = fmt
     if indent is not None and effective != "json":
-        runtime.stderr.print("[red]error[/red]: --indent requires --json")
+        runtime.stderr.print("[red]error[/red]: --indent requires --format json")
         raise typer.Exit(EXIT_TOOL_ERROR)
     return OutputSelection(format=effective, indent=indent)
 

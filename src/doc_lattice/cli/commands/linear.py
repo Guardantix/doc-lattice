@@ -9,7 +9,7 @@ from ...linear_fetch import fetch_tickets
 from ...linear_render import findings_json, render_findings
 from ...stale_shipped import build_audit_trigger, build_from_trigger, stale_shipped
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
-from ..options import ConfigOpt, IndentOpt, JsonOpt
+from ..options import BasicFormatOpt, ConfigOpt, IndentOpt
 from ..output import select_output, write_json
 from ..runtime import get_runtime
 
@@ -38,7 +38,7 @@ def register_linear(app: typer.Typer) -> None:
             bool, typer.Option("--warn-exit", help="With --exit-code, also exit 1 on WARNING.")
         ] = False,
         config: ConfigOpt = None,
-        json_out: JsonOpt = False,
+        fmt: BasicFormatOpt = "human",
         indent: IndentOpt = None,
     ) -> None:
         """Report tickets shipped against a spec that has since drifted.
@@ -49,8 +49,7 @@ def register_linear(app: typer.Typer) -> None:
         runtime = get_runtime(ctx)
         selection = select_output(
             runtime,
-            fmt="human",
-            json_alias=json_out,
+            fmt=fmt,
             valid=VALID_BASIC_OUTPUT_FORMATS,
             indent=indent,
         )

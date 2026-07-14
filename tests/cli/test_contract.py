@@ -70,7 +70,7 @@ def _run_cli_subprocess(argv: list[str], env: dict[str, str]) -> subprocess.Comp
     "argv",
     [
         ["doc-lattice", "--no-color", "--help"],
-        ["doc-lattice", "--no-color", "check", "--json", "--indent", "-1"],
+        ["doc-lattice", "--no-color", "check", "--format", "json", "--indent", "-1"],
     ],
     ids=["help", "invalid-indent"],
 )
@@ -93,7 +93,7 @@ def test_no_color_suppresses_typer_rendered_colors(argv):
     "argv",
     [
         ["doc-lattice", "--help"],
-        ["doc-lattice", "check", "--json", "--indent", "-1"],
+        ["doc-lattice", "check", "--format", "json", "--indent", "-1"],
     ],
     ids=["help", "invalid-indent"],
 )
@@ -129,17 +129,33 @@ def test_json_commands_help_lists_indent(command, monkeypatch):
     assert result.exit_code == 0
     output = Text.from_ansi(result.stdout).plain
     assert "--indent" in output
-    assert "requires --json" in output
+    assert "requires --format json" in output
 
 
-@pytest.mark.parametrize("command", ["check", "lint"])
-def test_report_commands_reject_json_github_conflict(lattice_dir: Path, monkeypatch, command: str):
+@pytest.mark.parametrize(
+    "command",
+    ["check", "lint", "impact", "reconcile", "linear"],
+)
+def test_removed_json_alias_is_an_unknown_option(lattice_dir: Path, monkeypatch, command: str):
+    # The silent --json alias is gone in 2.0; Click must reject it as an unknown option.
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, [command, "--json", "--format", "github"])
+    args = [command, "--json"]
+    if command in {"impact", "reconcile"}:
+        args = [command, "target", "--json"]
+    result = runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert "--json" in result.stderr
-    assert "--format github" in result.stderr
+    stderr = Text.from_ansi(result.stderr).plain
+    assert "No such option: --json" in stderr
+
+
+def test_reconcile_recover_rejects_removed_json_alias(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+
+    assert result.exit_code == 2
+    stderr = Text.from_ansi(result.stderr).plain
+    assert "No such option: --json" in stderr
 
 
 @pytest.mark.parametrize("command", ["check", "lint"])
@@ -154,16 +170,23 @@ def test_report_commands_reject_unknown_format(lattice_dir: Path, monkeypatch, c
     assert "github" in result.stderr
 
 
-@pytest.mark.parametrize("command", ["check", "lint"])
-def test_report_commands_reject_unknown_format_even_with_json(
-    lattice_dir: Path, monkeypatch, command: str
-):
-    # --json must not mask a typoed --format; the bad format still fails loudly.
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["impact", "art-direction#accent", "--format", "nonsense"],
+        ["reconcile", "--all", "--format", "nonsense"],
+        ["linear", "--format", "nonsense"],
+    ],
+    ids=["impact", "reconcile", "linear"],
+)
+def test_basic_commands_reject_unknown_format(lattice_dir: Path, monkeypatch, args: list[str]):
     monkeypatch.chdir(lattice_dir)
-    result = runner.invoke(app, [command, "--json", "--format", "githu"])
+    result = runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert "githu" in result.stderr
+    assert "nonsense" in result.stderr
+    assert "human" in result.stderr
+    assert "json" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -212,7 +235,7 @@ def test_indent_without_json_exits_2_before_project_loading(tmp_path: Path, monk
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, [*args, "--indent", "2"])
     assert result.exit_code == 2
-    assert "--indent requires --json" in result.stderr
+    assert "--indent requires --format json" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -225,8 +248,8 @@ def test_indent_without_json_exits_2_before_project_loading(tmp_path: Path, monk
 )
 def test_offline_json_indent_round_trips(lattice_dir: Path, monkeypatch, args, expected_exit):
     monkeypatch.chdir(lattice_dir)
-    compact = runner.invoke(app, [*args, "--json"])
-    pretty = runner.invoke(app, [*args, "--json", "--indent", "2"])
+    compact = runner.invoke(app, [*args, "--format", "json"])
+    pretty = runner.invoke(app, [*args, "--format", "json", "--indent", "2"])
     assert compact.exit_code == pretty.exit_code == expected_exit
     assert json.loads(pretty.stdout) == json.loads(compact.stdout)
     assert "\n  " in pretty.stdout
