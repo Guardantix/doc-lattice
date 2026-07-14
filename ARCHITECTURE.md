@@ -41,11 +41,14 @@ edges.
 **Status:** Accepted
 **Context:** Graph and report logic must be testable against synthetic inputs.
 **Decision:** All graph and report logic is filesystem-free and pure. `config`,
-`discovery`, `orchestrate`, and `cli` own high-level filesystem work. Within the cache
-package, `cache/schema.py` and `cache/state.py` are filesystem-free,
-`cache/store.py` owns cache-file I/O, and `cache/lookup.py` reads and stats documents
-to select the verify or stat tier. `linear_fetch` is impure wiring and
-`linear_client` is the only module that touches the network.
+`discovery`, and `orchestrate` own load-path filesystem work. `persistence.py` owns
+shared low-level durable staging, replace, create-if-absent, fingerprint, sync, and
+cleanup primitives. `reconcile_transaction.py` owns the reconcile lock, journal,
+commit, rollback, and recovery state machine; `cli` orchestrates it and reports only
+completed outcomes. Within the cache package, `cache/schema.py` and `cache/state.py`
+are filesystem-free, `cache/store.py` owns cache-file I/O, and `cache/lookup.py` reads
+and stats documents to select the verify or stat tier. `linear_fetch` is impure wiring
+and `linear_client` is the only module that touches the network.
 **Consequences:** Every command's logic is unit-tested with no I/O; the network slice
 is quarantined to one module.
 
@@ -74,19 +77,48 @@ lines.
 trailing whitespace, and leading or trailing blank lines do not. 128 bits is ample
 for a human-scale corpus.
 
-### AD-5: Reconcile validates the batch and atomically replaces each file
+### AD-5: Reconcile is a durable whole-batch transaction
 
-**Date:** 2026-06-27
+**Date:** 2026-07-13
 **Status:** Accepted
-**Context:** Reconcile is the only mutating command and must not clobber edits.
-**Decision:** At write time reconcile re-reads each downstream file fresh, rewrites
-only the targeted `seen` scalar(s) through round-trip YAML (preserving body, key
-order, and comments), and validates every rewrite before mutation begins. It then
-atomically replaces each file in sequence.
-**Consequences:** Edits present at fresh-read validation survive, and a validation
-failure leaves every file untouched. An edit racing after validation may be
-overwritten. A multi-file run is not transactional: if a later atomic replacement
-fails, earlier replacements remain.
+**Context:** Reconcile is the only command that mutates tracked documents. It must
+reject edits made after validation, prevent concurrent reconciles from interfering,
+and leave an interrupted multi-file batch recoverable.
+**Decision:** Every reconcile mode takes a nonblocking advisory lock on the existing
+project-root directory through preflight, planning, and any recovery or commit. A real
+run re-reads downstream files, retains exact before and after bytes, and stages synced
+before-image and after-image files beside each destination. Before mutation, it durably
+publishes the `prepared` journal at `.doc-lattice-reconcile.json`. Immediately before
+each atomic replacement, it compares the destination's full SHA-256 fingerprint with
+the validated before bytes;
+a mismatch is a conflict. Replacement and namespace changes include file and parent
+directory synchronization. Any pre-commit conflict or persistence failure rolls back
+transaction-owned after images in reverse order while preserving unrelated edits. At
+the point of no return (PONR), all destinations are durable and the journal is durably
+marked `committed`; recovery then preserves those destinations and only cleans staged
+evidence. Success output is emitted only after committed cleanup and clean lock
+release.
+
+Normal real startup recovers a valid outstanding journal before lattice loading.
+`reconcile --recover` performs only that recovery, while dry-run never recovers or
+persists anything and refuses an outstanding journal. Invalid or unauthenticated
+recovery evidence is retained for explicit manual remediation rather than guessed at
+or deleted. Journal paths and artifacts are project-relative, contained, role-checked,
+and fingerprint-authenticated before recovery mutates them.
+
+**Consequences:** A successful reconcile is a durable all-or-nothing batch from the
+operator's perspective. A `prepared` journal rolls transaction-owned changes back; a
+`committed` journal records that PONR has passed and makes recovery cleanup-only. The
+lock serializes doc-lattice reconcile processes but does not coordinate unrelated
+editors. This contract assumes local-filesystem `flock`, atomic rename, and directory
+sync behavior; network filesystems are outside it.
+
+Shared write semantics stop at the primitive boundary. Cache persistence uses the
+same durable atomic-replace primitive but remains a disposable, best-effort
+single-file write whose `OSError` is reported once and swallowed. `init` uses durable
+create-if-absent, still refuses to replace an existing config, and never joins a
+reconcile journal. It always prints transaction-artifact `.gitignore` guidance but
+does not modify `.gitignore`.
 
 ### AD-6: lint is a pure structural check, separate from drift
 

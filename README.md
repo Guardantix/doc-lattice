@@ -210,10 +210,10 @@ uv run --group dev ty check src
 | `check [--only STATE ...] [--format human\|json\|github]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN. | 1 on drift, 2 on tool error |
 | `lint [--format human\|json\|github]` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
 | `impact TOKEN [--depth N]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
-| `reconcile [ID] [--ref REF] [--all] [--dry-run]` | Set `seen` to current upstream hashes for the selected edges (the only command that mutates your tracked docs); `--dry-run` previews the plan without writing. | 2 on tool error |
+| `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY]` | Scaffold `.doc-lattice.yml` and print pre-commit and CI codegen. | 2 on tool error |
+| `init [--docs-root ...] [--linear-team KEY]` | Scaffold `.doc-lattice.yml` and print `.gitignore`, pre-commit, and CI guidance. | 2 on tool error |
 
 Only `check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
 `impact`, `reconcile`, `graph`, and `init` are informational and always exit 0 on success (2 only on
@@ -253,7 +253,7 @@ OK` on a drifting lattice still exits 1.
 
 ### `reconcile` selectors
 
-`reconcile` needs either a downstream id or `--all` (running it with neither is an error):
+Normal reconcile needs either a downstream id or `--all` (running it with neither is an error):
 
 - **`reconcile DOWNSTREAM_ID`**: reconcile every drifting edge of one downstream node.
 - **`reconcile DOWNSTREAM_ID --ref REF`**: narrow to a single upstream ref on that node, selected
@@ -264,19 +264,86 @@ OK` on a drifting lattice still exits 1.
 - **`reconcile --all --ref REF`**: reconcile matching drifting edges across every downstream
   node. Nonmatching, BROKEN, and already-OK edges are skipped; unlike the single-node form, no
   match is a successful no-op.
+- **`reconcile --recover`**: perform recovery or cleanup for an outstanding transaction and exit
+  without loading the lattice or planning a new batch. It cannot be combined with a downstream id,
+  `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--json` is supported.
 
 `reconcile` re-reads each downstream file fresh at write time, rewrites only the targeted `seen`
-scalar through round-trip YAML (preserving your body, key order, and comments), and validates all
-rewrites before mutation. Edits present during that fresh-read validation are preserved, but an
-edit racing after validation may be overwritten. It atomically replaces each file, but a
-multi-file run is not transactional: if a later replacement fails, earlier replacements remain.
+scalar through round-trip YAML (preserving your body, key order, and comments), and retains the
+exact source and replacement bytes. A real run stages exact before and after images, publishes a
+`prepared` journal, fingerprints each destination immediately before its replacement, and rejects
+a changed destination as a conflict. The full batch is rolled back in reverse order if a conflict
+or write/durability failure occurs before the committed marker. After every replacement is durable,
+the journal becomes `committed`; success output waits until committed cleanup and a clean
+advisory-lock release have both completed.
 
-Add `--dry-run` to any of the selectors above to preview the plan without writing: it prints
+Every reconcile mode holds a nonblocking advisory lock on the existing project-root directory
+through preflight, planning, and any recovery or commit. A competing invocation exits 2 with
+`another reconcile is in progress; retry after it exits` and does not inspect or alter the active
+transaction. The durability guarantee assumes a local filesystem with reliable advisory-lock,
+atomic-rename, and directory-sync semantics. Network filesystems such as NFS may weaken or emulate
+`flock`, so reconcile on them is outside this durability contract.
+
+A real reconcile checks for recovery immediately after config and lock setup, before loading the
+lattice. A `prepared` journal rolls transaction-owned after images back to their exact before
+images; unrelated edits are preserved. A `committed` journal keeps the committed destinations and
+finishes artifact cleanup. Automatic recovery is reported once on stderr, then the newly requested
+reconcile proceeds. This ordering ensures the new plan sees recovered files.
+
+Add `--dry-run` to any normal selector above to preview the plan without writing: it prints
 `would reconcile FILE: REF` per edge that would change (`nothing to reconcile` if none would),
-and leaves every file byte-identical. Combine with `--json` for a machine-readable plan:
+and remains byte-, namespace-, and cache-read-only. It does not create, rewrite, recover, or remove
+the journal or staged images, and it does not persist the optional load cache. If an outstanding
+journal exists, dry-run exits 2, names it, and tells you to run `reconcile --recover` first without
+loading the lattice. Combine a safe dry-run with `--json` for a machine-readable plan:
 `{"dry_run": true, "reconciled": [{"path": ..., "ref": ..., "new_seen": ...}]}`, sorted by path
 then ref. A real run with `--json` emits the same shape with `"dry_run": false`, after the
-writes complete.
+durable commit, artifact cleanup, and lock release complete. Failed real batches emit no human
+`reconciled` lines and no JSON success payload. A source conflict names the changed destination and
+says whether rollback completed; an I/O or durability failure names the failed operation and says
+whether rollback completed or recovery evidence remains.
+
+### Reconcile recovery and artifacts
+
+The project-root transaction journal is `.doc-lattice-reconcile.json`. Its state is `prepared` or
+`committed`, and each entry records project-relative destination, before-image, and after-image
+paths plus full SHA-256 fingerprints. Temporary files use these exact patterns:
+
+```gitignore
+.doc-lattice-reconcile.json
+.doc-lattice-reconcile.json.*.tmp
+.*.doc-lattice-before.*.tmp
+.*.doc-lattice-after.*.tmp
+```
+
+Before and after images are staged beside each destination, so the last two patterns ignore staged
+images in nested document directories as well as at the project root. `doc-lattice init` always
+prints this block and tells you to append it to `.gitignore`; it never reads, creates, appends to,
+or overwrites `.gitignore` itself.
+
+After an interrupted run, use this workflow:
+
+1. Stop any other reconcile and run `doc-lattice reconcile --recover` from the project root. A safe
+   rerun of a normal real reconcile also performs this recovery before lattice loading.
+2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`; a valid
+   `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
+   reports `nothing to recover: JOURNAL`. All three outcomes exit 0.
+3. For machine-readable recovery, add `--json`. The complete stdout object contains exactly
+   `action` and `journal`, with no additional keys, for example
+   `{"action": "none", "journal": "PATH"}`. `action` is `none`, `rolled_back`, or
+   `cleaned_committed`.
+
+A malformed or unsafe journal exits 2 and is not deleted. Inspect the named journal, destinations,
+and staged files; restore each destination or deliberately preserve its current contents; then move
+the invalid journal aside only after that manual restoration or preservation and rerun
+`doc-lattice reconcile --recover`.
+
+Missing, corrupt, nonregular, or otherwise unauthenticated staged evidence also exits 2 without
+unsafe cleanup. Preserve the journal and available staged files, restore or correct the required
+evidence named by the diagnostic, or manually preserve the affected destination, then rerun
+`doc-lattice reconcile --recover`. Do not delete evidence or guess which image is authoritative
+before inspecting its recorded fingerprint. If rollback itself fails, the diagnostic names the
+remaining artifacts and the destination that still needs manual attention.
 
 ## Frontmatter reference
 
@@ -380,10 +447,11 @@ track:
 uvx --python 3.13 --from doc-lattice==1.0.1 doc-lattice init
 ```
 
-This writes `.doc-lattice.yml` (only if absent) and prints pre-commit hooks and a GitHub
-Actions workflow that run `doc-lattice check` (drift) and `doc-lattice lint` (authority
-ladder) as your gates. Paste each where the output says. Pass `--docs-root` (repeatable) or
-`--linear-team` to bake those values into the generated config.
+This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
+`.gitignore` block above, pre-commit hooks, and a GitHub Actions workflow that run
+`doc-lattice check` (drift) and `doc-lattice lint` (authority ladder) as your gates. Paste each
+where the output says. `init` only prints `.gitignore` guidance and never modifies that file. Pass
+`--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
 
@@ -419,7 +487,7 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 |------|---------|
 | `0` | Success; no drift or violations. |
 | `1` | The lattice is coherent but a gate failed: drift (`check`), an authority inversion (`lint`), or (with `--exit-code`) a DANGER/BLOCKED `linear` finding. |
-| `2` | Tool error: invalid or unclosed frontmatter, invalid config, unreadable or non-UTF-8 input, incoherent ids, or a containment failure. |
+| `2` | Tool error: invalid or unclosed frontmatter, invalid config, unreadable or non-UTF-8 input, incoherent ids, containment failure, reconcile conflict/lock contention, or persistence/recovery failure. |
 
 ## Troubleshooting
 
@@ -467,6 +535,8 @@ doc-lattice/
 ├── src/doc_lattice/         # the engine: a pure graph/report core behind a thin impure shell
 │   ├── markdown_compat.py      # pinned heading and GitHub-slug compatibility adapter
 │   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
+│   ├── persistence.py          # shared durable single-path filesystem primitives
+│   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery
 │   └── cache/               # phase-separated incremental load cache
 │       ├── schema.py        # filesystem-free models and codec
 │       ├── state.py         # filesystem-free run-local state
@@ -480,8 +550,10 @@ doc-lattice/
 
 The engine is a pure pipeline (`config -> discovery -> frontmatter parse -> build_lattice`
 feeding `{ check, impact, reconcile, graph, lint, linear }`) where all graph and report logic
-is filesystem-free. `config`, `discovery`, `orchestrate`, and `cli` own high-level filesystem
-work; cache I/O is split between document-reading `cache/lookup.py` and cache-file-owning
+is filesystem-free. `config`, `discovery`, and `orchestrate` own load-path filesystem work;
+`persistence.py` owns shared durable single-path operations; `reconcile_transaction.py` owns the
+reconcile batch, lock, and recovery state machine; and `cli` orchestrates and reports those
+operations. Cache I/O is split between document-reading `cache/lookup.py` and cache-file-owning
 `cache/store.py`. Only `linear_client` touches the network. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the decisions behind that split.
 
