@@ -299,6 +299,15 @@ independent of heading text. Invalid or nontrailing marker-like text is ordinary
 so the heading falls back to its generated GitHub slug. Section refs are file-scoped
 (`file#anchor`), so the same anchor in two files does not collide.
 
+Addressable sections intentionally use a narrow Markdown subset: column-zero ATX headings at
+levels 1 through 6, including empty headings and optional ATX closing sequences. CommonMark
+backtick and tilde fences suppress headings inside them. Setext headings, headings in block quotes
+or list items, and indented headings are not addressable. Inline Markdown remains part of the raw
+heading text used for slugging. Heading and fence recognition is pinned to
+`markdown-it-py==4.2.0`; generated slugs and document-order duplicate suffixes target
+`github-slugger@2.0.0` under JavaScript Unicode 17.0. Generated lowercase patches and contextual
+casing-property tables bridge the minimum supported Python 3.13 Unicode 15.1 table to that target.
+
 ## Configuration
 
 doc-lattice runs zero-config (defaulting to a `docs/` root), or reads `.doc-lattice.yml`
@@ -456,13 +465,15 @@ collision. Equal anchors in different files do not collide.
 ```
 doc-lattice/
 ├── src/doc_lattice/         # the engine: a pure graph/report core behind a thin impure shell
+│   ├── markdown_compat.py      # pinned heading and GitHub-slug compatibility adapter
+│   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
 │   └── cache/               # phase-separated incremental load cache
 │       ├── schema.py        # filesystem-free models and codec
 │       ├── state.py         # filesystem-free run-local state
 │       ├── lookup.py        # document reads and stats for cache-tier selection
 │       └── store.py         # cache-file reads and atomic writes
 ├── tests/                   # test suite (mirrors sources; property-based hashing invariants)
-├── scripts/                 # CI guards (typing boundary, version sync)
+├── scripts/                 # CI guards plus slug generation and section benchmark tools
 ├── docs/superpowers/        # historical design and implementation context
 └── pyproject.toml           # project configuration
 ```

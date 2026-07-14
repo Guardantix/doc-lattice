@@ -21,8 +21,10 @@ def _assert_sdist_members(members, expected_prefix):
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     assert duplicates == [], f"duplicate sdist members: {duplicates}"
     repository_only_tests = {
+        f"{expected_prefix}/tests/test_bench_sections.py",
         f"{expected_prefix}/tests/test_release_gate.py",
         f"{expected_prefix}/tests/test_release_workflow.py",
+        f"{expected_prefix}/tests/test_slugger_generator.py",
     }
     assert repository_only_tests.isdisjoint(names), (
         f"repository-only tests included: {sorted(repository_only_tests.intersection(names))}"
@@ -82,8 +84,10 @@ def test_sdist_has_an_explicit_minimal_include_set():
         "/pyproject.toml",
     ]
     assert sdist["exclude"] == [
+        "/tests/test_bench_sections.py",
         "/tests/test_release_gate.py",
         "/tests/test_release_workflow.py",
+        "/tests/test_slugger_generator.py",
     ]
 
 

@@ -14,6 +14,7 @@ from doc_lattice.check import check_lattice, statuses_json
 from doc_lattice.config import load_config
 from doc_lattice.constants import CACHE_VERSION
 from doc_lattice.error_types import UnreadableDocError
+from doc_lattice.model import TargetId
 from doc_lattice.orchestrate import load_lattice
 
 
@@ -80,6 +81,31 @@ def test_version_1_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, mon
     with pytest.raises(UnreadableDocError, match="unclosed YAML frontmatter"):
         load_lattice(load_config(None, tmp_path))
     assert old_cache.version < CACHE_VERSION
+
+
+def test_version_2_cached_sections_are_rederived(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(
+        "---\nid: a\n---\n``` invalid`info\n# Visible\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: old-sections\n", encoding="utf-8")
+    project = load_config(None, tmp_path)
+
+    load_lattice(project)
+    path = cache_path("old-sections", os.environ)
+    stale = CacheFile.model_validate_json(path.read_text(encoding="utf-8"))
+    node = stale.entries["docs/a.md"].node
+    assert node is not None
+    node.sections = []
+    stale.version = 2
+    path.write_text(stale.model_dump_json(), encoding="utf-8")
+
+    lattice = load_lattice(project)
+
+    assert TargetId("a", "visible") in lattice.index
 
 
 def test_cache_facade_exports_surviving_names():

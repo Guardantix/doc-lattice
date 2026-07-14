@@ -173,6 +173,56 @@ def test_cached_and_uncached_loads_are_structurally_equal(lattice_dir: Path, mon
     assert warm == uncached
 
 
+def test_section_compatibility_is_structurally_equal_cold_and_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    project_root = tmp_path / "project"
+    docs = project_root / "docs"
+    docs.mkdir(parents=True)
+    (docs / "compat.md").write_text(
+        """---
+id: compat
+---
+# Top
+```
+## Hidden
+```
+## Notes
+## Notes
+## Привет 你好
+## Stable {#stable}
+##
+""",
+        encoding="utf-8",
+    )
+
+    uncached = load_lattice(load_config(None, project_root))
+    _with_cache(project_root)
+    cold = load_lattice(load_config(None, project_root))
+
+    def reject_derivation(_body: str):
+        pytest.fail("a warm cache hit must not derive sections again")
+
+    monkeypatch.setattr(orchestrate, "derive_file_sections", reject_derivation)
+    warm = load_lattice(load_config(None, project_root))
+
+    assert cold == uncached
+    assert warm == uncached
+    assert {
+        target.anchor: location.span
+        for target, location in warm.index.items()
+        if target.file_id == "compat" and target.anchor is not None
+    } == {
+        "top": (1, 9),
+        "notes": (5, 5),
+        "notes-1": (6, 6),
+        "привет-你好": (7, 7),
+        "stable": (8, 8),
+        "": (9, 9),
+    }
+
+
 def test_cache_disabled_leaves_env_untouched(lattice_dir: Path):
     # With no cache_key, load_lattice must never resolve or write a cache.
     project = load_config(None, lattice_dir)

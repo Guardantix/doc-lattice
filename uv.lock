@@ -106,6 +106,7 @@ name = "doc-lattice"
 version = "1.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "markdown-it-py" },
     { name = "pydantic" },
     { name = "rich" },
     { name = "ruamel-yaml" },
@@ -126,6 +127,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "markdown-it-py", specifier = "==4.2.0" },
     { name = "pydantic", specifier = ">=2" },
     { name = "rich", specifier = ">=13" },
     { name = "ruamel-yaml", specifier = ">=0.18" },

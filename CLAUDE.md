@@ -28,6 +28,8 @@ uv run --group dev ruff format src tests  # format (add --check to verify only)
 uv run --group dev ty check src           # type check
 uv run --group dev python scripts/check_typing_boundaries.py src           # boundary rule check
 uv run --group dev python scripts/check_version_sync.py    # version-consistency guard
+uv run --group dev python scripts/generate_github_slugger_data.py --check  # exhaustive slug parity
+uv run --group dev python scripts/bench_sections.py        # large-document section benchmark
 ```
 
 A pre-commit hook runs ruff (with `--fix`), ruff-format, `ty`, the typing-boundary check, the version-sync check, and detect-secrets on every commit, and blocks direct commits to `main`.
@@ -61,11 +63,20 @@ config -> discovery -> frontmatter parse -> loader.build_lattice -> { check, imp
 `save-format#slot-table` parses to `TargetId("save-format", "slot-table")` and resolves against
 that file's headings, while a bare ref (`save-format`) is a whole-file target. A heading is
 addressed by an explicit `{#marker}` when present, otherwise by its GitHub slug (byte-parity with
-GitHub's rendered anchor; see `sections.github_slug`/`anchor_ids`). A ref that resolves to nothing
-is not a load error: it is a normal lattice state (`target_id=None`) that `check` reports as
+GitHub's rendered anchor; see `markdown_compat.github_slug`/`anchor_ids`). Heading and fence
+recognition is owned by `markdown_compat.py` against `markdown-it-py==4.2.0`; slug data in
+`_github_slugger_data.py` is generated from `github-slugger@2.0.0` under JavaScript Unicode 17.0
+and must not be hand-edited. It also patches the minimum Python 3.13 Unicode 15.1 lowercase table.
+Regenerate and verify it through `scripts/generate_github_slugger_data.py`; maintenance requires a
+Unicode 17 Node runtime and `python3.13`. A ref that resolves to nothing is not a load error: it is a
+normal lattice state (`target_id=None`) that `check` reports as
 `BROKEN`. The same slug in two different files does not collide, because their `TargetId`s differ;
 a within-file clash (two equal markers or a marker equal to a computed slug) is a
 `DuplicateIdError`. A file id equal to an anchor in another file also does not collide.
+
+Before declaring support for a Python runtime whose `unicodedata.unidata_version` exceeds the
+pinned JavaScript Unicode target, update that target, regenerate the artifact, and rerun the slug
+compatibility and benchmark gates.
 
 **Drift detection.** Each edge carries a `seen` hash captured when it was last reconciled.
 `check` classifies every edge as OK / STALE / UNRECONCILED / BROKEN by comparing `seen` against
@@ -114,7 +125,8 @@ testing unreleased code. Historical spec:
 `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md`.
 
 **Pure vs impure split.** All graph and report logic is pure and filesystem-free: `model`,
-`hashing`, `sections`, `resolve`, `loader`, `check`, `lint`, `impact`, `render`, `reconcile.reconcile`/
+`hashing`, `markdown_compat`, `sections`, `resolve`, `loader`, `check`, `lint`, `impact`, `render`,
+`reconcile.reconcile`/
 `apply_reconcile`/`plan_rewrites` (which return planned updates or rewritten text rather than
 writing it), the shared `report_render`, plus the linear pure core (`tickets`, `linear_query`,
 `stale_shipped`, `linear_render`), `scaffold`, and the release version-consistency core
