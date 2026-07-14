@@ -10,7 +10,12 @@ from .loader import build_lattice, derive_file_sections
 from .model import Lattice, ParsedDoc
 
 
-def load_lattice(project: ProjectConfig, *, require_verified: bool = False) -> Lattice:
+def load_lattice(
+    project: ProjectConfig,
+    *,
+    require_verified: bool = False,
+    persist_cache: bool = True,
+) -> Lattice:
     """Discover, parse, and assemble the lattice for a project.
 
     With ``cache_key`` unset this is today's full parse of every discovered file. With it set,
@@ -22,13 +27,19 @@ def load_lattice(project: ProjectConfig, *, require_verified: bool = False) -> L
         require_verified: Force the verify tier for every file, disabling the stat fast tier.
             Set only by the reconcile CLI path, whose writes must never derive from stale
             content.
+        persist_cache: Whether a cache-enabled load may persist its final cache state. Read-only
+            commands pass False while retaining verified cache reads.
 
     Returns:
         The built Lattice. Files without lattice frontmatter (no ``id``) are skipped.
     """
     if project.config.cache_key is None:
         return _load_uncached(project)
-    return _load_cached(project, require_verified=require_verified)
+    return _load_cached(
+        project,
+        require_verified=require_verified,
+        persist_cache=persist_cache,
+    )
 
 
 def _load_uncached(project: ProjectConfig) -> Lattice:
@@ -46,7 +57,12 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
     return build_lattice(parsed)
 
 
-def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
+def _load_cached(
+    project: ProjectConfig,
+    *,
+    require_verified: bool,
+    persist_cache: bool,
+) -> Lattice:
     """The incremental load path. Writes the cache only after a successful build."""
     config = project.config
     # ty cannot narrow cache_key: str | None from the caller's is-None branch across the call;
@@ -81,5 +97,6 @@ def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
         if meta is not None:
             parsed.append(ParsedDoc(path=doc_path, meta=meta, body=body, sections=sections))
     lattice = build_lattice(parsed)
-    store.save_if_changed(path, state.complete(), snapshot.baseline)
+    if persist_cache:
+        store.save_if_changed(path, state.complete(), snapshot.baseline)
     return lattice

@@ -4,11 +4,8 @@ This is the only module that touches the cache file. Any read failure yields an 
 so the load recomputes, while any write failure emits one stderr line and is swallowed.
 """
 
-import contextlib
 import json
-import os
 import sys
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +14,8 @@ from pydantic import ValidationError
 
 from .. import __version__
 from ..constants import CACHE_FILE_NAME, CACHE_VERSION
+from ..error_types import exception_details
+from ..persistence import atomic_replace_bytes
 from .schema import CacheFile
 
 
@@ -109,30 +108,17 @@ def save_if_changed(path: Path, final: CacheFile, baseline: dict[str, object] | 
 def _write(path: Path, cache_file: CacheFile) -> None:
     """Atomically replace the cache file, emitting one stderr diagnostic on failure.
 
-    Writes through a temp file in the same directory, fsyncs, then ``os.replace``. Any
-    OSError (unwritable directory, failed write or replace) is reported on stderr with a
-    single line and swallowed, so a broken cache never changes a command's result or exit
-    code. The temp file is always removed.
+    Any OSError is reported on stderr with a single line and swallowed, so a broken cache
+    never changes a command's result or exit code.
     """
-    text = cache_file.model_dump_json()
-    tmp: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=CACHE_FILE_NAME, suffix=".tmp")
-        tmp = Path(tmp_name)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)  # noqa: PTH105 (tests monkeypatch os.replace directly)
-        tmp = None
+        atomic_replace_bytes(
+            path,
+            cache_file.model_dump_json().encode("utf-8"),
+            prefix=f"{CACHE_FILE_NAME}.",
+        )
     except OSError as exc:
-        sys.stderr.write(f"doc-lattice: could not write load cache at {path}: {exc}\n")
-    finally:
-        if tmp is not None:
-            # The cleanup unlink must never escape: a write failure already emitted its one
-            # diagnostic, and an OSError here (missing_ok only swallows FileNotFoundError)
-            # would propagate past the handler and change the command's exit code, which the
-            # cache contract forbids. A leaked temp is reclaimed on the next successful write.
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
+        sys.stderr.write(
+            f"doc-lattice: could not write load cache at {path}: {exception_details(exc)}\n"
+        )

@@ -47,6 +47,10 @@ config -> discovery -> frontmatter parse -> loader.build_lattice -> { check, imp
 ```
 
 `orchestrate.load_lattice(project)` is the single wiring point that runs that pipeline.
+Real reconcile is the exception to the displayed startup order: after config and project-directory
+lock setup, it recovers an outstanding transaction before calling `load_lattice`, so planning uses
+the recovered bytes. Recovery-only mode never loads the lattice, and dry-run refuses an outstanding
+journal without changing files, namespaces, or the load cache.
 
 **The `Lattice` (model.py) is the central structure** and every command reads from it:
 
@@ -91,13 +95,18 @@ is more authoritative than its target (binding > derived > exploratory), reports
 because an endpoint lacks `authority`, and never mutates. It exits 1 on a violation, mirroring `check`.
 Historical spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
 
-**Reconcile is the only mutating command.** It plans new `seen` values from the loaded snapshot,
-then at write time **re-reads each downstream file fresh**, rewrites only the targeted `seen`
-scalar(s) through round-trip YAML (preserving body, key order, comments, and edits present at that
-fresh read), and validates every rewrite before mutation. An edit racing after validation may be
-overwritten. It then atomically replaces each file, but the multi-file run is not transactional: a
-later replacement failure leaves earlier replacements in place. `--ref` selects on resolved
-identity; `--all` clears only STALE/UNRECONCILED edges (it skips
+**Reconcile is the only command that mutates tracked documents.** It plans new `seen` values from
+the loaded snapshot, then re-reads each downstream file and retains exact before and replacement
+bytes while rewriting only targeted `seen` scalars through round-trip YAML. The CLI validates
+contained write destinations and orchestrates reporting, but does not own direct per-file atomic
+writes. `reconcile_transaction.py` holds a nonblocking advisory lock on the project-root directory,
+stages and syncs exact before/after images, publishes the `prepared` journal, fingerprints each
+destination immediately before replacement, and rolls the batch back in reverse on conflict or
+pre-commit persistence failure. Once every destination is durable, it marks the journal `committed`
+before cleanup. Human or JSON success is reported only after transaction cleanup and clean lock
+release. `--recover` is recovery-only; normal real runs recover before lattice load; dry-run stays
+byte-, namespace-, and cache-read-only and refuses an outstanding journal. `--ref` selects on
+resolved identity; `--all` clears only STALE/UNRECONCILED edges (it skips
 BROKEN and already-OK), and `--all --ref REF` narrows that selection across every downstream node
 without treating no matches as an error. A node's BROKEN edge is skipped, not fatal, so it never
 blocks the node's reconcilable edges; only a single-node `--ref` aimed directly at a broken edge is
@@ -117,11 +126,12 @@ non-negative integer `Retry-After`. Historical spec:
 `docs/superpowers/specs/2026-06-27-doc-lattice-linear-design.md`.
 
 **The `init` slice scaffolds an adopting repo and never loads the lattice.** `scaffold.py` is pure
-(`render_config`/`render_precommit`/`render_ci`/`build_scaffold` return text); `cli._atomic_create`
-publishes each file via temp -> fsync -> `os.link`, so a partial write never lands. `init` writes
-`.doc-lattice.yml` only if absent and always prints pre-commit and CI codegen pinned to Python 3.13
-and the exact PyPI requirement `doc-lattice==X.Y.Z`. Git commit sources are only fallbacks for
-testing unreleased code. Historical spec:
+(`render_config`/`render_gitignore`/`render_precommit`/`render_ci`/`build_scaffold` return text);
+`persistence.atomic_create_bytes` durably publishes `.doc-lattice.yml` only if absent. `init` always
+prints `.gitignore`, pre-commit, and CI guidance pinned to Python 3.13 and the exact PyPI requirement
+`doc-lattice==X.Y.Z`. The printed ignore block covers the reconcile journal, journal stages, and
+before/after images; `init` never reads or modifies `.gitignore`. Git commit sources are only
+fallbacks for testing unreleased code. Historical spec:
 `docs/superpowers/specs/2026-06-28-doc-lattice-init-design.md`.
 
 **Pure vs impure split.** All graph and report logic is pure and filesystem-free: `model`,
@@ -132,10 +142,14 @@ writing it), the shared `report_render`, plus the linear pure core (`tickets`, `
 `stale_shipped`, `linear_render`), `scaffold`, and the release version-consistency core
 `version_check`, plus `cache/schema.py` (models and codec) and `cache/state.py` (run-local
 `RunState`). The untyped-to-typed boundary modules are `frontmatter_parser` and `linear_parser`.
-High-level filesystem I/O is owned by `config`, `discovery`, `orchestrate`, and `cli` (`cli`
-performs the reconcile and init writes). The `path_utils.safe_resolve()` helper used by config and
-discovery, plus `cli` before reconcile writes, is filesystem-aware path resolution: it calls
-`Path.resolve()`, which follows symlinks.
+Load-path filesystem I/O is owned by `config`, `discovery`, and `orchestrate`. `persistence.py` owns
+the shared durable staging, atomic replace, create-if-absent, fingerprint, directory sync, and
+cleanup primitives. `reconcile_transaction.py` is the impure owner of reconcile locking, journal
+prepare/commit, rollback, recovery, and artifact cleanup. `cli` owns orchestration, destination
+containment, and user reporting; it delegates reconcile mutation and init creation to those owners.
+The `path_utils.safe_resolve()` helper used by config and discovery, plus `cli` before reconcile
+writes and `reconcile_transaction` for journal recovery paths, is filesystem-aware path resolution:
+it calls `Path.resolve()`, which follows symlinks.
 The cache package splits by phase: `cache/schema.py` (models and codec) and `cache/state.py`
 (run-local `RunState`) are pure in this architecture's I/O-boundary sense; `RunState` is mutable,
 deterministic, and filesystem-free. In contrast, `cache/store.py` (reads and atomically writes the
@@ -167,7 +181,9 @@ violation fails CI rather than just being a style preference:
   `config` rejects docs roots outside the project root. `discovery` allows project-internal
   document symlinks, skips external targets with a warning, and deduplicates resolved aliases while
   retaining the first unresolved path as document identity. Before reconcile writes, `cli`
-  re-resolves each identity path and rejects a destination outside the project root.
+  re-resolves each identity path and rejects a destination outside the project root. Transaction
+  journals store only project-relative paths; recovery revalidates containment, role-specific
+  artifact names and locations, regular-file type, and recorded fingerprints before mutation.
 - **Node ids.** A frontmatter `id` may not contain `#`; `#` separates a file id from a section
   anchor in a ref. Enforced by a `NodeMeta` field validator (exit 2, names the id).
 - **No `datetime.now()`/`utcnow()` outside `datetime_utils.py`.**

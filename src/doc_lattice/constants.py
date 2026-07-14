@@ -54,3 +54,10 @@ C1_CONTROL_MAX: int = 0x9F
 CACHE_VERSION: int = 3
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
+
+# Reconcile transaction schema plus the shared journal and staged-image naming contract.
+RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
+RECONCILE_JOURNAL_VERSION: int = 1
+PERSISTENCE_TEMP_SUFFIX: str = ".tmp"
+RECONCILE_BEFORE_IMAGE_INFIX: str = ".doc-lattice-before."
+RECONCILE_AFTER_IMAGE_INFIX: str = ".doc-lattice-after."

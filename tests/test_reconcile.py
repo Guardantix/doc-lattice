@@ -32,21 +32,40 @@ def _planned_refs(plan: dict[Path, dict[str, str]]) -> set[str]:
 
 def test_plan_rewrites_applies_updates_from_reader():
     path = Path("downstream.md")
-    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+    source = (
+        "---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: old\r\n---\r\ncafé ☕\r\n"
+    ).encode()
+    expected_after = (
+        "---\nid: d\nderives_from:\n- ref: a#x\n  seen: newhash\n---\ncafé ☕\n".encode()
+    )
 
-    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: text)
+    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
 
     assert len(rewrites) == 1
-    rewrite_path, new_text, applied = rewrites[0]
-    assert rewrite_path == path
-    assert "seen: newhash" in new_text
-    assert applied == {"a#x"}
+    rewrite = rewrites[0]
+    assert rewrite.path == path
+    assert rewrite.before == source
+    assert isinstance(rewrite.after, bytes)
+    assert rewrite.after == expected_after
+    assert isinstance(rewrite.applied, frozenset)
+    assert rewrite.applied == frozenset({"a#x"})
+
+
+def test_plan_rewrites_normalizes_lone_cr_only_for_transformation():
+    path = Path("downstream.md")
+    source = b"---\rid: d\rderives_from:\r  - ref: a#x\r    seen: old\r---\rbody\r"
+
+    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+
+    assert len(rewrites) == 1
+    assert rewrites[0].before == source
+    assert b"seen: newhash" in rewrites[0].after
 
 
 def test_plan_rewrites_wraps_reader_error_with_path():
     path = Path("downstream.md")
 
-    def raise_os_error(_path: Path) -> str:
+    def raise_os_error(_path: Path) -> bytes:
         raise OSError("disk vanished")
 
     with pytest.raises(UnreadableDocError) as exc_info:
@@ -56,29 +75,38 @@ def test_plan_rewrites_wraps_reader_error_with_path():
 
 def test_plan_rewrites_names_unclosed_frontmatter_source():
     path = Path("downstream.md")
-    text = "---\nid: d\nderives_from:\n  - ref: a#x\n"
+    source = b"---\nid: d\nderives_from:\n  - ref: a#x\n"
 
     with pytest.raises(UnreadableDocError) as exc_info:
-        plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: text)
+        plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
 
     assert str(exc_info.value) == (
         "unclosed YAML frontmatter in downstream.md: add a closing '---' fence"
     )
 
 
+def test_plan_rewrites_wraps_invalid_utf8_with_path():
+    path = Path("downstream.md")
+
+    with pytest.raises(UnreadableDocError) as exc_info:
+        plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: b"\xff")
+
+    assert str(exc_info.value).startswith("cannot read downstream.md to reconcile: ")
+
+
 def test_plan_rewrites_skips_file_when_updates_already_applied():
     path = Path("downstream.md")
-    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: same\n---\nbody\n"
+    source = b"---\nid: d\nderives_from:\n  - ref: a#x\n    seen: same\n---\nbody\n"
 
-    assert plan_rewrites({path: {"a#x": "same"}}, lambda _path: text) == []
+    assert plan_rewrites({path: {"a#x": "same"}}, lambda _path: source) == []
 
 
 def test_plan_rewrites_preserves_plan_order():
     first = Path("first.md")
     second = Path("second.md")
     text_by_path = {
-        first: "---\nid: one\nderives_from:\n  - ref: up#first\n---\nbody\n",
-        second: "---\nid: two\nderives_from:\n  - ref: up#second\n---\nbody\n",
+        first: b"---\nid: one\nderives_from:\n  - ref: up#first\n---\nbody\n",
+        second: b"---\nid: two\nderives_from:\n  - ref: up#second\n---\nbody\n",
     }
 
     rewrites = plan_rewrites(
@@ -86,7 +114,7 @@ def test_plan_rewrites_preserves_plan_order():
         text_by_path.__getitem__,
     )
 
-    assert [path for path, _new_text, _applied in rewrites] == [first, second]
+    assert [rewrite.path for rewrite in rewrites] == [first, second]
 
 
 def test_apply_reconcile_sets_seen_and_preserves_body():

@@ -7,10 +7,18 @@ from hypothesis import given
 from hypothesis import strategies as st
 from ruamel.yaml import YAML
 
+import doc_lattice.scaffold as scaffold_module
 from doc_lattice.config import Config
+from doc_lattice.constants import (
+    PERSISTENCE_TEMP_SUFFIX,
+    RECONCILE_AFTER_IMAGE_INFIX,
+    RECONCILE_BEFORE_IMAGE_INFIX,
+    RECONCILE_JOURNAL_NAME,
+)
 from doc_lattice.scaffold import (
     build_scaffold,
     render_config,
+    render_gitignore,
 )
 
 
@@ -22,6 +30,43 @@ def _load(text: str) -> Config:
 def test_render_config_includes_commented_cache_key_example():
     text = render_config(("docs",), None)
     assert "# cache_key: my-project-docs" in text
+
+
+def test_render_gitignore_matches_reconcile_transaction_artifacts():
+    exact = (
+        ".doc-lattice-reconcile.json\n"
+        ".doc-lattice-reconcile.json.*.tmp\n"
+        ".*.doc-lattice-before.*.tmp\n"
+        ".*.doc-lattice-after.*.tmp\n"
+    )
+    coupled = (
+        f"{RECONCILE_JOURNAL_NAME}\n"
+        f"{RECONCILE_JOURNAL_NAME}.*{PERSISTENCE_TEMP_SUFFIX}\n"
+        f".*{RECONCILE_BEFORE_IMAGE_INFIX}*{PERSISTENCE_TEMP_SUFFIX}\n"
+        f".*{RECONCILE_AFTER_IMAGE_INFIX}*{PERSISTENCE_TEMP_SUFFIX}\n"
+    )
+
+    assert render_gitignore() == exact == coupled
+
+
+def test_render_gitignore_derives_patterns_from_shared_naming_constants(monkeypatch):
+    monkeypatch.setattr(scaffold_module, "RECONCILE_JOURNAL_NAME", ".renamed-journal")
+    monkeypatch.setattr(scaffold_module, "PERSISTENCE_TEMP_SUFFIX", ".stage")
+    monkeypatch.setattr(scaffold_module, "RECONCILE_BEFORE_IMAGE_INFIX", ".before-image.")
+    monkeypatch.setattr(scaffold_module, "RECONCILE_AFTER_IMAGE_INFIX", ".after-image.")
+
+    assert render_gitignore() == (
+        ".renamed-journal\n"
+        ".renamed-journal.*.stage\n"
+        ".*.before-image.*.stage\n"
+        ".*.after-image.*.stage\n"
+    )
+
+
+def test_build_scaffold_includes_exact_gitignore_text():
+    scaffold = build_scaffold(("docs",), None, "1.0.0")
+
+    assert scaffold.gitignore_text == render_gitignore()
 
 
 def test_render_config_default_has_docs_active_and_keys_commented():

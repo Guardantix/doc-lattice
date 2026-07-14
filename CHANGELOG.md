@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `reconcile` now commits multi-file updates as one conflict-detecting durable transaction, recovers
+  interrupted work automatically before real runs, and provides recovery-only `--recover` mode;
+  `init` prints the corresponding transaction-artifact ignore patterns.
 - Empty ATX headings such as `#` and `##   ` are now recognized and receive the same empty GitHub
   slug that `github-slugger` generates.
 - Document symlinks whose targets remain inside the project root are now supported. Aliases to the

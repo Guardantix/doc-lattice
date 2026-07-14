@@ -3,8 +3,11 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -13,16 +16,98 @@ from rich.text import Text
 from typer.testing import CliRunner
 
 import doc_lattice.cli as cli_mod
-from doc_lattice import __version__
+import doc_lattice.reconcile_transaction as transaction
+from doc_lattice import __version__, persistence
 from doc_lattice.cli import (
     _escape_github_message,
     _escape_github_property,
     app,
 )
-from doc_lattice.error_types import ConfigError
+from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
+from doc_lattice.error_types import ConfigError, ReconcilePersistenceError
+from doc_lattice.reconcile_transaction import Journal, JournalEntry, JournalState, reconcile_lock
 from doc_lattice.tickets import Ticket, TicketState
 
 runner = CliRunner()
+
+
+def test_cli_imports_when_fcntl_is_unavailable():
+    project_root = Path(__file__).resolve().parents[1]
+    code = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "fcntl":
+        raise ModuleNotFoundError("fcntl blocked for portability test")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+import doc_lattice.cli
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(project_root / "src")
+
+    completed = subprocess.run(  # noqa: S603 (fixed interpreter and static test program)
+        [sys.executable, "-c", code],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
+    """Capture every namespace entry without following symlinks or reading special files."""
+    snapshot: dict[str, tuple[str, bytes]] = {}
+    for path in sorted(root.rglob("*")):
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            entry = ("symlink", os.fsencode(path.readlink()))
+        elif stat.S_ISREG(mode):
+            entry = ("file", path.read_bytes())
+        elif stat.S_ISDIR(mode):
+            entry = ("directory", b"")
+        else:
+            entry = ("special", b"")
+        snapshot[path.relative_to(root).as_posix()] = entry
+    return snapshot
+
+
+def _write_cli_transaction(
+    root: Path,
+    destination: Path,
+    before_bytes: bytes,
+    after_bytes: bytes,
+    *,
+    state: JournalState = "prepared",
+) -> tuple[Path, Path, Path]:
+    """Write a valid single-entry recovery transaction for CLI integration tests."""
+    before = destination.with_name(f".{destination.name}.doc-lattice-before.test.tmp")
+    after = destination.with_name(f".{destination.name}.doc-lattice-after.test.tmp")
+    journal = root / RECONCILE_JOURNAL_NAME
+    before.write_bytes(before_bytes)
+    after.write_bytes(after_bytes)
+    entry = JournalEntry(
+        destination=destination.relative_to(root).as_posix(),
+        before_path=before.relative_to(root).as_posix(),
+        before_sha256=sha256(before_bytes).hexdigest(),
+        after_path=after.relative_to(root).as_posix(),
+        after_sha256=sha256(after_bytes).hexdigest(),
+    )
+    journal.write_text(
+        Journal(
+            version=RECONCILE_JOURNAL_VERSION,
+            state=state,
+            entries=(entry,),
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    return journal, before, after
 
 
 def _run(args: list[str], cwd: Path, env: dict[str, str]):
@@ -677,13 +762,403 @@ def test_reconcile_requires_id_or_all(lattice_dir: Path, monkeypatch):
     assert result.exit_code == 2
 
 
+def test_reconcile_recover_without_journal_reports_none_human(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert "nothing to recover" in result.stdout
+    assert str(lattice_dir / RECONCILE_JOURNAL_NAME) in result.stdout
+
+
+def test_reconcile_recover_without_journal_reports_exact_json(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "action": "none",
+        "journal": str(lattice_dir / RECONCILE_JOURNAL_NAME),
+    }
+
+
+def test_reconcile_recover_rolls_back_prepared_without_planning(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    before_bytes = b"original document\n"
+    after_bytes = b"transaction document\n"
+    destination.write_bytes(after_bytes)
+    journal, before, after = _write_cli_transaction(
+        tmp_path, destination, before_bytes, after_bytes
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def fail_if_loaded(*_args, **_kwargs):
+        pytest.fail("recovery-only mode loaded or planned a lattice")
+
+    monkeypatch.setattr(cli_mod, "load_lattice", fail_if_loaded)
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 0
+    assert "rolled back reconcile transaction" in result.stdout
+    assert str(journal) in result.stdout
+    assert destination.read_bytes() == before_bytes
+    assert not journal.exists()
+    assert not before.exists()
+    assert not after.exists()
+
+
+def test_reconcile_recover_cleans_committed_without_planning(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    before_bytes = b"original document\n"
+    after_bytes = b"committed document\n"
+    destination.write_bytes(after_bytes)
+    journal, before, after = _write_cli_transaction(
+        tmp_path,
+        destination,
+        before_bytes,
+        after_bytes,
+        state="committed",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def fail_if_loaded(*_args, **_kwargs):
+        pytest.fail("recovery-only mode loaded or planned a lattice")
+
+    monkeypatch.setattr(cli_mod, "load_lattice", fail_if_loaded)
+    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "action": "cleaned_committed",
+        "journal": str(journal),
+    }
+    assert destination.read_bytes() == after_bytes
+    assert not journal.exists()
+    assert not before.exists()
+    assert not after.exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["downstream", "--recover"],
+        ["--recover", "--all"],
+        ["--recover", "--ref", "upstream"],
+        ["--recover", "--dry-run"],
+    ],
+)
+def test_reconcile_recover_rejects_selection_and_dry_run_flags(
+    tmp_path: Path, monkeypatch, args: list[str]
+):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["reconcile", *args])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "--recover cannot be combined" in result.stderr
+
+
+def test_reconcile_dry_run_refuses_journal_without_mutating_or_loading(
+    lattice_dir: Path, monkeypatch
+):
+    journal = lattice_dir / RECONCILE_JOURNAL_NAME
+    journal.write_bytes(b"sentinel journal bytes\n")
+    before = _tree_snapshot(lattice_dir)
+    monkeypatch.chdir(lattice_dir)
+
+    def fail_if_loaded(*_args, **_kwargs):
+        pytest.fail("dry-run loaded the lattice before refusing recovery")
+
+    monkeypatch.setattr(cli_mod, "load_lattice", fail_if_loaded)
+    result = runner.invoke(app, ["reconcile", "--all", "--dry-run"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert str(journal) in result.stderr
+    assert "--recover" in result.stderr
+    assert _tree_snapshot(lattice_dir) == before
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["reconcile", "--recover", "--json"],
+        ["reconcile", "--all"],
+        ["reconcile", "--all", "--dry-run"],
+    ],
+)
+def test_reconcile_dangling_journal_symlink_never_reports_success_or_mutates_empty_project(
+    tmp_path: Path, monkeypatch, args: list[str]
+):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "node.md").write_text("---\nid: node\n---\n# Node\nbody\n", encoding="utf-8")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    journal.symlink_to("missing-journal-target")
+    before = _tree_snapshot(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert str(journal) in result.stderr
+    assert "symlink" in result.stderr
+    assert "RECONCILE_PERSISTENCE" in result.stderr
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_reconcile_dangling_journal_symlink_blocks_nonempty_real_plan(
+    lattice_dir: Path, monkeypatch
+):
+    journal = lattice_dir / RECONCILE_JOURNAL_NAME
+    journal.symlink_to("missing-journal-target")
+    before = _tree_snapshot(lattice_dir)
+    monkeypatch.chdir(lattice_dir)
+
+    result = runner.invoke(app, ["reconcile", "--all"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "symlink" in result.stderr
+    assert "RECONCILE_PERSISTENCE" in result.stderr
+    assert _tree_snapshot(lattice_dir) == before
+
+
+def test_reconcile_dry_run_does_not_mutate_external_load_cache(
+    lattice_dir: Path, tmp_path: Path, monkeypatch
+):
+    cache_home = tmp_path / "xdg"
+    cache_file = cache_home / "doc-lattice" / "dry-run-proof" / "load-cache.json"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_bytes(b"existing cache sentinel\n")
+    (lattice_dir / ".doc-lattice.yml").write_text(
+        "cache_key: dry-run-proof\ncache_trust_stat: true\n",
+        encoding="utf-8",
+    )
+    project_before = _tree_snapshot(lattice_dir)
+    cache_before = _tree_snapshot(cache_home)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.chdir(lattice_dir)
+
+    result = runner.invoke(app, ["reconcile", "--all", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert _tree_snapshot(lattice_dir) == project_before
+    assert _tree_snapshot(cache_home) == cache_before
+
+
+def test_reconcile_lock_contention_does_not_inspect_or_mutate_journal(
+    lattice_dir: Path, monkeypatch
+):
+    journal = lattice_dir / RECONCILE_JOURNAL_NAME
+    journal.write_bytes(b"not even valid journal json\n")
+    before = _tree_snapshot(lattice_dir)
+    monkeypatch.chdir(lattice_dir)
+
+    with reconcile_lock(lattice_dir):
+        result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "another reconcile is in progress" in result.stderr
+    assert "invalid reconcile journal" not in result.stderr
+    assert _tree_snapshot(lattice_dir) == before
+
+
+@pytest.mark.parametrize("failure", ["open", "flock", "fstat"])
+def test_reconcile_lock_setup_failure_is_typed_without_internal_error_or_mutation(
+    lattice_dir: Path, monkeypatch, failure: str
+):
+    before = _tree_snapshot(lattice_dir)
+    real_open = transaction.os.open
+    real_flock = transaction._flock
+
+    if failure == "open":
+
+        def fail_open(path: Path, flags: int) -> int:
+            if Path(path) == lattice_dir:
+                raise PermissionError("injected open failure")
+            return real_open(path, flags)
+
+        monkeypatch.setattr(transaction.os, "open", fail_open)
+    elif failure == "flock":
+
+        def fail_flock(fd: int, *, release: bool) -> None:
+            if not release:
+                raise OSError("injected flock failure")
+            real_flock(fd, release=release)
+
+        monkeypatch.setattr(transaction, "_flock", fail_flock)
+    else:
+        monkeypatch.setattr(
+            transaction.os,
+            "fstat",
+            lambda _fd: (_ for _ in ()).throw(OSError("injected fstat failure")),
+        )
+    monkeypatch.chdir(lattice_dir)
+
+    result = runner.invoke(app, ["reconcile", "--recover", "--json"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "RECONCILE_PERSISTENCE" in result.stderr
+    assert f"injected {failure} failure" in result.stderr
+    assert "internal error" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert _tree_snapshot(lattice_dir) == before
+
+
+def test_reconcile_real_run_recovers_before_loading_and_plans_recovered_bytes(
+    lattice_dir: Path, monkeypatch
+):
+    destination = lattice_dir / "docs" / "pc-design.md"
+    before_bytes = destination.read_bytes()
+    after_bytes = b"not a valid lattice document\n"
+    destination.write_bytes(after_bytes)
+    journal, before, after = _write_cli_transaction(
+        lattice_dir, destination, before_bytes, after_bytes
+    )
+    monkeypatch.chdir(lattice_dir)
+
+    result = runner.invoke(app, ["reconcile", "pc-design"])
+
+    assert result.exit_code == 0
+    assert "reconciled pc-design.md" in result.stdout
+    assert "recovered reconcile transaction: rolled_back" in result.stderr
+    assert b"seen:" in destination.read_bytes()
+    assert not journal.exists()
+    assert not before.exists()
+    assert not after.exists()
+
+
+@pytest.mark.parametrize("json_out", [False, True])
+def test_reconcile_concurrent_edit_is_preserved_without_success_report(
+    lattice_dir: Path, monkeypatch, json_out: bool
+):
+    monkeypatch.chdir(lattice_dir)
+    real_commit = transaction.commit_rewrites
+    editor_bytes = b"editor-owned concurrent bytes\n"
+    edited_path: Path | None = None
+
+    def edit_then_commit(project_root, rewrites, write_paths, *, lock):
+        nonlocal edited_path
+        edited_path = next(iter(write_paths.values()))
+        edited_path.write_bytes(editor_bytes)
+        return real_commit(project_root, rewrites, write_paths, lock=lock)
+
+    monkeypatch.setattr(cli_mod, "commit_rewrites", edit_then_commit, raising=False)
+    args = ["reconcile", "pc-design"]
+    if json_out:
+        args.append("--json")
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert edited_path is not None
+    assert str(edited_path) in result.stderr
+    assert "changed after validation" in result.stderr
+    assert "RECONCILE_CONFLICT" in result.stderr
+    assert edited_path.read_bytes() == editor_bytes
+
+
+def _two_downstream_project(tmp_path: Path) -> Path:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up {#s}\nupstream body\n", encoding="utf-8")
+    for name in ("down-a", "down-b"):
+        (docs / f"{name}.md").write_text(
+            f"---\nid: {name}\nderives_from:\n  - ref: up#s\n---\n# {name}\nbody\n",
+            encoding="utf-8",
+        )
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [("replace", "disk full"), ("fsync", "directory fsync failed")],
+)
+def test_reconcile_midbatch_persistence_failure_rolls_back_without_success(
+    tmp_path: Path, monkeypatch, failure: str, message: str
+):
+    project = _two_downstream_project(tmp_path)
+    before = _tree_snapshot(project)
+    monkeypatch.chdir(project)
+    real_replace = transaction.replace_staged
+    after_replaces = 0
+
+    def fail_second_after(staged: Path, destination: Path) -> None:
+        nonlocal after_replaces
+        if "doc-lattice-after" in staged.name:
+            after_replaces += 1
+            if after_replaces == 2:
+                if failure == "fsync":
+                    staged.replace(destination)
+                raise OSError(message)
+        real_replace(staged, destination)
+
+    monkeypatch.setattr(transaction, "replace_staged", fail_second_after)
+    result = runner.invoke(app, ["reconcile", "--all"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert message in result.stderr
+    assert "RECONCILE_PERSISTENCE" in result.stderr
+    assert _tree_snapshot(project) == before
+
+
+def test_reconcile_success_cleans_transaction_artifacts(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["reconcile", "--all", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["reconciled"]
+    assert not (lattice_dir / RECONCILE_JOURNAL_NAME).exists()
+    assert not list(lattice_dir.rglob(".*.doc-lattice-before.*.tmp"))
+    assert not list(lattice_dir.rglob(".*.doc-lattice-after.*.tmp"))
+    assert not list(lattice_dir.glob(f"{RECONCILE_JOURNAL_NAME}.*.tmp"))
+
+
+@pytest.mark.parametrize("mode", ["recover", "reconcile"])
+def test_reconcile_lock_exit_failure_publishes_no_success(
+    lattice_dir: Path, monkeypatch, mode: str
+):
+    real_lock = cli_mod.reconcile_lock
+
+    @contextmanager
+    def fail_after_lock_body(project_root: Path):
+        with real_lock(project_root) as lock:
+            yield lock
+        raise ReconcilePersistenceError("injected reconcile lock release failure")
+
+    monkeypatch.setattr(cli_mod, "reconcile_lock", fail_after_lock_body)
+    monkeypatch.chdir(lattice_dir)
+    args = ["reconcile", "--recover", "--json"]
+    if mode == "reconcile":
+        args = ["reconcile", "--all", "--json"]
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "injected reconcile lock release failure" in result.stderr
+    assert "RECONCILE_PERSISTENCE" in result.stderr
+
+
 def test_reconcile_write_error_exits_2(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
 
-    def boom(_path, _text):
+    def boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(cli_mod, "_atomic_write", boom)
+    monkeypatch.setattr(transaction, "stage_bytes", boom)
     result = runner.invoke(app, ["reconcile", "pc-design"])
     assert result.exit_code == 2
 
@@ -694,42 +1169,6 @@ def test_reconcile_real_run_reports_reconciled_lines(lattice_dir: Path, monkeypa
     assert result.exit_code == 0
     assert "reconciled pc-design.md: art-direction#accent" in result.stdout
     assert "reconciled pc-design.md: art-direction#motion" in result.stdout
-
-
-def test_reconcile_real_run_reports_progress_before_midbatch_write_error(
-    tmp_path: Path, monkeypatch
-):
-    # Phase 2 is non-atomic across files: if an earlier file writes durably and a later
-    # write fails, the earlier file's confirmation must still print (per-file progress is
-    # emitted as each write lands, not deferred to after the whole batch).
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    (docs / "up.md").write_text("---\nid: up\n---\n# Up {#s}\nupstream body\n", encoding="utf-8")
-    for name in ("down-a", "down-b"):
-        (docs / f"{name}.md").write_text(
-            f"---\nid: {name}\nderives_from:\n  - ref: up#s\n---\n# {name}\nbody\n",
-            encoding="utf-8",
-        )
-    monkeypatch.chdir(tmp_path)
-
-    real_write = cli_mod._atomic_write
-    calls: list[Path] = []
-
-    def flaky(path, text):
-        calls.append(path)
-        if len(calls) == 1:
-            real_write(path, text)  # first file writes durably
-            return
-        raise OSError("disk full")  # a later file's write fails mid-batch
-
-    monkeypatch.setattr(cli_mod, "_atomic_write", flaky)
-    result = runner.invoke(app, ["reconcile", "--all"])
-    assert result.exit_code == 2
-    first = calls[0]
-    # The durably rewritten file's confirmation survives the abort ...
-    assert f"reconciled {first.name}: up#s" in result.stdout
-    # ... and the write really landed on disk (a seen scalar now exists).
-    assert "seen:" in first.read_text(encoding="utf-8")
 
 
 def test_reconcile_dry_run_leaves_files_unchanged(lattice_dir: Path, monkeypatch):
@@ -1122,66 +1561,22 @@ def test_linear_unknown_from_exits_2(lattice_dir, monkeypatch):
     assert result.exit_code == 2
 
 
-def test_atomic_write_replace_failure_preserves_destination_and_cleans_temp(
-    tmp_path: Path, monkeypatch
-):
-    target = tmp_path / "document.md"
-    tmp = target.with_suffix(".md.tmp")
-    target.write_text("original\n", encoding="utf-8")
-    replace_error = OSError("replace failed")
+def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, monkeypatch):
+    calls: list[tuple[Path, bytes, str]] = []
 
-    def fail_replace(source: Path, destination: Path):
-        assert source == tmp
-        assert destination == target
-        assert source.read_text(encoding="utf-8") == "replacement\n"
-        raise replace_error
+    def capture(path: Path, data: bytes, *, prefix: str) -> None:
+        calls.append((path, data, prefix))
 
-    monkeypatch.setattr(Path, "replace", fail_replace)
-    with pytest.raises(OSError, match="replace failed") as exc_info:
-        cli_mod._atomic_write(target, "replacement\n")
+    monkeypatch.setattr(cli_mod, "atomic_create_bytes", capture, raising=False)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init"])
 
-    assert exc_info.value is replace_error
-    assert target.read_text(encoding="utf-8") == "original\n"
-    assert not tmp.exists()
-
-
-def test_atomic_create_writes_when_absent(tmp_path: Path):
-    target = tmp_path / ".doc-lattice.yml"
-    cli_mod._atomic_create(target, "hello\n")
-    assert target.read_text(encoding="utf-8") == "hello\n"
-    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
-
-
-def test_atomic_create_refuses_existing_and_preserves_it(tmp_path: Path):
-    target = tmp_path / ".doc-lattice.yml"
-    target.write_text("original\n", encoding="utf-8")
-    with pytest.raises(FileExistsError):
-        cli_mod._atomic_create(target, "new\n")
-    assert target.read_text(encoding="utf-8") == "original\n"
-    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
-
-
-def test_atomic_create_leaves_nothing_on_failure(tmp_path: Path, monkeypatch):
-    target = tmp_path / ".doc-lattice.yml"
-
-    def boom(_src, _dst):
-        raise OSError("link failed")
-
-    monkeypatch.setattr(os, "link", boom)
-    with pytest.raises(OSError, match="link failed"):
-        cli_mod._atomic_create(target, "data\n")
-    assert not target.exists()
-    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
-
-
-def test_atomic_create_writes_large_payload_intact(tmp_path: Path):
-    target = tmp_path / ".doc-lattice.yml"
-    # A payload larger than any single os.write buffer would publish; the helper
-    # must write every byte before linking, never a truncated file.
-    payload = "".join(f"line {i}\n" for i in range(20000))
-    cli_mod._atomic_create(target, payload)
-    assert target.read_text(encoding="utf-8") == payload
-    assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    target, data, prefix = calls[0]
+    assert target == tmp_path / ".doc-lattice.yml"
+    assert data.startswith(b"# doc-lattice configuration")
+    assert prefix == ".doc-lattice.yml."
 
 
 def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
@@ -1200,6 +1595,40 @@ def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
     assert "tag is pushed" not in narration
 
 
+def test_init_prints_gitignore_guidance_before_other_snippets_and_preserves_existing_file(
+    tmp_path: Path, monkeypatch
+):
+    gitignore = tmp_path / ".gitignore"
+    original = b"existing bytes\r\n*.local\n"
+    gitignore.write_bytes(original)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    expected = (
+        "# ===== .gitignore (append these lines) =====\n"
+        ".doc-lattice-reconcile.json\n"
+        ".doc-lattice-reconcile.json.*.tmp\n"
+        ".*.doc-lattice-before.*.tmp\n"
+        ".*.doc-lattice-after.*.tmp\n"
+    )
+    assert expected in result.stdout
+    assert result.stdout.index(expected) < result.stdout.index("# ===== .pre-commit-config.yaml")
+    assert gitignore.read_bytes() == original
+    assert "Append the .gitignore block" in result.stderr
+
+
+def test_init_prints_gitignore_guidance_without_creating_gitignore(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert ".doc-lattice-reconcile.json.*.tmp" in result.stdout
+    assert not (tmp_path / ".gitignore").exists()
+
+
 def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
@@ -1207,6 +1636,55 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
     assert result.exit_code == 0
     assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
     assert ".github/workflows/doc-lattice.yml" in result.stdout
+
+
+def test_init_existing_config_with_stage_cleanup_failure_exits_2_and_names_orphan(
+    tmp_path: Path, monkeypatch
+):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_bytes(b"existing config bytes\n")
+    cleanup_attempts: list[Path] = []
+
+    def fail_cleanup(staged: Path) -> None:
+        cleanup_attempts.append(staged)
+        raise OSError("cleanup blocked")
+
+    monkeypatch.setattr(persistence, "durable_unlink", fail_cleanup)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert config.read_bytes() == b"existing config bytes\n"
+    assert len(cleanup_attempts) == 1
+    orphan = cleanup_attempts[0]
+    assert orphan.exists()
+    expected_note = (
+        f"durable cleanup failed for helper-owned stage {orphan}: cleanup blocked; "
+        "it is not governed by a recovery journal, so inspect and remove it manually when safe"
+    )
+    assert expected_note in result.stderr
+    assert "CONFIG_ERROR" in result.stderr
+
+
+def test_init_other_persistence_error_flattens_exception_notes(tmp_path: Path, monkeypatch):
+    error = OSError("publication failed")
+    error.add_note("exact orphan remediation note")
+
+    def fail_create(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(cli_mod, "atomic_create_bytes", fail_create)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "cannot write .doc-lattice.yml: publication failed" in result.stderr
+    assert "exact orphan remediation note" in result.stderr
+    assert "CONFIG_ERROR" in result.stderr
 
 
 def test_init_bakes_flag_values(tmp_path: Path, monkeypatch):
@@ -1441,14 +1919,19 @@ def test_reconcile_all_cached_matches_uncached_bytes(lattice_dir: Path, tmp_path
 
 
 @pytest.mark.parametrize(
-    ("args", "expected_require_verified"),
+    ("args", "expected"),
     [
-        (["reconcile", "--all"], True),
-        (["check"], False),
+        (["reconcile", "--all"], (True, True)),
+        (["reconcile", "--all", "--dry-run"], (True, False)),
+        (["check"], (False, True)),
     ],
 )
 def test_cli_forces_require_verified_only_for_reconcile(
-    lattice_dir: Path, tmp_path: Path, monkeypatch, args, expected_require_verified
+    lattice_dir: Path,
+    tmp_path: Path,
+    monkeypatch,
+    args,
+    expected,
 ):
     # Mutant-killer: spy on the load_lattice that cli.py imported into its own namespace,
     # wrapping the real function so the real command still runs, and record the
@@ -1456,11 +1939,16 @@ def test_cli_forces_require_verified_only_for_reconcile(
     seen: dict[str, bool] = {}
     real = cli_mod.load_lattice
 
-    def spy(project, *, require_verified=False):
+    def spy(project, *, require_verified=False, persist_cache=True):
         seen["require_verified"] = require_verified
-        return real(project, require_verified=require_verified)
+        seen["persist_cache"] = persist_cache
+        return real(
+            project,
+            require_verified=require_verified,
+            persist_cache=persist_cache,
+        )
 
     monkeypatch.setattr(cli_mod, "load_lattice", spy)
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     _run(args, lattice_dir, env)
-    assert seen["require_verified"] is expected_require_verified
+    assert (seen["require_verified"], seen["persist_cache"]) == expected

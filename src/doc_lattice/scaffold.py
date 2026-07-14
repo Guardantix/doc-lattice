@@ -10,6 +10,13 @@ from dataclasses import dataclass
 
 from ruamel.yaml import YAML
 
+from .constants import (
+    PERSISTENCE_TEMP_SUFFIX,
+    RECONCILE_AFTER_IMAGE_INFIX,
+    RECONCILE_BEFORE_IMAGE_INFIX,
+    RECONCILE_JOURNAL_NAME,
+)
+
 DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
 PYTHON_PIN = "3.13"
 
@@ -22,9 +29,10 @@ _COMMENTED_BINDING = "# binding_layers: null\n"
 
 @dataclass(frozen=True, slots=True)
 class Scaffold:
-    """The three artifacts init produces: one written, two printed."""
+    """The four artifacts init produces: one written, three printed."""
 
     config_text: str
+    gitignore_text: str
     precommit_text: str
     ci_text: str
 
@@ -60,6 +68,16 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
         parts.append(_COMMENTED_LINEAR)
     parts.append(_COMMENTED_BINDING)
     return "".join(parts)
+
+
+def render_gitignore() -> str:
+    """Render ignore patterns for recoverable reconcile artifacts."""
+    return (
+        f"{RECONCILE_JOURNAL_NAME}\n"
+        f"{RECONCILE_JOURNAL_NAME}.*{PERSISTENCE_TEMP_SUFFIX}\n"
+        f".*{RECONCILE_BEFORE_IMAGE_INFIX}*{PERSISTENCE_TEMP_SUFFIX}\n"
+        f".*{RECONCILE_AFTER_IMAGE_INFIX}*{PERSISTENCE_TEMP_SUFFIX}\n"
+    )
 
 
 def render_precommit(version: str) -> str:
@@ -116,7 +134,7 @@ def render_ci(version: str) -> str:
 
 
 def build_scaffold(docs_roots: tuple[str, ...], linear_team: str | None, version: str) -> Scaffold:
-    """Build all three init artifacts from typed inputs.
+    """Build all four init artifacts from typed inputs.
 
     Args:
         docs_roots: The docs roots for the config's docs_roots list.
@@ -124,10 +142,11 @@ def build_scaffold(docs_roots: tuple[str, ...], linear_team: str | None, version
         version: The exact PyPI package version the snippets install, for example "1.0.0".
 
     Returns:
-        A Scaffold holding the config text and the two codegen snippets.
+        A Scaffold holding the config text and the three guidance snippets.
     """
     return Scaffold(
         config_text=render_config(docs_roots, linear_team),
+        gitignore_text=render_gitignore(),
         precommit_text=render_precommit(version),
         ci_text=render_ci(version),
     )

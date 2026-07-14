@@ -176,3 +176,54 @@ def test_pypi_metadata_links_to_maintainer_resources():
         "Changelog": "https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md",
         "Releases": "https://github.com/Guardantix/doc-lattice/releases",
     }
+
+
+def test_supported_docs_describe_conflict_safe_reconcile():
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    architecture = (_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    claude = (_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    readme_words = " ".join(readme.split())
+    architecture_words = " ".join(architecture.split())
+
+    for text in (readme, architecture, claude):
+        assert "edit racing after validation may be overwritten" not in text
+        assert "multi-file run is not transactional" not in text
+        assert "reconcile_transaction.py" in text
+
+    for token in (
+        "--recover",
+        ".doc-lattice-reconcile.json",
+        ".doc-lattice-reconcile.json.*.tmp",
+        ".*.doc-lattice-before.*.tmp",
+        ".*.doc-lattice-after.*.tmp",
+        '"action"',
+        '"journal"',
+        "prepared",
+        "committed",
+        "local filesystem",
+        "cannot be combined with a downstream id",
+        "byte-, namespace-, and cache-read-only",
+        "before lattice loading",
+        "no JSON success payload",
+        "no additional keys",
+        "unauthenticated staged evidence",
+        "another reconcile is in progress",
+        "clean advisory-lock release",
+        "recovery evidence remains",
+    ):
+        assert token in readme_words
+
+    for token in (
+        "persistence.py",
+        "reconcile_transaction.py",
+        "project-root directory",
+        "prepared",
+        "committed",
+        "before-image",
+        "after-image",
+        "rollback",
+    ):
+        assert token in architecture_words
+
+    for token in ("persistence.py", "reconcile_transaction.py"):
+        assert token in claude
