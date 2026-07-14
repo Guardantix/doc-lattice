@@ -176,7 +176,7 @@ def test_decode_doc_lone_cr_frontmatter_is_still_parsed(tmp_path: Path):
     doc = tmp_path / "cr.md"
     raw = b"---\rid: cr-node\r---\r# Body\r"
     text = decode_doc(doc, raw)
-    raw_meta, _body = split_frontmatter(text)
+    raw_meta, _body = split_frontmatter(text, doc)
     meta = parse_meta(raw_meta, doc)
     assert meta is not None
     assert meta.id == "cr-node"

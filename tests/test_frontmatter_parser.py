@@ -14,50 +14,53 @@ DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
 
 def test_split_frontmatter_separates_meta_and_body():
-    raw, body = split_frontmatter(DOC)
+    raw, body = split_frontmatter(DOC, Path("a.md"))
     assert raw == "id: pc\ntitle: PC\n"
     assert body == "# Body\ntext\n"
 
 
 def test_split_frontmatter_none_when_absent():
-    raw, body = split_frontmatter("# No frontmatter\n")
+    raw, body = split_frontmatter("# No frontmatter\n", Path("a.md"))
     assert raw is None
     assert body == "# No frontmatter\n"
 
 
 def test_split_frontmatter_tolerates_bom():
-    raw, _body = split_frontmatter("﻿---\nid: x\n---\nbody\n")
+    raw, _body = split_frontmatter("﻿---\nid: x\n---\nbody\n", Path("a.md"))
     assert raw == "id: x\n"
 
 
 def test_split_frontmatter_bom_preserves_body():
-    raw, body = split_frontmatter("﻿---\nid: x\n---\nbody\n")
+    raw, body = split_frontmatter("﻿---\nid: x\n---\nbody\n", Path("a.md"))
     assert raw == "id: x\n"
     assert body == "body\n"
 
 
 def test_split_frontmatter_bom_without_fence_returns_original():
     text = "﻿# No frontmatter\n"
-    raw, body = split_frontmatter(text)
+    raw, body = split_frontmatter(text, Path("a.md"))
     assert raw is None
     assert body == text  # original text (BOM still present) returned unchanged
 
 
 def test_split_frontmatter_empty_block_returns_empty_string():
-    raw, body = split_frontmatter("---\n---\n# Body\n")
+    raw, body = split_frontmatter("---\n---\n# Body\n", Path("a.md"))
     assert raw == ""  # empty string, NOT None: an empty fence differs from no fence
     assert body == "# Body\n"
 
 
-def test_split_frontmatter_unclosed_fence_returns_none():
+def test_split_frontmatter_unclosed_fence_raises_source_naming_error():
     text = "---\nid: x\nno closing fence\n"
-    raw, body = split_frontmatter(text)
-    assert raw is None
-    assert body == text  # original text returned unchanged when no closing fence
+
+    with pytest.raises(UnreadableDocError) as exc:
+        split_frontmatter(text, Path("broken.md"))
+
+    assert exc.value.code == "UNREADABLE_DOC"
+    assert str(exc.value) == ("unclosed YAML frontmatter in broken.md: add a closing '---' fence")
 
 
 def test_split_frontmatter_detects_crlf_fences():
-    raw, _body = split_frontmatter("---\r\nid: x\r\n---\r\nbody\r\n")
+    raw, _body = split_frontmatter("---\r\nid: x\r\n---\r\nbody\r\n", Path("a.md"))
     assert raw is not None
     meta = parse_meta(raw, Path("a.md"))
     assert meta is not None
@@ -68,7 +71,7 @@ def test_split_frontmatter_detects_crlf_fences():
 def test_split_frontmatter_identity_when_no_opening_fence(text):
     first_line = text.lstrip("﻿").split("\n", 1)[0]
     assume(first_line.strip() != "---")
-    raw, body = split_frontmatter(text)
+    raw, body = split_frontmatter(text, Path("a.md"))
     assert raw is None
     assert body == text
 

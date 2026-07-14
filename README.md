@@ -84,6 +84,10 @@ when two files repeat a file id or two headings in one file resolve to the same 
 anchor. Equal anchors in different files, and a file id equal to another file's anchor, remain
 distinct `TargetId(file_id, anchor)` keys and do not collide.
 
+A Markdown file without an opening `---` fence is valid untracked prose. Once a file opens YAML
+frontmatter with `---`, it must include a closing `---` fence; otherwise every lattice-loading
+command names the file, asks for the missing close, and exits 2 instead of omitting the node.
+
 ### The authority ladder
 
 Separately from drift, `lint` enforces a structural rule: authority only flows downhill.
@@ -406,7 +410,7 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 |------|---------|
 | `0` | Success; no drift or violations. |
 | `1` | The lattice is coherent but a gate failed: drift (`check`), an authority inversion (`lint`), or (with `--exit-code`) a DANGER/BLOCKED `linear` finding. |
-| `2` | Tool error: invalid config/frontmatter, unreadable or non-UTF-8 input, incoherent ids, or a containment failure. |
+| `2` | Tool error: invalid or unclosed frontmatter, invalid config, unreadable or non-UTF-8 input, incoherent ids, or a containment failure. |
 
 ## Troubleshooting
 
@@ -423,6 +427,10 @@ meantime.
 **A `linear` finding is BLOCKED `not-found`.** A ticket the Linear filter does not return is treated
 as absence, not an error: it grades as a BLOCKED `not-found` finding rather than crashing the
 command. Confirm the ticket id exists and that `linear_team` targets the right team.
+
+**`unclosed YAML frontmatter ...` exits 2.** A file beginning with `---` must add another `---`
+line after its YAML metadata. The message names the malformed file; a file with no opening fence
+remains ordinary untracked Markdown.
 
 **`duplicate id ...` exits 2.** A duplicate id makes the index incoherent, so loading the lattice
 fails with exit 2 (a tool error, distinct from the exit 1 that `check` and `lint` use for drift).

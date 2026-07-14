@@ -20,6 +20,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (schema/codec, store, lookup, run state). No user-facing behavior change; the cache file
   format is unchanged.
 
+### Fixed
+
+- Markdown files that open YAML frontmatter without a closing `---` now fail with a
+  source-naming tool error (exit 2) across cached and uncached loads instead of being silently
+  omitted from the lattice. Existing version-1 load caches are rebuilt.
+
 ## [1.0.1] - 2026-07-13
 
 ### Fixed

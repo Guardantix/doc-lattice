@@ -80,7 +80,9 @@ def reconcile(
     return dict(plan)
 
 
-def apply_reconcile(current_file_text: str, updates: dict[str, str]) -> tuple[str, set[str]]:
+def apply_reconcile(
+    current_file_text: str, updates: dict[str, str], source: Path
+) -> tuple[str, set[str]]:
     """Return ``current_file_text`` with matching edges' seen scalars set.
 
     The fresh read is parsed defensively: a concurrent edit that leaves the frontmatter
@@ -91,6 +93,7 @@ def apply_reconcile(current_file_text: str, updates: dict[str, str]) -> tuple[st
     Args:
         current_file_text: A fresh read of the downstream file at write time.
         updates: ``{target_ref: new_seen}`` for edges in this file.
+        source: The downstream file the frontmatter came from, for error messages.
 
     Returns:
         A pair of the rewritten file text and the set of refs from ``updates`` whose
@@ -104,7 +107,7 @@ def apply_reconcile(current_file_text: str, updates: dict[str, str]) -> tuple[st
     Raises:
         UnreadableDocError: If the fresh frontmatter cannot be parsed or is malformed.
     """
-    raw_meta, body = split_frontmatter(current_file_text)
+    raw_meta, body = split_frontmatter(current_file_text, source)
     if raw_meta is None:
         return current_file_text, set()
     # Round-trip loaders retain document-specific state, so construct one for each call.
@@ -172,7 +175,7 @@ def plan_rewrites(
         except (OSError, UnicodeDecodeError) as exc:
             msg = f"cannot read {path} to reconcile: {exc}"
             raise UnreadableDocError(msg) from exc
-        new_text, applied = apply_reconcile(fresh, updates)
+        new_text, applied = apply_reconcile(fresh, updates, path)
         if applied:
             rewrites.append((path, new_text, applied))
     return rewrites

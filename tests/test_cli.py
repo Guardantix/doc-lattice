@@ -456,6 +456,38 @@ def test_check_error_handler_escapes_markup_in_message(tmp_path: Path, monkeypat
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["check"],
+        ["lint"],
+        ["impact", "vanished"],
+        ["reconcile", "vanished"],
+        ["graph"],
+        ["linear"],
+    ],
+)
+@pytest.mark.parametrize("cache_enabled", [False, True], ids=["uncached", "cached"])
+def test_lattice_loading_commands_exit_2_on_unclosed_frontmatter(
+    tmp_path: Path, args: list[str], cache_enabled: bool
+):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    broken = docs / "broken.md"
+    broken.write_text("---\nid: vanished\n# Missing close\n", encoding="utf-8")
+    if cache_enabled:
+        (tmp_path / ".doc-lattice.yml").write_text("cache_key: cli-unclosed\n", encoding="utf-8")
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1", "COLUMNS": "240"}
+
+    result = _run(args, tmp_path, env)
+
+    assert result.exit_code == 2
+    assert "unclosed YAML frontmatter" in result.stderr
+    assert str(broken) in result.stderr
+    assert "add a closing '---' fence" in result.stderr
+    assert "UNREADABLE_DOC" in result.stderr
+
+
 def test_impact_lists_dependents(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["impact", "art-direction#accent", "--json"])
