@@ -24,7 +24,9 @@ from doc_lattice.reconcile_transaction import (
     RecoveryResult,
     ensure_dry_run_safe,
     reconcile_lock,
-    recover_transaction,
+)
+from doc_lattice.reconcile_transaction import (
+    recover_transaction as _recover_transaction_unlocked,
 )
 
 
@@ -35,6 +37,12 @@ def _tree_snapshot(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def recover_transaction(project_root: Path) -> RecoveryResult:
+    """Run recovery through the required project-bound lock capability."""
+    with reconcile_lock(project_root) as lock:
+        return _recover_transaction_unlocked(project_root, lock=lock)
 
 
 @dataclass(frozen=True)
@@ -242,6 +250,78 @@ def test_dry_run_allows_project_without_journal(tmp_path: Path):
     ensure_dry_run_safe(tmp_path)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_recovery_requires_a_valid_active_lock_before_mutation(tmp_path: Path):
+    _write_synthetic_transaction(tmp_path)
+    before = _tree_snapshot(tmp_path)
+
+    with pytest.raises(ReconcileInProgressError, match="active reconcile lock"):
+        reconcile_transaction.recover_transaction(
+            tmp_path,
+            lock=None,  # ty: ignore[invalid-argument-type] - deliberate misuse
+        )
+
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_recovery_rejects_wrong_root_lock_before_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    other_root = tmp_path / "other"
+    project_root.mkdir()
+    other_root.mkdir()
+    _write_synthetic_transaction(project_root)
+    before = _tree_snapshot(project_root)
+
+    with (
+        reconcile_lock(other_root) as wrong_lock,
+        pytest.raises(ReconcileInProgressError, match="different project root"),
+    ):
+        reconcile_transaction.recover_transaction(project_root, lock=wrong_lock)
+
+    assert _tree_snapshot(project_root) == before
+
+
+def test_recovery_rejects_replaced_root_directory_before_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    moved_root = tmp_path / "moved-project"
+    project_root.mkdir()
+
+    with reconcile_lock(project_root) as stale_lock:
+        project_root.rename(moved_root)
+        project_root.mkdir()
+        _write_synthetic_transaction(project_root)
+        before = _tree_snapshot(project_root)
+
+        with pytest.raises(ReconcileInProgressError, match="different project root directory"):
+            reconcile_transaction.recover_transaction(project_root, lock=stale_lock)
+
+    assert _tree_snapshot(project_root) == before
+
+
+def test_recovery_rejects_released_lock_before_mutation(tmp_path: Path):
+    _write_synthetic_transaction(tmp_path)
+    before = _tree_snapshot(tmp_path)
+    with reconcile_lock(tmp_path) as released_lock:
+        pass
+
+    with pytest.raises(ReconcileInProgressError, match="no longer active"):
+        reconcile_transaction.recover_transaction(tmp_path, lock=released_lock)
+
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_recovery_accepts_current_root_bound_lock(tmp_path: Path):
+    transaction = _write_synthetic_transaction(tmp_path)
+
+    with reconcile_lock(tmp_path) as lock:
+        result = reconcile_transaction.recover_transaction(tmp_path, lock=lock)
+
+    assert result.action == "rolled_back"
+    assert transaction.destination.read_bytes() == b"before image\n"
+    assert not transaction.journal.exists()
+    assert not transaction.before.exists()
+    assert not transaction.after.exists()
 
 
 def test_journal_models_are_frozen():

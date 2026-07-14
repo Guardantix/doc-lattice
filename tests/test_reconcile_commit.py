@@ -7,8 +7,36 @@ import pytest
 
 from doc_lattice import persistence, reconcile_transaction
 from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
-from doc_lattice.error_types import ReconcileConflictError, ReconcilePersistenceError
+from doc_lattice.error_types import (
+    ReconcileConflictError,
+    ReconcileInProgressError,
+    ReconcilePersistenceError,
+)
 from doc_lattice.reconcile import Rewrite
+
+_UNLOCKED_COMMIT_REWRITES = reconcile_transaction.commit_rewrites
+_UNLOCKED_RECOVER_TRANSACTION = reconcile_transaction.recover_transaction
+
+
+def _commit_rewrites(
+    project_root: Path,
+    rewrites: list[Rewrite],
+    write_paths: dict[Path, Path],
+) -> None:
+    """Run a behavior test's commit through the required lock capability."""
+    with reconcile_transaction.reconcile_lock(project_root) as lock:
+        _UNLOCKED_COMMIT_REWRITES(
+            project_root,
+            rewrites,
+            write_paths,
+            lock=lock,
+        )
+
+
+def _recover_transaction(project_root: Path) -> reconcile_transaction.RecoveryResult:
+    """Run a behavior test's recovery through the required lock capability."""
+    with reconcile_transaction.reconcile_lock(project_root) as lock:
+        return _UNLOCKED_RECOVER_TRANSACTION(project_root, lock=lock)
 
 
 def _rewrite(path: Path, before: bytes, after: bytes, ref: str) -> Rewrite:
@@ -22,6 +50,143 @@ def _assert_no_transaction_artifacts(root: Path) -> None:
     assert not list(root.rglob("*.tmp"))
 
 
+def test_commit_requires_a_valid_active_lock_before_mutation(tmp_path: Path):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+
+    with pytest.raises(ReconcileInProgressError, match="active reconcile lock"):
+        _UNLOCKED_COMMIT_REWRITES(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+            lock=None,  # ty: ignore[invalid-argument-type] - deliberate misuse
+        )
+
+    assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_commit_rejects_wrong_root_lock_before_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    other_root = tmp_path / "other"
+    project_root.mkdir()
+    other_root.mkdir()
+    destination = project_root / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+
+    with (
+        reconcile_transaction.reconcile_lock(other_root) as wrong_lock,
+        pytest.raises(ReconcileInProgressError, match="different project root"),
+    ):
+        _UNLOCKED_COMMIT_REWRITES(
+            project_root,
+            [rewrite],
+            {destination: destination},
+            lock=wrong_lock,
+        )
+
+    assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(project_root)
+
+
+def test_commit_rejects_replaced_root_directory_before_mutation(tmp_path: Path):
+    project_root = tmp_path / "project"
+    moved_root = tmp_path / "moved-project"
+    project_root.mkdir()
+
+    with reconcile_transaction.reconcile_lock(project_root) as stale_lock:
+        project_root.rename(moved_root)
+        project_root.mkdir()
+        destination = project_root / "doc.md"
+        destination.write_bytes(b"old bytes")
+        rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+
+        with pytest.raises(ReconcileInProgressError, match="different project root directory"):
+            _UNLOCKED_COMMIT_REWRITES(
+                project_root,
+                [rewrite],
+                {destination: destination},
+                lock=stale_lock,
+            )
+
+    assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(project_root)
+    _assert_no_transaction_artifacts(moved_root)
+
+
+def test_commit_rejects_released_lock_before_mutation(tmp_path: Path):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    with reconcile_transaction.reconcile_lock(tmp_path) as released_lock:
+        pass
+
+    with pytest.raises(ReconcileInProgressError, match="no longer active"):
+        _UNLOCKED_COMMIT_REWRITES(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+            lock=released_lock,
+        )
+
+    assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_commit_accepts_current_root_bound_lock(tmp_path: Path):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+
+    with reconcile_transaction.reconcile_lock(tmp_path) as lock:
+        _UNLOCKED_COMMIT_REWRITES(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+            lock=lock,
+        )
+
+    assert destination.read_bytes() == b"new bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_commit_rejects_same_capability_reentrant_recovery(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    real_atomic_replace = reconcile_transaction.atomic_replace_bytes
+    reentrant_rejections: list[str] = []
+
+    with reconcile_transaction.reconcile_lock(tmp_path) as lock:
+
+        def _attempt_reentrant_recovery(path: Path, data: bytes, *, prefix: str) -> None:
+            if path == journal:
+                try:
+                    _UNLOCKED_RECOVER_TRANSACTION(tmp_path, lock=lock)
+                except ReconcileInProgressError as error:
+                    reentrant_rejections.append(str(error))
+            real_atomic_replace(path, data, prefix=prefix)
+
+        monkeypatch.setattr(
+            reconcile_transaction,
+            "atomic_replace_bytes",
+            _attempt_reentrant_recovery,
+        )
+        _UNLOCKED_COMMIT_REWRITES(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+            lock=lock,
+        )
+
+    assert reentrant_rejections == ["reconcile lock capability is already in use"]
+    assert destination.read_bytes() == b"new bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
 def test_commit_rewrites_durably_replaces_batch_and_cleans_artifacts(tmp_path: Path):
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
@@ -32,7 +197,7 @@ def test_commit_rewrites_durably_replaces_batch_and_cleans_artifacts(tmp_path: P
         _rewrite(second, b"old second\r\n", b"new second\x00\xfe", "up#b"),
     ]
 
-    reconcile_transaction.commit_rewrites(
+    _commit_rewrites(
         tmp_path,
         rewrites,
         {first: first, second: second},
@@ -58,7 +223,7 @@ def test_duplicate_resolved_destinations_fail_before_creating_artifacts(tmp_path
         ReconcilePersistenceError,
         match=r"duplicate reconcile destination.*doc\.md",
     ):
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             rewrites,
             {first_identity: destination, second_identity: destination},
@@ -91,7 +256,7 @@ def test_canonical_duplicate_destinations_fail_before_staging(tmp_path: Path, mo
     monkeypatch.setattr(reconcile_transaction, "stage_bytes", _observe_stage)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             rewrites,
             {first_identity: destination, second_identity: alias},
@@ -113,7 +278,7 @@ def test_journal_destination_alias_fails_before_creating_artifacts(tmp_path: Pat
         ReconcilePersistenceError,
         match=r"reconcile destination.*aliases journal path",
     ):
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {identity: journal},
@@ -139,7 +304,7 @@ def test_canonical_journal_alias_fails_before_staging(tmp_path: Path, monkeypatc
     monkeypatch.setattr(reconcile_transaction, "stage_bytes", _observe_stage)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {identity: journal_alias},
@@ -220,7 +385,7 @@ def test_commit_journal_order_and_artifact_lifecycle(  # noqa: PLR0915
     )
     monkeypatch.setattr(reconcile_transaction, "_cleanup_transaction_artifacts", _cleanup)
 
-    reconcile_transaction.commit_rewrites(
+    _commit_rewrites(
         tmp_path,
         rewrites,
         {first: first, second: second},
@@ -283,7 +448,7 @@ def test_commit_detects_edit_before_replace_and_preserves_it(tmp_path: Path, mon
     monkeypatch.setattr(reconcile_transaction, "file_sha256", _edit_then_hash)
 
     with pytest.raises(ReconcileConflictError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -318,7 +483,7 @@ def test_second_conflict_rolls_back_first_and_preserves_editor_bytes(tmp_path: P
     monkeypatch.setattr(reconcile_transaction, "file_sha256", _edit_second_then_hash)
 
     with pytest.raises(ReconcileConflictError, match=r"second.md.*changed after validation"):
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             rewrites,
             {first: first, second: second},
@@ -326,6 +491,95 @@ def test_second_conflict_rolls_back_first_and_preserves_editor_bytes(tmp_path: P
 
     assert first.read_bytes() == b"old first"
     assert second.read_bytes() == b"unrelated editor bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_tampered_second_after_stage_rolls_back_first_and_preserves_evidence(
+    tmp_path: Path, monkeypatch
+):
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"old first")
+    second.write_bytes(b"old second")
+    rewrites = [
+        _rewrite(first, b"old first", b"new first", "up#a"),
+        _rewrite(second, b"old second", b"new second", "up#b"),
+    ]
+    real_file_sha256 = reconcile_transaction.file_sha256
+    tampered_after: list[Path] = []
+
+    def _tamper_before_second_check(path: Path) -> str:
+        if path == second and not tampered_after:
+            stages = list(tmp_path.glob(".second.md.doc-lattice-after.*.tmp"))
+            assert len(stages) == 1
+            stages[0].write_bytes(b"tampered after stage")
+            tampered_after.append(stages[0])
+        return real_file_sha256(path)
+
+    monkeypatch.setattr(reconcile_transaction, "file_sha256", _tamper_before_second_check)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            rewrites,
+            {first: first, second: second},
+        )
+
+    message = str(caught.value)
+    assert "digest mismatch" in message
+    assert "rollback failed" in message
+    assert "run 'doc-lattice reconcile --recover'" in message
+    assert first.read_bytes() == b"old first"
+    assert second.read_bytes() == b"old second"
+    assert len(tampered_after) == 1
+    assert tampered_after[0].read_bytes() == b"tampered after stage"
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    assert json.loads(journal.read_bytes())["state"] == "prepared"
+
+
+def test_missing_second_after_stage_rolls_back_first_and_cleans_resolved_transaction(
+    tmp_path: Path, monkeypatch
+):
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"old first")
+    second.write_bytes(b"old second")
+    rewrites = [
+        _rewrite(first, b"old first", b"new first", "up#a"),
+        _rewrite(second, b"old second", b"new second", "up#b"),
+    ]
+    real_file_sha256 = reconcile_transaction.file_sha256
+    missing_after: list[Path] = []
+
+    def _remove_after_before_second_check(path: Path) -> str:
+        if path == second and not missing_after:
+            stages = list(tmp_path.glob(".second.md.doc-lattice-after.*.tmp"))
+            assert len(stages) == 1
+            stages[0].unlink()
+            missing_after.append(stages[0])
+        return real_file_sha256(path)
+
+    monkeypatch.setattr(
+        reconcile_transaction,
+        "file_sha256",
+        _remove_after_before_second_check,
+    )
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            rewrites,
+            {first: first, second: second},
+        )
+
+    message = str(caught.value)
+    assert "staged after image" in message
+    assert "is missing immediately before replacement" in message
+    assert "rollback complete" in message
+    assert first.read_bytes() == b"old first"
+    assert second.read_bytes() == b"old second"
+    assert len(missing_after) == 1
+    assert not missing_after[0].exists()
     _assert_no_transaction_artifacts(tmp_path)
 
 
@@ -353,7 +607,7 @@ def test_missing_destination_during_check_is_persistence_failure_and_rolls_back(
     monkeypatch.setattr(reconcile_transaction, "file_sha256", _remove_second_then_hash)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             rewrites,
             {first: first, second: second},
@@ -385,7 +639,7 @@ def test_unreadable_destination_during_check_is_typed_and_rolls_back(tmp_path: P
     monkeypatch.setattr(reconcile_transaction, "file_sha256", _fail_destination_read)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -425,7 +679,7 @@ def test_second_replace_failure_rolls_back_first_and_reports_primary_cause(
     monkeypatch.setattr(reconcile_transaction, "replace_staged", _fail_second_after)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             rewrites,
             {first: first, second: second},
@@ -461,7 +715,7 @@ def test_directory_sync_failure_after_replace_rolls_back_consumed_stage(
     monkeypatch.setattr(persistence, "sync_directory", _fail_after_destination_replace)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -492,7 +746,7 @@ def test_stage_failure_cleans_attempt_stages_without_changing_destination(
     monkeypatch.setattr(reconcile_transaction, "stage_bytes", _fail_after_stage)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -517,7 +771,7 @@ def test_journal_link_failure_cleans_stages_without_changing_destination(
     monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_journal_link)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -544,7 +798,7 @@ def test_journal_stage_failure_cleans_document_stages_without_mutation(tmp_path:
     monkeypatch.setattr(persistence, "stage_bytes", _fail_journal_stage)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -577,7 +831,7 @@ def test_journal_publish_sync_failure_cleans_visible_journal_and_stages(
     monkeypatch.setattr(persistence, "sync_directory", _fail_prepared_journal_sync)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -606,7 +860,7 @@ def test_journal_post_publication_stage_cleanup_failure_names_orphan(tmp_path: P
     monkeypatch.setattr(persistence, "durable_unlink", _fail_helper_stage_cleanup)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -632,7 +886,7 @@ def test_existing_journal_is_preserved_and_requires_recovery(tmp_path: Path):
     journal.write_bytes(journal_bytes)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -667,7 +921,7 @@ def test_preparation_cleanup_failure_is_secondary_to_primary_error(tmp_path: Pat
     monkeypatch.setattr(reconcile_transaction, "durable_unlink", _fail_cleanup)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -709,7 +963,7 @@ def test_rollback_failure_preserves_prepared_recovery_evidence_and_both_causes(
     monkeypatch.setattr(reconcile_transaction, "replace_staged", _fail_commit_and_rollback)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             rewrites,
             {first: first, second: second},
@@ -744,7 +998,7 @@ def test_marker_replace_failure_resets_prepared_journal_then_rolls_back(
     monkeypatch.setattr(persistence.os, "replace", _fail_marker_replace)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -782,7 +1036,7 @@ def test_marker_directory_sync_failure_resets_visible_committed_bytes_and_rolls_
     monkeypatch.setattr(persistence, "sync_directory", _fail_committed_marker_sync)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -793,6 +1047,35 @@ def test_marker_directory_sync_failure_resets_visible_committed_bytes_and_rolls_
     assert "rollback complete" in message
     assert visible_marker_states == ["committed"]
     assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_durable_committed_marker_has_no_fallible_pre_cleanup_step(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    real_unlink = persistence.durable_unlink
+    post_marker_cleanup_calls: list[Path] = []
+
+    def _reject_cleanup_after_marker(path: Path) -> None:
+        if not path.exists() and journal.exists():
+            state = json.loads(journal.read_bytes())["state"]
+            if state == "committed":
+                post_marker_cleanup_calls.append(path)
+                raise OSError("post-marker helper cleanup failed")
+        real_unlink(path)
+
+    monkeypatch.setattr(persistence, "durable_unlink", _reject_cleanup_after_marker)
+
+    _commit_rewrites(
+        tmp_path,
+        [rewrite],
+        {destination: destination},
+    )
+
+    assert post_marker_cleanup_calls == []
+    assert destination.read_bytes() == b"new bytes"
     _assert_no_transaction_artifacts(tmp_path)
 
 
@@ -822,7 +1105,7 @@ def test_marker_reset_failure_refuses_unsafe_rollback_and_requires_recovery(
     monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _fail_marker_and_reset)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -838,7 +1121,7 @@ def test_marker_reset_failure_refuses_unsafe_rollback_and_requires_recovery(
     assert list(tmp_path.rglob("*.doc-lattice-before.*.tmp"))
 
     monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", real_atomic_replace)
-    result = reconcile_transaction.recover_transaction(tmp_path)
+    result = _recover_transaction(tmp_path)
     assert result.action == "cleaned_committed"
     assert destination.read_bytes() == b"new bytes"
     _assert_no_transaction_artifacts(tmp_path)
@@ -864,7 +1147,7 @@ def test_cleanup_failure_after_durable_commit_never_rolls_back_and_recovery_fini
     monkeypatch.setattr(reconcile_transaction, "durable_unlink", _fail_committed_cleanup)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
-        reconcile_transaction.commit_rewrites(
+        _commit_rewrites(
             tmp_path,
             [rewrite],
             {destination: destination},
@@ -875,7 +1158,7 @@ def test_cleanup_failure_after_durable_commit_never_rolls_back_and_recovery_fini
     assert destination.read_bytes() == b"new bytes"
     assert json.loads(journal.read_bytes())["state"] == "committed"
 
-    result = reconcile_transaction.recover_transaction(tmp_path)
+    result = _recover_transaction(tmp_path)
     assert result.action == "cleaned_committed"
     assert destination.read_bytes() == b"new bytes"
     _assert_no_transaction_artifacts(tmp_path)

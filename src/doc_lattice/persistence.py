@@ -130,7 +130,6 @@ def atomic_replace_bytes(path: Path, data: bytes, *, prefix: str) -> None:
     except OSError as primary:
         _durable_unlink_preserving_error(staged, primary)
         raise
-    durable_unlink(staged)
 
 
 def atomic_create_bytes(path: Path, data: bytes, *, prefix: str) -> None:

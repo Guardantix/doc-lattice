@@ -248,20 +248,16 @@ def test_atomic_replace_bytes_preserves_replace_error_when_cleanup_fails(
     assert any("cleanup sync failed" in note for note in getattr(caught.value, "__notes__", []))
 
 
-def test_atomic_replace_bytes_raises_cleanup_error_after_successful_replace(
-    tmp_path: Path, monkeypatch
-):
+def test_atomic_replace_bytes_has_no_post_publish_cleanup_step(tmp_path: Path, monkeypatch):
     destination = tmp_path / "doc.md"
     destination.write_bytes(b"original")
 
-    def _fail_cleanup(staged: Path) -> None:
-        assert not staged.exists()
-        raise OSError("cleanup failed")
+    def _unexpected_cleanup(staged: Path) -> None:
+        pytest.fail(f"consumed replace stage unexpectedly cleaned: {staged}")
 
-    monkeypatch.setattr(persistence, "durable_unlink", _fail_cleanup)
+    monkeypatch.setattr(persistence, "durable_unlink", _unexpected_cleanup)
 
-    with pytest.raises(OSError, match="cleanup failed"):
-        atomic_replace_bytes(destination, b"replacement", prefix=".doc.md.replace.")
+    atomic_replace_bytes(destination, b"replacement", prefix=".doc.md.replace.")
 
     assert destination.read_bytes() == b"replacement"
 

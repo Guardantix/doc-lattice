@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -35,6 +36,7 @@ from .reconcile import Rewrite
 JournalState = Literal["prepared", "committed"]
 RecoveryAction = Literal["none", "rolled_back", "cleaned_committed"]
 Sha256Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_LOCK_FACTORY_TOKEN = object()
 
 
 class JournalEntry(BaseModel):
@@ -65,6 +67,69 @@ class RecoveryResult:
 
     action: RecoveryAction
     journal: Path
+
+
+class ReconcileLock:
+    """An active, root-bound capability for reconcile transaction mutation."""
+
+    __slots__ = (
+        "_active",
+        "_directory_identity",
+        "_in_use",
+        "_project_root",
+        "_state_lock",
+    )
+
+    def __init__(
+        self,
+        project_root: Path,
+        directory_stat: os.stat_result,
+        factory_token: object,
+    ) -> None:
+        """Create a capability only for the reconcile-lock context manager."""
+        if factory_token is not _LOCK_FACTORY_TOKEN:
+            message = "reconcile lock capabilities must be acquired through reconcile_lock"
+            raise ReconcileInProgressError(message)
+        self._project_root = project_root.resolve()
+        self._directory_identity = (directory_stat.st_dev, directory_stat.st_ino)
+        self._state_lock = Lock()
+        self._active = True
+        self._in_use = False
+
+    @property
+    def project_root(self) -> Path:
+        """Return the canonical project root protected by this capability."""
+        return self._project_root
+
+    @property
+    def is_active(self) -> bool:
+        """Return whether the context still holds the underlying advisory lock."""
+        return self._active
+
+    def _deactivate(self) -> None:
+        """Invalidate the capability before releasing its advisory lock."""
+        with self._state_lock:
+            self._active = False
+
+    def _protects_directory(self, directory_stat: os.stat_result) -> bool:
+        """Return whether a stat result identifies the locked directory inode."""
+        return self._directory_identity == (directory_stat.st_dev, directory_stat.st_ino)
+
+    def _claim_operation(self) -> None:
+        """Reserve this capability for one commit or recovery operation."""
+        with self._state_lock:
+            if not self._active:
+                message = "reconcile lock capability is no longer active"
+                raise ReconcileInProgressError(message)
+            if self._in_use:
+                message = "reconcile lock capability is already in use"
+                raise ReconcileInProgressError(message)
+            self._in_use = True
+
+    def _release_operation(self) -> None:
+        """Release this capability after its current operation returns."""
+        with self._state_lock:
+            self._in_use = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -606,6 +671,53 @@ def _journal_path(project_root: Path) -> Path:
     return project_root / RECONCILE_JOURNAL_NAME
 
 
+def _require_reconcile_lock(lock: object, project_root: Path) -> ReconcileLock:
+    """Validate an active capability for the requested project root."""
+    if not isinstance(lock, ReconcileLock):
+        message = "reconcile mutation requires an active reconcile lock"
+        raise ReconcileInProgressError(message)
+    if not lock.is_active:
+        message = "reconcile lock capability is no longer active"
+        raise ReconcileInProgressError(message)
+    try:
+        requested_root = project_root.resolve()
+    except (OSError, RuntimeError) as cause:
+        message = f"cannot validate reconcile lock project root {project_root}: {cause}"
+        raise ReconcileInProgressError(message) from cause
+    if lock.project_root != requested_root:
+        message = (
+            f"reconcile lock capability protects a different project root: "
+            f"{lock.project_root}, not {requested_root}"
+        )
+        raise ReconcileInProgressError(message)
+    try:
+        directory_stat = requested_root.stat()
+    except OSError as cause:
+        message = f"cannot validate reconcile lock project root directory {requested_root}: {cause}"
+        raise ReconcileInProgressError(message) from cause
+    if not lock._protects_directory(directory_stat):
+        message = (
+            "reconcile lock capability protects a different project root directory "
+            f"than the directory currently at {requested_root}"
+        )
+        raise ReconcileInProgressError(message)
+    return lock
+
+
+@contextmanager
+def _reconcile_operation_lease(
+    lock: object,
+    project_root: Path,
+) -> Iterator[None]:
+    """Reserve a validated lock capability for one mutation operation."""
+    validated_lock = _require_reconcile_lock(lock, project_root)
+    validated_lock._claim_operation()
+    try:
+        yield
+    finally:
+        validated_lock._release_operation()
+
+
 def _cleanup_unpublished_stages(staged_paths: list[Path], primary: BaseException) -> None:
     """Durably clean this preparation attempt's unpublished staged images."""
     for staged in staged_paths:
@@ -778,14 +890,17 @@ def _commit_operation_error(
 def _abort_prepared(
     prepared: _PreparedTransaction,
     primary: ReconcileConflictError | ReconcilePersistenceError,
+    *,
+    authenticate_all: bool = True,
 ) -> NoReturn:
     """Roll back a prepared transaction, preserving the primary failure."""
     try:
-        _authenticate_transaction_artifacts(
-            _staged_artifacts(prepared.entries),
-            prepared.journal_path,
-            prepared.journal_bytes,
-        )
+        if authenticate_all:
+            _authenticate_transaction_artifacts(
+                _staged_artifacts(prepared.entries),
+                prepared.journal_path,
+                prepared.journal_bytes,
+            )
         _rollback_prepared(
             prepared.entries,
             prepared.journal_path,
@@ -880,6 +995,8 @@ def commit_rewrites(
     project_root: Path,
     rewrites: list[Rewrite],
     write_paths: dict[Path, Path],
+    *,
+    lock: ReconcileLock,
 ) -> None:
     """Commit exact-byte reconcile rewrites as one durable transaction.
 
@@ -887,11 +1004,23 @@ def commit_rewrites(
         project_root: Configured project root containing the transaction journal.
         rewrites: Ordered fresh-read rewrites to publish.
         write_paths: Contained resolved destinations keyed by rewrite identity path.
+        lock: Active capability protecting this project root.
 
     Raises:
         ReconcileConflictError: If a destination changed after rewrite validation.
+        ReconcileInProgressError: If the lock capability is absent or invalid.
         ReconcilePersistenceError: If preparation or durable commit cannot complete.
     """
+    with _reconcile_operation_lease(lock, project_root):
+        _commit_rewrites_locked(project_root, rewrites, write_paths)
+
+
+def _commit_rewrites_locked(
+    project_root: Path,
+    rewrites: list[Rewrite],
+    write_paths: dict[Path, Path],
+) -> None:
+    """Commit rewrites while the public API holds its capability lease."""
     prepared = _prepare_transaction(project_root, rewrites, write_paths)
     for entry in prepared.entries:
         try:
@@ -906,6 +1035,22 @@ def commit_rewrites(
                 f"reconcile destination {entry.destination} changed after validation"
             )
             _abort_prepared(prepared, primary)
+        try:
+            after_present = _authenticate_staged_artifact(
+                entry.after_path,
+                entry.after_sha256,
+                entry.destination,
+                prepared.journal_path,
+                prepared.journal_bytes,
+            )
+        except ReconcilePersistenceError as primary:
+            _abort_prepared(prepared, primary, authenticate_all=False)
+        if not after_present:
+            primary = ReconcilePersistenceError(
+                f"cannot apply reconcile destination {entry.destination}: staged after image "
+                f"{entry.after_path} is missing immediately before replacement"
+            )
+            _abort_prepared(prepared, primary, authenticate_all=False)
         try:
             replace_staged(entry.after_path, entry.destination)
         except (OSError, ValueError) as cause:
@@ -937,14 +1082,14 @@ def commit_rewrites(
 
 
 @contextmanager
-def reconcile_lock(project_root: Path) -> Iterator[None]:
+def reconcile_lock(project_root: Path) -> Iterator[ReconcileLock]:
     """Hold the existing project directory's nonblocking advisory reconcile lock.
 
     Args:
         project_root: The existing configured project-root directory.
 
     Yields:
-        Control while this process exclusively holds the advisory lock.
+        An active capability while this process exclusively holds the advisory lock.
 
     Raises:
         ReconcileInProgressError: If another reconcile process holds the lock.
@@ -953,6 +1098,7 @@ def reconcile_lock(project_root: Path) -> Iterator[None]:
     """
     fd = os.open(project_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     acquired = False
+    capability: ReconcileLock | None = None
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -960,10 +1106,13 @@ def reconcile_lock(project_root: Path) -> Iterator[None]:
             message = "another reconcile is in progress; retry after it exits"
             raise ReconcileInProgressError(message) from None
         acquired = True
-        yield
+        capability = ReconcileLock(project_root, os.fstat(fd), _LOCK_FACTORY_TOKEN)
+        yield capability
     finally:
         active_error = sys.exception()
         cleanup_errors: list[tuple[str, OSError]] = []
+        if capability is not None:
+            capability._deactivate()
         try:
             if acquired:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1001,15 +1150,29 @@ def ensure_dry_run_safe(project_root: Path) -> None:
         raise ReconcilePersistenceError(message)
 
 
-def recover_transaction(project_root: Path) -> RecoveryResult:
+def recover_transaction(
+    project_root: Path,
+    *,
+    lock: ReconcileLock,
+) -> RecoveryResult:
     """Recover or finish cleanup for a durable reconcile journal.
 
     Args:
         project_root: The configured project root containing transaction artifacts.
+        lock: Active capability protecting this project root.
 
     Returns:
         The recovery action and project journal path.
+
+    Raises:
+        ReconcileInProgressError: If the lock capability is absent or invalid.
     """
+    with _reconcile_operation_lease(lock, project_root):
+        return _recover_transaction_locked(project_root)
+
+
+def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
+    """Recover one journal while the public API holds its capability lease."""
     journal = _journal_path(project_root)
     if not journal.exists():
         return RecoveryResult(action="none", journal=journal)
