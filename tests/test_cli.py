@@ -1966,9 +1966,9 @@ def test_cli_forces_require_verified_only_for_reconcile(
     args,
     expected,
 ):
-    # Mutant-killer: spy on the load_lattice that cli.py imported into its own namespace,
-    # wrapping the real function so the real command still runs, and record the
-    # require_verified kwarg. reconcile must force the verify tier; check must not.
+    # Mutant-killer: spy on cli.runtime.load_lattice, which default_runtime captures for
+    # each invocation. Wrap the real function so the command still runs and record the
+    # loader policy: reconcile must force the verify tier; check must not.
     seen: dict[str, bool] = {}
     real = runtime_module.load_lattice
 
