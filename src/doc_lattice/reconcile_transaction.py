@@ -8,21 +8,29 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from pydantic import ValidationError as PydanticValidationError
 
 from .constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
-from .error_types import ReconcileInProgressError, ReconcilePersistenceError
+from .error_types import (
+    ReconcileConflictError,
+    ReconcileInProgressError,
+    ReconcilePersistenceError,
+)
 from .path_utils import safe_resolve
 from .persistence import (
     atomic_create_bytes,
+    atomic_replace_bytes,
     durable_unlink,
     file_sha256,
     replace_staged,
+    sha256_bytes,
+    stage_bytes,
     sync_directory,
 )
+from .reconcile import Rewrite
 
 JournalState = Literal["prepared", "committed"]
 RecoveryAction = Literal["none", "rolled_back", "cleaned_committed"]
@@ -68,6 +76,16 @@ class _ResolvedEntry:
     before_sha256: str
     after_path: Path
     after_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedTransaction:
+    """A published prepared journal and its validated filesystem entries."""
+
+    journal: Journal
+    entries: tuple[_ResolvedEntry, ...]
+    journal_path: Path
+    journal_bytes: bytes
 
 
 def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistenceError:
@@ -577,6 +595,299 @@ def _rollback_prepared(
 def _journal_path(project_root: Path) -> Path:
     """Return the reconcile journal path for a project root."""
     return project_root / RECONCILE_JOURNAL_NAME
+
+
+def _cleanup_unpublished_stages(staged_paths: list[Path], primary: BaseException) -> None:
+    """Durably clean this preparation attempt's unpublished staged images."""
+    for staged in staged_paths:
+        try:
+            durable_unlink(staged)
+        except OSError as cleanup_error:
+            primary.add_note(
+                f"durable cleanup failed for unpublished stage {staged}: {cleanup_error}; "
+                "it has no recovery journal, so inspect and remove it manually after "
+                "confirming it is not a destination"
+            )
+
+
+def _cleanup_failed_journal_publication(
+    project_root: Path,
+    journal_path: Path,
+    prepared_bytes: bytes,
+    staged_paths: list[Path],
+    primary: OSError,
+) -> None:
+    """Clean a failed preparation without touching a pre-existing journal."""
+    if isinstance(primary, FileExistsError):
+        _cleanup_unpublished_stages(staged_paths, primary)
+        return
+    status, _detail = _exact_journal_status(journal_path, prepared_bytes)
+    if status != "exact":
+        _cleanup_unpublished_stages(staged_paths, primary)
+        return
+    try:
+        _loaded, entries, journal_bytes = _load_journal(project_root, journal_path)
+        _cleanup_transaction_artifacts(entries, journal_path, journal_bytes)
+    except ReconcilePersistenceError as cleanup_error:
+        primary.add_note(f"failed preparation cleanup: {cleanup_error}")
+
+
+def _copy_notes(target: BaseException, source: BaseException) -> None:
+    """Copy diagnostic notes from a lower-level failure to its typed wrapper."""
+    for note in getattr(source, "__notes__", ()):
+        target.add_note(str(note))
+
+
+def _prepare_transaction(
+    project_root: Path,
+    rewrites: list[Rewrite],
+    write_paths: dict[Path, Path],
+) -> _PreparedTransaction:
+    """Stage exact images and durably publish an ordered prepared journal."""
+    journal_path = _journal_path(project_root)
+    staged_paths: list[Path] = []
+    journal_entries: list[JournalEntry] = []
+    operation = "staging transaction image"
+    operation_path = project_root
+    prepared_bytes = b""
+    try:
+        for rewrite in rewrites:
+            destination = write_paths[rewrite.path]
+            operation_path = destination
+            before_path = stage_bytes(
+                destination,
+                rewrite.before,
+                prefix=f".{destination.name}.doc-lattice-before.",
+            )
+            staged_paths.append(before_path)
+            after_path = stage_bytes(
+                destination,
+                rewrite.after,
+                prefix=f".{destination.name}.doc-lattice-after.",
+            )
+            staged_paths.append(after_path)
+            journal_entries.append(
+                JournalEntry(
+                    destination=destination.relative_to(project_root).as_posix(),
+                    before_path=before_path.relative_to(project_root).as_posix(),
+                    before_sha256=sha256_bytes(rewrite.before),
+                    after_path=after_path.relative_to(project_root).as_posix(),
+                    after_sha256=sha256_bytes(rewrite.after),
+                )
+            )
+        prepared = Journal(
+            version=RECONCILE_JOURNAL_VERSION,
+            state="prepared",
+            entries=tuple(journal_entries),
+        )
+        prepared_bytes = prepared.model_dump_json().encode("utf-8")
+        operation = "publishing prepared journal"
+        operation_path = journal_path
+        atomic_create_bytes(
+            journal_path,
+            prepared_bytes,
+            prefix=f"{RECONCILE_JOURNAL_NAME}.",
+        )
+    except (KeyError, OSError, ValueError) as primary:
+        if operation == "publishing prepared journal" and isinstance(primary, OSError):
+            _cleanup_failed_journal_publication(
+                project_root,
+                journal_path,
+                prepared_bytes,
+                staged_paths,
+                primary,
+            )
+        else:
+            _cleanup_unpublished_stages(staged_paths, primary)
+        if isinstance(primary, FileExistsError):
+            message = (
+                f"reconcile journal {journal_path} already exists; preserve it and run "
+                "'doc-lattice reconcile --recover'"
+            )
+        else:
+            message = (
+                f"reconcile preparation failed while {operation} {operation_path}: "
+                f"{_cause_details(primary)}; no destination was changed"
+            )
+        error = ReconcilePersistenceError(message)
+        _copy_notes(error, primary)
+        raise error from primary
+    loaded, entries, journal_bytes = _load_journal(project_root, journal_path)
+    return _PreparedTransaction(loaded, entries, journal_path, journal_bytes)
+
+
+def _commit_operation_error(
+    operation: str,
+    path: Path,
+    cause: OSError | ValueError,
+) -> ReconcilePersistenceError:
+    """Wrap one commit I/O failure with its operation and destination."""
+    error = ReconcilePersistenceError(
+        f"reconcile commit failed while {operation} {path}: {_cause_details(cause)}"
+    )
+    _copy_notes(error, cause)
+    return error
+
+
+def _abort_prepared(
+    prepared: _PreparedTransaction,
+    primary: ReconcileConflictError | ReconcilePersistenceError,
+) -> NoReturn:
+    """Roll back a prepared transaction, preserving the primary failure."""
+    try:
+        _authenticate_transaction_artifacts(
+            _staged_artifacts(prepared.entries),
+            prepared.journal_path,
+            prepared.journal_bytes,
+        )
+        _rollback_prepared(
+            prepared.entries,
+            prepared.journal_path,
+            prepared.journal_bytes,
+        )
+    except ReconcilePersistenceError as rollback_error:
+        error = ReconcilePersistenceError(
+            f"{primary}; rollback failed: {rollback_error}; recovery artifacts remain; "
+            "run 'doc-lattice reconcile --recover'"
+        )
+        error.add_note(f"original commit failure: {_cause_details(primary)}")
+        error.add_note(f"rollback failure: {_cause_details(rollback_error)}")
+        raise error from primary
+    message = f"{primary}; no files were reconciled (rollback complete)"
+    if isinstance(primary, ReconcileConflictError):
+        error = ReconcileConflictError(message)
+    else:
+        error = ReconcilePersistenceError(message)
+    _copy_notes(error, primary)
+    raise error from primary
+
+
+def _reset_prepared_journal(
+    prepared: _PreparedTransaction,
+    committed_bytes: bytes,
+) -> None:
+    """Durably restore the prepared journal after a failed marker update."""
+    journal_path = prepared.journal_path
+    try:
+        current_bytes = journal_path.read_bytes()
+    except FileNotFoundError:
+        try:
+            atomic_create_bytes(
+                journal_path,
+                prepared.journal_bytes,
+                prefix=f"{RECONCILE_JOURNAL_NAME}.",
+            )
+        except OSError as cause:
+            raise _commit_operation_error(
+                "restoring prepared journal", journal_path, cause
+            ) from cause
+    except OSError as cause:
+        raise _commit_operation_error("reading journal for reset", journal_path, cause) from cause
+    else:
+        if current_bytes == prepared.journal_bytes:
+            return
+        if current_bytes != committed_bytes:
+            message = (
+                f"reconcile commit failed while resetting prepared journal {journal_path}: "
+                "the visible journal contains unexpected bytes"
+            )
+            raise ReconcilePersistenceError(message)
+        try:
+            atomic_replace_bytes(
+                journal_path,
+                prepared.journal_bytes,
+                prefix=f"{RECONCILE_JOURNAL_NAME}.",
+            )
+        except OSError as cause:
+            raise _commit_operation_error(
+                "resetting prepared journal", journal_path, cause
+            ) from cause
+    status, detail = _exact_journal_status(journal_path, prepared.journal_bytes)
+    if status != "exact":
+        message = (
+            f"reconcile commit failed while resetting prepared journal {journal_path}: {detail}"
+        )
+        raise ReconcilePersistenceError(message)
+
+
+def _abort_failed_marker(
+    prepared: _PreparedTransaction,
+    committed_bytes: bytes,
+    primary: ReconcilePersistenceError,
+) -> NoReturn:
+    """Reset a failed commit marker before allowing document rollback."""
+    try:
+        _reset_prepared_journal(prepared, committed_bytes)
+    except ReconcilePersistenceError as reset_error:
+        error = ReconcilePersistenceError(
+            f"{primary}; prepared journal reset failed: {reset_error}; rollback was not attempted; "
+            "preserve the journal and staged evidence, then run "
+            "'doc-lattice reconcile --recover'"
+        )
+        error.add_note(f"original marker failure: {_cause_details(primary)}")
+        error.add_note(f"journal reset failure: {_cause_details(reset_error)}")
+        raise error from primary
+    _abort_prepared(prepared, primary)
+
+
+def commit_rewrites(
+    project_root: Path,
+    rewrites: list[Rewrite],
+    write_paths: dict[Path, Path],
+) -> None:
+    """Commit exact-byte reconcile rewrites as one durable transaction.
+
+    Args:
+        project_root: Configured project root containing the transaction journal.
+        rewrites: Ordered fresh-read rewrites to publish.
+        write_paths: Contained resolved destinations keyed by rewrite identity path.
+
+    Raises:
+        ReconcileConflictError: If a destination changed after rewrite validation.
+        ReconcilePersistenceError: If preparation or durable commit cannot complete.
+    """
+    prepared = _prepare_transaction(project_root, rewrites, write_paths)
+    for entry in prepared.entries:
+        try:
+            current_sha256 = file_sha256(entry.destination)
+        except OSError as cause:
+            primary = _commit_operation_error(
+                "fingerprinting destination", entry.destination, cause
+            )
+            _abort_prepared(prepared, primary)
+        if current_sha256 != entry.before_sha256:
+            primary = ReconcileConflictError(
+                f"reconcile destination {entry.destination} changed after validation"
+            )
+            _abort_prepared(prepared, primary)
+        try:
+            replace_staged(entry.after_path, entry.destination)
+        except (OSError, ValueError) as cause:
+            primary = _commit_operation_error("replacing destination", entry.destination, cause)
+            _abort_prepared(prepared, primary)
+    committed = Journal(
+        version=prepared.journal.version,
+        state="committed",
+        entries=prepared.journal.entries,
+    )
+    committed_bytes = committed.model_dump_json().encode("utf-8")
+    committed_durably = False
+    try:
+        atomic_replace_bytes(
+            prepared.journal_path,
+            committed_bytes,
+            prefix=f"{RECONCILE_JOURNAL_NAME}.",
+        )
+    except OSError as cause:
+        primary = _commit_operation_error("marking journal committed", prepared.journal_path, cause)
+        _abort_failed_marker(prepared, committed_bytes, primary)
+    committed_durably = True
+    if committed_durably:
+        _cleanup_transaction_artifacts(
+            prepared.entries,
+            prepared.journal_path,
+            committed_bytes,
+        )
 
 
 @contextmanager
