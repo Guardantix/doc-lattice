@@ -1,8 +1,8 @@
 """Generate the config and codegen artifacts for the init command.
 
 Pure and filesystem-free: every function returns a string built from typed
-inputs, so the module is tested with no I/O. The init command in cli.py does the
-disk write and the printing.
+inputs, so the module is tested with no I/O. The init command adapter in the CLI
+package does the disk write and the printing.
 """
 
 import io

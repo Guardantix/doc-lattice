@@ -1,6 +1,7 @@
 """Tests for per-invocation CLI runtime state."""
 
-from io import StringIO
+import sys
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
 import typer
@@ -8,7 +9,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from doc_lattice.cli.application import create_app
-from doc_lattice.cli.runtime import CliRuntime, get_runtime
+from doc_lattice.cli.runtime import CliRuntime, default_runtime, get_runtime
 from doc_lattice.config import Config, ProjectConfig
 from doc_lattice.model import Lattice
 
@@ -59,6 +60,17 @@ def test_runtime_factory_creates_isolated_invocation_state(tmp_path: Path):
     assert created[0] is not created[1]
     assert created[0].stdout.no_color is False
     assert created[1].stdout.no_color is True
+
+
+def test_default_runtime_writes_unicode_to_strict_ascii_stdout(monkeypatch):
+    buffer = BytesIO()
+    stream = TextIOWrapper(buffer, encoding="ascii", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    runtime = default_runtime(no_color=True)
+    runtime.write_stdout("café")
+
+    assert buffer.getvalue() == b"caf\xc3\xa9\n"
 
 
 def test_get_runtime_reads_context_object(tmp_path: Path):

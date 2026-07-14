@@ -1,7 +1,6 @@
 """Immutable per-invocation state for command-line adapters."""
 
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,8 +96,12 @@ class CliRuntime:
 def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
     disabled = no_color or os.environ.get("NO_COLOR", "") != ""
     return CliRuntime(
-        stdout=Console(file=sys.stdout, no_color=disabled),
-        stderr=Console(file=sys.stderr, stderr=True, no_color=disabled),
+        stdout=Console(file=typer.get_text_stream("stdout"), no_color=disabled),
+        stderr=Console(
+            file=typer.get_text_stream("stderr"),
+            stderr=True,
+            no_color=disabled,
+        ),
         cwd=cwd,
         load_config=load_config,
         load_lattice=load_lattice,

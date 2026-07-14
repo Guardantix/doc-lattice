@@ -80,9 +80,14 @@ def test_no_broad_except():
 
 def test_cli_project_error_handlers_stay_centralized():
     """CLI command ProjectError handling must stay centralized in one helper plus main."""
-    cli_source = (SRC_DIR / "cli.py").read_text(encoding="utf-8")
+    cli_dir = SRC_DIR / "cli"
+    handler_counts = {
+        path.relative_to(cli_dir).as_posix(): count
+        for path in sorted(cli_dir.rglob("*.py"))
+        if (count := path.read_text(encoding="utf-8").count("except ProjectError"))
+    }
 
-    assert cli_source.count("except ProjectError") == 2
+    assert handler_counts == {"__init__.py": 1, "errors.py": 1}
 
 
 def test_no_raw_authority_strings():
