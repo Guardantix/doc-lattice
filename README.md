@@ -241,6 +241,24 @@ workflow command per drift finding or ladder violation, each with a repo-relativ
 findings attach inline to the offending doc in the pull-request diff. Output selection never
 changes gate exit codes. Do not combine `--json` with `--format github`.
 
+Structured-output compatibility is command-specific. `--json` remains silent throughout 1.x, with
+no deprecation warning on stderr. The selector matrix is:
+
+| Release | Commands | Selection |
+|---------|----------|-----------|
+| 1.x | `check`, `lint` | `--format human\|json\|github`, plus silent `--json` alias |
+| 1.x | `graph` | `--format mermaid\|dot\|json`; no `--json` alias |
+| 1.x | `impact`, `reconcile`, `linear` | Human default; only silent `--json` selector |
+| 1.x | `init` | Deliberately excluded from structured-output selection |
+| 2.0 | `check`, `lint` | `--format human\|json\|github`; no `--json` alias |
+| 2.0 | `graph` | `--format mermaid\|dot\|json`; no `--json` alias |
+| 2.0 | `impact`, `reconcile`, `linear` | `--format human\|json`; no `--json` alias |
+| 2.0 | `init` | Remains excluded from structured-output selection |
+
+Where supported, `--indent` continues to require an effective JSON format. The 2.0 changes remove
+`--json` from `check`, `lint`, `impact`, `reconcile`, and `linear`; `graph` never accepts that
+alias.
+
 `impact` walks the full transitive closure by default. Pass `--depth N` (N >= 1) to bound the
 walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly from it. Human
 output is unchanged, and each `--json` entry gains a `"depth"` field carrying the minimum number
@@ -552,9 +570,10 @@ The engine is a pure pipeline (`config -> discovery -> frontmatter parse -> buil
 feeding `{ check, impact, reconcile, graph, lint, linear }`) where all graph and report logic
 is filesystem-free. `config`, `discovery`, and `orchestrate` own load-path filesystem work;
 `persistence.py` owns shared durable single-path operations; `reconcile_transaction.py` owns the
-reconcile batch, lock, and recovery state machine; and `cli` orchestrates and reports those
-operations. Cache I/O is split between document-reading `cache/lookup.py` and cache-file-owning
-`cache/store.py`. Only `linear_client` touches the network. See
+reconcile lock capability, independent live commit destination preflight, durable batch, rollback,
+and recovery; and the `doc_lattice.cli` package orchestrates and reports those operations. Cache I/O
+is split between document-reading `cache/lookup.py` and cache-file-owning `cache/store.py`. Only
+`linear_client` touches the network. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the decisions behind that split.
 
 ## License

@@ -35,6 +35,9 @@ VALID_SKIP_REASONS: frozenset[str] = frozenset(get_args(SkipReason))
 GraphFormat = Literal["mermaid", "dot", "json"]
 VALID_GRAPH_FORMATS: frozenset[str] = frozenset(get_args(GraphFormat))
 
+BasicOutputFormat = Literal["human", "json"]
+VALID_BASIC_OUTPUT_FORMATS: frozenset[str] = frozenset(get_args(BasicOutputFormat))
+
 ReportFormat = Literal["human", "json", "github"]
 VALID_REPORT_FORMATS: frozenset[str] = frozenset(get_args(ReportFormat))
 

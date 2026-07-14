@@ -5,10 +5,8 @@ from pathlib import Path
 
 import pytest
 
-# Strip FORCE_COLOR before any source module is imported. cli.py builds module-level rich Consoles
-# at import time, so a color-forcing dev shell (FORCE_COLOR set) would make them emit ANSI escapes
-# that break contiguous-substring assertions on human output. CI runs without FORCE_COLOR; this
-# just matches the CI environment. Runs at conftest import, ahead of test modules importing cli.py.
+# Keep default captured CLI output stable across color-forcing developer shells and CI.
+# Tests that exercise forced color set FORCE_COLOR explicitly for their own invocation.
 os.environ.pop("FORCE_COLOR", None)
 
 

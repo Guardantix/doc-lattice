@@ -97,15 +97,18 @@ Historical spec: `docs/superpowers/specs/2026-06-28-doc-lattice-lint-design.md`.
 
 **Reconcile is the only command that mutates tracked documents.** It plans new `seen` values from
 the loaded snapshot, then re-reads each downstream file and retains exact before and replacement
-bytes while rewriting only targeted `seen` scalars through round-trip YAML. The CLI validates
-contained write destinations and orchestrates reporting, but does not own direct per-file atomic
-writes. `reconcile_transaction.py` holds a nonblocking advisory lock on the project-root directory,
-stages and syncs exact before/after images, publishes the `prepared` journal, fingerprints each
-destination immediately before replacement, and rolls the batch back in reverse on conflict or
-pre-commit persistence failure. Once every destination is durable, it marks the journal `committed`
-before cleanup. Human or JSON success is reported only after transaction cleanup and clean lock
-release. `--recover` is recovery-only; normal real runs recover before lattice load; dry-run stays
-byte-, namespace-, and cache-read-only and refuses an outstanding journal. `--ref` selects on
+bytes while rewriting only targeted `seen` scalars through round-trip YAML. The reconcile adapter
+resolves identity paths against the project root before fresh reads and orchestrates lock
+acquisition and lifetime across recovery, load, plan, fresh reads, and the commit call. It delays
+final outcome and success reporting until clean lock release; an automatic-recovery notice may be
+emitted on stderr while the lock is held. The adapter does not own direct per-file atomic writes.
+`reconcile_transaction.py` independently contains live commit destinations before staging, stages
+and syncs exact before/after images, publishes the `prepared` journal, fingerprints each destination
+immediately before replacement, and rolls the batch back in reverse on conflict or pre-commit
+persistence failure. Once every destination is durable, it marks the journal `committed` before
+cleanup. Human or JSON success is reported only after transaction cleanup and clean lock release.
+`--recover` is recovery-only; normal real runs recover before lattice load; dry-run stays byte-,
+namespace-, and cache-read-only and refuses an outstanding journal. `--ref` selects on
 resolved identity; `--all` clears only STALE/UNRECONCILED edges (it skips
 BROKEN and already-OK), and `--all --ref REF` narrows that selection across every downstream node
 without treating no matches as an error. A node's BROKEN edge is skipped, not fatal, so it never
@@ -144,12 +147,26 @@ writing it), the shared `report_render`, plus the linear pure core (`tickets`, `
 `RunState`). The untyped-to-typed boundary modules are `frontmatter_parser` and `linear_parser`.
 Load-path filesystem I/O is owned by `config`, `discovery`, and `orchestrate`. `persistence.py` owns
 the shared durable staging, atomic replace, create-if-absent, fingerprint, directory sync, and
-cleanup primitives. `reconcile_transaction.py` is the impure owner of reconcile locking, journal
-prepare/commit, rollback, recovery, and artifact cleanup. `cli` owns orchestration, destination
-containment, and user reporting; it delegates reconcile mutation and init creation to those owners.
-The `path_utils.safe_resolve()` helper used by config and discovery, plus `cli` before reconcile
-writes and `reconcile_transaction` for journal recovery paths, is filesystem-aware path resolution:
-it calls `Path.resolve()`, which follows symlinks.
+cleanup primitives. `reconcile_transaction.py` is the impure owner of the reconcile lock capability
+and mechanics, independent live commit destination preflight, journal prepare/commit, rollback,
+recovery containment and validation, and artifact cleanup. The `doc_lattice.cli` package owns the
+impure application boundary: `cli/application.py` constructs Typer and registers all seven
+commands; `cli/runtime.py` creates a frozen per-invocation runtime containing stdout, stderr, cwd,
+and the config and lattice loaders; and `cli/output.py` owns output selection, JSON indentation,
+exact writes, and GitHub annotations. `cli/errors.py` owns diagnostic rendering, exit constants,
+and command-level `ProjectError` context conversion. `cli/__init__.py` owns entry-point exception
+mapping for `ProjectError` and supported unexpected errors, converts them to exit 2, and preserves
+intended `SystemExit` values.
+Each `cli/commands/*.py` module is a narrow adapter. `cli/commands/reconcile.py` owns selection,
+document identity resolution before fresh reads, lock acquisition and lifetime, recovery, load,
+plan, the transaction commit call, and delayed report orchestration. Durable mutation remains in
+`reconcile_transaction.py`; `cli/commands/init.py` delegates durable creation to `persistence.py`.
+`cli/__init__.py` also preserves the `doc_lattice.cli:main` entry point and lazy `app`
+compatibility. Do not add mutable module-level consoles or mutate Typer color globals.
+The current `path_utils.safe_resolve()` consumers are `config`, `discovery`,
+`cli/commands/reconcile.py` before fresh reconcile reads, and `reconcile_transaction.py` for both
+independent live commit destination preflight and journal recovery paths. The helper is
+filesystem-aware path resolution: it calls `Path.resolve()`, which follows symlinks.
 The cache package splits by phase: `cache/schema.py` (models and codec) and `cache/state.py`
 (run-local `RunState`) are pure in this architecture's I/O-boundary sense; `RunState` is mutable,
 deterministic, and filesystem-free. In contrast, `cache/store.py` (reads and atomically writes the
@@ -171,7 +188,7 @@ violation fails CI rather than just being a style preference:
   prefixed by `_` (for example `frontmatter_parser`) (or sits under a directory of that
   name). The real engine boundaries are `frontmatter_parser.py` (raw YAML to `NodeMeta`) and
   `linear_parser.py` (Linear JSON to `Ticket`). In `path_utils.py`, only `safe_resolve` is wired in
-  (by `config`, `discovery`, and `cli` for reconcile write-path validation).
+  (by `config`, `discovery`, `cli/commands/reconcile.py`, and `reconcile_transaction.py`).
   Everywhere else, convert at the boundary and pass typed models.
 - **Errors.** All custom exceptions extend `ProjectError` (error_types.py) and carry a `code`; no
   bare `except Exception`/`except BaseException`. Messages name the file and the fix.
@@ -180,10 +197,13 @@ violation fails CI rather than just being a style preference:
 - **Paths and containment.** User-provided paths go through `safe_resolve()` (path_utils.py).
   `config` rejects docs roots outside the project root. `discovery` allows project-internal
   document symlinks, skips external targets with a warning, and deduplicates resolved aliases while
-  retaining the first unresolved path as document identity. Before reconcile writes, `cli`
-  re-resolves each identity path and rejects a destination outside the project root. Transaction
-  journals store only project-relative paths; recovery revalidates containment, role-specific
-  artifact names and locations, regular-file type, and recorded fingerprints before mutation.
+  retaining the first unresolved path as document identity. Before reconcile writes,
+  `cli/commands/reconcile.py` resolves each identity path and rejects a destination outside the
+  project root before fresh reads. The transaction's `_preflight_rewrite_destinations` independently
+  applies `safe_resolve` to every supplied live commit destination before staging. Transaction
+  journals store only project-relative paths; recovery separately applies `safe_resolve` and
+  revalidates containment, role-specific artifact names and locations, regular-file type, and
+  recorded fingerprints before mutation.
 - **Node ids.** A frontmatter `id` may not contain `#`; `#` separates a file id from a section
   anchor in a ref. Enforced by a `NodeMeta` field validator (exit 2, names the id).
 - **No `datetime.now()`/`utcnow()` outside `datetime_utils.py`.**
@@ -204,7 +224,9 @@ violation fails CI rather than just being a style preference:
 ## Testing notes
 
 Test files mirror sources (`src/doc_lattice/foo.py` -> `tests/test_foo.py`) and use `tmp_path` for
-filesystem work.
+filesystem work. CLI tests live under `tests/cli/`: command test modules mirror the seven adapters,
+focused modules cover runtime and output behavior, and the concise `test_contract.py` suite owns
+cross-command entry behavior.
 `tests/conftest.py` provides the shared `lattice_dir` fixture: a small synthetic doc set
 (art-direction with STALE/UNRECONCILED downstream edges, plus a BROKEN ref) that the check,
 reconcile, and CLI tests build on, so its contents are load-bearing across those suites.
