@@ -22,7 +22,7 @@ exclude = [
 
 [project]
 name = "doc-lattice"
-version = "1.0.1"
+version = "2.0.0"
 description = "Traceability engine for design and production documentation"
 readme = "README.md"
 requires-python = ">=3.13"
