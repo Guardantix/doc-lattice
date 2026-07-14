@@ -1,5 +1,6 @@
 """End-to-end cache lifecycle tests through orchestrate and CLI, plus the facade contract."""
 
+import hashlib
 import json
 import os
 
@@ -7,9 +8,11 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from doc_lattice.cache import CacheFile, cache_path
+from doc_lattice import __version__
+from doc_lattice.cache import CacheFile, Entry, StatRecord, cache_path
 from doc_lattice.check import check_lattice, statuses_json
 from doc_lattice.config import load_config
+from doc_lattice.constants import CACHE_VERSION
 from doc_lattice.error_types import UnreadableDocError
 from doc_lattice.orchestrate import load_lattice
 
@@ -47,6 +50,36 @@ def test_fully_warm_same_root_run_writes_nothing(tmp_path, monkeypatch):
 
     assert path.read_bytes() == before
     assert path.stat().st_mtime_ns == mtime_before
+
+
+def test_version_1_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    doc = docs / "broken.md"
+    doc.write_text("---\nid: vanished\n# Missing close\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: legacy\n", encoding="utf-8")
+    root = str(tmp_path.resolve())
+    st = doc.stat()
+    old_cache = CacheFile(
+        version=1,
+        tool_version=__version__,
+        roots=[root],
+        entries={
+            "docs/broken.md": Entry(
+                file_sha256=hashlib.sha256(doc.read_bytes()).hexdigest(),
+                stats={root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)},
+                node=None,
+            )
+        },
+    )
+    path = cache_path("legacy", os.environ)
+    path.parent.mkdir(parents=True)
+    path.write_text(old_cache.model_dump_json(), encoding="utf-8")
+
+    with pytest.raises(UnreadableDocError, match="unclosed YAML frontmatter"):
+        load_lattice(load_config(None, tmp_path))
+    assert old_cache.version < CACHE_VERSION
 
 
 def test_cache_facade_exports_surviving_names():

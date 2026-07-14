@@ -21,7 +21,7 @@ from doc_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
 
 def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
     for path, updates in plan.items():
-        new_text, _ = apply_reconcile(path.read_text(encoding="utf-8"), updates)
+        new_text, _ = apply_reconcile(path.read_text(encoding="utf-8"), updates, path)
         path.write_text(new_text, encoding="utf-8")
 
 
@@ -54,6 +54,18 @@ def test_plan_rewrites_wraps_reader_error_with_path():
     assert str(exc_info.value) == "cannot read downstream.md to reconcile: disk vanished"
 
 
+def test_plan_rewrites_names_unclosed_frontmatter_source():
+    path = Path("downstream.md")
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n"
+
+    with pytest.raises(UnreadableDocError) as exc_info:
+        plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: text)
+
+    assert str(exc_info.value) == (
+        "unclosed YAML frontmatter in downstream.md: add a closing '---' fence"
+    )
+
+
 def test_plan_rewrites_skips_file_when_updates_already_applied():
     path = Path("downstream.md")
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: same\n---\nbody\n"
@@ -79,7 +91,7 @@ def test_plan_rewrites_preserves_plan_order():
 
 def test_apply_reconcile_sets_seen_and_preserves_body():
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\n# Body\nkeep me\n"
-    out, applied = apply_reconcile(text, {"a#x": "newhash"})
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
     assert "seen: newhash" in out
     assert "old" not in out
     assert out.endswith("# Body\nkeep me\n")
@@ -88,7 +100,7 @@ def test_apply_reconcile_sets_seen_and_preserves_body():
 
 def test_apply_reconcile_adds_missing_seen():
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n---\nbody\n"
-    out, applied = apply_reconcile(text, {"a#x": "h"})
+    out, applied = apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
     assert "seen: h" in out
     assert applied == {"a#x"}
 
@@ -96,14 +108,14 @@ def test_apply_reconcile_adds_missing_seen():
 def test_apply_reconcile_no_match_leaves_text_and_reports_nothing():
     # A ref edited away between load and write no longer matches the plan key.
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
-    out, applied = apply_reconcile(text, {"a#gone": "newhash"})
+    out, applied = apply_reconcile(text, {"a#gone": "newhash"}, Path("downstream.md"))
     assert applied == set()
     assert out == text
 
 
 def test_apply_reconcile_null_derives_from_is_safe():
     text = "---\nid: d\nderives_from:\n---\nbody\n"
-    out, applied = apply_reconcile(text, {"a#x": "h"})
+    out, applied = apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
     assert applied == set()
     assert out == text
 
@@ -111,19 +123,19 @@ def test_apply_reconcile_null_derives_from_is_safe():
 def test_apply_reconcile_unparseable_frontmatter_raises():
     text = "---\nfoo: [1, 2\n---\nbody\n"
     with pytest.raises(UnreadableDocError):
-        apply_reconcile(text, {"a#x": "h"})
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
 
 
 def test_apply_reconcile_non_mapping_frontmatter_raises():
     text = "---\n- just\n- a list\n---\nbody\n"
     with pytest.raises(UnreadableDocError):
-        apply_reconcile(text, {"a#x": "h"})
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
 
 
 def test_apply_reconcile_non_mapping_entry_raises():
     text = "---\nid: d\nderives_from:\n  - plainstring\n---\nbody\n"
     with pytest.raises(UnreadableDocError):
-        apply_reconcile(text, {"a#x": "h"})
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
 
 
 def test_reconcile_clears_drift_for_node(lattice_dir: Path):
@@ -141,7 +153,7 @@ def test_reconcile_preserves_concurrent_body_edit():
     text_initial = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nORIGINAL\n"
     # Simulate a concurrent body edit before the in-place write.
     text_fresh = text_initial.replace("ORIGINAL", "EDITED LATER")
-    out, applied = apply_reconcile(text_fresh, {"a#x": "newhash"})
+    out, applied = apply_reconcile(text_fresh, {"a#x": "newhash"}, Path("downstream.md"))
     assert "EDITED LATER" in out
     assert "seen: newhash" in out
     assert applied == {"a#x"}
@@ -277,7 +289,7 @@ def test_apply_reconcile_preserves_comments_key_order_and_untargeted_edges():
         "tickets: [T-1]\n"
         "---\n# Body\nkeep\n"
     )
-    out, applied = apply_reconcile(text, {"a#x": "newx"})
+    out, applied = apply_reconcile(text, {"a#x": "newx"}, Path("downstream.md"))
     assert applied == {"a#x"}
     assert "seen: newx" in out
     assert "seen: oldy" in out  # the untargeted edge is untouched
@@ -290,7 +302,7 @@ def test_apply_reconcile_no_change_when_seen_already_matches():
     # A planned ref whose seen already equals the new value is a no-op: not reported,
     # text returned unchanged.
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: same\n---\nbody\n"
-    out, applied = apply_reconcile(text, {"a#x": "same"})
+    out, applied = apply_reconcile(text, {"a#x": "same"}, Path("downstream.md"))
     assert applied == set()
     assert out == text
 
@@ -330,7 +342,7 @@ def test_reconcile_all_skips_already_ok_edge(lattice_dir: Path):
 def test_apply_reconcile_no_frontmatter_returns_unchanged():
     # No opening fence: a concurrent edit stripped the frontmatter entirely.
     text = "no frontmatter here\njust body\n"
-    out, applied = apply_reconcile(text, {"a#x": "h"})
+    out, applied = apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
     assert out == text
     assert applied == set()
 
@@ -338,7 +350,7 @@ def test_apply_reconcile_no_frontmatter_returns_unchanged():
 def test_apply_reconcile_empty_frontmatter_returns_unchanged():
     # An empty fence block (yaml.load -> None) is safe, not a crash.
     text = "---\n---\nbody\n"
-    out, applied = apply_reconcile(text, {"a#x": "h"})
+    out, applied = apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
     assert out == text
     assert applied == set()
 
@@ -347,7 +359,7 @@ def test_apply_reconcile_non_list_derives_from_raises():
     # derives_from present but not a list is a distinct error branch from a non-mapping entry.
     text = "---\nid: d\nderives_from: oops\n---\nbody\n"
     with pytest.raises(UnreadableDocError) as exc_info:
-        apply_reconcile(text, {"a#x": "h"})
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
     assert exc_info.value.code == "UNREADABLE_DOC"
 
 

@@ -35,6 +35,27 @@ def test_files_without_frontmatter_skipped(tmp_path: Path):
     assert lat.nodes_by_id == {}
 
 
+def test_cached_and_uncached_loads_reject_unclosed_frontmatter_identically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    broken = docs / "broken.md"
+    broken.write_text("---\nid: vanished\n# Missing close\n", encoding="utf-8")
+
+    with pytest.raises(UnreadableDocError) as uncached:
+        load_lattice(load_config(None, tmp_path))
+
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: unclosed\n", encoding="utf-8")
+    with pytest.raises(UnreadableDocError) as cached:
+        load_lattice(load_config(None, tmp_path))
+
+    expected = f"unclosed YAML frontmatter in {broken}: add a closing '---' fence"
+    assert str(uncached.value) == expected
+    assert str(cached.value) == expected
+
+
 def test_duplicate_id_propagates(tmp_path: Path):
     # Two discovered files sharing an id must collide in the shared index through the
     # full discovery -> parse -> build seam, surfacing DuplicateIdError (exit 2).

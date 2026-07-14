@@ -38,7 +38,7 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
         project.resolved_roots, project.config.ignore_globs, project.project_root
     ):
         text = read_doc(path)
-        raw_meta, body = split_frontmatter(text)
+        raw_meta, body = split_frontmatter(text, path)
         meta = parse_meta(raw_meta, path)
         if meta is None:
             continue
@@ -71,7 +71,7 @@ def _load_cached(project: ProjectConfig, *, require_verified: bool) -> Lattice:
                 parsed.append(result.doc)
             continue
         text = decode_doc(doc_path, result.data)
-        raw_meta, body = split_frontmatter(text)
+        raw_meta, body = split_frontmatter(text, doc_path)
         meta = parse_meta(raw_meta, doc_path)
         sections = derive_file_sections(body) if meta is not None else None
         state.replace(

@@ -53,7 +53,7 @@ class Entry(BaseModel):
 
 
 class CacheFile(BaseModel):
-    """The whole cache document, version 1."""
+    """The whole versioned cache document."""
 
     model_config = ConfigDict(extra="forbid")
 

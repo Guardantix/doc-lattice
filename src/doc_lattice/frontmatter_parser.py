@@ -15,16 +15,21 @@ _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening 
 _YAML = YAML(typ="safe")
 
 
-def split_frontmatter(text: str) -> tuple[str | None, str]:
+def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
     """Split a document into its YAML frontmatter block and body.
 
     Args:
         text: The full file text.
+        source: The file the frontmatter came from, for error messages.
 
     Returns:
         ``(raw_meta, body)`` where ``raw_meta`` is the YAML between the opening and
         closing ``---`` fences (or None if the file does not open with a fence), and
-        ``body`` is everything after the closing fence (the whole text if no fence).
+        ``body`` is everything after the closing fence (the whole text if there is no
+        opening fence).
+
+    Raises:
+        UnreadableDocError: If an opening fence has no closing fence.
     """
     # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
     # "---" fence recognized on line 0 instead of being read as having no frontmatter.
@@ -37,7 +42,7 @@ def split_frontmatter(text: str) -> tuple[str | None, str]:
             raw_meta = "\n".join(lines[1:closing_fence_index])
             body = "\n".join(lines[closing_fence_index + 1 :])
             return raw_meta + "\n" if raw_meta else "", body
-    return None, text
+    raise UnreadableDocError(f"unclosed YAML frontmatter in {source}: add a closing '---' fence")
 
 
 def parse_meta(raw_meta: str | None, source: Path) -> NodeMeta | None:
