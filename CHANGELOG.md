@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Internal: `doc_lattice.cli` is now a package with a frozen per-invocation runtime, focused
+  command adapters, centralized output and error handling, and command-mirrored CLI tests. Runtime
+  behavior is unchanged. The silent 1.x `--json` compatibility alias and its 2.0 removal in favor
+  of consistent `--format` selection are now documented.
 - Internal: Markdown heading recognition and GitHub-compatible slug generation now pass through a
   documented adapter pinned to `markdown-it-py==4.2.0` and `github-slugger@2.0.0`. The slug-strip
   and JavaScript Unicode 17 lowercase and contextual-casing compatibility data is generated from

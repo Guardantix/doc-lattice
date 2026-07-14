@@ -241,6 +241,15 @@ workflow command per drift finding or ladder violation, each with a repo-relativ
 findings attach inline to the offending doc in the pull-request diff. Output selection never
 changes gate exit codes. Do not combine `--json` with `--format github`.
 
+Compatibility policy: `--json` remains a silent compatibility alias for the entire 1.x series.
+It emits no deprecation warning in 1.x, preserving stderr for scripts. The next breaking release,
+2.0, removes `--json` and uses `--format` consistently on output-producing commands. Until then,
+`--format` is available only where documented above: report formats remain
+`human|json|github` for `check` and `lint`, while graph formats remain `mermaid|dot|json`.
+Commands documented only with `--json` do not currently accept an undocumented `--format` flag.
+`--indent` continues to require an effective JSON format, whether selected by `--json` or a
+command that supports `--format json`.
+
 `impact` walks the full transitive closure by default. Pass `--depth N` (N >= 1) to bound the
 walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly from it. Human
 output is unchanged, and each `--json` entry gains a `"depth"` field carrying the minimum number
