@@ -227,3 +227,23 @@ def test_supported_docs_describe_conflict_safe_reconcile():
 
     for token in ("persistence.py", "reconcile_transaction.py"):
         assert token in claude
+
+
+def test_supported_docs_order_github_linear_secret_after_verified_policy():
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    assert readme.count("gh secret set DOC_LATTICE_LINEAR_API_KEY") == 1
+    verified = readme.index("environment policy verified")
+    secret_set = readme.index("gh secret set DOC_LATTICE_LINEAR_API_KEY")
+    assert verified < secret_set
+    assert "gh secret delete LINEAR_API_KEY --repo" in readme
+    assert "gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo" in readme
+    assert "pull_request_target" in readme
+    assert "ci audit is meaningful only after" in readme
+
+
+def test_architecture_records_external_github_administration_boundary():
+    architecture = (_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "reviewed external `gh` script" in architecture
+    assert "GitHub environment" in architecture
+    assert "linear_client" in architecture
+    assert "doc_lattice.github_ci" in architecture

@@ -328,3 +328,22 @@ configs migrate by deleting the key, with no replacement. Authority behavior rem
 the removed key.
 **Consequences:** This is a documented breaking change in the next major release. Future
 configuration keys are not reserved as inert surface without an approved requirement.
+
+### AD-16: GitHub administration remains an external human boundary
+
+**Date:** 2026-07-15
+**Status:** Accepted
+**Context:** Workflow files are repository-controlled input, so a same-repository pull request can
+edit a workflow that receives a broadly scoped secret. The normal package code must not receive
+GitHub administration credentials while establishing a safer authorization boundary.
+**Decision:** `doc_lattice.github_ci` renders and audits the managed workflows and bootstrap
+artifact. CLI filesystem adapters create, inspect, audit, and refresh those local files without
+loading the lattice or accessing the network. A reviewed external `gh` script is run explicitly by
+a human maintainer to configure and read back a GitHub environment whose deployment allow list is
+exactly the `main` branch. The dedicated `DOC_LATTICE_LINEAR_API_KEY` exists only in that
+environment and is mapped to `LINEAR_API_KEY` only on the final Linear step. Repository-global
+audit policy bans `pull_request_target`, and generated workflows never run real `reconcile`.
+**Consequences:** `linear_client` remains the only Python network module. Remote setup is explicit,
+reviewable, resumable, and separate from the Linear secret entry. Local audit cannot observe
+GitHub environment or organization-policy drift, so the bootstrap verifier remains necessary.
+Workflow and branch governance for trusted `main` remains the residual authorization boundary.

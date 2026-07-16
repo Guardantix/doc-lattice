@@ -8,8 +8,9 @@ engineering design built on a product brief), it records that link in frontmatte
 the upstream changes, doc-lattice tells you exactly which downstream docs went stale, and a
 CI gate keeps stale work from shipping silently.
 
-It is pure tooling: no network (except the optional `linear` command), no secrets, no LLM,
-no database. The dependency graph is derived from your docs on demand, never committed.
+It is pure tooling: no network (except the optional `linear` command), stores no secrets, uses no
+LLM, and needs no database. The dependency graph is derived from your docs on demand, never
+committed.
 
 ## The problem it solves
 
@@ -213,18 +214,22 @@ uv run --group dev ty check src
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY]` | Scaffold `.doc-lattice.yml` and print `.gitignore`, pre-commit, and CI guidance. | 2 on tool error |
+| `init [--docs-root ...] [--linear-team KEY] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the three managed GitHub artifacts. | 2 on tool error or unsafe existing artifact |
+| `ci audit [--repository OWNER/REPO]` | Audit repository-global workflow prohibitions and the managed GitHub installation without loading the lattice or using the network. | 1 on findings, 2 on unreadable or ambiguous state |
+| `ci refresh --repository OWNER/REPO [--apply]` | Preview a managed artifact upgrade or rename, then optionally apply it after exact interactive confirmation. | 1 when a preview has updates, 2 on refusal, unsafe state, or tool error |
 
-Only `check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
-`impact`, `reconcile`, `graph`, and `init` are informational and always exit 0 on success (2 only on
-a tool error), so wiring `impact` into a CI gate never turns the build red. `linear` also exits 0 by
-default; pass `--exit-code` to gate on any DANGER or BLOCKED finding, and add `--warn-exit` to gate on
-WARNING as well.
+`check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
+`ci audit` uses the same finding code for a coherent policy violation, and a read-only `ci refresh`
+preview uses it when an update is available. `impact`, `reconcile`, `graph`, and ordinary `init`
+are informational and exit 0 on success, so wiring `impact` into a CI gate never turns the build
+red. `linear` also exits 0 by default; pass `--exit-code` to gate on any DANGER or BLOCKED finding,
+and add `--warn-exit` to gate on WARNING as well.
 
-Every command except `init` accepts `--config PATH` (path to `.doc-lattice.yml`; defaults to
-the file in the current directory). `check`, `lint`, `impact`, `reconcile`, and `linear` accept
-`--format json` for machine-readable output. Run `uv run doc-lattice <command> --help` for the
-full flag list.
+The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, and `linear` accept
+`--config PATH` (path to `.doc-lattice.yml`; defaults to the file in the current directory).
+`init`, `ci audit`, and `ci refresh` deliberately do not accept config or load the lattice.
+`check`, `lint`, `impact`, `reconcile`, and `linear` accept `--format json` for machine-readable
+output. Run `uv run doc-lattice <command> --help` for the full flag list.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
@@ -442,6 +447,8 @@ ignored: it does not change command results or exit codes.
 
 ## Adopting doc-lattice in your docs repo
 
+### Ordinary offline setup
+
 Bootstrap config and the drift and authority-ladder gates for a repo whose docs you want to
 track:
 
@@ -461,6 +468,137 @@ To test an unreleased commit, replace the PyPI requirement with a Git source suc
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should
 keep the exact PyPI version pin.
 
+### Managed GitHub and Linear setup
+
+To add protected Linear reporting, a human maintainer generates and reviews three committed,
+create-only artifacts:
+
+- `.github/workflows/doc-lattice.yml` runs the offline audit, drift, and authority gates.
+- `.github/workflows/doc-lattice-linear.yml` runs the Linear gate only on trusted `main`.
+- `.github/doc-lattice-bootstrap.sh` configures and verifies the GitHub environment.
+
+The bootstrap script is a durable managed artifact, not a disposable installer. Keep it committed
+so `verify`, `ci audit`, and `ci refresh` can detect drift or recreate it after a reviewed deletion.
+The initial script supports GitHub.com repositories whose default branch is exactly `main`. It
+requires Bash 3.2 or later and an authenticated GitHub CLI. Run it on macOS or Linux, or on Windows
+through Git Bash or WSL. Native PowerShell is not supported.
+
+Run this sequence from reviewed, trusted project state:
+
+```bash
+uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice init \
+  --github --repository OWNER/REPO
+bash .github/doc-lattice-bootstrap.sh plan OWNER/REPO
+bash .github/doc-lattice-bootstrap.sh apply OWNER/REPO
+
+# Continue only after apply prints: environment policy verified
+gh secret set DOC_LATTICE_LINEAR_API_KEY \
+  --env doc-lattice-linear --repo OWNER/REPO
+
+# Run either deletion only when plan/apply reported that repository-scoped name.
+gh secret delete LINEAR_API_KEY --repo OWNER/REPO
+gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo OWNER/REPO
+
+bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO
+uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit \
+  --repository OWNER/REPO
+```
+
+The secret-setting command is not ready before `apply` re-reads and proves the exact `main`-only
+environment policy. `apply` never receives the Linear key. `gh secret set` prompts for the value or
+reads it from stdin, so the value is not part of the command arguments. This ordering is a
+maintainer procedure; the server-side GitHub environment scope is the authorization control.
+
+Bootstrap `plan` and `verify` exit 0 only when the protected policy, dedicated environment secret,
+and repository-secret cleanup are all complete. They exit 1 for coherent but incomplete state and
+2 when inspection is unreliable or setup is unsupported. `apply` first prints and fingerprints the
+reviewed state, requires an attached stdin TTY and the exact canonical `OWNER/REPO`, then reinspects
+before mutation. A first-time `apply` normally exits 1 because the separately entered secret is not
+present yet. It exits 0 if setup is already complete and exits 2 on EOF, non-TTY input, confirmation
+mismatch, changed state, or another tool error. There is no `--yes`, `--force`, environment
+variable, or other noninteractive apply bypass. The same no-bypass rule applies to
+`ci refresh --apply`.
+
+GitHub API updates are not transactional, but completed remote state is re-readable and safe
+partial setup can be resumed with a fresh `plan` and `apply`. The script does not roll back or
+delete preexisting remote state. If an existing environment has broader or ambiguous rules, it
+refuses to narrow or claim ownership of that environment and requires manual remediation.
+
+Public repositories are eligible on current GitHub plans. Private repositories owned by a user
+require GitHub Pro; private or internal organization repositories require GitHub Team or
+Enterprise. The script fails closed if visibility, plan eligibility, canonical repository casing,
+the exact `main` default branch, repository secret metadata, or environment policy cannot be
+verified. A repository name, transfer, or casing change requires:
+
+```bash
+doc-lattice ci refresh --repository CANONICAL/NAME
+doc-lattice ci refresh --repository CANONICAL/NAME --apply
+```
+
+The preview exits 0 when current, 1 after printing an update diff, and 2 for an unreadable,
+unmarked, or otherwise unsafe target. Apply prints the same diff, requires typing the explicit
+repository identity exactly, repeats preflight after confirmation, and atomically replaces only
+marked canonical artifacts or creates a missing one. Mixed versions after an interruption are safe
+to preview and resume. Use this flow for generator upgrades and repository renames, then review and
+commit the resulting diff. GitHub generation and refresh accept only final-version syntax such as
+`2.0.0`: this rejects pins that can never resolve as final releases, but it does not prove the
+release is already published or that an unreleased source checkout matches that release.
+
+When `ci audit` omits `--repository`, it resolves the local `origin` only from GitHub.com SCP
+(`git@github.com:OWNER/REPO.git`), `ssh://git@github.com/OWNER/REPO.git`, or
+`https://github.com/OWNER/REPO.git` form, with the `.git` suffix optional. Comparisons are ASCII
+case-insensitive, but the offline audit cannot establish GitHub's canonical display casing.
+Bootstrap `plan` and `verify` read the API `full_name` and require its spelling and case to match the
+generated literal exactly.
+
+For an existing installation, rotate or obtain a Linear key out of band. In the same reviewed
+change, remove the old hand-written Linear workflow, set the replacement only as
+`DOC_LATTICE_LINEAR_API_KEY` on the `doc-lattice-linear` environment, and delete every reported
+repository-scoped secret under both the legacy `LINEAR_API_KEY` and dedicated names. Rotation is
+preferred because the broader key may already have been exposed. Repository administrators cannot
+always inspect organization secret visibility, so obtain organization-owner confirmation that
+neither name is exposed to this repository, or have the owner remove or exclude it. Setup is not
+complete until bootstrap `verify` and local `ci audit` both pass.
+
+In short, ci audit is meaningful only after `init --github`: before adoption, the absent artifacts
+intentionally produce exit-1 findings. The audit checks every workflow for
+`pull_request_target`, Linear secret references, direct Linear invocations under pull-request
+events, and direct mutating reconcile invocations under those events. Least-privilege permissions,
+action pins, checkout credentials, caching, triggers, and exact command structure are scoped to the
+two canonical managed workflow paths, so an unrelated release workflow may legitimately use
+`contents: write`.
+
+Audit recognizes direct shell invocations, including supported `uv run` and `uvx` forms. It cannot
+prove that an arbitrary script, local action, reusable workflow, renamed wrapper, or dynamic shell
+construction does not eventually invoke a sensitive command. Malformed, oversized, or otherwise
+unreliably inspectable workflows exit 2 instead of being treated as safe. Local audit also cannot
+see remote environment or organization-policy drift, so rerun bootstrap `verify` after relevant
+policy, visibility, plan, rename, or transfer changes.
+
+The generated environment is the authoritative secret boundary. It allows only the exact `main`
+branch, and the dedicated environment-only secret is mapped to `LINEAR_API_KEY` only on the final
+step of the trusted workflow. Removing the environment binding removes secret access. Current
+ordinary `pull_request`, `pull_request_review`, and `pull_request_review_comment` runs use
+`refs/pull/N/merge`, which the environment policy rejects. `pull_request_target` is different: it
+uses the default branch ref, so the environment can authorize it while it handles untrusted input.
+For that reason audit bans `pull_request_target` repository-wide, and trusted default-branch review
+remains a load-bearing control.
+
+No generated workflow runs real `reconcile`; the offline workflow does not run even
+`reconcile --dry-run` in this release. The exact managed triggers also omit `merge_group`, so merge
+queues are unsupported until a generator release adds that event. Dependency and Actions caching
+are disabled in both managed workflows; introducing caching requires a separate security review.
+Optional required environment reviewers and disabled administrator bypass can add manual approval
+to each Linear run, but they are administered manually outside the initial generated script and
+depend on repository visibility and plan support.
+
+The boundary does not protect malicious code already reviewed and admitted to `main`. Other
+residual risks include a compromised maintainer workstation or `gh` binary, pinned action, package
+artifact, or dependency; a maintainer later broadening the environment; invisible organization
+secret policy; and later visibility or billing changes that disable controls. Branch governance,
+bootstrap `verify`, local `ci audit`, key rotation, and optional environment review address
+different parts of that residual risk rather than replacing the environment boundary.
+
 ## Linear integration
 
 `doc-lattice linear` is the only network-touching command. It builds a trigger map from the
@@ -472,10 +610,10 @@ HTTP 429 or 5xx gets two retries, for three total attempts. Without a usable `Re
 wait 1 second and then 2 seconds. A non-negative integer `Retry-After` is honored up to the
 30-second cap; negative, date-form, and invalid values use the fallback delay.
 
-> **Security note:** If `linear` is used in CI, run it only on trusted refs and never in a fork
-> pull-request job, whether or not `--exit-code` is used. The command processes
-> repository-controlled `tickets` and `linear_team` while `LINEAR_API_KEY` is present. Fork
-> pull-request workflows should use the offline `check`, `lint`, and `impact` commands instead.
+> **Security note:** If `linear` is used in CI, use the
+> [managed protected GitHub setup](#managed-github-and-linear-setup). The command processes
+> repository-controlled `tickets` and `linear_team` while `LINEAR_API_KEY` is present. Untrusted
+> pull-request workflows should use only offline commands.
 
 Canonical ticket ids are uppercase ASCII `TEAM-NUMBER`: `TEAM` starts with an uppercase letter
 and continues with uppercase letters or digits, while `NUMBER` is `0` or a decimal with no leading
@@ -487,9 +625,9 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success; no drift or violations. |
-| `1` | The lattice is coherent but a gate failed: drift (`check`), an authority inversion (`lint`), or (with `--exit-code`) a DANGER/BLOCKED `linear` finding. |
-| `2` | Tool error: invalid or unclosed frontmatter, invalid config, unreadable or non-UTF-8 input, incoherent ids, containment failure, reconcile conflict/lock contention, or persistence/recovery failure. |
+| `0` | Success; no coherent policy or gate finding, and no refresh update is pending. |
+| `1` | Coherent finding: lattice drift, authority or Linear gate failure, GitHub CI policy violation, incomplete bootstrap state, or a managed refresh update. |
+| `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal and persistence or recovery failure. |
 
 ## Troubleshooting
 
