@@ -29,6 +29,7 @@ _MAX_UTF8_INPUT_BYTES = 1_048_576
 _MAX_YAML_NESTING_DEPTH = 100
 _MAX_EXPANDED_VISITS = 50_000
 _MAX_COLLECTED_STRING_SCALARS = 10_000
+_UTF8_COUNT_CHUNK_CHARS = 8_192
 
 
 @dataclass(slots=True)
@@ -37,21 +38,19 @@ class _TraversalBudget:
     visits: int = 0
     string_scalars: int = 0
 
-    def visit(self, depth: int) -> None:
-        if depth > _MAX_YAML_NESTING_DEPTH:
-            raise _resource_limit(self.workflow_path)
-        self.visits += 1
-        if self.visits > _MAX_EXPANDED_VISITS:
-            raise _resource_limit(self.workflow_path)
-
     def collect_string(self) -> None:
         self.string_scalars += 1
         if self.string_scalars > _MAX_COLLECTED_STRING_SCALARS:
             raise _resource_limit(self.workflow_path)
 
-    def require_visit_capacity(self, additional: int) -> None:
+    def reserve_visits(self, additional: int, *, depth: int) -> None:
+        if additional == 0:
+            return
+        if depth > _MAX_YAML_NESTING_DEPTH:
+            raise _resource_limit(self.workflow_path)
         if self.visits + additional > _MAX_EXPANDED_VISITS:
             raise _resource_limit(self.workflow_path)
+        self.visits += additional
 
 
 def parse_workflow(path: Path, text: str) -> WorkflowDocument:
@@ -68,7 +67,7 @@ def parse_workflow(path: Path, text: str) -> WorkflowDocument:
         ConfigError: If the YAML is malformed or has a shape the audit cannot inspect.
     """
     try:
-        if len(text.encode("utf-8")) > _MAX_UTF8_INPUT_BYTES:
+        if _exceeds_utf8_input_budget(text):
             raise _resource_limit(path)
 
         yaml = YAML(typ="safe")
@@ -110,6 +109,7 @@ def _validate_syntax_tree(node: Node | None, workflow_path: Path, budget: _Trave
         return
 
     active_nodes: set[int] = set()
+    budget.reserve_visits(1, depth=1)
     stack: list[tuple[Node, tuple[str, ...], int, bool]] = [(node, (), 1, False)]
     while stack:
         current, yaml_path, depth, exiting = stack.pop()
@@ -118,7 +118,6 @@ def _validate_syntax_tree(node: Node | None, workflow_path: Path, budget: _Trave
             active_nodes.remove(current_id)
             continue
 
-        budget.visit(depth)
         if isinstance(current, ScalarNode):
             continue
         if not isinstance(current, (MappingNode, SequenceNode)):
@@ -129,7 +128,7 @@ def _validate_syntax_tree(node: Node | None, workflow_path: Path, budget: _Trave
         active_nodes.add(current_id)
         stack.append((current, yaml_path, depth, True))
         if isinstance(current, MappingNode):
-            budget.require_visit_capacity(len(current.value) * 2)
+            budget.reserve_visits(len(current.value) * 2, depth=depth + 1)
             _validate_mapping_syntax(current, workflow_path, yaml_path)
             for key_node, value_node in reversed(current.value):
                 key_component = _syntax_key_component(key_node)
@@ -143,7 +142,7 @@ def _validate_syntax_tree(node: Node | None, workflow_path: Path, budget: _Trave
                 )
                 stack.append((key_node, yaml_path, depth + 1, False))
         else:
-            budget.require_visit_capacity(len(current.value))
+            budget.reserve_visits(len(current.value), depth=depth + 1)
             for index in range(len(current.value) - 1, -1, -1):
                 stack.append(
                     (
@@ -356,6 +355,7 @@ def _collect_scalars(
 ) -> list[WorkflowScalar]:
     scalars: list[WorkflowScalar] = []
     active_containers: set[int] = set()
+    budget.reserve_visits(1, depth=1)
     stack: list[tuple[Any, tuple[str, ...], int, bool]] = [(raw, (), 1, False)]
     while stack:
         current, yaml_path, depth, exiting = stack.pop()
@@ -364,7 +364,6 @@ def _collect_scalars(
             active_containers.remove(current_id)
             continue
 
-        budget.visit(depth)
         if isinstance(current, str):
             budget.collect_string()
             scalars.append(WorkflowScalar(path=yaml_path, value=current))
@@ -393,7 +392,7 @@ def _schedule_mapping_values(
     budget: _TraversalBudget,
     stack: list[tuple[Any, tuple[str, ...], int, bool]],
 ) -> None:
-    budget.require_visit_capacity(len(mapping))
+    budget.reserve_visits(len(mapping), depth=depth + 1)
     for key in mapping:
         if not isinstance(key, str):
             _invalid(budget.workflow_path, yaml_path, "mapping keys must be strings")
@@ -410,7 +409,7 @@ def _schedule_sequence_values(
     budget: _TraversalBudget,
     stack: list[tuple[Any, tuple[str, ...], int, bool]],
 ) -> None:
-    budget.require_visit_capacity(len(sequence))
+    budget.reserve_visits(len(sequence), depth=depth + 1)
     for index in range(len(sequence) - 1, -1, -1):
         stack.append((sequence[index], (*yaml_path, str(index)), depth + 1, False))
 
@@ -428,6 +427,18 @@ def _parse_error(workflow_path: Path, detail: str) -> ConfigError:
 
 def _resource_limit(workflow_path: Path) -> ConfigError:
     return _parse_error(workflow_path, "workflow resource limit exceeded")
+
+
+def _exceeds_utf8_input_budget(text: str) -> bool:
+    if len(text) > _MAX_UTF8_INPUT_BYTES:
+        return True
+    total = 0
+    for start in range(0, len(text), _UTF8_COUNT_CHUNK_CHARS):
+        chunk = text[start : start + _UTF8_COUNT_CHUNK_CHARS]
+        total += len(chunk.encode("utf-8"))
+        if total > _MAX_UTF8_INPUT_BYTES:
+            return True
+    return False
 
 
 def _display_path(workflow_path: Path) -> str:

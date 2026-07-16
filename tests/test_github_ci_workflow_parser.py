@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import doc_lattice.github_ci.workflow_parser as workflow_parser_module
 from doc_lattice.error_types import ConfigError
 from doc_lattice.github_ci.workflow_parser import parse_workflow
 
@@ -436,6 +437,28 @@ def test_parse_workflow_rejects_input_over_byte_budget_before_parsing():
         parse_workflow(path, _workflow_padded_to_bytes(MAX_UTF8_INPUT_BYTES + 1))
 
     assert str(path) in str(exc.value)
+    assert "resource limit" in str(exc.value)
+
+
+def test_parse_workflow_stops_byte_count_before_invalid_oversize_tail():
+    path = Path(".github/workflows/oversize-tail.yml")
+    text = ("x" * (MAX_UTF8_INPUT_BYTES + 8_192)) + "\ud800"
+
+    with pytest.raises(ConfigError) as exc:
+        parse_workflow(path, text)
+
+    assert str(path) in str(exc.value)
+    assert "resource limit" in str(exc.value)
+    assert "malformed YAML" not in str(exc.value)
+
+
+def test_traversal_budget_reserves_pending_visits_before_queueing():
+    budget = workflow_parser_module._TraversalBudget(Path(".github/workflows/reservation.yml"))
+    budget.reserve_visits(40_000, depth=1)
+
+    with pytest.raises(ConfigError) as exc:
+        budget.reserve_visits(10_001, depth=2)
+
     assert "resource limit" in str(exc.value)
 
 
