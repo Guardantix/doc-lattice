@@ -2,6 +2,7 @@
 
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from doc_lattice.error_types import ConfigError
@@ -154,6 +155,14 @@ _MANAGED_MESSAGES = {
         "managed Linear secret scope differs from the canonical installation"
     ),
 }
+
+
+@dataclass(slots=True)
+class _SubstitutionScanState:
+    separated: list[str]
+    quotes: list[str | None]
+    substitution_depths: list[int]
+    parameter_depths: list[int]
 
 
 def audit_global_workflows(
@@ -372,6 +381,7 @@ def direct_doc_lattice_invocations(script: str) -> tuple[tuple[str, bool], ...]:
     normalized = normalized.replace("\n", "\n;\n")
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars=";&|()<>")
     lexer.whitespace_split = True
+    lexer.commenters = ""
 
     invocations: list[tuple[str, bool]] = []
     command: list[str] = []
@@ -576,12 +586,12 @@ def _strip_heredoc_bodies(script: str) -> str:
             if candidate == delimiter:
                 pending.pop(0)
             continue
-        retained.append(line)
-        delimiters, quote, arithmetic_depth = _heredoc_delimiters(
+        retained_line, delimiters, quote, arithmetic_depth = _heredoc_delimiters(
             line,
             quote,
             arithmetic_depth,
         )
+        retained.append(retained_line)
         pending.extend(delimiters)
     return "\n".join(retained)
 
@@ -590,29 +600,42 @@ def _heredoc_delimiters(
     line: str,
     quote: str | None,
     arithmetic_depth: int,
-) -> tuple[list[tuple[str, bool]], str | None, int]:
+) -> tuple[str, list[tuple[str, bool]], str | None, int]:
     delimiters: list[tuple[str, bool]] = []
     index = 0
+    word_start = quote is None
     while index < len(line):
         character = line[index]
         if quote is not None:
             index, quote = _advance_quoted_character(line, index, quote)
+            word_start = False
             continue
+        if character in {" ", "\t"}:
+            word_start = True
+            index += 1
+            continue
+        if character == "#" and word_start:
+            return line[:index], delimiters, quote, arithmetic_depth
         if character in {"'", '"'}:
             quote = character
+            word_start = False
             index += 1
             continue
         if character == "\\":
+            word_start = False
             index += 2
             continue
         arithmetic_step = _arithmetic_scan_step(line, index, arithmetic_depth)
         if arithmetic_step is not None:
             index, arithmetic_depth = arithmetic_step
+            word_start = False
             continue
         if line.startswith("<<<", index):
             index += 3
+            word_start = True
             continue
         if not line.startswith("<<", index):
+            word_start = character in ";&|()<>"
             index += 1
             continue
         index += 2
@@ -624,7 +647,8 @@ def _heredoc_delimiters(
         delimiter, index = _read_heredoc_delimiter(line, index)
         if delimiter:
             delimiters.append((delimiter, strip_tabs))
-    return delimiters, quote, arithmetic_depth
+        word_start = False
+    return line, delimiters, quote, arithmetic_depth
 
 
 def _advance_quoted_character(
@@ -677,6 +701,10 @@ def _read_heredoc_delimiter(line: str, start: int) -> tuple[str, int]:
             if not closed:
                 return "", index
             characters.extend(segment)
+            continue
+        if line.startswith('$"', index):
+            quote = '"'
+            index += 2
             continue
         if character in {"'", '"'}:
             quote = character
@@ -809,70 +837,90 @@ def _collect_quoted_delimiter_character(
 
 
 def _separate_legacy_command_substitutions(script: str) -> str:
-    separated: list[str] = []
+    state = _SubstitutionScanState(
+        separated=[],
+        quotes=[None],
+        substitution_depths=[],
+        parameter_depths=[0],
+    )
     index = 0
-    quotes: list[str | None] = [None]
-    substitution_depths: list[int] = []
     while index < len(script):
         character = script[index]
-        if character == "\\":
-            separated.append(character)
-            if index + 1 < len(script):
-                index += 1
-                separated.append(script[index])
-            index += 1
+        context_end = _advance_shell_context(script, index, state)
+        if context_end is not None:
+            index = context_end
             continue
-        if character in {"'", '"'}:
-            quotes[-1] = _updated_shell_quote(quotes[-1], character)
-            separated.append(character)
-            index += 1
-            continue
-        if (
-            script.startswith("$(", index)
-            and not script.startswith("$((", index)
-            and quotes[-1] != "'"
-        ):
-            separated.append("$(")
-            quotes.append(None)
-            substitution_depths.append(1)
-            index += 2
-            continue
-        if substitution_depths and quotes[-1] is None and character in {"(", ")"}:
-            _update_substitution_context(
-                character,
-                quotes,
-                substitution_depths,
-            )
-            separated.append(character)
-            index += 1
-            continue
-        if character != "`" or quotes[-1] == "'":
-            separated.append(character)
+        if character != "`" or state.quotes[-1] == "'":
+            state.separated.append(character)
             index += 1
             continue
         closing = _legacy_command_substitution_end(script, index + 1)
         if closing is None:
-            separated.append(character)
+            state.separated.append(character)
             index += 1
             continue
         body = script[index + 1 : closing]
-        separated.extend(_legacy_substitution_fragments(body, quotes))
+        state.separated.extend(_legacy_substitution_fragments(body, state.quotes))
         index = closing + 1
-    return "".join(separated)
+    return "".join(state.separated)
+
+
+def _advance_shell_context(
+    script: str,
+    index: int,
+    state: _SubstitutionScanState,
+) -> int | None:
+    character = script[index]
+    end: int | None = None
+    if character == "\\":
+        end = min(index + 2, len(script))
+        state.separated.append(script[index:end])
+    elif character in {"'", '"'}:
+        state.quotes[-1] = _updated_shell_quote(state.quotes[-1], character)
+        state.separated.append(character)
+        end = index + 1
+    elif script.startswith("${", index) and state.quotes[-1] != "'":
+        state.parameter_depths[-1] += 1
+        state.separated.append("${")
+        end = index + 2
+    elif state.parameter_depths[-1] and state.quotes[-1] is None and character == "}":
+        state.parameter_depths[-1] -= 1
+        state.separated.append(character)
+        end = index + 1
+    elif (
+        script.startswith("$(", index)
+        and not script.startswith("$((", index)
+        and state.quotes[-1] != "'"
+    ):
+        state.separated.append("$(")
+        state.quotes.append(None)
+        state.substitution_depths.append(1)
+        state.parameter_depths.append(0)
+        end = index + 2
+    elif (
+        state.substitution_depths
+        and state.parameter_depths[-1] == 0
+        and state.quotes[-1] is None
+        and character in {"(", ")"}
+    ):
+        _update_substitution_context(character, state)
+        state.separated.append(character)
+        end = index + 1
+    return end
 
 
 def _update_substitution_context(
     character: str,
-    quotes: list[str | None],
-    depths: list[int],
+    state: _SubstitutionScanState,
 ) -> None:
     if character == "(":
-        depths[-1] += 1
+        state.substitution_depths[-1] += 1
         return
-    depths[-1] -= 1
-    if depths[-1] == 0:
-        depths.pop()
-        quotes.pop()
+    state.substitution_depths[-1] -= 1
+    if state.substitution_depths[-1] == 0:
+        state.substitution_depths.pop()
+        state.quotes.pop()
+        state.parameter_depths.pop()
 
 
 def _updated_shell_quote(quote: str | None, character: str) -> str | None:

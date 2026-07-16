@@ -325,6 +325,35 @@ def test_direct_doc_lattice_invocations_detects_active_backticks_in_substitution
     assert direct_doc_lattice_invocations(script) == (("linear", False),)
 
 
+def test_direct_doc_lattice_invocations_ignores_heredoc_text_in_comment():
+    script = "# note <<EOF\ndoc-lattice linear"
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_removes_locale_quoted_heredoc_body():
+    script = """\
+cat <<$"EOF"
+harmless
+EOF
+doc-lattice linear
+"""
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_keeps_hash_inside_shell_word():
+    script = "doc-lattice reconcile --all --ref --dry-run#suffix"
+
+    assert direct_doc_lattice_invocations(script) == (("reconcile", False),)
+
+
+def test_direct_doc_lattice_invocations_tracks_parameter_expansion_in_substitution():
+    script = '''echo "$(printf %s ${x:-)}; printf '%s' '`doc-lattice linear`')"'''
+
+    assert direct_doc_lattice_invocations(script) == ()
+
+
 def test_global_audit_reports_target_secret_linear_and_mutating_reconcile():
     document = _workflow(
         """\
