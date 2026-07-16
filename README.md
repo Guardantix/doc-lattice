@@ -483,26 +483,54 @@ The initial script supports GitHub.com repositories whose default branch is exac
 requires Bash 3.2 or later and an authenticated GitHub CLI. Run it on macOS or Linux, or on Windows
 through Git Bash or WSL. Native PowerShell is not supported.
 
-Run this sequence from reviewed, trusted project state:
+Run this human-maintainer sequence from reviewed, trusted project state:
 
-```bash
-uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice init \
-  --github --repository OWNER/REPO
-bash .github/doc-lattice-bootstrap.sh plan OWNER/REPO
-bash .github/doc-lattice-bootstrap.sh apply OWNER/REPO
+1. Generate and review the local managed artifacts.
 
-# Continue only after apply prints: environment policy verified
-gh secret set DOC_LATTICE_LINEAR_API_KEY \
-  --env doc-lattice-linear --repo OWNER/REPO
+   ```bash
+   uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice init \
+     --github --repository OWNER/REPO
+   ```
 
-# Run either deletion only when plan/apply reported that repository-scoped name.
-gh secret delete LINEAR_API_KEY --repo OWNER/REPO
-gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo OWNER/REPO
+2. Inspect the remote repository, plan eligibility, environment, and visible secret names.
 
-bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO
-uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit \
-  --repository OWNER/REPO
-```
+   ```bash
+   bash .github/doc-lattice-bootstrap.sh plan OWNER/REPO
+   ```
+
+3. Apply and read back the exact `main`-only environment policy after typing the canonical
+   repository identity.
+
+   ```bash
+   bash .github/doc-lattice-bootstrap.sh apply OWNER/REPO
+   ```
+
+4. Set the dedicated environment secret separately.
+
+   Stop unless `apply` printed the exact success phrase: `environment policy verified`.
+
+   ```bash
+   # Continue only after apply prints: environment policy verified
+   gh secret set DOC_LATTICE_LINEAR_API_KEY \
+     --env doc-lattice-linear --repo OWNER/REPO
+   ```
+
+5. Complete legacy migration in the same reviewed change. Remove the old hand-written Linear
+   workflow, and run either deletion only when `plan` or `apply` reported that repository-scoped
+   name.
+
+   ```bash
+   gh secret delete LINEAR_API_KEY --repo OWNER/REPO
+   gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo OWNER/REPO
+   ```
+
+6. Verify both the remote environment state and the committed local workflow policy.
+
+   ```bash
+   bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO
+   uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit \
+     --repository OWNER/REPO
+   ```
 
 The secret-setting command is not ready before `apply` re-reads and proves the exact `main`-only
 environment policy. `apply` never receives the Linear key. `gh secret set` prompts for the value or
@@ -583,6 +611,14 @@ ordinary `pull_request`, `pull_request_review`, and `pull_request_review_comment
 uses the default branch ref, so the environment can authorize it while it handles untrusted input.
 For that reason audit bans `pull_request_target` repository-wide, and trusted default-branch review
 remains a load-bearing control.
+
+Before December 8, 2025, GitHub evaluated environment branch policy for pull-request-family runs
+against the attacker-controlled pull-request head branch. The exact `main`, with no pattern, rule
+was load-bearing under those semantics: relaxing it to a pattern such as `release/*` would
+authorize attacker-chosen matching head branches. Even the exact name could be attacker-chosen, so
+this design does not claim that the rule repairs the older behavior.
+
+Older GitHub Enterprise Server versions are unsupported pending a separate compatibility review.
 
 No generated workflow runs real `reconcile`; the offline workflow does not run even
 `reconcile --dry-run` in this release. The exact managed triggers also omit `merge_group`, so merge

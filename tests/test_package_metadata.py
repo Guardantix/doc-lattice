@@ -232,13 +232,27 @@ def test_supported_docs_describe_conflict_safe_reconcile():
 def test_supported_docs_order_github_linear_secret_after_verified_policy():
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     assert readme.count("gh secret set DOC_LATTICE_LINEAR_API_KEY") == 1
+    assert "1. Generate and review" in readme
+    assert "6. Verify both" in readme
     verified = readme.index("environment policy verified")
     secret_set = readme.index("gh secret set DOC_LATTICE_LINEAR_API_KEY")
     assert verified < secret_set
+    assert (
+        "Stop unless `apply` printed the exact success phrase: "
+        "`environment policy verified`.\n\n   ```bash\n"
+        "   # Continue only after apply prints: environment policy verified\n"
+        "   gh secret set DOC_LATTICE_LINEAR_API_KEY"
+    ) in readme
     assert "gh secret delete LINEAR_API_KEY --repo" in readme
     assert "gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo" in readme
     assert "pull_request_target" in readme
     assert "ci audit is meaningful only after" in readme
+    assert "Before December 8, 2025" in readme
+    assert "attacker-controlled pull-request head branch" in readme
+    assert "exact `main`, with no pattern" in readme
+    assert "`release/*`" in readme
+    assert "Older GitHub Enterprise Server" in readme
+    assert "separate compatibility review" in readme
 
 
 def test_architecture_records_external_github_administration_boundary():

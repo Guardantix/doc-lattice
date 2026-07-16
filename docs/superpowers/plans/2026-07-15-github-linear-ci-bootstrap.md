@@ -1983,10 +1983,12 @@ def test_architecture_records_external_github_administration_boundary():
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_package_metadata.py -v
+uv run --group dev pytest --no-cov tests/test_package_metadata.py -v
 ```
 
-Expected: the new README and architecture assertions fail.
+Expected: the new README and architecture assertions fail. This focused metadata-only suite imports
+no production code, so it disables coverage; the complete full-suite run is the authoritative
+coverage gate.
 
 - [ ] **Step 3: Update README command and adoption documentation**
 
@@ -2070,12 +2072,13 @@ generated Linear workflow uses an environment-only credential and that existing 
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_package_metadata.py -v
+uv run --group dev pytest --no-cov tests/test_package_metadata.py -v
 UV_CACHE_DIR=/tmp/doc-lattice-uv-cache uv run --group dev python scripts/check_version_sync.py
 git diff --check
 ```
 
-Expected: documentation-contract tests and version sync pass; diff check prints nothing.
+Expected: documentation-contract tests and version sync pass; diff check prints nothing. The
+complete full-suite run remains the authoritative coverage gate.
 
 - [ ] **Step 7: Commit supported documentation**
 
