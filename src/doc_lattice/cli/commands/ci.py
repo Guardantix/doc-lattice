@@ -132,6 +132,7 @@ def register_ci(app: typer.Typer) -> None:
                             "run a fresh preview before applying"
                         )
                     apply_changes(repeated_changes)
+                    _verify_refresh_converged(runtime, artifacts)
         raise typer.Exit(exit_code)
 
 
@@ -167,7 +168,6 @@ def _resolve_repository(
             ],
             cwd=runtime.cwd,
             capture_output=True,
-            text=True,
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
@@ -175,7 +175,11 @@ def _resolve_repository(
         raise ConfigError("cannot resolve repository from git origin") from exc
     if completed.returncode != 0:
         raise ConfigError("cannot resolve repository from git origin")
-    lines = completed.stdout.splitlines()
+    try:
+        stdout = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("cannot decode repository from git origin as UTF-8") from exc
+    lines = stdout.splitlines()
     if len(lines) != 1 or not lines[0]:
         raise ConfigError("cannot resolve repository from git origin")
     return parse_origin_repository(lines[0])
@@ -192,3 +196,20 @@ def _repeat_refresh_preflight(
         raise ConfigError(
             "managed artifacts changed after confirmation; run a fresh preview before applying"
         ) from exc
+
+
+def _verify_refresh_converged(
+    runtime: CliRuntime,
+    artifacts: tuple[ManagedArtifact, ...],
+) -> None:
+    """Require every managed artifact to remain current after refresh writes."""
+    try:
+        installed = preflight_refresh(runtime.cwd, artifacts)
+    except ConfigError as exc:
+        raise ConfigError(
+            "managed refresh did not converge; inspect installed artifacts and run a fresh preview"
+        ) from exc
+    if any(change.action != "current" for change in installed):
+        raise ConfigError(
+            "managed refresh did not converge; inspect installed artifacts and run a fresh preview"
+        )

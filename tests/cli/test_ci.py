@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from io import StringIO
 from typing import TYPE_CHECKING, cast
 
@@ -37,6 +38,20 @@ class _TtyStringIO(StringIO):
 def _install(root: Path, repository: str = "Guardantix/doc-lattice") -> None:
     artifacts = render_managed_artifacts(repository, __version__)
     apply_changes(preflight_create(root, artifacts))
+
+
+def _write_non_utf8_origin(root: Path) -> None:
+    subprocess.run(
+        ["git", "init", "--quiet"],  # noqa: S607 - test requires the local git executable
+        cwd=root,
+        check=True,
+    )
+    config = root / ".git/config"
+    config.write_bytes(
+        config.read_bytes() + b"\n"
+        b'[remote "origin"]\n'
+        b"\turl = https://github.com/Guardantix/SENSITIVE_ORIGIN_\xff.git\n"
+    )
 
 
 def _runtime(tmp_path: Path) -> tuple[CliRuntime, StringIO]:
@@ -122,9 +137,9 @@ def test_ci_audit_omitted_repository_resolves_supported_origin(
     monkeypatch.chdir(tmp_path)
     calls: list[tuple[list[str], Path, int]] = []
 
-    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         assert kwargs["capture_output"] is True
-        assert kwargs["text"] is True
+        assert "text" not in kwargs
         assert kwargs["check"] is False
         calls.append(
             (
@@ -133,7 +148,7 @@ def test_ci_audit_omitted_repository_resolves_supported_origin(
                 cast("int", kwargs["timeout"]),
             )
         )
-        return subprocess.CompletedProcess(argv, 0, origin, "")
+        return subprocess.CompletedProcess(argv, 0, origin.encode(), b"")
 
     monkeypatch.setattr(ci_module.subprocess, "run", fake_run)
     result = runner.invoke(app, ["ci", "audit"])
@@ -152,16 +167,16 @@ def test_ci_audit_omitted_repository_resolves_supported_origin(
 @pytest.mark.parametrize(
     ("failure", "message"),
     [
-        (subprocess.CompletedProcess([], 1, "", "ignored"), "cannot resolve"),
-        (subprocess.CompletedProcess([], 0, "", ""), "cannot resolve"),
+        (subprocess.CompletedProcess([], 1, b"", b"ignored"), "cannot resolve"),
+        (subprocess.CompletedProcess([], 0, b"", b""), "cannot resolve"),
         (
             subprocess.CompletedProcess(
-                [], 0, "https://github.com/a/b\nhttps://github.com/c/d\n", ""
+                [], 0, b"https://github.com/a/b\nhttps://github.com/c/d\n", b""
             ),
             "cannot resolve",
         ),
         (
-            subprocess.CompletedProcess([], 0, "https://example.com/a/b\n", ""),
+            subprocess.CompletedProcess([], 0, b"https://example.com/a/b\n", b""),
             "origin URL",
         ),
     ],
@@ -169,7 +184,7 @@ def test_ci_audit_omitted_repository_resolves_supported_origin(
 def test_ci_audit_missing_ambiguous_or_unsupported_origin_exits_two(
     tmp_path: Path,
     monkeypatch,
-    failure: subprocess.CompletedProcess[str],
+    failure: subprocess.CompletedProcess[bytes],
     message: str,
 ):
     monkeypatch.chdir(tmp_path)
@@ -180,6 +195,51 @@ def test_ci_audit_missing_ambiguous_or_unsupported_origin_exits_two(
     assert result.stdout == ""
     assert message in result.stderr
     assert "CONFIG_ERROR" in result.stderr
+
+
+def test_ci_audit_non_utf8_real_git_origin_exits_two_without_leaking(tmp_path: Path, monkeypatch):
+    _write_non_utf8_origin(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["ci", "audit"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == (
+        "error: cannot decode repository from git origin as UTF-8 (CONFIG_ERROR)\n"
+    )
+    assert "Traceback" not in result.stderr
+    assert "internal error" not in result.stderr
+    assert "SENSITIVE_ORIGIN" not in result.stderr
+    assert "b'" not in result.stderr
+
+
+def test_ci_audit_non_utf8_real_git_origin_has_stable_entry_error(tmp_path: Path):
+    _write_non_utf8_origin(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from doc_lattice.cli import main; main()",
+            "ci",
+            "audit",
+        ],
+        cwd=tmp_path,
+        env={"NO_COLOR": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == (
+        "error: cannot decode repository from git origin as UTF-8 (CONFIG_ERROR)\n"
+    )
+    assert "Traceback" not in completed.stderr
+    assert "internal error" not in completed.stderr
+    assert "SENSITIVE_ORIGIN" not in completed.stderr
+    assert "b'" not in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -340,7 +400,7 @@ def test_ci_refresh_apply_repeats_preflight_and_applies_exact_plan(tmp_path: Pat
 
     assert result.exit_code == 0
     assert confirmations == ["Guardantix/doc-lattice"]
-    assert preflight_calls == 2
+    assert preflight_calls == 3
     expected = render_managed_artifacts("Guardantix/doc-lattice", __version__)
     assert all(
         (tmp_path / artifact.relative_path).read_text(encoding="utf-8") == artifact.text
@@ -366,6 +426,36 @@ def test_ci_refresh_apply_refuses_change_after_confirmation(tmp_path: Path, monk
     assert result.exit_code == 2
     assert "fresh preview" in result.stderr
     assert target.read_text(encoding="utf-8").endswith("# changed\n")
+
+
+def test_ci_refresh_apply_detects_current_artifact_race_during_apply(tmp_path: Path, monkeypatch):
+    current = render_managed_artifacts("Guardantix/doc-lattice", __version__)
+    old = render_managed_artifacts("Guardantix/doc-lattice", "1.9.0")
+    apply_changes(preflight_create(tmp_path, (current[0], old[1], old[2])))
+    raced_target = tmp_path / current[0].relative_path
+    real_apply = ci_module.apply_changes
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        ci_module,
+        "require_repository_confirmation",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def race_current_artifact(changes: tuple[ArtifactChange, ...]) -> None:
+        raced_target.write_text(old[0].text, encoding="utf-8")
+        real_apply(changes)
+
+    monkeypatch.setattr(ci_module, "apply_changes", race_current_artifact)
+    result = runner.invoke(
+        app,
+        ["ci", "refresh", "--repository", "Guardantix/doc-lattice", "--apply"],
+    )
+
+    assert result.exit_code == 2
+    assert "did not converge" in result.stderr
+    assert raced_target.read_text(encoding="utf-8") == old[0].text
+    assert (tmp_path / current[1].relative_path).read_text(encoding="utf-8") == current[1].text
+    assert (tmp_path / current[2].relative_path).read_text(encoding="utf-8") == current[2].text
 
 
 def test_ci_refresh_recreates_missing_bootstrap(tmp_path: Path, monkeypatch):
