@@ -32,6 +32,333 @@ def _finding_codes(findings) -> set[str]:
     return {finding.code for finding in findings}
 
 
+NONE = ()
+LINEAR = (("linear", False),)
+RECONCILE = (("reconcile", False),)
+RECONCILE_DRY = (("reconcile", True),)
+CHECK = (("check", False),)
+LINEAR_LINT = (("linear", False), ("lint", False))
+
+ACCEPTANCE_CASES = [
+    # Literal executable identity and control syntax.
+    ("ansi-c executable", "$'doc-lattice' linear", LINEAR),
+    ("locale executable", '$"doc-lattice" linear', LINEAR),
+    ("concatenated quoted words", 'doc-"lattice" l"inear"', LINEAR),
+    (
+        "elif condition",
+        "if false; then :; elif doc-lattice linear; then :; fi",
+        LINEAR,
+    ),
+    (
+        "while condition",
+        "while doc-lattice check; do break; done",
+        CHECK,
+    ),
+    (
+        "until condition",
+        "until doc-lattice check; do break; done",
+        CHECK,
+    ),
+    ("time reserved word", "time doc-lattice linear", LINEAR),
+    (
+        "coproc reserved word",
+        'coproc doc-lattice linear; p=$COPROC_PID; wait "$p"',
+        LINEAR,
+    ),
+    ("case arm", "case x in x) doc-lattice linear;; esac", LINEAR),
+    (
+        "runtime-unreachable command remains conservative",
+        "false && doc-lattice linear",
+        LINEAR,
+    ),
+    # Modern command substitutions.
+    ("double-quoted substitution", 'echo "$(doc-lattice linear)"', LINEAR),
+    (
+        "assignment-only substitution",
+        'value="$(doc-lattice reconcile --all)"',
+        RECONCILE,
+    ),
+    (
+        "nested substitution",
+        'echo "$(printf %s "$(doc-lattice linear)")"',
+        LINEAR,
+    ),
+    ("locale-quoted substitution", 'echo $"$(doc-lattice linear)"', LINEAR),
+    (
+        "escaped substitution literal",
+        r'echo "\$(doc-lattice linear)"',
+        NONE,
+    ),
+    (
+        "single-quoted substitution literal",
+        "echo '$(doc-lattice linear)'",
+        NONE,
+    ),
+    (
+        "inner single-quoted substitution literal",
+        """echo "$(printf '%s' '$(doc-lattice linear)')\"""",
+        NONE,
+    ),
+    (
+        "comment then active command",
+        'echo "$(true # harmless\ndoc-lattice linear)"',
+        LINEAR,
+    ),
+    (
+        "backticks inside substitution comment",
+        'echo "$(true # `doc-lattice linear`\nprintf done)"',
+        NONE,
+    ),
+    (
+        "comment line then active command",
+        'echo "$(\n# doc-lattice linear\ndoc-lattice check\n)"',
+        CHECK,
+    ),
+    # Legacy backtick substitutions.
+    (
+        "nested legacy substitution",
+        "echo `printf '%s' \\`doc-lattice linear\\``",
+        LINEAR,
+    ),
+    (
+        "legacy substitution comment literal",
+        "echo `true # doc-lattice linear\nprintf done`",
+        NONE,
+    ),
+    (
+        "legacy substitution command after comment",
+        "echo `true # harmless\ndoc-lattice linear`",
+        LINEAR,
+    ),
+    # Parameter and arithmetic contexts.
+    (
+        "parameter default substitution",
+        'unset x; echo "${x:-$(doc-lattice linear)}"',
+        LINEAR,
+    ),
+    (
+        "nested parameter substitution",
+        'unset x y; echo "${x:-${y:-$(doc-lattice linear)}}"',
+        LINEAR,
+    ),
+    (
+        "parameter parenthesis does not close substitution",
+        'echo "$(printf %s ${x:-)}; doc-lattice linear)"',
+        LINEAR,
+    ),
+    (
+        "hash inside parameter expansion is not a comment",
+        'unset x; echo "${x:-# $(doc-lattice linear)}"',
+        LINEAR,
+    ),
+    (
+        "single-quoted parameter expansion literal",
+        "echo '${x:-$(doc-lattice linear)}'",
+        NONE,
+    ),
+    (
+        "parameter text resembling heredoc",
+        "echo ${x:-<<EOF}\ndoc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "parameter arithmetic shift",
+        "x=abcdef; echo ${x:1<<2}\ndoc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "arithmetic expansion shift",
+        "echo $((1 << 2))\ndoc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "arithmetic command shift",
+        "((x = 1 << 2))\ndoc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "legacy arithmetic shift",
+        "echo $[1 << 2]\ndoc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "modern substitution in arithmetic",
+        "echo $(( $(doc-lattice check) + 1 ))",
+        CHECK,
+    ),
+    (
+        "legacy substitution in arithmetic",
+        "echo $(( `doc-lattice check` + 1 ))",
+        CHECK,
+    ),
+    (
+        "substitution in legacy arithmetic",
+        "echo $[ $(doc-lattice check) + 1 ]",
+        CHECK,
+    ),
+    # Heredocs, here-strings, and process substitutions.
+    (
+        "plain heredoc body is data",
+        "cat <<EOF\ndoc-lattice linear\nEOF\ndoc-lattice check",
+        CHECK,
+    ),
+    (
+        "unquoted heredoc expands modern substitution",
+        "cat <<EOF\n$(doc-lattice linear)\nEOF",
+        LINEAR,
+    ),
+    (
+        "quote characters do not quote unquoted heredoc body",
+        "cat <<EOF\n'$(doc-lattice linear)'\nEOF",
+        LINEAR,
+    ),
+    (
+        "escaped dollar in unquoted heredoc",
+        "cat <<EOF\n\\$(doc-lattice linear)\nEOF",
+        NONE,
+    ),
+    (
+        "quoted heredoc suppresses modern substitution",
+        "cat <<'EOF'\n$(doc-lattice linear)\nEOF",
+        NONE,
+    ),
+    (
+        "ansi-quoted heredoc suppresses substitution",
+        "cat <<$'EOF'\n$(doc-lattice linear)\nEOF",
+        NONE,
+    ),
+    (
+        "locale-quoted heredoc suppresses substitution",
+        'cat <<$"EOF"\n$(doc-lattice linear)\nEOF',
+        NONE,
+    ),
+    (
+        "unquoted heredoc expands backticks",
+        "cat <<EOF\n`doc-lattice linear`\nEOF",
+        LINEAR,
+    ),
+    (
+        "quoted heredoc suppresses backticks",
+        "cat <<'EOF'\n`doc-lattice linear`\nEOF",
+        NONE,
+    ),
+    (
+        "hash does not comment unquoted heredoc expansion",
+        "cat <<EOF\n# $(doc-lattice linear)\nEOF",
+        LINEAR,
+    ),
+    (
+        "nested unquoted heredoc",
+        'echo "$(cat <<EOF\n$(doc-lattice linear)\nEOF\n)"',
+        LINEAR,
+    ),
+    (
+        "nested quoted heredoc",
+        "echo \"$(cat <<'EOF'\n$(doc-lattice linear)\nEOF\n)\"",
+        NONE,
+    ),
+    (
+        "multiple heredocs retain expansion policy and ordering",
+        (
+            "cat <<A <<'B'\n"
+            "$(doc-lattice linear)\n"
+            "A\n"
+            "$(doc-lattice reconcile --all)\n"
+            "B\n"
+            "doc-lattice lint"
+        ),
+        LINEAR_LINT,
+    ),
+    (
+        "here-string substitution",
+        'cat <<< "$(doc-lattice linear)"',
+        LINEAR,
+    ),
+    ("here-string literal", "cat <<< 'doc-lattice linear'", NONE),
+    (
+        "input process substitution",
+        "cat <(doc-lattice linear) >/dev/null",
+        LINEAR,
+    ),
+    (
+        "output process substitution",
+        "printf x > >(doc-lattice linear)",
+        LINEAR,
+    ),
+    (
+        "process substitution literal argument",
+        "cat <(printf '%s' 'doc-lattice linear') >/dev/null",
+        NONE,
+    ),
+    # Redirection placement and dry-run accounting.
+    (
+        "named-fd redirection before executable",
+        "{fd}>/dev/null doc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "redirection before subcommand",
+        "doc-lattice >/dev/null linear",
+        LINEAR,
+    ),
+    (
+        "redirection before uv payload",
+        "uv run >/dev/null doc-lattice linear",
+        LINEAR,
+    ),
+    (
+        "dry-run is redirection target",
+        "doc-lattice reconcile > --dry-run",
+        RECONCILE,
+    ),
+    (
+        "dry-run is here-string redirection word",
+        "doc-lattice reconcile <<< --dry-run",
+        RECONCILE,
+    ),
+    (
+        "quoted dry-run remains an argv token",
+        "doc-lattice reconcile '--dry-run'",
+        RECONCILE_DRY,
+    ),
+    (
+        "dynamically expanded dry-run is not a distinct lexical token",
+        'FLAG=--dry-run; doc-lattice reconcile "$FLAG"',
+        RECONCILE,
+    ),
+    (
+        "substitution in redirection target executes",
+        'printf x > "$(doc-lattice check)"',
+        CHECK,
+    ),
+    # Literal multiline and malformed-fragment boundaries.
+    (
+        "multiline double-quoted literal",
+        'printf "%s" "doc-lattice linear\nuv run doc-lattice reconcile"',
+        NONE,
+    ),
+    (
+        "multiline single-quoted literal",
+        "printf '%s' 'doc-lattice linear\nuv run doc-lattice reconcile'",
+        NONE,
+    ),
+    (
+        "complete command before malformed substitution",
+        'doc-lattice check; echo "$(',
+        CHECK,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script", "expected"),
+    ACCEPTANCE_CASES,
+    ids=[case[0] for case in ACCEPTANCE_CASES],
+)
+def test_direct_doc_lattice_acceptance_corpus(_description, script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
 @pytest.mark.parametrize(
     ("script", "expected"),
     [
