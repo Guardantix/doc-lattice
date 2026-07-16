@@ -406,6 +406,20 @@ def test_direct_doc_lattice_invocations_handles_documented_forms(script, expecte
         ("{ doc-lattice reconcile --all; }", RECONCILE),
         ("time -p doc-lattice linear", LINEAR),
         ("coproc DL doc-lattice reconcile --all", RECONCILE),
+        (
+            "coproc DL uvx --from doc-lattice==2.1.0 doc-lattice linear",
+            LINEAR,
+        ),
+        ("coproc DL uv run doc-lattice reconcile --all", RECONCILE),
+        ("coproc DL env X=1 doc-lattice linear", LINEAR),
+        ("coproc DL command doc-lattice reconcile --all", RECONCILE),
+        (
+            "coproc uvx --from doc-lattice==2.1.0 doc-lattice linear",
+            LINEAR,
+        ),
+        ("coproc uv run doc-lattice reconcile --all", RECONCILE),
+        ("coproc env X=1 doc-lattice linear", LINEAR),
+        ("coproc command doc-lattice reconcile --all", RECONCILE),
     ],
 )
 def test_direct_doc_lattice_invocations_handles_root_options_and_compound_grammar(
@@ -428,6 +442,19 @@ def test_direct_doc_lattice_invocations_handles_root_options_and_compound_gramma
         ("{ doc-lattice reconcile --all; }", "PR_MUTATING_RECONCILE"),
         ("time -p doc-lattice linear", "PR_LINEAR_INVOCATION"),
         ("coproc DL doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
+        (
+            "coproc DL uvx --from doc-lattice==2.1.0 doc-lattice linear",
+            "PR_LINEAR_INVOCATION",
+        ),
+        (
+            "coproc DL uv run doc-lattice reconcile --all",
+            "PR_MUTATING_RECONCILE",
+        ),
+        ("coproc DL env X=1 doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        (
+            "coproc DL command doc-lattice reconcile --all",
+            "PR_MUTATING_RECONCILE",
+        ),
     ],
 )
 def test_global_audit_rejects_root_options_and_compound_grammar_on_pr(

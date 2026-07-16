@@ -900,10 +900,7 @@ def direct_doc_lattice_invocations(script: str) -> tuple[_Invocation, ...]:
 
 
 def _invocation_in_simple_command(words: list[_ShellWord]) -> _Invocation | None:
-    index = _skip_shell_prefixes(words, 0)
-    if index >= len(words):
-        return None
-    executable_index = _doc_lattice_payload_index(words, index)
+    executable_index = _doc_lattice_command_index(words, 0)
     if executable_index is None:
         return None
     subcommand_index = _doc_lattice_subcommand_index(words, executable_index + 1)
@@ -933,9 +930,6 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> int:
             if index < len(words) and not words[index].dynamic and words[index].literal == "-p":
                 index += 1
             continue
-        if word.literal == "coproc":
-            index = _skip_coproc_prefix(words, index + 1)
-            continue
         if word.literal == "env":
             index = _skip_env_prefix(words, index + 1)
             continue
@@ -945,22 +939,6 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> int:
             return _skip_exec_wrapper(words, index + 1)
         return index
     return index
-
-
-def _skip_coproc_prefix(words: list[_ShellWord], start: int) -> int:
-    """Skip the optional literal name in a named Bash coprocess."""
-    if start + 1 >= len(words):
-        return start
-    name = words[start]
-    executable = words[start + 1]
-    if (
-        not name.dynamic
-        and _is_name(name.literal)
-        and not executable.dynamic
-        and _basename(executable.literal) == "doc-lattice"
-    ):
-        return start + 1
-    return start
 
 
 def _skip_command_builtin(words: list[_ShellWord], start: int) -> int:
@@ -1013,10 +991,52 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
     return index
 
 
+def _doc_lattice_command_index(
+    words: list[_ShellWord],
+    start: int,
+) -> int | None:
+    """Resolve one direct command, including an optional named Bash coprocess."""
+    command_index = _skip_shell_prefixes(words, start)
+    if (
+        command_index < len(words)
+        and not words[command_index].dynamic
+        and words[command_index].literal == "coproc"
+    ):
+        return _coproc_doc_lattice_command_index(words, command_index + 1)
+    return _doc_lattice_payload_index(words, command_index)
+
+
+def _coproc_doc_lattice_command_index(
+    words: list[_ShellWord],
+    start: int,
+) -> int | None:
+    """Resolve the unnamed command or one optional literal coprocess name."""
+    unnamed = _doc_lattice_command_after_prefixes(words, start)
+    if unnamed is not None:
+        return unnamed
+    if start >= len(words):
+        return None
+    name = words[start]
+    if name.dynamic or not _is_name(name.literal):
+        return None
+    return _doc_lattice_command_after_prefixes(words, start + 1)
+
+
+def _doc_lattice_command_after_prefixes(
+    words: list[_ShellWord],
+    start: int,
+) -> int | None:
+    """Reuse normal prefix, wrapper, and payload resolution from one command start."""
+    executable_index = _skip_shell_prefixes(words, start)
+    return _doc_lattice_payload_index(words, executable_index)
+
+
 def _doc_lattice_payload_index(
     words: list[_ShellWord],
     executable_index: int,
 ) -> int | None:
+    if executable_index >= len(words):
+        return None
     executable_word = words[executable_index]
     executable = _basename(executable_word.literal)
     if _is_doc_lattice_executable(executable_word):
