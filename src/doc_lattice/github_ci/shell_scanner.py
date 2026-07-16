@@ -263,6 +263,33 @@ _ANSI_C_SIMPLE_ESCAPES = {
 class _ShellWord:
     literal: str
     dynamic: bool = False
+    active_argv_expansion: bool = False
+
+
+@dataclass(slots=True)
+class _ShellWordBuilder:
+    characters: list[str]
+    active_syntax: list[str]
+    dynamic: bool = False
+
+    def append_protected(self, segment: str | list[str], *, dynamic: bool = False) -> None:
+        """Append text protected from literal argv expansion."""
+        self.characters.extend(segment)
+        self.active_syntax.append(" ")
+        self.dynamic = self.dynamic or dynamic
+
+    def append_active(self, character: str) -> None:
+        """Append one unquoted, unescaped literal character."""
+        self.characters.append(character)
+        self.active_syntax.append(character)
+
+    def build(self) -> _ShellWord:
+        """Build the immutable decoded word and its expansion provenance."""
+        return _ShellWord(
+            "".join(self.characters),
+            self.dynamic,
+            _has_active_argv_expansion("".join(self.active_syntax)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -825,8 +852,7 @@ class _ShellScanner:
         limit: int,
         depth: int,
     ) -> tuple[_ShellWord, int]:
-        characters: list[str] = []
-        dynamic = False
+        builder = _ShellWordBuilder([], [])
         index = start
         while index < limit and self.source[index] not in _WORD_BREAKS:
             self.budget.step()
@@ -836,7 +862,7 @@ class _ShellScanner:
                     index,
                     limit,
                 )
-                characters.extend(segment)
+                builder.append_protected(segment)
                 continue
             if self.source.startswith('$"', index):
                 segment, index, fragment_dynamic = self._parse_double_quoted(
@@ -844,16 +870,15 @@ class _ShellScanner:
                     limit,
                     depth,
                 )
-                characters.extend(segment)
-                dynamic = dynamic or fragment_dynamic
+                builder.append_protected(segment, dynamic=fragment_dynamic)
                 continue
             character = self.source[index]
             if character == "'":
                 closing = self.source.find("'", index + 1, limit)
                 if closing == -1:
-                    characters.append(self.source[index + 1 : limit])
-                    return _ShellWord("".join(characters), dynamic), limit
-                characters.append(self.source[index + 1 : closing])
+                    builder.append_protected(self.source[index + 1 : limit])
+                    return builder.build(), limit
+                builder.append_protected(self.source[index + 1 : closing])
                 index = closing + 1
                 continue
             if character == '"':
@@ -862,32 +887,32 @@ class _ShellScanner:
                     limit,
                     depth,
                 )
-                characters.extend(segment)
-                dynamic = dynamic or fragment_dynamic
+                builder.append_protected(segment, dynamic=fragment_dynamic)
                 continue
             if character == "\\":
                 if index + 1 < limit and self.source[index + 1] == "\n":
                     index += 2
                     continue
                 if index + 1 < limit:
-                    characters.append(self.source[index + 1])
+                    builder.append_protected(self.source[index + 1])
                     index += 2
                 else:
+                    builder.append_protected("")
                     index += 1
                 continue
             expansion_end = self._consume_active_expansion(index, limit, depth)
             if expansion_end is not None:
-                dynamic = True
+                builder.append_protected("", dynamic=True)
                 index = expansion_end
                 continue
             process_end = self._consume_process_substitution(index, limit, depth)
             if process_end is not None:
-                dynamic = True
+                builder.append_protected("", dynamic=True)
                 index = process_end
                 continue
-            characters.append(character)
+            builder.append_active(character)
             index += 1
-        return _ShellWord("".join(characters), dynamic), index
+        return builder.build(), index
 
     def _parse_double_quoted(
         self,
@@ -1256,12 +1281,32 @@ def _reconcile_has_effective_dry_run(arguments: list[_ShellWord]) -> bool:
 
 def _word_may_change_argv(word: _ShellWord) -> bool:
     """Return whether shell expansion may change one lexical word's argv shape."""
-    literal = word.literal
-    return (
-        word.dynamic
-        or any(marker in literal for marker in "*?[")
-        or ("{" in literal and "}" in literal and ("," in literal or ".." in literal))
-    )
+    return word.dynamic or word.active_argv_expansion
+
+
+def _has_active_argv_expansion(syntax: str) -> bool:
+    """Return whether unquoted word syntax can expand into a different argv shape."""
+    if any(marker in syntax for marker in "*?["):
+        return True
+    brace_separators: list[bool] = []
+    previous_period = False
+    for character in syntax:
+        if character == "{":
+            brace_separators.append(False)
+            previous_period = False
+            continue
+        if character == "}":
+            if brace_separators and brace_separators.pop():
+                return True
+            previous_period = False
+            continue
+        if not brace_separators:
+            previous_period = False
+            continue
+        if character == "," or (character == "." and previous_period):
+            brace_separators[-1] = True
+        previous_period = character == "."
+    return False
 
 
 def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> int:

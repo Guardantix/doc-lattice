@@ -584,6 +584,22 @@ def test_direct_doc_lattice_invocations_accepts_unconsumed_reconcile_dry_run_opt
     assert direct_doc_lattice_invocations(script) == RECONCILE_DRY
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "doc-lattice reconcile 'pc[1]' --dry-run",
+        'doc-lattice reconcile "pc*" --dry-run',
+        r"doc-lattice reconcile pc\? --dry-run",
+        "doc-lattice reconcile $'pc[1]' --dry-run",
+        "doc-lattice reconcile '{pc,design}' --dry-run",
+        r"doc-lattice reconcile \{pc,design\} --dry-run",
+        "doc-lattice reconcile {a}x,{b} --dry-run",
+    ],
+)
+def test_direct_doc_lattice_invocations_ignores_protected_or_inactive_argv_metacharacters(script):
+    assert direct_doc_lattice_invocations(script) == RECONCILE_DRY
+
+
 def test_direct_doc_lattice_invocations_keeps_dry_run_scoped_to_one_command():
     script = "doc-lattice reconcile --all; doc-lattice check --dry-run"
 

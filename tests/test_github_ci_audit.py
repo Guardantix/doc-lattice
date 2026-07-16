@@ -234,6 +234,21 @@ jobs:
     assert audit_global_workflows((document,)) == ()
 
 
+def test_global_audit_allows_quoted_glob_like_dry_run_reconcile_argument():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: doc-lattice reconcile 'pc[1]' --dry-run
+"""
+    )
+
+    assert audit_global_workflows((document,)) == ()
+
+
 def test_global_audit_rejects_dry_run_token_consumed_as_reconcile_config_value():
     document = _workflow(
         """\
