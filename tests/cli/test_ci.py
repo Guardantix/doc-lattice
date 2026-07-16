@@ -16,7 +16,7 @@ from doc_lattice.cli.commands import ci as ci_module
 from doc_lattice.cli.runtime import CliRuntime
 from doc_lattice.error_types import ConfigError
 from doc_lattice.github_ci.filesystem import apply_changes, preflight_create
-from doc_lattice.github_ci.render import render_managed_artifacts
+from doc_lattice.github_ci.render import CHECKOUT_REF, SETUP_UV_REF, render_managed_artifacts
 
 from .helpers import runner
 
@@ -38,6 +38,12 @@ class _TtyStringIO(StringIO):
 def _install(root: Path, repository: str = "Guardantix/doc-lattice") -> None:
     artifacts = render_managed_artifacts(repository, __version__)
     apply_changes(preflight_create(root, artifacts))
+
+
+def _replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
 def _write_non_utf8_origin(root: Path) -> None:
@@ -292,6 +298,273 @@ def test_ci_audit_does_not_load_project_or_lattice(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["ci", "audit", "--repository", "Guardantix/doc-lattice"])
 
     assert result.exit_code == 0
+
+
+def test_init_github_then_ci_audit_round_trips_without_loading_lattice(
+    tmp_path: Path,
+    monkeypatch,
+):
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("project and lattice loading are not allowed")
+
+    monkeypatch.setattr("doc_lattice.cli.runtime.load_config", fail)
+    monkeypatch.setattr("doc_lattice.cli.runtime.load_lattice", fail)
+    monkeypatch.chdir(tmp_path)
+
+    initialized = runner.invoke(
+        app,
+        ["init", "--github", "--repository", "Guardantix/doc-lattice"],
+    )
+    audited = runner.invoke(
+        app,
+        ["ci", "audit", "--repository", "guardantix/DOC-LATTICE"],
+    )
+
+    assert initialized.exit_code == 0
+    assert audited.exit_code == 0
+    assert audited.stdout == "doc-lattice ci audit: ok\n"
+
+
+@pytest.mark.parametrize(
+    ("target", "old", "new", "finding_code"),
+    [
+        pytest.param(
+            "offline",
+            "on:\n  push:",
+            "on:\n  pull_request_target:\n  push:",
+            "PULL_REQUEST_TARGET",
+            id="pull-request-target",
+        ),
+        pytest.param(
+            "linear",
+            "  workflow_dispatch:",
+            "  workflow_dispatch:\n  pull_request:",
+            "PR_LINEAR_INVOCATION",
+            id="linear-pr-trigger",
+        ),
+        pytest.param(
+            "linear",
+            "      github.repository == 'Guardantix/doc-lattice' &&\n",
+            "",
+            "MANAGED_COMMAND",
+            id="repository-condition-removed",
+        ),
+        pytest.param(
+            "linear",
+            "      github.ref == 'refs/heads/main' &&\n",
+            "      startsWith(github.ref, 'refs/heads/') &&\n",
+            "MANAGED_COMMAND",
+            id="ref-condition-broadened",
+        ),
+        pytest.param(
+            "linear",
+            "      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+            "      (github.event_name == 'push' || "
+            "github.event_name == 'workflow_dispatch' || "
+            "github.event_name == 'pull_request')",
+            "MANAGED_COMMAND",
+            id="event-condition-broadened",
+        ),
+        pytest.param(
+            "linear",
+            "jobs:\n  linear:",
+            "jobs:\n  trusted:",
+            "MANAGED_JOB",
+            id="linear-job-renamed",
+        ),
+        pytest.param(
+            "linear",
+            "    environment: doc-lattice-linear\n",
+            "",
+            "MANAGED_JOB",
+            id="environment-removed",
+        ),
+        pytest.param(
+            "secret-job-env",
+            "",
+            "",
+            "MANAGED_SECRET",
+            id="secret-moved-to-job-env",
+        ),
+        pytest.param(
+            "secret-earlier-step",
+            "",
+            "",
+            "MANAGED_SECRET",
+            id="secret-moved-to-earlier-step",
+        ),
+        pytest.param(
+            "linear",
+            "secrets.DOC_LATTICE_LINEAR_API_KEY",
+            "secrets.LINEAR_API_KEY",
+            "LINEAR_SECRET_REFERENCE",
+            id="legacy-repository-secret",
+        ),
+        pytest.param(
+            "unrelated",
+            "",
+            """\
+on: push
+jobs:
+  unrelated:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TOKEN: ${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}
+        run: true
+""",
+            "LINEAR_SECRET_REFERENCE",
+            id="unrelated-secret-reference",
+        ),
+        pytest.param(
+            "offline",
+            "        with:\n          persist-credentials: false\n",
+            "",
+            "MANAGED_CHECKOUT",
+            id="checkout-credentials-setting-removed",
+        ),
+        pytest.param(
+            "offline",
+            f"actions/checkout@{CHECKOUT_REF}",
+            "actions/checkout@v4",
+            "MANAGED_ACTION",
+            id="checkout-tag",
+        ),
+        pytest.param(
+            "linear",
+            f"astral-sh/setup-uv@{SETUP_UV_REF}",
+            "astral-sh/setup-uv@v6",
+            "MANAGED_ACTION",
+            id="setup-uv-tag",
+        ),
+        pytest.param(
+            "linear",
+            "          enable-cache: false",
+            "          enable-cache: true",
+            "MANAGED_CACHE",
+            id="setup-uv-cache-enabled",
+        ),
+        pytest.param(
+            "offline",
+            "      - name: Audit, check, and lint\n",
+            "      - uses: actions/cache@v4\n"
+            "        with:\n"
+            "          path: .cache\n"
+            "      - name: Audit, check, and lint\n",
+            "MANAGED_CACHE",
+            id="actions-cache-added",
+        ),
+        pytest.param(
+            "unrelated",
+            "",
+            """\
+on: pull_request
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - run: doc-lattice reconcile --all
+""",
+            "PR_MUTATING_RECONCILE",
+            id="mutating-reconcile-on-pr",
+        ),
+        pytest.param(
+            "delete-bootstrap",
+            "",
+            "",
+            "MISSING_MANAGED_ARTIFACT",
+            id="bootstrap-deleted",
+        ),
+    ],
+)
+def test_ci_audit_reports_each_load_bearing_security_control_mutation(  # noqa: PLR0913
+    tmp_path: Path,
+    monkeypatch,
+    target: str,
+    old: str,
+    new: str,
+    finding_code: str,
+):
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", __version__)
+    _install(tmp_path)
+    paths: dict[str, Path] = {
+        artifact.role: tmp_path / artifact.relative_path for artifact in artifacts
+    }
+    if target == "unrelated":
+        unrelated = tmp_path / ".github/workflows/unrelated.yml"
+        unrelated.write_text(new, encoding="utf-8")
+    elif target == "delete-bootstrap":
+        paths["bootstrap"].unlink()
+    elif target in {"secret-job-env", "secret-earlier-step"}:
+        linear = paths["linear"]
+        _replace_once(
+            linear,
+            "        env:\n          LINEAR_API_KEY: ${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}\n",
+            "",
+        )
+        if target == "secret-job-env":
+            _replace_once(
+                linear,
+                "    runs-on: ubuntu-latest\n",
+                "    env:\n"
+                "      LINEAR_API_KEY: ${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}\n"
+                "    runs-on: ubuntu-latest\n",
+            )
+        else:
+            _replace_once(
+                linear,
+                "      - name: Install pinned doc-lattice without the Linear secret\n        run:",
+                "      - name: Install pinned doc-lattice without the Linear secret\n"
+                "        env:\n"
+                "          LINEAR_API_KEY: ${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}\n"
+                "        run:",
+            )
+    else:
+        _replace_once(paths[target], old, new)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["ci", "audit", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert result.exit_code == 1
+    assert f": {finding_code}:" in result.stdout
+
+
+def test_ci_audit_allows_unrelated_release_workflow_controls(tmp_path: Path, monkeypatch):
+    _install(tmp_path)
+    release = tmp_path / ".github/workflows/release.yml"
+    release.write_text(
+        """\
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+      - run: uv publish
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["ci", "audit", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == "doc-lattice ci audit: ok\n"
 
 
 def test_ci_refresh_current_installation_exits_zero(tmp_path: Path, monkeypatch):

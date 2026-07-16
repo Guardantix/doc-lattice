@@ -1054,6 +1054,36 @@ jobs:
     assert audit_global_workflows((document,)) == ()
 
 
+@pytest.mark.parametrize(
+    ("event", "github_ref", "environment_main_matches"),
+    [
+        ("pull_request", "refs/pull/17/merge", False),
+        ("pull_request_review", "refs/pull/17/merge", False),
+        ("pull_request_review_comment", "refs/pull/17/merge", False),
+        ("pull_request_target", "refs/heads/main", True),
+    ],
+)
+def test_documented_github_ref_security_model(
+    event: str,
+    github_ref: str,
+    environment_main_matches: bool,
+):
+    assert (github_ref == "refs/heads/main") is environment_main_matches
+    if event == "pull_request_target":
+        workflow = parse_workflow(
+            Path(".github/workflows/unsafe.yml"),
+            "on: pull_request_target\njobs: {}\n",
+        )
+        assert _finding_codes(audit_global_workflows((workflow,))) == {"PULL_REQUEST_TARGET"}
+
+
+def test_documented_prechange_head_ref_could_match_exact_main_policy():
+    attacker_controlled_head_branch = "main"
+    allowed_environment_branches = {"main"}
+
+    assert attacker_controlled_head_branch in allowed_environment_branches
+
+
 def _write_managed_artifacts(root: Path, repository: str = "Guardantix/doc-lattice") -> None:
     for artifact in render_managed_artifacts(repository, "2.1.0"):
         destination = root / artifact.relative_path

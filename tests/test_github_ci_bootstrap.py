@@ -360,6 +360,7 @@ def _run_bootstrap(  # noqa: PLR0913
     env = {
         **os.environ,
         "PATH": path,
+        "LINEAR_SECRET_FIXTURE": "lin_api_DO_NOT_LEAK_FROM_BOOTSTRAP",  # pragma: allowlist secret
         "FAKE_GH_STATE": str(state_path),
         "FAKE_GH_LOG": str(log_path),
         "FAKE_SORT_COUNT": str(tmp_path / "sort-count"),
@@ -409,11 +410,34 @@ def _run_bootstrap(  # noqa: PLR0913
         {"calls": calls, "state": final_state, "stdout": result.stdout, "stderr": result.stderr},
         sort_keys=True,
     )
-    assert "lin_api_" not in observed
+    assert "lin_api_" not in observed.casefold()
+    assert all(call[:1] != ["secret"] for call in calls)
+    mutation_indices = [index for index, call in enumerate(calls) if "--method" in call]
+    for mutation_index in mutation_indices:
+        repository_reads = [
+            index for index, call in enumerate(calls[:mutation_index]) if REPOSITORY_JQ in call
+        ]
+        assert len(repository_reads) == 2
+        assert confirmation == "Guardantix/doc-lattice"
+        assert "Type Guardantix/doc-lattice to apply:" in result.stderr
+    if mutation_indices and "environment policy verified" in result.stdout:
+        last_mutation = mutation_indices[-1]
+        readback_calls = [
+            call
+            for call in calls[last_mutation + 1 :]
+            if call[:3] == ["api", "--hostname", "github.com"] and call[3] != "--method"
+        ]
+        assert any(call[3].endswith("/deployment-branch-policies") for call in readback_calls)
+        if "gh secret set" in result.stdout:
+            assert result.stdout.index("environment policy verified") < result.stdout.index(
+                "gh secret set"
+            )
     return result, final_state, calls
 
 
-def test_render_managed_artifacts_includes_bash_32_bootstrap(tmp_path: Path):
+def test_rendered_bootstrap_is_the_third_managed_artifact_and_is_valid_bash(
+    tmp_path: Path,
+):
     """Render workflows followed by a dependency-minimal Bash bootstrap."""
     artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
 
