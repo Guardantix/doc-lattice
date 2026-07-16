@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 
 from doc_lattice import __version__
 from doc_lattice.cli import app
@@ -934,11 +935,13 @@ def test_ci_refresh_has_no_confirmation_bypass(tmp_path: Path, monkeypatch, opti
     )
 
     assert result.exit_code == 2
-    assert f"No such option: {option}" in result.stderr
+    stderr = Text.from_ansi(result.stderr).plain
+    assert f"No such option: {option}" in stderr
 
 
 def test_ci_refresh_requires_repository(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["ci", "refresh"])
     assert result.exit_code == 2
-    assert "Missing option '--repository'" in result.stderr
+    stderr = Text.from_ansi(result.stderr).plain
+    assert "Missing option '--repository'" in stderr

@@ -140,7 +140,8 @@ def test_ci_help_lists_audit_and_refresh():
 def test_configless_commands_reject_config_option(command: str):
     result = runner.invoke(app, [command, "--config", ".doc-lattice.yml"])
     assert result.exit_code == 2
-    assert "No such option: --config" in result.stderr
+    stderr = Text.from_ansi(result.stderr).plain
+    assert "No such option: --config" in stderr
 
 
 @pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])
