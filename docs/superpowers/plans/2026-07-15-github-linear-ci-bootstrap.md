@@ -1928,11 +1928,12 @@ for the Linear fixture prefix and require no match.
 Run:
 
 ```bash
-uv run --group dev pytest tests/test_github_ci_audit.py tests/test_github_ci_bootstrap.py tests/cli/test_ci.py tests/cli/test_init.py -v
+uv run --group dev pytest --no-cov tests/test_github_ci_audit.py tests/test_github_ci_bootstrap.py tests/cli/test_ci.py tests/cli/test_init.py -v
 ```
 
 Expected: every adversarial mutation fails for its intended reason, counterexamples remain clean,
-and the init-to-audit round trip passes.
+and the init-to-audit round trip passes. This focused slice intentionally disables repository-wide
+coverage enforcement; the full suite below remains the authoritative coverage gate.
 
 - [ ] **Step 6: Commit the end-to-end security contract**
 

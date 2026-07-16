@@ -3,7 +3,12 @@
 import json
 import os
 import pty
+import selectors
+import signal
 import subprocess
+import time
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -25,6 +30,8 @@ ENVIRONMENT_JQ = (
 )
 POLICIES_JQ = ".branch_policies[] | [.name, .type] | @tsv"
 ENVIRONMENT_SECRETS_JQ = ".secrets[].name"
+_CONFIRMATION_PROMPT = b"Type Guardantix/doc-lattice to apply: "
+_PROCESS_TIMEOUT_SECONDS = 10
 
 _FAKE_GH = r"""#!/usr/bin/env python3
 import json
@@ -327,6 +334,92 @@ def _write_fake_tools(tmp_path: Path):
     return bin_path
 
 
+def _read_fake_gh_calls(log_path: Path) -> tuple[list[str], ...]:
+    """Read complete fake-gh argv records already flushed to the live log."""
+    return tuple(json.loads(line) for line in log_path.read_text().splitlines())
+
+
+def _read_until_confirmation_or_exit(
+    process: subprocess.Popen[bytes],
+) -> tuple[bytes, bool]:
+    """Read stderr until the child blocks for confirmation or exits safely before it."""
+    assert process.stderr is not None
+    captured = bytearray()
+    deadline = time.monotonic() + _PROCESS_TIMEOUT_SECONDS
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stderr, selectors.EVENT_READ)
+        while _CONFIRMATION_PROMPT not in captured:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("bootstrap confirmation prompt timed out")
+            events = selector.select(remaining)
+            if not events:
+                raise AssertionError("bootstrap confirmation prompt timed out")
+            chunk = os.read(process.stderr.fileno(), 4096)
+            if not chunk:
+                return bytes(captured), False
+            captured.extend(chunk)
+    assert process.poll() is None
+    return bytes(captured), True
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Bound cleanup for an interactive bootstrap process and its descendants."""
+    if process.poll() is None:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    process.communicate(timeout=_PROCESS_TIMEOUT_SECONDS)
+
+
+def _run_confirmed_bootstrap(
+    command: list[str],
+    env: dict[str, str],
+    log_path: Path,
+    confirmation: str,
+    confirmation_probe: (
+        Callable[[subprocess.Popen[bytes], tuple[list[str], ...], str], None] | None
+    ),
+) -> subprocess.CompletedProcess[str]:
+    """Run one TTY confirmation flow and inspect its live pre-confirmation boundary."""
+    master, slave = pty.openpty()
+    try:
+        try:
+            process = subprocess.Popen(  # noqa: S603
+                command,
+                env=env,
+                stdin=slave,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        finally:
+            os.close(slave)
+        try:
+            prompt, confirmation_requested = _read_until_confirmation_or_exit(process)
+            calls_before_confirmation = _read_fake_gh_calls(log_path)
+            assert all("--method" not in call for call in calls_before_confirmation)
+            if confirmation_requested:
+                if confirmation_probe is not None:
+                    confirmation_probe(
+                        process,
+                        calls_before_confirmation,
+                        prompt.decode("utf-8"),
+                    )
+                os.write(master, f"{confirmation}\n".encode())
+            stdout_bytes, remaining_stderr = process.communicate(timeout=_PROCESS_TIMEOUT_SECONDS)
+        except BaseException:
+            _kill_process_group(process)
+            raise
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout_bytes.decode("utf-8"),
+            (prompt + remaining_stderr).decode("utf-8"),
+        )
+    finally:
+        os.close(master)
+
+
 def _run_bootstrap(  # noqa: PLR0913
     tmp_path: Path,
     state,
@@ -338,6 +431,9 @@ def _run_bootstrap(  # noqa: PLR0913
     arguments: list[str] | None = None,
     sort_fail_calls: tuple[int, ...] = (),
     tr_fail_calls: tuple[int, ...] = (),
+    confirmation_probe: (
+        Callable[[subprocess.Popen[bytes], tuple[list[str], ...], str], None] | None
+    ) = None,
 ):
     """Render and exercise the bootstrap against fake GitHub metadata."""
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -389,23 +485,16 @@ def _run_bootstrap(  # noqa: PLR0913
             text=True,
         )
     else:
-        master, slave = pty.openpty()
-        process = subprocess.Popen(  # noqa: S603
+        result = _run_confirmed_bootstrap(
             command,
-            env=env,
-            stdin=slave,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            env,
+            log_path,
+            confirmation,
+            confirmation_probe,
         )
-        os.close(slave)
-        os.write(master, f"{confirmation}\n".encode())
-        stdout, stderr = process.communicate(timeout=10)
-        os.close(master)
-        result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
     final_state = json.loads(state_path.read_text())
-    calls = [json.loads(line) for line in log_path.read_text().splitlines()]
+    calls = list(_read_fake_gh_calls(log_path))
     observed = json.dumps(
         {"calls": calls, "state": final_state, "stdout": result.stdout, "stderr": result.stderr},
         sort_keys=True,
@@ -524,14 +613,27 @@ def _mutation_calls(calls):
 
 def test_apply_creates_absent_environment_after_tty_confirmation(tmp_path: Path):
     """Create custom policy mode then exact-main policy and require later secret work."""
+    calls_before_confirmation: list[list[str]] = []
+
+    def observe_confirmation_boundary(
+        process: subprocess.Popen[bytes],
+        calls: tuple[list[str], ...],
+        prompt: str,
+    ) -> None:
+        assert process.poll() is None
+        assert prompt == "Type Guardantix/doc-lattice to apply: "
+        calls_before_confirmation.extend(calls)
+
     result, final_state, calls = _run_bootstrap(
         tmp_path,
         _state(environment=None),
         "apply",
         confirmation="Guardantix/doc-lattice",
+        confirmation_probe=observe_confirmation_boundary,
     )
 
     assert result.returncode == 1, result.stderr
+    assert _mutation_calls(calls_before_confirmation) == []
     assert _mutation_calls(calls) == [
         [
             "api",
