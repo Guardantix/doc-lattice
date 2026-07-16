@@ -11,6 +11,7 @@ _OWNER_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 _REPOSITORY_PATTERN = r"[A-Za-z0-9_.-]+"
 _IDENTITY_RE = re.compile(rf"{_OWNER_PATTERN}/{_REPOSITORY_PATTERN}", flags=re.ASCII)
 _SCP_ORIGIN_RE = re.compile(r"git@(?i:github\.com):(?P<identity>.+)", flags=re.ASCII)
+_UNSAFE_ORIGIN_CHARACTER_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 _FINAL_RELEASE_RE = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",
     flags=re.ASCII,
@@ -53,41 +54,47 @@ def parse_origin_repository(url: str) -> RepositoryIdentity:
     Raises:
         ConfigError: If the URL is not one of the supported exact GitHub.com forms.
     """
-    if "?" in url or "#" in url:
-        raise ConfigError(_origin_error(url))
+    if _UNSAFE_ORIGIN_CHARACTER_RE.search(url) is not None or "?" in url or "#" in url:
+        raise ConfigError(_origin_error())
 
     scp_match = _SCP_ORIGIN_RE.fullmatch(url)
     if scp_match is not None:
-        return parse_repository(_strip_git_suffix(scp_match.group("identity")))
+        identity = _strip_git_suffix(scp_match.group("identity"))
+        return _parse_origin_identity(identity)
 
     try:
         parsed = urlsplit(url)
         hostname = parsed.hostname
         port = parsed.port
     except ValueError as exc:
-        raise ConfigError(_origin_error(url)) from exc
+        raise ConfigError(_origin_error()) from exc
 
     if hostname is None or hostname.lower() != "github.com":
-        raise ConfigError(_origin_error(url))
+        raise ConfigError(_origin_error())
     if port is not None or ":" in parsed.netloc.rsplit("@", 1)[-1]:
-        raise ConfigError(_origin_error(url))
+        raise ConfigError(_origin_error())
 
     if parsed.scheme == "ssh":
         if parsed.username != "git" or parsed.password is not None:
-            raise ConfigError(_origin_error(url))
+            raise ConfigError(_origin_error())
     elif parsed.scheme == "https":
         if parsed.username is not None or parsed.password is not None:
-            raise ConfigError(_origin_error(url))
+            raise ConfigError(_origin_error())
     else:
-        raise ConfigError(_origin_error(url))
+        raise ConfigError(_origin_error())
 
     if not parsed.path.startswith("/"):
-        raise ConfigError(_origin_error(url))
+        raise ConfigError(_origin_error())
     identity = _strip_git_suffix(parsed.path[1:])
+    return _parse_origin_identity(identity)
+
+
+def _parse_origin_identity(value: str) -> RepositoryIdentity:
+    """Validate an origin identity without exposing its raw value in errors."""
     try:
-        return parse_repository(identity)
+        return parse_repository(value)
     except ConfigError as exc:
-        raise ConfigError(_origin_error(url)) from exc
+        raise ConfigError(_origin_error()) from exc
 
 
 def validate_final_release_version(version: str) -> tuple[int, int, int]:
@@ -107,7 +114,11 @@ def validate_final_release_version(version: str) -> tuple[int, int, int]:
         msg = f"version {version!r} must be a final release version such as 2.0.0"
         raise ConfigError(msg)
     major, minor, patch = match.groups()
-    return int(major), int(minor), int(patch)
+    try:
+        return int(major), int(minor), int(patch)
+    except ValueError as exc:
+        msg = f"version {version!r} must be a final release version such as 2.0.0"
+        raise ConfigError(msg) from exc
 
 
 def _strip_git_suffix(value: str) -> str:
@@ -115,9 +126,9 @@ def _strip_git_suffix(value: str) -> str:
     return value[:-4] if value.lower().endswith(".git") else value
 
 
-def _origin_error(url: str) -> str:
+def _origin_error() -> str:
     """Build the configuration error message for an unsupported origin URL."""
     return (
-        f"origin {url!r} must be a GitHub.com SCP, ssh://git@github.com, "
+        "origin URL must be a GitHub.com SCP, ssh://git@github.com, "
         "or https://github.com repository URL"
     )

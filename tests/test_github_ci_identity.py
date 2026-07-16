@@ -44,6 +44,41 @@ def test_parse_origin_repository_accepts_supported_github_urls(url):
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        " https://github.com/Guardantix/doc-lattice.git",
+        "\tssh://git@github.com/Guardantix/doc-lattice.git",
+        "https://github.com/Guardantix/doc-\nlattice.git",
+        "ssh://git@github.com/Guardantix/doc-\rlattice.git",
+        "https://github.com/Guardantix/doc-lattice.git\t",
+        "ssh://git@github.com/Guardantix/doc-lattice.git\n",
+        " git@github.com:Guardantix/doc-lattice.git",
+        "git@github.com:Guardantix/doc-\nlattice.git",
+        "git@github.com:Guardantix/doc-lattice.git\t",
+    ],
+)
+def test_parse_origin_repository_rejects_raw_whitespace_and_ascii_controls(url):
+    with pytest.raises(ConfigError):
+        parse_origin_repository(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:DO-NOT-ECHO@github.com/a/a",  # pragma: allowlist secret
+        "https://github.com/Guardantix/doc-lattice.git?token=DO-NOT-ECHO",
+        "https://github.com/Guardantix/doc-lattice.git#DO-NOT-ECHO",
+        "git@github.com:Guardantix/DO-NOT-ECHO!",
+    ],
+)
+def test_parse_origin_repository_does_not_echo_sensitive_input(url):
+    with pytest.raises(ConfigError) as exc_info:
+        parse_origin_repository(url)
+
+    assert "DO-NOT-ECHO" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
     "value",
     [
         "owner",
@@ -54,6 +89,8 @@ def test_parse_origin_repository_accepts_supported_github_urls(url):
         "owner/repo\nname",
         "-owner/repo",
         "owner-/repo",
+        "owner/.",
+        "owner/..",
     ],
 )
 def test_parse_repository_rejects_invalid_identity(value):
@@ -76,6 +113,13 @@ def test_parse_repository_rejects_invalid_identity(value):
         "https://github.com/Guardantix/doc-lattice.git#",
         "ssh://git@github.com/Guardantix/doc-lattice.git?",
         "ssh://git@github.com/Guardantix/doc-lattice.git#",
+        "https://github.com:443/Guardantix/doc-lattice.git",
+        "ssh://git@github.com:22/Guardantix/doc-lattice.git",
+        "https://github.com:not-a-port/Guardantix/doc-lattice.git",
+        "ssh://git@github.com:not-a-port/Guardantix/doc-lattice.git",
+        "https://github.com/Guardantix/",
+        "ssh://git@github.com/Guardantix/",
+        "git@github.com:Guardantix/",
     ],
 )
 def test_parse_origin_repository_rejects_unsupported_urls(url):
@@ -93,6 +137,13 @@ def test_parse_origin_repository_rejects_unsupported_urls(url):
 )
 def test_validate_final_release_version_accepts_three_numeric_components(version, expected):
     assert validate_final_release_version(version) == expected
+
+
+def test_validate_final_release_version_rejects_oversized_numeric_component():
+    version = f"{'9' * 5000}.0.0"
+
+    with pytest.raises(ConfigError, match="final release version"):
+        validate_final_release_version(version)
 
 
 @pytest.mark.parametrize(
