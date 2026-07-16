@@ -2099,7 +2099,8 @@ git commit -m "Document protected GitHub Linear installation"
 uv run --group dev pytest
 ```
 
-Expected: all tests pass and coverage remains at least 80 percent.
+Expected: all tests pass and coverage remains at least 80 percent. This full-suite run remains the
+authoritative coverage gate; isolated verification commands below disable coverage.
 
 - [ ] **Step 2: Run all production static gates**
 
@@ -2120,7 +2121,7 @@ Run:
 
 ```bash
 uv build --sdist --no-build-isolation --out-dir /tmp/doc-lattice-github-ci-dist
-uv run --group dev pytest tests/test_package_metadata.py::test_built_sdist_contains_only_publishable_source_files -v
+uv run --group dev pytest --no-cov tests/test_package_metadata.py::test_built_sdist_contains_only_publishable_source_files -v
 ```
 
 Expected: one valid sdist is built and the package-content test passes with the new package modules
@@ -2132,7 +2133,7 @@ Use a pytest-owned temporary directory through the end-to-end test rather than m
 repository:
 
 ```bash
-uv run --group dev pytest tests/cli/test_ci.py::test_init_github_then_ci_audit_round_trips_without_loading_lattice tests/test_github_ci_bootstrap.py::test_rendered_bootstrap_is_the_third_managed_artifact_and_is_valid_bash -v
+uv run --group dev pytest --no-cov tests/cli/test_ci.py::test_init_github_then_ci_audit_round_trips_without_loading_lattice tests/test_github_ci_bootstrap.py::test_rendered_bootstrap_is_the_third_managed_artifact_and_is_valid_bash -v
 ```
 
 Expected: generated files audit cleanly and Bash syntax exits `0`.
