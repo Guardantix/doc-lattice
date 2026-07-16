@@ -183,7 +183,9 @@ def register_init(app: typer.Typer) -> None:
                 runtime.stderr.print(
                     "Append the .gitignore block and add the pre-commit block under `repos:`. "
                     f"Review {escape(offline_path)}, {escape(linear_path)}, and "
-                    f"{escape(bootstrap_path)} before enabling or running them."
+                    f"{escape(bootstrap_path)} before enabling or running them, and make sure "
+                    f"the exact pinned version {__version__} is published on PyPI so the "
+                    "generated workflows resolve."
                 )
                 runtime.stderr.print(
                     f"bash .github/doc-lattice-bootstrap.sh plan {escape(github_plan.repository)}",

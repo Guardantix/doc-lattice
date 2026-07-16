@@ -175,6 +175,17 @@ def test_init_github_creates_managed_artifacts_and_prints_review_guidance(
     assert f"bash .github/doc-lattice-bootstrap.sh plan {repository}" in result.stderr
 
 
+def test_init_github_warns_pinned_version_must_be_published(tmp_path: Path, monkeypatch):
+    repository = "Guardantix/doc-lattice"
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--github", "--repository", repository])
+
+    assert result.exit_code == 0
+    narration = " ".join(result.stderr.split())
+    assert f"exact pinned version {__version__} is published on PyPI" in narration
+
+
 def test_init_github_preflights_conflict_before_config_or_other_artifact_write(
     tmp_path: Path,
     monkeypatch,

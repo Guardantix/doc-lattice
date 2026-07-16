@@ -20,6 +20,7 @@ _COMMAND_PREFIXES = frozenset(
         "!",
         "do",
         "elif",
+        "else",
         "if",
         "then",
         "until",
@@ -147,6 +148,33 @@ _UV_RUN_NON_COMMAND_OPTIONS = frozenset(
         "--script",
         "-m",
         "-s",
+    }
+)
+_UV_GLOBAL_OPTIONS_WITH_ARGUMENTS = frozenset(
+    {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--directory",
+        "--project",
+    }
+)
+_UV_GLOBAL_FLAGS = frozenset(
+    {
+        "--managed-python",
+        "--native-tls",
+        "--no-cache",
+        "--no-config",
+        "--no-managed-python",
+        "--no-progress",
+        "--no-python-downloads",
+        "--offline",
+        "--quiet",
+        "--verbose",
+        "-n",
+        "-q",
+        "-v",
     }
 )
 _DOC_LATTICE_ROOT_OPTIONS = frozenset({"--no-color"})
@@ -1038,37 +1066,99 @@ def _doc_lattice_payload_index(
     if executable_index >= len(words):
         return None
     executable_word = words[executable_index]
-    executable = _basename(executable_word.literal)
     if _is_doc_lattice_executable(executable_word):
         return executable_index
     if executable_word.dynamic:
         return None
-    payload_index: int | None = None
+    executable = _basename(executable_word.literal)
     if executable == "uvx":
+        return _uvx_payload_index(words, executable_index + 1)
+    if executable == "uv":
+        return _uv_payload_index(words, executable_index + 1)
+    return None
+
+
+def _uvx_payload_index(words: list[_ShellWord], start: int) -> int | None:
+    """Resolve a ``uvx [options] doc-lattice`` payload, tolerating an ``@spec`` suffix."""
+    payload_index = _skip_options(words, start, _UVX_OPTIONS_WITH_ARGUMENTS)
+    return _matched_launcher_payload(words, payload_index, strip_version=True)
+
+
+def _uv_payload_index(words: list[_ShellWord], start: int) -> int | None:
+    """Resolve ``uv`` launcher payloads for ``run`` and the ``tool run`` (uvx) long form.
+
+    Global flags that precede the subcommand are skipped. An unknown or dynamic option-like
+    word between ``uv`` and its subcommand cannot be resolved statically, so the scan fails
+    closed by marking itself incomplete instead of silently reporting no invocation.
+
+    Raises:
+        _ShellScanIncomplete: If an unresolvable option-like word precedes the subcommand.
+    """
+    subcommand_index = _skip_uv_global_options(words, start)
+    if subcommand_index is None or subcommand_index >= len(words):
+        return None
+    subcommand = words[subcommand_index]
+    if subcommand.dynamic:
+        return None
+    if subcommand.literal == "run":
         payload_index = _skip_options(
             words,
-            executable_index + 1,
-            _UVX_OPTIONS_WITH_ARGUMENTS,
+            subcommand_index + 1,
+            _UV_RUN_OPTIONS_WITH_ARGUMENTS,
+            non_command_options=_UV_RUN_NON_COMMAND_OPTIONS,
         )
-    elif executable == "uv":
-        run_index = executable_index + 1
-        if (
-            run_index < len(words)
-            and not words[run_index].dynamic
-            and words[run_index].literal == "run"
-        ):
-            payload_index = _skip_options(
-                words,
-                run_index + 1,
-                _UV_RUN_OPTIONS_WITH_ARGUMENTS,
-                non_command_options=_UV_RUN_NON_COMMAND_OPTIONS,
-            )
-    if (
-        payload_index is not None
-        and payload_index < len(words)
-        and not words[payload_index].dynamic
-        and _basename(words[payload_index].literal) == "doc-lattice"
-    ):
+        return _matched_launcher_payload(words, payload_index, strip_version=False)
+    if subcommand.literal == "tool":
+        run_index = subcommand_index + 1
+        if run_index >= len(words) or words[run_index].dynamic or words[run_index].literal != "run":
+            return None
+        payload_index = _skip_options(words, run_index + 1, _UVX_OPTIONS_WITH_ARGUMENTS)
+        return _matched_launcher_payload(words, payload_index, strip_version=True)
+    return None
+
+
+def _skip_uv_global_options(words: list[_ShellWord], start: int) -> int | None:
+    """Skip uv global flags to the subcommand index, failing closed on unresolvable options.
+
+    Returns:
+        The index of the first non-option word, or ``None`` when only flags remain.
+
+    Raises:
+        _ShellScanIncomplete: If an unknown or dynamic option-like word is encountered.
+    """
+    index = start
+    while index < len(words):
+        word = words[index]
+        if not word.literal.startswith("-"):
+            return index
+        if word.dynamic:
+            raise _ShellScanIncomplete("unresolved uv global option")
+        option_name = word.literal.split("=", 1)[0]
+        if option_name in _UV_GLOBAL_OPTIONS_WITH_ARGUMENTS:
+            index += 1 if "=" in word.literal else 2
+        elif word.literal in _UV_GLOBAL_FLAGS:
+            index += 1
+        else:
+            raise _ShellScanIncomplete("unresolved uv global option")
+    return None
+
+
+def _matched_launcher_payload(
+    words: list[_ShellWord],
+    payload_index: int | None,
+    *,
+    strip_version: bool,
+) -> int | None:
+    """Return the payload index when it names doc-lattice, optionally after an ``@spec`` strip."""
+    if payload_index is None or payload_index >= len(words):
+        return None
+    payload = words[payload_index]
+    if payload.dynamic:
+        return None
+    basename = _basename(payload.literal)
+    if strip_version:
+        basename = basename.split("@", 1)[0]
+    if basename == "doc-lattice":
         return payload_index
     return None
 

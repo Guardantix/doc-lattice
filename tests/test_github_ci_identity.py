@@ -33,6 +33,7 @@ def test_parse_repository_accepts_ascii_github_identity(value):
     [
         "git@github.com:Guardantix/doc-lattice.git",
         "git@GITHUB.COM:Guardantix/doc-lattice",
+        "git@github.com:/Guardantix/doc-lattice.git",
         "ssh://git@github.com/Guardantix/doc-lattice.git",
         "https://github.com/Guardantix/doc-lattice",
         "https://GITHUB.COM/Guardantix/doc-lattice.git",
@@ -142,6 +143,7 @@ def test_parse_repository_rejects_invalid_identity(value):
         "https://github.com/Guardantix/",
         "ssh://git@github.com/Guardantix/",
         "git@github.com:Guardantix/",
+        "git@github.com://Guardantix/doc-lattice.git",
     ],
 )
 def test_parse_origin_repository_rejects_unsupported_urls(url):

@@ -1,5 +1,6 @@
 """Tests for repository-global and managed GitHub CI audit policy."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -643,6 +644,67 @@ def test_direct_doc_lattice_invocations_handles_supported_wrappers_and_redirecti
 )
 def test_direct_doc_lattice_invocations_ignores_nonexecuting_command_forms(script):
     assert direct_doc_lattice_invocations(script) == ()
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("if false; then :; else doc-lattice linear; fi", LINEAR),
+        ("if false; then :; else doc-lattice reconcile --all; fi", RECONCILE),
+    ],
+)
+def test_direct_doc_lattice_invocations_detects_else_branch_commands(script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("uv tool run doc-lattice linear", LINEAR),
+        (
+            "uv tool run --from doc-lattice==2.1.0 doc-lattice reconcile --all",
+            RECONCILE,
+        ),
+        ("uvx doc-lattice@2.0.0 linear", LINEAR),
+        ("uvx doc-lattice@latest reconcile --all", RECONCILE),
+        ("uv tool run doc-lattice@2.0.0 linear", LINEAR),
+        ("uv -q run doc-lattice linear", LINEAR),
+        ("uv -q run doc-lattice reconcile --all", RECONCILE),
+        ("uv --color=always run doc-lattice reconcile --all", RECONCILE),
+        ("uv --directory /repo run doc-lattice linear", LINEAR),
+        ("uv --no-cache tool run doc-lattice linear", LINEAR),
+        ("uv -q tool run doc-lattice@2.0.0 reconcile --all", RECONCILE),
+        ("uvx doc-lattice@2.0.0 reconcile --dry-run", RECONCILE_DRY),
+    ],
+)
+def test_direct_doc_lattice_invocations_recognizes_uv_launcher_spellings(script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "uv sync",
+        "uv pip install doc-lattice",
+        "uv run doc-lattice@2.0.0 linear",
+    ],
+)
+def test_direct_doc_lattice_invocations_ignores_uv_non_launcher_forms(script):
+    assert direct_doc_lattice_invocations(script) == ()
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "uv --frobnicate run doc-lattice linear",
+        "uv -Z run doc-lattice linear",
+        "uv --opt$X run doc-lattice linear",
+        "uv --frobnicate tool run doc-lattice linear",
+    ],
+)
+def test_direct_doc_lattice_invocations_fails_closed_on_unknown_uv_option(script):
+    with pytest.raises(ConfigError, match=r"shell scan.*uv"):
+        direct_doc_lattice_invocations(script)
 
 
 def test_direct_doc_lattice_invocations_ignores_heredoc_bodies():
@@ -1289,10 +1351,26 @@ def test_discover_workflows_rejects_symlinked_or_nonregular_yaml_files(tmp_path:
         discover_workflows(tmp_path)
 
     (workflows / "linked.yml").unlink()
-    (workflows / "directory.yaml").mkdir()
+    os.mkfifo(workflows / "fifo.yml")
 
-    with pytest.raises(ConfigError, match=r"regular file.*directory\.yaml"):
+    with pytest.raises(ConfigError, match=r"regular file.*fifo\.yml"):
         discover_workflows(tmp_path)
+
+
+def test_discover_workflows_skips_subdirectory_entries(tmp_path: Path):
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "real.yml").write_text("on: push\njobs: {}\n", encoding="utf-8")
+    # GitHub Actions ignores subdirectories, even ones named like a workflow file, so a
+    # benign directory must not make the whole repository unauditable.
+    (workflows / "templates.yml").mkdir()
+
+    discovery = discover_workflows(tmp_path)
+
+    assert discovery.directory_exists is True
+    assert [document.path for document in discovery.documents] == [
+        Path(".github/workflows/real.yml"),
+    ]
 
 
 def test_discover_workflows_rejects_non_utf8_or_malformed_yaml(tmp_path: Path):
@@ -1622,11 +1700,27 @@ def test_managed_audit_reports_stale_generator_without_current_version_cascade(
     assert all("ci refresh" in finding.message for finding in findings)
 
 
+def test_managed_audit_stale_generator_advises_upgrade_for_newer_marker(tmp_path: Path):
+    _write_managed_artifacts(tmp_path)
+    newer_artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.2.0")
+    for artifact in newer_artifacts:
+        destination = tmp_path / artifact.relative_path
+        destination.write_text(artifact.text, encoding="utf-8")
+
+    findings = _audit_installed(tmp_path, running_version="2.1.0")
+
+    assert _finding_codes(findings) == {"STALE_GENERATOR"}
+    # A newer installed marker cannot be reached by `ci refresh`, which refuses the
+    # downgrade, so the advice must direct the maintainer to upgrade instead.
+    assert all("upgrade your local doc-lattice to at least 2.2.0" in f.message for f in findings)
+    assert all("ci refresh" not in finding.message for finding in findings)
+
+
 @pytest.mark.parametrize(
     "running_version",
     ["2.2.0.dev1", "2.2.0rc1", "2.1.0+local"],
 )
-def test_managed_audit_nonfinal_running_version_uses_installed_marker_semantics(
+def test_managed_audit_stale_marker_skips_semantic_comparison(
     tmp_path: Path,
     monkeypatch,
     running_version: str,
@@ -1645,8 +1739,36 @@ def test_managed_audit_nonfinal_running_version_uses_installed_marker_semantics(
 
     findings = _audit_installed(tmp_path, running_version=running_version)
 
+    # The installed marker (2.1.0) differs from the running version, so STALE_GENERATOR is
+    # the only actionable finding and no chimera expected document is rendered.
     assert _finding_codes(findings) == {"STALE_GENERATOR"}
-    assert rendered_versions == ["2.1.0", "2.1.0"]
+    assert rendered_versions == []
+
+
+def test_managed_audit_byte_canonical_other_release_reports_only_stale_generator(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from doc_lattice.github_ci import audit as audit_module  # noqa: PLC0415
+
+    # A byte-canonical install produced by a different release whose templates differ must
+    # not gain spurious managed-drift findings from a chimera expected document. When the
+    # marker version differs from the running version the semantic comparison is skipped
+    # entirely, so render_workflows must never be called.
+    old_artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")
+    for artifact in old_artifacts:
+        destination = tmp_path / artifact.relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(artifact.text, encoding="utf-8")
+
+    def fail_render(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("semantic comparison must be skipped on a version mismatch")
+
+    monkeypatch.setattr(audit_module, "render_workflows", fail_render)
+
+    findings = _audit_installed(tmp_path, running_version="2.1.0")
+
+    assert _finding_codes(findings) == {"STALE_GENERATOR"}
 
 
 def test_managed_audit_reports_invalid_bootstrap_marker_as_finding(tmp_path: Path):

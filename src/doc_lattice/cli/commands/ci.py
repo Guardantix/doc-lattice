@@ -9,7 +9,7 @@ import typer
 from rich.markup import escape
 
 from ... import __version__
-from ...error_types import ConfigError
+from ...error_types import ConfigError, copy_exception_notes
 from ...github_ci.audit import audit_global_workflows, audit_managed_installation
 from ...github_ci.filesystem import (
     apply_changes,
@@ -196,9 +196,12 @@ def _repeat_refresh_preflight(
     try:
         return preflight_refresh(runtime.cwd, artifacts)
     except ConfigError as exc:
-        raise ConfigError(
+        error = ConfigError(
             "managed artifacts changed after confirmation; run a fresh preview before applying"
-        ) from exc
+        )
+        copy_exception_notes(error, exc)
+        error.add_note(str(exc))
+        raise error from exc
 
 
 def _verify_refresh_converged(
@@ -209,9 +212,12 @@ def _verify_refresh_converged(
     try:
         installed = preflight_refresh(runtime.cwd, artifacts)
     except ConfigError as exc:
-        raise ConfigError(
+        error = ConfigError(
             "managed refresh did not converge; inspect installed artifacts and run a fresh preview"
-        ) from exc
+        )
+        copy_exception_notes(error, exc)
+        error.add_note(str(exc))
+        raise error from exc
     if any(change.action != "current" for change in installed):
         raise ConfigError(
             "managed refresh did not converge; inspect installed artifacts and run a fresh preview"

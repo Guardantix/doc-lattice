@@ -59,7 +59,7 @@ def parse_origin_repository(url: str) -> RepositoryIdentity:
 
     scp_match = _SCP_ORIGIN_RE.fullmatch(url)
     if scp_match is not None:
-        identity = _strip_git_suffix(scp_match.group("identity"))
+        identity = _strip_git_suffix(scp_match.group("identity")).removeprefix("/")
         return _parse_origin_identity(identity)
 
     try:

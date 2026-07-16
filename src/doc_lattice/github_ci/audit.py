@@ -5,6 +5,7 @@ from pathlib import Path
 
 from doc_lattice.error_types import ConfigError
 
+from .identity import validate_final_release_version
 from .model import (
     ArtifactRole,
     AuditFinding,
@@ -221,10 +222,7 @@ def _audit_installed_artifact(
             AuditFinding(
                 path=path,
                 code="STALE_GENERATOR",
-                message=(
-                    f"managed artifact uses generator version {marker.version!r}, not "
-                    f"{running_version!r}; run `doc-lattice ci refresh`"
-                ),
+                message=_stale_generator_message(marker.version, running_version),
             )
         )
     if marker.repository.comparison_key != repository.comparison_key:
@@ -251,6 +249,12 @@ def _audit_installed_artifact(
             )
         )
         return findings
+    if marker.version != running_version:
+        # The expected document is rendered from the running release's templates, so it is
+        # only a valid semantic baseline when the marker records that same version. On a
+        # version mismatch STALE_GENERATOR already reports the actionable state; comparing
+        # against a chimera baseline would emit spurious managed-drift findings.
+        return findings
     expected_document = _expected_workflow_document(
         artifact.expected.role,
         marker.repository,
@@ -261,6 +265,23 @@ def _audit_installed_artifact(
         for code in _managed_semantic_codes(document, expected_document)
     )
     return findings
+
+
+def _stale_generator_message(marker_version: str, running_version: str) -> str:
+    """Advise refresh or an upgrade based on the marker and running version ordering."""
+    detail = (
+        f"managed artifact uses generator version {marker_version!r}, not {running_version!r}; "
+    )
+    try:
+        marker_release = validate_final_release_version(marker_version)
+        running_release = validate_final_release_version(running_version)
+    except ConfigError:
+        return detail + "run `doc-lattice ci refresh`"
+    if marker_release > running_release:
+        return detail + (
+            f"upgrade your local doc-lattice to at least {marker_version} and rerun the audit"
+        )
+    return detail + "run `doc-lattice ci refresh`"
 
 
 def _expected_workflow_document(

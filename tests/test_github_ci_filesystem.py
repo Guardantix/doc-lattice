@@ -8,13 +8,15 @@ import pytest
 from doc_lattice.error_types import ConfigError
 from doc_lattice.github_ci import filesystem
 from doc_lattice.github_ci.filesystem import (
+    MAX_WORKFLOW_BYTES,
     apply_changes,
+    inspect_installed_artifacts,
     preflight_create,
     preflight_refresh,
     render_diff,
 )
 from doc_lattice.github_ci.model import ArtifactChange, ManagedArtifact
-from doc_lattice.github_ci.render import render_managed_artifacts
+from doc_lattice.github_ci.render import CANONICAL_ARTIFACT_TARGETS, render_managed_artifacts
 
 
 def _write_artifacts(root: Path, artifacts: tuple[ManagedArtifact, ...]) -> None:
@@ -142,6 +144,101 @@ def test_preflight_rejects_symlinked_parent_that_escapes_root(tmp_path: Path):
         preflight_create(root, artifacts)
 
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("preflight", [preflight_create, preflight_refresh])
+def test_preflight_rejects_in_repo_symlinked_workflows_ancestor(tmp_path: Path, preflight):
+    inside = tmp_path / "real-workflows"
+    inside.mkdir()
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/workflows").symlink_to(inside, target_is_directory=True)
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+
+    with pytest.raises(ConfigError, match=r"symlink.*\.github/workflows"):
+        preflight(tmp_path, artifacts)
+
+    assert list(inside.iterdir()) == []
+
+
+def test_inspect_rejects_in_repo_symlinked_workflows_ancestor(tmp_path: Path):
+    inside = tmp_path / "real-workflows"
+    inside.mkdir()
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/workflows").symlink_to(inside, target_is_directory=True)
+
+    with pytest.raises(ConfigError) as caught:
+        inspect_installed_artifacts(tmp_path, CANONICAL_ARTIFACT_TARGETS)
+
+    assert "symlink" in str(caught.value)
+    assert ".github/workflows" in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_apply_create_rechecks_symlinked_ancestor_after_mkdir(tmp_path: Path, monkeypatch):
+    # A concurrent swap can replace a real ancestor directory with an in-repo symlink whose
+    # resolved destination is unchanged, so the post-mkdir ancestor recheck must fail closed
+    # even when containment resolution still matches the preflight destination.
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    changes = preflight_create(tmp_path, (artifacts[0],))
+    stable_destination = changes[0].destination
+    inside = tmp_path / "real-workflows"
+    inside.mkdir()
+    real_mkdir = Path.mkdir
+
+    def _planting_mkdir(_self: Path, *_args: object, **_kwargs: object) -> None:
+        github = tmp_path / ".github"
+        if not github.exists():
+            real_mkdir(github)
+        workflows = tmp_path / ".github/workflows"
+        if not workflows.is_symlink():
+            workflows.symlink_to(inside, target_is_directory=True)
+
+    monkeypatch.setattr(Path, "mkdir", _planting_mkdir)
+    monkeypatch.setattr(filesystem, "safe_resolve", lambda _logical, _root: stable_destination)
+
+    with pytest.raises(ConfigError, match=r"symlink.*\.github/workflows"):
+        apply_changes(changes)
+
+    assert list(inside.iterdir()) == []
+
+
+def test_preflight_bounds_oversized_managed_file(tmp_path: Path):
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    target = tmp_path / artifacts[0].relative_path
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"x" * (MAX_WORKFLOW_BYTES + 1))
+
+    with pytest.raises(ConfigError, match=r"byte limit.*doc-lattice\.yml"):
+        preflight_create(tmp_path, artifacts)
+
+
+def test_apply_replace_bounds_oversized_destination_after_preflight(tmp_path: Path):
+    old_artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")
+    new_artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    _write_artifacts(tmp_path, old_artifacts)
+    changes = preflight_refresh(tmp_path, new_artifacts)
+    target = tmp_path / old_artifacts[0].relative_path
+    target.write_bytes(b"x" * (MAX_WORKFLOW_BYTES + 1))
+
+    with pytest.raises(ConfigError, match=r"byte limit.*doc-lattice\.yml"):
+        apply_changes(changes)
+
+
+def test_apply_create_error_detail_hides_absolute_path(tmp_path: Path, monkeypatch):
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    changes = preflight_create(tmp_path, artifacts)
+    secret = tmp_path / "SECRET_ABSOLUTE_SEGMENT"
+
+    def _fail_mkdir(*_args: object, **_kwargs: object) -> None:
+        raise OSError(13, "Permission denied", str(secret))
+
+    monkeypatch.setattr(Path, "mkdir", _fail_mkdir)
+
+    with pytest.raises(ConfigError, match=r"Permission denied.*doc-lattice\.yml") as caught:
+        apply_changes(changes)
+
+    assert "SECRET_ABSOLUTE_SEGMENT" not in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
 
 
 def test_preflight_rejects_non_regular_existing_target(tmp_path: Path):
@@ -508,12 +605,12 @@ def test_preflight_wraps_read_oserror_with_notes_and_canonical_path(
     artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
     _write_artifacts(tmp_path, artifacts)
 
-    def _fail_read(_path: Path) -> bytes:
+    def _fail_open(_self: Path, *_args: object, **_kwargs: object):
         error = OSError("synthetic read failure")
         error.add_note("exact read remediation")
         raise error
 
-    monkeypatch.setattr(Path, "read_bytes", _fail_read)
+    monkeypatch.setattr(Path, "open", _fail_open)
 
     with pytest.raises(ConfigError, match=r"synthetic read failure.*doc-lattice\.yml") as caught:
         preflight_create(tmp_path, artifacts)

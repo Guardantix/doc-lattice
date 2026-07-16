@@ -863,6 +863,70 @@ def test_ci_refresh_apply_detects_current_artifact_race_during_apply(tmp_path: P
     assert (tmp_path / current[2].relative_path).read_text(encoding="utf-8") == current[2].text
 
 
+def test_ci_refresh_apply_preserves_repeat_preflight_diagnostic(tmp_path: Path, monkeypatch):
+    old = render_managed_artifacts("Guardantix/doc-lattice", "1.9.0")
+    apply_changes(preflight_create(tmp_path, old))
+    monkeypatch.chdir(tmp_path)
+    real_preflight = ci_module.preflight_refresh
+    calls = 0
+
+    def failing_repeat(
+        root: Path, artifacts: tuple[ManagedArtifact, ...]
+    ) -> tuple[ArtifactChange, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            error = ConfigError("cannot read managed artifact: Permission denied; path X")
+            error.add_note("distinctive repeat remediation note")
+            raise error
+        return real_preflight(root, artifacts)
+
+    monkeypatch.setattr(ci_module, "preflight_refresh", failing_repeat)
+    monkeypatch.setattr(ci_module, "require_repository_confirmation", lambda *_a, **_k: None)
+
+    result = runner.invoke(
+        app,
+        ["ci", "refresh", "--repository", "Guardantix/doc-lattice", "--apply"],
+    )
+
+    assert result.exit_code == 2
+    assert "changed after confirmation" in result.stderr
+    assert "Permission denied" in result.stderr
+    assert "distinctive repeat remediation note" in result.stderr
+
+
+def test_ci_refresh_apply_preserves_converge_diagnostic(tmp_path: Path, monkeypatch):
+    old = render_managed_artifacts("Guardantix/doc-lattice", "1.9.0")
+    apply_changes(preflight_create(tmp_path, old))
+    monkeypatch.chdir(tmp_path)
+    real_preflight = ci_module.preflight_refresh
+    calls = 0
+
+    def failing_converge(
+        root: Path, artifacts: tuple[ManagedArtifact, ...]
+    ) -> tuple[ArtifactChange, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            error = ConfigError("cannot recheck managed artifact: Input/output error; path X")
+            error.add_note("distinctive converge remediation note")
+            raise error
+        return real_preflight(root, artifacts)
+
+    monkeypatch.setattr(ci_module, "preflight_refresh", failing_converge)
+    monkeypatch.setattr(ci_module, "require_repository_confirmation", lambda *_a, **_k: None)
+
+    result = runner.invoke(
+        app,
+        ["ci", "refresh", "--repository", "Guardantix/doc-lattice", "--apply"],
+    )
+
+    assert result.exit_code == 2
+    assert "did not converge" in result.stderr
+    assert "Input/output error" in result.stderr
+    assert "distinctive converge remediation note" in result.stderr
+
+
 def test_ci_refresh_recreates_missing_bootstrap(tmp_path: Path, monkeypatch):
     _install(tmp_path)
     artifacts = render_managed_artifacts("Guardantix/doc-lattice", __version__)

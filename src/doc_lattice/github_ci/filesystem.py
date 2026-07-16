@@ -117,7 +117,11 @@ def discover_workflows(root: Path) -> WorkflowDiscovery:
             f"cannot list GitHub workflow directory {display_directory}",
             exc,
         ) from exc
-    candidates = tuple(_inspect_workflow_candidate(root, name) for name in names)
+    candidates = tuple(
+        candidate
+        for name in names
+        if (candidate := _inspect_workflow_candidate(root, name)) is not None
+    )
     declared_total = sum(candidate.size for candidate in candidates)
     if declared_total > MAX_CUMULATIVE_WORKFLOW_BYTES:
         raise ConfigError(
@@ -177,11 +181,13 @@ def inspect_installed_artifacts(
         _validate_artifact_path(artifact)
         logical_destination = root / artifact.relative_path
         destination = _resolve_destination(logical_destination, root, artifact, "inspect")
-        data = _read_installed_bytes(
+        _require_real_artifact_ancestors(root, artifact.relative_path)
+        data = _read_bounded_artifact_bytes(
             logical_destination,
             destination,
             root,
             artifact,
+            phase="inspection",
         )
         if data is None:
             installed.append(None)
@@ -325,8 +331,13 @@ def apply_changes(changes: tuple[ArtifactChange, ...]) -> None:
             raise
 
 
-def _inspect_workflow_candidate(root: Path, name: str) -> _WorkflowCandidate:
-    """Validate and size one direct workflow before any YAML parsing."""
+def _inspect_workflow_candidate(root: Path, name: str) -> _WorkflowCandidate | None:
+    """Validate and size one direct workflow before any YAML parsing.
+
+    Returns ``None`` for a real subdirectory entry, which GitHub Actions deterministically
+    ignores, so a benign directory named like a workflow does not make the repository
+    unauditable. Symlinks and every other non-regular type stay fail-closed errors.
+    """
     relative_path = _WORKFLOWS_DIRECTORY / name
     display_path = relative_path.as_posix()
     logical_path = root / relative_path
@@ -338,6 +349,8 @@ def _inspect_workflow_candidate(root: Path, name: str) -> _WorkflowCandidate:
         raise _filesystem_error(f"cannot inspect GitHub workflow {display_path}", exc) from exc
     if stat.S_ISLNK(target_stat.st_mode):
         raise ConfigError(f"symlink is not allowed for GitHub workflow {display_path}")
+    if stat.S_ISDIR(target_stat.st_mode):
+        return None
     if not stat.S_ISREG(target_stat.st_mode):
         raise ConfigError(f"GitHub workflow must be a regular file: {display_path}")
     if target_stat.st_size > MAX_WORKFLOW_BYTES:
@@ -408,6 +421,42 @@ def _workflow_parent_exists(root: Path, display_path: str) -> bool:
     return True
 
 
+def _require_real_artifact_ancestors(root: Path, relative_path: PurePosixPath) -> None:
+    """Reject any symlinked or non-directory existing ancestor of a managed artifact.
+
+    The write path resolves fixed destinations with ``safe_resolve``, which accepts an
+    in-repo symlinked ancestor such as ``.github/workflows``. The audit read path rejects
+    those symlinks, so writing through one installs an artifact that can never be audited.
+    Failing closed at every managed read or write keeps both paths consistent. Missing
+    ancestors are fine because the create path materializes them as real directories.
+
+    Args:
+        root: Repository root containing the fixed artifact destinations.
+        relative_path: Canonical repository-relative path of the managed artifact.
+
+    Raises:
+        ConfigError: If an existing ancestor is a symlink or is not a real directory.
+    """
+    for ancestor in reversed(relative_path.parents):
+        if ancestor == PurePosixPath("."):
+            continue
+        display = ancestor.as_posix()
+        logical_ancestor = root / ancestor
+        try:
+            ancestor_stat = logical_ancestor.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise _filesystem_error(
+                f"cannot inspect managed artifact ancestor {display}",
+                exc,
+            ) from exc
+        if stat.S_ISLNK(ancestor_stat.st_mode):
+            raise ConfigError(f"symlink is not allowed in managed artifact path {display}")
+        if not stat.S_ISDIR(ancestor_stat.st_mode):
+            raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
+
+
 def _resolve_repository_path(
     logical_path: Path,
     root: Path,
@@ -453,7 +502,14 @@ def _preflight(
         _validate_artifact_path(artifact)
         logical_destination = root / artifact.relative_path
         destination = _resolve_destination(logical_destination, root, artifact, "inspect")
-        before = _read_preflight_bytes(logical_destination, destination, root, artifact)
+        _require_real_artifact_ancestors(root, artifact.relative_path)
+        before = _read_bounded_artifact_bytes(
+            logical_destination,
+            destination,
+            root,
+            artifact,
+            phase="preflight",
+        )
         desired = artifact.text.encode("utf-8")
         if before is None:
             action = "create"
@@ -525,60 +581,31 @@ def _resolve_destination(
         raise error from exc
 
 
-def _read_preflight_bytes(
-    logical_destination: Path,
-    destination: Path,
-    root: Path,
-    artifact: ManagedArtifact,
-) -> bytes | None:
-    """Read exact existing bytes after rejecting symlinks and non-regular files."""
-    path = artifact.relative_path.as_posix()
-    try:
-        target_stat = logical_destination.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot inspect managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
-    _require_regular_not_symlink(target_stat.st_mode, path)
-    try:
-        before = destination.read_bytes()
-    except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot read managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
-
-    resolved_after_read = _resolve_destination(
-        logical_destination,
-        root,
-        artifact,
-        "recheck",
-    )
-    if resolved_after_read != destination:
-        raise ConfigError(f"managed artifact path changed during preflight: {path}")
-    try:
-        target_stat = logical_destination.stat(follow_symlinks=False)
-    except FileNotFoundError as exc:
-        raise ConfigError(f"managed artifact path changed during preflight: {path}") from exc
-    except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot recheck managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
-    _require_regular_not_symlink(target_stat.st_mode, path)
-    return before
-
-
-def _read_installed_bytes(
+def _read_bounded_artifact_bytes(
     logical_destination: Path,
     destination: Path,
     root: Path,
     artifact: ManagedArtifactTarget,
+    *,
+    phase: str,
 ) -> bytes | None:
-    """Read one installed artifact with the per-file workflow byte bound."""
+    """Read one managed artifact under the per-file byte bound with change detection.
+
+    Args:
+        logical_destination: Unresolved repository-relative destination path.
+        destination: Resolved, root-contained destination path.
+        root: Repository root used to re-authenticate containment after the read.
+        artifact: Fixed managed artifact identity being read.
+        phase: Human word ("preflight" or "inspection") used in change diagnostics.
+
+    Returns:
+        The existing bytes bounded to the per-file workflow limit, or ``None`` when the
+        destination is absent.
+
+    Raises:
+        ConfigError: If the target is a symlink or non-regular file, exceeds the byte bound,
+            cannot be read, or its containment, type, or size changed during the read.
+    """
     path = artifact.relative_path.as_posix()
     try:
         target_stat = logical_destination.stat(follow_symlinks=False)
@@ -611,11 +638,11 @@ def _read_installed_bytes(
         "recheck",
     )
     if resolved_after_read != destination:
-        raise ConfigError(f"managed artifact path changed during inspection: {path}")
+        raise ConfigError(f"managed artifact path changed during {phase}: {path}")
     try:
         target_stat = logical_destination.stat(follow_symlinks=False)
     except FileNotFoundError as exc:
-        raise ConfigError(f"managed artifact path changed during inspection: {path}") from exc
+        raise ConfigError(f"managed artifact path changed during {phase}: {path}") from exc
     except OSError as exc:
         detail = _stable_error_detail(exc)
         error = ConfigError(f"cannot recheck managed artifact: {detail}; path {path}")
@@ -623,7 +650,7 @@ def _read_installed_bytes(
         raise error from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
     if target_stat.st_size != initial_size or len(data) != initial_size:
-        raise ConfigError(f"managed artifact changed during inspection: {path}")
+        raise ConfigError(f"managed artifact changed during {phase}: {path}")
     return data
 
 
@@ -737,16 +764,19 @@ def _apply_create(change: ArtifactChange) -> None:
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        error = ConfigError(f"cannot create managed artifact parent: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot create managed artifact parent: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
     logical_destination, destination = _resolve_change(change)
+    _require_real_artifact_ancestors(change.root, artifact.relative_path)
     try:
         target_stat = logical_destination.stat(follow_symlinks=False)
     except FileNotFoundError:
         pass
     except OSError as exc:
-        error = ConfigError(f"cannot inspect create destination: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot inspect create destination: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
     else:
@@ -764,7 +794,8 @@ def _apply_create(change: ArtifactChange) -> None:
         copy_exception_notes(error, exc)
         raise error from exc
     except OSError as exc:
-        error = ConfigError(f"cannot write managed artifact: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot write managed artifact: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
 
@@ -792,7 +823,8 @@ def _apply_replace(change: ArtifactChange) -> None:
             prefix=f".{destination.name}.doc-lattice-replace.",
         )
     except OSError as exc:
-        error = ConfigError(f"cannot write managed artifact: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot write managed artifact: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
 
@@ -827,13 +859,21 @@ def _read_apply_bytes(
             f"destination changed after preflight for managed artifact {path}"
         ) from exc
     except OSError as exc:
-        error = ConfigError(f"cannot inspect replacement destination: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot inspect replacement destination: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
+    if target_stat.st_size > MAX_WORKFLOW_BYTES:
+        raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
     try:
-        return destination.read_bytes()
+        with destination.open("rb") as handle:
+            data = handle.read(MAX_WORKFLOW_BYTES + 1)
     except OSError as exc:
-        error = ConfigError(f"cannot read replacement destination: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot read replacement destination: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
+    if len(data) > MAX_WORKFLOW_BYTES:
+        raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
+    return data
