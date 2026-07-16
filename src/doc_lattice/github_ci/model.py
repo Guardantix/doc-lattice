@@ -37,6 +37,16 @@ class ManagedArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class InstalledArtifact:
+    """A present managed artifact with its expected form and ownership inspection."""
+
+    expected: ManagedArtifact
+    text: str
+    marker: ManagedMarker | None
+    marker_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactChange:
     """A planned filesystem change for one managed artifact."""
 
@@ -99,6 +109,14 @@ class WorkflowDocument:
     permissions: PermissionValue
     jobs: tuple[WorkflowJob, ...]
     scalars: tuple[WorkflowScalar, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowDiscovery:
+    """Read-only discovery state for the repository workflow directory."""
+
+    directory_exists: bool
+    documents: tuple[WorkflowDocument, ...]
 
 
 @dataclass(frozen=True, slots=True, order=True)

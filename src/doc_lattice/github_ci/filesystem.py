@@ -12,16 +12,22 @@ from .identity import parse_repository, validate_final_release_version
 from .model import (
     ArtifactChange,
     ArtifactRole,
+    InstalledArtifact,
     ManagedArtifact,
     ManagedMarker,
+    WorkflowDiscovery,
+    WorkflowDocument,
 )
 from .render import BOOTSTRAP_PATH, LINEAR_WORKFLOW_PATH, OFFLINE_WORKFLOW_PATH
+from .workflow_parser import parse_workflow
 
 _CANONICAL_PATHS: dict[ArtifactRole, PurePosixPath] = {
     "offline": OFFLINE_WORKFLOW_PATH,
     "linear": LINEAR_WORKFLOW_PATH,
     "bootstrap": BOOTSTRAP_PATH,
 }
+_WORKFLOWS_DIRECTORY = PurePosixPath(".github/workflows")
+_WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
 _MARKER_PREFIXES = (
     "# doc-lattice-managed:",
     "# doc-lattice-artifact:",
@@ -35,6 +41,118 @@ _PARTIAL_STATE_NOTE = (
     "managed artifacts are applied in input order without rollback; earlier changes, "
     "if any, remain in place, so inspect the reported path and rerun to converge"
 )
+
+
+def discover_workflows(root: Path) -> WorkflowDiscovery:
+    """Discover and parse direct repository GitHub Actions workflow files.
+
+    Args:
+        root: Repository root containing the optional ``.github/workflows`` directory.
+
+    Returns:
+        Whether the workflow directory exists and its parsed YAML documents in stable
+        repository-relative path order.
+
+    Raises:
+        ConfigError: If the directory or a selected workflow is unsafe, unreadable,
+            non-UTF-8, or invalid YAML.
+    """
+    logical_directory = root / _WORKFLOWS_DIRECTORY
+    display_directory = _WORKFLOWS_DIRECTORY.as_posix()
+    try:
+        directory_stat = logical_directory.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return WorkflowDiscovery(directory_exists=False, documents=())
+    except OSError as exc:
+        raise _filesystem_error(
+            f"cannot inspect GitHub workflow directory {display_directory}",
+            exc,
+        ) from exc
+    if stat.S_ISLNK(directory_stat.st_mode):
+        raise ConfigError(
+            f"symlink is not allowed for GitHub workflow directory {display_directory}"
+        )
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise ConfigError(
+            f"GitHub workflow directory must be a real directory: {display_directory}"
+        )
+    directory = _resolve_repository_path(
+        logical_directory,
+        root,
+        display_directory,
+        "GitHub workflow directory",
+    )
+    try:
+        names = sorted(
+            entry.name for entry in directory.iterdir() if entry.suffix in _WORKFLOW_SUFFIXES
+        )
+    except OSError as exc:
+        raise _filesystem_error(
+            f"cannot list GitHub workflow directory {display_directory}",
+            exc,
+        ) from exc
+
+    documents = tuple(_read_workflow(root, name) for name in names)
+    return WorkflowDiscovery(directory_exists=True, documents=documents)
+
+
+def inspect_installed_artifacts(
+    root: Path,
+    expected: tuple[ManagedArtifact, ...],
+) -> tuple[InstalledArtifact | None, ...]:
+    """Read fixed managed artifact paths and inspect strict ownership markers.
+
+    Args:
+        root: Repository root containing the fixed artifact destinations.
+        expected: Expected canonical artifacts in caller presentation order.
+
+    Returns:
+        One installed artifact or ``None`` per expected path. Invalid ownership headers
+        are represented by ``marker_error`` so policy audit can report drift.
+
+    Raises:
+        ConfigError: If a requested path is noncanonical, unsafe, unreadable, or non-UTF-8.
+    """
+    installed: list[InstalledArtifact | None] = []
+    for artifact in expected:
+        _validate_artifact_path(artifact)
+        logical_destination = root / artifact.relative_path
+        destination = _resolve_destination(logical_destination, root, artifact, "inspect")
+        data = _read_preflight_bytes(
+            logical_destination,
+            destination,
+            root,
+            artifact,
+        )
+        if data is None:
+            installed.append(None)
+            continue
+        path = artifact.relative_path.as_posix()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigError(f"UTF-8 text is required for managed artifact {path}") from exc
+        try:
+            marker = _parse_managed_marker(data, artifact)
+        except ConfigError as exc:
+            installed.append(
+                InstalledArtifact(
+                    expected=artifact,
+                    text=text,
+                    marker=None,
+                    marker_error=str(exc),
+                )
+            )
+        else:
+            installed.append(
+                InstalledArtifact(
+                    expected=artifact,
+                    text=text,
+                    marker=marker,
+                    marker_error=None,
+                )
+            )
+    return tuple(installed)
 
 
 def preflight_create(
@@ -148,6 +266,89 @@ def apply_changes(changes: tuple[ArtifactChange, ...]) -> None:
             raise
 
 
+def _read_workflow(root: Path, name: str) -> WorkflowDocument:
+    """Read and parse one direct workflow file with stable repository-relative context."""
+    relative_path = _WORKFLOWS_DIRECTORY / name
+    display_path = relative_path.as_posix()
+    logical_path = root / relative_path
+    resolved_path = _resolve_repository_path(
+        logical_path,
+        root,
+        display_path,
+        "GitHub workflow",
+    )
+    try:
+        target_stat = logical_path.stat(follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise ConfigError(f"GitHub workflow changed during discovery: {display_path}") from exc
+    except OSError as exc:
+        raise _filesystem_error(f"cannot inspect GitHub workflow {display_path}", exc) from exc
+    if stat.S_ISLNK(target_stat.st_mode):
+        raise ConfigError(f"symlink is not allowed for GitHub workflow {display_path}")
+    if not stat.S_ISREG(target_stat.st_mode):
+        raise ConfigError(f"GitHub workflow must be a regular file: {display_path}")
+    try:
+        data = resolved_path.read_bytes()
+    except OSError as exc:
+        raise _filesystem_error(f"cannot read GitHub workflow {display_path}", exc) from exc
+    resolved_after_read = _resolve_repository_path(
+        logical_path,
+        root,
+        display_path,
+        "GitHub workflow",
+    )
+    if resolved_after_read != resolved_path:
+        raise ConfigError(f"GitHub workflow changed during discovery: {display_path}")
+    try:
+        target_stat = logical_path.stat(follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise ConfigError(f"GitHub workflow changed during discovery: {display_path}") from exc
+    except OSError as exc:
+        raise _filesystem_error(f"cannot recheck GitHub workflow {display_path}", exc) from exc
+    if stat.S_ISLNK(target_stat.st_mode):
+        raise ConfigError(f"symlink is not allowed for GitHub workflow {display_path}")
+    if not stat.S_ISREG(target_stat.st_mode):
+        raise ConfigError(f"GitHub workflow must be a regular file: {display_path}")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"UTF-8 text is required for GitHub workflow {display_path}") from exc
+    return parse_workflow(Path(display_path), text)
+
+
+def _resolve_repository_path(
+    logical_path: Path,
+    root: Path,
+    display_path: str,
+    kind: str,
+) -> Path:
+    """Resolve one read-only repository path without leaking an absolute display path."""
+    try:
+        return safe_resolve(logical_path, root)
+    except ValueError as exc:
+        raise ConfigError(f"{kind} resolves outside the repository root: {display_path}") from exc
+    except (OSError, RuntimeError) as exc:
+        raise _filesystem_error(f"cannot resolve {kind} {display_path}", exc) from exc
+
+
+def _filesystem_error(context: str, error: OSError | RuntimeError) -> ConfigError:
+    """Wrap one filesystem failure with stable path context and preserved notes."""
+    detail = _stable_error_detail(error)
+    wrapped = ConfigError(f"{context}: {detail}")
+    copy_exception_notes(wrapped, error)
+    return wrapped
+
+
+def _stable_error_detail(error: OSError | RuntimeError) -> str:
+    """Describe an I/O failure without including an absolute filename."""
+    if isinstance(error, OSError):
+        if error.strerror:
+            return error.strerror
+        if error.filename is None and str(error):
+            return str(error)
+    return type(error).__name__
+
+
 def _preflight(
     root: Path,
     artifacts: tuple[ManagedArtifact, ...],
@@ -221,10 +422,11 @@ def _resolve_destination(
         return safe_resolve(logical_destination, root)
     except ValueError as exc:
         raise ConfigError(
-            f"path resolves outside the repository root for managed artifact {path}: {exc}"
+            f"path resolves outside the repository root for managed artifact {path}"
         ) from exc
     except (OSError, RuntimeError) as exc:
-        error = ConfigError(f"cannot {operation} managed artifact: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot {operation} managed artifact: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
 
@@ -242,14 +444,16 @@ def _read_preflight_bytes(
     except FileNotFoundError:
         return None
     except OSError as exc:
-        error = ConfigError(f"cannot inspect managed artifact: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot inspect managed artifact: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
     try:
         before = destination.read_bytes()
     except OSError as exc:
-        error = ConfigError(f"cannot read managed artifact: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot read managed artifact: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
 
@@ -266,7 +470,8 @@ def _read_preflight_bytes(
     except FileNotFoundError as exc:
         raise ConfigError(f"managed artifact path changed during preflight: {path}") from exc
     except OSError as exc:
-        error = ConfigError(f"cannot recheck managed artifact: {exc}; path {path}")
+        detail = _stable_error_detail(exc)
+        error = ConfigError(f"cannot recheck managed artifact: {detail}; path {path}")
         copy_exception_notes(error, exc)
         raise error from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
