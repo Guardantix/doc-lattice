@@ -2,10 +2,29 @@
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, get_args
 
 ArtifactRole = Literal["offline", "linear", "bootstrap"]
 ArtifactAction = Literal["current", "create", "replace"]
+
+VALID_ARTIFACT_ROLES: frozenset[str] = frozenset(get_args(ArtifactRole))
+
+# Single source of the managed-artifact ownership grammar. The renderer builds every
+# header line from these constants and the filesystem adapter parses installed markers
+# with them, so writer and parser can never silently diverge.
+MANAGED_SCHEMA_VERSION = "github-ci-v1"
+MANAGED_MARKER_PREFIX = "# doc-lattice-managed:"
+ARTIFACT_MARKER_PREFIX = "# doc-lattice-artifact:"
+VERSION_MARKER_PREFIX = "# doc-lattice-version:"
+REPOSITORY_MARKER_PREFIX = "# doc-lattice-repository:"
+MANAGED_SCHEMA_LINE = f"{MANAGED_MARKER_PREFIX} {MANAGED_SCHEMA_VERSION}"
+MARKER_PREFIXES = (
+    MANAGED_MARKER_PREFIX,
+    ARTIFACT_MARKER_PREFIX,
+    VERSION_MARKER_PREFIX,
+    REPOSITORY_MARKER_PREFIX,
+)
+BOOTSTRAP_SHEBANG = "#!/usr/bin/env bash"
 TriggerShape = Literal["null", "mapping", "sequence"]
 WorkflowStructureKind = Literal[
     "mapping",

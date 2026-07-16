@@ -2,18 +2,29 @@
 
 import re
 from collections.abc import Mapping, Sequence
+from typing import get_args
 
 import pytest
 from ruamel.yaml import YAML
 
+from doc_lattice.github_ci.model import (
+    ARTIFACT_MARKER_PREFIX,
+    MANAGED_SCHEMA_LINE,
+    REPOSITORY_MARKER_PREFIX,
+    VALID_ARTIFACT_ROLES,
+    VERSION_MARKER_PREFIX,
+    ArtifactRole,
+)
 from doc_lattice.github_ci.render import (
     BOOTSTRAP_PATH,
     CHECKOUT_REF,
     LINEAR_WORKFLOW_PATH,
     OFFLINE_WORKFLOW_PATH,
     SETUP_UV_REF,
+    ownership_header,
     render_workflows,
 )
+from doc_lattice.scaffold import PYTHON_PIN
 
 _SECRETS_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])secrets(?![A-Za-z0-9_])")
 
@@ -218,6 +229,31 @@ def test_rendered_workflows_pin_actions_and_mark_ownership():
             "# doc-lattice-version: 2.1.0",
             "# doc-lattice-repository: Guardantix/doc-lattice",
         ]
+
+
+def test_artifact_role_domain_matches_literal():
+    # The shared frozenset must stay in lockstep with the ArtifactRole Literal so the
+    # marker parser accepts exactly the declared roles.
+    assert frozenset(get_args(ArtifactRole)) == VALID_ARTIFACT_ROLES
+
+
+def test_ownership_header_is_built_from_shared_grammar_constants():
+    header = ownership_header("offline", "Guardantix/doc-lattice", "2.1.0")
+
+    assert header.splitlines() == [
+        MANAGED_SCHEMA_LINE,
+        f"{ARTIFACT_MARKER_PREFIX} offline",
+        f"{VERSION_MARKER_PREFIX} 2.1.0",
+        f"{REPOSITORY_MARKER_PREFIX} Guardantix/doc-lattice",
+    ]
+
+
+def test_rendered_python_pin_is_single_sourced_from_scaffold():
+    offline, linear = render_workflows("Guardantix/doc-lattice", "2.1.0")
+
+    assert f"--python {PYTHON_PIN} --from doc-lattice==2.1.0" in offline.text
+    assert f"uv python install {PYTHON_PIN}" in linear.text
+    assert f'uv venv --python {PYTHON_PIN} "$RUNNER_TEMP/doc-lattice-venv"' in linear.text
 
 
 def test_render_workflows_is_byte_deterministic():

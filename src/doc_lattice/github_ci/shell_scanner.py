@@ -3,7 +3,8 @@
 import re
 from dataclasses import dataclass
 
-from doc_lattice.error_types import ConfigError
+from doc_lattice.error_types import ConfigError, ProjectError
+from doc_lattice.hashing import normalize_newlines
 
 _Invocation = tuple[str, bool]
 _MAX_SHELL_SOURCE_CHARS = 1_048_576
@@ -118,28 +119,22 @@ _UVX_OPTIONS_WITH_ARGUMENTS = _UV_SHARED_OPTIONS_WITH_ARGUMENTS | frozenset(
         "-w",
     }
 )
-_UV_RUN_OPTIONS_WITH_ARGUMENTS = (
-    frozenset(
-        {
-            "--env-file",
-            "--extra",
-            "--group",
-            "--no-editable-package",
-            "--no-extra",
-            "--no-group",
-            "--only-group",
-            "--package",
-            "--with-requirements",
-        }
-    )
-    | _UV_SHARED_OPTIONS_WITH_ARGUMENTS
-    | frozenset(
-        {
-            "--with",
-            "--with-editable",
-            "-w",
-        }
-    )
+_UV_RUN_OPTIONS_WITH_ARGUMENTS = _UV_SHARED_OPTIONS_WITH_ARGUMENTS | frozenset(
+    {
+        "--env-file",
+        "--extra",
+        "--group",
+        "--no-editable-package",
+        "--no-extra",
+        "--no-group",
+        "--only-group",
+        "--package",
+        "--with-requirements",
+        # --with, --with-editable, and -w attach extra dependencies for the run.
+        "--with",
+        "--with-editable",
+        "-w",
+    }
 )
 _UV_RUN_NON_COMMAND_OPTIONS = frozenset(
     {
@@ -177,8 +172,89 @@ _UV_GLOBAL_FLAGS = frozenset(
         "-v",
     }
 )
+_UV_LAUNCHER_FLAGS = frozenset(
+    {
+        "--active",
+        "--frozen",
+        "--isolated",
+        "--locked",
+        "--managed-python",
+        "--native-tls",
+        "--no-cache",
+        "--no-config",
+        "--no-dev",
+        "--no-editable",
+        "--no-env-file",
+        "--no-managed-python",
+        "--no-progress",
+        "--no-project",
+        "--no-python-downloads",
+        "--no-sync",
+        "--offline",
+        "--quiet",
+        "--verbose",
+        "-q",
+        "-v",
+    }
+)
 _DOC_LATTICE_ROOT_OPTIONS = frozenset({"--no-color"})
-_DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS = frozenset({"--version"})
+# --help and --version are eager Typer options that exit before any subcommand runs.
+_DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS = frozenset({"--version", "--help"})
+
+
+def _short_options(options: frozenset[str]) -> tuple[str, ...]:
+    """Return the single-dash options whose values may attach without a separator."""
+    return tuple(option for option in options if option.startswith("-") and option[1:2] != "-")
+
+
+@dataclass(frozen=True, slots=True)
+class _LauncherOptions:
+    """Precomputed option surface for one uv launcher, avoiding per-word set filtering."""
+
+    options_with_arguments: frozenset[str]
+    flags: frozenset[str]
+    non_command_options: frozenset[str]
+    short_options_with_arguments: tuple[str, ...]
+    short_non_command_options: tuple[str, ...]
+
+    @classmethod
+    def build(
+        cls,
+        options_with_arguments: frozenset[str],
+        flags: frozenset[str],
+        non_command_options: frozenset[str] = frozenset(),
+    ) -> "_LauncherOptions":
+        """Bundle option data with its short-option subsets computed once at import."""
+        return cls(
+            options_with_arguments=options_with_arguments,
+            flags=flags,
+            non_command_options=non_command_options,
+            short_options_with_arguments=_short_options(options_with_arguments),
+            short_non_command_options=_short_options(non_command_options),
+        )
+
+
+_UVX_LAUNCHER = _LauncherOptions.build(_UVX_OPTIONS_WITH_ARGUMENTS, _UV_LAUNCHER_FLAGS)
+_UV_RUN_LAUNCHER = _LauncherOptions.build(
+    _UV_RUN_OPTIONS_WITH_ARGUMENTS,
+    _UV_LAUNCHER_FLAGS,
+    _UV_RUN_NON_COMMAND_OPTIONS,
+)
+_ANSI_C_SIMPLE_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +275,16 @@ class _CommandScanState:
     words: list[_ShellWord]
     heredocs: list[_Heredoc]
     cases: list["_CaseScanState"]
+    prefix_mode: str = "normal"
+    prefix_pending: int = 0
+    at_command_position: bool = True
+
+    def reset_command(self) -> None:
+        """Clear the accumulated simple command and its incremental prefix-scan state."""
+        self.words.clear()
+        self.prefix_mode = "normal"
+        self.prefix_pending = 0
+        self.at_command_position = True
 
 
 @dataclass(slots=True)
@@ -216,22 +302,22 @@ class ShellScanResult:
     incomplete_reason: str | None = None
 
 
-class _ShellScanIncomplete(RuntimeError):
+class _ShellScanIncomplete(ProjectError):
     """A declared scanner resource bound prevented a complete result."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="SHELL_SCAN_INCOMPLETE")
 
 
 @dataclass(slots=True)
 class _ScanBudget:
     remaining_steps: int = _MAX_SHELL_SCAN_STEPS
 
-    def step(self, amount: int = 1) -> bool:
-        if amount < 0:
-            raise ValueError("shell scan step amount cannot be negative")
-        if self.remaining_steps < amount:
-            self.remaining_steps = 0
+    def step(self) -> None:
+        """Charge one scan step, raising when the declared step budget is exhausted."""
+        if self.remaining_steps < 1:
             raise _ShellScanIncomplete("step limit exceeded")
-        self.remaining_steps -= amount
-        return True
+        self.remaining_steps -= 1
 
 
 class _ShellScanner:
@@ -262,13 +348,14 @@ class _ShellScanner:
             raise _ShellScanIncomplete("recursion limit exceeded")
         state = _CommandScanState(words=[], heredocs=[], cases=[])
         index = start
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             character = self.source[index]
             if character == ")" and self._consume_case_pattern_close(state):
                 index += 1
                 continue
             if terminator is not None and character == terminator:
-                self._flush_command(state.words)
+                self._flush_command(state)
                 return index + 1
             boundary_end = self._consume_command_boundary(
                 index,
@@ -280,12 +367,14 @@ class _ShellScanner:
                 index = boundary_end
                 continue
             if self.source.startswith("((", index):
-                self._flush_command(state.words)
+                self._flush_command(state)
                 index = self._consume_arithmetic(index + 2, limit, depth + 1)
                 continue
             process_end = self._consume_process_substitution(index, limit, depth)
             if process_end is not None:
-                state.words.append(_ShellWord("", dynamic=True))
+                substitution_word = _ShellWord("", dynamic=True)
+                state.words.append(substitution_word)
+                self._advance_prefix_scan(state, substitution_word)
                 index = process_end
                 continue
             redirection = self._redirection_at(index, limit)
@@ -308,7 +397,7 @@ class _ShellScanner:
                 continue
             self._record_word(state, word)
             index = next_index
-        self._flush_command(state.words)
+        self._flush_command(state)
         return index
 
     def _consume_command_operator(
@@ -324,7 +413,7 @@ class _ShellScanner:
         index += len(operator)
         if self._consume_case_pattern_operator(state, operator):
             return index
-        self._flush_command(state.words)
+        self._flush_command(state)
         self._advance_case_body(state, operator)
         if operator == "(":
             return self._scan_commands(
@@ -336,7 +425,7 @@ class _ShellScanner:
         return index
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
-        command_position = _skip_shell_prefixes(state.words, 0) == len(state.words)
+        command_position = state.at_command_position
         if not word.dynamic and command_position and word.literal == "case":
             state.cases.append(_CaseScanState(phase="word"))
         elif state.cases:
@@ -351,7 +440,100 @@ class _ShellScanner:
                     state.cases.pop()
                 else:
                     case.at_pattern_start = False
+        self._advance_prefix_scan(state, word)
         state.words.append(word)
+
+    def _advance_prefix_scan(self, state: _CommandScanState, word: _ShellWord) -> None:
+        """Track incrementally whether the next word sits at the simple-command position.
+
+        This mirrors ``_skip_shell_prefixes`` one word at a time so ``_record_word`` avoids a
+        full left-to-right rescan of the accumulated words on every append. Once the running
+        scan leaves the prefix region it stays there until the command is reset.
+
+        Args:
+            state: The command being accumulated, whose prefix-scan fields are updated in place.
+            word: The word just appended to ``state.words``.
+        """
+        if not state.at_command_position:
+            return
+        if state.prefix_pending > 0:
+            state.prefix_pending -= 1
+            return
+        if state.prefix_mode != "normal" and self._advance_prefix_wrapper(state, word):
+            return
+        self._advance_prefix_normal(state, word)
+
+    def _prefix_stop(self, state: _CommandScanState) -> None:
+        """Mark the running scan as having left the simple-command prefix region."""
+        state.prefix_mode = "stopped"
+        state.at_command_position = False
+
+    def _advance_prefix_wrapper(self, state: _CommandScanState, word: _ShellWord) -> bool:
+        """Advance a multi-word wrapper prefix, returning whether the word is fully handled.
+
+        A ``False`` result means the wrapper ended on this word, which must then be
+        re-evaluated in normal mode by the caller.
+        """
+        mode = state.prefix_mode
+        if mode == "command_v":
+            return True
+        if mode in {"command_dashdash", "exec_dashdash"} or word.dynamic:
+            self._prefix_stop(state)
+            return True
+        literal = word.literal
+        if mode == "time":
+            state.prefix_mode = "normal"
+            return literal == "-p"
+        if mode == "env":
+            return self._advance_prefix_env(state, literal)
+        if mode == "command":
+            return self._advance_prefix_command(state, literal)
+        return self._advance_prefix_exec(state, literal)
+
+    def _advance_prefix_env(self, state: _CommandScanState, literal: str) -> bool:
+        if _ENV_ASSIGNMENT_RE.fullmatch(literal):
+            return True
+        if literal in {"-u", "--unset", "-C", "--chdir"}:
+            state.prefix_pending = 1
+            return True
+        if literal.startswith("-"):
+            return True
+        state.prefix_mode = "normal"
+        return False
+
+    def _advance_prefix_command(self, state: _CommandScanState, literal: str) -> bool:
+        if literal == "--":
+            state.prefix_mode = "command_dashdash"
+            return True
+        if not literal.startswith("-"):
+            self._prefix_stop(state)
+            return True
+        if "v" in literal[1:] or "V" in literal[1:]:
+            state.prefix_mode = "command_v"
+        return True
+
+    def _advance_prefix_exec(self, state: _CommandScanState, literal: str) -> bool:
+        if literal == "--":
+            state.prefix_mode = "exec_dashdash"
+            return True
+        if literal == "-a":
+            state.prefix_pending = 1
+            return True
+        if not literal.startswith("-"):
+            self._prefix_stop(state)
+        return True
+
+    def _advance_prefix_normal(self, state: _CommandScanState, word: _ShellWord) -> None:
+        if word.dynamic:
+            self._prefix_stop(state)
+            return
+        literal = word.literal
+        if literal in _COMMAND_PREFIXES or _SHELL_ASSIGNMENT_RE.fullmatch(literal):
+            return
+        if literal in {"time", "env", "command", "exec"}:
+            state.prefix_mode = literal
+            return
+        self._prefix_stop(state)
 
     def _consume_case_pattern_close(self, state: _CommandScanState) -> bool:
         if not state.cases or state.cases[-1].phase != "pattern":
@@ -360,7 +542,7 @@ class _ShellScanner:
         if case.pattern_parentheses:
             case.pattern_parentheses -= 1
         else:
-            state.words.clear()
+            state.reset_command()
             case.phase = "body"
         return True
 
@@ -400,7 +582,7 @@ class _ShellScanner:
             return self._line_end(index, limit)
         if character != "\n":
             return None
-        self._flush_command(state.words)
+        self._flush_command(state)
         index += 1
         if state.heredocs:
             index = self._consume_heredocs(
@@ -412,16 +594,15 @@ class _ShellScanner:
             state.heredocs.clear()
         return index
 
-    def _flush_command(self, words: list[_ShellWord]) -> None:
-        if not words:
-            words.clear()
+    def _flush_command(self, state: _CommandScanState) -> None:
+        if not state.words:
             return
-        invocation = _invocation_in_simple_command(words)
+        invocation = _invocation_in_simple_command(state.words)
         if invocation is not None:
             if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
                 raise _ShellScanIncomplete("invocation limit exceeded")
             self.invocations.append(invocation)
-        words.clear()
+        state.reset_command()
 
     def _consume_process_substitution(
         self,
@@ -549,7 +730,8 @@ class _ShellScanner:
             body_start = index
             body_end = limit
             after_delimiter = limit
-            while index <= limit and self.budget.step():
+            while index <= limit:
+                self.budget.step()
                 line_end = self._line_end(index, limit)
                 candidate = self.source[index:line_end]
                 if heredoc.strip_tabs:
@@ -579,7 +761,8 @@ class _ShellScanner:
         depth: int,
     ) -> None:
         index = start
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             if self.source[index] == "\\":
                 index = min(index + 2, limit)
                 continue
@@ -599,8 +782,7 @@ class _ShellScanner:
         dynamic = False
         index = start
         while index < limit and self.source[index] not in _WORD_BREAKS:
-            if not self.budget.step():
-                break
+            self.budget.step()
             if self.source.startswith("$'", index):
                 segment, index, _closed = _read_ansi_c_quoted_segment(
                     self.source,
@@ -666,7 +848,8 @@ class _ShellScanner:
         characters: list[str] = []
         dynamic = False
         index = start
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             character = self.source[index]
             if character == '"':
                 return characters, index + 1, dynamic
@@ -739,7 +922,8 @@ class _ShellScanner:
         index = start
         braces = 1
         quote: str | None = None
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             character = self.source[index]
             quoted_character = self._consume_parameter_quoted_character(
                 index,
@@ -806,7 +990,8 @@ class _ShellScanner:
     ) -> int:
         index = start
         parentheses = 1
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             expansion_end = self._consume_active_expansion(index, limit, depth)
             if expansion_end is not None:
                 index = expansion_end
@@ -830,7 +1015,8 @@ class _ShellScanner:
         depth: int,
     ) -> int:
         index = start
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             expansion_end = self._consume_active_expansion(index, limit, depth)
             if expansion_end is not None:
                 index = expansion_end
@@ -848,7 +1034,8 @@ class _ShellScanner:
     ) -> int:
         body: list[str] = []
         index = opening + 1
-        while index < limit and self.budget.step():
+        while index < limit:
+            self.budget.step()
             character = self.source[index]
             if character == "`":
                 child = _ShellScanner(
@@ -899,7 +1086,7 @@ class _ShellScanner:
 def scan_doc_lattice_invocations(script: str) -> ShellScanResult:
     """Scan literal Bash syntax and explicitly report bounded-scan exhaustion."""
     normalized = re.sub(r"(?<!\\)((?:\\\\)*)\\\r?\n", r"\1", script)
-    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalize_newlines(normalized)
     if len(normalized) > _MAX_SHELL_SOURCE_CHARS:
         return ShellScanResult((), "source character limit exceeded")
 
@@ -911,18 +1098,30 @@ def scan_doc_lattice_invocations(script: str) -> ShellScanResult:
     return ShellScanResult(invocations)
 
 
-def direct_doc_lattice_invocations(script: str) -> tuple[_Invocation, ...]:
+def direct_doc_lattice_invocations(
+    script: str,
+    *,
+    context: str | None = None,
+) -> tuple[_Invocation, ...]:
     """Return conservative direct doc-lattice commands from literal Bash syntax.
 
     The scanner is bounded, recursive, and non-executing. It intentionally does not resolve
     aliases, functions, variables used as executable names, ``eval``/``source``, ``sh -c`` or
     ``bash -c``, external wrapper scripts, actions, or reusable workflows.
 
+    Args:
+        script: Literal Bash source to scan.
+        context: Optional caller-supplied prefix (for example a workflow path) that identifies
+            the source when the scan cannot complete. When given it is prepended to the raised
+            fail-closed error so the operator can locate the offending script.
+
     Raises:
         ConfigError: If a scanner resource bound prevents a complete result.
     """
     result = scan_doc_lattice_invocations(script)
     if result.incomplete_reason is not None:
+        if context is not None:
+            raise ConfigError(f"{context}: shell scan incomplete: {result.incomplete_reason}")
         raise ConfigError(f"shell scan incomplete: {result.incomplete_reason}")
     return result.invocations
 
@@ -1080,7 +1279,7 @@ def _doc_lattice_payload_index(
 
 def _uvx_payload_index(words: list[_ShellWord], start: int) -> int | None:
     """Resolve a ``uvx [options] doc-lattice`` payload, tolerating an ``@spec`` suffix."""
-    payload_index = _skip_options(words, start, _UVX_OPTIONS_WITH_ARGUMENTS)
+    payload_index = _skip_options(words, start, _UVX_LAUNCHER)
     return _matched_launcher_payload(words, payload_index, strip_version=True)
 
 
@@ -1101,18 +1300,13 @@ def _uv_payload_index(words: list[_ShellWord], start: int) -> int | None:
     if subcommand.dynamic:
         return None
     if subcommand.literal == "run":
-        payload_index = _skip_options(
-            words,
-            subcommand_index + 1,
-            _UV_RUN_OPTIONS_WITH_ARGUMENTS,
-            non_command_options=_UV_RUN_NON_COMMAND_OPTIONS,
-        )
+        payload_index = _skip_options(words, subcommand_index + 1, _UV_RUN_LAUNCHER)
         return _matched_launcher_payload(words, payload_index, strip_version=False)
     if subcommand.literal == "tool":
         run_index = subcommand_index + 1
         if run_index >= len(words) or words[run_index].dynamic or words[run_index].literal != "run":
             return None
-        payload_index = _skip_options(words, run_index + 1, _UVX_OPTIONS_WITH_ARGUMENTS)
+        payload_index = _skip_options(words, run_index + 1, _UVX_LAUNCHER)
         return _matched_launcher_payload(words, payload_index, strip_version=True)
     return None
 
@@ -1167,7 +1361,12 @@ def _doc_lattice_subcommand_index(
     words: list[_ShellWord],
     start: int,
 ) -> int | None:
-    """Skip exact root options that can precede a doc-lattice subcommand."""
+    """Skip known root options that can precede a doc-lattice subcommand, failing closed.
+
+    Raises:
+        _ShellScanIncomplete: If an unknown static root option precedes the subcommand, since a
+            future root option that consumes its successor could otherwise hide an invocation.
+    """
     index = start
     while index < len(words):
         word = words[index]
@@ -1178,17 +1377,28 @@ def _doc_lattice_subcommand_index(
         if word.literal in _DOC_LATTICE_ROOT_OPTIONS:
             index += 1
             continue
+        if word.literal.startswith("-"):
+            raise _ShellScanIncomplete("unresolved doc-lattice root option")
         return index
     return index
+
+
+def _has_attached_short_value(literal: str, short_options: tuple[str, ...]) -> bool:
+    """Return whether ``literal`` is a known short option carrying an attached value."""
+    return any(literal.startswith(option) and literal != option for option in short_options)
 
 
 def _skip_options(
     words: list[_ShellWord],
     start: int,
-    options_with_arguments: frozenset[str],
-    *,
-    non_command_options: frozenset[str] = frozenset(),
+    options: _LauncherOptions,
 ) -> int | None:
+    """Skip a uv launcher's options to its payload word, failing closed on unknown options.
+
+    Raises:
+        _ShellScanIncomplete: If an option-like word is neither a known valueless flag nor a
+            known option with an argument, since silently skipping it could hide an invocation.
+    """
     index = start
     while index < len(words):
         word = words[index]
@@ -1198,22 +1408,18 @@ def _skip_options(
         if literal == "--":
             return index + 1
         option_name = literal.split("=", 1)[0]
-        non_command_short_value = any(
-            literal.startswith(option) and literal != option
-            for option in non_command_options
-            if option.startswith("-") and not option.startswith("--")
-        )
-        if option_name in non_command_options or non_command_short_value:
+        if option_name in options.non_command_options or _has_attached_short_value(
+            literal, options.short_non_command_options
+        ):
             return None
-        attached_short_value = any(
-            literal.startswith(option) and literal != option
-            for option in options_with_arguments
-            if option.startswith("-") and not option.startswith("--")
-        )
-        if option_name in options_with_arguments:
+        if option_name in options.options_with_arguments:
             index += 1 if "=" in literal else 2
-        elif attached_short_value or literal.startswith("-"):
+        elif option_name in options.flags or _has_attached_short_value(
+            literal, options.short_options_with_arguments
+        ):
             index += 1
+        elif literal.startswith("-"):
+            raise _ShellScanIncomplete("unresolved uv launcher option")
         else:
             return index
     return index
@@ -1270,31 +1476,11 @@ def _read_ansi_c_escape(
     if start >= limit:
         return "\\", start
     character = source[start]
-    simple = {
-        "a": "\a",
-        "b": "\b",
-        "e": "\x1b",
-        "E": "\x1b",
-        "f": "\f",
-        "n": "\n",
-        "r": "\r",
-        "t": "\t",
-        "v": "\v",
-        "\\": "\\",
-        "'": "'",
-        '"': '"',
-        "?": "?",
-    }
-    if character in simple:
-        result = (simple[character], start + 1)
+    if character in _ANSI_C_SIMPLE_ESCAPES:
+        result = (_ANSI_C_SIMPLE_ESCAPES[character], start + 1)
     elif character in "01234567":
-        result = _read_ansi_c_numeric_escape(
-            source,
-            start,
-            limit,
-            _OCTAL_BASE,
-            3,
-        )
+        value, end = _read_ansi_c_digits(source, start, limit, _OCTAL_BASE, 3)
+        result = (_valid_ansi_c_character(value, source[start:end]), end)
     elif character == "x":
         result = _read_ansi_c_prefixed_escape(source, start, limit, 16, 2)
     elif character == "u":
@@ -1327,17 +1513,6 @@ def _read_ansi_c_prefixed_escape(
     if end == prefix_index + 1:
         return f"\\{source[prefix_index]}", end
     return _valid_ansi_c_character(value, source[prefix_index:end]), end
-
-
-def _read_ansi_c_numeric_escape(
-    source: str,
-    start: int,
-    limit: int,
-    base: int,
-    digit_limit: int,
-) -> tuple[str, int]:
-    value, end = _read_ansi_c_digits(source, start, limit, base, digit_limit)
-    return _valid_ansi_c_character(value, source[start:end]), end
 
 
 def _read_ansi_c_digits(

@@ -11,6 +11,10 @@ from doc_lattice.persistence import atomic_create_bytes, atomic_replace_bytes
 
 from .identity import parse_repository, validate_final_release_version
 from .model import (
+    BOOTSTRAP_SHEBANG,
+    MANAGED_SCHEMA_LINE,
+    MARKER_PREFIXES,
+    VALID_ARTIFACT_ROLES,
     ArtifactChange,
     ArtifactRole,
     InstalledArtifact,
@@ -20,27 +24,18 @@ from .model import (
     WorkflowDiscovery,
     WorkflowDocument,
 )
-from .render import BOOTSTRAP_PATH, LINEAR_WORKFLOW_PATH, OFFLINE_WORKFLOW_PATH
+from .render import CANONICAL_ARTIFACT_TARGETS
 from .workflow_parser import parse_workflow
 
 _CANONICAL_PATHS: dict[ArtifactRole, PurePosixPath] = {
-    "offline": OFFLINE_WORKFLOW_PATH,
-    "linear": LINEAR_WORKFLOW_PATH,
-    "bootstrap": BOOTSTRAP_PATH,
+    target.role: target.relative_path for target in CANONICAL_ARTIFACT_TARGETS
 }
 _WORKFLOWS_DIRECTORY = PurePosixPath(".github/workflows")
 _WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
 MAX_WORKFLOW_FILES = 256
 MAX_WORKFLOW_BYTES = 1_048_576
 MAX_CUMULATIVE_WORKFLOW_BYTES = 8_388_608
-_MARKER_PREFIXES = (
-    "# doc-lattice-managed:",
-    "# doc-lattice-artifact:",
-    "# doc-lattice-version:",
-    "# doc-lattice-repository:",
-)
 _NONSTANDARD_LINE_SEPARATORS = ("\v", "\f", "\x85", "\u2028", "\u2029")
-_MANAGED_SCHEMA_LINE = "# doc-lattice-managed: github-ci-v1"
 _UNIFIED_DIFF_HEADER_RECORDS = 2
 _PARTIAL_STATE_NOTE = (
     "managed artifacts are applied in input order without rollback; earlier changes, "
@@ -198,7 +193,7 @@ def inspect_installed_artifacts(
         except UnicodeDecodeError as exc:
             raise ConfigError(f"UTF-8 text is required for managed artifact {path}") from exc
         try:
-            marker = _parse_managed_marker(data, artifact)
+            marker = _parse_managed_marker(text, artifact)
         except ConfigError as exc:
             installed.append(
                 InstalledArtifact(
@@ -457,6 +452,37 @@ def _require_real_artifact_ancestors(root: Path, relative_path: PurePosixPath) -
             raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
 
 
+def _resolve_within_root(
+    logical_path: Path,
+    root: Path,
+    *,
+    outside_message: str,
+    resolve_context: str,
+    path: str | None = None,
+) -> Path:
+    """Resolve one path within the root, mapping every failure to a stable ConfigError.
+
+    Args:
+        logical_path: Unresolved repository-relative path to authenticate.
+        root: Repository root that must contain the resolved path.
+        outside_message: Exact message when the path escapes the repository root.
+        resolve_context: Context passed to ``_filesystem_error`` for I/O failures.
+        path: Optional canonical path appended to the I/O failure detail.
+
+    Returns:
+        The resolved, root-contained path.
+
+    Raises:
+        ConfigError: If the path escapes the root or cannot be resolved.
+    """
+    try:
+        return safe_resolve(logical_path, root)
+    except ValueError as exc:
+        raise ConfigError(outside_message) from exc
+    except (OSError, RuntimeError) as exc:
+        raise _filesystem_error(resolve_context, exc, path=path) from exc
+
+
 def _resolve_repository_path(
     logical_path: Path,
     root: Path,
@@ -464,18 +490,35 @@ def _resolve_repository_path(
     kind: str,
 ) -> Path:
     """Resolve one read-only repository path without leaking an absolute display path."""
-    try:
-        return safe_resolve(logical_path, root)
-    except ValueError as exc:
-        raise ConfigError(f"{kind} resolves outside the repository root: {display_path}") from exc
-    except (OSError, RuntimeError) as exc:
-        raise _filesystem_error(f"cannot resolve {kind} {display_path}", exc) from exc
+    return _resolve_within_root(
+        logical_path,
+        root,
+        outside_message=f"{kind} resolves outside the repository root: {display_path}",
+        resolve_context=f"cannot resolve {kind} {display_path}",
+    )
 
 
-def _filesystem_error(context: str, error: OSError | RuntimeError) -> ConfigError:
-    """Wrap one filesystem failure with stable path context and preserved notes."""
+def _filesystem_error(
+    context: str,
+    error: OSError | RuntimeError,
+    *,
+    path: str | None = None,
+) -> ConfigError:
+    """Wrap one filesystem failure with stable path context and preserved notes.
+
+    Args:
+        context: Human phrase describing the failed operation.
+        error: The underlying I/O or runtime failure.
+        path: Optional canonical path appended as ``; path {path}`` to the detail.
+
+    Returns:
+        A ``ConfigError`` carrying the stable detail and any preserved notes.
+    """
     detail = _stable_error_detail(error)
-    wrapped = ConfigError(f"{context}: {detail}")
+    message = f"{context}: {detail}"
+    if path is not None:
+        message = f"{message}; path {path}"
+    wrapped = ConfigError(message)
     copy_exception_notes(wrapped, error)
     return wrapped
 
@@ -522,12 +565,12 @@ def _preflight(
                 f"overwritten: {path}"
             )
         else:
-            desired_marker = _parse_managed_marker(desired, artifact)
-            prior_marker = _parse_managed_marker(before, artifact)
+            path = artifact.relative_path.as_posix()
+            desired_marker = _parse_managed_marker(artifact.text, artifact)
+            prior_marker = _parse_managed_marker(_decode_marker_text(before, path), artifact)
             desired_version = validate_final_release_version(desired_marker.version)
             prior_version = validate_final_release_version(prior_marker.version)
             if prior_version > desired_version:
-                path = artifact.relative_path.as_posix()
                 raise _marker_error(
                     path,
                     f"version {prior_marker.version!r} is newer than requested "
@@ -568,17 +611,13 @@ def _resolve_destination(
 ) -> Path:
     """Resolve one fixed destination with typed path context."""
     path = artifact.relative_path.as_posix()
-    try:
-        return safe_resolve(logical_destination, root)
-    except ValueError as exc:
-        raise ConfigError(
-            f"path resolves outside the repository root for managed artifact {path}"
-        ) from exc
-    except (OSError, RuntimeError) as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot {operation} managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+    return _resolve_within_root(
+        logical_destination,
+        root,
+        outside_message=f"path resolves outside the repository root for managed artifact {path}",
+        resolve_context=f"cannot {operation} managed artifact",
+        path=path,
+    )
 
 
 def _read_bounded_artifact_bytes(
@@ -612,10 +651,7 @@ def _read_bounded_artifact_bytes(
     except FileNotFoundError:
         return None
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot inspect managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot inspect managed artifact", exc, path=path) from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
     if target_stat.st_size > MAX_WORKFLOW_BYTES:
         raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
@@ -624,10 +660,7 @@ def _read_bounded_artifact_bytes(
         with destination.open("rb") as handle:
             data = handle.read(MAX_WORKFLOW_BYTES + 1)
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot read managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot read managed artifact", exc, path=path) from exc
     if len(data) > MAX_WORKFLOW_BYTES:
         raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
 
@@ -644,10 +677,7 @@ def _read_bounded_artifact_bytes(
     except FileNotFoundError as exc:
         raise ConfigError(f"managed artifact path changed during {phase}: {path}") from exc
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot recheck managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot recheck managed artifact", exc, path=path) from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
     if target_stat.st_size != initial_size or len(data) != initial_size:
         raise ConfigError(f"managed artifact changed during {phase}: {path}")
@@ -662,32 +692,36 @@ def _require_regular_not_symlink(mode: int, path: str) -> None:
         raise ConfigError(f"existing target must be a regular file for managed artifact {path}")
 
 
-def _parse_managed_marker(
-    data: bytes,
-    artifact: ManagedArtifactTarget,
-) -> ManagedMarker:
-    """Parse the exact ownership header from existing managed artifact bytes."""
-    path = artifact.relative_path.as_posix()
+def _decode_marker_text(data: bytes, path: str) -> str:
+    """Decode existing managed artifact bytes at the ownership-marker boundary."""
     try:
-        text = data.decode("utf-8")
+        return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ConfigError(
             f"UTF-8 ownership marker is required for managed artifact {path}"
         ) from exc
+
+
+def _parse_managed_marker(
+    text: str,
+    artifact: ManagedArtifactTarget,
+) -> ManagedMarker:
+    """Parse the exact ownership header from already-decoded managed artifact text."""
+    path = artifact.relative_path.as_posix()
     if any(separator in text for separator in _NONSTANDARD_LINE_SEPARATORS):
         raise _marker_error(path, "ownership lines must use LF or CRLF separators")
     if "\r" in text.replace("\r\n", ""):
         raise _marker_error(path, "bare or embedded carriage return is not allowed")
     lines = [line.removesuffix("\r") for line in text.split("\n")]
-    offset = 1 if lines and lines[0] == "#!/usr/bin/env bash" else 0
+    offset = 1 if lines and lines[0] == BOOTSTRAP_SHEBANG else 0
     if len(lines) < offset + 4:
         raise _marker_error(path, "the four required ownership lines are missing")
 
     header = lines[offset : offset + 4]
-    if header[0] != _MANAGED_SCHEMA_LINE:
+    if header[0] != MANAGED_SCHEMA_LINE:
         raise _marker_error(path, "managed schema must be exactly github-ci-v1")
 
-    role_prefix = f"{_MARKER_PREFIXES[1]} "
+    role_prefix = f"{MARKER_PREFIXES[1]} "
     if not header[1].startswith(role_prefix):
         raise _marker_error(path, "artifact role line is missing or malformed")
     role = _parse_artifact_role(header[1][len(role_prefix) :], path)
@@ -697,7 +731,7 @@ def _parse_managed_marker(
             f"artifact role {role!r} does not match canonical role {artifact.role!r}",
         )
 
-    version_prefix = f"{_MARKER_PREFIXES[2]} "
+    version_prefix = f"{MARKER_PREFIXES[2]} "
     if not header[2].startswith(version_prefix):
         raise _marker_error(path, "version line is missing or malformed")
     version = header[2][len(version_prefix) :]
@@ -706,7 +740,7 @@ def _parse_managed_marker(
     except ConfigError as exc:
         raise _marker_error(path, str(exc)) from exc
 
-    repository_prefix = f"{_MARKER_PREFIXES[3]} "
+    repository_prefix = f"{MARKER_PREFIXES[3]} "
     if not header[3].startswith(repository_prefix):
         raise _marker_error(path, "repository line is missing or malformed")
     repository_text = header[3][len(repository_prefix) :]
@@ -715,20 +749,22 @@ def _parse_managed_marker(
     except ConfigError as exc:
         raise _marker_error(path, str(exc)) from exc
 
-    if any(line.startswith(prefix) for line in lines[offset + 4 :] for prefix in _MARKER_PREFIXES):
+    if any(line.startswith(prefix) for line in lines[offset + 4 :] for prefix in MARKER_PREFIXES):
         raise _marker_error(path, "duplicate ownership line appears after the header")
     return ManagedMarker(role=role, version=version, repository=repository)
 
 
 def _parse_artifact_role(value: str, path: str) -> ArtifactRole:
-    """Validate and narrow one ownership marker artifact role."""
+    """Validate one ownership marker role against the shared role domain and narrow it."""
+    if value not in VALID_ARTIFACT_ROLES:
+        raise _marker_error(path, f"artifact role {value!r} is not recognized")
+    # The value is a member of the shared role domain; narrow it to the Literal so the
+    # typed model records an exact ArtifactRole.
     if value == "offline":
         return "offline"
     if value == "linear":
         return "linear"
-    if value == "bootstrap":
-        return "bootstrap"
-    raise _marker_error(path, f"artifact role {value!r} is not recognized")
+    return "bootstrap"
 
 
 def _marker_error(path: str, detail: str) -> ConfigError:
@@ -764,10 +800,7 @@ def _apply_create(change: ArtifactChange) -> None:
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot create managed artifact parent: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot create managed artifact parent", exc, path=path) from exc
     logical_destination, destination = _resolve_change(change)
     _require_real_artifact_ancestors(change.root, artifact.relative_path)
     try:
@@ -775,10 +808,7 @@ def _apply_create(change: ArtifactChange) -> None:
     except FileNotFoundError:
         pass
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot inspect create destination: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot inspect create destination", exc, path=path) from exc
     else:
         if stat.S_ISLNK(target_stat.st_mode):
             raise ConfigError(f"symlink appeared after preflight for managed artifact {path}")
@@ -794,10 +824,7 @@ def _apply_create(change: ArtifactChange) -> None:
         copy_exception_notes(error, exc)
         raise error from exc
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot write managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
 
 
 def _apply_replace(change: ArtifactChange) -> None:
@@ -811,11 +838,6 @@ def _apply_replace(change: ArtifactChange) -> None:
     current = _read_apply_bytes(logical_destination, destination, artifact)
     if current != change.before:
         raise ConfigError(f"destination changed after preflight for managed artifact {path}")
-
-    logical_destination, destination = _resolve_change(change)
-    current = _read_apply_bytes(logical_destination, destination, artifact)
-    if current != change.before:
-        raise ConfigError(f"destination changed after preflight for managed artifact {path}")
     try:
         atomic_replace_bytes(
             destination,
@@ -823,10 +845,7 @@ def _apply_replace(change: ArtifactChange) -> None:
             prefix=f".{destination.name}.doc-lattice-replace.",
         )
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot write managed artifact: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
 
 
 def _resolve_change(change: ArtifactChange) -> tuple[Path, Path]:
@@ -859,10 +878,7 @@ def _read_apply_bytes(
             f"destination changed after preflight for managed artifact {path}"
         ) from exc
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot inspect replacement destination: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot inspect replacement destination", exc, path=path) from exc
     _require_regular_not_symlink(target_stat.st_mode, path)
     if target_stat.st_size > MAX_WORKFLOW_BYTES:
         raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
@@ -870,10 +886,7 @@ def _read_apply_bytes(
         with destination.open("rb") as handle:
             data = handle.read(MAX_WORKFLOW_BYTES + 1)
     except OSError as exc:
-        detail = _stable_error_detail(exc)
-        error = ConfigError(f"cannot read replacement destination: {detail}; path {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
+        raise _filesystem_error("cannot read replacement destination", exc, path=path) from exc
     if len(data) > MAX_WORKFLOW_BYTES:
         raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
     return data

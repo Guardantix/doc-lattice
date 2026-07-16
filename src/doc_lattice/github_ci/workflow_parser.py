@@ -447,9 +447,9 @@ def _schedule_mapping_values(
     for key in mapping:
         if not isinstance(key, str):
             _invalid(budget.workflow_path, yaml_path, "mapping keys must be strings")
+    # Every key is now known to be a string, so the sorted scheduling loop cannot encounter a
+    # non-string key and does not re-check for one.
     for key in sorted(mapping, reverse=True):
-        if not isinstance(key, str):
-            _invalid(budget.workflow_path, yaml_path, "mapping keys must be strings")
         stack.append((mapping[key], (*yaml_path, key), depth + 1, False))
 
 

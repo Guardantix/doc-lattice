@@ -10,7 +10,7 @@ from rich.markup import escape
 
 from ... import __version__
 from ...error_types import ConfigError, copy_exception_notes
-from ...github_ci.audit import audit_global_workflows, audit_managed_installation
+from ...github_ci.audit import audit_repository
 from ...github_ci.filesystem import (
     apply_changes,
     discover_workflows,
@@ -21,7 +21,6 @@ from ...github_ci.filesystem import (
 from ...github_ci.identity import (
     parse_origin_repository,
     parse_repository,
-    validate_final_release_version,
 )
 from ...github_ci.render import CANONICAL_ARTIFACT_TARGETS, render_managed_artifacts
 from ..errors import EXIT_FINDING, exit_on_project_error
@@ -60,19 +59,7 @@ def register_ci(app: typer.Typer) -> None:
             identity = _resolve_repository(runtime, repository)
             discovery = discover_workflows(runtime.cwd)
             installed = inspect_installed_artifacts(runtime.cwd, CANONICAL_ARTIFACT_TARGETS)
-            findings = tuple(
-                sorted(
-                    set(
-                        audit_global_workflows(discovery.documents)
-                        + audit_managed_installation(
-                            discovery,
-                            installed,
-                            identity,
-                            __version__,
-                        )
-                    )
-                )
-            )
+            findings = audit_repository(discovery, installed, identity, __version__)
             if findings:
                 for finding in findings:
                     runtime.write_stdout(f"{finding.path}: {finding.code}: {finding.message}")
@@ -104,7 +91,6 @@ def register_ci(app: typer.Typer) -> None:
         exit_code = 0
         with exit_on_project_error(runtime):
             identity = parse_repository(repository)
-            validate_final_release_version(__version__)
             artifacts = render_managed_artifacts(identity.display, __version__)
             changes = preflight_refresh(runtime.cwd, artifacts)
             diff = render_diff(changes)
@@ -124,8 +110,7 @@ def register_ci(app: typer.Typer) -> None:
                         runtime,
                         artifacts,
                     )
-                    repeated_diff = render_diff(repeated_changes)
-                    if repeated_changes != changes or repeated_diff != diff:
+                    if repeated_changes != changes:
                         raise ConfigError(
                             "managed artifacts changed after confirmation; "
                             "run a fresh preview before applying"

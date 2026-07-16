@@ -3,8 +3,18 @@
 import re
 from pathlib import PurePosixPath
 
+from ..scaffold import PYTHON_PIN
 from .identity import parse_repository, validate_final_release_version
-from .model import ArtifactRole, ManagedArtifact, ManagedArtifactTarget
+from .model import (
+    ARTIFACT_MARKER_PREFIX,
+    BOOTSTRAP_SHEBANG,
+    MANAGED_SCHEMA_LINE,
+    REPOSITORY_MARKER_PREFIX,
+    VERSION_MARKER_PREFIX,
+    ArtifactRole,
+    ManagedArtifact,
+    ManagedArtifactTarget,
+)
 
 OFFLINE_WORKFLOW_PATH = PurePosixPath(".github/workflows/doc-lattice.yml")
 LINEAR_WORKFLOW_PATH = PurePosixPath(".github/workflows/doc-lattice-linear.yml")
@@ -19,7 +29,7 @@ CANONICAL_ARTIFACT_TARGETS = (
 CHECKOUT_REF = "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
 SETUP_UV_REF = "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
 
-_TOKEN_RE = re.compile(r"__(?:REPOSITORY|VERSION|CHECKOUT_REF|SETUP_UV_REF)__")
+_TOKEN_RE = re.compile(r"__(?:REPOSITORY|VERSION|CHECKOUT_REF|SETUP_UV_REF|PYTHON_PIN)__")
 
 _OFFLINE_TEMPLATE = (
     """name: doc-lattice
@@ -44,12 +54,13 @@ jobs:
       - name: Audit, check, and lint
         run: |
           set +e
-          uvx --python 3.13 --from doc-lattice==__VERSION__ doc-lattice ci audit --repository """
-    "__REPOSITORY__\n"
+"""
+    "          uvx --python __PYTHON_PIN__ --from doc-lattice==__VERSION__ "
+    "doc-lattice ci audit --repository __REPOSITORY__\n"
     """          rc_audit=$?
-          uvx --python 3.13 --from doc-lattice==__VERSION__ doc-lattice check
+          uvx --python __PYTHON_PIN__ --from doc-lattice==__VERSION__ doc-lattice check
           rc_check=$?
-          uvx --python 3.13 --from doc-lattice==__VERSION__ doc-lattice lint
+          uvx --python __PYTHON_PIN__ --from doc-lattice==__VERSION__ doc-lattice lint
           rc_lint=$?
           [ "$rc_audit" -eq 0 ] && [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]
 """
@@ -81,8 +92,8 @@ jobs:
           enable-cache: false
       - name: Install pinned doc-lattice without the Linear secret
         run: |
-          uv python install 3.13
-          uv venv --python 3.13 "$RUNNER_TEMP/doc-lattice-venv"
+          uv python install __PYTHON_PIN__
+          uv venv --python __PYTHON_PIN__ "$RUNNER_TEMP/doc-lattice-venv"
           uv pip install --python "$RUNNER_TEMP/doc-lattice-venv/bin/python" doc-lattice=="""
     "__VERSION__\n"
     """      - name: Run trusted Linear gate
@@ -439,10 +450,10 @@ def ownership_header(role: ArtifactRole, repository: str, version: str) -> str:
         The four-line ownership header with a final newline.
     """
     return (
-        "# doc-lattice-managed: github-ci-v1\n"
-        f"# doc-lattice-artifact: {role}\n"
-        f"# doc-lattice-version: {version}\n"
-        f"# doc-lattice-repository: {repository}\n"
+        f"{MANAGED_SCHEMA_LINE}\n"
+        f"{ARTIFACT_MARKER_PREFIX} {role}\n"
+        f"{VERSION_MARKER_PREFIX} {version}\n"
+        f"{REPOSITORY_MARKER_PREFIX} {repository}\n"
     )
 
 
@@ -494,7 +505,7 @@ def render_bootstrap(repository: str, version: str) -> ManagedArtifact:
     identity = parse_repository(repository)
     validate_final_release_version(version)
     text = (
-        "#!/usr/bin/env bash\n"
+        f"{BOOTSTRAP_SHEBANG}\n"
         + ownership_header("bootstrap", identity.display, version)
         + _replace_tokens(_BOOTSTRAP_TEMPLATE, identity.display, version)
     )
@@ -528,5 +539,6 @@ def _replace_tokens(template: str, repository: str, version: str) -> str:
         "__VERSION__": version,
         "__CHECKOUT_REF__": CHECKOUT_REF,
         "__SETUP_UV_REF__": SETUP_UV_REF,
+        "__PYTHON_PIN__": PYTHON_PIN,
     }
     return _TOKEN_RE.sub(lambda match: replacements[match.group(0)], template)

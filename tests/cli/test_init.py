@@ -1,8 +1,6 @@
 """CLI integration tests for the init command."""
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -107,31 +105,6 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         "workflow as .github/workflows/doc-lattice.yml, and make sure the exact pinned \n"
         f"version {__version__} is published on PyPI so the snippets resolve.\n"
     )
-
-
-def test_importing_init_command_does_not_load_github_ci_modules():
-    project_root = Path(__file__).resolve().parents[2]
-    code = """
-import sys
-import doc_lattice.cli.commands.init
-
-loaded = sorted(name for name in sys.modules if name.startswith("doc_lattice.github_ci"))
-if loaded:
-    raise AssertionError(f"ordinary init import loaded GitHub support: {loaded}")
-"""
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(project_root / "src")
-
-    completed = subprocess.run(  # noqa: S603 (fixed interpreter and static test program)
-        [sys.executable, "-c", code],
-        cwd=project_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
 
 
 def test_init_github_requires_repository_before_any_write(tmp_path: Path, monkeypatch):

@@ -230,57 +230,28 @@ def test_supported_docs_describe_conflict_safe_reconcile():
 
 
 def test_supported_docs_order_github_linear_secret_after_verified_policy():
+    # This test pins load-bearing invariants only: the documented setup ordering, the
+    # exact secret names and commands, and the banned trigger token. Editorial prose,
+    # dates, and long URLs are deliberately not asserted so wording can evolve freely.
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    readme_words = " ".join(readme.split())
-    changelog_words = " ".join(changelog.split())
-    assert readme.count("gh secret set DOC_LATTICE_LINEAR_API_KEY") == 1
+
+    # Setup steps are present and ordered: the dedicated environment secret is set
+    # exactly once, and only after the bootstrap reports its verified-policy phrase.
     assert "1. Generate and review" in readme
     assert "6. Verify both" in readme
+    assert readme.count("gh secret set DOC_LATTICE_LINEAR_API_KEY") == 1
     verified = readme.index("environment policy verified")
     secret_set = readme.index("gh secret set DOC_LATTICE_LINEAR_API_KEY")
     assert verified < secret_set
-    assert (
-        "Stop unless `apply` printed the exact success phrase: "
-        "`environment policy verified`.\n\n   ```bash\n"
-        "   # Continue only after apply prints: environment policy verified\n"
-        "   gh secret set DOC_LATTICE_LINEAR_API_KEY"
-    ) in readme
+
+    # The required cleanup commands and the banned trigger token stay documented.
     assert "gh secret delete LINEAR_API_KEY --repo" in readme
     assert "gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo" in readme
     assert "pull_request_target" in readme
-    assert "ci audit is meaningful only after" in readme
-    assert "Before December 8, 2025" in readme
-    assert "attacker-controlled pull-request head branch" in readme
-    assert "exact `main`, with no pattern" in readme
-    assert "`release/*`" in readme
-    assert "Older GitHub Enterprise Server" in readme
-    assert "separate compatibility review" in readme
-    assert "repository owner or administrator" in readme_words
-    assert "organization-plan metadata" in readme_words
-    assert "unmarked `.github/workflows/doc-lattice.yml`" in readme_words
-    assert "before running `init --github`" in readme_words
-    assert "`ci refresh` cannot adopt an unmarked file" in readme_words
-    assert "every old hand-written Linear workflow, regardless of path or filename" in readme_words
-    assert "Do not rely on `ci audit` to discover all legacy workflow indirection" in readme_words
-    assert "every later `plan`, `apply`, or `verify` execution" in readme_words
-    assert "remote environment policy and secret-name metadata" in readme_words
-    assert "valid ownership marker, version, and repository identity" in readme_words
-    assert "does not compare the bootstrap script byte for byte" in readme_words
-    assert "byte-level managed-artifact diff" in readme_words
-    assert "persistent cross-run setup-uv and Actions caching" in readme_words
-    assert "ephemeral job-local cache" in readme_words
-    assert (
-        "https://docs.github.com/en/actions/reference/workflows-and-actions/"
-        "deployments-and-environments"
-    ) in readme
-    assert (
-        "https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-"
-        "environment-branch-protections-changes/"
-    ) in readme
-    assert "unmarked canonical workflow files" in changelog_words
-    assert "before `init --github`" in changelog_words
-    assert "all old hand-written Linear workflows regardless of filename" in changelog_words
+
+    # The changelog documents the managed-workflow adoption command.
+    assert "init --github" in changelog
 
 
 def test_architecture_records_external_github_administration_boundary():

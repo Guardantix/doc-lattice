@@ -17,14 +17,15 @@ from .model import (
     WorkflowStep,
     WorkflowStructureEntry,
 )
-from .render import CANONICAL_ARTIFACT_TARGETS, render_workflows
-from .shell_scanner import direct_doc_lattice_invocations, scan_doc_lattice_invocations
+from .render import CANONICAL_ARTIFACT_TARGETS, LINEAR_WORKFLOW_PATH, render_workflows
+from .shell_scanner import direct_doc_lattice_invocations
 from .workflow_parser import parse_workflow
 
 __all__ = [
     "SECRET_NAMES",
     "audit_global_workflows",
     "audit_managed_installation",
+    "audit_repository",
     "direct_doc_lattice_invocations",
 ]
 
@@ -36,14 +37,35 @@ PR_EVENTS = frozenset(
     }
 )
 SECRET_NAMES = frozenset({"LINEAR_API_KEY", "DOC_LATTICE_LINEAR_API_KEY"})
+_SECRET_NAMES_CASEFOLDED = frozenset(name.casefold() for name in SECRET_NAMES)
 
+# Build the reference alternation from SECRET_NAMES so a new secret extends key and value
+# detection together. Longest-first ordering keeps the alternation from partially matching a
+# name that is a prefix of a longer one.
+_SECRET_NAME_ALTERNATION = "|".join(
+    re.escape(name) for name in sorted(SECRET_NAMES, key=len, reverse=True)
+)
 _SECRET_NAME_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:LINEAR_API_KEY|DOC_LATTICE_LINEAR_API_KEY)(?![A-Za-z0-9_])",
+    rf"(?<![A-Za-z0-9_])(?:{_SECRET_NAME_ALTERNATION})(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
-_CANONICAL_LINEAR_PATH = ".github/workflows/doc-lattice-linear.yml"
+_CANONICAL_LINEAR_PATH = LINEAR_WORKFLOW_PATH.as_posix()
+_WORKFLOW_DIRECTORY = LINEAR_WORKFLOW_PATH.parent.as_posix()
 _CANONICAL_LINEAR_ENV_VALUE = (
     "${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}"  # pragma: allowlist secret
+)
+_COMMAND_BEHAVIOR_FIELDS = frozenset(
+    {
+        "run",
+        "if",
+        "continue-on-error",
+        "shell",
+        "working-directory",
+        "defaults",
+        "env",
+        "strategy",
+        "timeout-minutes",
+    }
 )
 _ROOT_ENV_PATH_LENGTH = 2
 _JOB_FIELD_PATH_LENGTH = 3
@@ -62,6 +84,36 @@ _MANAGED_MESSAGES = {
         "managed Linear secret scope differs from the canonical installation"
     ),
 }
+
+
+def audit_repository(
+    discovery: WorkflowDiscovery,
+    installed: tuple[InstalledArtifact | None, ...],
+    identity: RepositoryIdentity,
+    running_version: str,
+) -> tuple[AuditFinding, ...]:
+    """Compose repository-global and managed audits into one deterministic result.
+
+    This owns the "findings are deterministic, sorted, and unique" contract so callers only
+    render the merged result.
+
+    Args:
+        discovery: Parsed repository workflow discovery state.
+        installed: Read-only inspection results aligned with expected managed artifacts.
+        identity: Explicit or origin-derived repository identity for this audit.
+        running_version: Current generator version used to diagnose stale installations.
+
+    Returns:
+        Deterministically sorted unique findings across both audit layers.
+
+    Raises:
+        ConfigError: If a shell scan cannot complete or inspection results are misaligned.
+    """
+    findings = [
+        *audit_global_workflows(discovery.documents),
+        *audit_managed_installation(discovery, installed, identity, running_version),
+    ]
+    return _sorted_unique(findings)
 
 
 def audit_global_workflows(
@@ -95,13 +147,12 @@ def audit_global_workflows(
                 for step in job.steps:
                     if step.run is None:
                         continue
-                    scan = scan_doc_lattice_invocations(step.run)
-                    if scan.incomplete_reason is not None:
-                        raise ConfigError(
-                            f"{document.path.as_posix()}: shell scan incomplete: "
-                            f"{scan.incomplete_reason}"
+                    invocations.extend(
+                        direct_doc_lattice_invocations(
+                            step.run,
+                            context=document.path.as_posix(),
                         )
-                    invocations.extend(scan.invocations)
+                    )
             if any(command == "linear" for command, _dry_run in invocations):
                 findings.append(
                     _finding(
@@ -168,13 +219,16 @@ def audit_managed_installation(
     if not discovery.directory_exists:
         findings.append(
             AuditFinding(
-                path=".github/workflows",
+                path=_WORKFLOW_DIRECTORY,
                 code="MISSING_WORKFLOW_DIRECTORY",
                 message="managed GitHub workflow directory is missing",
             )
         )
 
     documents_by_path = {document.path.as_posix(): document for document in discovery.documents}
+    # Render and parse each expected workflow at most once per (repository, version) within this
+    # audit call, so multiple installed artifacts do not each re-render both workflows.
+    expected_documents: dict[tuple[str, str], dict[ArtifactRole, WorkflowDocument]] = {}
     for index, artifact in enumerate(installed):
         canonical_artifact = canonical[index]
         if artifact is None:
@@ -193,6 +247,7 @@ def audit_managed_installation(
                 documents_by_path,
                 repository,
                 running_version,
+                expected_documents,
             )
         )
     return _sorted_unique(findings)
@@ -203,6 +258,7 @@ def _audit_installed_artifact(
     documents_by_path: dict[str, WorkflowDocument],
     repository: RepositoryIdentity,
     running_version: str,
+    expected_documents: dict[tuple[str, str], dict[ArtifactRole, WorkflowDocument]],
 ) -> list[AuditFinding]:
     """Audit one present canonical artifact after positional validation."""
     path = artifact.expected.relative_path.as_posix()
@@ -255,11 +311,11 @@ def _audit_installed_artifact(
         # version mismatch STALE_GENERATOR already reports the actionable state; comparing
         # against a chimera baseline would emit spurious managed-drift findings.
         return findings
-    expected_document = _expected_workflow_document(
-        artifact.expected.role,
+    expected_document = _expected_documents_for(
+        expected_documents,
         marker.repository,
         marker.version,
-    )
+    )[artifact.expected.role]
     findings.extend(
         AuditFinding(path=path, code=code, message=_MANAGED_MESSAGES[code])
         for code in _managed_semantic_codes(document, expected_document)
@@ -284,19 +340,30 @@ def _stale_generator_message(marker_version: str, running_version: str) -> str:
     return detail + "run `doc-lattice ci refresh`"
 
 
-def _expected_workflow_document(
-    role: ArtifactRole,
+def _expected_documents_for(
+    cache: dict[tuple[str, str], dict[ArtifactRole, WorkflowDocument]],
     repository: RepositoryIdentity,
     version: str,
-) -> WorkflowDocument:
+) -> dict[ArtifactRole, WorkflowDocument]:
+    """Return the expected workflow documents for one repository and version, memoized."""
+    key = (repository.display, version)
+    documents = cache.get(key)
+    if documents is None:
+        documents = _render_expected_documents(repository, version)
+        cache[key] = documents
+    return documents
+
+
+def _render_expected_documents(
+    repository: RepositoryIdentity,
+    version: str,
+) -> dict[ArtifactRole, WorkflowDocument]:
+    """Render and parse the expected managed workflows keyed by their role."""
     workflows = render_workflows(repository.display, version)
-    if role == "offline":
-        artifact = workflows[0]
-    elif role == "linear":
-        artifact = workflows[1]
-    else:
-        raise ConfigError("bootstrap artifact cannot be parsed as managed workflow YAML")
-    return parse_workflow(Path(artifact.relative_path.as_posix()), artifact.text)
+    return {
+        artifact.role: parse_workflow(Path(artifact.relative_path.as_posix()), artifact.text)
+        for artifact in workflows
+    }
 
 
 def _managed_semantic_codes(
@@ -330,32 +397,56 @@ def _managed_semantic_codes(
     return frozenset(codes)
 
 
-def _managed_step_codes(job: WorkflowJob, expected: WorkflowJob) -> set[str]:
+def _classify_step_drift(
+    current_steps: tuple[WorkflowStep, ...],
+    desired_steps: tuple[WorkflowStep, ...],
+) -> set[str]:
+    """Classify uses and run drift between two step sequences.
+
+    This is the single owner of the uses-sequence comparison, the run-sequence comparison, and
+    the cache-versus-action classification, so a step count mismatch and an aligned drift are
+    diagnosed by the same logic. Cache steps are excluded from the action comparison and are
+    reported through their own code.
+
+    Args:
+        current_steps: Steps discovered in the installed workflow.
+        desired_steps: Steps of the expected rendered workflow.
+
+    Returns:
+        The managed drift codes implied by the uses and run sequences.
+    """
     codes: set[str] = set()
+    current_without_cache = tuple(
+        step for step in current_steps if _action_name(step.uses) != "actions/cache"
+    )
+    if len(current_without_cache) != len(current_steps):
+        codes.add("MANAGED_CACHE")
+    if _uses_sequence(current_without_cache) != _uses_sequence(desired_steps):
+        codes.add("MANAGED_ACTION")
+    if _run_sequence(current_steps) != _run_sequence(desired_steps):
+        codes.add("MANAGED_COMMAND")
+    return codes
+
+
+def _uses_sequence(steps: tuple[WorkflowStep, ...]) -> tuple[str, ...]:
+    return tuple(step.uses for step in steps if step.uses is not None)
+
+
+def _run_sequence(steps: tuple[WorkflowStep, ...]) -> tuple[str, ...]:
+    return tuple(step.run for step in steps if step.run is not None)
+
+
+def _managed_step_codes(job: WorkflowJob, expected: WorkflowJob) -> set[str]:
+    codes = _classify_step_drift(job.steps, expected.steps)
     current_steps_without_cache = tuple(
         step for step in job.steps if _action_name(step.uses) != "actions/cache"
     )
-    if len(current_steps_without_cache) != len(job.steps):
-        codes.add("MANAGED_CACHE")
-
-    expected_actions = tuple(step.uses for step in expected.steps if step.uses is not None)
-    current_actions = tuple(
-        step.uses for step in current_steps_without_cache if step.uses is not None
-    )
-    if current_actions != expected_actions:
-        codes.add("MANAGED_ACTION")
-
-    expected_runs = tuple(step.run for step in expected.steps if step.run is not None)
-    current_runs = tuple(step.run for step in job.steps if step.run is not None)
-    if current_runs != expected_runs:
-        codes.add("MANAGED_COMMAND")
-
     expected_kinds = tuple(_step_kind(step) for step in expected.steps)
     current_kinds = tuple(_step_kind(step) for step in current_steps_without_cache)
     if (
         current_kinds != expected_kinds
-        and current_actions == expected_actions
-        and current_runs == expected_runs
+        and _uses_sequence(current_steps_without_cache) == _uses_sequence(expected.steps)
+        and _run_sequence(job.steps) == _run_sequence(expected.steps)
     ):
         code = "MANAGED_ACTION" if "action" in current_kinds else "MANAGED_JOB"
         codes.add(code)
@@ -407,33 +498,19 @@ def _managed_structure_codes(
     expected: WorkflowDocument,
 ) -> set[str]:
     codes: set[str] = set()
-    current = _structure_map(document.structure, include_steps=False)
-    desired = _structure_map(expected.structure, include_steps=False)
-    all_current = _structure_map(document.structure, include_steps=True)
-    all_desired = _structure_map(expected.structure, include_steps=True)
+    all_current = _structure_map(document.structure)
+    all_desired = _structure_map(expected.structure)
+    current = {path: value for path, value in all_current.items() if not _is_step_path(path)}
+    desired = {path: value for path, value in all_desired.items() if not _is_step_path(path)}
     for path in current.keys() | desired.keys():
         if current.get(path) != desired.get(path):
             codes.add(_structure_code(path, current, desired))
 
     for job, expected_job in zip(document.jobs, expected.jobs, strict=True):
         if len(job.steps) != len(expected_job.steps):
-            step_code_added = False
-            if tuple(step.uses for step in job.steps if step.uses is not None) != tuple(
-                step.uses for step in expected_job.steps if step.uses is not None
-            ):
-                code = (
-                    "MANAGED_CACHE"
-                    if any(_action_name(step.uses) == "actions/cache" for step in job.steps)
-                    else "MANAGED_ACTION"
-                )
-                codes.add(code)
-                step_code_added = True
-            if tuple(step.run for step in job.steps if step.run is not None) != tuple(
-                step.run for step in expected_job.steps if step.run is not None
-            ):
-                codes.add("MANAGED_COMMAND")
-                step_code_added = True
-            if not step_code_added:
+            step_codes = _classify_step_drift(job.steps, expected_job.steps)
+            codes.update(step_codes)
+            if not step_codes:
                 codes.add("MANAGED_JOB")
             continue
         if tuple(_step_kind(step) for step in job.steps) != tuple(
@@ -453,14 +530,11 @@ def _managed_structure_codes(
 
 def _structure_map(
     structure: tuple[WorkflowStructureEntry, ...],
-    *,
-    include_steps: bool,
 ) -> dict[tuple[str, ...], tuple[str, str | None]]:
     return {
         entry.path: (entry.kind, entry.value)
         for entry in structure
         if not _is_display_name_path(entry.path)
-        and (include_steps or not _is_step_path(entry.path))
     }
 
 
@@ -519,18 +593,7 @@ def _structure_code(
 
 
 def _is_command_behavior_path(path: tuple[str, ...]) -> bool:
-    command_fields = {
-        "run",
-        "if",
-        "continue-on-error",
-        "shell",
-        "working-directory",
-        "defaults",
-        "env",
-        "strategy",
-        "timeout-minutes",
-    }
-    return any(component in command_fields for component in path)
+    return any(component in _COMMAND_BEHAVIOR_FIELDS for component in path)
 
 
 def _with_structure_code(
@@ -557,7 +620,7 @@ def _structure_values_reference_secret(
     current: dict[tuple[str, ...], tuple[str, str | None]],
     desired: dict[tuple[str, ...], tuple[str, str | None]],
 ) -> bool:
-    if path and path[-1].casefold() in {name.casefold() for name in SECRET_NAMES}:
+    if path and path[-1].casefold() in _SECRET_NAMES_CASEFOLDED:
         return True
     return any(
         value is not None and value[1] is not None and _SECRET_NAME_RE.search(value[1]) is not None
@@ -573,13 +636,12 @@ def _has_linear_secret_reference(document: WorkflowDocument) -> bool:
         if _SECRET_NAME_RE.search(scalar.value) is not None:
             return True
 
-    secret_keys = {name.casefold() for name in SECRET_NAMES}
     for entry in document.structure:
         if not _is_environment_key_path(entry.path):
             continue
         if entry.path == exempt_path and entry.value == _CANONICAL_LINEAR_ENV_VALUE:
             continue
-        if entry.path[-1].casefold() in secret_keys:
+        if entry.path[-1].casefold() in _SECRET_NAMES_CASEFOLDED:
             return True
     return False
 

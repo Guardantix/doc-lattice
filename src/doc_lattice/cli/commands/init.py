@@ -12,6 +12,9 @@ from rich.markup import escape
 from ... import __version__
 from ...config import DEFAULT_CONFIG_NAME
 from ...error_types import ConfigError, copy_exception_notes
+from ...github_ci.filesystem import apply_changes, preflight_create
+from ...github_ci.identity import parse_repository
+from ...github_ci.render import render_managed_artifacts
 from ...linear_query import is_valid_team_key
 from ...persistence import atomic_create_bytes
 from ...scaffold import build_scaffold
@@ -28,7 +31,6 @@ class _GithubInitPlan:
     """Preflighted inputs for explicit managed GitHub artifact creation."""
 
     repository: str
-    artifact_paths: tuple[str, str, str]
     changes: tuple[ArtifactChange, ...]
 
 
@@ -68,28 +70,16 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
 
 
 def _prepare_github_init(root: Path, repository: str) -> _GithubInitPlan:
-    """Validate and preflight explicit GitHub artifact initialization."""
-    from ...github_ci.filesystem import preflight_create  # noqa: PLC0415
-    from ...github_ci.identity import (  # noqa: PLC0415
-        parse_repository,
-        validate_final_release_version,
-    )
-    from ...github_ci.render import render_managed_artifacts  # noqa: PLC0415
+    """Validate and preflight explicit GitHub artifact initialization.
 
+    The renderer validates the pinned final-release version internally, so no separate
+    caller-side version check is needed. The full preflight result is stored unfiltered
+    because ``apply_changes`` skips already-current artifacts on its own.
+    """
     identity = parse_repository(repository)
-    validate_final_release_version(__version__)
     artifacts = render_managed_artifacts(identity.display, __version__)
     changes = preflight_create(root, artifacts)
-    artifact_paths = (
-        artifacts[0].relative_path.as_posix(),
-        artifacts[1].relative_path.as_posix(),
-        artifacts[2].relative_path.as_posix(),
-    )
-    return _GithubInitPlan(
-        repository=identity.display,
-        artifact_paths=artifact_paths,
-        changes=tuple(change for change in changes if change.action == "create"),
-    )
+    return _GithubInitPlan(repository=identity.display, changes=changes)
 
 
 def register_init(app: typer.Typer) -> None:
@@ -161,8 +151,6 @@ def register_init(app: typer.Typer) -> None:
             else:
                 runtime.stderr.print(f"wrote {escape(target.name)}")
             if github_plan is not None:
-                from ...github_ci.filesystem import apply_changes  # noqa: PLC0415
-
                 apply_changes(github_plan.changes)
             runtime.write_stdout("# ===== .gitignore (append these lines) =====")
             runtime.write_stdout(scaffold.gitignore_text)
@@ -179,16 +167,19 @@ def register_init(app: typer.Typer) -> None:
                     "snippets resolve."
                 )
             else:
-                offline_path, linear_path, bootstrap_path = github_plan.artifact_paths
+                offline_path, linear_path, bootstrap_path = (
+                    escape(change.artifact.relative_path.as_posix())
+                    for change in github_plan.changes
+                )
                 runtime.stderr.print(
                     "Append the .gitignore block and add the pre-commit block under `repos:`. "
-                    f"Review {escape(offline_path)}, {escape(linear_path)}, and "
-                    f"{escape(bootstrap_path)} before enabling or running them, and make sure "
+                    f"Review {offline_path}, {linear_path}, and "
+                    f"{bootstrap_path} before enabling or running them, and make sure "
                     f"the exact pinned version {__version__} is published on PyPI so the "
                     "generated workflows resolve."
                 )
                 runtime.stderr.print(
-                    f"bash .github/doc-lattice-bootstrap.sh plan {escape(github_plan.repository)}",
+                    f"bash {bootstrap_path} plan {escape(github_plan.repository)}",
                     soft_wrap=True,
                 )
         raise typer.Exit(0)
