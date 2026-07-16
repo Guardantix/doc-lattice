@@ -238,6 +238,58 @@ doc-lattice lint
     )
 
 
+def test_direct_doc_lattice_invocations_keeps_command_after_here_string():
+    script = "cat <<< harmless\ndoc-lattice linear"
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_keeps_command_after_arithmetic_shift():
+    script = "(( x = 1 << 2 ))\ndoc-lattice reconcile --all"
+
+    assert direct_doc_lattice_invocations(script) == (("reconcile", False),)
+
+
+def test_direct_doc_lattice_invocations_assembles_quoted_heredoc_delimiter_word():
+    script = """\
+cat <<'E'OF
+harmless
+EOF
+doc-lattice linear
+"""
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_preserves_non_special_double_quote_escape():
+    script = 'cat <<"E\\OF"\nharmless\nE\\OF\ndoc-lattice linear\n'
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_detects_legacy_command_substitution():
+    script = "echo `doc-lattice linear`"
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_detects_legacy_substitution_in_double_quotes():
+    script = 'echo "`doc-lattice linear`"'
+
+    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "echo '`doc-lattice linear`'",
+        r"echo \`doc-lattice linear\`",
+    ],
+)
+def test_direct_doc_lattice_invocations_ignores_literal_backticks(script):
+    assert direct_doc_lattice_invocations(script) == ()
+
+
 def test_global_audit_reports_target_secret_linear_and_mutating_reconcile():
     document = _workflow(
         """\

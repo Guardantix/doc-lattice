@@ -363,6 +363,7 @@ def direct_doc_lattice_invocations(script: str) -> tuple[tuple[str, bool], ...]:
     """
     normalized = script.replace("\\\r\n", "").replace("\\\n", "")
     normalized = _strip_heredoc_bodies(normalized)
+    normalized = _separate_legacy_command_substitutions(normalized)
     normalized = normalized.replace("\r\n", "\n").replace("\r", "\n").replace("\n", ";")
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars=";&|()<>")
     lexer.whitespace_split = True
@@ -561,6 +562,8 @@ def _strip_heredoc_bodies(script: str) -> str:
     lines = script.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     retained: list[str] = []
     pending: list[tuple[str, bool]] = []
+    quote: str | None = None
+    arithmetic_depth = 0
     for line in lines:
         if pending:
             delimiter, strip_tabs = pending[0]
@@ -569,22 +572,26 @@ def _strip_heredoc_bodies(script: str) -> str:
                 pending.pop(0)
             continue
         retained.append(line)
-        pending.extend(_heredoc_delimiters(line))
+        delimiters, quote, arithmetic_depth = _heredoc_delimiters(
+            line,
+            quote,
+            arithmetic_depth,
+        )
+        pending.extend(delimiters)
     return "\n".join(retained)
 
 
-def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+def _heredoc_delimiters(
+    line: str,
+    quote: str | None,
+    arithmetic_depth: int,
+) -> tuple[list[tuple[str, bool]], str | None, int]:
     delimiters: list[tuple[str, bool]] = []
     index = 0
-    quote: str | None = None
     while index < len(line):
         character = line[index]
         if quote is not None:
-            if character == quote:
-                quote = None
-            elif character == "\\" and quote == '"' and index + 1 < len(line):
-                index += 1
-            index += 1
+            index, quote = _advance_quoted_character(line, index, quote)
             continue
         if character in {"'", '"'}:
             quote = character
@@ -593,7 +600,14 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
         if character == "\\":
             index += 2
             continue
-        if not line.startswith("<<", index) or line.startswith("<<<", index):
+        arithmetic_step = _arithmetic_scan_step(line, index, arithmetic_depth)
+        if arithmetic_step is not None:
+            index, arithmetic_depth = arithmetic_step
+            continue
+        if line.startswith("<<<", index):
+            index += 3
+            continue
+        if not line.startswith("<<", index):
             index += 1
             continue
         index += 2
@@ -605,28 +619,145 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
         delimiter, index = _read_heredoc_delimiter(line, index)
         if delimiter:
             delimiters.append((delimiter, strip_tabs))
-    return delimiters
+    return delimiters, quote, arithmetic_depth
+
+
+def _advance_quoted_character(
+    text: str,
+    index: int,
+    quote: str,
+) -> tuple[int, str | None]:
+    character = text[index]
+    if character == quote:
+        return index + 1, None
+    if character == "\\" and quote == '"' and index + 1 < len(text):
+        return index + 2, quote
+    return index + 1, quote
+
+
+def _arithmetic_scan_step(
+    line: str,
+    index: int,
+    depth: int,
+) -> tuple[int, int] | None:
+    if line.startswith("$((", index):
+        return index + 3, depth + 1
+    if line.startswith("((", index):
+        return index + 2, depth + 1
+    if depth == 0:
+        return None
+    if line.startswith("))", index):
+        return index + 2, depth - 1
+    return index + 1, depth
 
 
 def _read_heredoc_delimiter(line: str, start: int) -> tuple[str, int]:
-    if start >= len(line):
-        return "", start
-    quote = line[start] if line[start] in {"'", '"'} else None
-    index = start + 1 if quote is not None else start
+    quote: str | None = None
+    index = start
     characters: list[str] = []
     while index < len(line):
         character = line[index]
         if quote is not None:
-            if character == quote:
-                return "".join(characters), index + 1
-        elif character.isspace() or character in ";&|()<>":
+            index, quote = _collect_quoted_delimiter_character(
+                line,
+                index,
+                quote,
+                characters,
+            )
+            continue
+        if character.isspace() or character in ";&|()<>":
             break
+        if character in {"'", '"'}:
+            quote = character
         elif character == "\\" and index + 1 < len(line):
             index += 1
-            character = line[index]
-        characters.append(character)
+            characters.append(line[index])
+        else:
+            characters.append(character)
         index += 1
+    if quote is not None:
+        return "", index
     return "".join(characters), index
+
+
+def _collect_quoted_delimiter_character(
+    line: str,
+    index: int,
+    quote: str,
+    characters: list[str],
+) -> tuple[int, str | None]:
+    character = line[index]
+    if character == quote:
+        return index + 1, None
+    if quote == '"' and character == "\\" and index + 1 < len(line):
+        escaped = line[index + 1]
+        if escaped in {"$", '"', "\\", "`"}:
+            characters.append(escaped)
+            return index + 2, quote
+    characters.append(character)
+    return index + 1, quote
+
+
+def _separate_legacy_command_substitutions(script: str) -> str:
+    separated: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(script):
+        character = script[index]
+        if character == "\\":
+            separated.append(character)
+            if index + 1 < len(script):
+                index += 1
+                separated.append(script[index])
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = _updated_shell_quote(quote, character)
+            separated.append(character)
+            index += 1
+            continue
+        if character != "`" or quote == "'":
+            separated.append(character)
+            index += 1
+            continue
+        closing = _legacy_command_substitution_end(script, index + 1)
+        if closing is None:
+            separated.append(character)
+            index += 1
+            continue
+        body = script[index + 1 : closing]
+        separated.extend(_legacy_substitution_fragments(body, quote))
+        index = closing + 1
+    return "".join(separated)
+
+
+def _updated_shell_quote(quote: str | None, character: str) -> str | None:
+    if quote is None:
+        return character
+    if quote == character:
+        return None
+    return quote
+
+
+def _legacy_substitution_fragments(
+    body: str,
+    quote: str | None,
+) -> tuple[str, str, str]:
+    if quote == '"':
+        return '" ; ', body, ' ; "'
+    return " ; ", body, " ; "
+
+
+def _legacy_command_substitution_end(script: str, start: int) -> int | None:
+    index = start
+    while index < len(script):
+        if script[index] == "\\":
+            index += 2
+        elif script[index] == "`":
+            return index
+        else:
+            index += 1
+    return None
 
 
 def _expected_workflow_document(
