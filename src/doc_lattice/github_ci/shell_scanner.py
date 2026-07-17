@@ -265,6 +265,7 @@ class _ShellWord:
     literal: str
     dynamic: bool = False
     unquoted_dynamic: bool = False
+    quoted_multiword_dynamic: bool = False
     active_argv_expansion: bool = False
 
 
@@ -274,6 +275,7 @@ class _ShellWordBuilder:
     active_syntax: list[str]
     dynamic: bool = False
     unquoted_dynamic: bool = False
+    quoted_multiword_dynamic: bool = False
 
     def append_protected(
         self,
@@ -281,12 +283,14 @@ class _ShellWordBuilder:
         *,
         dynamic: bool = False,
         unquoted_dynamic: bool = False,
+        quoted_multiword_dynamic: bool = False,
     ) -> None:
         """Append text protected from literal argv expansion."""
         self.characters.extend(segment)
         self.active_syntax.append(" ")
         self.dynamic = self.dynamic or dynamic
         self.unquoted_dynamic = self.unquoted_dynamic or unquoted_dynamic
+        self.quoted_multiword_dynamic = self.quoted_multiword_dynamic or quoted_multiword_dynamic
 
     def append_active(self, character: str) -> None:
         """Append one unquoted, unescaped literal character."""
@@ -299,6 +303,7 @@ class _ShellWordBuilder:
             "".join(self.characters),
             self.dynamic,
             self.unquoted_dynamic,
+            self.quoted_multiword_dynamic,
             _has_active_argv_expansion("".join(self.active_syntax)),
         )
 
@@ -905,12 +910,18 @@ class _ShellScanner:
                 builder.append_protected(segment)
                 continue
             if self.source.startswith('$"', index):
-                segment, index, fragment_dynamic = self._parse_double_quoted(
-                    index + 2,
-                    limit,
-                    depth,
+                segment, index, fragment_dynamic, fragment_multiword_dynamic = (
+                    self._parse_double_quoted(
+                        index + 2,
+                        limit,
+                        depth,
+                    )
                 )
-                builder.append_protected(segment, dynamic=fragment_dynamic)
+                builder.append_protected(
+                    segment,
+                    dynamic=fragment_dynamic,
+                    quoted_multiword_dynamic=fragment_multiword_dynamic,
+                )
                 continue
             character = self.source[index]
             if character == "'":
@@ -922,12 +933,18 @@ class _ShellScanner:
                 index = closing + 1
                 continue
             if character == '"':
-                segment, index, fragment_dynamic = self._parse_double_quoted(
-                    index + 1,
-                    limit,
-                    depth,
+                segment, index, fragment_dynamic, fragment_multiword_dynamic = (
+                    self._parse_double_quoted(
+                        index + 1,
+                        limit,
+                        depth,
+                    )
                 )
-                builder.append_protected(segment, dynamic=fragment_dynamic)
+                builder.append_protected(
+                    segment,
+                    dynamic=fragment_dynamic,
+                    quoted_multiword_dynamic=fragment_multiword_dynamic,
+                )
                 continue
             if character == "\\":
                 if index + 1 < limit and self.source[index + 1] == "\n":
@@ -959,15 +976,16 @@ class _ShellScanner:
         start: int,
         limit: int,
         depth: int,
-    ) -> tuple[list[str], int, bool]:
+    ) -> tuple[list[str], int, bool, bool]:
         characters: list[str] = []
         dynamic = False
+        multiword_dynamic = False
         index = start
         while index < limit:
             self.budget.step()
             character = self.source[index]
             if character == '"':
-                return characters, index + 1, dynamic
+                return characters, index + 1, dynamic, multiword_dynamic
             if character == "\\" and index + 1 < limit:
                 escaped = self.source[index + 1]
                 if escaped == "\n":
@@ -988,11 +1006,47 @@ class _ShellScanner:
             )
             if expansion_end is not None:
                 dynamic = True
+                multiword_dynamic = multiword_dynamic or self._double_quoted_expansion_is_multiword(
+                    index,
+                    expansion_end,
+                    limit,
+                )
                 index = expansion_end
                 continue
             characters.append(character)
             index += 1
-        return characters, index, dynamic
+        return characters, index, dynamic, multiword_dynamic
+
+    def _double_quoted_expansion_is_multiword(
+        self,
+        start: int,
+        end: int,
+        limit: int,
+    ) -> bool:
+        """Return whether one double-quoted expansion can produce multiple argv words."""
+        if self.source.startswith("$@", start):
+            return True
+        if (
+            not self.source.startswith("${", start)
+            or end > limit
+            or end <= start + 2
+            or self.source[end - 1] != "}"
+        ):
+            return False
+        parameter = self.source[start + 2 : end - 1]
+        if parameter == "@":
+            return True
+        if parameter.startswith("!"):
+            parameter = parameter[1:]
+        name_end = 0
+        while name_end < len(parameter) and (
+            parameter[name_end].isalnum() or parameter[name_end] == "_"
+        ):
+            name_end += 1
+        if name_end == 0:
+            return False
+        remainder = parameter[name_end:]
+        return remainder == "@" or remainder.startswith("[@]")
 
     def _consume_active_expansion(
         self,
@@ -1473,6 +1527,10 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
                 if word.unquoted_dynamic:
                     raise _ShellScanIncomplete(
                         "unquoted dynamic env assignment cannot be scanned safely"
+                    )
+                if word.quoted_multiword_dynamic:
+                    raise _ShellScanIncomplete(
+                        "quoted multiword env assignment cannot be scanned safely"
                     )
                 index += 1
                 continue
