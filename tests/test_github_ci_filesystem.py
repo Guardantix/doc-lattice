@@ -631,6 +631,39 @@ def test_apply_keeps_contending_refresh_from_publishing_before_outer_write(
     ]
 
 
+def test_apply_rejects_root_replaced_after_lock_acquisition_before_writing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "repository"
+    displaced_root = tmp_path / "displaced-repository"
+    root.mkdir()
+    old_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")[0]
+    new_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
+    _write_artifacts(root, (old_artifact,))
+    changes = preflight_refresh(root, (new_artifact,))
+    old_bytes = old_artifact.text.encode("utf-8")
+    real_claim = filesystem._claim_lock
+
+    def _replace_root_after_claim(fd: int) -> None:
+        real_claim(fd)
+        root.rename(displaced_root)
+        root.mkdir()
+        _write_artifacts(root, (old_artifact,))
+
+    monkeypatch.setattr(filesystem, "_claim_lock", _replace_root_after_claim)
+
+    with pytest.raises(
+        ConfigError,
+        match="managed artifact lock protects a different repository root directory",
+    ) as caught:
+        apply_changes(changes)
+
+    assert str(root) not in str(caught.value)
+    assert (root / old_artifact.relative_path).read_bytes() == old_bytes
+    assert (displaced_root / old_artifact.relative_path).read_bytes() == old_bytes
+
+
 def test_apply_rejects_unsupported_locking_before_replacing_target(tmp_path: Path, monkeypatch):
     old_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")[0]
     new_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]

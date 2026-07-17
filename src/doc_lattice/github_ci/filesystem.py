@@ -57,6 +57,18 @@ class _WorkflowCandidate:
     size: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ManagedArtifactLock:
+    """A root-bound capability for managed-artifact publication."""
+
+    root: Path
+    directory_identity: tuple[int, int]
+
+    def protects_directory(self, directory_stat: os.stat_result) -> bool:
+        """Return whether a directory stat result identifies the locked root."""
+        return self.directory_identity == (directory_stat.st_dev, directory_stat.st_ino)
+
+
 def _real_directory_exists(
     logical_path: Path,
     *,
@@ -350,11 +362,12 @@ def apply_changes(changes: tuple[ArtifactChange, ...]) -> None:
     root = _mutable_changes_root(changes)
     if root is None:
         return
-    with _managed_artifact_lock(root):
+    with _managed_artifact_lock(root) as lock:
         for change in changes:
             if change.action == "current":
                 continue
             try:
+                _require_managed_artifact_lock(lock, change.root)
                 if change.action == "create":
                     _apply_create(change)
                 else:
@@ -377,7 +390,7 @@ def _mutable_changes_root(changes: tuple[ArtifactChange, ...]) -> Path | None:
 
 
 @contextmanager
-def _managed_artifact_lock(root: Path) -> Iterator[None]:
+def _managed_artifact_lock(root: Path) -> Iterator[_ManagedArtifactLock]:
     """Hold the root directory's nonblocking advisory lock through publication."""
     if not _LOCKING_SUPPORTED:
         raise _unsupported_lock_error()
@@ -386,7 +399,10 @@ def _managed_artifact_lock(root: Path) -> Iterator[None]:
     try:
         _claim_lock(fd)
         acquired = True
-        yield
+        directory_stat = _inspect_lock_directory(fd)
+        lock = _new_managed_artifact_lock(root, directory_stat)
+        _require_managed_artifact_lock(lock, root)
+        yield lock
     finally:
         active_error = sys.exception()
         cleanup_errors: list[tuple[str, BaseException]] = []
@@ -419,6 +435,45 @@ def _open_lock_directory(root: Path) -> int:
         raise _lock_setup_error("opening repository root", cause) from cause
 
 
+def _inspect_lock_directory(fd: int) -> os.stat_result:
+    """Inspect the directory inode protected by an acquired advisory lock."""
+    try:
+        return os.fstat(fd)
+    except OSError as cause:
+        raise _lock_setup_error("inspecting locked repository root", cause) from cause
+
+
+def _new_managed_artifact_lock(
+    root: Path,
+    directory_stat: os.stat_result,
+) -> _ManagedArtifactLock:
+    """Create a capability bound to the resolved root and locked directory inode."""
+    try:
+        resolved_root = root.resolve()
+    except (OSError, RuntimeError) as cause:
+        raise _lock_setup_error("resolving locked repository root", cause) from cause
+    return _ManagedArtifactLock(
+        root=resolved_root,
+        directory_identity=(directory_stat.st_dev, directory_stat.st_ino),
+    )
+
+
+def _require_managed_artifact_lock(lock: _ManagedArtifactLock, root: Path) -> None:
+    """Ensure one mutation root is still the directory protected by ``lock``."""
+    try:
+        resolved_root = root.resolve()
+    except (OSError, RuntimeError) as cause:
+        raise _lock_validation_error("resolving repository root", cause) from cause
+    if lock.root != resolved_root:
+        raise ConfigError("managed artifact lock protects a different repository root")
+    try:
+        directory_stat = resolved_root.stat()
+    except OSError as cause:
+        raise _lock_validation_error("inspecting repository root", cause) from cause
+    if not lock.protects_directory(directory_stat):
+        raise ConfigError("managed artifact lock protects a different repository root directory")
+
+
 def _claim_lock(fd: int) -> None:
     """Acquire one nonblocking advisory lock or describe why publication cannot begin."""
     try:
@@ -446,10 +501,19 @@ def _unsupported_lock_error() -> ConfigError:
     )
 
 
-def _lock_setup_error(operation: str, cause: OSError) -> ConfigError:
+def _lock_setup_error(operation: str, cause: OSError | RuntimeError) -> ConfigError:
     """Wrap one directory-lock setup failure without leaking a local root path."""
     error = ConfigError(
         f"managed artifact lock setup failed while {operation}: {_stable_error_detail(cause)}"
+    )
+    copy_exception_notes(error, cause)
+    return error
+
+
+def _lock_validation_error(operation: str, cause: OSError | RuntimeError) -> ConfigError:
+    """Wrap a root-identity validation failure without exposing a local path."""
+    error = ConfigError(
+        f"managed artifact lock validation failed while {operation}: {_stable_error_detail(cause)}"
     )
     copy_exception_notes(error, cause)
     return error
