@@ -1503,6 +1503,27 @@ def _word_may_change_argv(word: _ShellWord) -> bool:
     return word.dynamic or word.active_argv_expansion
 
 
+def _reject_active_executable_word(word: _ShellWord) -> None:
+    """Reject a brace- or glob-expanded word that may become the executed program."""
+    if word.active_argv_expansion:
+        raise _ShellScanIncomplete("executable word uses brace or glob expansion")
+
+
+def _reject_unresolved_active_executable(
+    words: list[_ShellWord],
+    start: int,
+    end: int,
+    *,
+    ignore_shell_assignments: bool,
+) -> None:
+    """Reject unresolved executable grammar containing active argv expansion."""
+    if any(
+        word.active_argv_expansion and not (ignore_shell_assignments and word.shell_assignment)
+        for word in words[start:end]
+    ):
+        raise _ShellScanIncomplete("executable word uses brace or glob expansion")
+
+
 def _word_may_change_option_value_shape(word: _ShellWord) -> bool:
     """Return whether a static option's value can add or remove argv fields.
 
@@ -1531,7 +1552,10 @@ def _command_boundary_word_may_disappear(word: _ShellWord) -> bool:
 
 def _has_active_argv_expansion(syntax: str) -> bool:
     """Return whether unquoted word syntax can expand into a different argv shape."""
-    if any(marker in syntax for marker in "*?["):
+    if "*" in syntax or "?" in syntax:
+        return True
+    bracket_start = syntax.find("[")
+    if bracket_start >= 0 and "]" in syntax[bracket_start + 1 :]:
         return True
     brace_separators: list[bool] = []
     previous_period = False
@@ -1814,6 +1838,13 @@ def _doc_lattice_command_index(
         payload_index = _coproc_doc_lattice_command_index(words, command_index + 1)
     else:
         payload_index = _doc_lattice_payload_index(words, command_index)
+    if payload_index.index is None:
+        _reject_unresolved_active_executable(
+            words,
+            start,
+            command_index + 1,
+            ignore_shell_assignments=True,
+        )
     return _ResolvedIndex(payload_index.index, command.ambiguous or payload_index.ambiguous)
 
 
@@ -1843,6 +1874,13 @@ def _doc_lattice_command_after_prefixes(
     if executable.index is None:
         return executable
     payload = _doc_lattice_payload_index(words, executable.index)
+    if payload.index is None:
+        _reject_unresolved_active_executable(
+            words,
+            start,
+            executable.index + 1,
+            ignore_shell_assignments=True,
+        )
     return _ResolvedIndex(payload.index, executable.ambiguous or payload.ambiguous)
 
 
@@ -1855,6 +1893,7 @@ def _doc_lattice_payload_index(
     if executable_index >= len(words):
         return _ResolvedIndex(None)
     executable_word = words[executable_index]
+    _reject_active_executable_word(executable_word)
     if _is_doc_lattice_executable(executable_word):
         return _ResolvedIndex(executable_index)
     if not executable_word.dynamic:
@@ -2046,7 +2085,7 @@ def _launcher_payload_index(
     request: _LauncherPayloadRequest,
 ) -> _ResolvedIndex:
     """Resolve a selected launcher's static payload, including executable prefix chains."""
-    payload = _skip_options(
+    option_resolution = _skip_options(
         words,
         start,
         request.options,
@@ -2054,10 +2093,20 @@ def _launcher_payload_index(
     )
     payload = _nested_launcher_payload_index(
         words,
-        payload,
+        option_resolution,
         strip_version=request.strip_version,
         launcher_depth=request.launcher_depth,
     )
+    if payload.index is None:
+        expansion_end = (
+            option_resolution.index + 1 if option_resolution.index is not None else len(words)
+        )
+        _reject_unresolved_active_executable(
+            words,
+            start,
+            expansion_end,
+            ignore_shell_assignments=False,
+        )
     return _ResolvedIndex(payload.index, request.inherited_ambiguity or payload.ambiguous)
 
 
@@ -2078,6 +2127,7 @@ def _nested_launcher_payload_index(
     if payload_index is None or payload_index >= len(words):
         return payload_resolution
     payload = words[payload_index]
+    _reject_active_executable_word(payload)
     if payload.dynamic:
         return _ResolvedIndex(None, payload_resolution.ambiguous)
     basename = _basename(payload.literal)
@@ -2418,7 +2468,7 @@ def _read_ansi_c_escape(
     elif character == "c" and start + 1 < limit:
         controlled = source[start + 1]
         value = 127 if controlled == "?" else ord(controlled.upper()) & 0x1F
-        result = (chr(value), start + 2)
+        result = (_valid_ansi_c_character(value, source[start : start + 2]), start + 2)
     else:
         result = (f"\\{character}", start + 1)
     return result
@@ -2459,6 +2509,8 @@ def _read_ansi_c_digits(
 
 
 def _valid_ansi_c_character(value: int, source: str) -> str:
+    if value == 0:
+        raise _ShellScanIncomplete("ANSI-C quoted word decodes to NUL")
     if value > _UNICODE_MAX or _SURROGATE_MIN <= value <= _SURROGATE_MAX:
         return f"\\{source}"
     return chr(value)

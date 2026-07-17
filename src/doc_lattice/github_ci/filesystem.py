@@ -42,6 +42,9 @@ MAX_WORKFLOW_BYTES = 1_048_576
 MAX_CUMULATIVE_WORKFLOW_BYTES = 8_388_608
 _NONSTANDARD_LINE_SEPARATORS = ("\v", "\f", "\x85", "\u2028", "\u2029")
 _UNIFIED_DIFF_HEADER_RECORDS = 2
+_C0_CONTROL_LIMIT = 0x20
+_DELETE_OR_C1_CONTROL_START = 0x7F
+_C1_CONTROL_END = 0x9F
 _PARTIAL_STATE_NOTE = (
     "managed artifacts are applied in input order without rollback; earlier changes, "
     "if any, remain in place, so inspect the reported path and rerun to converge"
@@ -1056,14 +1059,30 @@ def _split_lf_records(text: str) -> list[str]:
     return records
 
 
+def _escape_diff_terminal_controls(record: str) -> str:
+    """Render terminal controls visibly while preserving LF and a final CRLF sequence."""
+    final_cr = len(record) - 2 if record.endswith("\r\n") else -1
+    rendered: list[str] = []
+    for index, character in enumerate(record):
+        value = ord(character)
+        if character == "\n" or index == final_cr:
+            rendered.append(character)
+        elif value < _C0_CONTROL_LIMIT or _DELETE_OR_C1_CONTROL_START <= value <= _C1_CONTROL_END:
+            rendered.append(f"\\x{value:02x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
 def _render_diff_record(index: int, record: str) -> str:
     """Render one difflib record without hiding content line-ending differences."""
     is_control = index < _UNIFIED_DIFF_HEADER_RECORDS or record.startswith("@@")
+    rendered = _escape_diff_terminal_controls(record)
     if is_control:
-        return f"{record}\n"
+        return f"{rendered}\n"
     if record.endswith("\n"):
-        return record
-    return f"{record}\n\\ No newline at end of file\n"
+        return rendered
+    return f"{rendered}\n\\ No newline at end of file\n"
 
 
 def _descriptor_open_flags(*, directory: bool) -> int:
@@ -1086,7 +1105,7 @@ def _ensure_locked_artifact_ancestor(
     create: bool,
 ) -> None:
     """Require one descriptor-relative artifact ancestor to be a real directory."""
-    synchronize_parent = False
+    synchronize_parent = create
     try:
         ancestor_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -1094,7 +1113,6 @@ def _ensure_locked_artifact_ancestor(
             raise ConfigError(
                 f"destination changed after preflight for managed artifact {artifact_path}"
             ) from None
-        synchronize_parent = True
         try:
             os.mkdir(component, dir_fd=parent_fd)
         except FileExistsError:

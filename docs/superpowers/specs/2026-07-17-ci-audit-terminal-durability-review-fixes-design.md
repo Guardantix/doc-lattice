@@ -26,9 +26,10 @@ supported Bash wrappers and coprocesses, and `uv run` or `uvx` payloads. Expande
 literal subcommand remain allowed because they cannot change which command or subcommand runs.
 
 The check will use the `_ShellWord.active_argv_expansion` provenance already produced by the
-bounded lexer. Resolver layers will reject that provenance before they speculate that the word can
-disappear and expose a later word. This prevents ambiguity from being discarded when no later
-literal `doc-lattice` payload is found.
+bounded lexer. Resolver layers may continue speculatively past that word so an already-supported
+later payload retains its more specific fail-closed diagnostic. If executable resolution otherwise
+ends without a payload, the resolver rejects any active expansion it traversed instead of
+discarding the ambiguity.
 
 ### ANSI-C quoted NUL
 

@@ -702,6 +702,43 @@ def test_scan_doc_lattice_invocations_reports_incomplete_on_expanded_subcommand(
 
 
 @pytest.mark.parametrize(
+    "script",
+    [
+        "{doc-lattice,} linear",
+        "command {doc-lattice,} linear",
+        "exec {doc-lattice,} linear",
+        "builtin exec {doc-lattice,} linear",
+        "time {doc-lattice,} linear",
+        "coproc {doc-lattice,} linear",
+        "coproc worker {doc-lattice,} linear",
+        "uv run {doc-lattice,} linear",
+        "uvx {doc-lattice,} linear",
+    ],
+)
+def test_scan_doc_lattice_invocations_fails_closed_on_expanded_executable(script):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "executable word uses brace or glob expansion"
+
+
+@pytest.mark.parametrize("escape", [r"\0", r"\x00", r"\u0000", r"\U00000000", r"\c@"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "$'doc-lattice{escape}suffix' linear",
+        "doc-lattice $'linear{escape}suffix'",
+    ],
+    ids=["executable", "subcommand"],
+)
+def test_scan_doc_lattice_invocations_rejects_ansi_c_nul_escape(escape, template):
+    result = scan_doc_lattice_invocations(template.format(escape=escape))
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "ANSI-C quoted word decodes to NUL"
+
+
+@pytest.mark.parametrize(
     ("script", "expected"),
     [
         ("doc-lattice reconcile {a,b}", RECONCILE),

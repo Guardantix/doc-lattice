@@ -470,6 +470,32 @@ def test_render_diff_is_stable_for_replace_and_omits_current():
     assert render_diff((changes[1],)) == ""
 
 
+def test_render_diff_escapes_non_line_ending_terminal_controls():
+    controls = "".join(
+        chr(value) for value in (*range(0x20), 0x7F, *range(0x80, 0xA0)) if value != 0x0A
+    )
+    artifact = ManagedArtifact(
+        role="offline",
+        relative_path=PurePosixPath(".github/workflows/doc-lattice.yml"),
+        text=f"new:{controls}:suffix\n",
+    )
+    change = ArtifactChange(
+        artifact=artifact,
+        root=Path("/repo"),
+        destination=Path("/repo/.github/workflows/doc-lattice.yml"),
+        action="replace",
+        before=f"old:{controls}:suffix\n".encode(),
+    )
+
+    rendered = render_diff((change,))
+
+    for value in (*range(0x20), 0x7F, *range(0x80, 0xA0)):
+        if value == 0x0A:
+            continue
+        assert chr(value) not in rendered
+        assert f"\\x{value:02x}" in rendered
+
+
 def test_render_diff_preserves_crlf_difference_in_replacement_content():
     artifact = ManagedArtifact(
         role="offline",
@@ -737,6 +763,54 @@ def test_apply_reports_parent_sync_failure_before_writing_artifact(
 
     assert all(not (tmp_path / artifact.relative_path).exists() for artifact in artifacts)
     assert any("without rollback" in note for note in getattr(caught.value, "__notes__", ()))
+
+
+def test_apply_create_retry_resynchronizes_existing_ancestor(tmp_path: Path, monkeypatch):
+    artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
+    real_fsync = filesystem.os.fsync
+
+    def _fail_parent_sync(_fd: int) -> None:
+        raise OSError("synthetic parent sync failure")
+
+    with monkeypatch.context() as context:
+        context.setattr(filesystem.os, "fsync", _fail_parent_sync)
+        with pytest.raises(ConfigError, match="cannot synchronize managed artifact parent"):
+            apply_changes(preflight_create(tmp_path, (artifact,)))
+
+    assert (tmp_path / ".github").is_dir()
+    assert not (tmp_path / artifact.relative_path).exists()
+    root_stat = tmp_path.stat()
+    root_identity = root_stat.st_dev, root_stat.st_ino
+    events: list[tuple[str, tuple[int, int]]] = []
+    real_create = filesystem.atomic_create_bytes_at
+
+    def _identity(fd: int) -> tuple[int, int]:
+        result = os.fstat(fd)
+        return result.st_dev, result.st_ino
+
+    def _record_fsync(fd: int) -> None:
+        events.append(("fsync", _identity(fd)))
+        real_fsync(fd)
+
+    def _record_create(
+        directory_fd: int,
+        destination_name: str,
+        data: bytes,
+        *,
+        prefix: str,
+    ) -> None:
+        events.append(("write", _identity(directory_fd)))
+        real_create(directory_fd, destination_name, data, prefix=prefix)
+
+    monkeypatch.setattr(filesystem.os, "fsync", _record_fsync)
+    monkeypatch.setattr(filesystem, "atomic_create_bytes_at", _record_create)
+
+    apply_changes(preflight_create(tmp_path, (artifact,)))
+
+    assert ("fsync", root_identity) in events
+    assert events.index(("fsync", root_identity)) < next(
+        index for index, event in enumerate(events) if event[0] == "write"
+    )
 
 
 def test_apply_rejects_root_replaced_after_lock_acquisition_before_writing(

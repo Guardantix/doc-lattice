@@ -17,7 +17,7 @@
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write the failing executable-position regression**
+- [x] **Step 1: Write the failing executable-position regression**
 
 Add a parameterized test beside the expanded-subcommand cases:
 
@@ -46,7 +46,7 @@ def test_scan_doc_lattice_invocations_fails_closed_on_expanded_executable(script
 The existing expanded-argument test remains the positive control proving that
 `doc-lattice linear {one,two}` is still classified normally.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov \
@@ -55,7 +55,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 
 Expected: all cases fail because the scanner reports `incomplete_reason=None`.
 
-- [ ] **Step 3: Reject active expansion at supported executable boundaries**
+- [x] **Step 3: Reject active expansion at supported executable boundaries**
 
 Add the shared guard near the argv-provenance helpers:
 
@@ -66,16 +66,16 @@ def _reject_active_executable_word(word: _ShellWord) -> None:
         raise _ShellScanIncomplete("executable word uses brace or glob expansion")
 ```
 
-Call it before speculative disappearance or classification in `_skip_shell_prefixes`,
-`_skip_builtin_wrapper`, `_skip_command_builtin`, `_skip_exec_wrapper`,
-`_doc_lattice_payload_index`, `_nested_launcher_payload_index`, and each `_skip_options` loop.
-This covers top-level, Bash-wrapper, coprocess, and uv payload positions while leaving post-command
-arguments unchanged.
+Use it directly when a selected payload word still carries active expansion. Add a range guard that
+rejects active expansion traversed by top-level, Bash-wrapper, coprocess, and uv resolution only
+when no later payload was classified. This preserves established diagnostics for a later sensitive
+payload while preventing unresolved expansion ambiguity from being discarded. Require a closing
+`]` before treating `[` as an active bracket glob so the literal Bash `[` command stays valid.
 
 Update the README audit contract to state that active brace/glob expansion in executable or
 subcommand words fails closed.
 
-- [ ] **Step 4: Run GREEN and the scanner/audit suites**
+- [x] **Step 4: Run GREEN and the scanner/audit suites**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov \
@@ -91,7 +91,7 @@ Expected: PASS.
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write the failing ANSI-C NUL regressions**
+- [x] **Step 1: Write the failing ANSI-C NUL regressions**
 
 Add executable and protected-subcommand coverage for every supported NUL spelling:
 
@@ -112,12 +112,12 @@ def test_scan_doc_lattice_invocations_rejects_ansi_c_nul_escape(escape, template
     assert result.incomplete_reason == "ANSI-C quoted word decodes to NUL"
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run the new parameterized test with `pytest --no-cov -q`. Expected: executable cases report a
 complete empty result and subcommand cases retain a literal containing `chr(0)`.
 
-- [ ] **Step 3: Reject zero at the common decoder boundary**
+- [x] **Step 3: Reject zero at the common decoder boundary**
 
 Change `_valid_ansi_c_character` before its Unicode-range validation:
 
@@ -129,7 +129,7 @@ if value == 0:
 Update the same README audit paragraph to document NUL-producing ANSI-C quoted words as
 fail-closed input.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run the new test, then all of `tests/test_github_ci_shell_scanner.py` and
 `tests/test_github_ci_audit.py` with `pytest --no-cov -q`. Expected: PASS.
@@ -141,7 +141,7 @@ Run the new test, then all of `tests/test_github_ci_shell_scanner.py` and
 - Modify: `src/doc_lattice/github_ci/filesystem.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write the failing terminal-safety regression**
+- [x] **Step 1: Write the failing terminal-safety regression**
 
 Add a replacement diff test after the stable render cases:
 
@@ -176,11 +176,11 @@ def test_render_diff_escapes_non_line_ending_terminal_controls():
 
 The existing CRLF test remains the positive control for a final line-ending CR.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run the new test with `pytest --no-cov -q`. Expected: the raw control-character assertion fails.
 
-- [ ] **Step 3: Escape C0, DEL, and C1 controls at record rendering**
+- [x] **Step 3: Escape C0, DEL, and C1 controls at record rendering**
 
 Add a helper beside `_render_diff_record`:
 
@@ -204,7 +204,7 @@ Have `_render_diff_record` render the escaped record while using the original re
 headers and final-newline state. Update the README refresh contract to say non-line-ending terminal
 controls are shown as visible `\xNN` escapes.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run the new test and `tests/test_github_ci_filesystem.py tests/cli/test_ci.py` with
 `pytest --no-cov -q`. Expected: PASS, including the existing CRLF/no-final-newline cases.
@@ -216,7 +216,7 @@ Run the new test and `tests/test_github_ci_filesystem.py tests/cli/test_ci.py` w
 - Modify: `src/doc_lattice/github_ci/filesystem.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write the failing two-attempt durability regression**
+- [x] **Step 1: Write the failing two-attempt durability regression**
 
 Add a test beside the parent synchronization coverage. The first attempt fails its first `fsync`
 after creating `.github`. The retry preflights again, records directory identities for `fsync` and
@@ -271,12 +271,12 @@ def test_apply_create_retry_resynchronizes_existing_ancestor(tmp_path: Path, mon
     )
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run the new test with `pytest --no-cov -q`. Expected: the retry writes successfully but has no
 `("fsync", root_identity)` event.
 
-- [ ] **Step 3: Synchronize every validated create ancestor**
+- [x] **Step 3: Synchronize every validated create ancestor**
 
 Initialize `synchronize_parent = create` in `_ensure_locked_artifact_ancestor` rather than only
 setting it after this attempt's `FileNotFoundError`. Keep validation before `fsync` and keep
@@ -285,7 +285,7 @@ setting it after this attempt's `FileNotFoundError`. Keep validation before `fsy
 Update the README refresh contract to state that create retries resynchronize ancestor entries
 before publishing a missing artifact.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run the new test and all of `tests/test_github_ci_filesystem.py` with `pytest --no-cov -q`.
 Expected: PASS.
@@ -295,7 +295,7 @@ Expected: PASS.
 **Files:**
 - Verify every modified source, test, README, design, and plan file.
 
-- [ ] **Step 1: Run the complete repository gates**
+- [x] **Step 1: Run the complete repository gates**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest
@@ -309,7 +309,7 @@ git diff --check
 
 Expected: every command exits 0; pytest reports zero failures and coverage at or above 80 percent.
 
-- [ ] **Step 2: Audit all four findings against fresh evidence**
+- [x] **Step 2: Audit all four findings against fresh evidence**
 
 Rerun the four focused regression tests, inspect `git diff --stat`, `git diff`, and
 `git status --short`, and map every finding to its regression and production boundary. Confirm the
@@ -321,7 +321,9 @@ that no unrelated user change is included.
 ```bash
 git add README.md src/doc_lattice/github_ci/shell_scanner.py \
   src/doc_lattice/github_ci/filesystem.py tests/test_github_ci_shell_scanner.py \
-  tests/test_github_ci_filesystem.py
+  tests/test_github_ci_filesystem.py \
+  docs/superpowers/specs/2026-07-17-ci-audit-terminal-durability-review-fixes-design.md \
+  docs/superpowers/plans/2026-07-17-ci-audit-terminal-durability-review-fixes.md
 git commit -m "fix: close final ci audit review gaps"
 ```
 

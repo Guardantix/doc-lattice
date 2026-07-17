@@ -591,13 +591,16 @@ doc-lattice ci refresh --repository CANONICAL/NAME --apply
 ```
 
 The preview exits 0 when current, 1 after printing an update diff, and 2 for an unreadable,
-unmarked, or otherwise unsafe target. Apply prints the same diff, requires typing the explicit
-repository identity exactly, repeats preflight after confirmation, and atomically replaces only
-marked canonical artifacts or creates a missing one. Mixed versions after an interruption are safe
-to preview and resume. Use this flow for generator upgrades and repository renames, then review and
-commit the resulting diff. GitHub generation and refresh accept only final-version syntax such as
-`2.0.0`: this rejects pins that can never resolve as final releases, but it does not prove the
-release is already published or that an unreleased source checkout matches that release.
+unmarked, or otherwise unsafe target. The diff renders non-line-ending terminal controls as visible
+`\xNN` escapes instead of sending repository-controlled sequences to the terminal. Apply prints the
+same diff, requires typing the explicit repository identity exactly, repeats preflight after
+confirmation, and atomically replaces only marked canonical artifacts or creates a missing one.
+Before publishing a missing artifact, both an initial create and a retry synchronize every
+validated ancestor directory entry. Mixed versions after an interruption are safe to preview and
+resume. Use this flow for generator upgrades and repository renames, then review and commit the
+resulting diff. GitHub generation and refresh accept only final-version syntax such as `2.0.0`:
+this rejects pins that can never resolve as final releases, but it does not prove the release is
+already published or that an unreleased source checkout matches that release.
 
 When `ci audit` omits `--repository`, it resolves the local `origin` only from GitHub.com SCP
 (`git@github.com:OWNER/REPO.git`), `ssh://git@github.com/OWNER/REPO.git`, or
@@ -626,9 +629,12 @@ two canonical managed workflow paths, so an unrelated release workflow may legit
 Audit recognizes direct Bash and `sh` invocations, including supported `uv run` and `uvx` forms.
 For pull-request steps it resolves step, job-default, and workflow-default shell configuration and
 scans the selected command template. Unsupported runner defaults or shell semantics exit 2 instead
-of being interpreted as Bash. Audit cannot prove that an arbitrary script, local action, reusable
-workflow, or renamed wrapper eventually invokes a sensitive command. Malformed, oversized, or
-otherwise unreliably inspectable workflows also exit 2 instead of being treated as safe.
+of being interpreted as Bash. Active brace or glob expansion in an executable or subcommand word
+also exits 2 because the resulting command cannot be certified statically. ANSI-C quoted words that
+decode to NUL exit 2 because Bash discards the suffix after NUL instead of placing that byte in an
+argument. Audit cannot prove that an arbitrary script, local action, reusable workflow, or renamed
+wrapper eventually invokes a sensitive command. Malformed, oversized, or otherwise unreliably
+inspectable workflows also exit 2 instead of being treated as safe.
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. For the bootstrap script, audit validates only presence and
 ownership metadata rather than content equality. Local audit also cannot see remote environment or
