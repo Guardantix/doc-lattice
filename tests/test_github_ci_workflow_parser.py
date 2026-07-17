@@ -13,6 +13,7 @@ MAX_UTF8_INPUT_BYTES = 1_048_576
 MAX_YAML_NESTING_DEPTH = 100
 MAX_EXPANDED_VISITS = 50_000
 MAX_COLLECTED_STRING_SCALARS = 10_000
+MAX_EXPANDED_SCALAR_CHARS = 1_048_576
 
 
 def _alias_graph(leaf: str, *, layers: int) -> str:
@@ -526,6 +527,28 @@ def test_parse_workflow_rejects_alias_expansion_over_scalar_budget():
     assert str(path) in str(exc.value)
     assert "resource limit" in str(exc.value)
     assert "LEAK_ME" not in str(exc.value)
+
+
+def test_parse_workflow_rejects_alias_expansion_over_scalar_volume_budget():
+    path = Path(".github/workflows/aliases.yml")
+    command = "x" * (MAX_EXPANDED_SCALAR_CHARS // 2)
+    text = f"""\
+on: pull_request
+command: &command {command}
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: *command
+"""
+    assert len(text.encode("utf-8")) < MAX_UTF8_INPUT_BYTES
+
+    with pytest.raises(ConfigError) as exc:
+        parse_workflow(path, text)
+
+    assert str(path) in str(exc.value)
+    assert "resource limit" in str(exc.value)
 
 
 def test_parse_workflow_rejects_alias_expansion_over_visit_budget():

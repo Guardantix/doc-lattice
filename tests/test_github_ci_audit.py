@@ -1114,12 +1114,16 @@ jobs:
         (".venv/Scripts/doc-lattice.exe reconcile --all", "PR_MUTATING_RECONCILE"),
         ("uv run doc-lattice.exe linear", "PR_LINEAR_INVOCATION"),
         ("uv run doc-lattice.exe reconcile --all", "PR_MUTATING_RECONCILE"),
+        (".venv/Scripts/DOC-LATTICE.EXE reconcile --all", "PR_MUTATING_RECONCILE"),
+        ("uv run DoC-LaTtIcE.ExE linear", "PR_LINEAR_INVOCATION"),
     ],
     ids=[
         "direct-linear",
         "direct-mutating-reconcile",
         "nested-linear",
         "nested-mutating-reconcile",
+        "direct-uppercase-mutating-reconcile",
+        "nested-mixed-case-linear",
     ],
 )
 def test_global_audit_rejects_windows_console_script_launchers_on_pr(

@@ -304,6 +304,7 @@ _ANSI_C_SIMPLE_ESCAPES = {
 class _ShellWord:
     literal: str
     dynamic: bool = False
+    locale_translated: bool = False
     unquoted_dynamic: bool = False
     quoted_zero_field_expansion: bool = False
     active_argv_expansion: bool = False
@@ -316,6 +317,7 @@ class _ShellWordBuilder:
     characters: list[str]
     active_syntax: list[str]
     dynamic: bool = False
+    locale_translated: bool = False
     unquoted_dynamic: bool = False
     quoted_zero_field_expansion: bool = False
     assignment_name_is_literal: bool = True
@@ -328,6 +330,7 @@ class _ShellWordBuilder:
         segment: str | list[str],
         *,
         dynamic: bool = False,
+        locale_translated: bool = False,
         unquoted_dynamic: bool = False,
         quoted_zero_field_expansion: bool = False,
     ) -> None:
@@ -335,6 +338,7 @@ class _ShellWordBuilder:
         self.characters.extend(segment)
         self.active_syntax.append(" ")
         self.dynamic = self.dynamic or dynamic
+        self.locale_translated = self.locale_translated or locale_translated
         self.unquoted_dynamic = self.unquoted_dynamic or unquoted_dynamic
         self.quoted_zero_field_expansion = (
             self.quoted_zero_field_expansion or quoted_zero_field_expansion
@@ -361,6 +365,7 @@ class _ShellWordBuilder:
         return _ShellWord(
             literal="".join(self.characters),
             dynamic=self.dynamic,
+            locale_translated=self.locale_translated,
             unquoted_dynamic=self.unquoted_dynamic,
             quoted_zero_field_expansion=self.quoted_zero_field_expansion,
             active_argv_expansion=_has_active_argv_expansion("".join(self.active_syntax)),
@@ -991,17 +996,9 @@ class _ShellScanner:
                 quoted = True
                 continue
             if self.source.startswith('$"', index):
-                segment, index, closed = _read_simple_quoted_segment(
-                    self.source,
-                    index + 1,
-                    limit,
-                    '"',
+                raise _ShellScanIncomplete(
+                    "locale-translated heredoc delimiter cannot be scanned safely"
                 )
-                if not closed:
-                    return "", True, index
-                characters.extend(segment)
-                quoted = True
-                continue
             character = self.source[index]
             if character in {"'", '"'}:
                 segment, index, closed = _read_simple_quoted_segment(
@@ -1082,14 +1079,12 @@ class _ShellScanner:
         """Read one logical unquoted-heredoc line after active continuations."""
         parts: list[str] = []
         index = start
-        first_physical_line = True
         while index <= limit:
             self.budget.step()
             line_end = self._line_end(index, limit)
             physical_line = self.source[index:line_end]
-            if first_physical_line and strip_tabs:
+            if strip_tabs:
                 physical_line = physical_line.lstrip("\t")
-            first_physical_line = False
 
             backslash_start = len(physical_line)
             while backslash_start > 0 and physical_line[backslash_start - 1] == "\\":
@@ -1144,14 +1139,15 @@ class _ShellScanner:
                 builder.append_protected(segment)
                 continue
             if self.source.startswith('$"', index):
-                segment, index, fragment_dynamic, fragment_zero_field = self._parse_double_quoted(
+                segment, index, _fragment_dynamic, fragment_zero_field = self._parse_double_quoted(
                     index + 2,
                     limit,
                     depth,
                 )
                 builder.append_protected(
                     segment,
-                    dynamic=fragment_dynamic,
+                    dynamic=True,
+                    locale_translated=True,
                     quoted_zero_field_expansion=fragment_zero_field,
                 )
                 continue
@@ -1650,25 +1646,26 @@ def _word_may_change_argv(word: _ShellWord) -> bool:
     return word.dynamic or word.active_argv_expansion
 
 
-def _reject_active_executable_word(word: _ShellWord) -> None:
-    """Reject a brace- or glob-expanded word that may become the executed program."""
+def _reject_unsafe_executable_word(word: _ShellWord) -> None:
+    """Reject a runtime-translated or argv-expanded executable word."""
+    if word.locale_translated:
+        raise _ShellScanIncomplete("locale-translated executable cannot be scanned safely")
     if word.active_argv_expansion:
         raise _ShellScanIncomplete("executable word uses brace or glob expansion")
 
 
-def _reject_unresolved_active_executable(
+def _reject_unresolved_unsafe_executable(
     words: list[_ShellWord],
     start: int,
     end: int,
     *,
     ignore_shell_assignments: bool,
 ) -> None:
-    """Reject unresolved executable grammar containing active argv expansion."""
-    if any(
-        word.active_argv_expansion and not (ignore_shell_assignments and word.shell_assignment)
-        for word in words[start:end]
-    ):
-        raise _ShellScanIncomplete("executable word uses brace or glob expansion")
+    """Reject unresolved executable grammar containing unsafe runtime provenance."""
+    for word in words[start:end]:
+        if ignore_shell_assignments and word.shell_assignment:
+            continue
+        _reject_unsafe_executable_word(word)
 
 
 def _word_may_change_option_value_shape(word: _ShellWord) -> bool:
@@ -2004,7 +2001,7 @@ def _doc_lattice_command_index(
     else:
         payload_index = _doc_lattice_payload_index(words, command_index)
     if payload_index.index is None:
-        _reject_unresolved_active_executable(
+        _reject_unresolved_unsafe_executable(
             words,
             start,
             command_index + 1,
@@ -2040,7 +2037,7 @@ def _doc_lattice_command_after_prefixes(
         return executable
     payload = _doc_lattice_payload_index(words, executable.index)
     if payload.index is None:
-        _reject_unresolved_active_executable(
+        _reject_unresolved_unsafe_executable(
             words,
             start,
             executable.index + 1,
@@ -2058,7 +2055,7 @@ def _doc_lattice_payload_index(
     if executable_index >= len(words):
         return _ResolvedIndex(None)
     executable_word = words[executable_index]
-    _reject_active_executable_word(executable_word)
+    _reject_unsafe_executable_word(executable_word)
     if _is_doc_lattice_executable(executable_word):
         return _ResolvedIndex(executable_index)
     if not executable_word.dynamic:
@@ -2266,7 +2263,7 @@ def _launcher_payload_index(
         expansion_end = (
             option_resolution.index + 1 if option_resolution.index is not None else len(words)
         )
-        _reject_unresolved_active_executable(
+        _reject_unresolved_unsafe_executable(
             words,
             start,
             expansion_end,
@@ -2292,7 +2289,7 @@ def _nested_launcher_payload_index(
     if payload_index is None or payload_index >= len(words):
         return payload_resolution
     payload = words[payload_index]
-    _reject_active_executable_word(payload)
+    _reject_unsafe_executable_word(payload)
     if payload.dynamic:
         return _ResolvedIndex(None, payload_resolution.ambiguous)
     basename = _basename(payload.literal)
@@ -2751,7 +2748,7 @@ def _basename(token: str) -> str:
 
 
 def _is_doc_lattice_executable_basename(value: str) -> bool:
-    return value in ("doc-lattice", "doc-lattice.exe")
+    return value.casefold() in ("doc-lattice", "doc-lattice.exe")
 
 
 def _is_doc_lattice_executable(word: _ShellWord) -> bool:

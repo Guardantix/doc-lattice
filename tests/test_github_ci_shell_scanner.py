@@ -26,7 +26,6 @@ LINEAR_LINT = (("linear", False), ("lint", False))
 ACCEPTANCE_CASES = [
     # Literal executable identity and control syntax.
     ("ansi-c executable", "$'doc-lattice' linear", LINEAR),
-    ("locale executable", '$"doc-lattice" linear', LINEAR),
     ("concatenated quoted words", 'doc-"lattice" l"inear"', LINEAR),
     (
         "elif condition",
@@ -269,11 +268,6 @@ ACCEPTANCE_CASES = [
     (
         "ansi-quoted heredoc suppresses substitution",
         "cat <<$'EOF'\n$(doc-lattice linear)\nEOF",
-        NONE,
-    ),
-    (
-        "locale-quoted heredoc suppresses substitution",
-        'cat <<$"EOF"\n$(doc-lattice linear)\nEOF',
         NONE,
     ),
     (
@@ -1757,6 +1751,12 @@ doc-lattice lint
     )
 
 
+def test_direct_doc_lattice_invocations_strips_tabs_from_continued_dash_heredoc_lines():
+    script = "cat <<-EOF\n\\\n\tEOF\ndoc-lattice linear\n"
+
+    assert direct_doc_lattice_invocations(script) == LINEAR
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_direct_doc_lattice_invocations_preserves_quoted_heredoc_continuation(newline):
     script = f"cat <<'EOF'{newline}body \\{newline}EOF{newline}doc-lattice linear{newline}"
@@ -1857,15 +1857,20 @@ def test_direct_doc_lattice_invocations_ignores_heredoc_text_in_comment():
     assert direct_doc_lattice_invocations(script) == (("linear", False),)
 
 
-def test_direct_doc_lattice_invocations_removes_locale_quoted_heredoc_body():
-    script = """\
-cat <<$"EOF"
-harmless
-EOF
-doc-lattice linear
-"""
+def test_direct_doc_lattice_invocations_fails_closed_on_locale_translated_executable():
+    with pytest.raises(ConfigError, match=r"shell scan.*locale-translated executable"):
+        direct_doc_lattice_invocations('$"harmless" linear')
 
-    assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+def test_direct_doc_lattice_invocations_fails_closed_on_locale_translated_heredoc_delimiter():
+    script = 'cat <<$"harmless"\nEOF\ndoc-lattice linear\nharmless\n'
+
+    with pytest.raises(ConfigError, match=r"shell scan.*locale-translated heredoc delimiter"):
+        direct_doc_lattice_invocations(script)
+
+
+def test_direct_doc_lattice_invocations_allows_locale_translated_non_executable_argument():
+    assert direct_doc_lattice_invocations('printf %s $"harmless"') == NONE
 
 
 def test_direct_doc_lattice_invocations_keeps_hash_inside_shell_word():

@@ -28,11 +28,12 @@ _YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
 _YAML_1_2 = (1, 2)
 
 # Inclusive security budgets for repository-controlled workflow audit input. The root YAML node
-# has depth 1; visits count each expanded syntax or loaded-value occurrence, including aliases.
+# has depth 1; visits and scalar characters count each expanded occurrence, including aliases.
 _MAX_UTF8_INPUT_BYTES = 1_048_576
 _MAX_YAML_NESTING_DEPTH = 100
 _MAX_EXPANDED_VISITS = 50_000
 _MAX_COLLECTED_STRING_SCALARS = 10_000
+_MAX_EXPANDED_SCALAR_CHARS = 1_048_576
 _UTF8_COUNT_CHUNK_CHARS = 8_192
 
 
@@ -41,11 +42,18 @@ class _TraversalBudget:
     workflow_path: Path
     visits: int = 0
     string_scalars: int = 0
+    scalar_chars: int = 0
 
-    def collect_string(self) -> None:
+    def collect_string(self, value: str) -> None:
         self.string_scalars += 1
         if self.string_scalars > _MAX_COLLECTED_STRING_SCALARS:
             raise _resource_limit(self.workflow_path)
+        self.reserve_scalar_chars(len(value))
+
+    def reserve_scalar_chars(self, additional: int) -> None:
+        if self.scalar_chars + additional > _MAX_EXPANDED_SCALAR_CHARS:
+            raise _resource_limit(self.workflow_path)
+        self.scalar_chars += additional
 
     def reserve_visits(self, additional: int, *, depth: int) -> None:
         if additional == 0:
@@ -452,18 +460,23 @@ def _collect_scalar_structure(
 ) -> None:
     scalars, structure = output
     if isinstance(current, str):
-        budget.collect_string()
+        budget.collect_string(current)
         scalars.append(WorkflowScalar(path=yaml_path, value=current))
         structure.append(WorkflowStructureEntry(yaml_path, "string", current))
     elif current is None:
         structure.append(WorkflowStructureEntry(yaml_path, "null", None))
     elif isinstance(current, bool):
         value = "true" if current else "false"
+        budget.reserve_scalar_chars(len(value))
         structure.append(WorkflowStructureEntry(yaml_path, "boolean", value))
     elif isinstance(current, int):
-        structure.append(WorkflowStructureEntry(yaml_path, "integer", str(current)))
+        value = str(current)
+        budget.reserve_scalar_chars(len(value))
+        structure.append(WorkflowStructureEntry(yaml_path, "integer", value))
     elif isinstance(current, float):
-        structure.append(WorkflowStructureEntry(yaml_path, "float", str(current)))
+        value = str(current)
+        budget.reserve_scalar_chars(len(value))
+        structure.append(WorkflowStructureEntry(yaml_path, "float", value))
     elif isinstance(current, (set, tuple)):
         _invalid(budget.workflow_path, yaml_path, "unsupported YAML container")
     else:
