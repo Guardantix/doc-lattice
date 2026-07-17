@@ -901,6 +901,35 @@ def test_apply_wraps_parent_handoff_close_failure_and_closes_child_descriptor(
                 real_close(child_fd)
 
 
+def test_apply_closes_open_parent_descriptor_on_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch,
+):
+    artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
+    changes = preflight_create(tmp_path, (artifact,))
+    real_dup = os.dup
+    duplicated_fds: list[int] = []
+
+    def _capture_parent_duplicate(fd: int) -> int:
+        duplicated = real_dup(fd)
+        duplicated_fds.append(duplicated)
+        return duplicated
+
+    def _interrupt_parent_open(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(filesystem.os, "dup", _capture_parent_duplicate)
+    monkeypatch.setattr(filesystem, "_ensure_locked_artifact_ancestor", _interrupt_parent_open)
+
+    with pytest.raises(KeyboardInterrupt):
+        apply_changes(changes)
+
+    assert duplicated_fds
+    for duplicated in duplicated_fds:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(duplicated)
+
+
 def test_apply_preserves_post_open_target_validation_error_when_target_close_fails(
     tmp_path: Path,
     monkeypatch,

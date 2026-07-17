@@ -1203,10 +1203,10 @@ def _open_locked_artifact_parent(
                 child_fd,
                 artifact_path,
             )
-    except BaseException as error:
-        if parent_fd != _NO_DESCRIPTOR:
-            _close_unowned_artifact_descriptor(parent_fd, error, phase="parent")
-        raise
+    finally:
+        active_error = sys.exception()
+        if active_error is not None and parent_fd != _NO_DESCRIPTOR:
+            _close_unowned_artifact_descriptor(parent_fd, active_error, phase="parent")
     return parent_fd
 
 
