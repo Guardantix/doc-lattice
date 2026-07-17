@@ -655,6 +655,28 @@ def test_direct_doc_lattice_invocations_accepts_unconsumed_reconcile_dry_run_opt
 @pytest.mark.parametrize(
     "script",
     [
+        "doc-lattice reconcile --help",
+        "doc-lattice reconcile pc-design --format human --help",
+    ],
+)
+def test_direct_doc_lattice_invocations_treats_effective_reconcile_help_as_non_mutating(script):
+    assert direct_doc_lattice_invocations(script) == RECONCILE_DRY
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "doc-lattice reconcile pc-design --config --help",
+        "doc-lattice reconcile -- --help",
+    ],
+)
+def test_direct_doc_lattice_invocations_does_not_widen_consumed_reconcile_help(script):
+    assert direct_doc_lattice_invocations(script) == RECONCILE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "doc-lattice reconcile 'pc[1]' --dry-run",
         'doc-lattice reconcile "pc*" --dry-run',
         r"doc-lattice reconcile pc\? --dry-run",
@@ -701,6 +723,22 @@ def test_scan_doc_lattice_invocations_reports_incomplete_on_expanded_subcommand(
     assert result.incomplete_reason == "subcommand word uses brace or glob expansion"
 
 
+@pytest.mark.parametrize("operator", ["?", "*", "+", "@", "!"])
+def test_scan_doc_lattice_invocations_fails_closed_on_extglob_operator(operator):
+    result = scan_doc_lattice_invocations(
+        f"shopt -s extglob\ndoc-lattice {operator}(reconcile) --all"
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "extglob expansion cannot be scanned safely"
+
+
+def test_direct_doc_lattice_invocations_keeps_quoted_extglob_text_literal():
+    assert direct_doc_lattice_invocations("doc-lattice '@(reconcile)' --all") == (
+        ("@(reconcile)", False),
+    )
+
+
 @pytest.mark.parametrize(
     "script",
     [
@@ -722,7 +760,10 @@ def test_scan_doc_lattice_invocations_fails_closed_on_expanded_executable(script
     assert result.incomplete_reason == "executable word uses brace or glob expansion"
 
 
-@pytest.mark.parametrize("escape", [r"\0", r"\x00", r"\u0000", r"\U00000000", r"\c@"])
+@pytest.mark.parametrize(
+    "escape",
+    [r"\0", r"\400", r"\x00", r"\u0000", r"\U00000000", r"\c@"],
+)
 @pytest.mark.parametrize(
     "template",
     [
@@ -1261,8 +1302,8 @@ def test_direct_doc_lattice_invocations_fails_closed_on_env_split_string_long_op
 
 @pytest.mark.parametrize(
     "script",
-    ["env -uS doc-lattice linear", "env -CS doc-lattice linear"],
-    ids=["unset", "chdir"],
+    ["env -aS doc-lattice linear", "env -uS doc-lattice linear", "env -CS doc-lattice linear"],
+    ids=["argv0", "unset", "chdir"],
 )
 def test_direct_doc_lattice_invocations_handles_env_short_option_value_attached_to_short_option(
     script,
@@ -1425,6 +1466,18 @@ def test_direct_doc_lattice_invocations_honors_env_option_terminator():
         "uv run --script doc-lattice linear",
         "uv run -s doc-lattice linear",
         "uv run --gui-script doc-lattice linear",
+        "uv --help run doc-lattice linear",
+        "uv -h run doc-lattice linear",
+        "uv --version run doc-lattice linear",
+        "uv -V run doc-lattice linear",
+        "uvx --help doc-lattice linear",
+        "uvx -h doc-lattice linear",
+        "uvx --version doc-lattice linear",
+        "uvx -V doc-lattice linear",
+        "uv run --help doc-lattice linear",
+        "uv run -h doc-lattice linear",
+        "uv tool run --help doc-lattice linear",
+        "uv tool run -h doc-lattice linear",
     ],
 )
 def test_direct_doc_lattice_invocations_ignores_nonexecuting_command_forms(script):

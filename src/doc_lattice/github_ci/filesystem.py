@@ -4,6 +4,7 @@ import difflib
 import os
 import stat
 import sys
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ _UNIFIED_DIFF_HEADER_RECORDS = 2
 _C0_CONTROL_LIMIT = 0x20
 _DELETE_OR_C1_CONTROL_START = 0x7F
 _C1_CONTROL_END = 0x9F
+_BMP_MAX_CODEPOINT = 0xFFFF
 _PARTIAL_STATE_NOTE = (
     "managed artifacts are applied in input order without rollback; earlier changes, "
     "if any, remain in place, so inspect the reported path and rerun to converge"
@@ -1059,6 +1061,13 @@ def _split_lf_records(text: str) -> list[str]:
     return records
 
 
+def _unicode_format_escape(value: int) -> str:
+    """Return a visible Python-style escape for one Unicode format control."""
+    if value <= _BMP_MAX_CODEPOINT:
+        return f"\\u{value:04x}"
+    return f"\\U{value:08x}"
+
+
 def _escape_diff_terminal_controls(record: str) -> str:
     """Render terminal controls visibly while preserving LF and a final CRLF sequence."""
     final_cr = len(record) - 2 if record.endswith("\r\n") else -1
@@ -1069,6 +1078,8 @@ def _escape_diff_terminal_controls(record: str) -> str:
             rendered.append(character)
         elif value < _C0_CONTROL_LIMIT or _DELETE_OR_C1_CONTROL_START <= value <= _C1_CONTROL_END:
             rendered.append(f"\\x{value:02x}")
+        elif unicodedata.category(character) == "Cf":
+            rendered.append(_unicode_format_escape(value))
         else:
             rendered.append(character)
     return "".join(rendered)

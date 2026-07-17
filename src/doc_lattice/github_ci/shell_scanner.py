@@ -13,6 +13,7 @@ _MAX_SHELL_RECURSION_DEPTH = 64
 _MAX_SHELL_INVOCATIONS = 10_000
 _MAX_LAUNCHER_NESTING_DEPTH = 64
 _OCTAL_BASE = 8
+_ANSI_C_OCTAL_BYTE_MASK = 0xFF
 _UNICODE_MAX = 0x10FFFF
 _SURROGATE_MIN = 0xD800
 _SURROGATE_MAX = 0xDFFF
@@ -152,6 +153,9 @@ _UV_RUN_OPTIONS_WITH_ARGUMENTS = _UV_SHARED_OPTIONS_WITH_ARGUMENTS | frozenset(
         "-w",
     }
 )
+_UV_HELP_OPTIONS = frozenset({"--help", "-h"})
+_UV_VERSION_OPTIONS = frozenset({"--version", "-V"})
+_UV_GLOBAL_STOP_OPTIONS = _UV_HELP_OPTIONS | _UV_VERSION_OPTIONS
 _UV_RUN_NON_COMMAND_OPTIONS = frozenset(
     {
         "--gui-script",
@@ -252,11 +256,20 @@ class _LauncherOptions:
         )
 
 
-_UVX_LAUNCHER = _LauncherOptions.build(_UVX_OPTIONS_WITH_ARGUMENTS, _UV_LAUNCHER_FLAGS)
+_UVX_LAUNCHER = _LauncherOptions.build(
+    _UVX_OPTIONS_WITH_ARGUMENTS,
+    _UV_LAUNCHER_FLAGS,
+    _UV_HELP_OPTIONS | _UV_VERSION_OPTIONS,
+)
+_UV_TOOL_RUN_LAUNCHER = _LauncherOptions.build(
+    _UVX_OPTIONS_WITH_ARGUMENTS,
+    _UV_LAUNCHER_FLAGS,
+    _UV_HELP_OPTIONS,
+)
 _UV_RUN_LAUNCHER = _LauncherOptions.build(
     _UV_RUN_OPTIONS_WITH_ARGUMENTS,
     _UV_LAUNCHER_FLAGS,
-    _UV_RUN_NON_COMMAND_OPTIONS,
+    _UV_RUN_NON_COMMAND_OPTIONS | _UV_HELP_OPTIONS,
 )
 _ANSI_C_SIMPLE_ESCAPES = {
     "a": "\a",
@@ -338,6 +351,12 @@ class _ShellWordBuilder:
             active_argv_expansion=_has_active_argv_expansion("".join(self.active_syntax)),
             shell_assignment=self.shell_assignment,
         )
+
+
+def _reject_active_extglob_opener(builder: _ShellWordBuilder, boundary: str) -> None:
+    """Reject an unquoted extglob opener before ``(`` becomes a command-group operator."""
+    if boundary == "(" and builder.active_syntax and builder.active_syntax[-1] in "?*+@!":
+        raise _ShellScanIncomplete("extglob expansion cannot be scanned safely")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1085,6 +1104,7 @@ class _ShellScanner:
                 continue
             builder.append_active(character)
             index += 1
+        _reject_active_extglob_opener(builder, self.source[index : index + 1])
         return builder.build(), index
 
     def _parse_double_quoted(
@@ -1454,20 +1474,20 @@ def _invocation_in_simple_command(words: list[_ShellWord]) -> _Invocation | None
         raise _ShellScanIncomplete("subcommand word uses brace or glob expansion")
     arguments = words[subcommand_index + 1 :]
     if subcommand.literal == "reconcile":
-        has_dry_run = _reconcile_has_effective_dry_run(arguments)
+        is_non_mutating = _reconcile_is_effectively_non_mutating(arguments)
     else:
-        has_dry_run = any(
+        is_non_mutating = any(
             not argument.dynamic and argument.literal == "--dry-run" for argument in arguments
         )
-    return subcommand.literal, has_dry_run
+    return subcommand.literal, is_non_mutating
 
 
-def _reconcile_has_effective_dry_run(arguments: list[_ShellWord]) -> bool:
-    """Return whether Typer will parse a literal reconcile ``--dry-run`` option.
+def _reconcile_is_effectively_non_mutating(arguments: list[_ShellWord]) -> bool:
+    """Return whether Typer will stop for help or parse reconcile as a dry run.
 
     Known value-taking options consume their next word even when it looks like another option.
-    Shell expansion or an unknown option before ``--dry-run`` can change the runtime argv shape,
-    so the scanner conservatively refuses to classify those invocations as read-only.
+    Shell expansion or an unknown option before the effective safe option can change the runtime
+    argv shape, so the scanner conservatively refuses to classify those invocations as read-only.
     """
     index = 0
     while index < len(arguments):
@@ -1479,7 +1499,7 @@ def _reconcile_has_effective_dry_run(arguments: list[_ShellWord]) -> bool:
         if separator and option_name in _RECONCILE_OPTIONS_WITH_ARGUMENTS:
             index += 1
             continue
-        if literal == "--dry-run":
+        if literal in {"--dry-run", "--help"}:
             return True
         if literal == "--":
             return False
@@ -1731,7 +1751,7 @@ def _is_env_split_string_short_option(literal: str) -> bool:
         return False
     for option in literal[1:]:
         # These options consume the rest of this word as their attached argument.
-        if option in {"u", "C"}:
+        if option in {"a", "u", "C"}:
             return False
         if option == "S":
             return True
@@ -2024,7 +2044,7 @@ def _uv_tool_payload_index(
         words,
         run_index + 1,
         _LauncherPayloadRequest(
-            _UVX_LAUNCHER,
+            _UV_TOOL_RUN_LAUNCHER,
             strip_version=True,
             inherited_ambiguity=inherited_ambiguity or dynamic_run,
             fail_on_unknown=fail_on_unknown,
@@ -2227,6 +2247,8 @@ def _static_uv_global_option_result(
         if value_index < len(words) and _word_may_change_option_value_shape(words[value_index]):
             candidate_start = value_index + 1
         return index + 2, candidate_start
+    if word.literal in _UV_GLOBAL_STOP_OPTIONS:
+        return len(words), None
     if word.literal in _UV_GLOBAL_FLAGS:
         return index + 1, None
     return None
@@ -2458,6 +2480,7 @@ def _read_ansi_c_escape(
         result = (_ANSI_C_SIMPLE_ESCAPES[character], start + 1)
     elif character in "01234567":
         value, end = _read_ansi_c_digits(source, start, limit, _OCTAL_BASE, 3)
+        value &= _ANSI_C_OCTAL_BYTE_MASK
         result = (_valid_ansi_c_character(value, source[start:end]), end)
     elif character == "x":
         result = _read_ansi_c_prefixed_escape(source, start, limit, 16, 2)

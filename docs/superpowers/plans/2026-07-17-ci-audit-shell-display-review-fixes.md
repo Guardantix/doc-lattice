@@ -16,7 +16,7 @@
 - Modify: `tests/test_github_ci_shell_scanner.py`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 
-- [ ] **Step 1: Write the failing extglob regressions**
+- [x] **Step 1: Write the failing extglob regressions**
 
 Add beside the active brace/glob subcommand tests:
 
@@ -37,7 +37,7 @@ def test_direct_doc_lattice_invocations_keeps_quoted_extglob_text_literal():
     )
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -49,28 +49,23 @@ Expected: the five active cases report complete scans
 with literal operator subcommands instead of the extglob incomplete reason; the quoted control
 passes.
 
-- [ ] **Step 3: Reject active extglob openers while word provenance is available**
+- [x] **Step 3: Reject active extglob openers while word provenance is available**
 
-Change `_parse_word` from a word-break loop condition to an explicit word-break branch before its
-existing scan-step charge:
+Add a boundary helper after `_ShellWordBuilder`:
 
 ```python
-while index < limit:
-    if self.source[index] in _WORD_BREAKS:
-        if (
-            self.source[index] == "("
-            and builder.active_syntax
-            and builder.active_syntax[-1] in "?*+@!"
-        ):
-            raise _ShellScanIncomplete("extglob expansion cannot be scanned safely")
-        break
-    self.budget.step()
+def _reject_active_extglob_opener(builder: _ShellWordBuilder, boundary: str) -> None:
+    """Reject an unquoted extglob opener before ``(`` becomes a command-group operator."""
+    if boundary == "(" and builder.active_syntax and builder.active_syntax[-1] in "?*+@!":
+        raise _ShellScanIncomplete("extglob expansion cannot be scanned safely")
 ```
 
-Protected operator characters append blank provenance, so quoted and escaped syntax is not
-rejected.
+Call `_reject_active_extglob_opener(builder, self.source[index : index + 1])` after the existing
+word loop and before building the word. Protected operators carry blank provenance, so quoted and
+escaped syntax is not rejected. Keeping the loop unchanged also keeps `_parse_word` within its
+enforced branch and statement budgets.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run:
 
@@ -87,7 +82,7 @@ Expected: PASS.
 - Modify: `tests/test_github_ci_shell_scanner.py`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 
-- [ ] **Step 1: Extend the ANSI-C NUL regression with wrapped octal**
+- [x] **Step 1: Extend the ANSI-C NUL regression with wrapped octal**
 
 Change the escape parameter list to:
 
@@ -98,7 +93,7 @@ Change the escape parameter list to:
 )
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -109,7 +104,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 Expected: the two `\400`
 cases fail because the scanner decodes U+0100 instead of NUL.
 
-- [ ] **Step 3: Reduce only three-digit octal escapes to a byte**
+- [x] **Step 3: Reduce only three-digit octal escapes to a byte**
 
 Add `_ANSI_C_OCTAL_BYTE_MASK = 0xFF` near `_OCTAL_BASE`, then change the octal arm to:
 
@@ -119,7 +114,7 @@ value &= _ANSI_C_OCTAL_BYTE_MASK
 result = (_valid_ansi_c_character(value, source[start:end]), end)
 ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run:
 
@@ -136,7 +131,7 @@ Expected: PASS with the established NUL diagnostic.
 - Modify: `tests/test_github_ci_shell_scanner.py`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 
-- [ ] **Step 1: Add eager uv non-command regressions**
+- [x] **Step 1: Add eager uv non-command regressions**
 
 Extend `test_direct_doc_lattice_invocations_ignores_nonexecuting_command_forms` with:
 
@@ -155,7 +150,7 @@ Extend `test_direct_doc_lattice_invocations_ignores_nonexecuting_command_forms` 
 "uv tool run -h doc-lattice linear",
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -165,7 +160,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 
 Expected: the new cases raise incomplete-scan errors.
 
-- [ ] **Step 3: Encode exact stop surfaces**
+- [x] **Step 3: Encode exact stop surfaces**
 
 Add:
 
@@ -185,7 +180,7 @@ if word.literal in _UV_GLOBAL_STOP_OPTIONS:
     return len(words), None
 ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run:
 
@@ -202,7 +197,7 @@ Expected: PASS.
 - Modify: `tests/test_github_ci_shell_scanner.py`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 
-- [ ] **Step 1: Add effective and consumed help regressions**
+- [x] **Step 1: Add effective and consumed help regressions**
 
 Add:
 
@@ -229,7 +224,7 @@ def test_direct_doc_lattice_invocations_does_not_widen_consumed_reconcile_help(s
     assert direct_doc_lattice_invocations(script) == RECONCILE
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -240,7 +235,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 Expected: effective help cases return `RECONCILE`; consumed and positional
 controls pass.
 
-- [ ] **Step 3: Broaden and rename the effective-safe parser**
+- [x] **Step 3: Broaden and rename the effective-safe parser**
 
 Rename `_reconcile_has_effective_dry_run` to `_reconcile_is_effectively_non_mutating`, update its
 docstring, rename the caller local to `is_non_mutating`, and recognize:
@@ -252,7 +247,7 @@ if literal in {"--dry-run", "--help"}:
 
 Preserve value consumption before this check and the existing `--` termination.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run:
 
@@ -269,22 +264,22 @@ Expected: PASS.
 - Modify: `tests/test_github_ci_shell_scanner.py`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py`
 
-- [ ] **Step 1: Add the attached argv0 regression**
+- [x] **Step 1: Add the attached argv0 regression**
 
-Add `"env -aS doc-lattice linear"` with an `"attached-argv0"` id to
-`test_direct_doc_lattice_invocations_consumes_env_option_values`.
+Add `"env -aS doc-lattice linear"` with an `"argv0"` id to
+`test_direct_doc_lattice_invocations_handles_env_short_option_value_attached_to_short_option`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
 ```bash
-env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov tests/test_github_ci_shell_scanner.py::test_direct_doc_lattice_invocations_consumes_env_option_values -q
+env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov tests/test_github_ci_shell_scanner.py::test_direct_doc_lattice_invocations_handles_env_short_option_value_attached_to_short_option -q
 ```
 
 Expected: the new case raises the env split-string diagnostic.
 
-- [ ] **Step 3: Correct the precheck**
+- [x] **Step 3: Correct the precheck**
 
 Change the required-value branch in `_is_env_split_string_short_option` to:
 
@@ -293,12 +288,12 @@ if option in {"a", "u", "C"}:
     return False
 ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run:
 
 ```bash
-env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov tests/test_github_ci_shell_scanner.py::test_direct_doc_lattice_invocations_consumes_env_option_values -q
+env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov tests/test_github_ci_shell_scanner.py::test_direct_doc_lattice_invocations_handles_env_short_option_value_attached_to_short_option -q
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest --no-cov tests/test_github_ci_shell_scanner.py tests/test_github_ci_audit.py -q
 ```
 
@@ -310,7 +305,7 @@ Expected: PASS.
 - Modify: `tests/test_github_ci_filesystem.py`
 - Modify: `src/doc_lattice/github_ci/filesystem.py`
 
-- [ ] **Step 1: Write the failing Unicode format-control regression**
+- [x] **Step 1: Write the failing Unicode format-control regression**
 
 Add:
 
@@ -346,7 +341,7 @@ def test_render_diff_escapes_unicode_format_controls():
     assert "café 🧪" in rendered
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -356,7 +351,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 
 Expected: a raw format-control assertion fails.
 
-- [ ] **Step 3: Escape general-category `Cf` characters**
+- [x] **Step 3: Escape general-category `Cf` characters**
 
 Import `unicodedata`, define `_BMP_MAX_CODEPOINT = 0xFFFF`, and add:
 
@@ -375,7 +370,7 @@ elif unicodedata.category(character) == "Cf":
     rendered.append(_unicode_format_escape(value))
 ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run:
 
@@ -392,13 +387,13 @@ Expected: PASS.
 - Modify: `README.md`
 - Modify: `docs/superpowers/plans/2026-07-17-ci-audit-shell-display-review-fixes.md`
 
-- [ ] **Step 1: Update the public safety contract**
+- [x] **Step 1: Update the public safety contract**
 
 Document `\xNN`, `\uNNNN`, and `\UNNNNNNNN` preview escapes. State that unsupported active
 extglob and byte-wrapped ANSI-C NUL fail closed while eager non-executing help/version forms do not
 produce policy findings.
 
-- [ ] **Step 2: Run complete repository gates**
+- [x] **Step 2: Run complete repository gates**
 
 Run:
 
@@ -414,7 +409,7 @@ git diff --check
 
 Expected: every command exits 0, with pytest coverage at or above 80 percent.
 
-- [ ] **Step 3: Audit every requirement against fresh evidence**
+- [x] **Step 3: Audit every requirement against fresh evidence**
 
 Rerun all six focused regressions, inspect the complete diff and status, and map each finding to its
 regression and production boundary. Confirm no unrelated file is staged.

@@ -496,6 +496,37 @@ def test_render_diff_escapes_non_line_ending_terminal_controls():
         assert f"\\x{value:02x}" in rendered
 
 
+def test_render_diff_escapes_unicode_format_controls():
+    controls = {
+        "\u00ad": r"\u00ad",
+        "\u061c": r"\u061c",
+        "\u200e": r"\u200e",
+        "\u202e": r"\u202e",
+        "\u2066": r"\u2066",
+        "\ufeff": r"\ufeff",
+        "\U000e0001": r"\U000e0001",
+    }
+    artifact = ManagedArtifact(
+        role="offline",
+        relative_path=PurePosixPath(".github/workflows/doc-lattice.yml"),
+        text="new:café 🧪\n",
+    )
+    change = ArtifactChange(
+        artifact=artifact,
+        root=Path("/repo"),
+        destination=Path("/repo/.github/workflows/doc-lattice.yml"),
+        action="replace",
+        before=f"old:{''.join(controls)}:suffix\n".encode(),
+    )
+
+    rendered = render_diff((change,))
+
+    for character, escaped in controls.items():
+        assert character not in rendered
+        assert escaped in rendered
+    assert "café 🧪" in rendered
+
+
 def test_render_diff_preserves_crlf_difference_in_replacement_content():
     artifact = ManagedArtifact(
         role="offline",
