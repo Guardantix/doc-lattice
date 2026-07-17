@@ -657,12 +657,30 @@ def test_direct_doc_lattice_invocations_accepts_unconsumed_reconcile_dry_run_opt
 @pytest.mark.parametrize(
     "script",
     [
+        "doc-lattice linear --help",
+        "doc-lattice linear target --format human --indent 2 --help",
+        "doc-lattice linear --exit-code --warn-exit --help",
         "doc-lattice reconcile --help",
         "doc-lattice reconcile pc-design --format human --help",
     ],
 )
-def test_direct_doc_lattice_invocations_treats_effective_reconcile_help_as_non_mutating(script):
-    assert direct_doc_lattice_invocations(script) == RECONCILE_DRY
+def test_direct_doc_lattice_invocations_ignores_effective_command_help(script):
+    assert direct_doc_lattice_invocations(script) == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "doc-lattice linear --from --help",
+        "doc-lattice linear --config --help",
+        "doc-lattice linear --format --help",
+        "doc-lattice linear --indent --help",
+        "doc-lattice linear -- --help",
+        'doc-lattice linear "$OPTION" --help',
+    ],
+)
+def test_direct_doc_lattice_invocations_does_not_widen_consumed_linear_help(script):
+    assert direct_doc_lattice_invocations(script) == LINEAR
 
 
 @pytest.mark.parametrize(

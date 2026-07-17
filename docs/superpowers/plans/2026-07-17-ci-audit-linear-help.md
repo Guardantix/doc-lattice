@@ -22,7 +22,7 @@
 - Modify: `tests/test_github_ci_shell_scanner.py:650-680`
 - Modify: `tests/test_github_ci_audit.py:35-130`
 
-- [ ] **Step 1: Write the failing scanner tests**
+- [x] **Step 1: Write the failing scanner tests**
 
 Replace the reconcile-only effective-help test with a command-level non-execution test and add
 Linear conservative controls:
@@ -59,7 +59,7 @@ def test_direct_doc_lattice_invocations_does_not_widen_consumed_linear_help(scri
 
 Keep the existing consumed reconcile-help controls unchanged.
 
-- [ ] **Step 2: Write the failing audit regression**
+- [x] **Step 2: Write the failing audit regression**
 
 Add an end-to-end workflow audit test:
 
@@ -79,7 +79,7 @@ jobs:
     assert _finding_codes(audit_global_workflows((document,))) == set()
 ```
 
-- [ ] **Step 3: Run RED and confirm the finding is reproduced**
+- [x] **Step 3: Run RED and confirm the finding is reproduced**
 
 Run:
 
@@ -99,7 +99,7 @@ Expected: effective Linear help returns `LINEAR`, effective reconcile help retur
 **Files:**
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py:1-230,1456-1515`
 
-- [ ] **Step 1: Define the disposition and Linear option grammar**
+- [x] **Step 1: Define the disposition and Linear option grammar**
 
 Import `Enum` and `auto`, then add the Linear option sets beside the existing reconcile grammar:
 
@@ -118,7 +118,7 @@ class _CommandDisposition(Enum):
     NON_EXECUTING = auto()
 ```
 
-- [ ] **Step 2: Route Linear and reconcile through one classifier**
+- [x] **Step 2: Route Linear and reconcile through one classifier**
 
 Replace the command-specific branch in `_invocation_in_simple_command` with:
 
@@ -143,7 +143,7 @@ Replace the command-specific branch in `_invocation_in_simple_command` with:
     return subcommand.literal, disposition is _CommandDisposition.NON_MUTATING
 ```
 
-- [ ] **Step 3: Generalize the bounded option walk**
+- [x] **Step 3: Generalize the bounded option walk**
 
 Replace `_reconcile_is_effectively_non_mutating` with:
 
@@ -190,13 +190,13 @@ def _classify_command_disposition(
     return disposition
 ```
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run the focused command from Task 1 Step 3.
 
 Expected: all focused tests pass.
 
-- [ ] **Step 5: Run focused regression suites**
+- [x] **Step 5: Run focused regression suites**
 
 Run:
 
@@ -212,7 +212,7 @@ Expected: all scanner and CI-audit tests pass.
 **Files:**
 - Verify: all changed files and repository gates
 
-- [ ] **Step 1: Run the full test suite**
+- [x] **Step 1: Run the full test suite**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest -q
@@ -220,7 +220,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 
 Expected: all tests pass and coverage remains above the configured 80% threshold.
 
-- [ ] **Step 2: Run static and repository checks**
+- [x] **Step 2: Run static and repository checks**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev ruff check src tests
@@ -234,7 +234,7 @@ git diff --check
 
 Expected: every command exits 0 with no findings or formatting changes.
 
-- [ ] **Step 3: Audit the implementation diff against the design**
+- [x] **Step 3: Audit the implementation diff against the design**
 
 Run:
 
@@ -248,7 +248,7 @@ git status --short
 Expected: only the planned tests and scanner implementation are uncommitted; the diff proves
 effective help is non-executing and conservative controls remain policy-sensitive.
 
-- [ ] **Step 4: Commit the implementation**
+- [x] **Step 4: Commit the implementation**
 
 ```bash
 git add tests/test_github_ci_shell_scanner.py tests/test_github_ci_audit.py \
@@ -258,7 +258,7 @@ git commit -m "fix: treat effective Linear help as non-executing"
 
 Expected: commit succeeds and all configured pre-commit hooks pass.
 
-- [ ] **Step 5: Push the current branch without force**
+- [x] **Step 5: Push the current branch without force**
 
 ```bash
 git push origin feature/github-linear-ci-bootstrap-impl

@@ -39,6 +39,21 @@ def _finding_codes(findings) -> set[str]:
     return {finding.code for finding in findings}
 
 
+def test_global_audit_allows_effective_linear_help_on_pr():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: doc-lattice linear --help
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == set()
+
+
 def test_secret_name_regex_single_sources_from_secret_names():
     from doc_lattice.github_ci import audit as audit_module  # noqa: PLC0415
 

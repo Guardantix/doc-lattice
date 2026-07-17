@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.hashing import normalize_newlines
@@ -220,8 +221,19 @@ _UV_LAUNCHER_FLAGS = frozenset(
 _DOC_LATTICE_ROOT_OPTIONS = frozenset({"--no-color"})
 # --help and --version are eager Typer options that exit before any subcommand runs.
 _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS = frozenset({"--version", "--help"})
+_LINEAR_OPTIONS_WITH_ARGUMENTS = frozenset({"--config", "--format", "--from", "--indent"})
+_LINEAR_FLAGS = frozenset({"--exit-code", "--warn-exit"})
 _RECONCILE_OPTIONS_WITH_ARGUMENTS = frozenset({"--config", "--format", "--ref"})
 _RECONCILE_FLAGS = frozenset({"--all", "--dry-run", "--recover"})
+_RECONCILE_NON_MUTATING_OPTIONS = frozenset({"--dry-run"})
+
+
+class _CommandDisposition(Enum):
+    """Describe whether a recognized policy-sensitive command can run."""
+
+    SENSITIVE = auto()
+    NON_MUTATING = auto()
+    NON_EXECUTING = auto()
 
 
 def _short_options(options: frozenset[str]) -> tuple[str, ...]:
@@ -1473,49 +1485,77 @@ def _invocation_in_simple_command(words: list[_ShellWord]) -> _Invocation | None
         # closed rather than silently approving the workflow.
         raise _ShellScanIncomplete("subcommand word uses brace or glob expansion")
     arguments = words[subcommand_index + 1 :]
-    if subcommand.literal == "reconcile":
-        is_non_mutating = _reconcile_is_effectively_non_mutating(arguments)
-    else:
-        is_non_mutating = any(
-            not argument.dynamic and argument.literal == "--dry-run" for argument in arguments
+    if subcommand.literal == "linear":
+        disposition = _classify_command_disposition(
+            arguments,
+            options_with_arguments=_LINEAR_OPTIONS_WITH_ARGUMENTS,
+            flags=_LINEAR_FLAGS,
         )
-    return subcommand.literal, is_non_mutating
+    elif subcommand.literal == "reconcile":
+        disposition = _classify_command_disposition(
+            arguments,
+            options_with_arguments=_RECONCILE_OPTIONS_WITH_ARGUMENTS,
+            flags=_RECONCILE_FLAGS,
+            non_mutating_options=_RECONCILE_NON_MUTATING_OPTIONS,
+        )
+    else:
+        disposition = (
+            _CommandDisposition.NON_MUTATING
+            if any(
+                not argument.dynamic and argument.literal == "--dry-run" for argument in arguments
+            )
+            else _CommandDisposition.SENSITIVE
+        )
+    if disposition is _CommandDisposition.NON_EXECUTING:
+        return None
+    return subcommand.literal, disposition is _CommandDisposition.NON_MUTATING
 
 
-def _reconcile_is_effectively_non_mutating(arguments: list[_ShellWord]) -> bool:
-    """Return whether Typer will stop for help or parse reconcile as a dry run.
+def _classify_command_disposition(
+    arguments: list[_ShellWord],
+    *,
+    options_with_arguments: frozenset[str],
+    flags: frozenset[str],
+    non_mutating_options: frozenset[str] = frozenset(),
+) -> _CommandDisposition:
+    """Classify a static Typer argv prefix without executing the command.
 
     Known value-taking options consume their next word even when it looks like another option.
     Shell expansion or an unknown option before the effective safe option can change the runtime
-    argv shape, so the scanner conservatively refuses to classify those invocations as read-only.
+    argv shape, so the scanner conservatively preserves the disposition established so far.
     """
+    disposition = _CommandDisposition.SENSITIVE
     index = 0
     while index < len(arguments):
         argument = arguments[index]
         if _word_may_change_argv(argument):
-            return False
+            return disposition
         literal = argument.literal
         option_name, separator, _value = literal.partition("=")
-        if separator and option_name in _RECONCILE_OPTIONS_WITH_ARGUMENTS:
+        if separator and option_name in options_with_arguments:
             index += 1
             continue
-        if literal in {"--dry-run", "--help"}:
-            return True
+        if literal == "--help":
+            return _CommandDisposition.NON_EXECUTING
+        if literal in non_mutating_options:
+            disposition = _CommandDisposition.NON_MUTATING
+            index += 1
+            continue
         if literal == "--":
-            return False
-        if literal in _RECONCILE_OPTIONS_WITH_ARGUMENTS:
+            return disposition
+        if literal in options_with_arguments:
             value_index = index + 1
             if value_index >= len(arguments) or _word_may_change_argv(arguments[value_index]):
-                return False
+                return disposition
             index += 2
             continue
-        if literal in _RECONCILE_FLAGS:
+        if literal in flags:
             index += 1
             continue
         if literal.startswith("-"):
-            return False
+            return disposition
         index += 1
-    return False
+    return disposition
 
 
 def _word_may_change_argv(word: _ShellWord) -> bool:
