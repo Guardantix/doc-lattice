@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from doc_lattice.error_types import ConfigError, copy_exception_notes
 from doc_lattice.path_utils import safe_resolve
-from doc_lattice.persistence import atomic_create_bytes, atomic_replace_bytes
+from doc_lattice.persistence import atomic_create_bytes_at, atomic_replace_bytes_at
 
 from .identity import parse_repository, validate_final_release_version
 from .model import (
@@ -63,6 +63,7 @@ class _ManagedArtifactLock:
 
     root: Path
     directory_identity: tuple[int, int]
+    directory_fd: int
 
     def protects_directory(self, directory_stat: os.stat_result) -> bool:
         """Return whether a directory stat result identifies the locked root."""
@@ -369,9 +370,9 @@ def apply_changes(changes: tuple[ArtifactChange, ...]) -> None:
             try:
                 _require_managed_artifact_lock(lock, change.root)
                 if change.action == "create":
-                    _apply_create(change)
+                    _apply_create(change, lock)
                 else:
-                    _apply_replace(change)
+                    _apply_replace(change, lock)
             except ConfigError as error:
                 if _PARTIAL_STATE_NOTE not in getattr(error, "__notes__", ()):
                     error.add_note(_PARTIAL_STATE_NOTE)
@@ -400,7 +401,7 @@ def _managed_artifact_lock(root: Path) -> Iterator[_ManagedArtifactLock]:
         _claim_lock(fd)
         acquired = True
         directory_stat = _inspect_lock_directory(fd)
-        lock = _new_managed_artifact_lock(root, directory_stat)
+        lock = _new_managed_artifact_lock(root, directory_stat, fd)
         _require_managed_artifact_lock(lock, root)
         yield lock
     finally:
@@ -446,6 +447,7 @@ def _inspect_lock_directory(fd: int) -> os.stat_result:
 def _new_managed_artifact_lock(
     root: Path,
     directory_stat: os.stat_result,
+    directory_fd: int,
 ) -> _ManagedArtifactLock:
     """Create a capability bound to the resolved root and locked directory inode."""
     try:
@@ -455,6 +457,7 @@ def _new_managed_artifact_lock(
     return _ManagedArtifactLock(
         root=resolved_root,
         directory_identity=(directory_stat.st_dev, directory_stat.st_ino),
+        directory_fd=directory_fd,
     )
 
 
@@ -1026,61 +1029,214 @@ def _render_diff_record(index: int, record: str) -> str:
     return f"{record}\n\\ No newline at end of file\n"
 
 
-def _apply_create(change: ArtifactChange) -> None:
-    """Create one absent artifact without replacing a concurrent winner."""
+def _descriptor_open_flags(*, directory: bool) -> int:
+    """Return no-follow descriptor-open flags or fail closed when unsupported."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ConfigError("managed artifact descriptor publication requires no-follow path support")
+    flags = os.O_RDONLY | nofollow
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _ensure_locked_artifact_ancestor(
+    parent_fd: int,
+    component: str,
+    display: str,
+    artifact_path: str,
+    *,
+    create: bool,
+) -> None:
+    """Require one descriptor-relative artifact ancestor to be a real directory."""
+    try:
+        ancestor_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if not create:
+            raise ConfigError(
+                f"destination changed after preflight for managed artifact {artifact_path}"
+            ) from None
+        try:
+            os.mkdir(component, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _filesystem_error(
+                "cannot create managed artifact parent",
+                exc,
+                path=artifact_path,
+            ) from exc
+        try:
+            ancestor_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise ConfigError(
+                f"destination changed after preflight for managed artifact {artifact_path}"
+            ) from exc
+        except OSError as exc:
+            raise _filesystem_error(
+                f"cannot inspect managed artifact ancestor {display}",
+                exc,
+            ) from exc
+    except OSError as exc:
+        raise _filesystem_error(
+            f"cannot inspect managed artifact ancestor {display}",
+            exc,
+        ) from exc
+    if stat.S_ISLNK(ancestor_stat.st_mode):
+        raise ConfigError(f"symlink is not allowed in managed artifact path {display}")
+    if not stat.S_ISDIR(ancestor_stat.st_mode):
+        raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
+
+
+def _open_locked_artifact_parent(
+    lock: _ManagedArtifactLock,
+    artifact: ManagedArtifact,
+    *,
+    create: bool,
+) -> int:
+    """Open the artifact parent beneath the locked root without using its pathname."""
+    artifact_path = artifact.relative_path.as_posix()
+    try:
+        parent_fd = os.dup(lock.directory_fd)
+    except OSError as exc:
+        raise _filesystem_error(
+            "cannot access locked managed artifact root",
+            exc,
+            path=artifact_path,
+        ) from exc
+    try:
+        display_parts: list[str] = []
+        for component in artifact.relative_path.parts[:-1]:
+            display_parts.append(component)
+            display = "/".join(display_parts)
+            _ensure_locked_artifact_ancestor(
+                parent_fd,
+                component,
+                display,
+                artifact_path,
+                create=create,
+            )
+            try:
+                child_fd = os.open(
+                    component,
+                    _descriptor_open_flags(directory=True),
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                raise _filesystem_error(
+                    f"cannot open managed artifact ancestor {display}",
+                    exc,
+                ) from exc
+            try:
+                child_stat = os.fstat(child_fd)
+            except OSError as exc:
+                os.close(child_fd)
+                raise _filesystem_error(
+                    f"cannot inspect managed artifact ancestor {display}",
+                    exc,
+                ) from exc
+            if not stat.S_ISDIR(child_stat.st_mode):
+                os.close(child_fd)
+                raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
+            os.close(parent_fd)
+            parent_fd = child_fd
+    except BaseException as error:
+        try:
+            os.close(parent_fd)
+        except OSError as cleanup_error:
+            error.add_note(
+                f"managed artifact parent close failed: {_stable_error_detail(cleanup_error)}"
+            )
+        raise
+    return parent_fd
+
+
+@contextmanager
+def _locked_artifact_parent(
+    lock: _ManagedArtifactLock,
+    artifact: ManagedArtifact,
+    *,
+    create: bool,
+) -> Iterator[int]:
+    """Yield one descriptor-relative artifact parent and close it with safe diagnostics."""
+    artifact_path = artifact.relative_path.as_posix()
+    parent_fd = _open_locked_artifact_parent(lock, artifact, create=create)
+    try:
+        yield parent_fd
+    finally:
+        active_error = sys.exception()
+        try:
+            os.close(parent_fd)
+        except OSError as cause:
+            if active_error is not None:
+                active_error.add_note(
+                    f"managed artifact parent close failed: {_stable_error_detail(cause)}"
+                )
+            else:
+                raise _filesystem_error(
+                    "cannot close managed artifact parent",
+                    cause,
+                    path=artifact_path,
+                ) from cause
+
+
+def _apply_create(change: ArtifactChange, lock: _ManagedArtifactLock) -> None:
+    """Create one absent artifact beneath the locked root without replacing a winner."""
     artifact = change.artifact
     _validate_artifact_path(artifact)
     path = artifact.relative_path.as_posix()
-    logical_destination, destination = _resolve_change(change)
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise _filesystem_error("cannot create managed artifact parent", exc, path=path) from exc
-    logical_destination, destination = _resolve_change(change)
-    _require_real_artifact_ancestors(change.root, artifact.relative_path)
-    try:
-        target_stat = logical_destination.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise _filesystem_error("cannot inspect create destination", exc, path=path) from exc
-    else:
-        if stat.S_ISLNK(target_stat.st_mode):
-            raise ConfigError(f"symlink appeared after preflight for managed artifact {path}")
-        raise ConfigError(f"destination appeared after preflight for managed artifact {path}")
-    try:
-        atomic_create_bytes(
-            destination,
-            artifact.text.encode("utf-8"),
-            prefix=f".{destination.name}.doc-lattice-create.",
-        )
-    except FileExistsError as exc:
-        error = ConfigError(f"destination appeared after preflight for managed artifact {path}")
-        copy_exception_notes(error, exc)
-        raise error from exc
-    except OSError as exc:
-        raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
+    _resolve_change(change)
+    with _locked_artifact_parent(lock, artifact, create=True) as parent_fd:
+        try:
+            target_stat = os.stat(
+                artifact.relative_path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise _filesystem_error("cannot inspect create destination", exc, path=path) from exc
+        else:
+            if stat.S_ISLNK(target_stat.st_mode):
+                raise ConfigError(f"symlink appeared after preflight for managed artifact {path}")
+            raise ConfigError(f"destination appeared after preflight for managed artifact {path}")
+        try:
+            atomic_create_bytes_at(
+                parent_fd,
+                artifact.relative_path.name,
+                artifact.text.encode("utf-8"),
+                prefix=f".{artifact.relative_path.name}.doc-lattice-create.",
+            )
+        except FileExistsError as exc:
+            error = ConfigError(f"destination appeared after preflight for managed artifact {path}")
+            copy_exception_notes(error, exc)
+            raise error from exc
+        except OSError as exc:
+            raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
 
 
-def _apply_replace(change: ArtifactChange) -> None:
-    """Replace one artifact only while its exact preflight bytes remain current."""
+def _apply_replace(change: ArtifactChange, lock: _ManagedArtifactLock) -> None:
+    """Replace one artifact beneath the locked root while its preflight bytes remain current."""
     artifact = change.artifact
     _validate_artifact_path(artifact)
     path = artifact.relative_path.as_posix()
     if change.before is None:
         raise ConfigError(f"replace change is missing prior bytes for managed artifact {path}")
-    logical_destination, destination = _resolve_change(change)
-    current = _read_apply_bytes(logical_destination, destination, artifact)
-    if current != change.before:
-        raise ConfigError(f"destination changed after preflight for managed artifact {path}")
-    try:
-        atomic_replace_bytes(
-            destination,
-            artifact.text.encode("utf-8"),
-            prefix=f".{destination.name}.doc-lattice-replace.",
-        )
-    except OSError as exc:
-        raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
+    _resolve_change(change)
+    with _locked_artifact_parent(lock, artifact, create=False) as parent_fd:
+        current = _read_apply_bytes_at(parent_fd, artifact)
+        if current != change.before:
+            raise ConfigError(f"destination changed after preflight for managed artifact {path}")
+        try:
+            atomic_replace_bytes_at(
+                parent_fd,
+                artifact.relative_path.name,
+                artifact.text.encode("utf-8"),
+                prefix=f".{artifact.relative_path.name}.doc-lattice-replace.",
+            )
+        except OSError as exc:
+            raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
 
 
 def _resolve_change(change: ArtifactChange) -> tuple[Path, Path]:
@@ -1099,15 +1255,15 @@ def _resolve_change(change: ArtifactChange) -> tuple[Path, Path]:
     return logical_destination, destination
 
 
-def _read_apply_bytes(
-    logical_destination: Path,
-    destination: Path,
-    artifact: ManagedArtifact,
-) -> bytes:
-    """Read exact replacement bytes while enforcing the current target type."""
+def _read_apply_bytes_at(parent_fd: int, artifact: ManagedArtifact) -> bytes:
+    """Read exact replacement bytes through an already-open artifact parent descriptor."""
     path = artifact.relative_path.as_posix()
     try:
-        target_stat = logical_destination.stat(follow_symlinks=False)
+        target_stat = os.stat(
+            artifact.relative_path.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
     except FileNotFoundError as exc:
         raise ConfigError(
             f"destination changed after preflight for managed artifact {path}"
@@ -1118,10 +1274,28 @@ def _read_apply_bytes(
     if target_stat.st_size > MAX_WORKFLOW_BYTES:
         raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
     try:
-        with destination.open("rb") as handle:
+        target_fd = os.open(
+            artifact.relative_path.name,
+            _descriptor_open_flags(directory=False),
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        raise _filesystem_error("cannot read replacement destination", exc, path=path) from exc
+    try:
+        opened_stat = os.fstat(target_fd)
+        _require_regular_not_symlink(opened_stat.st_mode, path)
+        if (target_stat.st_dev, target_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+            raise ConfigError(f"destination changed after preflight for managed artifact {path}")
+        if opened_stat.st_size > MAX_WORKFLOW_BYTES:
+            raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
+        with os.fdopen(target_fd, "rb") as handle:
+            target_fd = -1
             data = handle.read(MAX_WORKFLOW_BYTES + 1)
     except OSError as exc:
         raise _filesystem_error("cannot read replacement destination", exc, path=path) from exc
+    finally:
+        if target_fd != -1:
+            os.close(target_fd)
     if len(data) > MAX_WORKFLOW_BYTES:
         raise ConfigError(f"managed artifact exceeds the byte limit: {path}")
     return data

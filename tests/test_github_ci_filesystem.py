@@ -181,21 +181,29 @@ def test_apply_create_rechecks_symlinked_ancestor_after_mkdir(tmp_path: Path, mo
     # even when containment resolution still matches the preflight destination.
     artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
     changes = preflight_create(tmp_path, (artifacts[0],))
-    stable_destination = changes[0].destination
     inside = tmp_path / "real-workflows"
     inside.mkdir()
-    real_mkdir = Path.mkdir
+    real_mkdir = os.mkdir
 
-    def _planting_mkdir(_self: Path, *_args: object, **_kwargs: object) -> None:
-        github = tmp_path / ".github"
-        if not github.exists():
-            real_mkdir(github)
-        workflows = tmp_path / ".github/workflows"
-        if not workflows.is_symlink():
-            workflows.symlink_to(inside, target_is_directory=True)
+    def _planting_mkdir(
+        name: str,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        real_mkdir(name, mode, dir_fd=dir_fd)
+        if name == ".github":
+            github_fd = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                dir_fd=dir_fd,
+            )
+            try:
+                os.symlink(str(inside), "workflows", dir_fd=github_fd)
+            finally:
+                os.close(github_fd)
 
-    monkeypatch.setattr(Path, "mkdir", _planting_mkdir)
-    monkeypatch.setattr(filesystem, "safe_resolve", lambda _logical, _root: stable_destination)
+    monkeypatch.setattr(filesystem.os, "mkdir", _planting_mkdir)
 
     with pytest.raises(ConfigError, match=r"symlink.*\.github/workflows"):
         apply_changes(changes)
@@ -233,7 +241,7 @@ def test_apply_create_error_detail_hides_absolute_path(tmp_path: Path, monkeypat
     def _fail_mkdir(*_args: object, **_kwargs: object) -> None:
         raise OSError(13, "Permission denied", str(secret))
 
-    monkeypatch.setattr(Path, "mkdir", _fail_mkdir)
+    monkeypatch.setattr(filesystem.os, "mkdir", _fail_mkdir)
 
     with pytest.raises(ConfigError, match=r"Permission denied.*doc-lattice\.yml") as caught:
         apply_changes(changes)
@@ -562,17 +570,23 @@ def test_apply_create_refuses_atomic_publish_collision_without_overwrite(
     changes = preflight_create(tmp_path, artifacts)
     collision = tmp_path / artifacts[0].relative_path
     winner = b"concurrent user file\n"
-    real_create = filesystem.atomic_create_bytes
+    real_create = filesystem.atomic_create_bytes_at
 
-    def _collide_during_publish(path: Path, data: bytes, *, prefix: str) -> None:
-        path.write_bytes(winner)
+    def _collide_during_publish(
+        directory_fd: int,
+        destination_name: str,
+        data: bytes,
+        *,
+        prefix: str,
+    ) -> None:
+        collision.write_bytes(winner)
         try:
-            real_create(path, data, prefix=prefix)
+            real_create(directory_fd, destination_name, data, prefix=prefix)
         except FileExistsError as error:
             error.add_note("concurrent winner must remain untouched")
             raise
 
-    monkeypatch.setattr(filesystem, "atomic_create_bytes", _collide_during_publish)
+    monkeypatch.setattr(filesystem, "atomic_create_bytes_at", _collide_during_publish)
 
     with pytest.raises(
         ConfigError,
@@ -609,19 +623,25 @@ def test_apply_keeps_contending_refresh_from_publishing_before_outer_write(
     outer_changes = preflight_refresh(tmp_path, new_artifacts)
     contending_changes = preflight_refresh(tmp_path, new_artifacts)
     before = _artifact_bytes(tmp_path, old_artifacts)
-    real_replace = filesystem.atomic_replace_bytes
+    real_replace = filesystem.atomic_replace_bytes_at
     contended = False
 
-    def _contending_replace(path: Path, data: bytes, *, prefix: str) -> None:
+    def _contending_replace(
+        directory_fd: int,
+        destination_name: str,
+        data: bytes,
+        *,
+        prefix: str,
+    ) -> None:
         nonlocal contended
         if not contended:
             contended = True
             with pytest.raises(ConfigError, match="managed artifact refresh is in progress"):
                 apply_changes(contending_changes)
             assert _artifact_bytes(tmp_path, old_artifacts) == before
-        real_replace(path, data, prefix=prefix)
+        real_replace(directory_fd, destination_name, data, prefix=prefix)
 
-    monkeypatch.setattr(filesystem, "atomic_replace_bytes", _contending_replace)
+    monkeypatch.setattr(filesystem, "atomic_replace_bytes_at", _contending_replace)
 
     apply_changes(outer_changes)
 
@@ -664,6 +684,71 @@ def test_apply_rejects_root_replaced_after_lock_acquisition_before_writing(
     assert (displaced_root / old_artifact.relative_path).read_bytes() == old_bytes
 
 
+def test_apply_replace_publishes_to_locked_root_when_path_root_replaced_at_mutation_boundary(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "repository"
+    displaced_root = tmp_path / "displaced-repository"
+    root.mkdir()
+    old_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")[0]
+    new_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
+    _write_artifacts(root, (old_artifact,))
+    changes = preflight_refresh(root, (new_artifact,))
+    old_bytes = old_artifact.text.encode("utf-8")
+    new_bytes = new_artifact.text.encode("utf-8")
+    real_resolve_change = filesystem._resolve_change
+    replaced = False
+
+    def _replace_root_after_first_resolution(change: ArtifactChange) -> tuple[Path, Path]:
+        nonlocal replaced
+        resolved = real_resolve_change(change)
+        if not replaced:
+            replaced = True
+            root.rename(displaced_root)
+            root.mkdir()
+            _write_artifacts(root, (old_artifact,))
+        return resolved
+
+    monkeypatch.setattr(filesystem, "_resolve_change", _replace_root_after_first_resolution)
+
+    apply_changes(changes)
+
+    assert replaced is True
+    assert (root / old_artifact.relative_path).read_bytes() == old_bytes
+    assert (displaced_root / new_artifact.relative_path).read_bytes() == new_bytes
+
+
+def test_apply_create_publishes_to_locked_root_when_path_root_replaced_at_mutation_boundary(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "repository"
+    displaced_root = tmp_path / "displaced-repository"
+    root.mkdir()
+    artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
+    changes = preflight_create(root, (artifact,))
+    real_resolve_change = filesystem._resolve_change
+    replaced = False
+
+    def _replace_root_after_first_resolution(change: ArtifactChange) -> tuple[Path, Path]:
+        nonlocal replaced
+        resolved = real_resolve_change(change)
+        if not replaced:
+            replaced = True
+            root.rename(displaced_root)
+            root.mkdir()
+        return resolved
+
+    monkeypatch.setattr(filesystem, "_resolve_change", _replace_root_after_first_resolution)
+
+    apply_changes(changes)
+
+    assert replaced is True
+    assert not (root / artifact.relative_path).exists()
+    assert (displaced_root / artifact.relative_path).read_bytes() == artifact.text.encode("utf-8")
+
+
 def test_apply_rejects_unsupported_locking_before_replacing_target(tmp_path: Path, monkeypatch):
     old_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")[0]
     new_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
@@ -704,6 +789,13 @@ def test_apply_lock_cleanup_failures_are_notes_on_active_operation_error(
     _write_artifacts(tmp_path, (old_artifact,))
     changes = preflight_refresh(tmp_path, (new_artifact,))
     real_close = os.close
+    real_open_lock = filesystem._open_lock_directory
+    lock_fd: int | None = None
+
+    def _capture_open_lock(root: Path) -> int:
+        nonlocal lock_fd
+        lock_fd = real_open_lock(root)
+        return lock_fd
 
     def _fail_release(_fd: int, *, release: bool) -> None:
         if release:
@@ -711,15 +803,17 @@ def test_apply_lock_cleanup_failures_are_notes_on_active_operation_error(
 
     def _fail_close(fd: int) -> None:
         real_close(fd)
-        raise OSError("synthetic lock close failure")
+        if fd == lock_fd:
+            raise OSError("synthetic lock close failure")
 
     def _fail_publish(*_args: object, **_kwargs: object) -> None:
         raise OSError("synthetic publication failure")
 
     monkeypatch.setattr(filesystem, "_flock", _fail_release, raising=False)
+    monkeypatch.setattr(filesystem, "_open_lock_directory", _capture_open_lock)
     monkeypatch.setattr(filesystem, "os", os, raising=False)
     monkeypatch.setattr(filesystem.os, "close", _fail_close)
-    monkeypatch.setattr(filesystem, "atomic_replace_bytes", _fail_publish)
+    monkeypatch.setattr(filesystem, "atomic_replace_bytes_at", _fail_publish)
 
     with pytest.raises(ConfigError, match="synthetic publication failure") as caught:
         apply_changes(changes)
@@ -772,12 +866,14 @@ def test_apply_wraps_oserror_with_notes_and_canonical_path(
         )
     elif phase == "mkdir":
         monkeypatch.setattr(
-            Path, "mkdir", lambda *_args, **_kwargs: (_ for _ in ()).throw(_failure())
+            filesystem.os,
+            "mkdir",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(_failure()),
         )
     else:
         monkeypatch.setattr(
             filesystem,
-            "atomic_create_bytes",
+            "atomic_create_bytes_at",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(_failure()),
         )
 
@@ -846,18 +942,24 @@ def test_interrupted_replace_does_not_roll_back_and_rerun_converges(
     new_artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
     _write_artifacts(tmp_path, old_artifacts)
     changes = preflight_refresh(tmp_path, new_artifacts)
-    real_replace = filesystem.atomic_replace_bytes
+    real_replace = filesystem.atomic_replace_bytes_at
     calls = 0
 
-    def _interrupt_after_one(path: Path, data: bytes, *, prefix: str) -> None:
+    def _interrupt_after_one(
+        directory_fd: int,
+        destination_name: str,
+        data: bytes,
+        *,
+        prefix: str,
+    ) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("synthetic interruption")
-        real_replace(path, data, prefix=prefix)
+        real_replace(directory_fd, destination_name, data, prefix=prefix)
 
     with monkeypatch.context() as context:
-        context.setattr(filesystem, "atomic_replace_bytes", _interrupt_after_one)
+        context.setattr(filesystem, "atomic_replace_bytes_at", _interrupt_after_one)
         with pytest.raises(ConfigError, match="synthetic interruption") as caught:
             apply_changes(changes)
 
@@ -887,19 +989,25 @@ def test_interrupted_replace_note_and_prefix_follow_requested_input_order(
     requested = (new_artifacts[2], new_artifacts[0], new_artifacts[1])
     _write_artifacts(tmp_path, old_artifacts)
     changes = preflight_refresh(tmp_path, requested)
-    real_replace = filesystem.atomic_replace_bytes
+    real_replace = filesystem.atomic_replace_bytes_at
     calls = 0
 
-    def _interrupt_second_requested_change(path: Path, data: bytes, *, prefix: str) -> None:
+    def _interrupt_second_requested_change(
+        directory_fd: int,
+        destination_name: str,
+        data: bytes,
+        *,
+        prefix: str,
+    ) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("synthetic requested-order interruption")
-        real_replace(path, data, prefix=prefix)
+        real_replace(directory_fd, destination_name, data, prefix=prefix)
 
     monkeypatch.setattr(
         filesystem,
-        "atomic_replace_bytes",
+        "atomic_replace_bytes_at",
         _interrupt_second_requested_change,
     )
 
