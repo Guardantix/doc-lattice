@@ -178,6 +178,30 @@ jobs:
     assert WorkflowStructureEntry(("env", "EMPTY"), "null", None) in first.structure
 
 
+def test_parse_workflow_keeps_implicit_timestamps_as_strings():
+    parsed = parse_workflow(
+        Path(".github/workflows/timestamps.yml"),
+        """\
+env:
+  RELEASE_DATE: 2026-07-17
+  RELEASE_AT: 2026-07-17T14:30:00Z
+jobs: {}
+""",
+    )
+
+    values = {scalar.path: scalar.value for scalar in parsed.scalars}
+    assert values[("env", "RELEASE_DATE")] == "2026-07-17"
+    assert values[("env", "RELEASE_AT")] == "2026-07-17T14:30:00Z"
+
+
+def test_parse_workflow_rejects_explicit_timestamp_tag():
+    with pytest.raises(ConfigError, match="unsupported YAML scalar"):
+        parse_workflow(
+            Path(".github/workflows/tagged-timestamp.yml"),
+            "payload: !!timestamp 2026-07-17\njobs: {}\n",
+        )
+
+
 def test_parse_workflow_structure_distinguishes_missing_empty_and_sequence_order():
     missing = parse_workflow(Path("base.yml"), "on: push\njobs:\n  check:\n    steps: []\n")
     empty = parse_workflow(

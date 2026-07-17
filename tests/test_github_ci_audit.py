@@ -79,6 +79,13 @@ def test_secret_name_regex_single_sources_from_secret_names():
         ("time -p doc-lattice linear", "PR_LINEAR_INVOCATION"),
         ("time -- doc-lattice linear", "PR_LINEAR_INVOCATION"),
         ("time -p -- doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
+        (r"\time -p doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        ("'time' -- doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        ("command time -p doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        (
+            "exec time -p -- doc-lattice reconcile --all",
+            "PR_MUTATING_RECONCILE",
+        ),
         ("coproc DL doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
         (
             "coproc DL uvx --from doc-lattice==2.1.0 doc-lattice linear",
@@ -124,6 +131,23 @@ jobs:
     )
 
     assert _finding_codes(audit_global_workflows((document,))) == {expected_code}
+
+
+def test_global_audit_allows_literal_doc_lattice_array_data_on_pr():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          args=(doc-lattice linear)
+          declare -a reconcile_args=(doc-lattice reconcile --all)
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == set()
 
 
 def test_global_audit_rejects_linear_after_quoted_heredoc_continuation():
@@ -628,16 +652,26 @@ jobs:
         audit_global_workflows((document,))
 
 
-def test_global_audit_fails_closed_on_unknown_external_time_option_after_env():
+@pytest.mark.parametrize(
+    "script",
+    [
+        "env time -f '%e' doc-lattice linear",
+        r"\time -f '%e' doc-lattice linear",
+        "command time -f '%e' doc-lattice linear",
+        "exec time -f '%e' doc-lattice linear",
+    ],
+    ids=["env-prefix", "escaped", "command-wrapper", "exec-wrapper"],
+)
+def test_global_audit_fails_closed_on_unknown_external_time_option(script):
     document = _workflow(
-        """\
+        f"""\
 on: pull_request
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          env time -f '%e' doc-lattice linear
+          {script}
 """
     )
 

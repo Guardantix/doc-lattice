@@ -35,7 +35,7 @@ scanner budgets, typed workflow boundary, and fail-closed errors.
 - Modify: `tests/test_github_ci_audit.py:65-115,620-655`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py:304-365,575-780,1641-1680,1890-1920`
 
-- [ ] **Step 1: Add scanner regressions and portable controls**
+- [x] **Step 1: Add scanner regressions and portable controls**
 
 Extend the unknown external `time` option parameters with:
 
@@ -54,14 +54,14 @@ Extend the accepted compound grammar parameters with:
 ("exec time -p -- doc-lattice reconcile --all", RECONCILE),
 ```
 
-- [ ] **Step 2: Add pull-request audit regressions**
+- [x] **Step 2: Add pull-request audit regressions**
 
 Parameterize the unknown external-time audit test over `env time`, `\time`, `command time`, and
 `exec time` GNU `-f` forms, all expecting `shell scan.*external time option`. Add the portable
 escaped, quoted, `command`, and `exec` forms to the existing PR-policy parameter table with their
 Linear or mutating-reconcile finding code.
 
-- [ ] **Step 3: Run RED and confirm the bypass**
+- [x] **Step 3: Run RED and confirm the bypass**
 
 Run:
 
@@ -77,7 +77,7 @@ Expected: the new forced-external cases fail because escaped/quoted `time` is tr
 and because `command`/`exec` expose a target that is reclassified as a keyword. Existing controls
 pass.
 
-- [ ] **Step 4: Preserve Bash reserved-word provenance**
+- [x] **Step 4: Preserve Bash reserved-word provenance**
 
 Add a `keyword_eligible` field to `_ShellWord` and `_ShellWordBuilder`, clear it from
 `append_protected`, and copy it from `build`. Require that field when recognizing `case`, the
@@ -101,7 +101,7 @@ def append_protected(...):
     self.keyword_eligible = False
 ```
 
-- [ ] **Step 5: Route wrapper-exposed `time` through the external grammar**
+- [x] **Step 5: Route wrapper-exposed `time` through the external grammar**
 
 In `_skip_shell_prefixes`, retain the wrapper literal before advancing. When `command` or `exec`
 resolves a static target whose decoded literal is `time`, return the payload position from
@@ -123,7 +123,7 @@ if (
     )
 ```
 
-- [ ] **Step 6: Run GREEN and focused scanner/audit modules**
+- [x] **Step 6: Run GREEN and focused scanner/audit modules**
 
 Run the command from Step 3, then:
 
@@ -141,7 +141,7 @@ Expected: every selected test passes with no warnings.
 - Modify: `tests/test_github_ci_audit.py:115-160`
 - Modify: `src/doc_lattice/github_ci/shell_scanner.py:545-620`
 
-- [ ] **Step 1: Add literal-array and executable-substitution scanner tests**
+- [x] **Step 1: Add literal-array and executable-substitution scanner tests**
 
 Add:
 
@@ -172,7 +172,7 @@ def test_direct_doc_lattice_invocations_scans_executable_array_contexts(script, 
     assert direct_doc_lattice_invocations(script) == expected
 ```
 
-- [ ] **Step 2: Add pull-request audit false-positive coverage**
+- [x] **Step 2: Add pull-request audit false-positive coverage**
 
 Create one PR workflow whose run script builds both literal arrays:
 
@@ -194,7 +194,7 @@ jobs:
     assert _finding_codes(audit_global_workflows((document,))) == set()
 ```
 
-- [ ] **Step 3: Run RED and confirm literal elements are scanned as subshell commands**
+- [x] **Step 3: Run RED and confirm literal elements are scanned as subshell commands**
 
 Run:
 
@@ -208,7 +208,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 Expected: the three literal-data scanner parameters and the audit test fail with reported
 invocations/findings; the executable substitution and following-command controls pass.
 
-- [ ] **Step 4: Add a bounded compound array consumer**
+- [x] **Step 4: Add a bounded compound array consumer**
 
 Before flushing an opening `(` operator, detect a final assignment word ending in `=` and call a
 new `_consume_array_assignment` method. The method tracks balanced bare parentheses, uses
@@ -230,7 +230,7 @@ if (
 The consumer must not recursively call `_scan_commands` for ordinary array elements. Only the
 existing active-expansion and process-substitution routines may expose executable regions.
 
-- [ ] **Step 5: Run GREEN and focused scanner/audit modules**
+- [x] **Step 5: Run GREEN and focused scanner/audit modules**
 
 Run the command from Step 3, then:
 
@@ -247,7 +247,7 @@ Expected: every selected test passes with no warnings.
 - Modify: `tests/test_github_ci_workflow_parser.py:110-190,650-710`
 - Modify: `src/doc_lattice/github_ci/workflow_parser.py:22-90`
 
-- [ ] **Step 1: Add implicit timestamp and explicit-tag parser tests**
+- [x] **Step 1: Add implicit timestamp and explicit-tag parser tests**
 
 Add:
 
@@ -276,7 +276,7 @@ def test_parse_workflow_rejects_explicit_timestamp_tag():
         )
 ```
 
-- [ ] **Step 2: Run RED and verify implicit values construct date objects**
+- [x] **Step 2: Run RED and verify implicit values construct date objects**
 
 Run:
 
@@ -289,7 +289,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 Expected: the implicit timestamp test fails with `unsupported YAML scalar`; the explicit tag
 control passes.
 
-- [ ] **Step 3: Remove only the per-instance implicit timestamp resolver**
+- [x] **Step 3: Remove only the per-instance implicit timestamp resolver**
 
 Add the timestamp tag constant and configure the fresh safe loader before compose/load:
 
@@ -307,7 +307,7 @@ def _disable_implicit_timestamps(yaml: YAML) -> None:
 Call `_disable_implicit_timestamps(yaml)` immediately after setting duplicate-key behavior. Do not
 modify the timestamp constructor or class-level resolver state.
 
-- [ ] **Step 4: Run GREEN and the focused parser module**
+- [x] **Step 4: Run GREEN and the focused parser module**
 
 Run the command from Step 2, then:
 
@@ -323,7 +323,7 @@ Expected: every selected test passes with no warnings.
 **Files:**
 - Verify: the complete repository and all changed files
 
-- [ ] **Step 1: Run the full test suite with coverage**
+- [x] **Step 1: Run the full test suite with coverage**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev pytest -q
@@ -331,7 +331,7 @@ env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev p
 
 Expected: all tests pass and coverage meets the configured 80 percent minimum.
 
-- [ ] **Step 2: Run static and repository checks**
+- [x] **Step 2: Run static and repository checks**
 
 ```bash
 env UV_CACHE_DIR=/tmp/doc-lattice-review-uv-cache uv run --offline --group dev ruff check src tests
@@ -345,7 +345,7 @@ git diff --check
 
 Expected: every command exits 0 with no findings or formatting changes.
 
-- [ ] **Step 3: Audit every requirement and the complete diff**
+- [x] **Step 3: Audit every requirement and the complete diff**
 
 Confirm:
 

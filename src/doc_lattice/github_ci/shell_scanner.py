@@ -308,6 +308,7 @@ class _ShellWord:
     quoted_zero_field_expansion: bool = False
     active_argv_expansion: bool = False
     shell_assignment: bool = False
+    keyword_eligible: bool = True
 
 
 @dataclass(slots=True)
@@ -320,6 +321,7 @@ class _ShellWordBuilder:
     assignment_name_is_literal: bool = True
     assignment_name: str = ""
     shell_assignment: bool = False
+    keyword_eligible: bool = True
 
     def append_protected(
         self,
@@ -337,6 +339,7 @@ class _ShellWordBuilder:
         self.quoted_zero_field_expansion = (
             self.quoted_zero_field_expansion or quoted_zero_field_expansion
         )
+        self.keyword_eligible = False
         if not self.shell_assignment:
             self.assignment_name_is_literal = False
 
@@ -362,12 +365,23 @@ class _ShellWordBuilder:
             quoted_zero_field_expansion=self.quoted_zero_field_expansion,
             active_argv_expansion=_has_active_argv_expansion("".join(self.active_syntax)),
             shell_assignment=self.shell_assignment,
+            keyword_eligible=self.keyword_eligible,
         )
 
 
-def _reject_active_extglob_opener(builder: _ShellWordBuilder, boundary: str) -> None:
+def _reject_active_extglob_opener(
+    builder: _ShellWordBuilder,
+    boundary: str,
+    *,
+    enabled: bool = True,
+) -> None:
     """Reject an unquoted extglob opener before ``(`` becomes a command-group operator."""
-    if boundary == "(" and builder.active_syntax and builder.active_syntax[-1] in "?*+@!":
+    if (
+        enabled
+        and boundary == "("
+        and builder.active_syntax
+        and builder.active_syntax[-1] in "?*+@!"
+    ):
         raise _ShellScanIncomplete("extglob expansion cannot be scanned safely")
 
 
@@ -572,6 +586,58 @@ class _ShellScanner:
             return arithmetic_end
         return self._scan_commands(index + 1, limit, terminator=")", depth=depth + 1)
 
+    def _consume_array_assignment(
+        self,
+        index: int,
+        limit: int,
+        depth: int,
+    ) -> int:
+        """Consume compound assignment data while retaining executable expansions."""
+        if depth > _MAX_SHELL_RECURSION_DEPTH:
+            raise _ShellScanIncomplete("recursion limit exceeded")
+        parentheses = 1
+        at_word_start = True
+        while index < limit:
+            self.budget.step()
+            character = self.source[index]
+            if character in " \t\r\n":
+                index += 1
+                at_word_start = True
+                continue
+            if character == "#" and at_word_start:
+                index = self._comment_end(index, limit)
+                continue
+            process_end = self._consume_process_substitution(index, limit, depth)
+            if process_end is not None:
+                index = process_end
+                at_word_start = False
+                continue
+            if character == "(":
+                parentheses += 1
+                index += 1
+                at_word_start = False
+                continue
+            if character == ")":
+                parentheses -= 1
+                index += 1
+                if parentheses == 0:
+                    return index
+                at_word_start = False
+                continue
+            _word, next_index = self._parse_word(
+                index,
+                limit,
+                depth,
+                reject_extglob=False,
+            )
+            if next_index != index:
+                index = next_index
+                at_word_start = False
+                continue
+            index += 1
+            at_word_start = character in ";&|"
+        return index
+
     def _consume_command_operator(
         self,
         index: int,
@@ -585,6 +651,13 @@ class _ShellScanner:
         index += len(operator)
         if self._consume_case_pattern_operator(state, operator):
             return index
+        if (
+            operator == "("
+            and state.words
+            and state.words[-1].shell_assignment
+            and state.words[-1].literal.endswith("=")
+        ):
+            return self._consume_array_assignment(index, limit, depth + 1)
         self._flush_command(state)
         self._advance_case_body(state, operator)
         if operator == "(":
@@ -598,7 +671,12 @@ class _ShellScanner:
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
         command_position = state.at_command_position
-        if not word.dynamic and command_position and word.literal == "case":
+        if (
+            not word.dynamic
+            and word.keyword_eligible
+            and command_position
+            and word.literal == "case"
+        ):
             state.cases.append(_CaseScanState(phase="word"))
         elif state.cases:
             case = state.cases[-1]
@@ -751,9 +829,12 @@ class _ShellScanner:
         if word.dynamic:
             self._prefix_stop(state)
             return
-        if literal in _COMMAND_PREFIXES:
+        if word.keyword_eligible and literal in _COMMAND_PREFIXES:
             return
-        if literal in {"time", "builtin", "env", "command", "exec"}:
+        if word.keyword_eligible and literal == "time":
+            state.prefix_mode = literal
+            return
+        if literal in {"builtin", "env", "command", "exec"}:
             state.prefix_mode = literal
             return
         self._prefix_stop(state)
@@ -1047,6 +1128,8 @@ class _ShellScanner:
         start: int,
         limit: int,
         depth: int,
+        *,
+        reject_extglob: bool = True,
     ) -> tuple[_ShellWord, int]:
         builder = _ShellWordBuilder([], [])
         index = start
@@ -1116,7 +1199,11 @@ class _ShellScanner:
                 continue
             builder.append_active(character)
             index += 1
-        _reject_active_extglob_opener(builder, self.source[index : index + 1])
+        _reject_active_extglob_opener(
+            builder,
+            self.source[index : index + 1],
+            enabled=reject_extglob,
+        )
         return builder.build(), index
 
     def _parse_double_quoted(
@@ -1653,10 +1740,10 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
             continue
         if word.dynamic:
             return _ResolvedIndex(index, ambiguous)
-        if word.literal in _COMMAND_PREFIXES:
+        if word.keyword_eligible and word.literal in _COMMAND_PREFIXES:
             index += 1
             continue
-        if word.literal == "time":
+        if word.keyword_eligible and word.literal == "time":
             index += 1
             if (
                 index < len(words)
@@ -1674,11 +1761,22 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
         if _basename(word.literal) == "env":
             return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous)
         if word.literal in {"builtin", "command", "exec"}:
+            wrapper_literal = word.literal
             wrapper = _skip_shell_builtin_wrapper(words, index)
             if wrapper.index is None:
                 return _ResolvedIndex(None, ambiguous or wrapper.ambiguous)
             index = wrapper.index
             ambiguous = ambiguous or wrapper.ambiguous
+            if (
+                wrapper_literal in {"command", "exec"}
+                and index < len(words)
+                and not _word_may_change_argv(words[index])
+                and words[index].literal == "time"
+            ):
+                return _ResolvedIndex(
+                    _skip_external_time_prefix(words, index + 1),
+                    ambiguous,
+                )
             continue
         return _ResolvedIndex(index, ambiguous)
     return _ResolvedIndex(index, ambiguous)
@@ -1899,6 +1997,7 @@ def _doc_lattice_command_index(
     if (
         command_index < len(words)
         and not words[command_index].dynamic
+        and words[command_index].keyword_eligible
         and words[command_index].literal == "coproc"
     ):
         payload_index = _coproc_doc_lattice_command_index(words, command_index + 1)

@@ -24,6 +24,7 @@ from .model import (
 from .path_display import display_path
 
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+_YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
 _YAML_1_2 = (1, 2)
 
 # Inclusive security budgets for repository-controlled workflow audit input. The root YAML node
@@ -75,6 +76,7 @@ def parse_workflow(path: Path, text: str) -> WorkflowDocument:
 
         yaml = YAML(typ="safe")
         yaml.allow_duplicate_keys = False
+        _disable_implicit_timestamps(yaml)
         with warnings.catch_warnings():
             warnings.simplefilter("error", ReusedAnchorWarning)
             syntax_tree = _compose_yaml(yaml, text, path)
@@ -111,6 +113,12 @@ def parse_workflow(path: Path, text: str) -> WorkflowDocument:
         raise _resource_limit(path) from exc
     except (UnicodeEncodeError, UnicodeDecodeError, ValueError) as exc:
         raise _parse_error(path, "malformed YAML") from exc
+
+
+def _disable_implicit_timestamps(yaml: YAML) -> None:
+    """Keep GitHub workflow timestamp-looking scalars as strings."""
+    for resolvers in yaml.resolver.versioned_resolver.values():
+        resolvers[:] = [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_TIMESTAMP_TAG]
 
 
 def _compose_yaml(yaml: YAML, text: str, workflow_path: Path) -> Node | None:

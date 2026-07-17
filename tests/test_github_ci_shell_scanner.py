@@ -461,6 +461,10 @@ def test_direct_doc_lattice_invocations_handles_documented_forms(script, expecte
         ("time -p doc-lattice linear", LINEAR),
         ("time -- doc-lattice linear", LINEAR),
         ("time -p -- doc-lattice reconcile --all", RECONCILE),
+        (r"\time -p doc-lattice linear", LINEAR),
+        ("'time' -- doc-lattice linear", LINEAR),
+        ("command time -p doc-lattice linear", LINEAR),
+        ("exec time -p -- doc-lattice reconcile --all", RECONCILE),
         ("coproc DL doc-lattice reconcile --all", RECONCILE),
         (
             "coproc DL uvx --from doc-lattice==2.1.0 doc-lattice linear",
@@ -578,6 +582,32 @@ def test_direct_doc_lattice_invocations_detects_long_assignment_prefix_run():
     script = f"{assignments} doc-lattice linear"
 
     assert direct_doc_lattice_invocations(script) == LINEAR
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "args=(doc-lattice linear)",
+        "declare -a args=(doc-lattice reconcile --all)",
+        "args=([1+(2)]=doc-lattice linear)",
+    ],
+    ids=["indexed", "declare-indexed", "arithmetic-subscript"],
+)
+def test_direct_doc_lattice_invocations_treats_array_literals_as_data(script):
+    assert direct_doc_lattice_invocations(script) == NONE
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("args=($(doc-lattice linear))", LINEAR),
+        ("args=(<(doc-lattice reconcile --all))", RECONCILE),
+        ("args=(doc-lattice linear)\ndoc-lattice check", CHECK),
+    ],
+    ids=["command-substitution", "process-substitution", "following-command"],
+)
+def test_direct_doc_lattice_invocations_scans_executable_array_contexts(script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
 
 
 @pytest.mark.parametrize(
@@ -958,8 +988,18 @@ def test_direct_doc_lattice_invocations_fails_closed_on_wrapped_env_split_string
         "uv run /usr/bin/time -f '%e' doc-lattice linear",
         "/usr/bin/time -f '%e' doc-lattice linear",
         "env time -f '%e' doc-lattice linear",
+        r"\time -f '%e' doc-lattice linear",
+        "command time -f '%e' doc-lattice linear",
+        "exec time -f '%e' doc-lattice linear",
     ],
-    ids=["nested", "path-qualified", "env-prefix"],
+    ids=[
+        "nested",
+        "path-qualified",
+        "env-prefix",
+        "escaped",
+        "command-wrapper",
+        "exec-wrapper",
+    ],
 )
 def test_direct_doc_lattice_fails_closed_on_unknown_external_time_option(script):
     with pytest.raises(ConfigError, match=r"shell scan.*external time option"):
