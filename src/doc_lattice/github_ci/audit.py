@@ -57,6 +57,8 @@ _SECRET_NAME_RE = re.compile(
     rf"(?<![A-Za-z0-9_])(?:{_SECRET_NAME_ALTERNATION})(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
+_SECRETS_INDEX_RE = re.compile(r"(?<![A-Za-z0-9_])secrets\s*\[\s*", re.IGNORECASE)
+_STATIC_SECRET_INDEX_RE = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*'\s*\]")
 _CANONICAL_LINEAR_PATH = LINEAR_WORKFLOW_PATH.as_posix()
 _WORKFLOW_DIRECTORY = LINEAR_WORKFLOW_PATH.parent.as_posix()
 _COMMAND_BEHAVIOR_FIELDS = frozenset(
@@ -646,7 +648,9 @@ def _has_linear_secret_reference(document: WorkflowDocument) -> bool:
     for scalar in document.scalars:
         if scalar.path == exempt_path and scalar.value == LINEAR_SECRET_ENV_VALUE:
             continue
-        if _SECRET_NAME_RE.search(scalar.value) is not None:
+        if _SECRET_NAME_RE.search(scalar.value) is not None or _has_computed_secret_index(
+            scalar.value
+        ):
             return True
 
     for entry in document.structure:
@@ -655,6 +659,14 @@ def _has_linear_secret_reference(document: WorkflowDocument) -> bool:
         if entry.path and entry.path[-1].casefold() in _SECRET_NAMES_CASEFOLDED:
             return True
     return False
+
+
+def _has_computed_secret_index(value: str) -> bool:
+    """Return whether a secrets-context index has no provably static secret name."""
+    return any(
+        _STATIC_SECRET_INDEX_RE.match(value, match.end()) is None
+        for match in _SECRETS_INDEX_RE.finditer(value)
+    )
 
 
 def _canonical_linear_secret_path(document: WorkflowDocument) -> tuple[str, ...] | None:

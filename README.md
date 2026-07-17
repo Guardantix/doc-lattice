@@ -626,10 +626,12 @@ two canonical managed workflow paths, so an unrelated release workflow may legit
 Audit recognizes direct shell invocations, including supported `uv run` and `uvx` forms. It cannot
 prove that an arbitrary script, local action, reusable workflow, renamed wrapper, or dynamic shell
 construction does not eventually invoke a sensitive command. Malformed, oversized, or otherwise
-unreliably inspectable workflows exit 2 instead of being treated as safe. For the bootstrap script,
-audit validates only presence and ownership metadata rather than content equality. Local audit also
-cannot see remote environment or organization-policy drift, so rerun bootstrap `verify` from
-reviewed trusted state after relevant policy, visibility, plan, rename, or transfer changes.
+unreliably inspectable workflows exit 2 instead of being treated as safe. Computed
+`secrets[...]` keys also fail closed because local inspection cannot prove which secret name they
+resolve to. For the bootstrap script, audit validates only presence and ownership metadata rather
+than content equality. Local audit also cannot see remote environment or organization-policy drift,
+so rerun bootstrap `verify` from reviewed trusted state after relevant policy, visibility, plan,
+rename, or transfer changes.
 
 The generated environment is the authoritative secret boundary. It allows only the exact `main`
 branch, and the dedicated environment-only secret is mapped to `LINEAR_API_KEY` only on the final

@@ -937,10 +937,10 @@ def test_ci_refresh_apply_detects_current_artifact_race_during_apply(tmp_path: P
     )
 
     assert result.exit_code == 2
-    assert "did not converge" in result.stderr
+    assert "changed after preflight" in result.stderr
     assert raced_target.read_text(encoding="utf-8") == old[0].text
-    assert (tmp_path / current[1].relative_path).read_text(encoding="utf-8") == current[1].text
-    assert (tmp_path / current[2].relative_path).read_text(encoding="utf-8") == current[2].text
+    assert (tmp_path / current[1].relative_path).read_text(encoding="utf-8") == old[1].text
+    assert (tmp_path / current[2].relative_path).read_text(encoding="utf-8") == old[2].text
 
 
 def test_ci_refresh_apply_preserves_repeat_preflight_diagnostic(tmp_path: Path, monkeypatch):

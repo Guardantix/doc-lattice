@@ -32,6 +32,23 @@ _COMMAND_PREFIXES = frozenset(
 _SHELL_ASSIGNMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 _ENV_SPLIT_STRING_LONG_OPTION = "--split-string"
+_ENV_LONG_OPTION_KINDS = {
+    "--argv0": "required",
+    "--block-signal": "optional",
+    "--chdir": "required",
+    "--debug": "flag",
+    "--default-signal": "optional",
+    "--help": "stop",
+    "--ignore-environment": "flag",
+    "--ignore-signal": "optional",
+    "--list-signal-handling": "flag",
+    "--null": "flag",
+    _ENV_SPLIT_STRING_LONG_OPTION: "split",
+    "--unset": "required",
+    "--version": "stop",
+}
+_ENV_SHORT_FLAGS = frozenset({"0", "i", "v"})
+_ENV_SHORT_REQUIRED = frozenset({"a", "C", "u"})
 _REDIRECTION_OPERATORS = (
     "&>>",
     "<<<",
@@ -601,10 +618,10 @@ class _ShellScanner:
         re-evaluated in normal mode by the caller.
         """
         mode = state.prefix_mode
-        if mode == "command_v":
+        if mode in {"command_v", "env_stop"}:
             return True
         if (
-            mode in {"command_dashdash", "exec_dashdash"}
+            mode in {"command_dashdash", "env_dashdash", "exec_dashdash"}
             or word.dynamic
             or _command_boundary_word_may_disappear(word)
         ):
@@ -613,20 +630,42 @@ class _ShellScanner:
         literal = word.literal
         if mode == "time":
             state.prefix_mode = "normal"
-            return literal == "-p"
-        if mode == "env":
-            return self._advance_prefix_env(state, literal)
-        if mode == "command":
-            return self._advance_prefix_command(state, literal)
-        return self._advance_prefix_exec(state, literal)
+            handled = literal == "-p"
+        elif mode == "env":
+            handled = self._advance_prefix_env(state, literal)
+        elif mode in {"builtin", "builtin_target"}:
+            handled = self._advance_prefix_builtin(
+                state,
+                literal,
+                allow_dashdash=mode == "builtin",
+            )
+        elif mode == "command":
+            handled = self._advance_prefix_command(state, literal)
+        else:
+            handled = self._advance_prefix_exec(state, literal)
+        return handled
 
     def _advance_prefix_env(self, state: _CommandScanState, literal: str) -> bool:
         if _ENV_ASSIGNMENT_RE.fullmatch(literal):
             return True
-        if literal in {"-u", "--unset", "-C", "--chdir"}:
-            state.prefix_pending = 1
+        if literal == "--":
+            state.prefix_mode = "env_dashdash"
+            return True
+        if literal.startswith("--"):
+            option, attached_value = _resolve_env_long_option(literal)
+            kind = _ENV_LONG_OPTION_KINDS[option]
+            if kind == "split":
+                raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+            if kind == "stop":
+                state.prefix_mode = "env_stop"
+            elif kind == "required" and not attached_value:
+                state.prefix_pending = 1
+            elif kind == "flag" and attached_value:
+                raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
             return True
         if literal.startswith("-"):
+            if _env_short_option_requires_separate_value(literal):
+                state.prefix_pending = 1
             return True
         state.prefix_mode = "normal"
         return False
@@ -642,14 +681,32 @@ class _ShellScanner:
             state.prefix_mode = "command_v"
         return True
 
+    def _advance_prefix_builtin(
+        self,
+        state: _CommandScanState,
+        literal: str,
+        *,
+        allow_dashdash: bool,
+    ) -> bool:
+        """Follow only builtin targets that can expose a supported command wrapper."""
+        if allow_dashdash and literal == "--":
+            state.prefix_mode = "builtin_target"
+        elif literal == "builtin":
+            state.prefix_mode = "builtin"
+        elif literal in {"command", "exec"}:
+            state.prefix_mode = literal
+        else:
+            self._prefix_stop(state)
+        return True
+
     def _advance_prefix_exec(self, state: _CommandScanState, literal: str) -> bool:
         if literal == "--":
             state.prefix_mode = "exec_dashdash"
             return True
-        if literal == "-a":
-            state.prefix_pending = 1
-            return True
-        if not literal.startswith("-"):
+        if literal.startswith("-"):
+            if _exec_option_requires_separate_argv0(literal):
+                state.prefix_pending = 1
+        else:
             self._prefix_stop(state)
         return True
 
@@ -665,7 +722,7 @@ class _ShellScanner:
             return
         if literal in _COMMAND_PREFIXES:
             return
-        if literal in {"time", "env", "command", "exec"}:
+        if literal in {"time", "builtin", "env", "command", "exec"}:
             state.prefix_mode = literal
             return
         self._prefix_stop(state)
@@ -1526,15 +1583,8 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
             continue
         if _basename(word.literal) == "env":
             return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous)
-        if word.literal == "command":
-            wrapper = _skip_command_builtin(words, index + 1)
-            if wrapper.index is None:
-                return _ResolvedIndex(None, ambiguous or wrapper.ambiguous)
-            index = wrapper.index
-            ambiguous = ambiguous or wrapper.ambiguous
-            continue
-        if word.literal == "exec":
-            wrapper = _skip_exec_wrapper(words, index + 1)
+        if word.literal in {"builtin", "command", "exec"}:
+            wrapper = _skip_shell_builtin_wrapper(words, index)
             if wrapper.index is None:
                 return _ResolvedIndex(None, ambiguous or wrapper.ambiguous)
             index = wrapper.index
@@ -1542,6 +1592,31 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
             continue
         return _ResolvedIndex(index, ambiguous)
     return _ResolvedIndex(index, ambiguous)
+
+
+def _skip_shell_builtin_wrapper(words: list[_ShellWord], index: int) -> _ResolvedIndex:
+    """Resolve one supported Bash wrapper beginning at ``index``."""
+    literal = words[index].literal
+    if literal == "builtin":
+        return _skip_builtin_wrapper(words, index + 1)
+    if literal == "command":
+        return _skip_command_builtin(words, index + 1)
+    return _skip_exec_wrapper(words, index + 1)
+
+
+def _skip_builtin_wrapper(words: list[_ShellWord], start: int) -> _ResolvedIndex:
+    """Expose a supported literal Bash builtin target or one ambiguous successor."""
+    index = start
+    if index < len(words) and not words[index].dynamic and words[index].literal == "--":
+        index += 1
+    if index >= len(words):
+        return _ResolvedIndex(index)
+    target = words[index]
+    if _command_boundary_word_may_disappear(target) or target.dynamic:
+        return _ResolvedIndex(index + 1, ambiguous=True)
+    if target.literal not in {"builtin", "command", "exec"}:
+        return _ResolvedIndex(None)
+    return _ResolvedIndex(index)
 
 
 def _skip_command_builtin(words: list[_ShellWord], start: int) -> _ResolvedIndex:
@@ -1588,16 +1663,32 @@ def _skip_exec_wrapper(words: list[_ShellWord], start: int) -> _ResolvedIndex:
             continue
         if word.literal == "--":
             return _ResolvedIndex(index + 1, ambiguous)
-        if word.literal == "-a":
-            value_index = index + 1
-            if value_index < len(words) and _word_may_change_option_value_shape(words[value_index]):
-                ambiguous = True
-            index += 2
-        elif word.literal.startswith("-"):
-            index += 1
+        if word.literal.startswith("-"):
+            if _exec_option_requires_separate_argv0(word.literal):
+                value_index = index + 1
+                if value_index < len(words) and _word_may_change_option_value_shape(
+                    words[value_index]
+                ):
+                    ambiguous = True
+                index += 2
+            else:
+                index += 1
         else:
             return _ResolvedIndex(index, ambiguous)
     return _ResolvedIndex(index, ambiguous)
+
+
+def _exec_option_requires_separate_argv0(literal: str) -> bool:
+    """Validate one Bash exec short cluster and locate a separate ``-a`` value."""
+    if literal == "-":
+        return False
+    for offset, option in enumerate(literal[1:], start=1):
+        if option in {"c", "l"}:
+            continue
+        if option == "a":
+            return offset == len(literal) - 1
+        raise _ShellScanIncomplete("unsupported exec option cannot be scanned safely")
+    return False
 
 
 def _is_env_split_string_long_option(literal: str) -> bool:
@@ -1623,6 +1714,60 @@ def _is_env_split_string_short_option(literal: str) -> bool:
     return False
 
 
+def _resolve_env_long_option(literal: str) -> tuple[str, bool]:
+    """Resolve one exact or uniquely abbreviated GNU env long option."""
+    option, separator, _value = literal.partition("=")
+    candidates = tuple(
+        candidate for candidate in _ENV_LONG_OPTION_KINDS if candidate.startswith(option)
+    )
+    if len(candidates) != 1:
+        raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+    return candidates[0], bool(separator)
+
+
+def _env_short_option_requires_separate_value(literal: str) -> bool:
+    """Validate one GNU env short cluster and report whether its value is separate."""
+    if literal == "-":
+        return False
+    for offset, option in enumerate(literal[1:], start=1):
+        if option in _ENV_SHORT_FLAGS:
+            continue
+        if option == "S":
+            raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+        if option in _ENV_SHORT_REQUIRED:
+            return offset == len(literal) - 1
+        raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+    return False
+
+
+def _skip_env_option_value(words: list[_ShellWord], option_index: int) -> int:
+    """Consume one required separate GNU env option value."""
+    value_index = option_index + 1
+    if value_index >= len(words) or _word_may_change_argv(words[value_index]):
+        raise _ShellScanIncomplete("env option value cannot be scanned safely")
+    return value_index + 1
+
+
+def _skip_static_env_option(words: list[_ShellWord], index: int) -> int:
+    """Skip one validated static GNU env option and any required separate value."""
+    literal = words[index].literal
+    if not literal.startswith("--"):
+        if _env_short_option_requires_separate_value(literal):
+            return _skip_env_option_value(words, index)
+        return index + 1
+    option, attached_value = _resolve_env_long_option(literal)
+    kind = _ENV_LONG_OPTION_KINDS[option]
+    if kind == "split":
+        raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+    if kind == "stop":
+        return len(words)
+    if kind == "required" and not attached_value:
+        return _skip_env_option_value(words, index)
+    if kind == "flag" and attached_value:
+        raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+    return index + 1
+
+
 def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
     index = start
     while index < len(words):
@@ -1645,13 +1790,8 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
             raise _ShellScanIncomplete("expandable env prefix cannot be scanned safely")
         if _ENV_ASSIGNMENT_RE.fullmatch(word.literal):
             index += 1
-        elif word.literal in {"-u", "--unset", "-C", "--chdir"}:
-            value_index = index + 1
-            if value_index >= len(words) or _word_may_change_argv(words[value_index]):
-                raise _ShellScanIncomplete("env option value cannot be scanned safely")
-            index = value_index + 1
         elif word.literal.startswith("-"):
-            index += 1
+            index = _skip_static_env_option(words, index)
         else:
             return index
     return index

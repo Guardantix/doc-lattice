@@ -153,6 +153,78 @@ jobs:
 
 
 @pytest.mark.parametrize(
+    ("script", "expected_code"),
+    [
+        ("env --uns NAME doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        ("env -iu NAME doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
+    ],
+)
+def test_global_audit_rejects_env_option_values_on_pr(script: str, expected_code: str):
+    document = _workflow(
+        f"""\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {script}
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {expected_code}
+
+
+@pytest.mark.parametrize(
+    ("script", "expected_code"),
+    [
+        ("exec -ca fake doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        ("exec -la fake doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
+    ],
+)
+def test_global_audit_rejects_clustered_exec_argv0_on_pr(script: str, expected_code: str):
+    document = _workflow(
+        f"""\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {script}
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {expected_code}
+
+
+@pytest.mark.parametrize(
+    ("script", "expected_code"),
+    [
+        ("builtin exec doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        (
+            "builtin command doc-lattice reconcile --all",
+            "PR_MUTATING_RECONCILE",
+        ),
+    ],
+)
+def test_global_audit_rejects_supported_builtin_wrappers_on_pr(
+    script: str,
+    expected_code: str,
+):
+    document = _workflow(
+        f"""\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {script}
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {expected_code}
+
+
+@pytest.mark.parametrize(
     "script",
     [
         # A trailing backslash in a comment does not continue it, so the next line still runs.
@@ -1094,6 +1166,41 @@ jobs:
     )
 
     assert _finding_codes(audit_global_workflows((document,))) == {"LINEAR_SECRET_REFERENCE"}
+
+
+def test_global_audit_fails_closed_on_computed_secret_key():
+    document = _workflow(
+        """\
+on: issue_comment
+jobs:
+  unrelated:
+    environment: doc-lattice-linear
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TOKEN: ${{ secrets[format('DOC_LATTICE_LINEAR_API_{0}', 'KEY')] }}
+        run: true
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {"LINEAR_SECRET_REFERENCE"}
+
+
+def test_global_audit_allows_static_unrelated_secret_index():
+    document = _workflow(
+        """\
+on: push
+jobs:
+  unrelated:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TOKEN: ${{ secrets['RELEASE_TOKEN'] }}
+        run: true
+"""
+    )
+
+    assert audit_global_workflows((document,)) == ()
 
 
 @pytest.mark.parametrize("key", ["LINEAR_API_KEY", "doc_lattice_linear_api_key"])

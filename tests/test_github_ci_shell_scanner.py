@@ -769,6 +769,52 @@ def test_direct_doc_lattice_invocations_handles_supported_wrappers_and_redirecti
 
 
 @pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("exec -ca fake doc-lattice linear", LINEAR),
+        ("exec -la fake doc-lattice reconcile --all", RECONCILE),
+        ("exec -cafake doc-lattice linear", LINEAR),
+    ],
+)
+def test_direct_doc_lattice_invocations_consumes_clustered_exec_argv0(script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
+def test_direct_doc_lattice_invocations_fails_closed_on_unsupported_static_exec_option():
+    with pytest.raises(ConfigError, match=r"shell scan.*unsupported exec option"):
+        direct_doc_lattice_invocations("exec -z ignored doc-lattice linear")
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("builtin exec doc-lattice linear", LINEAR),
+        ("builtin command doc-lattice reconcile --all", RECONCILE),
+        ("builtin -- exec -ca fake doc-lattice linear", LINEAR),
+        ("builtin builtin command doc-lattice linear", LINEAR),
+    ],
+)
+def test_direct_doc_lattice_invocations_follows_supported_builtin_targets(script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
+def test_direct_doc_lattice_invocations_fails_closed_on_dynamic_builtin_target():
+    with pytest.raises(ConfigError, match=r"shell scan.*command-position expansion"):
+        direct_doc_lattice_invocations('builtin "$TARGET" doc-lattice linear')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "builtin doc-lattice linear",
+        "builtin env doc-lattice linear",
+    ],
+)
+def test_direct_doc_lattice_invocations_ignores_unsupported_builtin_targets(script):
+    assert direct_doc_lattice_invocations(script) == NONE
+
+
+@pytest.mark.parametrize(
     "script",
     [
         "env -S 'doc-lattice linear'",
@@ -1199,6 +1245,34 @@ def test_direct_doc_lattice_invocations_handles_env_short_option_value_attached_
 )
 def test_direct_doc_lattice_invocations_handles_static_env_option_values(script):
     assert direct_doc_lattice_invocations(script) == LINEAR
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "env --uns NAME doc-lattice linear",
+        "env --ch /tmp doc-lattice linear",
+        "env --arg fake doc-lattice linear",
+        "env -iu NAME doc-lattice linear",
+        "env -iC /tmp doc-lattice linear",
+        "env -ia fake doc-lattice linear",
+    ],
+    ids=[
+        "abbreviated-unset",
+        "abbreviated-chdir",
+        "abbreviated-argv0",
+        "clustered-unset",
+        "clustered-chdir",
+        "clustered-argv0",
+    ],
+)
+def test_direct_doc_lattice_invocations_consumes_env_option_values(script):
+    assert direct_doc_lattice_invocations(script) == LINEAR
+
+
+def test_direct_doc_lattice_invocations_fails_closed_on_unsupported_static_env_option():
+    with pytest.raises(ConfigError, match=r"shell scan.*unsupported env option"):
+        direct_doc_lattice_invocations("env --future-option ignored doc-lattice linear")
 
 
 @pytest.mark.parametrize(

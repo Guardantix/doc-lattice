@@ -653,6 +653,92 @@ def test_apply_keeps_contending_refresh_from_publishing_before_outer_write(
     ]
 
 
+def test_apply_prevalidates_current_artifacts_under_lock_before_mutating(
+    tmp_path: Path,
+    monkeypatch,
+):
+    desired = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    old = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")
+    _write_artifacts(tmp_path, (desired[0],))
+    planned = preflight_create(tmp_path, desired)
+    changes = (planned[1], planned[0], planned[2])
+    current_target = tmp_path / desired[0].relative_path
+    real_claim = filesystem._claim_lock
+
+    def _race_current_after_claim(fd: int) -> None:
+        real_claim(fd)
+        current_target.write_text(old[0].text, encoding="utf-8")
+
+    monkeypatch.setattr(filesystem, "_claim_lock", _race_current_after_claim)
+
+    with pytest.raises(ConfigError, match=r"changed after preflight.*doc-lattice\.yml"):
+        apply_changes(changes)
+
+    assert not (tmp_path / desired[1].relative_path).exists()
+    assert not (tmp_path / desired[2].relative_path).exists()
+
+
+def test_apply_syncs_each_parent_after_creating_artifact_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    changes = preflight_create(tmp_path, artifacts)
+    real_mkdir = filesystem.os.mkdir
+    real_fsync = filesystem.os.fsync
+    events: list[tuple[str, tuple[int, int], str | None]] = []
+
+    def _identity(fd: int) -> tuple[int, int]:
+        descriptor_stat = os.fstat(fd)
+        return descriptor_stat.st_dev, descriptor_stat.st_ino
+
+    def _record_mkdir(
+        path: str,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        assert dir_fd is not None
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        events.append(("mkdir", _identity(dir_fd), path))
+
+    def _record_fsync(fd: int) -> None:
+        events.append(("fsync", _identity(fd), None))
+        real_fsync(fd)
+
+    monkeypatch.setattr(filesystem.os, "mkdir", _record_mkdir)
+    monkeypatch.setattr(filesystem.os, "fsync", _record_fsync)
+
+    apply_changes(changes)
+
+    mkdir_events = [index for index, event in enumerate(events) if event[0] == "mkdir"]
+    assert [events[index][2] for index in mkdir_events] == [".github", "workflows"]
+    for index in mkdir_events:
+        assert events[index + 1][:2] == ("fsync", events[index][1])
+
+
+def test_apply_reports_parent_sync_failure_before_writing_artifact(
+    tmp_path: Path,
+    monkeypatch,
+):
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+    changes = preflight_create(tmp_path, artifacts)
+
+    def _fail_fsync(_fd: int) -> None:
+        raise OSError("synthetic parent sync failure")
+
+    monkeypatch.setattr(filesystem.os, "fsync", _fail_fsync)
+
+    with pytest.raises(
+        ConfigError,
+        match="cannot synchronize managed artifact parent: synthetic parent sync failure",
+    ) as caught:
+        apply_changes(changes)
+
+    assert all(not (tmp_path / artifact.relative_path).exists() for artifact in artifacts)
+    assert any("without rollback" in note for note in getattr(caught.value, "__notes__", ()))
+
+
 def test_apply_rejects_root_replaced_after_lock_acquisition_before_writing(
     tmp_path: Path,
     monkeypatch,

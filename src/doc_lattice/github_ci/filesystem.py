@@ -365,19 +365,25 @@ def apply_changes(changes: tuple[ArtifactChange, ...]) -> None:
     if root is None:
         return
     with _managed_artifact_lock(root) as lock:
-        for change in changes:
-            if change.action == "current":
-                continue
-            try:
+        try:
+            for change in changes:
+                if change.action != "current":
+                    continue
+                _require_managed_artifact_lock(lock, change.root)
+                with _unchanged_artifact_parent(change, lock):
+                    pass
+            for change in changes:
+                if change.action == "current":
+                    continue
                 _require_managed_artifact_lock(lock, change.root)
                 if change.action == "create":
                     _apply_create(change, lock)
                 else:
                     _apply_replace(change, lock)
-            except ConfigError as error:
-                if _PARTIAL_STATE_NOTE not in getattr(error, "__notes__", ()):
-                    error.add_note(_PARTIAL_STATE_NOTE)
-                raise
+        except ConfigError as error:
+            if _PARTIAL_STATE_NOTE not in getattr(error, "__notes__", ()):
+                error.add_note(_PARTIAL_STATE_NOTE)
+            raise
 
 
 def _mutable_changes_root(changes: tuple[ArtifactChange, ...]) -> Path | None:
@@ -1050,6 +1056,7 @@ def _ensure_locked_artifact_ancestor(
     create: bool,
 ) -> None:
     """Require one descriptor-relative artifact ancestor to be a real directory."""
+    synchronize_parent = False
     try:
         ancestor_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -1057,6 +1064,7 @@ def _ensure_locked_artifact_ancestor(
             raise ConfigError(
                 f"destination changed after preflight for managed artifact {artifact_path}"
             ) from None
+        synchronize_parent = True
         try:
             os.mkdir(component, dir_fd=parent_fd)
         except FileExistsError:
@@ -1087,6 +1095,15 @@ def _ensure_locked_artifact_ancestor(
         raise ConfigError(f"symlink is not allowed in managed artifact path {display}")
     if not stat.S_ISDIR(ancestor_stat.st_mode):
         raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
+    if synchronize_parent:
+        try:
+            os.fsync(parent_fd)
+        except OSError as exc:
+            raise _filesystem_error(
+                "cannot synchronize managed artifact parent",
+                exc,
+                path=artifact_path,
+            ) from exc
 
 
 def _close_unowned_artifact_descriptor(
@@ -1278,15 +1295,8 @@ def _apply_create(change: ArtifactChange, lock: _ManagedArtifactLock) -> None:
 def _apply_replace(change: ArtifactChange, lock: _ManagedArtifactLock) -> None:
     """Replace one artifact beneath the locked root while its preflight bytes remain current."""
     artifact = change.artifact
-    _validate_artifact_path(artifact)
     path = artifact.relative_path.as_posix()
-    if change.before is None:
-        raise ConfigError(f"replace change is missing prior bytes for managed artifact {path}")
-    _resolve_change(change)
-    with _locked_artifact_parent(lock, artifact, create=False) as parent_fd:
-        current = _read_apply_bytes_at(parent_fd, artifact)
-        if current != change.before:
-            raise ConfigError(f"destination changed after preflight for managed artifact {path}")
+    with _unchanged_artifact_parent(change, lock) as parent_fd:
         try:
             atomic_replace_bytes_at(
                 parent_fd,
@@ -1296,6 +1306,27 @@ def _apply_replace(change: ArtifactChange, lock: _ManagedArtifactLock) -> None:
             )
         except OSError as exc:
             raise _filesystem_error("cannot write managed artifact", exc, path=path) from exc
+
+
+@contextmanager
+def _unchanged_artifact_parent(
+    change: ArtifactChange,
+    lock: _ManagedArtifactLock,
+) -> Iterator[int]:
+    """Yield an existing artifact parent only while preflight bytes remain unchanged."""
+    artifact = change.artifact
+    _validate_artifact_path(artifact)
+    path = artifact.relative_path.as_posix()
+    if change.before is None:
+        raise ConfigError(
+            f"{change.action} change is missing prior bytes for managed artifact {path}"
+        )
+    _resolve_change(change)
+    with _locked_artifact_parent(lock, artifact, create=False) as parent_fd:
+        current = _read_apply_bytes_at(parent_fd, artifact)
+        if current != change.before:
+            raise ConfigError(f"destination changed after preflight for managed artifact {path}")
+        yield parent_fd
 
 
 def _resolve_change(change: ArtifactChange) -> tuple[Path, Path]:
