@@ -758,6 +758,30 @@ def test_direct_doc_lattice_invocations_handles_supported_wrappers_and_redirecti
 @pytest.mark.parametrize(
     "script",
     [
+        "env -S 'doc-lattice linear'",
+        "env -S'doc-lattice linear'",
+        "env -iS 'doc-lattice linear'",
+        "env -iS'doc-lattice linear'",
+        "env --split-string 'doc-lattice linear'",
+        "env --split-string='doc-lattice reconcile --all'",
+    ],
+    ids=[
+        "short-separate-value",
+        "short-attached-value",
+        "short-cluster-separate-value",
+        "short-cluster-attached-value",
+        "long-separate-value",
+        "long-equals-value",
+    ],
+)
+def test_direct_doc_lattice_invocations_fails_closed_on_env_split_string(script):
+    with pytest.raises(ConfigError, match=r"shell scan.*env split-string"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "command -v doc-lattice linear",
         "command -V doc-lattice linear",
         "command -pv doc-lattice linear",

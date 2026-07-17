@@ -1424,6 +1424,14 @@ def _skip_exec_wrapper(words: list[_ShellWord], start: int) -> int:
     return index
 
 
+def _is_env_split_string_option(literal: str) -> bool:
+    """Return whether one static GNU ``env`` option would construct a new command argv."""
+    if literal == "--split-string" or literal.startswith("--split-string="):
+        return True
+    # GNU short options may be clustered and a split-string value may attach to its ``-S``.
+    return literal.startswith("-") and not literal.startswith("--") and "S" in literal[1:]
+
+
 def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
     index = start
     while index < len(words):
@@ -1434,6 +1442,8 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
             index += 1
         elif word.literal in {"-u", "--unset", "-C", "--chdir"}:
             index += 2
+        elif _is_env_split_string_option(word.literal):
+            raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
         elif word.literal.startswith("-"):
             index += 1
         else:
