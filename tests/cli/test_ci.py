@@ -241,9 +241,9 @@ def test_ci_audit_absent_workflows_before_adoption_exits_one(tmp_path: Path, mon
 @pytest.mark.parametrize(
     "origin",
     [
-        "git@github.com:Guardantix/doc-lattice.git\n",
-        "ssh://git@github.com/Guardantix/doc-lattice.git\n",
-        "https://github.com/Guardantix/doc-lattice.git\n",
+        "git@github.com:Guardantix/doc-lattice.git",
+        "ssh://git@github.com/Guardantix/doc-lattice.git",
+        "https://github.com/Guardantix/doc-lattice.git",
     ],
 )
 def test_ci_audit_omitted_repository_resolves_supported_origin(
@@ -264,7 +264,7 @@ def test_ci_audit_omitted_repository_resolves_supported_origin(
                 cast("int", kwargs["timeout"]),
             )
         )
-        return subprocess.CompletedProcess(argv, 0, origin.encode(), b"")
+        return subprocess.CompletedProcess(argv, 0, b"local\0" + origin.encode() + b"\0", b"")
 
     monkeypatch.setattr(ci_module.subprocess, "run", fake_run)
     result = runner.invoke(app, ["ci", "audit"])
@@ -273,7 +273,14 @@ def test_ci_audit_omitted_repository_resolves_supported_origin(
     assert result.stdout == "doc-lattice ci audit: ok\n"
     assert calls == [
         (
-            ["git", "config", "--local", "--get-all", "remote.origin.url"],
+            [
+                "git",
+                "config",
+                "--null",
+                "--show-scope",
+                "--get-all",
+                "remote.origin.url",
+            ],
             tmp_path,
             5,
         )
@@ -316,6 +323,53 @@ def test_ci_audit_omitted_repository_rejects_multiple_local_origin_urls(
     assert "CONFIG_ERROR" in result.stderr
 
 
+def test_ci_audit_omitted_repository_rejects_common_and_worktree_origin_urls(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _install(tmp_path)
+    subprocess.run(
+        [  # noqa: S607 - test requires the local git executable
+            "git",
+            "config",
+            "extensions.worktreeConfig",
+            "true",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        [  # noqa: S607 - test requires the local git executable
+            "git",
+            "config",
+            "--local",
+            "remote.origin.url",
+            "https://github.com/Guardantix/doc-lattice.git",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        [  # noqa: S607 - test requires the local git executable
+            "git",
+            "config",
+            "--worktree",
+            "remote.origin.url",
+            "https://github.com/unrelated/worktree-origin.git",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["ci", "audit"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "cannot resolve repository from git origin" in result.stderr
+    assert "CONFIG_ERROR" in result.stderr
+
+
 def test_ci_audit_omitted_repository_ignores_global_origin(tmp_path: Path, monkeypatch):
     subprocess.run(
         ["git", "init", "--quiet"],  # noqa: S607 - test requires the local git executable
@@ -347,12 +401,15 @@ def test_ci_audit_omitted_repository_ignores_global_origin(tmp_path: Path, monke
         (subprocess.CompletedProcess([], 0, b" \t\n", b""), "cannot resolve"),
         (
             subprocess.CompletedProcess(
-                [], 0, b"https://github.com/a/b\nhttps://github.com/c/d\n", b""
+                [],
+                0,
+                b"local\0https://github.com/a/b\0local\0https://github.com/c/d\0",
+                b"",
             ),
             "cannot resolve",
         ),
         (
-            subprocess.CompletedProcess([], 0, b"https://example.com/a/b\n", b""),
+            subprocess.CompletedProcess([], 0, b"local\0https://example.com/a/b\0", b""),
             "origin URL",
         ),
     ],

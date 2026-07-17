@@ -11,7 +11,9 @@ from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_ROOT_OPTIONS,
     _RECONCILE_FLAGS,
     _RECONCILE_OPTIONS_WITH_ARGUMENTS,
+    _ScanBudget,
     _ShellScanIncomplete,
+    _ShellScanner,
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
 )
@@ -548,6 +550,18 @@ def test_direct_doc_lattice_invocations_does_not_continue_after_escaped_backslas
     script = "doc-lattice rec" + "\\\\" + newline + "oncile --dry-run"
 
     assert direct_doc_lattice_invocations(script) == (("rec" + "\\", False),)
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("echo foo\r#notcomment; doc-lattice linear", LINEAR),
+        ("echo\r doc-lattice linear", NONE),
+    ],
+    ids=["hash-remains-word-text", "carriage-return-remains-command-text"],
+)
+def test_direct_doc_lattice_invocations_preserves_lone_carriage_returns(script, expected):
+    assert direct_doc_lattice_invocations(script) == expected
 
 
 @pytest.mark.parametrize(
@@ -1525,6 +1539,38 @@ def test_direct_doc_lattice_invocations_fails_closed_on_unquoted_dynamic_env_ass
         direct_doc_lattice_invocations("env FOO=$OPTIONS doc-lattice linear")
 
 
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("env FOO-BAR=x doc-lattice linear", LINEAR),
+        ("env 1FOO=x doc-lattice reconcile --all", RECONCILE),
+        ("env =x doc-lattice linear", LINEAR),
+    ],
+    ids=["punctuation-name", "leading-digit-name", "empty-name"],
+)
+def test_direct_doc_lattice_invocations_consumes_every_gnu_env_assignment_operand(
+    script,
+    expected,
+):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ("env -- X=1 doc-lattice linear", LINEAR),
+        ("env -- X=1 doc-lattice reconcile --all", RECONCILE),
+        ("env -- -=x doc-lattice linear", LINEAR),
+    ],
+    ids=["linear", "mutating-reconcile", "dash-name"],
+)
+def test_direct_doc_lattice_invocations_consumes_env_assignments_after_option_terminator(
+    script,
+    expected,
+):
+    assert direct_doc_lattice_invocations(script) == expected
+
+
 def test_direct_doc_lattice_invocations_honors_env_option_terminator():
     assert direct_doc_lattice_invocations("env -- -S doc-lattice linear") == NONE
 
@@ -1702,6 +1748,14 @@ def test_shell_scan_incomplete_is_a_coded_project_error():
     assert error.code == "SHELL_SCAN_INCOMPLETE"
 
 
+def test_nested_dynamic_uv_resolution_charges_shared_scan_budget():
+    script = " ".join(["uv $X"] * 18 + ["doc-lattice linear"])
+    scanner = _ShellScanner(script, budget=_ScanBudget(200))
+
+    with pytest.raises(_ShellScanIncomplete, match="step limit exceeded"):
+        scanner.scan()
+
+
 def test_direct_doc_lattice_invocations_prefixes_context_on_incomplete_scan():
     script = 'echo "' + ("$(" * 65) + "doc-lattice linear" + (")" * 65) + '"'
 
@@ -1785,6 +1839,26 @@ doc-lattice linear
 """
 
     assert direct_doc_lattice_invocations(script) == (("linear", False),)
+
+
+def test_direct_doc_lattice_invocations_retains_quoted_empty_heredoc_delimiter():
+    script = "cat <<''\n'unclosed\n\ndoc-lattice linear"
+
+    assert direct_doc_lattice_invocations(script) == LINEAR
+
+
+def test_direct_doc_lattice_invocations_consumes_complete_literal_heredoc_delimiter_word():
+    script = "cat <<$(printf EOF)\nbody\n$(printf EOF)\ndoc-lattice linear"
+
+    assert direct_doc_lattice_invocations(script) == LINEAR
+
+
+def test_direct_doc_lattice_invocations_does_not_execute_expansion_syntax_in_heredoc_word():
+    script = (
+        "cat <<$(uv $X doc-lattice linear)\nbody\n$(uv $X doc-lattice linear)\ndoc-lattice check"
+    )
+
+    assert direct_doc_lattice_invocations(script) == CHECK
 
 
 def test_direct_doc_lattice_invocations_preserves_non_special_double_quote_escape():
@@ -1883,6 +1957,18 @@ def test_direct_doc_lattice_invocations_tracks_parameter_expansion_in_substituti
     script = '''echo "$(printf %s ${x:-)}; printf '%s' '`doc-lattice linear`')"'''
 
     assert direct_doc_lattice_invocations(script) == ()
+
+
+def test_direct_doc_lattice_invocations_scans_process_substitution_in_parameter_word():
+    script = "unset x; echo ${x:-<(doc-lattice linear)}"
+
+    assert direct_doc_lattice_invocations(script) == LINEAR
+
+
+def test_direct_doc_lattice_invocations_keeps_process_substitution_joined_to_word_suffix():
+    script = "echo <(true)#notcomment; doc-lattice linear"
+
+    assert direct_doc_lattice_invocations(script) == LINEAR
 
 
 def test_direct_doc_lattice_invocations_tracks_case_pattern_parentheses_in_substitution():

@@ -1,11 +1,10 @@
 """Bounded non-executing scanner for direct doc-lattice shell invocations."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
-from doc_lattice.hashing import normalize_newlines
 
 _Invocation = tuple[str, bool]
 _MAX_SHELL_SOURCE_CHARS = 1_048_576
@@ -32,7 +31,6 @@ _COMMAND_PREFIXES = frozenset(
     }
 )
 _SHELL_ASSIGNMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 _ENV_SPLIT_STRING_LONG_OPTION = "--split-string"
 _ENV_LONG_OPTION_KINDS = {
     "--argv0": "required",
@@ -79,7 +77,7 @@ _COMMAND_OPERATORS = (
     "{",
     "}",
 )
-_WORD_BREAKS = frozenset(" \t\r\n;&|()<>")
+_WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
 _UV_SHARED_OPTIONS_WITH_ARGUMENTS = frozenset(
     {
@@ -484,6 +482,18 @@ class _ScanBudget:
         self.remaining_steps -= 1
 
 
+@dataclass(slots=True)
+class _LauncherResolutionState:
+    """Shared budget and memoized states for one simple command's launcher grammar."""
+
+    budget: _ScanBudget
+    cache: dict[tuple[str, int, int], _ResolvedIndex] = field(default_factory=dict)
+
+    def step(self) -> None:
+        """Charge speculative launcher work to the shell scanner's declared budget."""
+        self.budget.step()
+
+
 class _ShellScanner:
     def __init__(
         self,
@@ -491,10 +501,12 @@ class _ShellScanner:
         *,
         budget: _ScanBudget | None = None,
         invocations: list[_Invocation] | None = None,
+        classify_commands: bool = True,
     ) -> None:
         self.source = source
         self.budget = budget if budget is not None else _ScanBudget()
         self.invocations = invocations if invocations is not None else []
+        self.classify_commands = classify_commands
 
     def scan(self) -> tuple[_Invocation, ...]:
         self._scan_commands(0, len(self.source), terminator=None, depth=0)
@@ -533,12 +545,9 @@ class _ShellScanner:
             if self.source.startswith("((", index):
                 index = self._consume_arithmetic_command(index, limit, state, depth)
                 continue
-            process_end = self._consume_process_substitution(index, limit, depth)
-            if process_end is not None:
-                substitution_word = _ShellWord("", dynamic=True)
-                state.words.append(substitution_word)
-                self._advance_prefix_scan(state, substitution_word)
-                index = process_end
+            if self.source.startswith(("<(", ">("), index, limit):
+                word, index = self._parse_word(index, limit, depth)
+                self._record_word(state, word)
                 continue
             redirection = self._redirection_at(index, limit)
             if redirection is not None:
@@ -605,7 +614,7 @@ class _ShellScanner:
         while index < limit:
             self.budget.step()
             character = self.source[index]
-            if character in " \t\r\n":
+            if character in " \t\n":
                 index += 1
                 at_word_start = True
                 continue
@@ -734,8 +743,16 @@ class _ShellScanner:
         mode = state.prefix_mode
         if mode in {"command_v", "env_stop"}:
             return True
+        if mode == "env_dashdash":
+            if word.dynamic or _command_boundary_word_may_disappear(word):
+                self._prefix_stop(state)
+                return True
+            if _is_env_assignment_operand(word.literal):
+                return True
+            state.prefix_mode = "normal"
+            return False
         if (
-            mode in {"command_dashdash", "env_dashdash", "exec_dashdash"}
+            mode in {"command_dashdash", "exec_dashdash"}
             or word.dynamic
             or _command_boundary_word_may_disappear(word)
         ):
@@ -760,8 +777,6 @@ class _ShellScanner:
         return handled
 
     def _advance_prefix_env(self, state: _CommandScanState, literal: str) -> bool:
-        if _ENV_ASSIGNMENT_RE.fullmatch(literal):
-            return True
         if literal == "--":
             state.prefix_mode = "env_dashdash"
             return True
@@ -780,6 +795,8 @@ class _ShellScanner:
         if literal.startswith("-"):
             if _env_short_option_requires_separate_value(literal):
                 state.prefix_pending = 1
+            return True
+        if _is_env_assignment_operand(literal):
             return True
         state.prefix_mode = "normal"
         return False
@@ -887,7 +904,7 @@ class _ShellScanner:
         if self.source.startswith("\\\n", index):
             return index + 2
         character = self.source[index]
-        if character in " \t\r":
+        if character in " \t":
             return index + 1
         if character == "#":
             return self._comment_end(index, limit)
@@ -908,11 +925,12 @@ class _ShellScanner:
     def _flush_command(self, state: _CommandScanState) -> None:
         if not state.words:
             return
-        invocation = _invocation_in_simple_command(state.words)
-        if invocation is not None:
-            if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
-                raise _ShellScanIncomplete("invocation limit exceeded")
-            self.invocations.append(invocation)
+        if self.classify_commands:
+            invocation = _invocation_in_simple_command(state.words, self.budget)
+            if invocation is not None:
+                if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
+                    raise _ShellScanIncomplete("invocation limit exceeded")
+                self.invocations.append(invocation)
         state.reset_command()
 
     def _consume_process_substitution(
@@ -958,8 +976,8 @@ class _ShellScanner:
         while index < limit and self.source[index] in " \t":
             index += 1
         if operator in {"<<", "<<-"}:
-            delimiter, quoted, index = self._parse_heredoc_delimiter(index, limit)
-            if not delimiter:
+            delimiter, quoted, index = self._parse_heredoc_delimiter(index, limit, depth)
+            if delimiter is None:
                 return index, None
             return (
                 index,
@@ -969,9 +987,6 @@ class _ShellScanner:
                     expand=not quoted,
                 ),
             )
-        process_end = self._consume_process_substitution(index, limit, depth)
-        if process_end is not None:
-            return process_end, None
         _target, index = self._parse_word(index, limit, depth)
         return index, None
 
@@ -979,10 +994,13 @@ class _ShellScanner:
         self,
         start: int,
         limit: int,
-    ) -> tuple[str, bool, int]:
+        depth: int,
+    ) -> tuple[str | None, bool, int]:
         characters: list[str] = []
         quoted = False
         index = start
+        if index >= limit or self.source[index] in _WORD_BREAKS:
+            return None, quoted, index
         while index < limit and self.source[index] not in _WORD_BREAKS:
             if self.source.startswith("$'", index):
                 segment, index, closed = _read_ansi_c_quoted_segment(
@@ -991,7 +1009,7 @@ class _ShellScanner:
                     limit,
                 )
                 if not closed:
-                    return "", True, index
+                    return None, True, index
                 characters.extend(segment)
                 quoted = True
                 continue
@@ -1008,7 +1026,7 @@ class _ShellScanner:
                     character,
                 )
                 if not closed:
-                    return "", True, index
+                    return None, True, index
                 characters.extend(segment)
                 quoted = True
                 continue
@@ -1020,9 +1038,28 @@ class _ShellScanner:
                 quoted = True
                 index += 2
                 continue
+            expansion = self._consume_literal_heredoc_expansion(index, limit, depth)
+            if expansion is not None:
+                characters.extend(self.source[index : expansion.end])
+                index = expansion.end
+                continue
             characters.append(character)
             index += 1
         return "".join(characters), quoted, index
+
+    def _consume_literal_heredoc_expansion(
+        self,
+        index: int,
+        limit: int,
+        depth: int,
+    ) -> _ShellExpansion | None:
+        """Consume expansion-shaped delimiter syntax without classifying its commands."""
+        lexer = _ShellScanner(
+            self.source,
+            budget=self.budget,
+            classify_commands=False,
+        )
+        return lexer._consume_active_expansion(index, limit, depth)
 
     def _consume_heredocs(
         self,
@@ -1065,6 +1102,7 @@ class _ShellScanner:
                     body,
                     budget=self.budget,
                     invocations=self.invocations,
+                    classify_commands=self.classify_commands,
                 )
                 child._scan_heredoc_expansions(0, len(body), depth + 1)
             index = after_delimiter
@@ -1128,7 +1166,7 @@ class _ShellScanner:
     ) -> tuple[_ShellWord, int]:
         builder = _ShellWordBuilder([], [])
         index = start
-        while index < limit and self.source[index] not in _WORD_BREAKS:
+        while index < limit and self._word_component_at(index, limit):
             self.budget.step()
             if self.source.startswith("$'", index):
                 segment, index, _closed = _read_ansi_c_quoted_segment(
@@ -1201,6 +1239,12 @@ class _ShellScanner:
             enabled=reject_extglob,
         )
         return builder.build(), index
+
+    def _word_component_at(self, index: int, limit: int) -> bool:
+        """Return whether syntax at ``index`` continues the current shell word."""
+        return self.source[index] not in _WORD_BREAKS or self.source.startswith(
+            ("<(", ">("), index, limit
+        )
 
     def _parse_double_quoted(
         self,
@@ -1337,6 +1381,11 @@ class _ShellScanner:
                 )
                 index = expansion_end.end
                 continue
+            if quote is None and not double_quoted:
+                process_end = self._consume_process_substitution(index, limit, depth)
+                if process_end is not None:
+                    index = process_end
+                    continue
             if character == "}":
                 braces -= 1
                 index += 1
@@ -1451,6 +1500,7 @@ class _ShellScanner:
                     "".join(body),
                     budget=self.budget,
                     invocations=self.invocations,
+                    classify_commands=self.classify_commands,
                 )
                 child._scan_commands(
                     0,
@@ -1485,7 +1535,7 @@ class _ShellScanner:
     def _standalone_brace_at(self, index: int, limit: int) -> bool:
         """Return whether a leading brace is a shell reserved word, not word text."""
         next_index = index + 1
-        return next_index == limit or self.source[next_index] in " \t\r\n;&|()<>"
+        return next_index == limit or self.source[next_index] in " \t\n;&|()<>"
 
     def _line_end(self, index: int, limit: int) -> int:
         line_end = self.source.find("\n", index, limit)
@@ -1508,7 +1558,7 @@ def _remove_active_line_continuations(source: str) -> str:
 
 def scan_doc_lattice_invocations(script: str) -> ShellScanResult:
     """Scan literal Bash syntax and explicitly report bounded-scan exhaustion."""
-    normalized = normalize_newlines(script)
+    normalized = script.replace("\r\n", "\n")
     if len(normalized) > _MAX_SHELL_SOURCE_CHARS:
         return ShellScanResult((), "source character limit exceeded")
 
@@ -1548,8 +1598,12 @@ def direct_doc_lattice_invocations(
     return result.invocations
 
 
-def _invocation_in_simple_command(words: list[_ShellWord]) -> _Invocation | None:
-    executable = _doc_lattice_command_index(words, 0)
+def _invocation_in_simple_command(
+    words: list[_ShellWord],
+    budget: _ScanBudget,
+) -> _Invocation | None:
+    resolution = _LauncherResolutionState(budget)
+    executable = _doc_lattice_command_index(words, 0, resolution)
     if executable.index is None:
         return None
     subcommand_resolution = _doc_lattice_subcommand_index(words, executable.index + 1)
@@ -1886,6 +1940,11 @@ def _is_env_split_string_long_option(literal: str) -> bool:
     )
 
 
+def _is_env_assignment_operand(literal: str) -> bool:
+    """Return whether GNU env treats a non-option operand as an environment assignment."""
+    return "=" in literal
+
+
 def _is_env_split_string_short_option(literal: str) -> bool:
     """Return whether a static GNU ``env`` short-option cluster reaches ``-S``."""
     if not literal.startswith("-") or literal.startswith("--"):
@@ -1955,16 +2014,20 @@ def _skip_static_env_option(words: list[_ShellWord], index: int) -> int:
 
 def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
     index = start
+    options_enabled = True
     while index < len(words):
         word = words[index]
-        if not word.dynamic and word.literal == "--":
-            return index + 1
-        if _is_env_split_string_long_option(word.literal) or _is_env_split_string_short_option(
-            word.literal
+        if options_enabled and not word.dynamic and word.literal == "--":
+            options_enabled = False
+            index += 1
+            continue
+        if options_enabled and (
+            _is_env_split_string_long_option(word.literal)
+            or _is_env_split_string_short_option(word.literal)
         ):
             raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
         if word.dynamic:
-            if _ENV_ASSIGNMENT_RE.fullmatch(word.literal):
+            if _is_env_assignment_operand(word.literal):
                 if word.unquoted_dynamic:
                     raise _ShellScanIncomplete(
                         "unquoted dynamic env assignment cannot be scanned safely"
@@ -1973,10 +2036,10 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
             raise _ShellScanIncomplete("dynamic env prefix cannot be scanned safely")
         if _word_may_change_argv(word):
             raise _ShellScanIncomplete("expandable env prefix cannot be scanned safely")
-        if _ENV_ASSIGNMENT_RE.fullmatch(word.literal):
-            index += 1
-        elif word.literal.startswith("-"):
+        if options_enabled and word.literal.startswith("-"):
             index = _skip_static_env_option(words, index)
+        elif _is_env_assignment_operand(word.literal):
+            index += 1
         else:
             return index
     return index
@@ -1985,6 +2048,7 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
 def _doc_lattice_command_index(
     words: list[_ShellWord],
     start: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve one direct command, including an optional named Bash coprocess."""
     command = _skip_shell_prefixes(words, start)
@@ -1997,9 +2061,13 @@ def _doc_lattice_command_index(
         and words[command_index].keyword_eligible
         and words[command_index].literal == "coproc"
     ):
-        payload_index = _coproc_doc_lattice_command_index(words, command_index + 1)
+        payload_index = _coproc_doc_lattice_command_index(
+            words,
+            command_index + 1,
+            resolution,
+        )
     else:
-        payload_index = _doc_lattice_payload_index(words, command_index)
+        payload_index = _doc_lattice_payload_index(words, command_index, resolution)
     if payload_index.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2013,9 +2081,10 @@ def _doc_lattice_command_index(
 def _coproc_doc_lattice_command_index(
     words: list[_ShellWord],
     start: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve the unnamed command or one optional literal coprocess name."""
-    unnamed = _doc_lattice_command_after_prefixes(words, start)
+    unnamed = _doc_lattice_command_after_prefixes(words, start, resolution)
     if unnamed.index is not None:
         return unnamed
     if start >= len(words):
@@ -2023,19 +2092,20 @@ def _coproc_doc_lattice_command_index(
     name = words[start]
     if name.dynamic or not _is_name(name.literal):
         return unnamed
-    named = _doc_lattice_command_after_prefixes(words, start + 1)
+    named = _doc_lattice_command_after_prefixes(words, start + 1, resolution)
     return _ResolvedIndex(named.index, unnamed.ambiguous or named.ambiguous)
 
 
 def _doc_lattice_command_after_prefixes(
     words: list[_ShellWord],
     start: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Reuse normal prefix, wrapper, and payload resolution from one command start."""
     executable = _skip_shell_prefixes(words, start)
     if executable.index is None:
         return executable
-    payload = _doc_lattice_payload_index(words, executable.index)
+    payload = _doc_lattice_payload_index(words, executable.index, resolution)
     if payload.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2049,6 +2119,7 @@ def _doc_lattice_command_after_prefixes(
 def _doc_lattice_payload_index(
     words: list[_ShellWord],
     executable_index: int,
+    resolution: _LauncherResolutionState,
     *,
     launcher_depth: int = 0,
 ) -> _ResolvedIndex:
@@ -2066,11 +2137,22 @@ def _doc_lattice_payload_index(
                 _ResolvedIndex(executable_index),
                 strip_version=False,
                 launcher_depth=launcher_depth,
+                resolution=resolution,
             )
         if executable == "uvx":
-            return _uvx_payload_index(words, executable_index + 1, launcher_depth=launcher_depth)
+            return _uvx_payload_index(
+                words,
+                executable_index + 1,
+                launcher_depth=launcher_depth,
+                resolution=resolution,
+            )
         if executable == "uv":
-            return _uv_payload_index(words, executable_index + 1, launcher_depth=launcher_depth)
+            return _uv_payload_index(
+                words,
+                executable_index + 1,
+                launcher_depth=launcher_depth,
+                resolution=resolution,
+            )
     return _ResolvedIndex(None)
 
 
@@ -2079,9 +2161,15 @@ def _uvx_payload_index(
     start: int,
     *,
     launcher_depth: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve a ``uvx [options] doc-lattice`` payload, tolerating an ``@spec`` suffix."""
-    return _launcher_payload_index(
+    cache_key = ("uvx", start, launcher_depth)
+    cached = resolution.cache.get(cache_key)
+    if cached is not None:
+        return cached
+    resolution.step()
+    payload = _launcher_payload_index(
         words,
         start,
         _LauncherPayloadRequest(
@@ -2091,7 +2179,10 @@ def _uvx_payload_index(
             fail_on_unknown=True,
             launcher_depth=launcher_depth,
         ),
+        resolution,
     )
+    resolution.cache[cache_key] = payload
+    return payload
 
 
 def _uv_payload_index(
@@ -2099,6 +2190,30 @@ def _uv_payload_index(
     start: int,
     *,
     launcher_depth: int,
+    resolution: _LauncherResolutionState,
+) -> _ResolvedIndex:
+    """Resolve and memoize one ``uv`` grammar state."""
+    cache_key = ("uv", start, launcher_depth)
+    cached = resolution.cache.get(cache_key)
+    if cached is not None:
+        return cached
+    resolution.step()
+    payload = _resolve_uv_payload_index(
+        words,
+        start,
+        launcher_depth=launcher_depth,
+        resolution=resolution,
+    )
+    resolution.cache[cache_key] = payload
+    return payload
+
+
+def _resolve_uv_payload_index(
+    words: list[_ShellWord],
+    start: int,
+    *,
+    launcher_depth: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve ``uv`` launcher payloads for ``run`` and the ``tool run`` (uvx) long form.
 
@@ -2109,12 +2224,13 @@ def _uv_payload_index(
     Raises:
         _ShellScanIncomplete: If an unresolvable option-like word precedes the subcommand.
     """
-    subcommand_resolution = _skip_uv_global_options(words, start)
+    subcommand_resolution = _skip_uv_global_options(words, start, resolution)
     for launcher_start in subcommand_resolution.launcher_starts:
         dynamic_launcher = _uv_dynamic_launcher_payload_index(
             words,
             launcher_start,
             launcher_depth=launcher_depth,
+            resolution=resolution,
         )
         if dynamic_launcher.index is not None:
             return dynamic_launcher
@@ -2130,17 +2246,27 @@ def _uv_payload_index(
         return _uv_run_payload_index(
             words,
             subcommand_index + 1,
-            inherited_ambiguity=subcommand_resolution.ambiguous,
-            fail_on_unknown=True,
-            launcher_depth=launcher_depth,
+            _LauncherPayloadRequest(
+                _UV_RUN_LAUNCHER,
+                strip_version=False,
+                inherited_ambiguity=subcommand_resolution.ambiguous,
+                fail_on_unknown=True,
+                launcher_depth=launcher_depth,
+            ),
+            resolution,
         )
     if subcommand.literal == "tool":
         return _uv_tool_payload_index(
             words,
             subcommand_index + 1,
-            inherited_ambiguity=subcommand_resolution.ambiguous,
-            fail_on_unknown=True,
-            launcher_depth=launcher_depth,
+            _LauncherPayloadRequest(
+                _UV_TOOL_RUN_LAUNCHER,
+                strip_version=True,
+                inherited_ambiguity=subcommand_resolution.ambiguous,
+                fail_on_unknown=True,
+                launcher_depth=launcher_depth,
+            ),
+            resolution,
         )
     return _ResolvedIndex(None, subcommand_resolution.ambiguous)
 
@@ -2148,50 +2274,37 @@ def _uv_payload_index(
 def _uv_run_payload_index(
     words: list[_ShellWord],
     start: int,
-    *,
-    inherited_ambiguity: bool,
-    fail_on_unknown: bool,
-    launcher_depth: int,
+    request: _LauncherPayloadRequest,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve a ``uv run`` payload and retain ambiguity inherited from its subcommand."""
-    return _launcher_payload_index(
-        words,
-        start,
-        _LauncherPayloadRequest(
-            _UV_RUN_LAUNCHER,
-            strip_version=False,
-            inherited_ambiguity=inherited_ambiguity,
-            fail_on_unknown=fail_on_unknown,
-            launcher_depth=launcher_depth,
-        ),
-    )
+    return _launcher_payload_index(words, start, request, resolution)
 
 
 def _uv_tool_payload_index(
     words: list[_ShellWord],
     run_index: int,
-    *,
-    inherited_ambiguity: bool,
-    fail_on_unknown: bool,
-    launcher_depth: int,
+    request: _LauncherPayloadRequest,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve the ``run`` portion of ``uv tool run`` and retain dynamic-token ambiguity."""
     if run_index >= len(words):
-        return _ResolvedIndex(None, inherited_ambiguity)
+        return _ResolvedIndex(None, request.inherited_ambiguity)
     run = words[run_index]
     dynamic_run = run.dynamic or run.active_argv_expansion
     if not dynamic_run and run.literal != "run":
-        return _ResolvedIndex(None, inherited_ambiguity)
+        return _ResolvedIndex(None, request.inherited_ambiguity)
     return _launcher_payload_index(
         words,
         run_index + 1,
         _LauncherPayloadRequest(
-            _UV_TOOL_RUN_LAUNCHER,
-            strip_version=True,
-            inherited_ambiguity=inherited_ambiguity or dynamic_run,
-            fail_on_unknown=fail_on_unknown,
-            launcher_depth=launcher_depth,
+            request.options,
+            strip_version=request.strip_version,
+            inherited_ambiguity=request.inherited_ambiguity or dynamic_run,
+            fail_on_unknown=request.fail_on_unknown,
+            launcher_depth=request.launcher_depth,
         ),
+        resolution,
     )
 
 
@@ -2200,6 +2313,7 @@ def _uv_dynamic_launcher_payload_index(
     start: int,
     *,
     launcher_depth: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Try launcher grammars a dynamic uv token could have supplied before ``start``.
 
@@ -2208,22 +2322,38 @@ def _uv_dynamic_launcher_payload_index(
     with each supported launcher grammar, but are marked ambiguous so a reachable payload fails
     closed rather than being classified as a trusted literal invocation.
     """
-    candidates = (
-        _uv_run_payload_index(
-            words,
-            start,
+    cache_key = ("dynamic", start, launcher_depth)
+    cached = resolution.cache.get(cache_key)
+    if cached is not None:
+        return cached
+    resolution.step()
+    candidate = _uv_run_payload_index(
+        words,
+        start,
+        _LauncherPayloadRequest(
+            _UV_RUN_LAUNCHER,
+            strip_version=False,
             inherited_ambiguity=True,
             fail_on_unknown=False,
             launcher_depth=launcher_depth,
         ),
-        _uv_tool_payload_index(
+        resolution,
+    )
+    if candidate.index is None:
+        candidate = _uv_tool_payload_index(
             words,
             start,
-            inherited_ambiguity=True,
-            fail_on_unknown=False,
-            launcher_depth=launcher_depth,
-        ),
-        _launcher_payload_index(
+            _LauncherPayloadRequest(
+                _UV_TOOL_RUN_LAUNCHER,
+                strip_version=True,
+                inherited_ambiguity=True,
+                fail_on_unknown=False,
+                launcher_depth=launcher_depth,
+            ),
+            resolution,
+        )
+    if candidate.index is None:
+        candidate = _launcher_payload_index(
             words,
             start,
             _LauncherPayloadRequest(
@@ -2233,31 +2363,34 @@ def _uv_dynamic_launcher_payload_index(
                 fail_on_unknown=False,
                 launcher_depth=launcher_depth,
             ),
-        ),
-    )
-    for candidate in candidates:
-        if candidate.index is not None:
-            return candidate
-    return _ResolvedIndex(None, True)
+            resolution,
+        )
+    result = candidate if candidate.index is not None else _ResolvedIndex(None, True)
+    resolution.cache[cache_key] = result
+    return result
 
 
 def _launcher_payload_index(
     words: list[_ShellWord],
     start: int,
     request: _LauncherPayloadRequest,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve a selected launcher's static payload, including executable prefix chains."""
+    resolution.step()
     option_resolution = _skip_options(
         words,
         start,
         request.options,
         fail_on_unknown=request.fail_on_unknown,
+        resolution=resolution,
     )
     payload = _nested_launcher_payload_index(
         words,
         option_resolution,
         strip_version=request.strip_version,
         launcher_depth=request.launcher_depth,
+        resolution=resolution,
     )
     if payload.index is None:
         expansion_end = (
@@ -2278,6 +2411,7 @@ def _nested_launcher_payload_index(
     *,
     strip_version: bool,
     launcher_depth: int,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve real executable chains after a uv launcher without assuming shell builtins.
 
@@ -2285,6 +2419,7 @@ def _nested_launcher_payload_index(
     ``exec`` are not wrappers here. ``env`` is an executable prefix, however, and nested
     ``uv``/``uvx`` launchers are also executable commands; those are resolved recursively.
     """
+    resolution.step()
     payload_index = payload_resolution.index
     if payload_index is None or payload_index >= len(words):
         return payload_resolution
@@ -2305,6 +2440,7 @@ def _nested_launcher_payload_index(
             _ResolvedIndex(nested_start),
             strip_version=False,
             launcher_depth=launcher_depth + 1,
+            resolution=resolution,
         )
     elif basename == "time":
         nested_start = _skip_external_time_prefix(words, payload_index + 1)
@@ -2313,18 +2449,21 @@ def _nested_launcher_payload_index(
             _ResolvedIndex(nested_start),
             strip_version=False,
             launcher_depth=launcher_depth + 1,
+            resolution=resolution,
         )
     elif basename == "uv":
         nested = _uv_payload_index(
             words,
             payload_index + 1,
             launcher_depth=launcher_depth + 1,
+            resolution=resolution,
         )
     elif basename == "uvx":
         nested = _uvx_payload_index(
             words,
             payload_index + 1,
             launcher_depth=launcher_depth + 1,
+            resolution=resolution,
         )
     else:
         return _ResolvedIndex(None, payload_resolution.ambiguous)
@@ -2412,7 +2551,11 @@ def _unresolved_uv_global_option(
     raise _ShellScanIncomplete("unresolved uv global option")
 
 
-def _skip_uv_global_options(words: list[_ShellWord], start: int) -> _UvGlobalResolution:
+def _skip_uv_global_options(
+    words: list[_ShellWord],
+    start: int,
+    resolution: _LauncherResolutionState,
+) -> _UvGlobalResolution:
     """Skip uv global flags and retain starts where dynamic syntax may have injected a launcher."""
     index = start
     ambiguous = False
@@ -2425,6 +2568,7 @@ def _skip_uv_global_options(words: list[_ShellWord], start: int) -> _UvGlobalRes
             launcher_starts.append(candidate_start)
 
     while index < len(words):
+        resolution.step()
         word = words[index]
         dynamic_result = _dynamic_uv_global_word_result(word, index)
         if dynamic_result is not None:
@@ -2509,6 +2653,7 @@ def _skip_options(
     options: _LauncherOptions,
     *,
     fail_on_unknown: bool = True,
+    resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Skip a uv launcher's options to its payload word, retaining dynamic ambiguity.
 
@@ -2519,6 +2664,7 @@ def _skip_options(
     index = start
     ambiguous = False
     while index < len(words):
+        resolution.step()
         word = words[index]
         if word.dynamic:
             if word.literal.startswith("-"):

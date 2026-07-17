@@ -159,7 +159,8 @@ def _resolve_repository(
             [  # noqa: S607 - git is intentionally resolved from the maintainer's PATH
                 "git",
                 "config",
-                "--local",
+                "--null",
+                "--show-scope",
                 "--get-all",
                 "remote.origin.url",
             ],
@@ -176,14 +177,30 @@ def _resolve_repository(
         raise ConfigError("cannot resolve repository from git origin") from exc
     if completed.returncode != 0:
         raise ConfigError("cannot resolve repository from git origin")
-    try:
-        stdout = completed.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ConfigError("cannot decode repository from git origin as UTF-8") from exc
-    lines = stdout.splitlines()
+    lines = _repository_local_origin_urls(completed.stdout)
     if len(lines) != 1 or not lines[0].strip():
         raise ConfigError("cannot resolve repository from git origin")
     return parse_origin_repository(lines[0])
+
+
+def _repository_local_origin_urls(stdout: bytes) -> tuple[str, ...]:
+    """Decode local and worktree origin records from ``git config --show-scope``."""
+    if not stdout.endswith(b"\0"):
+        raise ConfigError("cannot resolve repository from git origin")
+    fields = stdout.split(b"\0")[:-1]
+    if not fields or len(fields) % 2:
+        raise ConfigError("cannot resolve repository from git origin")
+    origins: list[str] = []
+    for index in range(0, len(fields), 2):
+        scope = fields[index]
+        if scope not in {b"local", b"worktree"}:
+            continue
+        value = fields[index + 1]
+        try:
+            origins.append(value.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ConfigError("cannot decode repository from git origin as UTF-8") from exc
+    return tuple(origins)
 
 
 def _repeat_refresh_preflight(
