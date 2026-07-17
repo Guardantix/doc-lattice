@@ -35,16 +35,16 @@ def _artifact_bytes(root: Path, artifacts: tuple[ManagedArtifact, ...]) -> list[
     return [(root / artifact.relative_path).read_bytes() for artifact in artifacts]
 
 
-def test_preflight_create_on_empty_root_returns_three_creates_without_making_directories(
+def test_preflight_create_on_empty_root_returns_four_creates_without_making_directories(
     tmp_path: Path,
 ):
     artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
 
     changes = preflight_create(tmp_path, artifacts)
 
-    assert [change.action for change in changes] == ["create", "create", "create"]
+    assert [change.action for change in changes] == ["create"] * 4
     assert [change.artifact for change in changes] == list(artifacts)
-    assert [change.before for change in changes] == [None, None, None]
+    assert [change.before for change in changes] == [None] * 4
     assert [change.destination for change in changes] == [
         (tmp_path / artifact.relative_path).resolve() for artifact in artifacts
     ]
@@ -58,7 +58,7 @@ def test_exact_artifacts_are_current(tmp_path: Path, preflight):
 
     changes = preflight(tmp_path, artifacts)
 
-    assert [change.action for change in changes] == ["current", "current", "current"]
+    assert [change.action for change in changes] == ["current"] * 4
     assert [change.before for change in changes] == [
         artifact.text.encode("utf-8") for artifact in artifacts
     ]
@@ -76,6 +76,7 @@ def test_create_conflict_names_canonical_path_without_writing_any_artifact(tmp_p
     assert not (tmp_path / artifacts[0].relative_path).exists()
     assert conflict.read_bytes() == b"user-owned workflow\n"
     assert not (tmp_path / artifacts[2].relative_path).exists()
+    assert not (tmp_path / artifacts[3].relative_path).exists()
 
 
 def test_refresh_replaces_a_prior_valid_managed_set(tmp_path: Path):
@@ -85,7 +86,7 @@ def test_refresh_replaces_a_prior_valid_managed_set(tmp_path: Path):
 
     changes = preflight_refresh(tmp_path, new_artifacts)
 
-    assert [change.action for change in changes] == ["replace", "replace", "replace"]
+    assert [change.action for change in changes] == ["replace"] * 4
     assert [change.before for change in changes] == [
         artifact.text.encode("utf-8") for artifact in old_artifacts
     ]
@@ -270,8 +271,9 @@ def test_refresh_creates_a_missing_artifact_while_replacing_prior_artifacts(tmp_
 
     changes = preflight_refresh(tmp_path, new_artifacts)
 
-    assert [change.action for change in changes] == ["replace", "replace", "create"]
+    assert [change.action for change in changes] == ["replace", "replace", "create", "create"]
     assert changes[2].before is None
+    assert changes[3].before is None
 
     apply_changes(changes)
 
@@ -297,7 +299,7 @@ def test_refresh_accepts_valid_old_repository_marker_difference(
 
     changes = preflight_refresh(tmp_path, new_artifacts)
 
-    assert [change.action for change in changes] == ["replace", "replace", "replace"]
+    assert [change.action for change in changes] == ["replace"] * 4
 
 
 def _replace_header_line(text: str, prefix: str, replacement: str) -> str:
@@ -658,6 +660,7 @@ def test_apply_create_refuses_atomic_publish_collision_without_overwrite(
     assert list(collision.parent.glob(f".{collision.name}.doc-lattice-create.*.tmp")) == []
     assert not (tmp_path / artifacts[1].relative_path).exists()
     assert not (tmp_path / artifacts[2].relative_path).exists()
+    assert not (tmp_path / artifacts[3].relative_path).exists()
 
 
 def test_apply_replace_preserves_existing_mode(tmp_path: Path):
@@ -1329,10 +1332,16 @@ def test_interrupted_replace_does_not_roll_back_and_rerun_converges(
         new_artifacts[0].text.encode("utf-8"),
         old_artifacts[1].text.encode("utf-8"),
         old_artifacts[2].text.encode("utf-8"),
+        old_artifacts[3].text.encode("utf-8"),
     ]
 
     retry_changes = preflight_refresh(tmp_path, new_artifacts)
-    assert [change.action for change in retry_changes] == ["current", "replace", "replace"]
+    assert [change.action for change in retry_changes] == [
+        "current",
+        "replace",
+        "replace",
+        "replace",
+    ]
 
     apply_changes(retry_changes)
 
@@ -1382,4 +1391,5 @@ def test_interrupted_replace_note_and_prefix_follow_requested_input_order(
         old_artifacts[0].text.encode("utf-8"),
         old_artifacts[1].text.encode("utf-8"),
         new_artifacts[2].text.encode("utf-8"),
+        old_artifacts[3].text.encode("utf-8"),
     ]

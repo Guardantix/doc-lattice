@@ -62,6 +62,8 @@ def test_secret_name_regex_single_sources_from_secret_names():
         ("{ doc-lattice linear; }", "PR_LINEAR_INVOCATION"),
         ("{ doc-lattice reconcile --all; }", "PR_MUTATING_RECONCILE"),
         ("time -p doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        ("time -- doc-lattice linear", "PR_LINEAR_INVOCATION"),
+        ("time -p -- doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
         ("coproc DL doc-lattice reconcile --all", "PR_MUTATING_RECONCILE"),
         (
             "coproc DL uvx --from doc-lattice==2.1.0 doc-lattice linear",
@@ -1250,6 +1252,38 @@ def test_global_audit_detects_reusable_workflow_secret_mapping_keys(workflow: st
     assert _finding_codes(audit_global_workflows((document,))) == {"LINEAR_SECRET_REFERENCE"}
 
 
+def test_global_audit_rejects_reusable_workflow_secret_inheritance():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  reusable:
+    uses: ./.github/workflows/reusable.yml
+    secrets: inherit
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {"LINEAR_SECRET_REFERENCE"}
+
+
+def test_global_audit_allows_inherit_outside_reusable_job_secrets():
+    document = _workflow(
+        """\
+on: push
+jobs:
+  ordinary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: owner/action@0123456789abcdef0123456789abcdef01234567
+        with:
+          mode: inherit
+      - run: echo inherit
+"""
+    )
+
+    assert audit_global_workflows((document,)) == ()
+
+
 def test_global_audit_allows_only_the_exact_canonical_linear_secret_slot():
     canonical = _workflow(
         """\
@@ -1826,6 +1860,7 @@ def test_inspect_installed_artifacts_returns_exact_text_and_parsed_markers(tmp_p
         "offline",
         "linear",
         "bootstrap",
+        "attributes",
     ]
     assert all(artifact.marker_error is None for artifact in installed if artifact)
 
@@ -1842,13 +1877,13 @@ def test_inspect_installed_artifacts_preserves_missing_positions_without_mutatio
     installed = inspect_installed_artifacts(tmp_path, CANONICAL_ARTIFACT_TARGETS)
 
     assert installed[0] is not None
-    assert installed[1:] == (None, None)
+    assert installed[1:] == (None, None, None)
     assert not (tmp_path / ".github/doc-lattice-bootstrap.sh").exists()
 
 
 def test_inspect_installed_artifacts_reports_bad_marker_as_data(tmp_path: Path):
     expected = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
-    bootstrap = expected[-1]
+    bootstrap = expected[2]
     destination = tmp_path / bootstrap.relative_path
     destination.parent.mkdir(parents=True)
     destination.write_text(
@@ -1914,7 +1949,7 @@ def test_inspect_external_parent_error_uses_only_repository_relative_path(tmp_pa
 
 def test_inspection_never_yaml_parses_bootstrap(tmp_path: Path):
     expected = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
-    bootstrap = expected[-1]
+    bootstrap = expected[2]
     destination = tmp_path / bootstrap.relative_path
     destination.parent.mkdir(parents=True)
     destination.write_text(bootstrap.text + "\nnot: [valid YAML\n", encoding="utf-8")
@@ -1965,6 +2000,31 @@ def test_managed_audit_accepts_exact_rendered_installation(tmp_path: Path):
     assert _audit_installed(tmp_path) == ()
 
 
+def test_managed_audit_rejects_weakened_bootstrap_lf_rule(tmp_path: Path):
+    _write_managed_artifacts(tmp_path)
+    _mutate_artifact(
+        tmp_path,
+        "attributes",
+        "doc-lattice-bootstrap.sh text eol=lf",
+        "doc-lattice-bootstrap.sh text",
+    )
+
+    assert _finding_codes(_audit_installed(tmp_path)) == {"MANAGED_ATTRIBUTES"}
+
+
+def test_managed_audit_accepts_crlf_attributes_file_with_exact_rule(tmp_path: Path):
+    _write_managed_artifacts(tmp_path)
+    attributes = next(
+        artifact
+        for artifact in render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+        if artifact.role == "attributes"
+    )
+    destination = tmp_path / attributes.relative_path
+    destination.write_bytes(attributes.text.replace("\n", "\r\n").encode("utf-8"))
+
+    assert _audit_installed(tmp_path) == ()
+
+
 def test_audit_repository_merges_global_and_managed_findings_sorted_unique(tmp_path: Path):
     _write_managed_artifacts(tmp_path)
     _mutate_artifact(tmp_path, "offline", "contents: read", "contents: write")
@@ -2007,11 +2067,11 @@ def test_managed_audit_renders_expected_documents_once_per_call(tmp_path: Path, 
     assert render_calls == [("Guardantix/doc-lattice", "2.1.0")]
 
 
-def test_managed_audit_requires_exactly_three_canonical_inspection_slots(tmp_path: Path):
+def test_managed_audit_requires_exactly_four_canonical_inspection_slots(tmp_path: Path):
     discovery = discover_workflows(tmp_path)
     installed = inspect_installed_artifacts(tmp_path, CANONICAL_ARTIFACT_TARGETS)
 
-    with pytest.raises(ConfigError, match="exactly three"):
+    with pytest.raises(ConfigError, match="exactly four"):
         audit_managed_installation(
             discovery,
             installed[:2],
@@ -2044,7 +2104,7 @@ def test_managed_audit_reports_absent_directory_and_artifacts_as_findings(tmp_pa
     assert not (tmp_path / ".github").exists()
 
 
-@pytest.mark.parametrize("missing_role", ["offline", "linear", "bootstrap"])
+@pytest.mark.parametrize("missing_role", ["offline", "linear", "bootstrap", "attributes"])
 def test_managed_audit_reports_each_missing_canonical_artifact(
     tmp_path: Path,
     missing_role: str,

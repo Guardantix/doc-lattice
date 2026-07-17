@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, get_args
 
-ArtifactRole = Literal["offline", "linear", "bootstrap"]
+ArtifactRole = Literal["offline", "linear", "bootstrap", "attributes"]
 ArtifactAction = Literal["current", "create", "replace"]
 
 VALID_ARTIFACT_ROLES: frozenset[str] = frozenset(get_args(ArtifactRole))

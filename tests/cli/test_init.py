@@ -1,6 +1,7 @@
 """CLI integration tests for the init command."""
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,16 @@ from doc_lattice.github_ci import filesystem
 from doc_lattice.github_ci.render import render_managed_artifacts
 
 from .helpers import runner
+
+
+@pytest.fixture(autouse=True)
+def _git_repository(tmp_path: Path) -> None:
+    """Run init command tests inside a real Git working tree."""
+    subprocess.run(
+        ["git", "init", "--quiet"],  # noqa: S607 - tests require the local git executable
+        cwd=tmp_path,
+        check=True,
+    )
 
 
 def _shared_guidance(version: str) -> str:
@@ -114,7 +125,7 @@ def test_init_github_requires_repository_before_any_write(tmp_path: Path, monkey
 
     assert result.exit_code == 2
     assert "--repository is required with --github" in result.stderr
-    assert list(tmp_path.iterdir()) == []
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
 
 
 def test_init_repository_requires_github_before_any_write(tmp_path: Path, monkeypatch):
@@ -124,7 +135,7 @@ def test_init_repository_requires_github_before_any_write(tmp_path: Path, monkey
 
     assert result.exit_code == 2
     assert "--repository requires --github" in result.stderr
-    assert list(tmp_path.iterdir()) == []
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
 
 
 def test_init_github_creates_managed_artifacts_and_prints_review_guidance(
@@ -146,6 +157,60 @@ def test_init_github_creates_managed_artifacts_and_prints_review_guidance(
     assert "# ===== .github/workflows/doc-lattice.yml (new file) =====" not in result.stdout
     assert "Review" in result.stderr
     assert f"bash .github/doc-lattice-bootstrap.sh plan {repository}" in result.stderr
+
+
+def test_init_github_from_subdirectory_anchors_at_git_top_level(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repository = "Guardantix/doc-lattice"
+    subprocess.run(
+        ["git", "init", "--quiet"],  # noqa: S607 - test requires the local git executable
+        cwd=tmp_path,
+        check=True,
+    )
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init", "--github", "--repository", repository])
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".doc-lattice.yml").is_file()
+    assert all(
+        (tmp_path / artifact.relative_path).is_file()
+        for artifact in render_managed_artifacts(repository, __version__)
+    )
+    assert not (nested / ".doc-lattice.yml").exists()
+    assert not (nested / ".github").exists()
+
+
+def test_init_github_creates_managed_lf_attributes_policy(tmp_path: Path, monkeypatch):
+    repository = "Guardantix/doc-lattice"
+    attributes = tmp_path / ".github/.gitattributes"
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--github", "--repository", repository])
+
+    assert result.exit_code == 0
+    assert attributes.read_text(encoding="utf-8").splitlines()[-1] == (
+        "doc-lattice-bootstrap.sh text eol=lf"
+    )
+    assert ".github/.gitattributes" in result.stderr
+    checked = subprocess.run(
+        [  # noqa: S607 - test requires the local git executable
+            "git",
+            "check-attr",
+            "eol",
+            "--",
+            ".github/doc-lattice-bootstrap.sh",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert checked.stdout == ".github/doc-lattice-bootstrap.sh: eol: lf\n"
 
 
 def test_init_github_warns_pinned_version_must_be_published(tmp_path: Path, monkeypatch):
@@ -181,6 +246,7 @@ def test_init_github_preflights_conflict_before_config_or_other_artifact_write(
     assert not (tmp_path / artifacts[0].relative_path).exists()
     assert conflict.read_bytes() == conflict_bytes
     assert not (tmp_path / artifacts[2].relative_path).exists()
+    assert not (tmp_path / artifacts[3].relative_path).exists()
 
 
 def test_init_github_exact_rerun_preserves_all_bytes(tmp_path: Path, monkeypatch):
@@ -265,7 +331,7 @@ def test_init_github_rejects_nonfinal_command_version_before_any_write(
 
     assert result.exit_code == 2
     assert "must be a final release version" in result.stderr
-    assert list(tmp_path.iterdir()) == []
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
 
 
 def test_init_github_create_race_preserves_winner_and_error_notes(
@@ -306,6 +372,7 @@ def test_init_github_create_race_preserves_winner_and_error_notes(
     assert winner_path.read_bytes() == winner
     assert not (tmp_path / artifacts[1].relative_path).exists()
     assert not (tmp_path / artifacts[2].relative_path).exists()
+    assert not (tmp_path / artifacts[3].relative_path).exists()
 
 
 def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):

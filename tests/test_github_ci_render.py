@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import PurePosixPath
 from typing import get_args
 
 import pytest
@@ -22,6 +23,7 @@ from doc_lattice.github_ci.render import (
     OFFLINE_WORKFLOW_PATH,
     SETUP_UV_REF,
     ownership_header,
+    render_managed_artifacts,
     render_workflows,
 )
 from doc_lattice.scaffold import PYTHON_PIN
@@ -128,6 +130,24 @@ def test_render_workflows_returns_only_canonical_workflow_artifacts():
         ("linear", LINEAR_WORKFLOW_PATH),
     ]
     assert BOOTSTRAP_PATH not in {artifact.relative_path for artifact in artifacts}
+
+
+def test_render_managed_artifacts_include_scoped_bootstrap_lf_policy():
+    artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
+
+    assert [(artifact.role, artifact.relative_path) for artifact in artifacts] == [
+        ("offline", OFFLINE_WORKFLOW_PATH),
+        ("linear", LINEAR_WORKFLOW_PATH),
+        ("bootstrap", BOOTSTRAP_PATH),
+        ("attributes", PurePosixPath(".github/.gitattributes")),
+    ]
+    assert artifacts[3].text.splitlines() == [
+        "# doc-lattice-managed: github-ci-v1",
+        "# doc-lattice-artifact: attributes",
+        "# doc-lattice-version: 2.1.0",
+        "# doc-lattice-repository: Guardantix/doc-lattice",
+        "doc-lattice-bootstrap.sh text eol=lf",
+    ]
 
 
 def test_render_offline_workflow_runs_all_gates_without_secrets():

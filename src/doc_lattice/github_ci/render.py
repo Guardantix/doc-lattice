@@ -19,11 +19,14 @@ from .model import (
 OFFLINE_WORKFLOW_PATH = PurePosixPath(".github/workflows/doc-lattice.yml")
 LINEAR_WORKFLOW_PATH = PurePosixPath(".github/workflows/doc-lattice-linear.yml")
 BOOTSTRAP_PATH = PurePosixPath(".github/doc-lattice-bootstrap.sh")
+GIT_ATTRIBUTES_PATH = PurePosixPath(".github/.gitattributes")
+BOOTSTRAP_EOL_RULE = "doc-lattice-bootstrap.sh text eol=lf"
 
 CANONICAL_ARTIFACT_TARGETS = (
     ManagedArtifactTarget("offline", OFFLINE_WORKFLOW_PATH),
     ManagedArtifactTarget("linear", LINEAR_WORKFLOW_PATH),
     ManagedArtifactTarget("bootstrap", BOOTSTRAP_PATH),
+    ManagedArtifactTarget("attributes", GIT_ATTRIBUTES_PATH),
 )
 
 CHECKOUT_REF = "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
@@ -521,10 +524,29 @@ def render_bootstrap(repository: str, version: str) -> ManagedArtifact:
     return ManagedArtifact("bootstrap", BOOTSTRAP_PATH, text)
 
 
+def render_git_attributes(repository: str, version: str) -> ManagedArtifact:
+    """Render the scoped policy that preserves bootstrap LF line endings.
+
+    Args:
+        repository: GitHub repository in ``OWNER/REPO`` form.
+        version: Exact final-release version recorded in the ownership header.
+
+    Returns:
+        The managed ``.github/.gitattributes`` artifact.
+
+    Raises:
+        ConfigError: If the repository or version is invalid.
+    """
+    identity = parse_repository(repository)
+    validate_final_release_version(version)
+    text = ownership_header("attributes", identity.display, version) + f"{BOOTSTRAP_EOL_RULE}\n"
+    return ManagedArtifact("attributes", GIT_ATTRIBUTES_PATH, text)
+
+
 def render_managed_artifacts(
     repository: str,
     version: str,
-) -> tuple[ManagedArtifact, ManagedArtifact, ManagedArtifact]:
+) -> tuple[ManagedArtifact, ManagedArtifact, ManagedArtifact, ManagedArtifact]:
     """Render every managed GitHub CI artifact in canonical order.
 
     Args:
@@ -532,13 +554,19 @@ def render_managed_artifacts(
         version: Exact final-release version for the managed artifacts.
 
     Returns:
-        The offline workflow, Linear workflow, and human-run bootstrap script.
+        The offline workflow, Linear workflow, human-run bootstrap script, and scoped
+        Git attributes policy.
 
     Raises:
         ConfigError: If the repository or version is invalid.
     """
     offline, linear = render_workflows(repository, version)
-    return offline, linear, render_bootstrap(repository, version)
+    return (
+        offline,
+        linear,
+        render_bootstrap(repository, version),
+        render_git_attributes(repository, version),
+    )
 
 
 def _replace_tokens(template: str, repository: str, version: str) -> str:

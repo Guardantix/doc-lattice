@@ -214,7 +214,7 @@ uv run --group dev ty check src
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the three managed GitHub artifacts. | 2 on tool error or unsafe existing artifact |
+| `init [--docs-root ...] [--linear-team KEY] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the four managed GitHub artifacts at the Git top-level. | 2 on tool error or unsafe existing artifact |
 | `ci audit [--repository OWNER/REPO]` | Audit repository-global workflow prohibitions and the managed GitHub installation without loading the lattice or using the network. | 1 on findings, 2 on unreadable or ambiguous state |
 | `ci refresh --repository OWNER/REPO [--apply]` | Preview a managed artifact upgrade or rename, then optionally apply it after exact interactive confirmation. | 1 when a preview has updates, 2 on refusal, unsafe state, or tool error |
 
@@ -228,6 +228,9 @@ and add `--warn-exit` to gate on WARNING as well.
 The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, and `linear` accept
 `--config PATH` (path to `.doc-lattice.yml`; defaults to the file in the current directory).
 `init`, `ci audit`, and `ci refresh` deliberately do not accept config or load the lattice.
+GitHub-mode `init` and both `ci` commands require a Git working tree and resolve its top-level
+before inspecting or writing managed files, even when invoked from a subdirectory. Ordinary
+`init` retains its current-directory behavior and does not require Git.
 `check`, `lint`, `impact`, `reconcile`, and `linear` accept `--format json` for machine-readable
 output. Run `uv run doc-lattice <command> --help` for the full flag list.
 
@@ -470,18 +473,23 @@ keep the exact PyPI version pin.
 
 ### Managed GitHub and Linear setup
 
-To add protected Linear reporting, a human maintainer generates and reviews three committed,
+To add protected Linear reporting, a human maintainer generates and reviews four committed,
 create-only artifacts:
 
 - `.github/workflows/doc-lattice.yml` runs the offline audit, drift, and authority gates.
 - `.github/workflows/doc-lattice-linear.yml` runs the Linear gate only on trusted `main`.
 - `.github/doc-lattice-bootstrap.sh` configures and verifies the GitHub environment.
+- `.github/.gitattributes` keeps the bootstrap script at LF line endings after checkout.
 
 The bootstrap script is a durable managed artifact, not a disposable installer. Keep it committed
 after installation. Bootstrap `verify` checks remote environment policy and secret-name metadata.
 `ci audit` checks that the script is present and carries a valid ownership marker, version, and
 repository identity, but it does not compare the bootstrap script byte for byte. `ci refresh`
 performs the byte-level managed-artifact diff and can recreate a missing script after confirmation.
+The scoped attributes file contains `doc-lattice-bootstrap.sh text eol=lf`, so a Windows checkout
+with `core.autocrlf=true` does not turn the Git Bash script into unusable CRLF shell syntax. Audit
+requires that exact effective rule while accepting either LF or CRLF separators in the attributes
+file itself.
 
 The initial script supports GitHub.com repositories whose default branch is exactly `main`. It
 requires Bash 3.2 or later and an authenticated GitHub CLI. The authenticated maintainer must be a
@@ -609,6 +617,8 @@ When `ci audit` omits `--repository`, it resolves the local `origin` only from G
 case-insensitive, and the repository segment is limited to GitHub's 100-character maximum. The
 offline audit cannot establish GitHub's canonical display casing. Bootstrap `plan` and `verify`
 read the API `full_name` and require its spelling and case to match the generated literal exactly.
+Origin lookup runs from the already-resolved Git top-level, so identity resolution and managed-file
+inspection always refer to the same worktree.
 
 For an existing installation, rotate or obtain a Linear key out of band. After the pre-generation
 workflow replacement described above, set the replacement key only as
@@ -640,10 +650,13 @@ local action, reusable workflow, or renamed wrapper eventually invokes a sensiti
 Malformed, oversized, or otherwise unreliably inspectable workflows also exit 2 instead of being
 treated as safe.
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
-selects one static unrelated name. For the bootstrap script, audit validates only presence and
-ownership metadata rather than content equality. Local audit also cannot see remote environment or
-organization-policy drift, so rerun bootstrap `verify` from reviewed trusted state after relevant
-policy, visibility, plan, rename, or transfer changes.
+selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
+access because it forwards every available caller secret, so it always produces a
+`LINEAR_SECRET_REFERENCE` finding. For the bootstrap script, audit validates only presence and
+ownership metadata rather than content equality; the adjacent attributes artifact is checked for
+its exact effective LF rule. Local audit also cannot see remote environment or organization-policy
+drift, so rerun bootstrap `verify` from reviewed trusted state after relevant policy, visibility,
+plan, rename, or transfer changes.
 
 The generated environment is the authoritative secret boundary. It allows only the exact `main`
 branch, and the dedicated environment-only secret is mapped to `LINEAR_API_KEY` only on the final

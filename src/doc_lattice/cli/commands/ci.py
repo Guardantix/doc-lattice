@@ -25,9 +25,12 @@ from ...github_ci.identity import (
 from ...github_ci.path_display import display_path
 from ...github_ci.render import CANONICAL_ARTIFACT_TARGETS, render_managed_artifacts
 from ..errors import EXIT_FINDING, exit_on_project_error
+from ..git_repository import resolve_git_repository_root
 from ..runtime import CliRuntime, get_runtime
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ...github_ci.model import ArtifactChange, ManagedArtifact, RepositoryIdentity
 
 _GIT_TIMEOUT_SECONDS = 5
@@ -57,9 +60,10 @@ def register_ci(app: typer.Typer) -> None:
         runtime = get_runtime(ctx)
         exit_code = 0
         with exit_on_project_error(runtime):
-            identity = _resolve_repository(runtime, repository)
-            discovery = discover_workflows(runtime.cwd)
-            installed = inspect_installed_artifacts(runtime.cwd, CANONICAL_ARTIFACT_TARGETS)
+            root = resolve_git_repository_root(runtime.cwd)
+            identity = _resolve_repository(root, repository)
+            discovery = discover_workflows(root)
+            installed = inspect_installed_artifacts(root, CANONICAL_ARTIFACT_TARGETS)
             findings = audit_repository(discovery, installed, identity, __version__)
             if findings:
                 for finding in findings:
@@ -92,9 +96,10 @@ def register_ci(app: typer.Typer) -> None:
         runtime = get_runtime(ctx)
         exit_code = 0
         with exit_on_project_error(runtime):
+            root = resolve_git_repository_root(runtime.cwd)
             identity = parse_repository(repository)
             artifacts = render_managed_artifacts(identity.display, __version__)
-            changes = preflight_refresh(runtime.cwd, artifacts)
+            changes = preflight_refresh(root, artifacts)
             diff = render_diff(changes)
             if not diff:
                 runtime.write_stdout("doc-lattice ci refresh: current")
@@ -109,7 +114,7 @@ def register_ci(app: typer.Typer) -> None:
                         identity.display,
                     )
                     repeated_changes = _repeat_refresh_preflight(
-                        runtime,
+                        root,
                         artifacts,
                     )
                     if repeated_changes != changes:
@@ -118,7 +123,7 @@ def register_ci(app: typer.Typer) -> None:
                             "run a fresh preview before applying"
                         )
                     apply_changes(repeated_changes)
-                    _verify_refresh_converged(runtime, artifacts)
+                    _verify_refresh_converged(root, artifacts)
         raise typer.Exit(exit_code)
 
 
@@ -143,7 +148,7 @@ def require_repository_confirmation(stream: TextIO, runtime: CliRuntime, reposit
 
 
 def _resolve_repository(
-    runtime: CliRuntime,
+    root: Path,
     repository: str | None,
 ) -> RepositoryIdentity:
     """Resolve an explicit repository or one supported local Git origin."""
@@ -158,7 +163,7 @@ def _resolve_repository(
                 "--get-all",
                 "remote.origin.url",
             ],
-            cwd=runtime.cwd,
+            cwd=root,
             capture_output=True,
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
@@ -182,12 +187,12 @@ def _resolve_repository(
 
 
 def _repeat_refresh_preflight(
-    runtime: CliRuntime,
+    root: Path,
     artifacts: tuple[ManagedArtifact, ...],
 ) -> tuple[ArtifactChange, ...]:
     """Repeat refresh preflight and replace races with an actionable diagnostic."""
     try:
-        return preflight_refresh(runtime.cwd, artifacts)
+        return preflight_refresh(root, artifacts)
     except ConfigError as exc:
         error = ConfigError(
             "managed artifacts changed after confirmation; run a fresh preview before applying"
@@ -198,12 +203,12 @@ def _repeat_refresh_preflight(
 
 
 def _verify_refresh_converged(
-    runtime: CliRuntime,
+    root: Path,
     artifacts: tuple[ManagedArtifact, ...],
 ) -> None:
     """Require every managed artifact to remain current after refresh writes."""
     try:
-        installed = preflight_refresh(runtime.cwd, artifacts)
+        installed = preflight_refresh(root, artifacts)
     except ConfigError as exc:
         error = ConfigError(
             "managed refresh did not converge; inspect installed artifacts and run a fresh preview"

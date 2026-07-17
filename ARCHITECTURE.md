@@ -336,17 +336,21 @@ configuration keys are not reserved as inert surface without an approved require
 **Context:** Workflow files are repository-controlled input, so a same-repository pull request can
 edit a workflow that receives a broadly scoped secret. The normal package code must not receive
 GitHub administration credentials while establishing a safer authorization boundary.
-**Decision:** `doc_lattice.github_ci` renders and audits the managed workflows and bootstrap
-artifact. CLI filesystem adapters create, inspect, audit, and refresh those local files without
-loading the lattice or accessing the network. A reviewed external `gh` script is run explicitly by
-a human maintainer to configure and read back a GitHub environment whose deployment allow list is
-exactly the `main` branch. The dedicated `DOC_LATTICE_LINEAR_API_KEY` exists only in that
-environment and is mapped to `LINEAR_API_KEY` only on the final Linear step. Repository-global
-audit policy bans `pull_request_target`, and generated workflows never run real `reconcile`.
+**Decision:** `doc_lattice.github_ci` renders and audits the managed workflows, bootstrap artifact,
+and a scoped `.github/.gitattributes` policy that preserves LF for the bootstrap after checkout.
+CLI filesystem adapters resolve the Git top-level, then create, inspect, audit, and refresh those
+local files without loading the lattice or accessing the network. A reviewed external `gh` script
+is run explicitly by a human maintainer to configure and read back a GitHub environment whose
+deployment allow list is exactly the `main` branch. The dedicated
+`DOC_LATTICE_LINEAR_API_KEY` exists only in that environment and is mapped to `LINEAR_API_KEY`
+only on the final Linear step. Repository-global audit policy bans `pull_request_target` and
+whole-context reusable-workflow secret inheritance, and generated workflows never run real
+`reconcile`.
 **Consequences:** `linear_client` remains the only Python network module. Remote setup is explicit,
 reviewable, resumable, and separate from the Linear secret entry. Bootstrap verification covers
 remote environment and secret-name metadata. Local audit covers workflow policy and bootstrap
-ownership metadata rather than byte equality, while managed refresh owns byte-level comparison and
-replacement. None of the local checks can observe GitHub environment or organization-policy drift,
-so the bootstrap verifier remains necessary. Workflow and branch governance for trusted `main`
-remains the residual authorization boundary.
+ownership metadata rather than byte equality, plus the exact effective bootstrap LF attribute,
+while managed refresh owns byte-level comparison and replacement. None of the local checks can
+observe GitHub environment or organization-policy drift, so the bootstrap verifier remains
+necessary. Workflow and branch governance for trusted `main` remains the residual authorization
+boundary.

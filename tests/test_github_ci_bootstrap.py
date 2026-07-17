@@ -541,7 +541,7 @@ def test_rendered_bootstrap_is_the_third_managed_artifact_and_is_valid_bash(
     """Render workflows followed by a dependency-minimal Bash bootstrap."""
     artifacts = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")
 
-    assert len(artifacts) == 3
+    assert len(artifacts) == 4
     bootstrap = artifacts[2]
     assert bootstrap.relative_path == BOOTSTRAP_PATH
 

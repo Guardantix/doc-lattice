@@ -31,6 +31,7 @@ _OFFLINE_WORKFLOW = ".github/workflows/doc-lattice.yml"
 _LINEAR_WORKFLOW = ".github/workflows/doc-lattice-linear.yml"
 _UNRELATED_WORKFLOW = ".github/workflows/unrelated.yml"
 _BOOTSTRAP_SCRIPT = ".github/doc-lattice-bootstrap.sh"
+_GIT_ATTRIBUTES = ".github/.gitattributes"
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,6 +46,16 @@ class _TtyStringIO(StringIO):
 
     def isatty(self) -> bool:
         return True
+
+
+@pytest.fixture(autouse=True)
+def _git_repository(tmp_path: Path) -> None:
+    """Run every managed-CI command test inside a real Git working tree."""
+    subprocess.run(
+        ["git", "init", "--quiet"],  # noqa: S607 - tests require the local git executable
+        cwd=tmp_path,
+        check=True,
+    )
 
 
 def _install(root: Path, repository: str = "Guardantix/doc-lattice") -> None:
@@ -115,6 +126,30 @@ def test_ci_audit_exact_installation_exits_zero(tmp_path: Path, monkeypatch):
     assert result.stdout == "doc-lattice ci audit: ok\n"
 
 
+def test_ci_audit_from_subdirectory_ignores_nested_managed_decoy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    _install(tmp_path)
+    _install(nested)
+    unsafe = tmp_path / ".github/workflows/unsafe.yml"
+    unsafe.write_text("on: pull_request_target\njobs: {}\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app,
+        ["ci", "audit", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        ".github/workflows/unsafe.yml: PULL_REQUEST_TARGET: "
+        "pull_request_target is prohibited for repository workflows\n"
+    )
+
+
 @pytest.mark.parametrize(
     "running_version",
     ["2.1.0.dev1", "2.1.0rc1", "2.0.0+local"],
@@ -145,6 +180,7 @@ def test_ci_audit_nonfinal_running_version_reports_stale_without_generation(
             (_OFFLINE_WORKFLOW, "STALE_GENERATOR"),
             (_LINEAR_WORKFLOW, "STALE_GENERATOR"),
             (_BOOTSTRAP_SCRIPT, "STALE_GENERATOR"),
+            (_GIT_ATTRIBUTES, "STALE_GENERATOR"),
         }
     )
     assert "MANAGED_" not in result.stdout
@@ -423,12 +459,12 @@ def test_ci_audit_missing_git_exits_two_with_actionable_error(tmp_path: Path, mo
     )
 
 
-def test_ci_audit_explicit_repository_never_invokes_git(tmp_path: Path, monkeypatch):
+def test_ci_audit_explicit_repository_never_reads_origin(tmp_path: Path, monkeypatch):
     _install(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     def fail(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("git must not run for an explicit repository")
+        raise AssertionError("origin lookup must not run for an explicit repository")
 
     monkeypatch.setattr(ci_module.subprocess, "run", fail)
     result = runner.invoke(app, ["ci", "audit", "--repository", "Guardantix/doc-lattice"])
@@ -757,6 +793,26 @@ def test_ci_refresh_current_installation_exits_zero(tmp_path: Path, monkeypatch)
     assert result.stdout == "doc-lattice ci refresh: current\n"
 
 
+def test_ci_refresh_from_subdirectory_previews_git_root_not_nested_decoy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    old = render_managed_artifacts("Guardantix/doc-lattice", "1.9.0")
+    apply_changes(preflight_create(tmp_path, old))
+    _install(nested)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app,
+        ["ci", "refresh", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert result.exit_code == 1
+    assert "--- a/.github/workflows/doc-lattice.yml" in result.stdout
+
+
 @pytest.mark.parametrize(
     "running_version",
     ["2.1.0.dev1", "2.1.0rc1", "2.0.0+local"],
@@ -916,7 +972,7 @@ def test_ci_refresh_apply_refuses_change_after_confirmation(tmp_path: Path, monk
 def test_ci_refresh_apply_detects_current_artifact_race_during_apply(tmp_path: Path, monkeypatch):
     current = render_managed_artifacts("Guardantix/doc-lattice", __version__)
     old = render_managed_artifacts("Guardantix/doc-lattice", "1.9.0")
-    apply_changes(preflight_create(tmp_path, (current[0], old[1], old[2])))
+    apply_changes(preflight_create(tmp_path, (current[0], old[1], old[2], old[3])))
     raced_target = tmp_path / current[0].relative_path
     real_apply = ci_module.apply_changes
     monkeypatch.chdir(tmp_path)
@@ -1033,10 +1089,41 @@ def test_ci_refresh_recreates_missing_bootstrap(tmp_path: Path, monkeypatch):
     assert bootstrap.read_text(encoding="utf-8") == artifacts[2].text
 
 
+def test_ci_refresh_recreates_missing_attributes_policy(tmp_path: Path, monkeypatch):
+    _install(tmp_path)
+    attributes = tmp_path / ".github/.gitattributes"
+    attributes.unlink(missing_ok=True)
+    monkeypatch.chdir(tmp_path)
+
+    preview = runner.invoke(
+        app,
+        ["ci", "refresh", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert preview.exit_code == 1
+    assert "+++ b/.github/.gitattributes" in preview.stdout
+    assert not attributes.exists()
+
+    monkeypatch.setattr(
+        ci_module,
+        "require_repository_confirmation",
+        lambda *_args, **_kwargs: None,
+    )
+    applied = runner.invoke(
+        app,
+        ["ci", "refresh", "--repository", "Guardantix/doc-lattice", "--apply"],
+    )
+
+    assert applied.exit_code == 0
+    assert attributes.read_text(encoding="utf-8").splitlines()[-1] == (
+        "doc-lattice-bootstrap.sh text eol=lf"
+    )
+
+
 def test_ci_refresh_converges_mixed_version_rerun(tmp_path: Path, monkeypatch):
     current = render_managed_artifacts("Guardantix/doc-lattice", __version__)
     old = render_managed_artifacts("Guardantix/doc-lattice", "1.9.0")
-    mixed = (current[0], old[1], old[2])
+    mixed = (current[0], old[1], old[2], old[3])
     apply_changes(preflight_create(tmp_path, mixed))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(

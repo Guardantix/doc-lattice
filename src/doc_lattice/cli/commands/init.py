@@ -20,6 +20,7 @@ from ...persistence import atomic_create_bytes
 from ...scaffold import build_scaffold
 from ...text_utils import strip_control_chars
 from ..errors import exit_on_project_error
+from ..git_repository import resolve_git_repository_root
 from ..runtime import get_runtime
 
 if TYPE_CHECKING:
@@ -125,10 +126,12 @@ def register_init(app: typer.Typer) -> None:
             roots = tuple(docs_root) if docs_root else ("docs",)
             _validate_init_flags(roots, linear_team)
             github_plan = None
+            root = runtime.cwd
             if github_repository is not None:
-                github_plan = _prepare_github_init(runtime.cwd, github_repository)
+                root = resolve_git_repository_root(runtime.cwd)
+                github_plan = _prepare_github_init(root, github_repository)
             scaffold = build_scaffold(roots, linear_team, __version__)
-            target = runtime.cwd / DEFAULT_CONFIG_NAME
+            target = root / DEFAULT_CONFIG_NAME
             try:
                 atomic_create_bytes(
                     target,
@@ -167,14 +170,15 @@ def register_init(app: typer.Typer) -> None:
                     "snippets resolve."
                 )
             else:
-                offline_path, linear_path, bootstrap_path = (
+                offline_path, linear_path, bootstrap_path, attributes_path = (
                     escape(change.artifact.relative_path.as_posix())
                     for change in github_plan.changes
                 )
                 runtime.stderr.print(
                     "Append the .gitignore block and add the pre-commit block under `repos:`. "
                     f"Review {offline_path}, {linear_path}, and "
-                    f"{bootstrap_path} before enabling or running them, and make sure "
+                    f"{bootstrap_path}, plus {attributes_path}, before enabling or running them, "
+                    "and make sure "
                     f"the exact pinned version {__version__} is published on PyPI so the "
                     "generated workflows resolve."
                 )

@@ -459,6 +459,8 @@ def test_direct_doc_lattice_invocations_handles_documented_forms(script, expecte
         ("{ doc-lattice linear; }", LINEAR),
         ("{ doc-lattice reconcile --all; }", RECONCILE),
         ("time -p doc-lattice linear", LINEAR),
+        ("time -- doc-lattice linear", LINEAR),
+        ("time -p -- doc-lattice reconcile --all", RECONCILE),
         ("coproc DL doc-lattice reconcile --all", RECONCILE),
         (
             "coproc DL uvx --from doc-lattice==2.1.0 doc-lattice linear",

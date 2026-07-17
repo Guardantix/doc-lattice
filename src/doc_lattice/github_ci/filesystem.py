@@ -1044,7 +1044,9 @@ def _parse_artifact_role(value: str, path: str) -> ArtifactRole:
         return "offline"
     if value == "linear":
         return "linear"
-    return "bootstrap"
+    if value == "bootstrap":
+        return "bootstrap"
+    return "attributes"
 
 
 def _marker_error(path: str, detail: str) -> ConfigError:

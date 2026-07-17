@@ -19,6 +19,7 @@ from .model import (
 )
 from .path_display import display_path
 from .render import (
+    BOOTSTRAP_EOL_RULE,
     CANONICAL_ARTIFACT_TARGETS,
     LINEAR_JOB_ID,
     LINEAR_SECRET_ENV_NAME,
@@ -102,6 +103,7 @@ _MANAGED_MESSAGES = {
     "MANAGED_SECRET": (  # pragma: allowlist secret
         "managed Linear secret scope differs from the canonical installation"
     ),
+    "MANAGED_ATTRIBUTES": "managed bootstrap line-ending policy differs from the canonical rule",
 }
 
 
@@ -298,11 +300,11 @@ def audit_managed_installation(
         Deterministically sorted unique managed-installation findings.
 
     Raises:
-        ConfigError: If inspection results do not use the canonical three-slot order.
+        ConfigError: If inspection results do not use the canonical four-slot order.
     """
     canonical = CANONICAL_ARTIFACT_TARGETS
     if len(installed) != len(canonical):
-        raise ConfigError("managed artifact inspection must contain exactly three slots")
+        raise ConfigError("managed artifact inspection must contain exactly four slots")
     for index, artifact in enumerate(installed):
         if artifact is None:
             continue
@@ -312,7 +314,8 @@ def audit_managed_installation(
             or artifact.expected.relative_path != expected.relative_path
         ):
             raise ConfigError(
-                "managed artifact inspection must use canonical order: offline, linear, bootstrap"
+                "managed artifact inspection must use canonical order: "
+                "offline, linear, bootstrap, attributes"
             )
 
     findings: list[AuditFinding] = []
@@ -394,6 +397,16 @@ def _audit_installed_artifact(
         )
     if artifact.expected.role == "bootstrap":
         return findings
+    if artifact.expected.role == "attributes":
+        if _effective_git_attribute_rules(artifact.text) != (BOOTSTRAP_EOL_RULE,):
+            findings.append(
+                AuditFinding(
+                    path=path,
+                    code="MANAGED_ATTRIBUTES",
+                    message=_MANAGED_MESSAGES["MANAGED_ATTRIBUTES"],
+                )
+            )
+        return findings
 
     document = documents_by_path.get(path)
     if document is None:
@@ -421,6 +434,11 @@ def _audit_installed_artifact(
         for code in _managed_semantic_codes(document, expected_document)
     )
     return findings
+
+
+def _effective_git_attribute_rules(text: str) -> tuple[str, ...]:
+    """Return nonempty, non-comment rules while accepting Git's line separators."""
+    return tuple(line for line in text.splitlines() if line and not line.startswith("#"))
 
 
 def _stale_generator_message(marker_version: str, running_version: str) -> str:
@@ -743,8 +761,10 @@ def _has_linear_secret_reference(document: WorkflowDocument) -> bool:
     for scalar in document.scalars:
         if scalar.path == exempt_path and scalar.value == LINEAR_SECRET_ENV_VALUE:
             continue
-        if _SECRET_NAME_RE.search(scalar.value) is not None or _has_unsafe_secret_context_access(
-            scalar.value
+        if (
+            _is_reusable_workflow_secret_inheritance(scalar.path, scalar.value)
+            or _SECRET_NAME_RE.search(scalar.value) is not None
+            or _has_unsafe_secret_context_access(scalar.value)
         ):
             return True
 
@@ -754,6 +774,16 @@ def _has_linear_secret_reference(document: WorkflowDocument) -> bool:
         if entry.path and entry.path[-1].casefold() in _SECRET_NAMES_CASEFOLDED:
             return True
     return False
+
+
+def _is_reusable_workflow_secret_inheritance(path: tuple[str, ...], value: str) -> bool:
+    """Return whether a reusable-workflow job forwards the whole secret context."""
+    return (
+        len(path) == _JOB_FIELD_PATH_LENGTH
+        and path[0] == "jobs"
+        and path[2] == "secrets"
+        and value == "inherit"
+    )
 
 
 def _has_unsafe_secret_context_access(value: str) -> bool:

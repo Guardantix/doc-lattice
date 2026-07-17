@@ -1624,6 +1624,12 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
                 and words[index].literal == "-p"
             ):
                 index += 1
+            if (
+                index < len(words)
+                and not _word_may_change_argv(words[index])
+                and words[index].literal == "--"
+            ):
+                index += 1
             continue
         if _basename(word.literal) == "env":
             return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous)
