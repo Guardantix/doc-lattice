@@ -47,6 +47,7 @@ _PARTIAL_STATE_NOTE = (
     "if any, remain in place, so inspect the reported path and rerun to converge"
 )
 _LOCKING_SUPPORTED = os.name != "nt"
+_NO_DESCRIPTOR = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,6 +1089,40 @@ def _ensure_locked_artifact_ancestor(
         raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
 
 
+def _close_unowned_artifact_descriptor(
+    fd: int,
+    primary: BaseException,
+    *,
+    phase: str,
+) -> None:
+    """Close one descriptor without replacing an already-selected primary error."""
+    try:
+        os.close(fd)
+    except OSError as cleanup_error:
+        primary.add_note(
+            f"managed artifact {phase} close failed: {_stable_error_detail(cleanup_error)}"
+        )
+
+
+def _transfer_locked_artifact_parent(
+    parent_fd: int,
+    child_fd: int,
+    artifact_path: str,
+) -> int:
+    """Transfer parent ownership to a child descriptor after closing the old parent."""
+    try:
+        os.close(parent_fd)
+    except OSError as cause:
+        error = _filesystem_error(
+            "cannot close managed artifact parent",
+            cause,
+            path=artifact_path,
+        )
+        _close_unowned_artifact_descriptor(child_fd, error, phase="child")
+        raise error from cause
+    return child_fd
+
+
 def _open_locked_artifact_parent(
     lock: _ManagedArtifactLock,
     artifact: ManagedArtifact,
@@ -1130,23 +1165,28 @@ def _open_locked_artifact_parent(
             try:
                 child_stat = os.fstat(child_fd)
             except OSError as exc:
-                os.close(child_fd)
-                raise _filesystem_error(
+                error = _filesystem_error(
                     f"cannot inspect managed artifact ancestor {display}",
                     exc,
-                ) from exc
+                )
+                _close_unowned_artifact_descriptor(child_fd, error, phase="child")
+                raise error from exc
             if not stat.S_ISDIR(child_stat.st_mode):
-                os.close(child_fd)
-                raise ConfigError(f"managed artifact ancestor must be a real directory: {display}")
-            os.close(parent_fd)
-            parent_fd = child_fd
-    except BaseException as error:
-        try:
-            os.close(parent_fd)
-        except OSError as cleanup_error:
-            error.add_note(
-                f"managed artifact parent close failed: {_stable_error_detail(cleanup_error)}"
+                error = ConfigError(
+                    f"managed artifact ancestor must be a real directory: {display}"
+                )
+                _close_unowned_artifact_descriptor(child_fd, error, phase="child")
+                raise error
+            old_parent_fd = parent_fd
+            parent_fd = _NO_DESCRIPTOR
+            parent_fd = _transfer_locked_artifact_parent(
+                old_parent_fd,
+                child_fd,
+                artifact_path,
             )
+    except BaseException as error:
+        if parent_fd != _NO_DESCRIPTOR:
+            _close_unowned_artifact_descriptor(parent_fd, error, phase="parent")
         raise
     return parent_fd
 

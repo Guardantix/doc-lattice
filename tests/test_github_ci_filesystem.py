@@ -1,7 +1,9 @@
 """Tests for managed GitHub CI artifact filesystem operations."""
 
+import errno
 import os
 import stat
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -824,6 +826,79 @@ def test_apply_lock_cleanup_failures_are_notes_on_active_operation_error(
         "lock release" in note and "synthetic lock release failure" in note for note in notes
     )
     assert any("lock close" in note and "synthetic lock close failure" in note for note in notes)
+
+
+def test_apply_wraps_parent_handoff_close_failure_and_closes_child_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+):
+    old_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.0.0")[0]
+    new_artifact = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
+    _write_artifacts(tmp_path, (old_artifact,))
+    changes = preflight_refresh(tmp_path, (new_artifact,))
+    real_dup = os.dup
+    real_open = os.open
+    real_close = os.close
+    duplicate_fd: int | None = None
+    handoff_close_attempts = 0
+    child_fds: list[int] = []
+    child_close_attempts = 0
+
+    def _capture_duplicate(fd: int) -> int:
+        nonlocal duplicate_fd
+        duplicate_fd = real_dup(fd)
+        return duplicate_fd
+
+    def _capture_child_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if duplicate_fd is not None and dir_fd == duplicate_fd:
+            child_fds.append(fd)
+        return fd
+
+    def _close_duplicate_then_fail(fd: int) -> None:
+        nonlocal child_close_attempts, handoff_close_attempts
+        if fd == duplicate_fd:
+            handoff_close_attempts += 1
+            real_close(fd)
+            raise OSError(errno.EBADF, "synthetic old parent close failure")
+        if fd in child_fds:
+            child_close_attempts += 1
+            real_close(fd)
+            raise OSError(errno.EIO, "synthetic child close failure")
+        real_close(fd)
+
+    monkeypatch.setattr(filesystem.os, "dup", _capture_duplicate)
+    monkeypatch.setattr(filesystem.os, "open", _capture_child_open)
+    monkeypatch.setattr(filesystem.os, "close", _close_duplicate_then_fail)
+
+    try:
+        with pytest.raises(
+            ConfigError,
+            match=r"cannot close managed artifact parent.*synthetic old parent close failure",
+        ) as caught:
+            apply_changes(changes)
+
+        assert str(tmp_path) not in str(caught.value)
+        assert handoff_close_attempts == 1
+        assert child_fds
+        assert child_close_attempts == len(child_fds)
+        assert any(
+            "managed artifact child close failed: synthetic child close failure" in note
+            for note in getattr(caught.value, "__notes__", ())
+        )
+        for child_fd in child_fds:
+            with pytest.raises(OSError, match="Bad file descriptor"):
+                os.fstat(child_fd)
+    finally:
+        for child_fd in child_fds:
+            with suppress(OSError):
+                real_close(child_fd)
 
 
 def test_preflight_wraps_read_oserror_with_notes_and_canonical_path(
