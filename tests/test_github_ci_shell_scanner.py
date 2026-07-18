@@ -781,6 +781,27 @@ def test_scan_doc_lattice_invocations_reports_incomplete_on_expanded_subcommand(
     assert result.incomplete_reason == "subcommand word uses brace or glob expansion"
 
 
+def test_scan_doc_lattice_invocations_fails_closed_on_mixed_dynamic_expanded_subcommand():
+    result = scan_doc_lattice_invocations("Xlinear=linear; X=; doc-lattice $X{linear,}")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "subcommand word uses brace or glob expansion"
+
+
+def test_scan_doc_lattice_invocations_fails_closed_on_expanded_uv_launcher_word():
+    result = scan_doc_lattice_invocations("uv {run,doc-lattice} linear")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "uv command word uses brace or glob expansion"
+
+
+def test_scan_doc_lattice_invocations_fails_closed_on_expanded_uv_tool_run_word():
+    result = scan_doc_lattice_invocations("uv tool {run,doc-lattice} linear")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "uv command word uses brace or glob expansion"
+
+
 @pytest.mark.parametrize("operator", ["?", "*", "+", "@", "!"])
 def test_scan_doc_lattice_invocations_fails_closed_on_extglob_operator(operator):
     result = scan_doc_lattice_invocations(

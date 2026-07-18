@@ -126,6 +126,36 @@ def test_ci_audit_exact_installation_exits_zero(tmp_path: Path, monkeypatch):
     assert result.stdout == "doc-lattice ci audit: ok\n"
 
 
+def test_ci_audit_uses_inspected_canonical_workflow_snapshot(tmp_path: Path, monkeypatch):
+    _install(tmp_path)
+    workflow = tmp_path / _OFFLINE_WORKFLOW
+    real_inspect = ci_module.inspect_installed_artifacts
+
+    def replace_before_inspection(root: Path, expected):
+        _replace_once(
+            workflow,
+            "on:\n  push:",
+            "on:\n  pull_request_target:\n  push:",
+        )
+        return real_inspect(root, expected)
+
+    monkeypatch.setattr(ci_module, "inspect_installed_artifacts", replace_before_inspection)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["ci", "audit", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert result.exit_code == 1
+    assert _audit_finding_keys(result.stdout) == frozenset(
+        {
+            (_OFFLINE_WORKFLOW, "PULL_REQUEST_TARGET"),
+            (_OFFLINE_WORKFLOW, "MANAGED_TRIGGERS"),
+        }
+    )
+
+
 def test_ci_audit_from_subdirectory_ignores_nested_managed_decoy(
     tmp_path: Path,
     monkeypatch,

@@ -2106,6 +2106,27 @@ def _mutate_artifact(
     destination.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def test_managed_audit_uses_inspected_canonical_workflow_snapshot(tmp_path: Path):
+    _write_managed_artifacts(tmp_path)
+    discovery = discover_workflows(tmp_path)
+    _mutate_artifact(
+        tmp_path,
+        "offline",
+        "on:\n  push:",
+        "on:\n  pull_request_target:\n  push:",
+    )
+    installed = inspect_installed_artifacts(tmp_path, CANONICAL_ARTIFACT_TARGETS)
+
+    findings = audit_managed_installation(
+        discovery,
+        installed,
+        parse_repository("Guardantix/doc-lattice"),
+        "2.1.0",
+    )
+
+    assert _finding_codes(findings) == {"MANAGED_TRIGGERS"}
+
+
 def test_managed_audit_accepts_exact_rendered_installation(tmp_path: Path):
     _write_managed_artifacts(tmp_path)
 

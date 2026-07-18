@@ -130,11 +130,40 @@ def audit_repository(
     Raises:
         ConfigError: If a shell scan cannot complete or inspection results are misaligned.
     """
+    inspected_discovery = _bind_inspected_workflow_snapshot(discovery, installed)
     findings = [
-        *audit_global_workflows(discovery.documents),
-        *audit_managed_installation(discovery, installed, identity, running_version),
+        *audit_global_workflows(inspected_discovery.documents),
+        *_audit_managed_installation(
+            inspected_discovery,
+            installed,
+            identity,
+            running_version,
+        ),
     ]
     return _sorted_unique(findings)
+
+
+def _bind_inspected_workflow_snapshot(
+    discovery: WorkflowDiscovery,
+    installed: tuple[InstalledArtifact | None, ...],
+) -> WorkflowDiscovery:
+    """Make inspected canonical workflow text authoritative for both audit layers."""
+    _validate_installed_artifacts(installed)
+    documents = {document.path.as_posix(): document for document in discovery.documents}
+    directory_exists = discovery.directory_exists
+    for expected, artifact in zip(CANONICAL_ARTIFACT_TARGETS, installed, strict=True):
+        if expected.relative_path.parent.as_posix() != _WORKFLOW_DIRECTORY:
+            continue
+        path = expected.relative_path.as_posix()
+        if artifact is None:
+            documents.pop(path, None)
+            continue
+        directory_exists = True
+        documents[path] = parse_workflow(Path(path), artifact.text)
+    return WorkflowDiscovery(
+        directory_exists=directory_exists,
+        documents=tuple(documents[path] for path in sorted(documents)),
+    )
 
 
 def audit_global_workflows(
@@ -302,21 +331,23 @@ def audit_managed_installation(
     Raises:
         ConfigError: If inspection results do not use the canonical four-slot order.
     """
+    inspected_discovery = _bind_inspected_workflow_snapshot(discovery, installed)
+    return _audit_managed_installation(
+        inspected_discovery,
+        installed,
+        repository,
+        running_version,
+    )
+
+
+def _audit_managed_installation(
+    discovery: WorkflowDiscovery,
+    installed: tuple[InstalledArtifact | None, ...],
+    repository: RepositoryIdentity,
+    running_version: str,
+) -> tuple[AuditFinding, ...]:
+    """Audit an already validated and snapshot-bound managed installation."""
     canonical = CANONICAL_ARTIFACT_TARGETS
-    if len(installed) != len(canonical):
-        raise ConfigError("managed artifact inspection must contain exactly four slots")
-    for index, artifact in enumerate(installed):
-        if artifact is None:
-            continue
-        expected = canonical[index]
-        if (
-            artifact.expected.role != expected.role
-            or artifact.expected.relative_path != expected.relative_path
-        ):
-            raise ConfigError(
-                "managed artifact inspection must use canonical order: "
-                "offline, linear, bootstrap, attributes"
-            )
 
     findings: list[AuditFinding] = []
     if not discovery.directory_exists:
@@ -354,6 +385,27 @@ def audit_managed_installation(
             )
         )
     return _sorted_unique(findings)
+
+
+def _validate_installed_artifacts(
+    installed: tuple[InstalledArtifact | None, ...],
+) -> None:
+    """Require managed inspection results in the canonical four-slot order."""
+    canonical = CANONICAL_ARTIFACT_TARGETS
+    if len(installed) != len(canonical):
+        raise ConfigError("managed artifact inspection must contain exactly four slots")
+    for index, artifact in enumerate(installed):
+        if artifact is None:
+            continue
+        expected = canonical[index]
+        if (
+            artifact.expected.role != expected.role
+            or artifact.expected.relative_path != expected.relative_path
+        ):
+            raise ConfigError(
+                "managed artifact inspection must use canonical order: "
+                "offline, linear, bootstrap, attributes"
+            )
 
 
 def _audit_installed_artifact(

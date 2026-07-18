@@ -1613,14 +1613,14 @@ def _invocation_in_simple_command(
         return None
     subcommand_index = subcommand_resolution.index
     subcommand = words[subcommand_index]
-    if subcommand.dynamic or not subcommand.literal:
-        return None
     if subcommand.active_argv_expansion:
         # A brace- or glob-expanded subcommand (for example "linea{r,}") expands to a different
         # word at runtime, so Bash may run linear/reconcile while the unexpanded literal never
         # matches classification. The scanner cannot certify which subcommand runs, so it fails
         # closed rather than silently approving the workflow.
         raise _ShellScanIncomplete("subcommand word uses brace or glob expansion")
+    if subcommand.dynamic or not subcommand.literal:
+        return None
     arguments = words[subcommand_index + 1 :]
     if subcommand.literal == "linear":
         disposition = _classify_command_disposition(
@@ -2291,7 +2291,9 @@ def _uv_tool_payload_index(
     if run_index >= len(words):
         return _ResolvedIndex(None, request.inherited_ambiguity)
     run = words[run_index]
-    dynamic_run = run.dynamic or run.active_argv_expansion
+    if run.active_argv_expansion:
+        raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
+    dynamic_run = run.dynamic
     if not dynamic_run and run.literal != "run":
         return _ResolvedIndex(None, request.inherited_ambiguity)
     return _launcher_payload_index(
@@ -2499,6 +2501,8 @@ def _dynamic_uv_global_word_result(
     index: int,
 ) -> tuple[int, int | None, bool] | None:
     """Return the next index, injected-launcher start, and unresolved-option state for one word."""
+    if word.active_argv_expansion:
+        raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
     option_name = word.literal.split("=", 1)[0]
     if word.dynamic and "=" in word.literal and option_name in _UV_GLOBAL_OPTIONS_WITH_ARGUMENTS:
         candidate_start = index + 1 if _word_may_change_option_value_shape(word) else None
@@ -2506,8 +2510,6 @@ def _dynamic_uv_global_word_result(
     if word.dynamic:
         if word.literal.startswith("-"):
             return index + 1, None, True
-        return index + 1, index + 1, False
-    if word.active_argv_expansion:
         return index + 1, index + 1, False
     return None
 
