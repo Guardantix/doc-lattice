@@ -275,6 +275,14 @@ def _parse_permissions(
     return tuple(sorted(pairs))
 
 
+def _parse_runs_on(raw: Any) -> str | None:
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], str):
+        return raw[0]
+    return None
+
+
 def _parse_jobs(raw: Any, workflow_path: Path) -> tuple[WorkflowJob, ...]:
     jobs = _require_mapping(raw, workflow_path, ("jobs",))
     parsed: list[WorkflowJob] = []
@@ -303,7 +311,7 @@ def _parse_jobs(raw: Any, workflow_path: Path) -> tuple[WorkflowJob, ...]:
                 environment=job.get("environment")
                 if isinstance(job.get("environment"), str)
                 else None,
-                runs_on=job.get("runs-on") if isinstance(job.get("runs-on"), str) else None,
+                runs_on=_parse_runs_on(job.get("runs-on")),
                 default_shell=_parse_default_shell(
                     job.get("defaults"), workflow_path, (*job_path, "defaults")
                 ),

@@ -102,6 +102,22 @@ jobs:
     )
 
 
+def test_parse_workflow_normalizes_singleton_runs_on_array():
+    parsed = parse_workflow(
+        Path(".github/workflows/array-runner.yml"),
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: [ubuntu-latest]
+    steps:
+      - run: echo safe
+""",
+    )
+
+    assert parsed.jobs[0].runs_on == "ubuntu-latest"
+
+
 def test_parse_workflow_normalizes_effective_shell_fields():
     parsed = parse_workflow(
         Path(".github/workflows/shells.yml"),

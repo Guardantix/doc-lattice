@@ -1219,6 +1219,53 @@ def test_global_audit_fails_closed_on_unsupported_shell_semantics(workflow: str)
 
 
 @pytest.mark.parametrize(
+    "runner",
+    [
+        "ubuntu-slim",
+        "ubuntu-22.04",
+        "ubuntu-24.04",
+        "ubuntu-26.04",
+        "ubuntu-22.04-arm",
+        "ubuntu-24.04-arm",
+        "ubuntu-26.04-arm",
+        "macos-14",
+        "macos-15",
+        "macos-26",
+        "macos-15-intel",
+        "macos-26-intel",
+    ],
+)
+def test_global_audit_scans_documented_non_windows_hosted_runner(runner: str):
+    document = _workflow(
+        f"""\
+on: pull_request
+jobs:
+  audit:
+    runs-on: {runner}
+    steps:
+      - run: doc-lattice linear
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {"PR_LINEAR_INVOCATION"}
+
+
+def test_global_audit_scans_singleton_array_hosted_runner():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: [ubuntu-latest]
+    steps:
+      - run: doc-lattice linear
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == {"PR_LINEAR_INVOCATION"}
+
+
+@pytest.mark.parametrize(
     "script",
     [
         "doc-lattice reconcile --all --dry-run",

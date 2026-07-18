@@ -71,7 +71,25 @@ _BASH_SHELL_EXECUTABLES = frozenset(
 _BASH_LONG_FLAGS = frozenset({"--noprofile", "--norc"})
 _BASH_SHORT_FLAGS = frozenset({"e", "n", "u", "v", "x"})
 _BASH_O_OPTIONS = frozenset({"errexit", "nounset", "pipefail", "xtrace"})
-_BASH_DEFAULT_RUNNERS = frozenset({"ubuntu-latest", "macos-latest"})
+# Keep this exact and fail closed for labels outside GitHub's documented standard runners.
+_BASH_DEFAULT_RUNNERS = frozenset(
+    {
+        "ubuntu-slim",
+        "ubuntu-latest",
+        "ubuntu-22.04",
+        "ubuntu-24.04",
+        "ubuntu-26.04",
+        "ubuntu-22.04-arm",
+        "ubuntu-24.04-arm",
+        "ubuntu-26.04-arm",
+        "macos-latest",
+        "macos-14",
+        "macos-15",
+        "macos-26",
+        "macos-15-intel",
+        "macos-26-intel",
+    }
+)
 _SCRIPT_PLACEHOLDER = "{0}"
 _SCRIPT_SENTINEL = "__doc_lattice_script__"
 _CANONICAL_LINEAR_PATH = LINEAR_WORKFLOW_PATH.as_posix()
