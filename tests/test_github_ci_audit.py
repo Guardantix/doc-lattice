@@ -1736,6 +1736,25 @@ def test_discover_workflows_reads_direct_yaml_files_in_stable_relative_order(
     ]
 
 
+@pytest.mark.parametrize("filename", [".yml", ".yaml"])
+def test_discover_workflows_reads_extension_only_yaml_filenames(
+    tmp_path: Path,
+    filename: str,
+):
+    workflows = tmp_path / ".github/workflows"
+    workflows.mkdir(parents=True)
+    (workflows / filename).write_text("on: pull_request_target\njobs: {}\n", encoding="utf-8")
+
+    discovery = discover_workflows(tmp_path)
+
+    assert [document.path for document in discovery.documents] == [
+        Path(f".github/workflows/{filename}"),
+    ]
+    assert [trigger.name for document in discovery.documents for trigger in document.triggers] == [
+        "pull_request_target",
+    ]
+
+
 def test_discover_workflows_rejects_workflows_directory_file(tmp_path: Path):
     github = tmp_path / ".github"
     github.mkdir()

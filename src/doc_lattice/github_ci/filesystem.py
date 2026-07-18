@@ -37,7 +37,7 @@ _CANONICAL_PATHS: dict[ArtifactRole, PurePosixPath] = {
     target.role: target.relative_path for target in CANONICAL_ARTIFACT_TARGETS
 }
 _WORKFLOWS_DIRECTORY = PurePosixPath(".github/workflows")
-_WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
+_WORKFLOW_SUFFIXES = (".yml", ".yaml")
 MAX_WORKFLOW_FILES = 256
 MAX_WORKFLOW_BYTES = 1_048_576
 MAX_CUMULATIVE_WORKFLOW_BYTES = 8_388_608
@@ -198,7 +198,7 @@ def discover_workflows(root: Path) -> WorkflowDiscovery:
 def _bounded_workflow_names(directory: Path, display_directory: str) -> tuple[str, ...]:
     names: list[str] = []
     for entry in directory.iterdir():
-        if entry.suffix not in _WORKFLOW_SUFFIXES:
+        if not entry.name.endswith(_WORKFLOW_SUFFIXES):
             continue
         names.append(entry.name)
         if len(names) > MAX_WORKFLOW_FILES:
