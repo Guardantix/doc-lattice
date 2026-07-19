@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Explicit `init --github --repository OWNER/REPO` generation for create-only managed offline,
+  trusted Linear, and human-run GitHub bootstrap artifacts.
+- A reviewed two-stage GitHub environment bootstrap that verifies an exact `main` deployment
+  policy before a maintainer separately sets the Linear credential.
+- Read-only `ci audit` policy checks and interactive `ci refresh` support for managed upgrades,
+  repository renames, and transfers.
+
+### Security
+
+- The generated Linear workflow uses a dedicated environment-only credential, maps it only on the
+  final trusted step, and never exposes it to the generated pull-request workflow.
+- Existing installations must migrate the repository-scoped `LINEAR_API_KEY` to the protected
+  environment and remove unmarked canonical and hand-written Linear workflows before
+  `init --github`. See
+  [Managed GitHub and Linear setup](README.md#managed-github-and-linear-setup) for the full
+  migration and secret-cleanup procedure.
+
 ## [2.0.0] - 2026-07-14
 
 ### Added

@@ -227,3 +227,39 @@ def test_supported_docs_describe_conflict_safe_reconcile():
 
     for token in ("persistence.py", "reconcile_transaction.py"):
         assert token in claude
+
+
+def test_supported_docs_order_github_linear_secret_after_verified_policy():
+    # This test pins load-bearing invariants only: the documented setup ordering, the
+    # exact secret names and commands, and the banned trigger token. Editorial prose,
+    # dates, and long URLs are deliberately not asserted so wording can evolve freely.
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    # Setup steps are present and ordered: the dedicated environment secret is set
+    # exactly once, and only after the bootstrap reports its verified-policy phrase.
+    assert "1. Generate and review" in readme
+    assert "6. Verify both" in readme
+    assert readme.count("gh secret set DOC_LATTICE_LINEAR_API_KEY") == 1
+    verified = readme.index("environment policy verified")
+    secret_set = readme.index("gh secret set DOC_LATTICE_LINEAR_API_KEY")
+    assert verified < secret_set
+
+    # The required cleanup commands and the banned trigger token stay documented.
+    assert "gh secret delete LINEAR_API_KEY --repo" in readme
+    assert "gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo" in readme
+    assert "pull_request_target" in readme
+
+    # The changelog documents the managed-workflow adoption command.
+    assert "init --github" in changelog
+
+
+def test_architecture_records_external_github_administration_boundary():
+    architecture = (_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "reviewed external `gh` script" in architecture
+    assert "GitHub environment" in architecture
+    assert "linear_client" in architecture
+    assert "doc_lattice.github_ci" in architecture
+    assert "remote environment and secret-name metadata" in architecture
+    assert "ownership metadata rather than byte equality" in architecture
+    assert "byte-level comparison" in architecture

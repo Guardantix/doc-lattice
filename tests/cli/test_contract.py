@@ -120,6 +120,30 @@ def test_global_help_lists_no_color(monkeypatch):
     assert "--no-color" in output
 
 
+def test_global_help_lists_ci():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    output = Text.from_ansi(result.stdout).plain
+    assert "ci" in output
+    assert "Audit or refresh managed GitHub CI artifacts." in output
+
+
+def test_ci_help_lists_audit_and_refresh():
+    result = runner.invoke(app, ["ci", "--help"])
+    assert result.exit_code == 0
+    output = Text.from_ansi(result.stdout).plain
+    assert "audit" in output
+    assert "refresh" in output
+
+
+@pytest.mark.parametrize("command", ["init", "ci"])
+def test_configless_commands_reject_config_option(command: str):
+    result = runner.invoke(app, [command, "--config", ".doc-lattice.yml"])
+    assert result.exit_code == 2
+    stderr = Text.from_ansi(result.stderr).plain
+    assert "No such option: --config" in stderr
+
+
 @pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])
 def test_json_commands_help_lists_indent(command, monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)

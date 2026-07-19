@@ -1,6 +1,7 @@
 """Tests for shared durable filesystem persistence primitives."""
 
 import hashlib
+import os
 import stat
 from pathlib import Path
 
@@ -226,6 +227,33 @@ def test_atomic_replace_bytes_replaces_target_and_cleans_stage(tmp_path: Path):
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
 
 
+def test_atomic_replace_bytes_at_stays_with_open_directory_after_path_is_replaced(
+    tmp_path: Path,
+):
+    root = tmp_path / "root"
+    displaced_root = tmp_path / "displaced-root"
+    root.mkdir()
+    target = root / "artifact.txt"
+    target.write_bytes(b"old")
+    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        root.rename(displaced_root)
+        root.mkdir()
+        (root / target.name).write_bytes(b"replacement root bytes")
+
+        persistence.atomic_replace_bytes_at(
+            fd,
+            target.name,
+            b"new",
+            prefix=".artifact.txt.replace.",
+        )
+    finally:
+        os.close(fd)
+
+    assert (root / target.name).read_bytes() == b"replacement root bytes"
+    assert (displaced_root / target.name).read_bytes() == b"new"
+
+
 def test_atomic_replace_bytes_preserves_existing_destination_mode(tmp_path: Path):
     destination = tmp_path / "doc.md"
     destination.write_bytes(b"old")
@@ -415,6 +443,31 @@ def test_atomic_create_bytes_creates_absent_target_and_cleans_stage(tmp_path: Pa
 
     assert destination.read_bytes() == b"created"
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
+
+
+def test_atomic_create_bytes_at_stays_with_open_directory_after_path_is_replaced(
+    tmp_path: Path,
+):
+    root = tmp_path / "root"
+    displaced_root = tmp_path / "displaced-root"
+    root.mkdir()
+    target_name = "artifact.txt"
+    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        root.rename(displaced_root)
+        root.mkdir()
+
+        persistence.atomic_create_bytes_at(
+            fd,
+            target_name,
+            b"created",
+            prefix=".artifact.txt.create.",
+        )
+    finally:
+        os.close(fd)
+
+    assert not (root / target_name).exists()
+    assert (displaced_root / target_name).read_bytes() == b"created"
 
 
 def test_atomic_create_bytes_raises_cleanup_error_after_successful_create(

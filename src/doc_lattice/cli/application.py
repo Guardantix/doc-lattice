@@ -6,6 +6,7 @@ import typer
 
 from .. import __version__
 from .commands.check import register_check
+from .commands.ci import register_ci
 from .commands.graph import register_graph
 from .commands.impact import register_impact
 from .commands.init import register_init
@@ -28,7 +29,7 @@ def create_app(*, runtime_factory: RuntimeFactory = default_runtime) -> typer.Ty
         runtime_factory: Factory called once for every application invocation.
 
     Returns:
-        A new Typer application with all seven commands registered.
+        A new Typer application with all supported commands registered.
     """
     application = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -57,6 +58,7 @@ def create_app(*, runtime_factory: RuntimeFactory = default_runtime) -> typer.Ty
     register_reconcile(application)
     register_graph(application)
     register_linear(application)
+    register_ci(application)
     register_init(application)
     return application
 

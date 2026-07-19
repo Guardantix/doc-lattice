@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import secrets
 import stat
 import tempfile
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from .constants import PERSISTENCE_TEMP_SUFFIX
 
 _IS_WINDOWS = os.name == "nt"
+_STAGE_NAME_ATTEMPTS = 128
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -51,6 +53,108 @@ def sync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _sync_directory_fd(directory_fd: int) -> None:
+    """Flush metadata for an already-open directory descriptor."""
+    if not _IS_WINDOWS:
+        os.fsync(directory_fd)
+
+
+def _require_directory_entry_name(name: str, *, description: str) -> None:
+    """Require one basename so a dirfd operation cannot escape its directory."""
+    separators = (os.sep, os.altsep)
+    if (
+        not name
+        or name in {".", ".."}
+        or any(separator and separator in name for separator in separators)
+    ):
+        raise ValueError(f"{description} must name one directory entry")
+
+
+def _open_stage_at(directory_fd: int, prefix: str) -> tuple[int, str]:
+    """Create one private random staging file inside ``directory_fd``."""
+    _require_directory_entry_name(prefix, description="staging prefix")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for _ in range(_STAGE_NAME_ATTEMPTS):
+        staged_name = f"{prefix}{secrets.token_hex(16)}{PERSISTENCE_TEMP_SUFFIX}"
+        try:
+            return os.open(staged_name, flags, 0o600, dir_fd=directory_fd), staged_name
+        except FileExistsError:
+            continue
+    raise FileExistsError("could not allocate a unique durable staging file")
+
+
+def _add_unpublished_stage_cleanup_note_at(
+    primary: OSError,
+    staged_name: str,
+    cleanup_error: OSError,
+) -> None:
+    """Attach manual remediation for an unpublished descriptor-relative stage orphan."""
+    primary.add_note(
+        f"durable cleanup failed for helper-owned stage {staged_name}: {cleanup_error}; "
+        "it is not governed by a recovery journal, so inspect and remove it manually "
+        "when safe"
+    )
+
+
+def _durable_unlink_at(directory_fd: int, name: str) -> None:
+    """Remove one descriptor-relative artifact and synchronize its directory."""
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    _sync_directory_fd(directory_fd)
+
+
+def _durable_unlink_at_preserving_error(
+    directory_fd: int,
+    staged_name: str,
+    primary: OSError,
+) -> None:
+    """Clean a descriptor-relative stage without replacing the primary error."""
+    try:
+        _durable_unlink_at(directory_fd, staged_name)
+    except OSError as cleanup_error:
+        _add_unpublished_stage_cleanup_note_at(primary, staged_name, cleanup_error)
+
+
+def _stage_bytes_at(
+    directory_fd: int,
+    destination_name: str,
+    data: bytes,
+    *,
+    prefix: str,
+) -> str:
+    """Write and synchronize one private staging file under an open directory."""
+    _require_directory_entry_name(destination_name, description="destination name")
+    try:
+        destination_stat = os.stat(
+            destination_name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        destination_mode = None
+    else:
+        destination_mode = (
+            stat.S_IMODE(destination_stat.st_mode)
+            if stat.S_ISREG(destination_stat.st_mode)
+            else None
+        )
+    fd, staged_name = _open_stage_at(directory_fd, prefix)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            if destination_mode is not None and not _IS_WINDOWS:
+                os.fchmod(handle.fileno(), destination_mode)
+            os.fsync(handle.fileno())
+        _sync_directory_fd(directory_fd)
+    except OSError as primary:
+        _durable_unlink_at_preserving_error(directory_fd, staged_name, primary)
+        raise
+    return staged_name
 
 
 def _add_unpublished_stage_cleanup_note(
@@ -155,6 +259,38 @@ def atomic_replace_bytes(path: Path, data: bytes, *, prefix: str) -> None:
         raise
 
 
+def atomic_replace_bytes_at(
+    directory_fd: int,
+    destination_name: str,
+    data: bytes,
+    *,
+    prefix: str,
+) -> None:
+    """Durably replace one descriptor-relative destination with exact bytes.
+
+    The staging file, atomic rename, and directory synchronization all remain relative to
+    ``directory_fd``. This lets a caller retain publication ownership after the directory's
+    pathname is renamed or recreated.
+    """
+    staged_name = _stage_bytes_at(
+        directory_fd,
+        destination_name,
+        data,
+        prefix=prefix,
+    )
+    try:
+        os.replace(
+            staged_name,
+            destination_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        _sync_directory_fd(directory_fd)
+    except OSError as primary:
+        _durable_unlink_at_preserving_error(directory_fd, staged_name, primary)
+        raise
+
+
 def atomic_create_bytes(path: Path, data: bytes, *, prefix: str) -> None:
     """Durably create a path without replacing an existing artifact.
 
@@ -177,6 +313,39 @@ def atomic_create_bytes(path: Path, data: bytes, *, prefix: str) -> None:
         durable_unlink(staged)
     except OSError as cleanup_error:
         _add_unpublished_stage_cleanup_note(cleanup_error, staged, cleanup_error)
+        raise
+
+
+def atomic_create_bytes_at(
+    directory_fd: int,
+    destination_name: str,
+    data: bytes,
+    *,
+    prefix: str,
+) -> None:
+    """Durably create one descriptor-relative destination without replacing a winner."""
+    staged_name = _stage_bytes_at(
+        directory_fd,
+        destination_name,
+        data,
+        prefix=prefix,
+    )
+    try:
+        os.link(
+            staged_name,
+            destination_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        _sync_directory_fd(directory_fd)
+    except OSError as primary:
+        _durable_unlink_at_preserving_error(directory_fd, staged_name, primary)
+        raise
+    try:
+        _durable_unlink_at(directory_fd, staged_name)
+    except OSError as cleanup_error:
+        _add_unpublished_stage_cleanup_note_at(cleanup_error, staged_name, cleanup_error)
         raise
 
 
