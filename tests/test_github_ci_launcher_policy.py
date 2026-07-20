@@ -175,3 +175,15 @@ def test_path_form_launcher_refuses():
         assert resolution.kind == "refused"
         assert resolution.reason_category == "policy-unresolvable"
         assert resolution.offset == 0
+
+
+def test_wrapper_head_refuses():
+    for wrapper in ("command", "exec", "builtin", "env"):
+        resolution = resolve_command(lit(wrapper, "doc-lattice", "linear"))
+        assert resolution.kind == "refused", wrapper
+        assert resolution.reason_category == "policy-unresolvable", wrapper
+        assert resolution.offset == 0, wrapper
+
+
+def test_echo_doc_lattice_stays_not_candidate():
+    assert resolve_command(lit("echo", "doc-lattice")).kind == "not_candidate"

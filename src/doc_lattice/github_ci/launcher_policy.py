@@ -33,6 +33,12 @@ _LAUNCHER_FLAG_OPTIONS: frozenset[str] = frozenset({"--no-sync"})
 # where a marker-bearing path-form launch would certify with no invocation.
 _LAUNCHER_BASENAMES: frozenset[str] = frozenset({"uvx", "uv"})
 
+# Shell command wrappers that can prepend a doc-lattice launch through forms the floor grammar
+# does not model (env option runs, exec/command/builtin re-dispatch). The old scanner resolves
+# through these; the floor does not grow to match, so a wrapper head fails closed rather than
+# leaving a marker-bearing wrapper launch to certify off-grammar or drop its invocation silently.
+_WRAPPER_HEADS: frozenset[str] = frozenset({"command", "exec", "builtin", "env"})
+
 # Root options between the executable and its subcommand, from shell_scanner.py:261-263.
 # --no-color is skipped; --help and --version are eager options that resolve with no
 # invocation before any subcommand runs.
@@ -128,9 +134,11 @@ def resolve_command(words: tuple[ScanWord, ...]) -> CandidateResolution:
         return _resolve_launcher_payload(words, 1)
     if head == "uv":
         return _resolve_uv(words)
-    if _basename(head) in _LAUNCHER_BASENAMES:
-        # Path-form launcher (basename matches but text is not the bare word); fail closed so a
-        # marker-bearing path-form launch cannot certify with no invocation.
+    if head in _WRAPPER_HEADS or _basename(head) in _LAUNCHER_BASENAMES:
+        # Fail closed on a shell wrapper head (command, exec, builtin, env), whose off-grammar
+        # re-dispatch the floor does not model, or a path-form launcher (basename matches but the
+        # text is not the bare word). Either could carry a marker-bearing launch, so neither is
+        # allowed to certify off-grammar or drop its invocation silently.
         return _refused(words[0].start)
     return _NOT_CANDIDATE
 
