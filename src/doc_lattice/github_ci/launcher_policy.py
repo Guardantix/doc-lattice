@@ -28,10 +28,15 @@ _DOC_LATTICE = "doc-lattice"
 # look-alikes through _looks_like_doc_lattice, so this set is for the head position only.
 _DOC_LATTICE_HEADS: frozenset[str] = frozenset({"doc-lattice", "doc-lattice.exe"})
 
-# Launcher options recognized before the payload, adapted from shell_scanner.py:2606 and
-# shell_scanner.py:2713. Only the options this contract names are recognized; any other
-# option-like word before the payload fails closed.
-_LAUNCHER_VALUE_OPTIONS: frozenset[str] = frozenset({"--python", "--from", "--with"})
+# Value-taking launcher options recognized before the payload, adapted from shell_scanner.py:2606
+# and shell_scanner.py:2713. The set splits by launcher form: --from selects the payload package
+# for the package-form launchers only (uvx and uv tool run). uv run does not accept --from, and the
+# old scanner reports an unresolved uv launcher option there, so the floor refuses it before the
+# payload rather than skipping it and certifying a marker-bearing source with no invocation.
+# --python and --with are shared by both forms. Only the options this contract names are
+# recognized; any other option-like word before the payload fails closed.
+_PACKAGE_FORM_VALUE_OPTIONS: frozenset[str] = frozenset({"--python", "--from", "--with"})
+_COMMAND_FORM_VALUE_OPTIONS: frozenset[str] = frozenset({"--python", "--with"})
 _LAUNCHER_FLAG_OPTIONS: frozenset[str] = frozenset({"--no-sync"})
 
 # A first word whose basename is one of these but whose text is not the bare launcher word is a
@@ -212,12 +217,15 @@ def _resolve_launcher_payload(
         start: The index of the first word after the launcher head.
         package_form: True when the launcher (uvx or uv tool run) treats the payload as a
             package specification whose version and extras normalize; False when the launcher
-            (uv run) launches a literal command matched by basename alone.
+            (uv run) launches a literal command matched by basename alone. The form also narrows
+            the recognized value options: --from selects the payload package in package form only,
+            so uv run refuses a --from before the payload rather than skipping it.
 
     Returns:
         The command's ``CandidateResolution``.
     """
     index = start
+    value_options = _PACKAGE_FORM_VALUE_OPTIONS if package_form else _COMMAND_FORM_VALUE_OPTIONS
     while index < len(words):
         word = words[index]
         if word.unstable:
@@ -226,7 +234,7 @@ def _resolve_launcher_payload(
         if text == "":
             break
         option_name = text.split("=", 1)[0]
-        if option_name in _LAUNCHER_VALUE_OPTIONS:
+        if option_name in value_options:
             if "=" in text:
                 index += 1
                 continue

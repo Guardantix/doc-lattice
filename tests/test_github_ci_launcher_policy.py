@@ -324,3 +324,37 @@ def test_bare_exe_head_resolves_with_no_invocation():
     resolution = resolve_command(lit("doc-lattice.exe"))
     assert resolution.kind == "resolved"
     assert resolution.invocation is None
+
+
+def test_uv_run_from_option_refuses():
+    # uv run does not accept --from (uvx does); the old scanner reports an unresolved uv launcher
+    # option there, so the floor refuses it before the payload rather than certifying a
+    # marker-bearing source with no invocation. --from starts at offset 7 under the lit() helper.
+    resolution = resolve_command(lit("uv", "run", "--from", "doc-lattice", "check"))
+    assert resolution.kind == "refused"
+    assert resolution.reason_category == "policy-unresolvable"
+    assert resolution.offset == 7
+
+
+def test_uv_run_from_attached_value_refuses():
+    resolution = resolve_command(lit("uv", "run", "--from=doc-lattice", "check"))
+    assert resolution.kind == "refused"
+    assert resolution.reason_category == "policy-unresolvable"
+    assert resolution.offset == 7
+
+
+def test_uv_tool_run_from_option_still_resolves():
+    # uv tool run is a package-form launcher, so it keeps --from and resolves the payload.
+    assert resolve_command(
+        lit("uv", "tool", "run", "--from", "doc-lattice", "doc-lattice", "check")
+    ).invocation == ("check", False)
+
+
+def test_uv_run_shared_options_still_resolve():
+    # --with and --python stay recognized for uv run; only --from is form-restricted.
+    assert resolve_command(
+        lit("uv", "run", "--with", "pyodide-build", "doc-lattice", "check")
+    ).invocation == ("check", False)
+    assert resolve_command(
+        lit("uv", "run", "--python", "3.13", "doc-lattice", "check")
+    ).invocation == ("check", False)
