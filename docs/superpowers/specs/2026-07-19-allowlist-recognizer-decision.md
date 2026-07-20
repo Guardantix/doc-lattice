@@ -148,6 +148,23 @@ no longer requires evaluation-host artifacts (`77fa164`). The frozen corpus exer
 reserved word in command position, so every recorded gate result and the verdict remain
 unchanged.
 
+A third PR #101 review round found three further dormant-module defects. The D1 reachability
+splitter treated a `&&` nested inside a parenthesized group as top-level, so
+`${{ !(true && github.event_name == 'push' && true) }}` pruned a job that does run on pull
+requests; an unquoted parenthesis is now a structural failure and such a condition stays unknown
+(`2c7e071`). An empty command closed by a second list operator anchored its refusal at that
+second operator instead of the earlier pending operator that already had no right-hand command,
+against D4's earliest-offset rule (`a2aa7fe`). A mid-word lexical refusal discarded the partially
+read word, so a command-level failure inside it could not anchor earlier, and
+`doc-lattice check $X#foo` reported the `#` at offset 20 instead of the unquoted expansion at
+offset 18; the partial word is now retained for the earliest-refusal choice (`0cfc554`). The
+first repair affects only the never-wired D1 predicate, and the frozen corpus contains no job
+`if:` condition, so no corpus outcome depends on it. The two scanner repairs move only the anchor
+and category of refusals on sources that were already uninspectable (for example the extglob
+replay entry `doc-lattice !(reconcile) --all`, whose anchor moves from the `(` to the
+unresolvable `!` word before it); no source's status or invocation evidence changes, so every
+recorded gate result and the verdict remain unchanged.
+
 ## 6. Parser-backed candidate scoping
 
 Per the issue thread and its review comments, the successor is a doc-lattice-owned static helper
