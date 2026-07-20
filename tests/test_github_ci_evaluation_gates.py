@@ -46,3 +46,40 @@ def test_gate2_replay_divergences_stay_in_predeclared_categories():
     prelabeled = json.loads((CHECKPOINT / "category_d_exceptions.json").read_text())
     assert category_d == prelabeled == []
     assert {r["category"] for r in records} <= allowed
+
+
+def test_gate3_tier1_offline_template_certifies(tmp_path):
+    from github_ci_evaluation_harness import evaluate_workflow, load_tier3a_cases  # noqa: PLC0415
+
+    from doc_lattice.github_ci.render import render_workflows  # noqa: PLC0415
+    from doc_lattice.github_ci.workflow_parser import parse_workflow  # noqa: PLC0415
+
+    offline, _linear = render_workflows("OWNER/REPO", "2.0.0")
+    target = tmp_path / "offline.yml"
+    target.write_text(offline.text)
+    document = parse_workflow(target, target.read_text())
+    evaluation = evaluate_workflow(document)
+
+    assert evaluation.diagnostics == ()
+    scans = [e for e in evaluation.evaluations if e.source_kind == "run_body"]
+    assert len(scans) == 1
+    assert scans[0].scan.status == "certified"
+    assert scans[0].scan.invocations == (("ci", False), ("check", False), ("lint", False))
+
+    frozen = next(case for case in load_tier3a_cases() if case["id"] == "offline-template-block")
+    runs = [step.run for job in document.jobs for step in job.steps if step.run is not None]
+    assert runs[0].strip() == frozen["source"].strip()
+
+
+def test_gate4_tier2_repository_workflow_is_clean():
+    from github_ci_evaluation_harness import evaluate_workflow  # noqa: PLC0415
+
+    from doc_lattice.github_ci.workflow_parser import parse_workflow  # noqa: PLC0415
+
+    path = Path(".github/workflows/ci.yml")
+    document = parse_workflow(path, path.read_text())
+    evaluation = evaluate_workflow(document)
+
+    assert "release" in evaluation.pruned_jobs
+    assert evaluation.diagnostics == ()
+    assert all(e.scan.status == "not_applicable" for e in evaluation.evaluations)

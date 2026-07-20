@@ -10,9 +10,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from doc_lattice.constants import AuditSourceKind
 from doc_lattice.error_types import ConfigError
-from doc_lattice.github_ci.direct_marker_scanner import scan_execution_source
-from doc_lattice.github_ci.model import BlockScan
+from doc_lattice.github_ci import audit as audit_module
+from doc_lattice.github_ci.direct_marker_scanner import DIRECT_MARKER_RE, scan_execution_source
+from doc_lattice.github_ci.model import AuditDiagnostic, BlockScan, WorkflowDocument
+from doc_lattice.github_ci.reachability import job_is_pr_reachable
 from doc_lattice.github_ci.shell_scanner import (
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
@@ -138,3 +141,101 @@ def replay_records() -> list[dict]:
             }
         )
     return records
+
+
+@dataclass(frozen=True, slots=True)
+class SourceEvaluation:
+    """One scanned execution source and its BlockScan."""
+
+    path: str
+    job_id: str
+    step_index: int
+    source_kind: str
+    scan: BlockScan
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowEvaluation:
+    """D1+D6 evaluation outcome for one workflow document."""
+
+    pruned_jobs: tuple[str, ...]
+    evaluations: tuple[SourceEvaluation, ...]
+    diagnostics: tuple[AuditDiagnostic, ...]
+
+
+def _body_shell_class(shell: str | None, runs_on: str | None) -> str:
+    """Classify a run body's effective shell per D6: BASH, NON_BASH, or UNKNOWN."""
+    if shell is not None:
+        # Spec-mandated reuse of the frozen D6 recognition set; SLF001 is not enabled in this
+        # repo's Ruff configuration, so no noqa directive is needed (and RUF100 rejects one).
+        bash = audit_module._supports_bash_run_body(shell)
+        return "BASH" if bash else "NON_BASH"
+    if runs_on is not None and runs_on.casefold() in audit_module._BASH_DEFAULT_RUNNERS:
+        return "BASH"
+    return "UNKNOWN"
+
+
+def evaluate_workflow(document: WorkflowDocument) -> WorkflowEvaluation:
+    """Apply D1 pruning and the D6 composition table to one workflow's PR scan."""
+    path = str(document.path)
+    event_names = frozenset(trigger.name for trigger in document.triggers) & audit_module.PR_EVENTS
+    pruned: list[str] = []
+    evaluations: list[SourceEvaluation] = []
+    diagnostics: list[AuditDiagnostic] = []
+
+    def scan_source(job_id: str, step_index: int, kind: AuditSourceKind, text: str) -> BlockScan:
+        scan = scan_execution_source(text)
+        evaluations.append(SourceEvaluation(path, job_id, step_index, kind, scan))
+        if scan.status == "uninspectable":
+            diagnostics.append(
+                AuditDiagnostic(
+                    path,
+                    job_id,
+                    step_index,
+                    kind,
+                    "UNINSPECTABLE_SOURCE",
+                    scan.reason or "",
+                    scan.offset,
+                )
+            )
+        return scan
+
+    def semantics_diagnostic(job_id: str, step_index: int, kind: AuditSourceKind) -> None:
+        diagnostics.append(
+            AuditDiagnostic(
+                path,
+                job_id,
+                step_index,
+                kind,
+                "UNSUPPORTED_EXECUTION_SEMANTICS",
+                "marker-bearing source executes under semantics the audit cannot inspect",
+                None,
+            )
+        )
+
+    for job in document.jobs:
+        if not job_is_pr_reachable(job.if_condition, event_names):
+            pruned.append(job.job_id)
+            continue
+        for step in job.steps:
+            if step.run is None:
+                continue
+            shell = step.shell or job.default_shell or document.default_shell
+            body_class = _body_shell_class(shell, job.runs_on)
+            template = (
+                shell.replace(audit_module._SCRIPT_PLACEHOLDER, audit_module._SCRIPT_SENTINEL)
+                if shell is not None
+                else None
+            )
+            marker_in_template = bool(template and DIRECT_MARKER_RE.search(template))
+            marker_in_body = bool(DIRECT_MARKER_RE.search(step.run))
+            if marker_in_template and template is not None:
+                scan_source(job.job_id, step.index, "shell_template", template)
+                if body_class != "BASH":
+                    semantics_diagnostic(job.job_id, step.index, "shell_template")
+            if marker_in_body:
+                if body_class == "BASH":
+                    scan_source(job.job_id, step.index, "run_body", step.run)
+                else:
+                    semantics_diagnostic(job.job_id, step.index, "run_body")
+    return WorkflowEvaluation(tuple(pruned), tuple(evaluations), tuple(diagnostics))
