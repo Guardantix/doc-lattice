@@ -300,9 +300,26 @@ class _Scanner:
         self.after_list_op = None
         return self._close_statement()
 
-    def _scan_command(self) -> _CommandEnd | _Refusal:  # noqa: PLR0911
-        """Read one command's words up to the next list or statement delimiter or source end."""
+    def _scan_command(self) -> _CommandEnd | _Refusal:
+        """Read one command, reporting the earliest command-level or lexical refusal (spec D4).
+
+        The lexical scan discards the words already read when it refuses mid-command, but the
+        command those words form may fail the grammar or policy at an earlier source offset. The
+        earliest failure by offset wins; a tie keeps the lexical refusal and its category, so a
+        control-flow keyword head (refused lexically at its own offset) ties the policy refusal a
+        time-style head would raise there and stays control-flow-keyword. The command-level
+        refusal is derived purely, so it never charges the work meter or flushes an invocation.
+        """
         words: list[_Word] = []
+        outcome = self._scan_command_words(words)
+        if isinstance(outcome, _Refusal) and words:
+            command_refusal = self._command_refusal(tuple(words))
+            if command_refusal is not None and command_refusal.offset < outcome.offset:
+                return command_refusal
+        return outcome
+
+    def _scan_command_words(self, words: list[_Word]) -> _CommandEnd | _Refusal:  # noqa: PLR0911
+        """Read one command's words up to the next list or statement delimiter or source end."""
         length = len(self.source)
         while self.pos < length:
             if self.work.over():
@@ -510,32 +527,70 @@ class _Scanner:
         return None
 
     def _resolve_and_flush(self, words: tuple[_Word, ...]) -> _Refusal | None:
-        """Apply the command-level grammar and policy, flushing a proven invocation."""
+        """Apply the command-level grammar and policy, charging work and flushing an invocation."""
+        refusal = self._precheck_command_refusal(words)
+        if refusal is not None:
+            return refusal
+        if self._is_assignment_only(words):
+            return None
+        scan_words = tuple(ScanWord(w.text, w.start, w.end, w.unstable) for w in words)
+        if not self.work.charge(len(scan_words)):
+            return _Refusal(words[0].start, _CAP_EXCEEDED)
+        return self._apply_resolution(resolve_command(scan_words), words[0].start)
+
+    def _command_refusal(self, words: tuple[_Word, ...]) -> _Refusal | None:
+        """Derive one command's grammar-or-policy refusal without charging or flushing (spec D4).
+
+        Pure counterpart to _resolve_and_flush that _scan_command uses to surface a command-level
+        failure preceding a later lexical refusal. It shares the same prechecks and policy-refusal
+        mapping, but never charges the work meter, appends an invocation, or touches the invocation
+        cap, so the accounting is identical whether or not this path runs.
+        """
+        refusal = self._precheck_command_refusal(words)
+        if refusal is not None:
+            return refusal
+        if self._is_assignment_only(words):
+            return None
+        scan_words = tuple(ScanWord(w.text, w.start, w.end, w.unstable) for w in words)
+        return self._resolution_refusal(resolve_command(scan_words), words[0].start)
+
+    def _precheck_command_refusal(self, words: tuple[_Word, ...]) -> _Refusal | None:
+        """Return the earliest grammar refusal shared by both command-level paths, or None.
+
+        The checks are the assignment prefix (a NAME= prefix before a command word), an unstable
+        first word, then an unquoted expansion in any command word. A lone assignment word is not
+        a command and returns None here, deferring to each caller's assignment-only guard.
+        _scan_command refuses a control-flow keyword head before a command closes, so the flushing
+        path never sees one; the pure path can, and there the keyword ties its own policy refusal
+        on offset (see _scan_command) and keeps the lexical control-flow-keyword category.
+        """
         first = words[0]
         if _ASSIGNMENT_RE.match(self.source, first.start) is not None:
             if len(words) > 1:
                 return _Refusal(first.start, _ASSIGNMENT_PREFIX)
             return None
-        # A control-flow keyword in command position is refused earlier, in _scan_command, so the
-        # command's first word is never a plain control-flow keyword by the time it reaches here.
         if first.unstable:
             return _Refusal(first.start, _UNSTABLE_FIRST_WORD)
         for word in words:
             if word.unquoted_expansion_offset is not None:
                 return _Refusal(word.unquoted_expansion_offset, _UNQUOTED_EXPANSION_IN_COMMAND_WORD)
-        scan_words = tuple(ScanWord(w.text, w.start, w.end, w.unstable) for w in words)
-        if not self.work.charge(len(scan_words)):
-            return _Refusal(first.start, _CAP_EXCEEDED)
-        return self._apply_resolution(resolve_command(scan_words), first.start)
+        return None
 
-    def _apply_resolution(self, resolution: CandidateResolution, anchor: int) -> _Refusal | None:
-        """Fold one policy disposition into the accumulated evidence."""
+    def _resolution_refusal(self, resolution: CandidateResolution, anchor: int) -> _Refusal | None:
+        """Map a refused policy disposition to its _Refusal; None for resolved or non-candidate."""
         if resolution.kind == "refused":
             category = resolution.reason_category
             return _Refusal(
                 resolution.offset if resolution.offset is not None else anchor,
                 category if category is not None else _POLICY_UNRESOLVABLE,
             )
+        return None
+
+    def _apply_resolution(self, resolution: CandidateResolution, anchor: int) -> _Refusal | None:
+        """Fold one policy disposition into the accumulated evidence, flushing a resolved one."""
+        refusal = self._resolution_refusal(resolution, anchor)
+        if refusal is not None:
+            return refusal
         if resolution.kind == "resolved" and resolution.invocation is not None:
             self.invocation_count += 1
             if self.invocation_count > _INVOCATION_CAP:

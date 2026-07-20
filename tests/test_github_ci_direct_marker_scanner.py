@@ -7,6 +7,7 @@ from doc_lattice.github_ci.direct_marker_scanner import (
     certified_command_words,
     scan_execution_source,
 )
+from doc_lattice.github_ci.model import BlockScan
 
 
 def test_marker_gate_not_applicable():
@@ -273,3 +274,53 @@ def test_semicolon_only_line_refuses():
     assert result.status == "uninspectable"
     assert result.reason_category == "unsupported-operator"
     assert result.offset == source.index(";")
+
+
+def test_earliest_policy_refusal_beats_later_pipe():
+    # D4: the unknown subcommand is a policy refusal at offset 12, earlier than the pipe at 23,
+    # so the earliest syntax-or-policy failure wins over the later lexical error.
+    result = scan_execution_source("doc-lattice frobnicate | cat")
+    assert result.status == "uninspectable"
+    assert result.reason_category == "policy-unresolvable"
+    assert result.offset == 12
+
+
+def test_earliest_assignment_prefix_beats_later_pipe():
+    result = scan_execution_source("FOO=bar doc-lattice check | cat")
+    assert result.status == "uninspectable"
+    assert result.reason_category == "assignment-prefix"
+    assert result.offset == 0
+
+
+def test_earliest_unstable_first_word_beats_later_pipe():
+    # An expansion in command position is an unstable first word refused at offset 0, earlier than
+    # the later pipe. The env-var spelling carries the direct marker so the source is scanned.
+    result = scan_execution_source('"$DOC_LATTICE" run | cat')
+    assert result.status == "uninspectable"
+    assert result.reason_category == "unstable-first-word"
+    assert result.offset == 0
+
+
+def test_clean_prefix_before_pipe_keeps_lexical_refusal():
+    # A cleanly resolving prefix yields no earlier command-level refusal, so the later pipe stands.
+    # The full BlockScan (work_charged=43 in particular) pins the pre-fix accounting: the pure
+    # earliest-refusal path never charges the work meter or flushes an invocation.
+    result = scan_execution_source("doc-lattice check | cat")
+    assert result == BlockScan(
+        "uninspectable",
+        (),
+        "unsupported-operator",
+        "unsupported shell operator at offset 18",
+        18,
+        43,
+    )
+
+
+def test_empty_command_before_pipe_keeps_lexical_refusal():
+    # A command with no scanned words (a leading pipe) is never intercepted by the command-level
+    # derivation, so the pipe is reported at its own offset. The payload carries the marker.
+    result = scan_execution_source("| doc-lattice")
+    assert result.status == "uninspectable"
+    assert result.reason_category == "unsupported-operator"
+    assert result.offset == 0
+    assert result.invocations == ()
