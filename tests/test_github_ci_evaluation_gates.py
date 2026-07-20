@@ -158,7 +158,7 @@ ADVERSARIAL_SOURCES = [
     ("nul-control", "doc-lattice check\x00\n"),
     ("carriage-return", "doc-lattice check\r\n"),
     ("token-storm", "doc-lattice check " + "x " * (_LIMITS["token_cap"] + 8)),
-    ("statement-storm", "# doc-lattice\n" + ";" * (_LIMITS["statement_cap"] + 8)),
+    ("statement-storm", "# doc-lattice\n" + "\n" * (_LIMITS["statement_cap"] + 8)),
     (
         "invocation-storm",
         "doc-lattice check\n" * (_LIMITS["invocation_cap"] + 1),
