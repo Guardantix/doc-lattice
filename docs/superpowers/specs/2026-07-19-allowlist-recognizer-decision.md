@@ -1,0 +1,158 @@
+# Allowlist recognizer decision record (issue #100)
+
+Date: 2026-07-20 (decision recorded; the evaluation spec is dated 2026-07-19)
+
+Status: decision record for the issue #100 allowlist recognizer evaluation. This document is
+non-authoritative. Durable user behavior transfers to [README.md](../../../README.md), durable
+decisions to [ARCHITECTURE.md](../../../ARCHITECTURE.md), and release history to
+[CHANGELOG.md](../../../CHANGELOG.md) when PR B lands.
+
+Issue: <https://github.com/Guardantix/doc-lattice/issues/100>
+
+Spec: [2026-07-19-allowlist-recognizer-design.md](2026-07-19-allowlist-recognizer-design.md)
+
+Baseline for all accounting in this record: commit `00737ca`.
+
+## 1. Verdict
+
+The D3 floor-grammar candidate is REJECTED by predeclared gate 6: candidate indeterminate 3 of
+20 against a budget of 2, and newly indeterminate 3 of 20 against a budget of 2 (fixtures 02,
+05, and 14: a command substitution with a pipe, a function definition, and a literal `${{ }}`
+template). Per the spec's failure path, only durable corpus, harness, results, and decision
+evidence merge; the evaluation implementation stays in the merged harness as the dormant
+`reachability.py`, `launcher_policy.py`, and `direct_marker_scanner.py` modules, referenced here
+by commit `bfc1f46`. The evaluation advances the parser-backed candidate (`mvdan/sh` family
+first), scoped in section 6.
+
+## 2. Gate results
+
+Every gate ran under both supported Python versions (3.13 and 3.14). Gates 1 through 5, 7, 8,
+and the CI half of 9 are pytest-enforced; the wall-clock half of gate 9 is the trusted
+fleetyard-only decision gate. Gates 1 through 5, 7, 8, and 9 pass; gate 6 fails by construction,
+and that recorded failure is the verdict above.
+
+| Gate | Budget | Measured result | Outcome |
+|------|--------|-----------------|---------|
+| 1. Corpus relabel | Every one of the 78 acceptance cases conforms to its checkpoint label and expected `BlockScan`. | 78 of 78 conform: 7 must-certify, 65 intentional-exit-2, 6 outside-direct-marker-contract. | Pass |
+| 2. Frozen replay inventory | Zero divergence outside categories (a) identical, (b) intentional exit 2, (c) outside direct-marker contract; category (d) empty absent a prelabeled exception. | 613 records (580 inventory, 13 Tier 3A, 20 Tier 3B): identical 266, intentional-exit-2 321, outside-direct-marker 26, unexplained 0, category (d) 0. | Pass |
+| 3. Tier 1, managed workflows | The rendered offline template's PR block certifies with its exact invocations; zero diagnostics. | Certified with invocations `(ci, false)`, `(check, false)`, `(lint, false)`; zero diagnostics. | Pass |
+| 4. Tier 2, this repository | `.github/workflows/ci.yml` reports zero diagnostics and zero findings. | The `release` job is pruned under D1; every PR-reachable block is not applicable under D2; zero diagnostics. | Pass |
+| 5. Tier 3A, documented conformance | 0 unexpected indeterminates over the documented invocation shapes. | 13 of 13 conform (11 certified, 2 uninspectable); 0 unexpected indeterminates. | Pass |
+| 6. Tier 3B, empirical envelopes | Candidate indeterminate at most 2 of 20; newly indeterminate at most 2 of 20; false-safe exactly 0; false positives exactly 0. | Candidate indeterminate 3 of 20 and newly indeterminate 3 of 20 (fixtures 02, 05, 14); false-safe 0; false positives 0. Both indeterminate budgets breach. | Fail (recorded rejection) |
+| 7. Semantic differential | Every layer agrees against the independent oracle. | Static layer 35 of 35 (`bash -n` plus shfmt structure), span reproduction 36 of 36, probe execution under pinned Bash 5.2.21(1)-release 36 of 36, boundary mutations 50 of 50. | Pass |
+| 8. Adversarial and bounds | Cap exhaustion and malformed tails produce deterministic `uninspectable` within bounds. | 9 adversarial inputs, each deterministic across repeated scans and within the work bound. | Pass |
+| 9. Complexity and performance | CI half: `work <= min(4,194,304, 4 * input_length + 4,096)` for every input. Trusted half: each version's median at or under the 250 ms ceiling. | CI half: 622 sources (580 inventory, 13 Tier 3A, 20 Tier 3B, 9 adversarial) all within bound. Trusted half (fleetyard, inventory 580): median 29.384 ms on CPython 3.13.14 and 25.302 ms on 3.14.6 against the 250 ms ceiling; candidate-to-baseline ratios 0.501 and 0.448. | Pass |
+
+Benchmark methodological caveat. The fleetyard timings above ran under ambient
+interactive-desktop load (one-minute load average roughly 6 to 8.5 on 8 logical cores, from
+steady-state Cinnamon, XRDP, and wezterm overhead, not a competing batch workload). That load
+biases the timings slower and noisier, the conservative direction. With the medians landing
+roughly 8.5x (3.13) and 9.9x (3.14) under the 250 ms ceiling, it could not flip the verdict, but
+the absolute numbers should not be read as idle-machine timings.
+
+## 3. Contract removals
+
+The D2 direct-marker gating replaces the previous notion of "direct invocation" with a
+"direct-marker contract". Two named contract removals follow. Both are reported separately in
+every benchmark result and are never silently reclassified as safe.
+
+1. Marker-free constructed executable names, for example `doc-"lattice" linear` (currently
+   accepted, `tests/test_github_ci_shell_scanner.py:31`). This is a deliberate contraction from
+   "direct invocation" to the new "direct-marker contract", a compatibility and security
+   reduction.
+2. Marker-free dynamically selected launcher payloads, for example `uvx "$PKG" ...`. This case
+   is already within the issue's declared dynamic and indirect exclusion; the gate makes it
+   explicit.
+
+## 4. Predeclaration integrity
+
+The predeclaration checkpoint landed as commit `7d1d2b2` (`test: land issue #100 predeclaration
+checkpoint`), PR A's first reviewed commit and the boundary that makes "inputs chosen first"
+independently auditable. The checkpoint carries two owner-adjudicated amendments: the
+insert-check substitution for the gate 7 boundary mutations, and the replay-inventory recapture
+that grew the frozen inventory from 550 to 580 entries.
+
+No checkpoint file changed after the freeze. `test_manifest_matches_artifacts`
+([tests/test_github_ci_checkpoint.py](../../../tests/test_github_ci_checkpoint.py)) runs
+`scripts/checkpoint_manifest.py --check` against the SHA-256
+[MANIFEST.sha256](../../../tests/fixtures/github_ci_checkpoint/MANIFEST.sha256), which is the
+auditable proof of that immutability.
+
+## 5. Replacement-surface accounting
+
+Symbol- and diff-based accounting against baseline `00737ca`, not line-range arithmetic. The
+three new dormant modules:
+
+| Module | Lines | Public symbols |
+|--------|-------|----------------|
+| [reachability.py](../../../src/doc_lattice/github_ci/reachability.py) | 98 | 1: `job_is_pr_reachable` |
+| [launcher_policy.py](../../../src/doc_lattice/github_ci/launcher_policy.py) | 418 | 3: `ScanWord`, `CandidateResolution`, `resolve_command` |
+| [direct_marker_scanner.py](../../../src/doc_lattice/github_ci/direct_marker_scanner.py) | 569 | 2: `scan_execution_source`, `certified_command_words` |
+
+Total: 6 public symbols across 1,085 module lines.
+
+`git diff --stat 00737ca...HEAD -- src/doc_lattice` reports 5 files changed and 1,181 insertions,
+0 deletions:
+
+```
+ src/doc_lattice/constants.py                       |  24 +
+ src/doc_lattice/github_ci/direct_marker_scanner.py | 569 +++++++++++++++++++++
+ src/doc_lattice/github_ci/launcher_policy.py       | 418 +++++++++++++++
+ src/doc_lattice/github_ci/model.py                 |  72 +++
+ src/doc_lattice/github_ci/reachability.py          |  98 ++++
+ 5 files changed, 1181 insertions(+)
+```
+
+`model.py` gains `AuditDiagnostic` and `AuditResult` plus the `BlockScan` result type; `constants.py`
+gains the status, reason-category, and diagnostic-code domains under the `Literal` plus
+`get_args()` plus `frozenset` pattern. No production line of
+`src/doc_lattice/github_ci/shell_scanner.py` changed in PR A; it is absent from the diff and
+remains the runtime scanner until PR B.
+
+Known limitation, dormant module. The work-counter helper `_advance_to` in
+[direct_marker_scanner.py](../../../src/doc_lattice/github_ci/direct_marker_scanner.py) charges a
+multi-character span in one call to `_WorkCounter.charge` but does not inspect that call's
+within-budget return value, so a jump that crosses the work limit is not detected at the crossing
+offset, only at the next `over()` check. The total charge is still accrued, so the meter cannot
+undercount; the gap is confined to the offset at which an overrun would be reported. It is real
+but unobserved on the corpus: every corpus source finished with an observed work margin of at
+least 4,114 units below the limit, so no source approached the crossing. Recorded here as a
+known, bounded limitation of the dormant module so it is not rediscovered from scratch.
+
+## 6. Parser-backed candidate scoping
+
+Per the issue thread and its review comments, the successor is a doc-lattice-owned static helper
+built directly on an exactly pinned `mvdan.cc/sh/v3` syntax API (`LangBash`, source supplied on
+stdin, with a doc-lattice-owned IR as the only production protocol). The reflection-derived typed
+JSON is acceptable for the differential oracles only, never as the production protocol.
+
+The successor evaluation requires its own spec revision and a fresh predeclaration checkpoint.
+The Tier 3B corpus and this harness are reusable, but every expected outcome must be re-derived
+under the successor grammar before any successor code runs.
+
+## 7. Evidence
+
+- Archived July 2026 bash-parser benchmark:
+  [docs/research/2026-07-bash-parser-benchmark/](../../research/2026-07-bash-parser-benchmark/),
+  with per-file SHA-256 hashes and provenance in
+  [PROVENANCE.md](../../research/2026-07-bash-parser-benchmark/PROVENANCE.md), labeled "internally
+  consistent, not independently reproducible". Audited totals (correct / false-safe /
+  indeterminate / false-positive over 234 executions): shfmt 3.13.1 = 69/1/8/0, tree-sitter-bash
+  0.25.1 = 58/5/14/1, bashlex 0.18 = 40/12/25/1. These artifacts are evidence for this record and
+  are never gate inputs.
+- Fleetyard benchmark JSON:
+  [py313.json](../../research/recognizer-benchmark/py313.json) and
+  [py314.json](../../research/recognizer-benchmark/py314.json), the trusted-half medians, ratios,
+  and ceiling recorded in the gate 9 row above.
+- Frozen predeclaration checkpoint:
+  [tests/fixtures/github_ci_checkpoint/](../../../tests/fixtures/github_ci_checkpoint/), with its
+  SHA-256 [MANIFEST.sha256](../../../tests/fixtures/github_ci_checkpoint/MANIFEST.sha256).
+- Gate automation:
+  [test_github_ci_evaluation_gates.py](../../../tests/test_github_ci_evaluation_gates.py) and
+  [test_github_ci_semantic_differential.py](../../../tests/test_github_ci_semantic_differential.py).
+
+## 8. Release freeze
+
+PR A bumps nothing; it lands this record and the archived evidence and changes no version
+surface. The next release stays frozen until the successor evaluation lands a decision and PR B
+ships the integration, per the spec's Delivery and Release sections.
