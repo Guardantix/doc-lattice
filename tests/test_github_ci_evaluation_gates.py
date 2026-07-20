@@ -85,6 +85,35 @@ def test_gate4_tier2_repository_workflow_is_clean():
     assert all(e.scan.status == "not_applicable" for e in evaluation.evaluations)
 
 
+@pytest.mark.parametrize("shell", ["python {0}", "bash {0}"])
+def test_d6_marker_free_template_with_placeholder_stays_not_applicable(tmp_path, shell):
+    """D6 row 1: a marker-free step is not applicable even when its template carries ``{0}``.
+
+    The ``{0}`` scan sentinel itself matches the direct-marker regex, so marker presence must
+    be judged on the author's template text, never on the sentinel-substituted scan input.
+    """
+    from github_ci_evaluation_harness import evaluate_workflow  # noqa: PLC0415
+
+    from doc_lattice.github_ci.workflow_parser import parse_workflow  # noqa: PLC0415
+
+    text = (
+        "name: repro\n"
+        "on: pull_request\n"
+        "jobs:\n"
+        "  demo:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f"      - shell: {shell}\n"
+        "        run: print(1)\n"
+    )
+    target = tmp_path / "repro.yml"
+    target.write_text(text)
+    evaluation = evaluate_workflow(parse_workflow(target, text))
+
+    assert evaluation.diagnostics == ()
+    assert evaluation.evaluations == ()
+
+
 def _tier3a_ids():
     from github_ci_evaluation_harness import load_tier3a_cases  # noqa: PLC0415
 

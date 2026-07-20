@@ -222,14 +222,15 @@ def evaluate_workflow(document: WorkflowDocument) -> WorkflowEvaluation:
                 continue
             shell = step.shell or job.default_shell or document.default_shell
             body_class = _body_shell_class(shell, job.runs_on)
-            template = (
-                shell.replace(audit_module._SCRIPT_PLACEHOLDER, audit_module._SCRIPT_SENTINEL)
-                if shell is not None
-                else None
-            )
-            marker_in_template = bool(template and DIRECT_MARKER_RE.search(template))
+            # D6's T column is judged on the author's template text: the scan sentinel that
+            # replaces {0} contains the direct marker itself, so testing the substituted text
+            # would misclassify every marker-free template that carries the placeholder.
+            marker_in_template = bool(shell is not None and DIRECT_MARKER_RE.search(shell))
             marker_in_body = bool(DIRECT_MARKER_RE.search(step.run))
-            if marker_in_template and template is not None:
+            if marker_in_template and shell is not None:
+                template = shell.replace(
+                    audit_module._SCRIPT_PLACEHOLDER, audit_module._SCRIPT_SENTINEL
+                )
                 scan_source(job.job_id, step.index, "shell_template", template)
                 if body_class != "BASH":
                     semantics_diagnostic(job.job_id, step.index, "shell_template")
