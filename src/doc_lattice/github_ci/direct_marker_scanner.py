@@ -195,6 +195,28 @@ def scan_execution_source(source: str) -> BlockScan:
     return _Scanner(source).run()
 
 
+def certified_command_words(source: str) -> tuple[tuple[str, ...], ...]:
+    """Expose the command structure of a certified source for the gate 7 differential.
+
+    Pure observability with no effect on ``scan_execution_source``. When the source certifies,
+    the scanner's tokenizer is rerun and every command's dequoted word texts are returned, one
+    tuple per command in source order, with one entry per ``&&``/``||`` list arm. Candidate and
+    non-candidate commands alike are reported; assignment-only statements contribute nothing,
+    matching the recognizer, which reports only commands. A source that does not certify yields
+    ``()`` and no structure is exposed.
+
+    Args:
+        source: The raw execution source text (a shell template or ``run:`` body).
+
+    Returns:
+        One tuple of dequoted word texts per command in source order, or ``()`` when the source
+        is not certified.
+    """
+    if scan_execution_source(source).status != "certified":
+        return ()
+    return _Scanner(source).command_words()
+
+
 @dataclass
 class _Scanner:
     """Iterative single-pass recognizer state for one execution source."""
@@ -225,6 +247,27 @@ class _Scanner:
             if refusal is not None:
                 return self._uninspectable(refusal)
         return BlockScan("certified", tuple(self.invocations), None, None, None, self.work.used)
+
+    def command_words(self) -> tuple[tuple[str, ...], ...]:
+        """Re-scan a certified source, returning each command's dequoted words in source order.
+
+        Assignment-only statements emit nothing; every other command emits its dequoted word
+        texts. The caller certifies the source before calling, so no refusal is reachable; an
+        unexpected one collapses to ``()`` rather than exposing partial structure.
+        """
+        commands: list[tuple[str, ...]] = []
+        length = len(self.source)
+        while self.pos < length:
+            outcome = self._scan_command()
+            if isinstance(outcome, _Refusal):
+                return ()
+            if outcome.words and not self._is_assignment_only(outcome.words):
+                commands.append(tuple(word.text for word in outcome.words))
+        return tuple(commands)
+
+    def _is_assignment_only(self, words: tuple[_Word, ...]) -> bool:
+        """Return whether a command is a single assignment word (which is not a command)."""
+        return len(words) == 1 and _ASSIGNMENT_RE.match(self.source, words[0].start) is not None
 
     def _commit_command(self, outcome: _CommandEnd) -> _Refusal | None:
         """Resolve one closed command, flush evidence, and advance list or statement state."""

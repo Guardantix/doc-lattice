@@ -4,6 +4,7 @@ import time
 
 from doc_lattice.github_ci.direct_marker_scanner import (
     DIRECT_MARKER_RE,
+    certified_command_words,
     scan_execution_source,
 )
 
@@ -167,3 +168,19 @@ def test_tokenization_is_linear_in_word_count():
     assert result.status == "certified"
     assert result.invocations == (("check", False),)
     assert elapsed < 5.0
+
+
+def test_certified_command_words_exposes_structure():
+    words = certified_command_words('doc-lattice check --config "$CFG" && doc-lattice lint\n')
+    assert words == (("doc-lattice", "check", "--config", "$CFG"), ("doc-lattice", "lint"))
+    assert certified_command_words("doc-lattice check | cat\n") == ()
+
+
+def test_certified_command_words_skips_assignment_only_statements():
+    words = certified_command_words('FLAG=--dry-run; doc-lattice reconcile "$FLAG"\n')
+    assert words == (("doc-lattice", "reconcile", "$FLAG"),)
+
+
+def test_certified_command_words_reports_non_candidate_commands():
+    words = certified_command_words("false && doc-lattice linear\n")
+    assert words == (("false",), ("doc-lattice", "linear"))

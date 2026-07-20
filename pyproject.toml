@@ -48,6 +48,7 @@ dev = [
     "ty>=0.0.26",
     "pre-commit>=3.0",
     "hypothesis>=6.0",
+    "shfmt-py==4.0.0",
 ]
 
 [project.scripts]
