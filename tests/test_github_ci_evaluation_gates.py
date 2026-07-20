@@ -165,7 +165,9 @@ ADVERSARIAL_SOURCES = [
     ),
     ("quote-flood", "doc-lattice check " + "'a' " * 100_000),
     ("malformed-tail", "doc-lattice check\ndoc-lattice lint 'unterminated"),
-    ("marker-heavy", "# doc-lattice doc_lattice DOC.LATTICE\n" * 50_000),
+    # 27_000 * 38 chars = 1_026_000, safely under source_cap_chars (1_048_576) so the tokenizer,
+    # not the early length guard, processes this source and exercises the marker pass.
+    ("marker-heavy", "# doc-lattice doc_lattice DOC.LATTICE\n" * 27_000),
 ]
 
 
@@ -180,6 +182,10 @@ def test_gate8_adversarial_inputs_refuse_deterministically(name):
         assert first.offset is not None
     work_bound = min(4_194_304, 4 * len(source) + 4_096)
     assert first.work_charged <= work_bound, (name, first.work_charged)
+    if name == "marker-heavy":
+        # The early length guard alone would charge exactly len(source); charging more proves
+        # the scan passed that guard and actually ran the marker pass plus the tokenizer.
+        assert first.work_charged > len(source), first.work_charged
 
 
 def test_gate9_work_counter_holds_over_every_input():
