@@ -83,3 +83,69 @@ def test_gate4_tier2_repository_workflow_is_clean():
     assert "release" in evaluation.pruned_jobs
     assert evaluation.diagnostics == ()
     assert all(e.scan.status == "not_applicable" for e in evaluation.evaluations)
+
+
+def _tier3a_ids():
+    from github_ci_evaluation_harness import load_tier3a_cases  # noqa: PLC0415
+
+    return [case["id"] for case in load_tier3a_cases()]
+
+
+@pytest.mark.parametrize("case_id", _tier3a_ids())
+def test_gate5_tier3a_documented_conformance(case_id):
+    from github_ci_evaluation_harness import load_tier3a_cases  # noqa: PLC0415
+
+    case = next(c for c in load_tier3a_cases() if c["id"] == case_id)
+    result = scan_execution_source(case["source"])
+    assert result.status == case["expected_status"], (case_id, result.reason)
+    assert [list(i) for i in result.invocations] == case["expected_invocations"], case_id
+    if case["expected_status"] == "uninspectable":
+        assert result.reason_category == case["reason_category"], case_id
+
+
+TIER3B_BUDGET_TOTAL = 2
+TIER3B_BUDGET_NEWLY = 2
+TIER3B_VERDICT = "rejected"
+
+
+def test_gate6_tier3b_conformance_and_recorded_verdict():
+    from github_ci_evaluation_harness import (  # noqa: PLC0415
+        load_tier3b_provenance,
+        old_scan,
+        tier3b_run_block,
+    )
+
+    fixtures = load_tier3b_provenance()["fixtures"]
+    assert len(fixtures) == 20
+    indeterminate = []
+    newly_indeterminate = []
+    false_safe = []
+    false_positive = []
+    for row in fixtures:
+        source = tier3b_run_block(row["id"])
+        new = scan_execution_source(source)
+        old = old_scan(source)
+        assert new.status == row["expected_status"], (row["id"], new.reason)
+        assert [list(i) for i in new.invocations] == row["expected_invocations"], row["id"]
+        if row["expected_status"] == "uninspectable":
+            assert new.reason_category == row["reason_category"], row["id"]
+        if new.status == "uninspectable":
+            indeterminate.append(row["id"])
+            if old.certified:
+                newly_indeterminate.append(row["id"])
+        if new.status == "certified" and row["expected_status"] == "uninspectable":
+            false_safe.append(row["id"])
+        if [list(i) for i in new.invocations] != row["expected_invocations"]:
+            false_positive.append(row["id"])
+
+    assert sorted(indeterminate) == ["fixture-02", "fixture-05", "fixture-14"]
+    assert sorted(newly_indeterminate) == ["fixture-02", "fixture-05", "fixture-14"]
+    assert false_safe == []
+    assert false_positive == []
+
+    # The owner-adjudicated recorded verdict (ruling 1a): both predeclared budgets breach,
+    # so the D3 candidate is rejected by the evaluation. This gate asserts that recorded
+    # outcome; a passing budget here would itself be evaluation drift.
+    assert len(indeterminate) > TIER3B_BUDGET_TOTAL
+    assert len(newly_indeterminate) > TIER3B_BUDGET_NEWLY
+    assert TIER3B_VERDICT == "rejected"
