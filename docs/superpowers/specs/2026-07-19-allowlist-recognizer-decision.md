@@ -21,9 +21,11 @@ The D3 floor-grammar candidate is REJECTED by predeclared gate 6: candidate inde
 template). Per the spec's failure path, only durable corpus, harness, results, and decision
 evidence merge; the evaluation implementation stays in the merged harness as the dormant
 `reachability.py`, `launcher_policy.py`, and `direct_marker_scanner.py` modules, which land in
-the branch's implementation commits, with their reviewed evaluation state pinned here by commit
-`bfc1f46`. The evaluation advances the parser-backed candidate (`mvdan/sh` family first), scoped
-in section 6.
+the branch's implementation commits. The evaluated implementation state is pinned by commit
+`17bcaf9`, the branch's final module-changing commit; every gate result in section 2 was
+measured at that state, and post-review repairs amended the dormant modules after that pin
+(section 5). The evaluation advances the parser-backed candidate (`mvdan/sh` family first),
+scoped in section 6.
 
 ## 2. Gate results
 
@@ -92,8 +94,8 @@ three new dormant modules:
 
 Total: 6 public symbols across 1,085 module lines.
 
-`git diff --stat 00737ca...HEAD -- src/doc_lattice` reports 5 files changed and 1,181 insertions,
-0 deletions:
+`git diff --stat 00737ca...17bcaf9 -- src/doc_lattice` reports 5 files changed and 1,181
+insertions, 0 deletions:
 
 ```
  src/doc_lattice/constants.py                       |  24 +
@@ -119,6 +121,18 @@ undercount; the gap is confined to the offset at which an overrun would be repor
 but unobserved on the corpus: every corpus source finished with an observed work margin of at
 least 4,114 units below the limit, so no source approached the crossing. Recorded here as a
 known, bounded limitation of the dormant module so it is not rediscovered from scratch.
+
+Post-review defect repairs. The PR A code review (PR #101) found four defects in the evaluated
+dormant modules, each repaired on the branch after the `17bcaf9` pin: a `doc-lattice.exe`
+executable head resolved to no candidate and silently dropped its invocation (`935e577`); a
+source ending exactly at a dangling `&&` or `||` certified despite Bash rejecting it
+(`14a5048`); empty semicolon statements such as `; cmd` and `cmd;;` certified outside the D3
+grammar (`6bdf5e3`); and a command-level grammar or policy refusal was reported at a later
+lexical offset, against D4's earliest-failure rule (`d143ba7`). The review also found that the
+gate 7 harness verified only the pinned Bash version string; `e3e1f27` strengthens it to verify
+the binary's recorded SHA-256 as well. The frozen corpus exercises none of the repaired paths,
+so every recorded gate result and the verdict are unchanged; the dormant modules at the branch
+head differ from the pinned evaluated state by exactly these repair commits.
 
 ## 6. Parser-backed candidate scoping
 
