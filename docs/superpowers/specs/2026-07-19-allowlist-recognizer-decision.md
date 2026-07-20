@@ -132,7 +132,21 @@ lexical offset, against D4's earliest-failure rule (`d143ba7`). The review also 
 gate 7 harness verified only the pinned Bash version string; `e3e1f27` strengthens it to verify
 the binary's recorded SHA-256 as well. The frozen corpus exercises none of the repaired paths,
 so every recorded gate result and the verdict are unchanged; the dormant modules at the branch
-head differ from the pinned evaluated state by exactly these repair commits.
+head differ from the pinned evaluated state by exactly the repair commits recorded in this
+section.
+
+A second PR #101 review round found one further dormant-module defect: Bash's `select` and `in`
+reserved words were missing from both the spec's D3 keyword enumeration and the implementation's
+command-position refusal set, so `select doc-lattice` and `in doc-lattice` certified although
+`bash -n` rejects both sources. Commit `80b45dc` adds the two keywords and joins the repair
+commits above. The same round hardened the evaluation and packaging surfaces without touching
+the dormant modules: the gate 8 statement storm now crosses the statement cap instead of
+stopping at the first empty-statement refusal (`c624508`), every gate 8 adversarial case pins
+its expected status and reason category so a regressed cap cannot certify silently (`cb8bf2c`),
+and the repository-only evaluation suites are excluded from the sdist so the bundled test suite
+no longer requires evaluation-host artifacts (`77fa164`). The frozen corpus exercises neither
+reserved word in command position, so every recorded gate result and the verdict remain
+unchanged.
 
 ## 6. Parser-backed candidate scoping
 
