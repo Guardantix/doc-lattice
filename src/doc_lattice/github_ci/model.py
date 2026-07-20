@@ -4,6 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, get_args
 
+from doc_lattice.constants import (
+    AuditDiagnosticCode,
+    AuditSourceKind,
+    BlockScanStatus,
+    ScanReasonCategory,
+)
+
 ArtifactRole = Literal["offline", "linear", "bootstrap", "attributes"]
 ArtifactAction = Literal["current", "create", "replace"]
 
@@ -173,3 +180,68 @@ class AuditFinding:
     path: str
     code: str
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class BlockScan:
+    """Certification outcome for one execution source under the D4 contract.
+
+    Invariants (spec D4): not_applicable carries no invocations and no reason; certified
+    carries no reason; uninspectable requires reason, reason_category, and offset, and may
+    retain invocations proven before the failure (monotonic evidence).
+    """
+
+    status: BlockScanStatus
+    invocations: tuple[tuple[str, bool], ...]
+    reason_category: ScanReasonCategory | None
+    reason: str | None
+    offset: int | None
+    work_charged: int
+
+    def __post_init__(self) -> None:
+        """Enforce the D4 status invariants at construction time."""
+        if self.status == "not_applicable" and (
+            self.invocations or self.reason is not None or self.reason_category is not None
+        ):
+            raise ValueError("not_applicable blocks carry no invocations and no reason")
+        if self.status == "certified" and (
+            self.reason is not None or self.reason_category is not None
+        ):
+            raise ValueError("certified blocks carry no reason")
+        if self.status == "uninspectable" and (
+            self.reason is None or self.reason_category is None or self.offset is None
+        ):
+            raise ValueError("uninspectable blocks require reason, category, and offset")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditDiagnostic:
+    """One uninspectability or composition diagnostic attributed to an execution source."""
+
+    path: str
+    job_id: str
+    step_index: int
+    source_kind: AuditSourceKind
+    code: AuditDiagnosticCode
+    reason: str
+    offset: int | None
+
+
+def diagnostic_sort_key(diagnostic: AuditDiagnostic) -> tuple[str, str, int, str, str, int]:
+    """Return the D5 deterministic ordering key; diagnostics without offsets sort first."""
+    return (
+        diagnostic.path,
+        diagnostic.job_id,
+        diagnostic.step_index,
+        diagnostic.source_kind,
+        diagnostic.code,
+        -1 if diagnostic.offset is None else diagnostic.offset,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AuditResult:
+    """Aggregated repository audit outcome under the D5 contract."""
+
+    findings: tuple[AuditFinding, ...]
+    diagnostics: tuple[AuditDiagnostic, ...]

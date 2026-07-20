@@ -64,3 +64,27 @@ RECONCILE_JOURNAL_VERSION: int = 1
 PERSISTENCE_TEMP_SUFFIX: str = ".tmp"
 RECONCILE_BEFORE_IMAGE_INFIX: str = ".doc-lattice-before."
 RECONCILE_AFTER_IMAGE_INFIX: str = ".doc-lattice-after."
+
+BlockScanStatus = Literal["not_applicable", "certified", "uninspectable"]
+VALID_BLOCK_SCAN_STATUSES: frozenset[str] = frozenset(get_args(BlockScanStatus))
+
+ScanReasonCategory = Literal[
+    "control-character",
+    "unsupported-operator",
+    "unsupported-expansion",
+    "unquoted-expansion-in-command-word",
+    "quote-spans-newline",
+    "unterminated-quote",
+    "control-flow-keyword",
+    "assignment-prefix",
+    "unstable-first-word",
+    "policy-unresolvable",
+    "cap-exceeded",
+]
+VALID_SCAN_REASON_CATEGORIES: frozenset[str] = frozenset(get_args(ScanReasonCategory))
+
+AuditSourceKind = Literal["shell_template", "run_body"]
+VALID_AUDIT_SOURCE_KINDS: frozenset[str] = frozenset(get_args(AuditSourceKind))
+
+AuditDiagnosticCode = Literal["UNINSPECTABLE_SOURCE", "UNSUPPORTED_EXECUTION_SEMANTICS"]
+VALID_AUDIT_DIAGNOSTIC_CODES: frozenset[str] = frozenset(get_args(AuditDiagnosticCode))
