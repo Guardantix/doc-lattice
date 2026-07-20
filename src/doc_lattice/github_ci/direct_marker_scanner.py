@@ -1,0 +1,513 @@
+"""D3 floor-grammar scanner for doc-lattice direct-marker execution sources.
+
+This module owns the marker gate and the conservative allowlist recognizer that certifies one
+GitHub CI execution source (a shell template or a ``run:`` body) against the frozen D3 floor
+grammar. It exposes exactly one public entry point, ``scan_execution_source``, so templates and
+bodies can never drift, plus the frozen ``DIRECT_MARKER_RE`` for the harness and later audit
+wiring.
+
+The scanner is a single iterative left-to-right pass with no recursion, bounded by explicit,
+predeclared caps and a linear work counter. It consumes the shared word IR and launcher policy
+from ``launcher_policy`` and returns a ``BlockScan`` from ``model``; refusal categories are the
+``constants.ScanReasonCategory`` domain. The dependency direction is permanent: this module
+imports policy, never the reverse.
+"""
+
+import re
+from dataclasses import dataclass, field
+
+from doc_lattice.constants import ScanReasonCategory
+from doc_lattice.github_ci.launcher_policy import CandidateResolution, ScanWord, resolve_command
+from doc_lattice.github_ci.model import BlockScan
+
+# Frozen direct marker (spec D2): an ASCII-case-insensitive ``doc[-_.]+lattice`` substring with
+# no word boundaries. re.ASCII keeps re.IGNORECASE from also matching Unicode dotted and dotless
+# I variants, which would over-match paths that are not doc-lattice.
+DIRECT_MARKER_RE = re.compile(r"doc[-_.]+lattice", re.ASCII | re.IGNORECASE)
+
+# Predeclared caps and the linear work limit (spec D3 Architecture, checkpoint limits.json).
+_SOURCE_CAP = 1_048_576
+_INVOCATION_CAP = 10_000
+_TOKEN_CAP = 262_144
+_STATEMENT_CAP = 65_536
+_WORK_CEILING = 4_194_304
+_WORK_SLACK = 4_096
+
+# Refusal categories, named once from the shared domain so raw strings are never restated.
+_CONTROL_CHARACTER: ScanReasonCategory = "control-character"
+_UNSUPPORTED_OPERATOR: ScanReasonCategory = "unsupported-operator"
+_UNSUPPORTED_EXPANSION: ScanReasonCategory = "unsupported-expansion"
+_UNQUOTED_EXPANSION_IN_COMMAND_WORD: ScanReasonCategory = "unquoted-expansion-in-command-word"
+_QUOTE_SPANS_NEWLINE: ScanReasonCategory = "quote-spans-newline"
+_UNTERMINATED_QUOTE: ScanReasonCategory = "unterminated-quote"
+_CONTROL_FLOW_KEYWORD: ScanReasonCategory = "control-flow-keyword"
+_ASSIGNMENT_PREFIX: ScanReasonCategory = "assignment-prefix"
+_UNSTABLE_FIRST_WORD: ScanReasonCategory = "unstable-first-word"
+_POLICY_UNRESOLVABLE: ScanReasonCategory = "policy-unresolvable"
+_CAP_EXCEEDED: ScanReasonCategory = "cap-exceeded"
+
+_REASON_PHRASE: dict[ScanReasonCategory, str] = {
+    _CONTROL_CHARACTER: "disallowed control character",
+    _UNSUPPORTED_OPERATOR: "unsupported shell operator",
+    _UNSUPPORTED_EXPANSION: "unsupported shell expansion",
+    _UNQUOTED_EXPANSION_IN_COMMAND_WORD: "unquoted parameter expansion in a command word",
+    _QUOTE_SPANS_NEWLINE: "quoted string spans a newline",
+    _UNTERMINATED_QUOTE: "unterminated quoted string",
+    _CONTROL_FLOW_KEYWORD: "control-flow keyword in command position",
+    _ASSIGNMENT_PREFIX: "assignment prefix precedes a command",
+    _UNSTABLE_FIRST_WORD: "non-literal command name",
+    _POLICY_UNRESOLVABLE: "unresolvable doc-lattice invocation",
+    _CAP_EXCEEDED: "scan resource cap exceeded",
+}
+
+# Control-flow keywords in command position and function definitions are refused (spec D3).
+_CONTROL_FLOW_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "if",
+        "then",
+        "elif",
+        "else",
+        "fi",
+        "while",
+        "until",
+        "do",
+        "done",
+        "for",
+        "case",
+        "esac",
+        "function",
+        "!",
+        "time",
+        "coproc",
+    }
+)
+
+# Characters that end a word without being part of it (whitespace and list or statement
+# separators), and characters that are always unsupported operators when unquoted.
+_WORD_TERMINATORS: frozenset[str] = frozenset({" ", "\t", "\n", ";", "&", "|"})
+_OPERATOR_CHARS: frozenset[str] = frozenset({"<", ">", "(", ")", "`", "\\", "{", "}"})
+_GLOB_CHARS: frozenset[str] = frozenset({"*", "?", "[", "]"})
+
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_NAME_PARAM_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
+_BRACE_PARAM_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _is_control(char: str) -> bool:
+    """Return whether ``char`` is a refused C0 control character (spec D3 preconditions).
+
+    Carriage return and every C0 code point below space refuse, except newline and tab, which
+    are ordinary separators. Non-ASCII code points are never control characters.
+    """
+    return char < " " and char not in {"\n", "\t"}
+
+
+def _reason_text(category: ScanReasonCategory, offset: int) -> str:
+    """Return the actionable uninspectability reason for ``category`` at ``offset``."""
+    return f"{_REASON_PHRASE[category]} at offset {offset}"
+
+
+@dataclass(frozen=True, slots=True)
+class _Refusal:
+    """One earliest-offset refusal discovered while scanning a source."""
+
+    offset: int
+    category: ScanReasonCategory
+
+
+@dataclass(frozen=True, slots=True)
+class _Word:
+    """One normalized word with the metadata the grammar needs beyond the shared IR.
+
+    Attributes:
+        text: The dequoted word text with permitted expansions kept raw.
+        start: The source offset of the word's first character.
+        end: The source offset one past the word's last character.
+        unstable: True when the word carries an expansion, an unquoted glob, or a leading tilde.
+        is_plain: True when the word is built only from unquoted literal characters.
+        unquoted_expansion_offset: The offset of the first unquoted permitted expansion, or None.
+    """
+
+    text: str
+    start: int
+    end: int
+    unstable: bool
+    is_plain: bool
+    unquoted_expansion_offset: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandEnd:
+    """The delimiter that closed one command's word run.
+
+    Attributes:
+        words: The command's words in source order.
+        list_op: True when the delimiter was ``&&`` or ``||`` (a list join, not a statement end).
+        offset: The source offset of the closing delimiter (or end of source).
+    """
+
+    words: tuple[_Word, ...]
+    list_op: bool
+    offset: int
+
+
+@dataclass
+class _WorkCounter:
+    """Bounded work meter with the linear D3 limit."""
+
+    limit: int
+    used: int = 0
+
+    def charge(self, amount: int = 1) -> bool:
+        """Charge ``amount`` units of work; return whether the meter is still within budget."""
+        self.used += amount
+        return self.used <= self.limit
+
+    def over(self) -> bool:
+        """Return whether the accumulated work has passed the limit."""
+        return self.used > self.limit
+
+
+def scan_execution_source(source: str) -> BlockScan:
+    """Certify one GitHub CI execution source against the D3 floor grammar.
+
+    The marker gate runs first: a source with no direct marker is not applicable and charges only
+    the single marker pass. A marker anywhere, including comments and quoted data, proceeds to the
+    grammar. Sources longer than the source cap are uninspectable before scanning. Otherwise the
+    source is scanned in one iterative left-to-right pass and the accumulated ``BlockScan`` is
+    returned, retaining every invocation proven before any refusal (monotonic evidence).
+
+    Args:
+        source: The raw execution source text (a shell template or ``run:`` body).
+
+    Returns:
+        The source's ``BlockScan`` certification outcome.
+    """
+    if DIRECT_MARKER_RE.search(source) is None:
+        return BlockScan("not_applicable", (), None, None, None, len(source))
+    if len(source) > _SOURCE_CAP:
+        return BlockScan(
+            "uninspectable", (), _CAP_EXCEEDED, _reason_text(_CAP_EXCEEDED, 0), 0, len(source)
+        )
+    return _Scanner(source).run()
+
+
+@dataclass
+class _Scanner:
+    """Iterative single-pass recognizer state for one execution source."""
+
+    source: str
+    pos: int = 0
+    invocations: list[tuple[str, bool]] = field(default_factory=list)
+    token_count: int = 0
+    statement_count: int = 0
+    invocation_count: int = 0
+    after_list_op: int | None = None
+    work: _WorkCounter = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Size the work meter from the source length and charge the marker pass."""
+        length = len(self.source)
+        self.work = _WorkCounter(min(_WORK_CEILING, 4 * length + _WORK_SLACK))
+        self.work.charge(length)
+
+    def run(self) -> BlockScan:
+        """Scan every statement left to right, returning the accumulated ``BlockScan``."""
+        length = len(self.source)
+        while self.pos < length:
+            outcome = self._scan_command()
+            if isinstance(outcome, _Refusal):
+                return self._uninspectable(outcome)
+            refusal = self._commit_command(outcome)
+            if refusal is not None:
+                return self._uninspectable(refusal)
+        return BlockScan("certified", tuple(self.invocations), None, None, None, self.work.used)
+
+    def _commit_command(self, outcome: _CommandEnd) -> _Refusal | None:
+        """Resolve one closed command, flush evidence, and advance list or statement state."""
+        if outcome.words:
+            refusal = self._resolve_and_flush(outcome.words)
+            if refusal is not None:
+                return refusal
+        elif outcome.list_op:
+            return _Refusal(outcome.offset, _UNSUPPORTED_OPERATOR)
+        elif self.after_list_op is not None:
+            return _Refusal(self.after_list_op, _UNSUPPORTED_OPERATOR)
+        if outcome.list_op:
+            self.after_list_op = outcome.offset
+            return None
+        self.after_list_op = None
+        return self._close_statement()
+
+    def _scan_command(self) -> _CommandEnd | _Refusal:  # noqa: PLR0911
+        """Read one command's words up to the next list or statement delimiter or source end."""
+        words: list[_Word] = []
+        length = len(self.source)
+        while self.pos < length:
+            if self.work.over():
+                return _Refusal(self.pos, _CAP_EXCEEDED)
+            char = self.source[self.pos]
+            if _is_control(char):
+                return _Refusal(self.pos, _CONTROL_CHARACTER)
+            if char in " \t":
+                self._advance()
+                continue
+            delimiter = self._read_delimiter(char, tuple(words))
+            if delimiter is not None:
+                return delimiter
+            if char == "#":
+                comment = self._consume_comment()
+                if comment is not None:
+                    return comment
+                continue
+            if char in _OPERATOR_CHARS:
+                return _Refusal(self.pos, _UNSUPPORTED_OPERATOR)
+            word = self._read_word()
+            if isinstance(word, _Refusal):
+                return word
+            words.append(word)
+            token_refusal = self._emit_token()
+            if token_refusal is not None:
+                return token_refusal
+        return _CommandEnd(tuple(words), False, self.pos)
+
+    def _read_delimiter(self, char: str, words: tuple[_Word, ...]) -> _CommandEnd | _Refusal | None:
+        """Classify a statement or list delimiter at the cursor, or None for a word start."""
+        if char in "\n;":
+            offset = self.pos
+            self._advance()
+            return _CommandEnd(words, False, offset)
+        if char == "&":
+            return self._read_pair(words, "&")
+        if char == "|":
+            return self._read_pair(words, "|")
+        return None
+
+    def _read_pair(self, words: tuple[_Word, ...], char: str) -> _CommandEnd | _Refusal:
+        """Accept a doubled ``&&`` or ``||`` list operator; refuse the single form."""
+        offset = self.pos
+        if self._peek(1) == char:
+            self._advance_to(offset + 2)
+            return _CommandEnd(words, True, offset)
+        return _Refusal(offset, _UNSUPPORTED_OPERATOR)
+
+    def _read_word(self) -> _Word | _Refusal:  # noqa: PLR0911, PLR0912
+        """Read one maximal word of literals, quoted strings, and permitted expansions."""
+        start = self.pos
+        length = len(self.source)
+        parts: list[str] = []
+        quoted = False
+        has_expansion = False
+        glob_unstable = False
+        unquoted_expansion_offset: int | None = None
+        while self.pos < length:
+            if self.work.over():
+                return _Refusal(self.pos, _CAP_EXCEEDED)
+            char = self.source[self.pos]
+            if _is_control(char):
+                return _Refusal(self.pos, _CONTROL_CHARACTER)
+            if char in _WORD_TERMINATORS:
+                break
+            if char == "#" or char in _OPERATOR_CHARS:
+                return _Refusal(self.pos, _UNSUPPORTED_OPERATOR)
+            if char == "'":
+                segment = self._read_single_quote()
+                if isinstance(segment, _Refusal):
+                    return segment
+                parts.append(segment)
+                quoted = True
+            elif char == '"':
+                segment = self._read_double_quote()
+                if isinstance(segment, _Refusal):
+                    return segment
+                text, saw_expansion = segment
+                parts.append(text)
+                quoted = True
+                has_expansion = has_expansion or saw_expansion
+            elif char == "$":
+                dollar = self.pos
+                expansion = self._read_expansion()
+                if isinstance(expansion, _Refusal):
+                    return expansion
+                parts.append(expansion)
+                has_expansion = True
+                if unquoted_expansion_offset is None:
+                    unquoted_expansion_offset = dollar
+            else:
+                glob_unstable = glob_unstable or self._is_glob_char(char, start)
+                parts.append(char)
+                self._advance()
+        text = "".join(parts)
+        if text in {"[", "]"}:
+            glob_unstable = False
+        return _Word(
+            text,
+            start,
+            self.pos,
+            has_expansion or glob_unstable,
+            not quoted and not has_expansion,
+            unquoted_expansion_offset,
+        )
+
+    def _is_glob_char(self, char: str, start: int) -> bool:
+        """Return whether an unquoted literal ``char`` makes the word glob- or tilde-unstable."""
+        if char in _GLOB_CHARS:
+            return True
+        return char == "~" and self.pos == start
+
+    def _read_single_quote(self) -> str | _Refusal:
+        """Read a single-quoted string; its content is inert literal text."""
+        open_offset = self.pos
+        self._advance()
+        length = len(self.source)
+        buffer: list[str] = []
+        while self.pos < length:
+            if self.work.over():
+                return _Refusal(self.pos, _CAP_EXCEEDED)
+            char = self.source[self.pos]
+            if char == "'":
+                self._advance()
+                return "".join(buffer)
+            if char == "\n":
+                return _Refusal(self.pos, _QUOTE_SPANS_NEWLINE)
+            if _is_control(char):
+                return _Refusal(self.pos, _CONTROL_CHARACTER)
+            buffer.append(char)
+            self._advance()
+        return _Refusal(open_offset, _UNTERMINATED_QUOTE)
+
+    def _read_double_quote(self) -> tuple[str, bool] | _Refusal:  # noqa: PLR0911
+        """Read a double-quoted string of literals and permitted parameter forms."""
+        open_offset = self.pos
+        self._advance()
+        length = len(self.source)
+        buffer: list[str] = []
+        saw_expansion = False
+        while self.pos < length:
+            if self.work.over():
+                return _Refusal(self.pos, _CAP_EXCEEDED)
+            char = self.source[self.pos]
+            if char == '"':
+                self._advance()
+                return "".join(buffer), saw_expansion
+            if char == "\n":
+                return _Refusal(self.pos, _QUOTE_SPANS_NEWLINE)
+            if _is_control(char):
+                return _Refusal(self.pos, _CONTROL_CHARACTER)
+            if char in "\\`":
+                return _Refusal(self.pos, _UNSUPPORTED_OPERATOR)
+            if char == "$":
+                expansion = self._read_expansion()
+                if isinstance(expansion, _Refusal):
+                    return expansion
+                buffer.append(expansion)
+                saw_expansion = True
+                continue
+            buffer.append(char)
+            self._advance()
+        return _Refusal(open_offset, _UNTERMINATED_QUOTE)
+
+    def _read_expansion(self) -> str | _Refusal:
+        """Read a permitted ``$?``, ``$NAME``, or ``${NAME}`` form; refuse every other ``$``."""
+        dollar = self.pos
+        following = self._peek(1)
+        if following == "?":
+            self._advance_to(dollar + 2)
+            return "$?"
+        if following == "{":
+            brace = _BRACE_PARAM_RE.match(self.source, dollar)
+            if brace is None:
+                return _Refusal(dollar, _UNSUPPORTED_EXPANSION)
+            self._advance_to(brace.end())
+            return brace.group()
+        name = _NAME_PARAM_RE.match(self.source, dollar)
+        if name is None:
+            return _Refusal(dollar, _UNSUPPORTED_EXPANSION)
+        self._advance_to(name.end())
+        return name.group()
+
+    def _consume_comment(self) -> _Refusal | None:
+        """Consume an unquoted comment to end of line, refusing any control character in it."""
+        length = len(self.source)
+        while self.pos < length:
+            char = self.source[self.pos]
+            if char == "\n":
+                return None
+            if _is_control(char):
+                return _Refusal(self.pos, _CONTROL_CHARACTER)
+            self._advance()
+        return None
+
+    def _resolve_and_flush(self, words: tuple[_Word, ...]) -> _Refusal | None:  # noqa: PLR0911
+        """Apply the command-level grammar and policy, flushing a proven invocation."""
+        first = words[0]
+        if _ASSIGNMENT_RE.match(self.source, first.start) is not None:
+            if len(words) > 1:
+                return _Refusal(first.start, _ASSIGNMENT_PREFIX)
+            return None
+        if first.is_plain and first.text in _CONTROL_FLOW_KEYWORDS:
+            return _Refusal(first.start, _CONTROL_FLOW_KEYWORD)
+        if first.unstable:
+            return _Refusal(first.start, _UNSTABLE_FIRST_WORD)
+        for word in words:
+            if word.unquoted_expansion_offset is not None:
+                return _Refusal(word.unquoted_expansion_offset, _UNQUOTED_EXPANSION_IN_COMMAND_WORD)
+        scan_words = tuple(ScanWord(w.text, w.start, w.end, w.unstable) for w in words)
+        if not self.work.charge(len(scan_words)):
+            return _Refusal(first.start, _CAP_EXCEEDED)
+        return self._apply_resolution(resolve_command(scan_words), first.start)
+
+    def _apply_resolution(self, resolution: CandidateResolution, anchor: int) -> _Refusal | None:
+        """Fold one policy disposition into the accumulated evidence."""
+        if resolution.kind == "refused":
+            category = resolution.reason_category
+            return _Refusal(
+                resolution.offset if resolution.offset is not None else anchor,
+                category if category is not None else _POLICY_UNRESOLVABLE,
+            )
+        if resolution.kind == "resolved" and resolution.invocation is not None:
+            self.invocation_count += 1
+            if self.invocation_count > _INVOCATION_CAP:
+                return _Refusal(anchor, _CAP_EXCEEDED)
+            self.invocations.append(resolution.invocation)
+        return None
+
+    def _emit_token(self) -> _Refusal | None:
+        """Charge one emitted token and enforce the token and work caps."""
+        self.token_count += 1
+        if self.token_count > _TOKEN_CAP or not self.work.charge():
+            return _Refusal(self.pos, _CAP_EXCEEDED)
+        return None
+
+    def _close_statement(self) -> _Refusal | None:
+        """Charge one closed statement and enforce the statement and work caps."""
+        self.statement_count += 1
+        if self.statement_count > _STATEMENT_CAP or not self.work.charge():
+            return _Refusal(self.pos, _CAP_EXCEEDED)
+        return None
+
+    def _uninspectable(self, refusal: _Refusal) -> BlockScan:
+        """Build the uninspectable result, retaining every invocation proven so far."""
+        return BlockScan(
+            "uninspectable",
+            tuple(self.invocations),
+            refusal.category,
+            _reason_text(refusal.category, refusal.offset),
+            refusal.offset,
+            self.work.used,
+        )
+
+    def _peek(self, ahead: int) -> str:
+        """Return the character ``ahead`` positions past the cursor, or empty at source end."""
+        index = self.pos + ahead
+        return self.source[index] if index < len(self.source) else ""
+
+    def _advance(self) -> None:
+        """Consume one character, charging one unit of work."""
+        self.pos += 1
+        self.work.charge()
+
+    def _advance_to(self, target: int) -> None:
+        """Consume characters up to ``target``, charging one unit of work per character."""
+        self.work.charge(target - self.pos)
+        self.pos = target
