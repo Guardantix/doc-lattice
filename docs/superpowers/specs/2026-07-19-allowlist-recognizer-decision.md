@@ -177,6 +177,21 @@ because no marker contains the substring `{0}`. The scan input itself is unchang
 modules are untouched, and neither workflow evaluated through the harness declares a shell
 template, so every recorded gate result and the verdict remain unchanged.
 
+A fifth PR #101 review round found two further dormant-module defects. The launcher policy shared
+one value-option set across every uv launcher form, so `uv run --from doc-lattice check` skipped
+`--from` and its value as a recognized option and certified the marker-bearing source with no
+invocation, although `uv run` does not accept `--from` (only the package-form launchers `uvx` and
+`uv tool run` do) and the old scanner reports an unresolved uv launcher option there; the value
+options now split by launcher form, and a `--from` under `uv run` refuses before the payload
+(`2ce0baa`). The scanner ended a statement at every newline, so a list split after `&&` or `||`,
+which `bash -n` accepts and the old scanner resolves through, refused at the pending operator
+instead of reading the right-hand command from the following lines; a newline after a pending
+operator now continues the list past blank and comment lines, `run`'s dangling check remains the
+single refusal for a right-hand command that never arrives, and the spec's D3 grammar text records
+the continuation rule (`04bc8b7`). The frozen corpus contains no `uv run --from` form (its
+`--from` occurrences are uvx package-form launches) and no list split across a newline, so every
+recorded gate result and the verdict remain unchanged.
+
 ## 6. Parser-backed candidate scoping
 
 Per the issue thread and its review comments, the successor is a doc-lattice-owned static helper
