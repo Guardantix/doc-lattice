@@ -153,33 +153,64 @@ def test_gate6_tier3b_conformance_and_recorded_verdict():
 
 _LIMITS = json.loads((CHECKPOINT / "limits.json").read_text())
 
+# Rows carry their expected outcome (name, source, expected_status, expected_reason_category) so
+# gate 8 can pin each status unconditionally; a regressed cap that let a storm certify would fail
+# the pinned status rather than silently skip the refusal assertions.
 ADVERSARIAL_SOURCES = [
-    ("oversized-source", "doc-lattice " + "a" * (_LIMITS["source_cap_chars"] + 1)),
-    ("nul-control", "doc-lattice check\x00\n"),
-    ("carriage-return", "doc-lattice check\r\n"),
-    ("token-storm", "doc-lattice check " + "x " * (_LIMITS["token_cap"] + 8)),
-    ("statement-storm", "# doc-lattice\n" + "\n" * (_LIMITS["statement_cap"] + 8)),
+    (
+        "oversized-source",
+        "doc-lattice " + "a" * (_LIMITS["source_cap_chars"] + 1),
+        "uninspectable",
+        "cap-exceeded",
+    ),
+    ("nul-control", "doc-lattice check\x00\n", "uninspectable", "control-character"),
+    ("carriage-return", "doc-lattice check\r\n", "uninspectable", "control-character"),
+    (
+        "token-storm",
+        "doc-lattice check " + "x " * (_LIMITS["token_cap"] + 8),
+        "uninspectable",
+        "cap-exceeded",
+    ),
+    (
+        "statement-storm",
+        "# doc-lattice\n" + "\n" * (_LIMITS["statement_cap"] + 8),
+        "uninspectable",
+        "cap-exceeded",
+    ),
     (
         "invocation-storm",
         "doc-lattice check\n" * (_LIMITS["invocation_cap"] + 1),
+        "uninspectable",
+        "cap-exceeded",
     ),
-    ("quote-flood", "doc-lattice check " + "'a' " * 100_000),
-    ("malformed-tail", "doc-lattice check\ndoc-lattice lint 'unterminated"),
+    ("quote-flood", "doc-lattice check " + "'a' " * 100_000, "certified", None),
+    (
+        "malformed-tail",
+        "doc-lattice check\ndoc-lattice lint 'unterminated",
+        "uninspectable",
+        "unterminated-quote",
+    ),
     # 27_000 * 38 chars = 1_026_000, safely under source_cap_chars (1_048_576) so the tokenizer,
     # not the early length guard, processes this source and exercises the marker pass.
-    ("marker-heavy", "# doc-lattice doc_lattice DOC.LATTICE\n" * 27_000),
+    ("marker-heavy", "# doc-lattice doc_lattice DOC.LATTICE\n" * 27_000, "certified", None),
 ]
 
 
-@pytest.mark.parametrize("name", [name for name, _ in ADVERSARIAL_SOURCES])
-def test_gate8_adversarial_inputs_refuse_deterministically(name):
-    source = dict(ADVERSARIAL_SOURCES)[name]
+@pytest.mark.parametrize(
+    ("name", "source", "expected_status", "expected_reason_category"),
+    ADVERSARIAL_SOURCES,
+    ids=[name for name, *_ in ADVERSARIAL_SOURCES],
+)
+def test_gate8_adversarial_inputs_refuse_deterministically(
+    name, source, expected_status, expected_reason_category
+):
     first = scan_execution_source(source)
     second = scan_execution_source(source)
     assert first == second, name
+    assert first.status == expected_status, (name, first.status, first.reason)
     if first.status == "uninspectable":
-        assert first.reason_category is not None
-        assert first.offset is not None
+        assert first.reason_category == expected_reason_category, name
+        assert first.offset is not None, name
     work_bound = min(4_194_304, 4 * len(source) + 4_096)
     assert first.work_charged <= work_bound, (name, first.work_charged)
     if name == "marker-heavy":
@@ -199,7 +230,7 @@ def test_gate9_work_counter_holds_over_every_input():
     sources = [entry["source"] for entry in load_replay_inventory()["entries"]]
     sources += [case["source"] for case in load_tier3a_cases()]
     sources += [tier3b_run_block(row["id"]) for row in load_tier3b_provenance()["fixtures"]]
-    sources += [source for _name, source in ADVERSARIAL_SOURCES]
+    sources += [source for _name, source, *_ in ADVERSARIAL_SOURCES]
     for source in sources:
         result = scan_execution_source(source)
         bound = min(4_194_304, 4 * len(source) + 4_096)
