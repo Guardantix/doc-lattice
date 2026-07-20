@@ -141,3 +141,37 @@ def test_distribution_spelling_variants_resolve():
     assert resolve_command(
         lit("uvx", "--from", "doc_lattice==2.0.0", "doc-lattice", "check")
     ).invocation == ("check", False)
+
+
+def test_uv_dynamic_selector_refuses():
+    resolution = resolve_command(
+        words(("uv", False), ("$OPT", True), ("doc-lattice", False), ("linear", False))
+    )
+    assert resolution.kind == "refused"
+    assert resolution.reason_category == "policy-unresolvable"
+    assert resolution.offset == 3
+
+
+def test_uv_tool_dynamic_selector_refuses():
+    resolution = resolve_command(
+        words(
+            ("uv", False),
+            ("tool", False),
+            ("$X", True),
+            ("doc-lattice", False),
+            ("check", False),
+        )
+    )
+    assert resolution.kind == "refused"
+    assert resolution.reason_category == "policy-unresolvable"
+    assert resolution.offset == 8
+
+
+def test_path_form_launcher_refuses():
+    for launcher in ("/usr/bin/uvx", "/usr/bin/uv"):
+        resolution = resolve_command(
+            words((launcher, False), ("doc-lattice", False), ("check", False))
+        )
+        assert resolution.kind == "refused"
+        assert resolution.reason_category == "policy-unresolvable"
+        assert resolution.offset == 0

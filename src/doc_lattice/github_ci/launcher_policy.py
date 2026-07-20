@@ -27,6 +27,12 @@ _DOC_LATTICE = "doc-lattice"
 _LAUNCHER_VALUE_OPTIONS: frozenset[str] = frozenset({"--python", "--from", "--with"})
 _LAUNCHER_FLAG_OPTIONS: frozenset[str] = frozenset({"--no-sync"})
 
+# A first word whose basename is one of these but whose text is not the bare launcher word is a
+# path-form launcher (for example /usr/bin/uvx or ./uv). The old scanner resolves those by
+# basename (shell_scanner.py:2178), so policy fails closed rather than leaving a false-safe hole
+# where a marker-bearing path-form launch would certify with no invocation.
+_LAUNCHER_BASENAMES: frozenset[str] = frozenset({"uvx", "uv"})
+
 # Root options between the executable and its subcommand, from shell_scanner.py:261-263.
 # --no-color is skipped; --help and --version are eager options that resolve with no
 # invocation before any subcommand runs.
@@ -122,27 +128,45 @@ def resolve_command(words: tuple[ScanWord, ...]) -> CandidateResolution:
         return _resolve_launcher_payload(words, 1)
     if head == "uv":
         return _resolve_uv(words)
+    if _basename(head) in _LAUNCHER_BASENAMES:
+        # Path-form launcher (basename matches but text is not the bare word); fail closed so a
+        # marker-bearing path-form launch cannot certify with no invocation.
+        return _refused(words[0].start)
     return _NOT_CANDIDATE
 
 
 def _resolve_uv(words: tuple[ScanWord, ...]) -> CandidateResolution:
     """Continue only for the literal ``uv run`` and ``uv tool run`` launcher forms.
 
-    Any other ``uv`` subcommand, including a non-literal one, is not a candidate (contract
-    point 2): the ``uv`` subcommand word governs launcher recognition, so an unstable word
-    here means the launcher form is unconfirmed rather than an in-argv refusal.
+    An unstable word in the subcommand-selector position (before ``run`` or ``tool run`` is
+    established) refuses with ``policy-unresolvable`` at that word's start: the selector could
+    expand to ``run`` at runtime, so the launcher form cannot be ruled out and the command
+    fails closed, matching the old scanner's incomplete result on a command-position expansion
+    (contract point 3's "any unstable word before the payload is established, is refused"). Any
+    stable non-``run``/``tool`` selector is not a candidate (contract point 2).
     """
     subcommand = _word_at(words, 1)
-    if subcommand is None or subcommand.unstable:
+    if subcommand is None:
         return _NOT_CANDIDATE
+    if subcommand.unstable:
+        return _refused(subcommand.start)
     if subcommand.text == "run":
         return _resolve_launcher_payload(words, 2)
     if subcommand.text == "tool":
-        run = _word_at(words, 2)
-        if run is None or run.unstable or run.text != "run":
-            return _NOT_CANDIDATE
-        return _resolve_launcher_payload(words, 3)
+        return _resolve_uv_tool(words)
     return _NOT_CANDIDATE
+
+
+def _resolve_uv_tool(words: tuple[ScanWord, ...]) -> CandidateResolution:
+    """Resolve the ``run`` selector of ``uv tool run``, failing closed on an unstable one."""
+    run = _word_at(words, 2)
+    if run is None:
+        return _NOT_CANDIDATE
+    if run.unstable:
+        return _refused(run.start)
+    if run.text != "run":
+        return _NOT_CANDIDATE
+    return _resolve_launcher_payload(words, 3)
 
 
 def _resolve_launcher_payload(words: tuple[ScanWord, ...], start: int) -> CandidateResolution:
