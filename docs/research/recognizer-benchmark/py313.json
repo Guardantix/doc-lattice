@@ -1,0 +1,11 @@
+{
+  "python": "3.13.14",
+  "inventory_count": 580,
+  "warmups": 3,
+  "repetitions": 30,
+  "candidate_median_ms": 29.384,
+  "baseline_median_ms": 58.648,
+  "candidate_to_baseline_ratio": 0.501,
+  "ceiling_ms": 250.0,
+  "within_ceiling": true
+}
