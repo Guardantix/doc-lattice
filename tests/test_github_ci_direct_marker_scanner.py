@@ -203,3 +203,28 @@ def test_exe_executable_head_carries_reconcile_dry_run_flag():
     dry = scan_execution_source("doc-lattice.exe reconcile --dry-run")
     assert dry.status == "certified"
     assert dry.invocations == (("reconcile", True),)
+
+
+def test_dangling_and_operator_at_eof_refuses():
+    # A source ending immediately after && is rejected by bash -n; the recognizer refuses at the
+    # operator offset, keeping the invocation proven before it (monotonic evidence), matching the
+    # trailing-space variant that already refuses through _commit_command.
+    result = scan_execution_source("doc-lattice check &&")
+    assert result.status == "uninspectable"
+    assert result.reason_category == "unsupported-operator"
+    assert result.offset == 18
+    assert result.invocations == (("check", False),)
+
+
+def test_dangling_or_operator_at_eof_refuses():
+    result = scan_execution_source("doc-lattice check ||")
+    assert result.status == "uninspectable"
+    assert result.reason_category == "unsupported-operator"
+    assert result.offset == 18
+    assert result.invocations == (("check", False),)
+
+
+def test_completed_list_after_operator_still_certifies():
+    result = scan_execution_source("doc-lattice check && doc-lattice lint")
+    assert result.status == "certified"
+    assert result.invocations == (("check", False), ("lint", False))

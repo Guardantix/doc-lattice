@@ -246,6 +246,12 @@ class _Scanner:
             refusal = self._commit_command(outcome)
             if refusal is not None:
                 return self._uninspectable(refusal)
+        if self.after_list_op is not None:
+            # The source ended immediately after a && or || with no following command; bash -n
+            # rejects the dangling operator. Refuse at the operator offset, matching the
+            # trailing-space variant that _commit_command already refuses, and keep every
+            # invocation proven before it (monotonic evidence).
+            return self._uninspectable(_Refusal(self.after_list_op, _UNSUPPORTED_OPERATOR))
         return BlockScan("certified", tuple(self.invocations), None, None, None, self.work.used)
 
     def command_words(self) -> tuple[tuple[str, ...], ...]:
