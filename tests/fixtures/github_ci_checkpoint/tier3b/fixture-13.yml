@@ -1,0 +1,10 @@
+name: tier3b-fixture-13
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uvx --from doc-lattice doc-lattice check --no-commit --no-tag --no-push

@@ -1,0 +1,159 @@
+{
+  "cases": [
+    {
+      "id": "direct-audit",
+      "origin": "README managed workflow docs",
+      "source": "doc-lattice ci audit --repository OWNER/REPO",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "ci",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "direct-check",
+      "origin": "README",
+      "source": "doc-lattice check",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "direct-lint",
+      "origin": "README",
+      "source": "doc-lattice lint",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "lint",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "uvx-pinned-audit",
+      "origin": "README:560 single-line form",
+      "source": "uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit --repository OWNER/REPO",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "ci",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "uvx-continuation",
+      "origin": "README:560 verbatim two-line form",
+      "source": "uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit \\\n     --repository OWNER/REPO",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "id": "uv-run-help",
+      "origin": "README:196",
+      "source": "uv run doc-lattice --help",
+      "expected_status": "certified",
+      "expected_invocations": []
+    },
+    {
+      "id": "uv-run-no-sync",
+      "origin": "repository ci.yml style",
+      "source": "uv run --no-sync doc-lattice check",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "uv-tool-run-long-form",
+      "origin": "README:640 supported uv forms",
+      "source": "uv tool run doc-lattice check",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "dynamic-non-policy-arg",
+      "origin": "spec Tier 3A shape list",
+      "source": "doc-lattice check --config \"$CFG\"",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "conditional-list-and",
+      "origin": "spec Tier 3A shape list",
+      "source": "doc-lattice check && doc-lattice lint",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ],
+        [
+          "lint",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "conditional-list-or",
+      "origin": "spec Tier 3A shape list",
+      "source": "doc-lattice lint || exit 1",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "lint",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "offline-template-block",
+      "origin": "render.py offline template",
+      "source": "set +e\nuvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit --repository OWNER/REPO\nrc_audit=$?\nuvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice check\nrc_check=$?\nuvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice lint\nrc_lint=$?\n[ \"$rc_audit\" -eq 0 ] && [ \"$rc_check\" -eq 0 ] && [ \"$rc_lint\" -eq 0 ]\n",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "ci",
+          false
+        ],
+        [
+          "check",
+          false
+        ],
+        [
+          "lint",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "linear-template-quoted-path",
+      "origin": "render.py:114",
+      "source": "\"$RUNNER_TEMP/doc-lattice-venv/bin/doc-lattice\" linear --exit-code",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unstable-first-word"
+    }
+  ]
+}

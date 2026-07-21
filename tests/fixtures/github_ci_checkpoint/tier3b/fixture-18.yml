@@ -1,0 +1,10 @@
+name: tier3b-fixture-18
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          doc-lattice check

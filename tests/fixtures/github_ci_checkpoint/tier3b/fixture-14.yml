@@ -1,0 +1,10 @@
+name: tier3b-fixture-14
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uvx --with=tox-uv doc-lattice check -e ${{ env.TOX_PYTHON }}

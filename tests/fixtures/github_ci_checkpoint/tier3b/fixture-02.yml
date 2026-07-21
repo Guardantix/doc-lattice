@@ -1,0 +1,19 @@
+name: tier3b-fixture-02
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          ENVS_JSON=$(NO_COLOR=1 uvx doc-lattice check show --json | jq -c 'to_entries
+            | map(
+              select(.key | startswith("hatch-test"))
+              | {
+                name: .key,
+                "test-type": (if (.key | test("pre|low-vers")) then "coverage" else null end),
+                python: .value.python
+              }
+            )')
+          echo "envs=${ENVS_JSON}" | tee $GITHUB_OUTPUT

@@ -1,0 +1,567 @@
+{
+  "cases": [
+    {
+      "description": "ansi-c executable",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "concatenated quoted words",
+      "label": "outside-direct-marker-contract",
+      "expected_status": "not_applicable",
+      "expected_invocations": []
+    },
+    {
+      "description": "elif condition",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "control-flow-keyword"
+    },
+    {
+      "description": "while condition",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "control-flow-keyword"
+    },
+    {
+      "description": "until condition",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "control-flow-keyword"
+    },
+    {
+      "description": "time reserved word",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "control-flow-keyword"
+    },
+    {
+      "description": "coproc reserved word",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "control-flow-keyword"
+    },
+    {
+      "description": "case arm",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "control-flow-keyword"
+    },
+    {
+      "description": "runtime-unreachable command remains conservative",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "linear",
+          false
+        ]
+      ]
+    },
+    {
+      "description": "double-quoted substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "assignment-only substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "nested substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "locale-quoted substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "escaped substitution literal",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "single-quoted substitution literal",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": []
+    },
+    {
+      "description": "inner single-quoted substitution literal",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "comment then active command",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "backticks inside substitution comment",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "comment line then active command",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "trailing comment backslash does not continue the comment",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "linear",
+          false
+        ]
+      ]
+    },
+    {
+      "description": "even trailing comment backslashes do not continue the comment",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "linear",
+          false
+        ]
+      ]
+    },
+    {
+      "description": "nested legacy substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "legacy substitution comment literal",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "legacy substitution command after comment",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "parameter default substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "nested parameter substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "parameter parenthesis does not close substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "hash inside parameter expansion is not a comment",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "single-quoted parameter expansion literal",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": []
+    },
+    {
+      "description": "parameter text resembling heredoc",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "parameter arithmetic shift",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "arithmetic expansion shift",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "arithmetic command shift",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "legacy arithmetic shift",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "modern substitution in arithmetic",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "legacy substitution in arithmetic",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "substitution in legacy arithmetic",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "unbalanced dollar-arithmetic runs a command-substitution subshell",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "unbalanced arithmetic command runs a nested subshell",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unbalanced dollar-arithmetic subshell without an invocation",
+      "label": "outside-direct-marker-contract",
+      "expected_status": "not_applicable",
+      "expected_invocations": []
+    },
+    {
+      "description": "balanced dollar-arithmetic is not a command",
+      "label": "outside-direct-marker-contract",
+      "expected_status": "not_applicable",
+      "expected_invocations": []
+    },
+    {
+      "description": "balanced dollar-arithmetic assignment is not a command",
+      "label": "outside-direct-marker-contract",
+      "expected_status": "not_applicable",
+      "expected_invocations": []
+    },
+    {
+      "description": "nested balanced dollar-arithmetic is not a command",
+      "label": "outside-direct-marker-contract",
+      "expected_status": "not_applicable",
+      "expected_invocations": []
+    },
+    {
+      "description": "unterminated dollar-arithmetic yields no command",
+      "label": "outside-direct-marker-contract",
+      "expected_status": "not_applicable",
+      "expected_invocations": []
+    },
+    {
+      "description": "plain heredoc body is data",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unquoted heredoc expands modern substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "quote characters do not quote unquoted heredoc body",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "escaped dollar in unquoted heredoc",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "quoted heredoc suppresses modern substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unquoted heredoc delimiter word removes continuation",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "double-quoted heredoc delimiter word removes continuation",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "single-quoted heredoc delimiter word preserves continuation",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "ansi-quoted heredoc suppresses substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unquoted heredoc expands backticks",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "quoted heredoc suppresses backticks",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "hash does not comment unquoted heredoc expansion",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "nested unquoted heredoc",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "nested quoted heredoc",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "description": "multiple heredocs retain expansion policy and ordering",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unquoted heredoc continuation suppresses physical delimiter",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unquoted heredoc continuation forms delimiter",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "unquoted heredoc continuation forms command substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "here-string substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "here-string literal",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "input process substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "output process substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "process substitution literal argument",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "named-fd redirection before executable",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "redirection before subcommand",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "redirection before uv payload",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "dry-run is redirection target",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "dry-run is here-string redirection word",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "quoted dry-run remains an argv token",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "reconcile",
+          true
+        ]
+      ]
+    },
+    {
+      "description": "dynamically expanded dry-run is not a distinct lexical token",
+      "label": "must-certify",
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "reconcile",
+          false
+        ]
+      ]
+    },
+    {
+      "description": "substitution in redirection target executes",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "description": "multiline double-quoted literal",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "quote-spans-newline"
+    },
+    {
+      "description": "multiline single-quoted literal",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "quote-spans-newline"
+    },
+    {
+      "description": "complete command before malformed substitution",
+      "label": "intentional-exit-2",
+      "expected_status": "uninspectable",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "reason_category": "unsupported-expansion"
+    }
+  ]
+}

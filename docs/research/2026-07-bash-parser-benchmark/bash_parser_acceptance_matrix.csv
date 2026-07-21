@@ -1,0 +1,146 @@
+case_number,description,script,expected,tree-sitter_outcome,tree-sitter_status,tree-sitter_hits,tree-sitter_error,tree-sitter_ms,shfmt_outcome,shfmt_status,shfmt_hits,shfmt_error,shfmt_ms,bashlex_outcome,bashlex_status,bashlex_hits,bashlex_error,bashlex_ms
+1,ansi-c executable,$'doc-lattice' linear,"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,7.394432999944911,correct,ok,"[[""linear"", false]]",,33.43906300005983,false-safe,ok,[],,2.8290239999932965
+2,concatenated quoted words,"doc-""lattice"" l""inear""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.909378000045763,correct,ok,"[[""linear"", false]]",,33.49704200013548,correct,ok,"[[""linear"", false]]",,2.7161509999586997
+3,elif condition,if false; then :; elif doc-lattice linear; then :; fi,"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,7.706614999960948,correct,ok,"[[""linear"", false]]",,37.78644799990616,correct,ok,"[[""linear"", false]]",,9.636780999926486
+4,while condition,while doc-lattice check; do break; done,"[[""check"", false]]",correct,ok,"[[""check"", false]]",,5.894529999977749,correct,ok,"[[""check"", false]]",,34.68833000010818,correct,ok,"[[""check"", false]]",,4.289677000087977
+5,until condition,until doc-lattice check; do break; done,"[[""check"", false]]",correct,ok,"[[""check"", false]]",,6.996696999976848,correct,ok,"[[""check"", false]]",,39.05299600000944,correct,ok,"[[""check"", false]]",,3.8407689999075956
+6,time reserved word,time doc-lattice linear,"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.728522999992492,correct,ok,"[[""linear"", false]]",,32.991563999985374,indeterminate,indeterminate,[],"NotImplementedError: type = {time command}, token = {time}",2.3258159999386407
+7,coproc reserved word,"coproc doc-lattice linear; p=$COPROC_PID; wait ""$p""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,7.328617999974085,correct,ok,"[[""linear"", false]]",,41.68211100000008,indeterminate,indeterminate,[],"NotImplementedError: type = {coproc}, token = {coproc}, parts = {[WordNode(parts=[] pos=(7, 18) word='doc-lattice'), WordNode(parts=[] pos=(19, 25) word='linear')]}",2.196125000182292
+8,case arm,case x in x) doc-lattice linear;; esac,"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.822923000072478,correct,ok,"[[""linear"", false]]",,38.8865170000372,indeterminate,indeterminate,[],"NotImplementedError: type = {pattern}, token = {x}",2.127422000057777
+9,runtime-unreachable command remains conservative,false && doc-lattice linear,"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,7.254353999996965,correct,ok,"[[""linear"", false]]",,36.07577000002493,correct,ok,"[[""linear"", false]]",,3.1099279999580176
+10,double-quoted substitution,"echo ""$(doc-lattice linear)""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.019318999960888,correct,ok,"[[""linear"", false]]",,29.61691600012273,correct,ok,"[[""linear"", false]]",,5.385380999996414
+11,assignment-only substitution,"value=""$(doc-lattice reconcile --all)""","[[""reconcile"", false]]",correct,ok,"[[""reconcile"", false]]",,7.2990930000287335,correct,ok,"[[""reconcile"", false]]",,39.25543300010759,correct,ok,"[[""reconcile"", false]]",,2.5681600000098115
+12,nested substitution,"echo ""$(printf %s ""$(doc-lattice linear)"")""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,5.4502859998137865,correct,ok,"[[""linear"", false]]",,30.249431999891385,correct,ok,"[[""linear"", false]]",,2.9850290000013047
+13,locale-quoted substitution,"echo $""$(doc-lattice linear)""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,5.684983000037391,correct,ok,"[[""linear"", false]]",,35.117206999984774,correct,ok,"[[""linear"", false]]",,4.507354999987001
+14,escaped substitution literal,"echo ""\$(doc-lattice linear)""",[],correct,ok,[],,5.485756999860314,correct,ok,[],,33.50370099997235,correct,ok,[],,2.1007299999382667
+15,single-quoted substitution literal,echo '$(doc-lattice linear)',[],correct,ok,[],,6.384491999824604,correct,ok,[],,30.542265000121915,correct,ok,[],,2.4864250001428445
+16,inner single-quoted substitution literal,"echo ""$(printf '%s' '$(doc-lattice linear)')""",[],correct,ok,[],,5.6448010000167415,correct,ok,[],,36.66671199994198,correct,ok,[],,2.999182999928962
+17,comment then active command,"echo ""$(true # harmless
+doc-lattice linear)""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,5.982270999993489,correct,ok,"[[""linear"", false]]",,37.54925400016873,false-safe,ok,[],,3.4477060000881465
+18,backticks inside substitution comment,"echo ""$(true # `doc-lattice linear`
+printf done)""",[],correct,ok,[],,6.610041000158162,correct,ok,[],,30.454312000074424,false-positive,ok,"[[""linear"", false]]",,2.635921999853963
+19,comment line then active command,"echo ""$(
+# doc-lattice linear
+doc-lattice check
+)""","[[""check"", false]]",correct,ok,"[[""check"", false]]",,5.965228999912142,correct,ok,"[[""check"", false]]",,30.995425000128307,correct,ok,"[[""check"", false]]",,2.715474999831713
+20,trailing comment backslash does not continue the comment,"# harmless \
+doc-lattice linear","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.6067239999938465,correct,ok,"[[""linear"", false]]",,28.840590999834603,correct,ok,"[[""linear"", false]]",,2.5467250000019703
+21,even trailing comment backslashes do not continue the comment,"echo before # harmless \\
+doc-lattice linear","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.140116999858947,correct,ok,"[[""linear"", false]]",,30.267428999877666,correct,ok,"[[""linear"", false]]",,2.7874750001046777
+22,nested legacy substitution,echo `printf '%s' \`doc-lattice linear\``,"[[""linear"", false]]",false-safe,ok,[],,5.840239000008296,correct,ok,"[[""linear"", false]]",,33.10041600002478,indeterminate,indeterminate,[],ParsingError: unexpected EOF (position 13),2.210104999903706
+23,legacy substitution comment literal,"echo `true # doc-lattice linear
+printf done`",[],correct,ok,[],,6.541870999853927,correct,ok,[],,30.23056600000018,correct,ok,[],,3.0311880000226665
+24,legacy substitution command after comment,"echo `true # harmless
+doc-lattice linear`","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.512167999972007,correct,ok,"[[""linear"", false]]",,38.315042000022004,false-safe,ok,[],,2.6173479998305993
+25,parameter default substitution,"unset x; echo ""${x:-$(doc-lattice linear)}""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.798315999958504,correct,ok,"[[""linear"", false]]",,37.302223000097,false-safe,ok,[],,2.604864000204543
+26,nested parameter substitution,"unset x y; echo ""${x:-${y:-$(doc-lattice linear)}}""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,11.980535000020609,correct,ok,"[[""linear"", false]]",,40.2080339999884,false-safe,ok,[],,2.946892999943884
+27,parameter parenthesis does not close substitution,"echo ""$(printf %s ${x:-)}; doc-lattice linear)""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.264660999931948,correct,ok,"[[""linear"", false]]",,31.45043600011377,correct,ok,"[[""linear"", false]]",,3.5056439999152644
+28,hash inside parameter expansion is not a comment,"unset x; echo ""${x:-# $(doc-lattice linear)}""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,7.115403999932823,correct,ok,"[[""linear"", false]]",,35.9386820000509,false-safe,ok,[],,2.0657820000451466
+29,single-quoted parameter expansion literal,echo '${x:-$(doc-lattice linear)}',[],correct,ok,[],,6.150875000002998,correct,ok,[],,29.066652999972575,correct,ok,[],,2.134436000005735
+30,parameter text resembling heredoc,"echo ${x:-<<EOF}
+doc-lattice linear","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,7.159030000138955,correct,ok,"[[""linear"", false]]",,29.794945000048756,correct,ok,"[[""linear"", false]]",,2.909994999981791
+31,parameter arithmetic shift,"x=abcdef; echo ${x:1<<2}
+doc-lattice linear","[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,6.922491000068476,correct,ok,"[[""linear"", false]]",,29.342410000026575,correct,ok,"[[""linear"", false]]",,3.4601009999732923
+32,arithmetic expansion shift,"echo $((1 << 2))
+doc-lattice linear","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.588818999944124,correct,ok,"[[""linear"", false]]",,29.394162000016877,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,1.6927799999848503
+33,arithmetic command shift,"((x = 1 << 2))
+doc-lattice linear","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.460826999955316,correct,ok,"[[""linear"", false]]",,29.569791000085388,indeterminate,indeterminate,[],ParsingError: here-document at line 0 delimited by end-of-file (wanted '2') (position 34),4.024402999903032
+34,legacy arithmetic shift,"echo $[1 << 2]
+doc-lattice linear","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.868292000035581,correct,ok,"[[""linear"", false]]",,32.11755099982838,indeterminate,indeterminate,[],NotImplementedError: arithmetic substitution,2.478811999935715
+35,modern substitution in arithmetic,echo $(( $(doc-lattice check) + 1 )),"[[""check"", false]]",correct,ok,"[[""check"", false]]",,7.8902149998612,correct,ok,"[[""check"", false]]",,30.61900800003059,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,2.5212460000147985
+36,legacy substitution in arithmetic,echo $(( `doc-lattice check` + 1 )),"[[""check"", false]]",correct,ok,"[[""check"", false]]",,7.288156999948114,correct,ok,"[[""check"", false]]",,29.597241000146823,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,2.1667609998985427
+37,substitution in legacy arithmetic,echo $[ $(doc-lattice check) + 1 ],"[[""check"", false]]",correct,ok,"[[""check"", false]]",,7.159940000065035,correct,ok,"[[""check"", false]]",,32.96662999991895,indeterminate,indeterminate,[],NotImplementedError: arithmetic substitution,2.0006860002013127
+38,unbalanced dollar-arithmetic runs a command-substitution subshell,x=$((doc-lattice linear) ),"[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,6.270359999916764,indeterminate,indeterminate,[],1:18: not a valid arithmetic operator: `linear`,24.697015999890937,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,1.8438689999129565
+39,unbalanced arithmetic command runs a nested subshell,((doc-lattice linear) ),"[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,6.4884109999638895,indeterminate,indeterminate,[],1:15: not a valid arithmetic operator: `linear`,36.7449210000359,correct,ok,"[[""linear"", false]]",,3.8847559999339865
+40,unbalanced dollar-arithmetic subshell without an invocation,echo out $((true INNER) ),[],indeterminate,indeterminate,[],ERROR or missing node,7.100766000121439,indeterminate,indeterminate,[],1:18: not a valid arithmetic operator: `INNER`,27.855385000066235,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,2.5465150001764414
+41,balanced dollar-arithmetic is not a command,echo $((rc_audit + 1)),[],correct,ok,[],,6.943560999843612,correct,ok,[],,30.747618999839688,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,1.9255500001236214
+42,balanced dollar-arithmetic assignment is not a command,x=$((1 + 2)),[],correct,ok,[],,6.545775999938996,correct,ok,[],,35.67342899987125,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,2.1944690001873823
+43,nested balanced dollar-arithmetic is not a command,echo $(( (rc_audit + 1) * 2 )),[],correct,ok,[],,7.8184900000906055,correct,ok,[],,31.6804299998239,indeterminate,indeterminate,[],NotImplementedError: arithmetic expansion,2.0270659999823692
+44,unterminated dollar-arithmetic yields no command,echo $((1 + 2,[],indeterminate,indeterminate,[],ERROR or missing node,5.561472999943362,indeterminate,indeterminate,[],1:6: reached EOF without matching `$((` with `))`,27.63445599998704,indeterminate,indeterminate,[],MatchedPairError: unexpected EOF while looking for matching ')' (position 13),1.5593519999583805
+45,plain heredoc body is data,"cat <<EOF
+doc-lattice linear
+EOF
+doc-lattice check","[[""check"", false]]",correct,ok,"[[""check"", false]]",,6.8317520001528464,correct,ok,"[[""check"", false]]",,32.06576000002315,correct,ok,"[[""check"", false]]",,2.432246999887866
+46,unquoted heredoc expands modern substitution,"cat <<EOF
+$(doc-lattice linear)
+EOF","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,8.002668000017366,correct,ok,"[[""linear"", false]]",,44.040540999958466,false-safe,ok,[],,2.242404000071474
+47,quote characters do not quote unquoted heredoc body,"cat <<EOF
+'$(doc-lattice linear)'
+EOF","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,5.869036000149208,correct,ok,"[[""linear"", false]]",,31.697370000074443,false-safe,ok,[],,2.9730940000263217
+48,escaped dollar in unquoted heredoc,"cat <<EOF
+\$(doc-lattice linear)
+EOF",[],indeterminate,indeterminate,[],ERROR or missing node,6.972661000190783,correct,ok,[],,29.881065999916245,correct,ok,[],,2.5690060001579695
+49,quoted heredoc suppresses modern substitution,"cat <<'EOF'
+$(doc-lattice linear)
+EOF",[],correct,ok,[],,5.912551999927018,correct,ok,[],,32.946046999995815,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted ""'EOF'"") (position 38)",3.302681999912238
+50,unquoted heredoc delimiter word removes continuation,"cat <<E\
+OF
+harmless
+EOF
+doc-lattice linear","[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,7.562666000012541,correct,ok,"[[""linear"", false]]",,37.24004600007902,correct,ok,"[[""linear"", false]]",,3.2766439999249997
+51,double-quoted heredoc delimiter word removes continuation,"cat <<""E\
+OF""
+harmless
+EOF
+doc-lattice linear","[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,6.867793999845162,correct,ok,"[[""linear"", false]]",,31.627131000050213,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted '""EOF""') (position 46)",2.0663069999500294
+52,single-quoted heredoc delimiter word preserves continuation,"cat <<'E\
+OF'
+harmless
+EOF
+doc-lattice linear",[],indeterminate,indeterminate,[],ERROR or missing node,5.922816000065723,indeterminate,indeterminate,[],"1:5: unclosed here-document ""E\\\nOF""",26.34632700005568,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted ""'E\\\nOF'"") (position 46)",2.0133820000864944
+53,ansi-quoted heredoc suppresses substitution,"cat <<$'EOF'
+$(doc-lattice linear)
+EOF",[],indeterminate,indeterminate,[],ERROR or missing node,12.954416999946261,correct,ok,[],,27.854247999812287,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted ""$'EOF'"") (position 39)",1.9378990000404883
+54,unquoted heredoc expands backticks,"cat <<EOF
+`doc-lattice linear`
+EOF","[[""linear"", false]]",false-safe,ok,[],,6.014701000140121,correct,ok,"[[""linear"", false]]",,32.37829799991232,false-safe,ok,[],,2.2571040001366782
+55,quoted heredoc suppresses backticks,"cat <<'EOF'
+`doc-lattice linear`
+EOF",[],correct,ok,[],,7.056249000015669,correct,ok,[],,29.803860000129134,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted ""'EOF'"") (position 37)",2.058884999996735
+56,hash does not comment unquoted heredoc expansion,"cat <<EOF
+# $(doc-lattice linear)
+EOF","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.547431999933906,correct,ok,"[[""linear"", false]]",,31.762945000082254,false-safe,ok,[],,2.7528760001587216
+57,nested unquoted heredoc,"echo ""$(cat <<EOF
+$(doc-lattice linear)
+EOF
+)""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.286572000135493,correct,ok,"[[""linear"", false]]",,31.826981999984127,correct,ok,"[[""linear"", false]]",,3.015728000036688
+58,nested quoted heredoc,"echo ""$(cat <<'EOF'
+$(doc-lattice linear)
+EOF
+)""",[],correct,ok,[],,5.973187999870788,correct,ok,[],,33.593559999872014,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted ""'EOF'"") (position 41)",2.4184100000184117
+59,multiple heredocs retain expansion policy and ordering,"cat <<A <<'B'
+$(doc-lattice linear)
+A
+$(doc-lattice reconcile --all)
+B
+doc-lattice lint","[[""linear"", false], [""lint"", false]]",indeterminate,indeterminate,[],ERROR or missing node,7.872934000033638,correct,ok,"[[""linear"", false], [""lint"", false]]",,30.60003600012351,indeterminate,indeterminate,[],"ParsingError: here-document at line 0 delimited by end-of-file (wanted ""'B'"") (position 88)",2.166872999850966
+60,unquoted heredoc continuation suppresses physical delimiter,"cat <<EOF
+body \
+EOF
+doc-lattice linear",[],false-positive,ok,"[[""linear"", false]]",,6.645725999987917,indeterminate,indeterminate,[],1:5: unclosed here-document `EOF`,26.601656999901024,indeterminate,indeterminate,[],ParsingError: here-document at line 0 delimited by end-of-file (wanted 'EOF') (position 40),2.244980999876134
+61,unquoted heredoc continuation forms delimiter,"cat <<EOF
+EO\
+F
+doc-lattice linear","[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,6.8379480001112825,indeterminate,indeterminate,[],1:5: unclosed here-document `EOF`,24.592245000121693,correct,ok,"[[""linear"", false]]",,4.555772999992769
+62,unquoted heredoc continuation forms command substitution,"cat <<EOF
+$\
+(doc-lattice linear)
+EOF","[[""linear"", false]]",false-safe,ok,[],,6.741426999951727,false-safe,ok,[],,28.480094999849825,false-safe,ok,[],,2.897836000101961
+63,here-string substitution,"cat <<< ""$(doc-lattice linear)""","[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,20.00666000003548,correct,ok,"[[""linear"", false]]",,37.67017399991346,correct,ok,"[[""linear"", false]]",,3.5657889998219616
+64,here-string literal,cat <<< 'doc-lattice linear',[],correct,ok,[],,7.322379000015644,correct,ok,[],,37.30572399990706,correct,ok,[],,2.7389700001094752
+65,input process substitution,cat <(doc-lattice linear) >/dev/null,"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,8.96109899986186,correct,ok,"[[""linear"", false]]",,36.85107199999038,correct,ok,"[[""linear"", false]]",,3.821290000132649
+66,output process substitution,printf x > >(doc-lattice linear),"[[""linear"", false]]",correct,ok,"[[""linear"", false]]",,6.953375999955824,correct,ok,"[[""linear"", false]]",,38.89806799998041,correct,ok,"[[""linear"", false]]",,2.5448799999594485
+67,process substitution literal argument,cat <(printf '%s' 'doc-lattice linear') >/dev/null,[],correct,ok,[],,6.1285889998998755,correct,ok,[],,51.712766000036936,correct,ok,[],,3.606941000043662
+68,named-fd redirection before executable,{fd}>/dev/null doc-lattice linear,"[[""linear"", false]]",indeterminate,indeterminate,[],ERROR or missing node,7.303042000103233,correct,ok,"[[""linear"", false]]",,35.16061099981016,false-safe,ok,[],,2.2642379999524564
+69,redirection before subcommand,doc-lattice >/dev/null linear,"[[""linear"", false]]",false-safe,ok,[],,7.400303000167696,correct,ok,"[[""linear"", false]]",,32.89467600006901,correct,ok,"[[""linear"", false]]",,2.5028390000443324
+70,redirection before uv payload,uv run >/dev/null doc-lattice linear,"[[""linear"", false]]",false-safe,ok,[],,6.555785000045944,correct,ok,"[[""linear"", false]]",,33.916689999841765,correct,ok,"[[""linear"", false]]",,2.7739300001030642
+71,dry-run is redirection target,doc-lattice reconcile > --dry-run,"[[""reconcile"", false]]",correct,ok,"[[""reconcile"", false]]",,8.121273999904588,correct,ok,"[[""reconcile"", false]]",,34.079436999945756,correct,ok,"[[""reconcile"", false]]",,2.364227000043684
+72,dry-run is here-string redirection word,doc-lattice reconcile <<< --dry-run,"[[""reconcile"", false]]",correct,ok,"[[""reconcile"", false]]",,6.361129999959303,correct,ok,"[[""reconcile"", false]]",,31.288223999808906,correct,ok,"[[""reconcile"", false]]",,2.347748999909527
+73,quoted dry-run remains an argv token,doc-lattice reconcile '--dry-run',"[[""reconcile"", true]]",correct,ok,"[[""reconcile"", true]]",,5.8251590000963915,correct,ok,"[[""reconcile"", true]]",,32.74337900006685,correct,ok,"[[""reconcile"", true]]",,2.8581530000337807
+74,dynamically expanded dry-run is not a distinct lexical token,"FLAG=--dry-run; doc-lattice reconcile ""$FLAG""","[[""reconcile"", false]]",correct,ok,"[[""reconcile"", false]]",,6.5737170000375045,correct,ok,"[[""reconcile"", false]]",,31.65867999996408,correct,ok,"[[""reconcile"", false]]",,2.535734000048251
+75,substitution in redirection target executes,"printf x > ""$(doc-lattice check)""","[[""check"", false]]",correct,ok,"[[""check"", false]]",,6.98691399998097,correct,ok,"[[""check"", false]]",,31.796851000081006,correct,ok,"[[""check"", false]]",,2.5685420000627346
+76,multiline double-quoted literal,"printf ""%s"" ""doc-lattice linear
+uv run doc-lattice reconcile""",[],correct,ok,[],,6.65094499981933,correct,ok,[],,31.9654840000112,correct,ok,[],,2.5336819999211
+77,multiline single-quoted literal,"printf '%s' 'doc-lattice linear
+uv run doc-lattice reconcile'",[],correct,ok,[],,7.537804999856235,correct,ok,[],,31.89988600001925,correct,ok,[],,2.6219530000162194
+78,complete command before malformed substitution,"doc-lattice check; echo ""$(","[[""check"", false]]",indeterminate,indeterminate,[],ERROR or missing node,5.9753299999556475,indeterminate,indeterminate,[],1:26: reached EOF without matching `$(` with `)`,27.25559800001065,indeterminate,indeterminate,[],MatchedPairError: unexpected EOF while looking for matching ')' (position 27),2.2494629999982863

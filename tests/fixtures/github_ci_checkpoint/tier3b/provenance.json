@@ -1,0 +1,260 @@
+{
+  "selection_queries": [
+    "gh search code 'uv run path:.github/workflows' --limit 50 --json path,repository,url",
+    "gh search code 'uvx path:.github/workflows' --limit 50 --json path,repository,url",
+    "gh search code '\"run: pytest\" path:.github/workflows' --limit 50 --json path,repository,url",
+    "gh search code 'run pytest path:.github/workflows' --limit 50 --json path,repository,url"
+  ],
+  "retrieved": "2026-07-19",
+  "normalization": "Executed-query mapping: the brief's frozen selection queries are `gh search code --filename '*.yml' --path '.github/workflows' '<TERM>' --limit 50` for TERM in ('uv run', 'uvx', 'run: pytest'). gh 2.96 has no --path flag and does not honor a '*.yml' --filename glob, so each was executed as the inline-qualifier form recorded in selection_queries (path:.github/workflows in the query, results post-filtered to paths ending .yml/.yaml). Query index 2 ('run: pytest') is retained verbatim but GitHub parses the colon as an unknown qualifier and returns zero results; per the task's documented latitude an analogous query index 3 ('run pytest') was appended to reach 20 blocks. Retrieval performed 2026-07-19.\nSelection rule: iterate each query's results in returned order; skip files without a pull_request or pull_request_target trigger, blocks longer than 40 lines, and repositories already selected; take the first 20 accepted run: blocks overall, at most one per repository. For a file with several run: steps, the mined block is the first run: step whose script invokes the query tool as a command. Each source is pinned to the latest commit that touched the file at retrieval; source_url is the https://github.com/{owner}/{repo}/blob/{commit}/{path} permalink of the exact fetched version.\nSubstitution rule (mechanical; leaves every wild option, value, and all surrounding shell structure byte-identical): replace the invoked console-script / launcher-payload executable word with `doc-lattice` (in uvx / uv run / uv tool run forms also replace the --from distribution word when present, preserving any @spec or ==version suffix shape), and establish `check` as its subcommand. If the word immediately after the executable is a bare literal word (does not begin with `-`; no quoting, expansion, or glob) it occupied the subcommand position and is replaced by `check` (for example `ruff check .` becomes `doc-lattice check .`). Otherwise (the word immediately after the executable begins with `-`, or the executable has no following word) `check` is inserted immediately after the `doc-lattice` token and every wild option and value after it is kept byte-identical (for example `pytest --cov=src` becomes `doc-lattice check --cov=src`, `uvx diffoscope --html f a b` becomes `uvx doc-lattice check --html f a b`, and a bare `pytest` becomes `doc-lattice check`). A folded (>) run body is emitted as its folded single-line shell text under the literal (|) skeleton. Amended 2026-07-19 by project-owner adjudication from the earlier form that inserted no `check` when the invocation had no positional argument. Each fixture's expected_status, expected_invocations, and reason_category were derived independently by hand from the D2/D3 checklist of the 2026-07-19 allowlist-recognizer design spec, without running any scanner or parser on the fixtures.",
+  "fixtures": [
+    {
+      "id": "fixture-01",
+      "source_url": "https://github.com/PDBeurope/PDBe-MCP-Servers/blob/a53e55fd6d2dad2c56f07ef3a465ca35e425cce7/.github/workflows/ci.yml",
+      "source_commit": "a53e55fd6d2dad2c56f07ef3a465ca35e425cce7",
+      "query_index": 0,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-02",
+      "source_url": "https://github.com/scverse/scanpy/blob/7df9ad6d828f5c2ebf57dab3b69518640df701de/.github/workflows/ci.yml",
+      "source_commit": "7df9ad6d828f5c2ebf57dab3b69518640df701de",
+      "query_index": 1,
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "id": "fixture-03",
+      "source_url": "https://github.com/alex-oleshkevich/starsessions/blob/a916da33a2144c79bd7b3f8de9db5d5ebd0cc2cc/.github/workflows/qa.yml",
+      "source_commit": "a916da33a2144c79bd7b3f8de9db5d5ebd0cc2cc",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-04",
+      "source_url": "https://github.com/JulesBelveze/bert-squeeze/blob/f17016748bd23732334ab90ab82de4f60a1c62c3/.github/workflows/pr.yml",
+      "source_commit": "f17016748bd23732334ab90ab82de4f60a1c62c3",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-05",
+      "source_url": "https://github.com/messense/typst-py/blob/03f4bc454153e9c532f6122ca440cc9006a833ff/.github/workflows/CI.yml",
+      "source_commit": "03f4bc454153e9c532f6122ca440cc9006a833ff",
+      "query_index": 1,
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-operator"
+    },
+    {
+      "id": "fixture-06",
+      "source_url": "https://github.com/oxidecomputer/hubris/blob/d06ece79c5c6b8ba1f47e40ecef38828576be836/.github/workflows/ci.yml",
+      "source_commit": "d06ece79c5c6b8ba1f47e40ecef38828576be836",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-07",
+      "source_url": "https://github.com/VioletsOleander/nowcastnet-rewritten/blob/b85c4a9ba08884fc87c92cb1e22703aee9b1c023/.github/workflows/uv.yml",
+      "source_commit": "b85c4a9ba08884fc87c92cb1e22703aee9b1c023",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-08",
+      "source_url": "https://github.com/vaamb/event-dispatcher/blob/bb2d615dcefefe35e08b7b9d9e3c6d6b40d2cadd/.github/workflows/qc.yml",
+      "source_commit": "bb2d615dcefefe35e08b7b9d9e3c6d6b40d2cadd",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-09",
+      "source_url": "https://github.com/vaamb/sqlalchemy-wrapper/blob/9b59b80b938585bc2ae655102d8e3e2247e5482c/.github/workflows/qc.yml",
+      "source_commit": "9b59b80b938585bc2ae655102d8e3e2247e5482c",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-10",
+      "source_url": "https://github.com/vaamb/ouranos-core/blob/eabc245aa312ab49ed19a5f2ab957e341d9c7a2f/.github/workflows/qc.yml",
+      "source_commit": "eabc245aa312ab49ed19a5f2ab957e341d9c7a2f",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-11",
+      "source_url": "https://github.com/petermcd/PIP-Security-Worker/blob/95e51e268c27b83dc752a608ec895d4adbc58c8f/.github/workflows/uv.yml",
+      "source_commit": "95e51e268c27b83dc752a608ec895d4adbc58c8f",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-12",
+      "source_url": "https://github.com/se-for-sci/se-for-sci.github.io/blob/3ce90a582d3f9724290114b363b80e3643360cd7/.github/workflows/cd.yml",
+      "source_commit": "3ce90a582d3f9724290114b363b80e3643360cd7",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-13",
+      "source_url": "https://github.com/guessit-io/guessit/blob/48c201ae66350a123b4337660abdb60d2e786789/.github/workflows/ci.yml",
+      "source_commit": "48c201ae66350a123b4337660abdb60d2e786789",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-14",
+      "source_url": "https://github.com/miracle2k/webassets/blob/37d6b550037f7f44171009df4e3d9941c0799496/.github/workflows/ci.yml",
+      "source_commit": "37d6b550037f7f44171009df4e3d9941c0799496",
+      "query_index": 1,
+      "expected_status": "uninspectable",
+      "expected_invocations": [],
+      "reason_category": "unsupported-expansion"
+    },
+    {
+      "id": "fixture-15",
+      "source_url": "https://github.com/tammoippen/zig-plotille/blob/b1b814064f80f40a1df69d8058310642bd044928/.github/workflows/main.yml",
+      "source_commit": "b1b814064f80f40a1df69d8058310642bd044928",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-16",
+      "source_url": "https://github.com/rst2pdf/rst2pdf/blob/84cc04ac39e0962d881c96549655ade93bf9a03a/.github/workflows/ci.yml",
+      "source_commit": "84cc04ac39e0962d881c96549655ade93bf9a03a",
+      "query_index": 1,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-17",
+      "source_url": "https://github.com/DailyInvestors/The-Guardian-Angel/blob/ea38b870da198b791a1ae00d08daba43956b67f9/.GitHub/WorkFlows/python-ci.yml",
+      "source_commit": "ea38b870da198b791a1ae00d08daba43956b67f9",
+      "query_index": 3,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-18",
+      "source_url": "https://github.com/chouhary12/Niki/blob/4b7a0582f9fe5b412d7b09f43312616c5aa258be/.GitHub/workflows/python-app.yml",
+      "source_commit": "4b7a0582f9fe5b412d7b09f43312616c5aa258be",
+      "query_index": 3,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-19",
+      "source_url": "https://github.com/Balajitakasi/Revolutionizing-Liver-Care-Predicting-Liver-Cirrhosis-Using-Advanced-Machine-Learning-Techniques/blob/f3a64c1d8208489b1074c22181a56a3901e76f69/.Github/Workflows/CI.yaml",
+      "source_commit": "f3a64c1d8208489b1074c22181a56a3901e76f69",
+      "query_index": 3,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fixture-20",
+      "source_url": "https://github.com/Gitdigital-products/GitDigital-model-registry/blob/1b04cb0e5faa133ee8fb49367b01bd12d753dd81/.GitHub/Workflows/ci.yml",
+      "source_commit": "1b04cb0e5faa133ee8fb49367b01bd12d753dd81",
+      "query_index": 3,
+      "expected_status": "certified",
+      "expected_invocations": [
+        [
+          "check",
+          false
+        ]
+      ]
+    }
+  ]
+}

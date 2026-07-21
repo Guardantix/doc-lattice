@@ -1,0 +1,14 @@
+{
+  "source_cap_chars": 1048576,
+  "invocation_cap": 10000,
+  "token_cap": 262144,
+  "statement_cap": 65536,
+  "work_limit": "min(4194304, 4 * source_length + 4096)",
+  "charges": {
+    "marker_pass": "source_length, charged once",
+    "character_examined": "1 per character the tokenizer examines",
+    "token_emitted": "1 per token",
+    "statement_closed": "1 per statement",
+    "policy_step": "1 per policy step"
+  }
+}

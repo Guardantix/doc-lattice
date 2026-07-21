@@ -1,0 +1,11 @@
+name: tier3b-fixture-19
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p reports
+          doc-lattice check --disable-warnings --html=reports/report.html

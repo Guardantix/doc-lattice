@@ -1,0 +1,10 @@
+name: tier3b-fixture-06
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uvx doc-lattice check --html report.html "reproducible-$name-a/build-$name-image-$image.zip" "reproducible-$name-b/build-$name-image-$image.zip"

@@ -1,0 +1,3028 @@
+{
+  "method": {
+    "per_case_outer_timeout_seconds": 2.0,
+    "shfmt_inner_timeout_seconds": 1.0,
+    "isolation": "forked worker process per parser/case"
+  },
+  "rows": [
+    {
+      "case_number": 1,
+      "description": "ansi-c executable",
+      "script": "$'doc-lattice' linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.394432999944911,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 33.43906300005983,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.8290239999932965,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 2,
+      "description": "concatenated quoted words",
+      "script": "doc-\"lattice\" l\"inear\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.909378000045763,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 33.49704200013548,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.7161509999586997,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 3,
+      "description": "elif condition",
+      "script": "if false; then :; elif doc-lattice linear; then :; fi",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.706614999960948,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 37.78644799990616,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 9.636780999926486,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 4,
+      "description": "while condition",
+      "script": "while doc-lattice check; do break; done",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.894529999977749,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 34.68833000010818,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 4.289677000087977,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 5,
+      "description": "until condition",
+      "script": "until doc-lattice check; do break; done",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.996696999976848,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 39.05299600000944,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.8407689999075956,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 6,
+      "description": "time reserved word",
+      "script": "time doc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.728522999992492,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 32.991563999985374,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: type = {time command}, token = {time}",
+        "ms": 2.3258159999386407,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 7,
+      "description": "coproc reserved word",
+      "script": "coproc doc-lattice linear; p=$COPROC_PID; wait \"$p\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.328617999974085,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 41.68211100000008,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: type = {coproc}, token = {coproc}, parts = {[WordNode(parts=[] pos=(7, 18) word='doc-lattice'), WordNode(parts=[] pos=(19, 25) word='linear')]}",
+        "ms": 2.196125000182292,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 8,
+      "description": "case arm",
+      "script": "case x in x) doc-lattice linear;; esac",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.822923000072478,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 38.8865170000372,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: type = {pattern}, token = {x}",
+        "ms": 2.127422000057777,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 9,
+      "description": "runtime-unreachable command remains conservative",
+      "script": "false && doc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.254353999996965,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 36.07577000002493,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.1099279999580176,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 10,
+      "description": "double-quoted substitution",
+      "script": "echo \"$(doc-lattice linear)\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.019318999960888,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 29.61691600012273,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.385380999996414,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 11,
+      "description": "assignment-only substitution",
+      "script": "value=\"$(doc-lattice reconcile --all)\"",
+      "expected": [
+        [
+          "reconcile",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.2990930000287335,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 39.25543300010759,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.5681600000098115,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 12,
+      "description": "nested substitution",
+      "script": "echo \"$(printf %s \"$(doc-lattice linear)\")\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.4502859998137865,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 30.249431999891385,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.9850290000013047,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 13,
+      "description": "locale-quoted substitution",
+      "script": "echo $\"$(doc-lattice linear)\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.684983000037391,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 35.117206999984774,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 4.507354999987001,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 14,
+      "description": "escaped substitution literal",
+      "script": "echo \"\\$(doc-lattice linear)\"",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 5.485756999860314,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 33.50370099997235,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.1007299999382667,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 15,
+      "description": "single-quoted substitution literal",
+      "script": "echo '$(doc-lattice linear)'",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.384491999824604,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 30.542265000121915,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.4864250001428445,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 16,
+      "description": "inner single-quoted substitution literal",
+      "script": "echo \"$(printf '%s' '$(doc-lattice linear)')\"",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 5.6448010000167415,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 36.66671199994198,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.999182999928962,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 17,
+      "description": "comment then active command",
+      "script": "echo \"$(true # harmless\ndoc-lattice linear)\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.982270999993489,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 37.54925400016873,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 3.4477060000881465,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 18,
+      "description": "backticks inside substitution comment",
+      "script": "echo \"$(true # `doc-lattice linear`\nprintf done)\"",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.610041000158162,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 30.454312000074424,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.635921999853963,
+        "outcome": "false-positive"
+      }
+    },
+    {
+      "case_number": 19,
+      "description": "comment line then active command",
+      "script": "echo \"$(\n# doc-lattice linear\ndoc-lattice check\n)\"",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.965228999912142,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 30.995425000128307,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.715474999831713,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 20,
+      "description": "trailing comment backslash does not continue the comment",
+      "script": "# harmless \\\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.6067239999938465,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 28.840590999834603,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.5467250000019703,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 21,
+      "description": "even trailing comment backslashes do not continue the comment",
+      "script": "echo before # harmless \\\\\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.140116999858947,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 30.267428999877666,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.7874750001046777,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 22,
+      "description": "nested legacy substitution",
+      "script": "echo `printf '%s' \\`doc-lattice linear\\``",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 5.840239000008296,
+        "outcome": "false-safe"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 33.10041600002478,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: unexpected EOF (position 13)",
+        "ms": 2.210104999903706,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 23,
+      "description": "legacy substitution comment literal",
+      "script": "echo `true # doc-lattice linear\nprintf done`",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.541870999853927,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 30.23056600000018,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 3.0311880000226665,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 24,
+      "description": "legacy substitution command after comment",
+      "script": "echo `true # harmless\ndoc-lattice linear`",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.512167999972007,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 38.315042000022004,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.6173479998305993,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 25,
+      "description": "parameter default substitution",
+      "script": "unset x; echo \"${x:-$(doc-lattice linear)}\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.798315999958504,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 37.302223000097,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.604864000204543,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 26,
+      "description": "nested parameter substitution",
+      "script": "unset x y; echo \"${x:-${y:-$(doc-lattice linear)}}\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 11.980535000020609,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 40.2080339999884,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.946892999943884,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 27,
+      "description": "parameter parenthesis does not close substitution",
+      "script": "echo \"$(printf %s ${x:-)}; doc-lattice linear)\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.264660999931948,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.45043600011377,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.5056439999152644,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 28,
+      "description": "hash inside parameter expansion is not a comment",
+      "script": "unset x; echo \"${x:-# $(doc-lattice linear)}\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.115403999932823,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 35.9386820000509,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.0657820000451466,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 29,
+      "description": "single-quoted parameter expansion literal",
+      "script": "echo '${x:-$(doc-lattice linear)}'",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.150875000002998,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 29.066652999972575,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.134436000005735,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 30,
+      "description": "parameter text resembling heredoc",
+      "script": "echo ${x:-<<EOF}\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.159030000138955,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 29.794945000048756,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.909994999981791,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 31,
+      "description": "parameter arithmetic shift",
+      "script": "x=abcdef; echo ${x:1<<2}\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 6.922491000068476,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 29.342410000026575,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.4601009999732923,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 32,
+      "description": "arithmetic expansion shift",
+      "script": "echo $((1 << 2))\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.588818999944124,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 29.394162000016877,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 1.6927799999848503,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 33,
+      "description": "arithmetic command shift",
+      "script": "((x = 1 << 2))\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.460826999955316,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 29.569791000085388,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted '2') (position 34)",
+        "ms": 4.024402999903032,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 34,
+      "description": "legacy arithmetic shift",
+      "script": "echo $[1 << 2]\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.868292000035581,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 32.11755099982838,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic substitution",
+        "ms": 2.478811999935715,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 35,
+      "description": "modern substitution in arithmetic",
+      "script": "echo $(( $(doc-lattice check) + 1 ))",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.8902149998612,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 30.61900800003059,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 2.5212460000147985,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 36,
+      "description": "legacy substitution in arithmetic",
+      "script": "echo $(( `doc-lattice check` + 1 ))",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.288156999948114,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 29.597241000146823,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 2.1667609998985427,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 37,
+      "description": "substitution in legacy arithmetic",
+      "script": "echo $[ $(doc-lattice check) + 1 ]",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 7.159940000065035,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 32.96662999991895,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic substitution",
+        "ms": 2.0006860002013127,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 38,
+      "description": "unbalanced dollar-arithmetic runs a command-substitution subshell",
+      "script": "x=$((doc-lattice linear) )",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 6.270359999916764,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:18: not a valid arithmetic operator: `linear`",
+        "ms": 24.697015999890937,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 1.8438689999129565,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 39,
+      "description": "unbalanced arithmetic command runs a nested subshell",
+      "script": "((doc-lattice linear) )",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 6.4884109999638895,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:15: not a valid arithmetic operator: `linear`",
+        "ms": 36.7449210000359,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.8847559999339865,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 40,
+      "description": "unbalanced dollar-arithmetic subshell without an invocation",
+      "script": "echo out $((true INNER) )",
+      "expected": [],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 7.100766000121439,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:18: not a valid arithmetic operator: `INNER`",
+        "ms": 27.855385000066235,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 2.5465150001764414,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 41,
+      "description": "balanced dollar-arithmetic is not a command",
+      "script": "echo $((rc_audit + 1))",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.943560999843612,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 30.747618999839688,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 1.9255500001236214,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 42,
+      "description": "balanced dollar-arithmetic assignment is not a command",
+      "script": "x=$((1 + 2))",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.545775999938996,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 35.67342899987125,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 2.1944690001873823,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 43,
+      "description": "nested balanced dollar-arithmetic is not a command",
+      "script": "echo $(( (rc_audit + 1) * 2 ))",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 7.8184900000906055,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 31.6804299998239,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "NotImplementedError: arithmetic expansion",
+        "ms": 2.0270659999823692,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 44,
+      "description": "unterminated dollar-arithmetic yields no command",
+      "script": "echo $((1 + 2",
+      "expected": [],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 5.561472999943362,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:6: reached EOF without matching `$((` with `))`",
+        "ms": 27.63445599998704,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "MatchedPairError: unexpected EOF while looking for matching ')' (position 13)",
+        "ms": 1.5593519999583805,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 45,
+      "description": "plain heredoc body is data",
+      "script": "cat <<EOF\ndoc-lattice linear\nEOF\ndoc-lattice check",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.8317520001528464,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 32.06576000002315,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.432246999887866,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 46,
+      "description": "unquoted heredoc expands modern substitution",
+      "script": "cat <<EOF\n$(doc-lattice linear)\nEOF",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 8.002668000017366,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 44.040540999958466,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.242404000071474,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 47,
+      "description": "quote characters do not quote unquoted heredoc body",
+      "script": "cat <<EOF\n'$(doc-lattice linear)'\nEOF",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 5.869036000149208,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.697370000074443,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.9730940000263217,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 48,
+      "description": "escaped dollar in unquoted heredoc",
+      "script": "cat <<EOF\n\\$(doc-lattice linear)\nEOF",
+      "expected": [],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 6.972661000190783,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 29.881065999916245,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.5690060001579695,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 49,
+      "description": "quoted heredoc suppresses modern substitution",
+      "script": "cat <<'EOF'\n$(doc-lattice linear)\nEOF",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 5.912551999927018,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 32.946046999995815,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted \"'EOF'\") (position 38)",
+        "ms": 3.302681999912238,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 50,
+      "description": "unquoted heredoc delimiter word removes continuation",
+      "script": "cat <<E\\\nOF\nharmless\nEOF\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 7.562666000012541,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 37.24004600007902,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.2766439999249997,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 51,
+      "description": "double-quoted heredoc delimiter word removes continuation",
+      "script": "cat <<\"E\\\nOF\"\nharmless\nEOF\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 6.867793999845162,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.627131000050213,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted '\"EOF\"') (position 46)",
+        "ms": 2.0663069999500294,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 52,
+      "description": "single-quoted heredoc delimiter word preserves continuation",
+      "script": "cat <<'E\\\nOF'\nharmless\nEOF\ndoc-lattice linear",
+      "expected": [],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 5.922816000065723,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:5: unclosed here-document \"E\\\\\\nOF\"",
+        "ms": 26.34632700005568,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted \"'E\\\\\\nOF'\") (position 46)",
+        "ms": 2.0133820000864944,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 53,
+      "description": "ansi-quoted heredoc suppresses substitution",
+      "script": "cat <<$'EOF'\n$(doc-lattice linear)\nEOF",
+      "expected": [],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 12.954416999946261,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 27.854247999812287,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted \"$'EOF'\") (position 39)",
+        "ms": 1.9378990000404883,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 54,
+      "description": "unquoted heredoc expands backticks",
+      "script": "cat <<EOF\n`doc-lattice linear`\nEOF",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.014701000140121,
+        "outcome": "false-safe"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 32.37829799991232,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.2571040001366782,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 55,
+      "description": "quoted heredoc suppresses backticks",
+      "script": "cat <<'EOF'\n`doc-lattice linear`\nEOF",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 7.056249000015669,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 29.803860000129134,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted \"'EOF'\") (position 37)",
+        "ms": 2.058884999996735,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 56,
+      "description": "hash does not comment unquoted heredoc expansion",
+      "script": "cat <<EOF\n# $(doc-lattice linear)\nEOF",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.547431999933906,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.762945000082254,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.7528760001587216,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 57,
+      "description": "nested unquoted heredoc",
+      "script": "echo \"$(cat <<EOF\n$(doc-lattice linear)\nEOF\n)\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.286572000135493,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.826981999984127,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.015728000036688,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 58,
+      "description": "nested quoted heredoc",
+      "script": "echo \"$(cat <<'EOF'\n$(doc-lattice linear)\nEOF\n)\"",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 5.973187999870788,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 33.593559999872014,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted \"'EOF'\") (position 41)",
+        "ms": 2.4184100000184117,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 59,
+      "description": "multiple heredocs retain expansion policy and ordering",
+      "script": "cat <<A <<'B'\n$(doc-lattice linear)\nA\n$(doc-lattice reconcile --all)\nB\ndoc-lattice lint",
+      "expected": [
+        [
+          "linear",
+          false
+        ],
+        [
+          "lint",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 7.872934000033638,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ],
+          [
+            "lint",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 30.60003600012351,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted \"'B'\") (position 88)",
+        "ms": 2.166872999850966,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 60,
+      "description": "unquoted heredoc continuation suppresses physical delimiter",
+      "script": "cat <<EOF\nbody \\\nEOF\ndoc-lattice linear",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.645725999987917,
+        "outcome": "false-positive"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:5: unclosed here-document `EOF`",
+        "ms": 26.601656999901024,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ParsingError: here-document at line 0 delimited by end-of-file (wanted 'EOF') (position 40)",
+        "ms": 2.244980999876134,
+        "outcome": "indeterminate"
+      }
+    },
+    {
+      "case_number": 61,
+      "description": "unquoted heredoc continuation forms delimiter",
+      "script": "cat <<EOF\nEO\\\nF\ndoc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 6.8379480001112825,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:5: unclosed here-document `EOF`",
+        "ms": 24.592245000121693,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 4.555772999992769,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 62,
+      "description": "unquoted heredoc continuation forms command substitution",
+      "script": "cat <<EOF\n$\\\n(doc-lattice linear)\nEOF",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.741426999951727,
+        "outcome": "false-safe"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 28.480094999849825,
+        "outcome": "false-safe"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.897836000101961,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 63,
+      "description": "here-string substitution",
+      "script": "cat <<< \"$(doc-lattice linear)\"",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 20.00666000003548,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 37.67017399991346,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.5657889998219616,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 64,
+      "description": "here-string literal",
+      "script": "cat <<< 'doc-lattice linear'",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 7.322379000015644,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 37.30572399990706,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.7389700001094752,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 65,
+      "description": "input process substitution",
+      "script": "cat <(doc-lattice linear) >/dev/null",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 8.96109899986186,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 36.85107199999038,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 3.821290000132649,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 66,
+      "description": "output process substitution",
+      "script": "printf x > >(doc-lattice linear)",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.953375999955824,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 38.89806799998041,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.5448799999594485,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 67,
+      "description": "process substitution literal argument",
+      "script": "cat <(printf '%s' 'doc-lattice linear') >/dev/null",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.1285889998998755,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 51.712766000036936,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 3.606941000043662,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 68,
+      "description": "named-fd redirection before executable",
+      "script": "{fd}>/dev/null doc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 7.303042000103233,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 35.16061099981016,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.2642379999524564,
+        "outcome": "false-safe"
+      }
+    },
+    {
+      "case_number": 69,
+      "description": "redirection before subcommand",
+      "script": "doc-lattice >/dev/null linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 7.400303000167696,
+        "outcome": "false-safe"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 32.89467600006901,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.5028390000443324,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 70,
+      "description": "redirection before uv payload",
+      "script": "uv run >/dev/null doc-lattice linear",
+      "expected": [
+        [
+          "linear",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.555785000045944,
+        "outcome": "false-safe"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 33.916689999841765,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "linear",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.7739300001030642,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 71,
+      "description": "dry-run is redirection target",
+      "script": "doc-lattice reconcile > --dry-run",
+      "expected": [
+        [
+          "reconcile",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 8.121273999904588,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 34.079436999945756,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.364227000043684,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 72,
+      "description": "dry-run is here-string redirection word",
+      "script": "doc-lattice reconcile <<< --dry-run",
+      "expected": [
+        [
+          "reconcile",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.361129999959303,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.288223999808906,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.347748999909527,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 73,
+      "description": "quoted dry-run remains an argv token",
+      "script": "doc-lattice reconcile '--dry-run'",
+      "expected": [
+        [
+          "reconcile",
+          true
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            true
+          ]
+        ],
+        "error": "",
+        "ms": 5.8251590000963915,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            true
+          ]
+        ],
+        "error": "",
+        "ms": 32.74337900006685,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            true
+          ]
+        ],
+        "error": "",
+        "ms": 2.8581530000337807,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 74,
+      "description": "dynamically expanded dry-run is not a distinct lexical token",
+      "script": "FLAG=--dry-run; doc-lattice reconcile \"$FLAG\"",
+      "expected": [
+        [
+          "reconcile",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.5737170000375045,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.65867999996408,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "reconcile",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.535734000048251,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 75,
+      "description": "substitution in redirection target executes",
+      "script": "printf x > \"$(doc-lattice check)\"",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 6.98691399998097,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 31.796851000081006,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [
+          [
+            "check",
+            false
+          ]
+        ],
+        "error": "",
+        "ms": 2.5685420000627346,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 76,
+      "description": "multiline double-quoted literal",
+      "script": "printf \"%s\" \"doc-lattice linear\nuv run doc-lattice reconcile\"",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 6.65094499981933,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 31.9654840000112,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.5336819999211,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 77,
+      "description": "multiline single-quoted literal",
+      "script": "printf '%s' 'doc-lattice linear\nuv run doc-lattice reconcile'",
+      "expected": [],
+      "tree-sitter": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 7.537804999856235,
+        "outcome": "correct"
+      },
+      "shfmt": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 31.89988600001925,
+        "outcome": "correct"
+      },
+      "bashlex": {
+        "status": "ok",
+        "hits": [],
+        "error": "",
+        "ms": 2.6219530000162194,
+        "outcome": "correct"
+      }
+    },
+    {
+      "case_number": 78,
+      "description": "complete command before malformed substitution",
+      "script": "doc-lattice check; echo \"$(",
+      "expected": [
+        [
+          "check",
+          false
+        ]
+      ],
+      "tree-sitter": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "ERROR or missing node",
+        "ms": 5.9753299999556475,
+        "outcome": "indeterminate"
+      },
+      "shfmt": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "1:26: reached EOF without matching `$(` with `)`",
+        "ms": 27.25559800001065,
+        "outcome": "indeterminate"
+      },
+      "bashlex": {
+        "status": "indeterminate",
+        "hits": [],
+        "error": "MatchedPairError: unexpected EOF while looking for matching ')' (position 27)",
+        "ms": 2.2494629999982863,
+        "outcome": "indeterminate"
+      }
+    }
+  ]
+}

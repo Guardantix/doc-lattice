@@ -1,0 +1,10 @@
+name: tier3b-fixture-11
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uvx doc-lattice check

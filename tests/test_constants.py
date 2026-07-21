@@ -95,3 +95,32 @@ def test_authority_ladder_is_ordered_weak_to_strong():
 def test_skip_reasons_match_literal():
     assert frozenset(get_args(SkipReason)) == VALID_SKIP_REASONS
     assert {"source-unannotated", "target-unannotated"} == set(VALID_SKIP_REASONS)
+
+
+def test_block_scan_domains_are_frozen():
+    from doc_lattice.constants import (  # noqa: PLC0415
+        VALID_AUDIT_DIAGNOSTIC_CODES,
+        VALID_AUDIT_SOURCE_KINDS,
+        VALID_BLOCK_SCAN_STATUSES,
+        VALID_SCAN_REASON_CATEGORIES,
+    )
+
+    assert {"not_applicable", "certified", "uninspectable"} == VALID_BLOCK_SCAN_STATUSES
+    assert {
+        "control-character",
+        "unsupported-operator",
+        "unsupported-expansion",
+        "unquoted-expansion-in-command-word",
+        "quote-spans-newline",
+        "unterminated-quote",
+        "control-flow-keyword",
+        "assignment-prefix",
+        "unstable-first-word",
+        "policy-unresolvable",
+        "cap-exceeded",
+    } == VALID_SCAN_REASON_CATEGORIES
+    assert {"shell_template", "run_body"} == VALID_AUDIT_SOURCE_KINDS
+    assert {
+        "UNINSPECTABLE_SOURCE",
+        "UNSUPPORTED_EXECUTION_SEMANTICS",
+    } == VALID_AUDIT_DIAGNOSTIC_CODES

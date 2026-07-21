@@ -1,0 +1,630 @@
+{
+  "env": {
+    "CFG": "/tmp/probe-cfg.yml",
+    "OPTION": "--verbose",
+    "RUNNER_TEMP": "/tmp/probe-rt",
+    "FLAG": "--dry-run",
+    "name": "pkg",
+    "image": "amd64"
+  },
+  "synthesis_rules": "One probe per span. Probe body is the span text only. Probes run under the pinned Bash with the env map above and PATH containing only the recorder stubs for doc-lattice, uvx, and uv. One probe per list arm; arms are never joined. Original fixture text is never executed.",
+  "spans": [
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "start": 9,
+      "end": 27,
+      "text": "doc-lattice linear",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "linear"
+      ],
+      "expected_verdict": {
+        "subcommand": "linear",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "start": 13,
+      "end": 31,
+      "text": "doc-lattice linear",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "linear"
+      ],
+      "expected_verdict": {
+        "subcommand": "linear",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "start": 26,
+      "end": 44,
+      "text": "doc-lattice linear",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "linear"
+      ],
+      "expected_verdict": {
+        "subcommand": "linear",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "start": 0,
+      "end": 33,
+      "text": "doc-lattice reconcile '--dry-run'",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "reconcile",
+        "--dry-run"
+      ],
+      "expected_verdict": {
+        "subcommand": "reconcile",
+        "dry_run": true
+      }
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "start": 16,
+      "end": 45,
+      "text": "doc-lattice reconcile \"$FLAG\"",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "reconcile"
+      ],
+      "expected_verdict": {
+        "subcommand": "reconcile",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "direct-audit",
+      "span_id": "direct-audit-s1",
+      "start": 0,
+      "end": 44,
+      "text": "doc-lattice ci audit --repository OWNER/REPO",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "ci",
+        "audit",
+        "--repository",
+        "OWNER/REPO"
+      ],
+      "expected_verdict": {
+        "subcommand": "ci",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "direct-check",
+      "span_id": "direct-check-s1",
+      "start": 0,
+      "end": 17,
+      "text": "doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "direct-lint",
+      "span_id": "direct-lint-s1",
+      "start": 0,
+      "end": 16,
+      "text": "doc-lattice lint",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "lint"
+      ],
+      "expected_verdict": {
+        "subcommand": "lint",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "uvx-pinned-audit",
+      "span_id": "uvx-pinned-audit-s1",
+      "start": 0,
+      "end": 88,
+      "text": "uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit --repository OWNER/REPO",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "--python",
+        "3.13",
+        "--from",
+        "doc-lattice==2.0.0",
+        "doc-lattice",
+        "ci",
+        "audit",
+        "--repository",
+        "OWNER/REPO"
+      ],
+      "expected_verdict": {
+        "subcommand": "ci",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "uv-run-help",
+      "span_id": "uv-run-help-s1",
+      "start": 0,
+      "end": 25,
+      "text": "uv run doc-lattice --help",
+      "expected_stable_argv_prefix": [
+        "uv",
+        "run",
+        "doc-lattice",
+        "--help"
+      ],
+      "expected_verdict": null
+    },
+    {
+      "fixture_id": "uv-run-no-sync",
+      "span_id": "uv-run-no-sync-s1",
+      "start": 0,
+      "end": 34,
+      "text": "uv run --no-sync doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "uv",
+        "run",
+        "--no-sync",
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "uv-tool-run-long-form",
+      "span_id": "uv-tool-run-long-form-s1",
+      "start": 0,
+      "end": 29,
+      "text": "uv tool run doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "uv",
+        "tool",
+        "run",
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "dynamic-non-policy-arg",
+      "span_id": "dynamic-non-policy-arg-s1",
+      "start": 0,
+      "end": 33,
+      "text": "doc-lattice check --config \"$CFG\"",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check",
+        "--config"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "conditional-list-and",
+      "span_id": "conditional-list-and-s1",
+      "start": 0,
+      "end": 17,
+      "text": "doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "conditional-list-and",
+      "span_id": "conditional-list-and-s2",
+      "start": 21,
+      "end": 37,
+      "text": "doc-lattice lint",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "lint"
+      ],
+      "expected_verdict": {
+        "subcommand": "lint",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "conditional-list-or",
+      "span_id": "conditional-list-or-s1",
+      "start": 0,
+      "end": 16,
+      "text": "doc-lattice lint",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "lint"
+      ],
+      "expected_verdict": {
+        "subcommand": "lint",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "offline-template-block",
+      "span_id": "offline-template-block-s1",
+      "start": 7,
+      "end": 95,
+      "text": "uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit --repository OWNER/REPO",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "--python",
+        "3.13",
+        "--from",
+        "doc-lattice==2.0.0",
+        "doc-lattice",
+        "ci",
+        "audit",
+        "--repository",
+        "OWNER/REPO"
+      ],
+      "expected_verdict": {
+        "subcommand": "ci",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "offline-template-block",
+      "span_id": "offline-template-block-s2",
+      "start": 108,
+      "end": 169,
+      "text": "uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "--python",
+        "3.13",
+        "--from",
+        "doc-lattice==2.0.0",
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "offline-template-block",
+      "span_id": "offline-template-block-s3",
+      "start": 182,
+      "end": 242,
+      "text": "uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice lint",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "--python",
+        "3.13",
+        "--from",
+        "doc-lattice==2.0.0",
+        "doc-lattice",
+        "lint"
+      ],
+      "expected_verdict": {
+        "subcommand": "lint",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-01",
+      "span_id": "fixture-01-s1",
+      "start": 0,
+      "end": 26,
+      "text": "uv run doc-lattice check .",
+      "expected_stable_argv_prefix": [
+        "uv",
+        "run",
+        "doc-lattice",
+        "check",
+        "."
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-03",
+      "span_id": "fixture-03-s1",
+      "start": 0,
+      "end": 33,
+      "text": "uvx doc-lattice check --all-files",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "--all-files"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-04",
+      "span_id": "fixture-04-s1",
+      "start": 0,
+      "end": 41,
+      "text": "uvx doc-lattice check -r requirements.txt",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "-r",
+        "requirements.txt"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-06",
+      "span_id": "fixture-06-s1",
+      "start": 0,
+      "end": 144,
+      "text": "uvx doc-lattice check --html report.html \"reproducible-$name-a/build-$name-image-$image.zip\" \"reproducible-$name-b/build-$name-image-$image.zip\"",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "--html",
+        "report.html"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-07",
+      "span_id": "fixture-07-s1",
+      "start": 0,
+      "end": 21,
+      "text": "uvx doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-08",
+      "span_id": "fixture-08-s1",
+      "start": 0,
+      "end": 23,
+      "text": "uvx doc-lattice check .",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "."
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-09",
+      "span_id": "fixture-09-s1",
+      "start": 0,
+      "end": 23,
+      "text": "uvx doc-lattice check .",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "."
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-10",
+      "span_id": "fixture-10-s1",
+      "start": 0,
+      "end": 23,
+      "text": "uvx doc-lattice check .",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "."
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-11",
+      "span_id": "fixture-11-s1",
+      "start": 0,
+      "end": 21,
+      "text": "uvx doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-12",
+      "span_id": "fixture-12-s1",
+      "start": 0,
+      "end": 32,
+      "text": "uvx doc-lattice check -s pyodide",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "-s",
+        "pyodide"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-13",
+      "span_id": "fixture-13-s1",
+      "start": 0,
+      "end": 71,
+      "text": "uvx --from doc-lattice doc-lattice check --no-commit --no-tag --no-push",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "--from",
+        "doc-lattice",
+        "doc-lattice",
+        "check",
+        "--no-commit",
+        "--no-tag",
+        "--no-push"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-15",
+      "span_id": "fixture-15-s1",
+      "start": 0,
+      "end": 31,
+      "text": "uvx doc-lattice check --check .",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "--check",
+        "."
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-16",
+      "span_id": "fixture-16-s1",
+      "start": 0,
+      "end": 56,
+      "text": "uvx doc-lattice check --all-files --show-diff-on-failure",
+      "expected_stable_argv_prefix": [
+        "uvx",
+        "doc-lattice",
+        "check",
+        "--all-files",
+        "--show-diff-on-failure"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-17",
+      "span_id": "fixture-17-s1",
+      "start": 0,
+      "end": 56,
+      "text": "doc-lattice check --cov=src/guardian_ai --cov-report=xml",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check",
+        "--cov=src/guardian_ai",
+        "--cov-report=xml"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-18",
+      "span_id": "fixture-18-s1",
+      "start": 0,
+      "end": 17,
+      "text": "doc-lattice check",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-19",
+      "span_id": "fixture-19-s1",
+      "start": 17,
+      "end": 80,
+      "text": "doc-lattice check --disable-warnings --html=reports/report.html",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check",
+        "--disable-warnings",
+        "--html=reports/report.html"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    },
+    {
+      "fixture_id": "fixture-20",
+      "span_id": "fixture-20-s1",
+      "start": 0,
+      "end": 62,
+      "text": "doc-lattice check --maxfail=1 --disable-warnings --cache-clear",
+      "expected_stable_argv_prefix": [
+        "doc-lattice",
+        "check",
+        "--maxfail=1",
+        "--disable-warnings",
+        "--cache-clear"
+      ],
+      "expected_verdict": {
+        "subcommand": "check",
+        "dry_run": false
+      }
+    }
+  ]
+}

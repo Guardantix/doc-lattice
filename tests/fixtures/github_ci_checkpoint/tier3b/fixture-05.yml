@@ -1,0 +1,12 @@
+name: tier3b-fixture-05
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pyodide() { uvx --from doc-lattice --with pyodide-build doc-lattice check "$@"; }
+          pyodide xbuildenv install "$PYODIDE_VERSION"
+          pyodide build --outdir dist-pyodide

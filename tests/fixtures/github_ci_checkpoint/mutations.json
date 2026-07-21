@@ -1,0 +1,416 @@
+{
+  "kinds": {
+    "backslash-newline": "insert \\\n between the executable and subcommand words",
+    "backtick-wrap": "wrap the subcommand word in backticks",
+    "unterminated-substitution": "insert $( before the subcommand word",
+    "unquoted-expansion": "insert the word $X before the subcommand word",
+    "heredoc-introducer": "append <<EOF to the span",
+    "pipe-suffix": "append | cat to the span",
+    "redirection-suffix": "append > out.txt to the span",
+    "subshell-wrap": "wrap the whole span in ( and )",
+    "control-flow-prefix": "prefix the span with if ",
+    "brace-payload": "replace the subcommand word with {check,lint}"
+  },
+  "sites": [
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "backslash-newline",
+      "offset": 21,
+      "inserted_text": "\\\n",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "backtick-wrap",
+      "offset": 21,
+      "inserted_text": "`",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "unterminated-substitution",
+      "offset": 21,
+      "inserted_text": "$(",
+      "expected_reason_category": "unsupported-expansion"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "unquoted-expansion",
+      "offset": 21,
+      "inserted_text": "$X ",
+      "expected_reason_category": "unquoted-expansion-in-command-word"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "heredoc-introducer",
+      "offset": 27,
+      "inserted_text": "<<EOF",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "pipe-suffix",
+      "offset": 27,
+      "inserted_text": "| cat",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "redirection-suffix",
+      "offset": 27,
+      "inserted_text": "> out.txt",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "subshell-wrap",
+      "offset": 9,
+      "inserted_text": "(",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "control-flow-prefix",
+      "offset": 9,
+      "inserted_text": "if ",
+      "expected_reason_category": "control-flow-keyword"
+    },
+    {
+      "fixture_id": "runtime-unreachable command remains conservative",
+      "span_id": "runtime-unreachable command remains conservative-s1",
+      "kind": "brace-payload",
+      "offset": 21,
+      "inserted_text": "{check,lint}",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "backslash-newline",
+      "offset": 25,
+      "inserted_text": "\\\n",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "backtick-wrap",
+      "offset": 25,
+      "inserted_text": "`",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "unterminated-substitution",
+      "offset": 25,
+      "inserted_text": "$(",
+      "expected_reason_category": "unsupported-expansion"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "unquoted-expansion",
+      "offset": 25,
+      "inserted_text": "$X ",
+      "expected_reason_category": "unquoted-expansion-in-command-word"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "heredoc-introducer",
+      "offset": 31,
+      "inserted_text": "<<EOF",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "pipe-suffix",
+      "offset": 31,
+      "inserted_text": "| cat",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "redirection-suffix",
+      "offset": 31,
+      "inserted_text": "> out.txt",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "subshell-wrap",
+      "offset": 13,
+      "inserted_text": "(",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "control-flow-prefix",
+      "offset": 13,
+      "inserted_text": "if ",
+      "expected_reason_category": "control-flow-keyword"
+    },
+    {
+      "fixture_id": "trailing comment backslash does not continue the comment",
+      "span_id": "trailing comment backslash does not continue the comment-s1",
+      "kind": "brace-payload",
+      "offset": 25,
+      "inserted_text": "{check,lint}",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "backslash-newline",
+      "offset": 38,
+      "inserted_text": "\\\n",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "backtick-wrap",
+      "offset": 38,
+      "inserted_text": "`",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "unterminated-substitution",
+      "offset": 38,
+      "inserted_text": "$(",
+      "expected_reason_category": "unsupported-expansion"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "unquoted-expansion",
+      "offset": 38,
+      "inserted_text": "$X ",
+      "expected_reason_category": "unquoted-expansion-in-command-word"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "heredoc-introducer",
+      "offset": 44,
+      "inserted_text": "<<EOF",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "pipe-suffix",
+      "offset": 44,
+      "inserted_text": "| cat",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "redirection-suffix",
+      "offset": 44,
+      "inserted_text": "> out.txt",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "subshell-wrap",
+      "offset": 26,
+      "inserted_text": "(",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "control-flow-prefix",
+      "offset": 26,
+      "inserted_text": "if ",
+      "expected_reason_category": "control-flow-keyword"
+    },
+    {
+      "fixture_id": "even trailing comment backslashes do not continue the comment",
+      "span_id": "even trailing comment backslashes do not continue the comment-s1",
+      "kind": "brace-payload",
+      "offset": 38,
+      "inserted_text": "{check,lint}",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "backslash-newline",
+      "offset": 12,
+      "inserted_text": "\\\n",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "backtick-wrap",
+      "offset": 12,
+      "inserted_text": "`",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "unterminated-substitution",
+      "offset": 12,
+      "inserted_text": "$(",
+      "expected_reason_category": "unsupported-expansion"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "unquoted-expansion",
+      "offset": 12,
+      "inserted_text": "$X ",
+      "expected_reason_category": "unquoted-expansion-in-command-word"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "heredoc-introducer",
+      "offset": 33,
+      "inserted_text": "<<EOF",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "pipe-suffix",
+      "offset": 33,
+      "inserted_text": "| cat",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "redirection-suffix",
+      "offset": 33,
+      "inserted_text": "> out.txt",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "subshell-wrap",
+      "offset": 0,
+      "inserted_text": "(",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "control-flow-prefix",
+      "offset": 0,
+      "inserted_text": "if ",
+      "expected_reason_category": "control-flow-keyword"
+    },
+    {
+      "fixture_id": "quoted dry-run remains an argv token",
+      "span_id": "quoted dry-run remains an argv token-s1",
+      "kind": "brace-payload",
+      "offset": 12,
+      "inserted_text": "{check,lint}",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "backslash-newline",
+      "offset": 28,
+      "inserted_text": "\\\n",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "backtick-wrap",
+      "offset": 28,
+      "inserted_text": "`",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "unterminated-substitution",
+      "offset": 28,
+      "inserted_text": "$(",
+      "expected_reason_category": "unsupported-expansion"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "unquoted-expansion",
+      "offset": 28,
+      "inserted_text": "$X ",
+      "expected_reason_category": "unquoted-expansion-in-command-word"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "heredoc-introducer",
+      "offset": 45,
+      "inserted_text": "<<EOF",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "pipe-suffix",
+      "offset": 45,
+      "inserted_text": "| cat",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "redirection-suffix",
+      "offset": 45,
+      "inserted_text": "> out.txt",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "subshell-wrap",
+      "offset": 16,
+      "inserted_text": "(",
+      "expected_reason_category": "unsupported-operator"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "control-flow-prefix",
+      "offset": 16,
+      "inserted_text": "if ",
+      "expected_reason_category": "control-flow-keyword"
+    },
+    {
+      "fixture_id": "dynamically expanded dry-run is not a distinct lexical token",
+      "span_id": "dynamically expanded dry-run is not a distinct lexical token-s1",
+      "kind": "brace-payload",
+      "offset": 28,
+      "inserted_text": "{check,lint}",
+      "expected_reason_category": "unsupported-operator"
+    }
+  ]
+}
