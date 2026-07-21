@@ -169,6 +169,29 @@ jobs:
         audit_global_workflows((document,))
 
 
+def test_global_audit_fails_closed_on_uv_tool_option_before_run_selector():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv tool -q run doc-lattice linear
+""",
+        path=".github/workflows/selector-option.yml",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            r"\.github/workflows/selector-option\.yml: shell scan incomplete: "
+            r"uv tool option before the run selector"
+        ),
+    ):
+        audit_global_workflows((document,))
+
+
 def test_global_audit_allows_literal_doc_lattice_array_data_on_pr():
     document = _workflow(
         """\

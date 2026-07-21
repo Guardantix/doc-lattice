@@ -1,5 +1,6 @@
 """Integrity gates for the issue #100 predeclaration checkpoint artifacts."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -7,6 +8,10 @@ import sys
 from pathlib import Path
 
 CHECKPOINT = Path("tests/fixtures/github_ci_checkpoint")
+_FROZEN_ACCEPTANCE_COUNT = 78
+_FROZEN_ACCEPTANCE_SHA256 = (
+    "7fb1da742f7f659e4454fbc85c4f7bf500f21d6cbbc275684878262bb9314f3b"  # pragma: allowlist secret
+)
 
 STATUSES = frozenset({"not_applicable", "certified", "uninspectable"})
 REASON_CATEGORIES = frozenset(
@@ -71,7 +76,7 @@ def test_replay_inventory_is_internally_consistent():
     assert inventory["aggregate_sha256"] == aggregate
 
 
-def test_replay_inventory_matches_suite_exercise(tmp_path):
+def test_replay_inventory_remains_covered_by_suite_exercise(tmp_path):
     out = tmp_path / "replay_inventory.json"
     env = {**os.environ, "CHECKPOINT_REPLAY_OUT": str(out)}
     result = subprocess.run(
@@ -98,7 +103,7 @@ def test_replay_inventory_matches_suite_exercise(tmp_path):
     frozen = json.loads((CHECKPOINT / "replay_inventory.json").read_text())
     recorded_shas = {entry["sha256"] for entry in recorded["entries"]}
     frozen_shas = {entry["sha256"] for entry in frozen["entries"]}
-    assert recorded_shas == frozen_shas
+    assert frozen_shas <= recorded_shas
 
 
 def test_replay_inventory_covers_acceptance_corpus():
@@ -107,9 +112,22 @@ def test_replay_inventory_covers_acceptance_corpus():
     from test_github_ci_shell_scanner import ACCEPTANCE_CASES  # noqa: PLC0415
 
     inventory = json.loads((CHECKPOINT / "replay_inventory.json").read_text())
+    labels = json.loads((CHECKPOINT / "acceptance_labels.json").read_text())["cases"]
     sources = {entry["source"] for entry in inventory["entries"]}
-    missing = [d for d, script, _ in ACCEPTANCE_CASES if script not in sources]
+    frozen_cases = ACCEPTANCE_CASES[: len(labels)]
+    missing = [d for d, script, _ in frozen_cases if script not in sources]
     assert missing == []
+
+
+def test_acceptance_prefix_matches_frozen_ordered_digest():
+    # tests/ is not a package: the cross-module import only resolves inside a running test.
+    from test_github_ci_shell_scanner import ACCEPTANCE_CASES  # noqa: PLC0415
+
+    frozen_cases = ACCEPTANCE_CASES[:_FROZEN_ACCEPTANCE_COUNT]
+    payload = json.dumps(frozen_cases, ensure_ascii=True, separators=(",", ":"))
+
+    assert len(frozen_cases) == _FROZEN_ACCEPTANCE_COUNT
+    assert hashlib.sha256(payload.encode()).hexdigest() == _FROZEN_ACCEPTANCE_SHA256
 
 
 def test_acceptance_labels_align_with_corpus():
@@ -117,8 +135,10 @@ def test_acceptance_labels_align_with_corpus():
     from test_github_ci_shell_scanner import ACCEPTANCE_CASES  # noqa: PLC0415
 
     labels = json.loads((CHECKPOINT / "acceptance_labels.json").read_text())["cases"]
-    assert len(labels) == len(ACCEPTANCE_CASES) == 78
-    for row, (description, _script, expected) in zip(labels, ACCEPTANCE_CASES, strict=True):
+    assert len(labels) == _FROZEN_ACCEPTANCE_COUNT
+    assert len(ACCEPTANCE_CASES) >= len(labels)
+    frozen_cases = ACCEPTANCE_CASES[: len(labels)]
+    for row, (description, _script, expected) in zip(labels, frozen_cases, strict=True):
         assert row["description"] == description
         assert row["label"] in {
             "must-certify",
@@ -128,6 +148,7 @@ def test_acceptance_labels_align_with_corpus():
         assert row["expected_status"] in STATUSES
         if row["label"] == "must-certify":
             assert row["expected_status"] == "certified"
+            assert isinstance(expected, tuple)
             assert [tuple(i) for i in row["expected_invocations"]] == list(expected)
         if row["label"] == "outside-direct-marker-contract":
             assert row["expected_status"] == "not_applicable"
@@ -145,7 +166,8 @@ def test_acceptance_labels_marker_consistency():
 
     marker = re.compile(r"doc[-_.]+lattice", re.ASCII | re.IGNORECASE)
     labels = json.loads((CHECKPOINT / "acceptance_labels.json").read_text())["cases"]
-    for row, (_d, script, _e) in zip(labels, ACCEPTANCE_CASES, strict=True):
+    frozen_cases = ACCEPTANCE_CASES[: len(labels)]
+    for row, (_d, script, _e) in zip(labels, frozen_cases, strict=True):
         has_marker = bool(marker.search(script))
         assert (row["label"] == "outside-direct-marker-contract") == (not has_marker)
 

@@ -6,6 +6,7 @@ from typer.main import get_command
 
 from doc_lattice.cli.application import create_app
 from doc_lattice.error_types import ConfigError, ProjectError
+from doc_lattice.github_ci.launcher_policy import ScanWord, resolve_command
 from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS,
     _DOC_LATTICE_ROOT_OPTIONS,
@@ -24,6 +25,7 @@ RECONCILE = (("reconcile", False),)
 RECONCILE_DRY = (("reconcile", True),)
 CHECK = (("check", False),)
 LINEAR_LINT = (("linear", False), ("lint", False))
+INCOMPLETE = object()
 
 ACCEPTANCE_CASES = [
     # Literal executable identity and control syntax.
@@ -402,6 +404,45 @@ ACCEPTANCE_CASES = [
         'doc-lattice check; echo "$(',
         CHECK,
     ),
+    # Issue #102 live-baseline launcher corrections. These cases must remain after the frozen
+    # first 78 rows consumed by the issue #100 candidate-evaluation checkpoint.
+    (
+        "uv tool short option before selector is intentional exit 2",
+        "uv tool -q run doc-lattice linear",
+        INCOMPLETE,
+    ),
+    (
+        "uv tool long option before selector is intentional exit 2",
+        "uv tool --quiet run doc-lattice linear",
+        INCOMPLETE,
+    ),
+    (
+        "uv tool value option before selector is intentional exit 2",
+        "uv tool --directory /tmp run doc-lattice linear",
+        INCOMPLETE,
+    ),
+    (
+        "uv tool option before non-run selector is intentional exit 2",
+        "uv tool -q install doc-lattice",
+        INCOMPLETE,
+    ),
+    (
+        "uv tool dynamic value option before selector is intentional exit 2",
+        'OPT=--directory; uv tool "$OPT" /tmp run doc-lattice linear',
+        INCOMPLETE,
+    ),
+    ("bare uv tool install remains non-candidate", "uv tool install doc-lattice", NONE),
+    (
+        "uvx no-sync is intentional exit 2",
+        "uvx --no-sync doc-lattice linear",
+        INCOMPLETE,
+    ),
+    (
+        "uv tool run no-sync is intentional exit 2",
+        "uv tool run --no-sync doc-lattice linear",
+        INCOMPLETE,
+    ),
+    ("uv run no-sync remains certified", "uv run --no-sync doc-lattice linear", LINEAR),
 ]
 
 
@@ -411,6 +452,13 @@ ACCEPTANCE_CASES = [
     ids=[case[0] for case in ACCEPTANCE_CASES],
 )
 def test_direct_doc_lattice_acceptance_corpus(_description, script, expected):
+    if expected is INCOMPLETE:
+        result = scan_doc_lattice_invocations(script)
+        assert result.invocations == NONE
+        assert result.incomplete_reason is not None
+        with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+            direct_doc_lattice_invocations(script)
+        return
     assert direct_doc_lattice_invocations(script) == expected
 
 
@@ -1690,6 +1738,112 @@ def test_direct_doc_lattice_invocations_detects_else_branch_commands(script, exp
 )
 def test_direct_doc_lattice_invocations_recognizes_uv_launcher_spellings(script, expected):
     assert direct_doc_lattice_invocations(script) == expected
+
+
+@pytest.mark.parametrize("option", ["-q", "--offline", "--no-cache", "--frobnicate", "--"])
+def test_uv_tool_option_before_run_selector_fails_closed(option):
+    script = f"uv tool {option} run doc-lattice linear"
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "uv tool option before the run selector"
+    with pytest.raises(ConfigError, match=r"uv tool option before the run selector"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize("subcommand", ["install doc-lattice", "list"])
+def test_uv_tool_bare_non_run_subcommand_stays_not_candidate(subcommand):
+    script = f"uv tool {subcommand}"
+
+    assert scan_doc_lattice_invocations(script).incomplete_reason is None
+    assert direct_doc_lattice_invocations(script) == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'OPT=-q; uv tool "$OPT" run doc-lattice linear',
+        'OPT=--directory; uv tool "$OPT" /tmp run doc-lattice linear',
+        'OPT=-q; uv tool "$OPT" --directory /tmp run doc-lattice linear',
+    ],
+    ids=["flag", "separate-value", "following-value-option"],
+)
+def test_uv_tool_dynamic_option_before_literal_run_fails_closed(script):
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+def test_uv_tool_dynamic_selector_probe_is_bounded():
+    script = "uv tool " + " ".join(['"$OPT"'] * 1_100) + " run doc-lattice linear"
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize("launcher", ["uvx", "uv tool run"])
+def test_package_form_no_sync_fails_closed(launcher):
+    script = f"{launcher} --no-sync doc-lattice linear"
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "unresolved uv launcher option"
+    with pytest.raises(ConfigError, match=r"unresolved uv launcher option"):
+        direct_doc_lattice_invocations(script)
+
+
+def test_uv_run_no_sync_still_resolves():
+    assert direct_doc_lattice_invocations("uv run --no-sync doc-lattice linear") == LINEAR
+
+
+def _literal_policy_words(script: str) -> tuple[ScanWord, ...]:
+    offset = 0
+    words = []
+    for text in script.split():
+        words.append(ScanWord(text, offset, offset + len(text), unstable=False))
+        offset += len(text) + 1
+    return tuple(words)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "uv tool -q run doc-lattice linear",
+        "uv tool --offline run doc-lattice linear",
+        "uv tool --no-cache run doc-lattice linear",
+        "uv tool --frobnicate run doc-lattice linear",
+        "uv tool -q install doc-lattice",
+        "uv tool install doc-lattice",
+        "uv tool list",
+        "uvx --no-sync doc-lattice linear",
+        "uv tool run --no-sync doc-lattice linear",
+        "uv run --no-sync doc-lattice linear",
+    ],
+)
+def test_scanner_matches_launcher_policy_on_issue_102_fixtures(script):
+    floor = resolve_command(_literal_policy_words(script))
+    scanner = scan_doc_lattice_invocations(script)
+    scanner_kind = (
+        "refused"
+        if scanner.incomplete_reason is not None
+        else "resolved"
+        if scanner.invocations
+        else "not_candidate"
+    )
+
+    assert scanner_kind == floor.kind
+    if floor.invocation is not None:
+        assert scanner.invocations == (floor.invocation,)
 
 
 @pytest.mark.parametrize(

@@ -296,8 +296,10 @@ input, landing before any recognizer implementation commit. Same-PR prose claimi
 chosen first is not independently auditable; the commit boundary and a content-hash manifest
 are. The checkpoint contains:
 
-1. The 78 `ACCEPTANCE_CASES` labels (`must certify`, `intentional exit 2`,
-   `outside direct-marker contract`) with expected `BlockScan` outcomes, derived from D2/D3.
+1. The labels for the first 78 `ACCEPTANCE_CASES` present at the checkpoint (`must certify`,
+   `intentional exit 2`, `outside direct-marker contract`) with expected `BlockScan` outcomes,
+   derived from D2/D3. Later live-baseline regressions may append cases without changing this
+   frozen positional prefix.
 2. The frozen replay-inventory manifest (gate 2) with stable IDs, count, and content hash.
 3. The Tier 3B fixtures, their provenance manifest, the exact selection query, and each
    fixture's independently assigned expected policy outcome.
@@ -331,7 +333,7 @@ All gates are pytest-enforced in PR A and run under both supported Python versio
 3.14) in CI, except the wall-clock half of gate 9, which is the trusted fleetyard-only
 decision gate defined in checkpoint item 7. Runtime audit behavior is unchanged in PR A.
 
-1. **Corpus relabel.** Every one of the 78 `ACCEPTANCE_CASES`
+1. **Corpus relabel.** Every one of the first 78 checkpoint-frozen `ACCEPTANCE_CASES`
    (`tests/test_github_ci_shell_scanner.py:28`) gets its checkpoint label as a checked-in
    column with the expected `BlockScan` outcome under this contract.
 2. **Frozen replay inventory.** Every input exercised by the existing scanner suite

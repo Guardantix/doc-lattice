@@ -96,9 +96,10 @@ def _certified_corpus():
     labels = json.loads(
         Path("tests/fixtures/github_ci_checkpoint/acceptance_labels.json").read_text()
     )["cases"]
+    frozen_cases = ACCEPTANCE_CASES[: len(labels)]
     corpus = [
         (row["description"], script)
-        for row, (_d, script, _e) in zip(labels, ACCEPTANCE_CASES, strict=True)
+        for row, (_d, script, _e) in zip(labels, frozen_cases, strict=True)
         if row["label"] == "must-certify"
     ]
     corpus += [

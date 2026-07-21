@@ -87,7 +87,7 @@ No other candidate both cleared the hard gates and improved on tree-sitter.
 
 ## Acceptance-Corpus Benchmark
 
-The attached test module defines **78 named `ACCEPTANCE_CASES`** covering:
+The evaluation checkpoint freezes the first **78 named `ACCEPTANCE_CASES`** covering:
 
 - Literal executable identity
 - Concatenated quoting
@@ -709,7 +709,8 @@ Pinned shfmt subprocess
 
 9. Maintain golden AST fixtures tied to the exact parser pin.
 
-10. Retain the full 78-case corpus as a release gate.
+10. Retain the frozen 78-case checkpoint prefix and every appended live regression as a release
+    gate.
 
 11. Add a permanent targeted regression for:
 
@@ -779,7 +780,7 @@ Benefits:
 
 ### Corpus tests
 
-Run all 78 cases on every change to:
+Run the frozen 78-case prefix plus every appended live regression on each change to:
 
 - Parser version
 - Python wrapper version

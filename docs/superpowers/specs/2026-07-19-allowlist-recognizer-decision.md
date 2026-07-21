@@ -217,6 +217,18 @@ options, and a package-form `--no-sync` refuses before the payload under contrac
 (`401e1e1`). The frozen corpus and replay inventory carry `--no-sync` only in `uv run` form, so
 every recorded gate result and the verdict remain unchanged.
 
+The 2026-07-21 issue #102 live-baseline follow-up mirrored both repairs into the production
+scanner. Every stable option-like `uv tool` selector now fails closed with a contextual reason;
+when the selector is dynamic, the scanner also considers the alternate interpretation in which
+that word is an option and a later word is the real `run` selector. `--no-sync` moved out
+of the shared launcher flags and remains recognized only by `uv run`, so the two package-form
+launchers fail closed through their existing unknown-option path. A normalized test table now
+checks floor-versus-scanner agreement on the fixtures touched by `31440be` and `401e1e1`. The
+first 78 acceptance rows remain the immutable checkpoint prefix, while the live scanner cases are
+appended after it. Because the frozen replay inventory contains neither corrected form, the full
+PR #101 harness still reports no recorded gate drift; this follow-up does not change the rejected
+successor verdict or lift the release freeze.
+
 ## 6. Parser-backed candidate scoping
 
 Per the issue thread and its review comments, the successor is a doc-lattice-owned static helper

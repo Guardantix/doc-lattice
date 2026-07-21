@@ -211,7 +211,6 @@ _UV_LAUNCHER_FLAGS = frozenset(
         "--no-progress",
         "--no-project",
         "--no-python-downloads",
-        "--no-sync",
         "--offline",
         "--quiet",
         "--verbose",
@@ -249,6 +248,7 @@ _UV_RUN_FLAGS = _UV_LAUNCHER_FLAGS | frozenset(
         "--no-default-groups",
         "--no-index",
         "--no-sources",
+        "--no-sync",
         "--only-dev",
         "--refresh",
         "--reinstall",
@@ -2340,9 +2340,16 @@ def _uv_tool_payload_index(
     if run.active_argv_expansion:
         raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
     dynamic_run = run.dynamic
+    if not dynamic_run and run.literal.startswith("-"):
+        if request.fail_on_unknown:
+            raise _ShellScanIncomplete("uv tool option before the run selector")
+        return _unresolved_uv_launcher_option(
+            fail_on_unknown=False,
+            ambiguous=request.inherited_ambiguity,
+        )
     if not dynamic_run and run.literal != "run":
         return _ResolvedIndex(None, request.inherited_ambiguity)
-    return _launcher_payload_index(
+    payload = _launcher_payload_index(
         words,
         run_index + 1,
         _LauncherPayloadRequest(
@@ -2354,6 +2361,33 @@ def _uv_tool_payload_index(
         ),
         resolution,
     )
+    if payload.index is not None or not dynamic_run:
+        return payload
+    # The dynamic word can instead be a selector-position option. Without introducing a uv-tool
+    # option table, conservatively probe each later literal ``run`` as the possible selector. The
+    # shared scan budget bounds this iterative search, including adversarial dynamic-word chains.
+    for alternate_run_index in range(run_index + 1, len(words)):
+        resolution.step()
+        alternate_run = words[alternate_run_index]
+        if alternate_run.active_argv_expansion:
+            raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
+        if alternate_run.dynamic or alternate_run.literal != "run":
+            continue
+        alternate_payload = _launcher_payload_index(
+            words,
+            alternate_run_index + 1,
+            _LauncherPayloadRequest(
+                request.options,
+                strip_version=request.strip_version,
+                inherited_ambiguity=True,
+                fail_on_unknown=request.fail_on_unknown,
+                launcher_depth=request.launcher_depth,
+            ),
+            resolution,
+        )
+        if alternate_payload.index is not None:
+            return alternate_payload
+    return payload
 
 
 def _uv_dynamic_launcher_payload_index(
