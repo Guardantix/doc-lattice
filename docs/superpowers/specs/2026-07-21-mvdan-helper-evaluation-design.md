@@ -59,8 +59,13 @@ evaluation harness and tests; `audit.py` never imports them in this PR):
   maps `BatchFailure` into per-source D5 diagnostics, and performs D4 aggregation. PR B
   disposition: folded into `audit.py` (the durable production name).
 - `helper_locator.py`: the dormant package-owned helper lookup, resolving the bundled
-  binary from package data for the current platform, never `PATH`. In this PR it is
-  invoked only by the installed candidate-wheel smoke tests of gate 13.
+  binary from package data for the current platform, never `PATH`. It returns a typed
+  outcome: a located absolute path, or a typed `HelperUnavailable` (`missing_binary` or
+  `unsupported_platform`) that `successor_audit.py` maps into per-source
+  `UNINSPECTABLE_SOURCE` D5 diagnostics with `offset=None` and a stable owned reason,
+  exactly like a `BatchFailure`. In this PR it is invoked by the installed
+  candidate-wheel smoke tests and by the helper-free sdist degradation harness of
+  gate 13.
 
 Direct reuse, unchanged: `reachability.py` (D1), `model.py` (`BlockScan`, D4 invariants,
 `AuditDiagnostic`, D5 aggregation), and `launcher_policy.py` behavior and tests, with one
@@ -69,8 +74,8 @@ checkpoint (section 8); the frozen D3 checkpoint at `tests/fixtures/github_ci_ch
 is never mutated.
 
 Ordinary evaluation tests inject the temporary helper binary's absolute path because no
-package-owned binary exists in the normal build before PR B; only the installed
-candidate-wheel smoke tests exercise `helper_locator.py`.
+package-owned binary exists in the normal build before PR B; `helper_locator.py` is
+exercised by the installed candidate-wheel smoke tests and the sdist degradation harness.
 
 ## 3. Go helper contract
 
@@ -244,9 +249,14 @@ an independently maintained constant, and must exactly match the checkpoint pin
 (`parser_pin_mismatch` on failure). `helper_version` must exactly match the expected
 internal build identity (`helper_identity_mismatch` on failure). That identity is
 mechanically enforced, not asserted: it is a build-embedded semantic digest computed over
-the owned protocol schema and the certifier inputs (the certification tables and visitor
-sources), the Python side expects the same generated value, and CI recomputes the digest
-so a forgotten manual bump cannot defeat the stale-binary check. It is decoupled from the
+a frozen digest-input manifest (a checkpoint artifact) that enumerates every
+behavior-affecting, non-generated helper source and contract input: the owned protocol
+schema, the certification tables, the visitor and IR-encoding sources, the protocol and
+framing code including `main.go`, and the compiled limits. The manifest fixes a
+deterministic file ordering and lists its exclusions (generated files, tests, build
+metadata) explicitly. The Python side expects the same generated value, and CI recomputes
+the digest from the manifest so a forgotten manual bump or an unlisted
+behavior-affecting file cannot defeat the stale-binary check. It is decoupled from the
 package semver. Reported versions are compatibility tripwires, not
 integrity proof; the package-owned path (PR B) and recorded artifact hashes remain the
 integrity controls.
@@ -456,7 +466,9 @@ ephemeral, platform-tagged candidate wheels using the exact wheel layout propose
 PR B. Gate 13 covers both halves: the five installed candidate wheels (smoke tests
 proving packaging, `helper_locator.py` lookup from the installed wheel, and direct
 protocol execution, under Python 3.13 and 3.14 on every claimed target) and a helper-free
-sdist degradation harness exercising the dormant pipeline's fail-closed path. The actual
+sdist degradation harness that invokes `helper_locator.py` (never a merely injected
+nonexistent path) and asserts its typed `HelperUnavailable` outcome maps into the D5
+diagnostics of the dormant pipeline's fail-closed path. The actual
 CLI exit-2 smoke is repeated in PR B when the pipeline is wired. Runner labels, target
 triples, wheel tags, and build-container digests are frozen in the checkpoint; actual
 hosted runner image versions cannot be frozen in advance (images are continuously
@@ -479,6 +491,7 @@ Contents:
   dispatcher grammar, and pre-policy command matrix;
 - the protocol JSON Schema, cross-language conformance fixtures, and raw negative
   fixtures;
+- the helper-identity digest-input manifest (section 4.3);
 - `limits.json`: every cap and formula in sections 3.5 and 4.4, work-unit definitions,
   and the performance and RSS ceilings of section 9;
 - budgets, tripwires, the platform matrix with frozen runner labels, target triples,
