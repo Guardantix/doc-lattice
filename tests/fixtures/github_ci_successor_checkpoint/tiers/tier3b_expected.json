@@ -91,8 +91,8 @@
       "id": "fixture-14",
       "expected_status": "uninspectable",
       "expected_invocations": [],
-      "reason_category": "unsupported-expansion",
-      "derivation": "uvx --with=tox-uv doc-lattice check -e ${{ env.TOX_PYTHON }}: the successor resolves doc-lattice check but the trailing unquoted ${{ env.TOX_PYTHON }} is not a statically resolvable single-cardinality word (single=False, and the ${{ ... }} form is an unmodeled parameter expansion), so S5.2 refuses. Because the unresolvable trailing word could inject a policy token, certifying would risk a false-safe (false_safe=0), so no invocation is retained. This is one of exactly two predeclared uninspectable fixtures; with fixture 05 it consumes the entire 2/20 budget, leaving zero headroom. The reason category is provisional pending the pinned parser's handling of the unquoted GitHub-expression word; the uninspectable status and the 2/20 count are pinned regardless."
+      "reason_category": "syntax-error",
+      "derivation": "uvx --with=tox-uv doc-lattice check -e ${{ env.TOX_PYTHON }}: the pinned parser raises invalid parameter name at parse time (mvdan.cc/sh/v3@v3.13.1 syntax/parser.go:1729, verified) when it reaches the ${{ sequence, because { is not a legal first character of a parameter name. The source therefore never yields an AST, so no command site is ever built and word-level policy never runs; this is a terminal syntax-error that ends the source with no retained invocations, which is why expected_invocations is empty. This is one of exactly two predeclared uninspectable fixtures; with fixture 05 it consumes the entire 2/20 budget, leaving zero headroom. The reason category is resolved to syntax-error against the pinned parser source cited above; the uninspectable status and the 2/20 count are unchanged."
     },
     {
       "id": "fixture-15",

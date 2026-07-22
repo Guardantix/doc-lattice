@@ -882,10 +882,11 @@ def _baseline(
     return "live-certified", json.dumps(pairs), None
 
 
-def _case_dict(description: str, decision: Decision) -> dict[str, object]:
+def _case_dict(description: str, source: str, decision: Decision) -> dict[str, object]:
     """Serialize one re-derived decision to the frozen corpus artifact shape."""
     case: dict[str, object] = {
         "description": description,
+        "source": source,
         "label": decision.label,
         "expected_status": _STATUS[decision.label],
         "expected_invocations": [list(pair) for pair in decision.invocations],
@@ -961,10 +962,10 @@ def main() -> None:
 
     cases: list[dict[str, object]] = []
     rows: list[tuple[int, str, Decision, tuple[str, str, str | None]]] = []
-    for index, ((description, _script, expected), decision) in enumerate(
+    for index, ((description, script, expected), decision) in enumerate(
         zip(acceptance, _DECISIONS, strict=True)
     ):
-        cases.append(_case_dict(description, decision))
+        cases.append(_case_dict(description, script, decision))
         base = _baseline(index, expected, expected is incomplete, d3)
         rows.append((index, description, decision, base))
 

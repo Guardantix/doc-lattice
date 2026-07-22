@@ -94,10 +94,12 @@
     "assignment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "value_known"],
+      "required": ["name", "value_known", "start_byte", "end_byte"],
       "properties": {
         "name": { "type": "string" },
-        "value_known": { "type": "boolean" }
+        "value_known": { "type": "boolean" },
+        "start_byte": { "type": "integer", "minimum": 0 },
+        "end_byte": { "type": "integer", "minimum": 0 }
       }
     },
     "word": {

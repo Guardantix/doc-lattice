@@ -172,8 +172,8 @@ def test_conformance_and_negative_fixture_sets():
     """Positive fixtures validate; negative fixtures enumerate the S4.2 rejections."""
     conformance = sorted((CHECKPOINT / "protocol" / "conformance").iterdir())
     negative = sorted((CHECKPOINT / "protocol" / "negative").iterdir())
-    assert len(conformance) == 6
-    assert len(negative) == 12
+    assert len(conformance) == 7
+    assert len(negative) == 14
     names = {p.stem for p in negative}
     assert {
         "duplicate-keys",
@@ -188,7 +188,15 @@ def test_conformance_and_negative_fixture_sets():
         "out-of-order-results",
         "span-out-of-range",
         "max-length-four-byte-source",
+        "source-count-over-limit",
+        "json-depth-over-limit",
     } <= names
+    boundary = CHECKPOINT / "protocol" / "boundary"
+    assert boundary.is_dir()
+    at_limit = boundary / "source-count-at-limit.json"
+    assert at_limit.is_file()
+    request = json.loads(at_limit.read_text(encoding="utf-8"))
+    assert len(request["sources"]) == 4096
 
 
 def test_encoder_rules_and_digest_manifest():
@@ -218,6 +226,10 @@ def test_limits_freeze_spec_numbers():
     assert limits["aggregate_request_cap_bytes"] == 8_388_608
     assert limits["stdout_cap_bytes"] == 16_777_216
     assert limits["stderr_capture_cap_bytes"] == 65_536
+    assert limits["max_sources_per_batch"] == 4096
+    assert limits["json_max_depth"] == 64
+    assert limits["max_argv_words_per_site"] == 4096
+    assert limits["max_assignments_per_site"] == 256
     deadline = limits["deadline_ms"]
     assert deadline == {"base": 2000, "per_source": 25, "per_4096_bytes": 1, "ceiling": 30000}
     for key in ("statement_cap", "visitor_node_cap", "visitor_depth_cap", "event_cap"):
@@ -263,6 +275,7 @@ def test_successor_acceptance_labels_cover_all_rows():
     assert len(cases) == len(ACCEPTANCE_CASES) == 87
     for row, case in zip(ACCEPTANCE_CASES, cases, strict=True):
         assert case["description"] == row[0]
+        assert case["source"] == row[1]
         assert case["label"] in _LABELS
         assert case["derivation"]
         if case["label"] == "must-certify":

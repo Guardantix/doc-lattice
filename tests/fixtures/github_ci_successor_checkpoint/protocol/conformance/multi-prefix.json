@@ -4,7 +4,7 @@
     "sources": [
       {
         "id": 0,
-        "source": "X=1 doc-lattice lint"
+        "source": "A=1 B=$X doc-lattice check"
       }
     ]
   },
@@ -20,32 +20,38 @@
             "kind": "command_site",
             "ordinal": 0,
             "start_byte": 0,
-            "end_byte": 20,
+            "end_byte": 26,
             "assignments": [
               {
-                "name": "X",
+                "name": "A",
                 "value_known": true,
                 "start_byte": 0,
                 "end_byte": 3
+              },
+              {
+                "name": "B",
+                "value_known": false,
+                "start_byte": 4,
+                "end_byte": 8
               }
             ],
             "argv": [
               {
                 "text": "doc-lattice",
                 "single": true,
-                "start_byte": 4,
-                "end_byte": 15
+                "start_byte": 9,
+                "end_byte": 20
               },
               {
-                "text": "lint",
+                "text": "check",
                 "single": true,
-                "start_byte": 16,
-                "end_byte": 20
+                "start_byte": 21,
+                "end_byte": 26
               }
             ]
           }
         ],
-        "work_units": 2
+        "work_units": 3
       }
     ]
   }

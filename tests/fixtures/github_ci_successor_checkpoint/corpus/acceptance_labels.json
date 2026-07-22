@@ -2,6 +2,7 @@
   "cases": [
     {
       "description": "ansi-c executable",
+      "source": "$'doc-lattice' linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -15,6 +16,7 @@
     },
     {
       "description": "concatenated quoted words",
+      "source": "doc-\"lattice\" l\"inear\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -28,6 +30,7 @@
     },
     {
       "description": "elif condition",
+      "source": "if false; then :; elif doc-lattice linear; then :; fi",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -41,6 +44,7 @@
     },
     {
       "description": "while condition",
+      "source": "while doc-lattice check; do break; done",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -54,6 +58,7 @@
     },
     {
       "description": "until condition",
+      "source": "until doc-lattice check; do break; done",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -67,6 +72,7 @@
     },
     {
       "description": "time reserved word",
+      "source": "time doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -76,6 +82,7 @@
     },
     {
       "description": "coproc reserved word",
+      "source": "coproc doc-lattice linear; p=$COPROC_PID; wait \"$p\"",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -85,6 +92,7 @@
     },
     {
       "description": "case arm",
+      "source": "case x in x) doc-lattice linear;; esac",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -98,6 +106,7 @@
     },
     {
       "description": "runtime-unreachable command remains conservative",
+      "source": "false && doc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -111,6 +120,7 @@
     },
     {
       "description": "double-quoted substitution",
+      "source": "echo \"$(doc-lattice linear)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -124,6 +134,7 @@
     },
     {
       "description": "assignment-only substitution",
+      "source": "value=\"$(doc-lattice reconcile --all)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -137,6 +148,7 @@
     },
     {
       "description": "nested substitution",
+      "source": "echo \"$(printf %s \"$(doc-lattice linear)\")\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -150,6 +162,7 @@
     },
     {
       "description": "locale-quoted substitution",
+      "source": "echo $\"$(doc-lattice linear)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -163,6 +176,7 @@
     },
     {
       "description": "escaped substitution literal",
+      "source": "echo \"\\$(doc-lattice linear)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -171,6 +185,7 @@
     },
     {
       "description": "single-quoted substitution literal",
+      "source": "echo '$(doc-lattice linear)'",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -179,6 +194,7 @@
     },
     {
       "description": "inner single-quoted substitution literal",
+      "source": "echo \"$(printf '%s' '$(doc-lattice linear)')\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -187,6 +203,7 @@
     },
     {
       "description": "comment then active command",
+      "source": "echo \"$(true # harmless\ndoc-lattice linear)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -200,6 +217,7 @@
     },
     {
       "description": "backticks inside substitution comment",
+      "source": "echo \"$(true # `doc-lattice linear`\nprintf done)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -208,6 +226,7 @@
     },
     {
       "description": "comment line then active command",
+      "source": "echo \"$(\n# doc-lattice linear\ndoc-lattice check\n)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -221,6 +240,7 @@
     },
     {
       "description": "trailing comment backslash does not continue the comment",
+      "source": "# harmless \\\ndoc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -234,6 +254,7 @@
     },
     {
       "description": "even trailing comment backslashes do not continue the comment",
+      "source": "echo before # harmless \\\\\ndoc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -247,6 +268,7 @@
     },
     {
       "description": "nested legacy substitution",
+      "source": "echo `printf '%s' \\`doc-lattice linear\\``",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -260,6 +282,7 @@
     },
     {
       "description": "legacy substitution comment literal",
+      "source": "echo `true # doc-lattice linear\nprintf done`",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -268,6 +291,7 @@
     },
     {
       "description": "legacy substitution command after comment",
+      "source": "echo `true # harmless\ndoc-lattice linear`",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -281,6 +305,7 @@
     },
     {
       "description": "parameter default substitution",
+      "source": "unset x; echo \"${x:-$(doc-lattice linear)}\"",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -290,6 +315,7 @@
     },
     {
       "description": "nested parameter substitution",
+      "source": "unset x y; echo \"${x:-${y:-$(doc-lattice linear)}}\"",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -299,6 +325,7 @@
     },
     {
       "description": "parameter parenthesis does not close substitution",
+      "source": "echo \"$(printf %s ${x:-)}; doc-lattice linear)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -312,6 +339,7 @@
     },
     {
       "description": "hash inside parameter expansion is not a comment",
+      "source": "unset x; echo \"${x:-# $(doc-lattice linear)}\"",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -321,6 +349,7 @@
     },
     {
       "description": "single-quoted parameter expansion literal",
+      "source": "echo '${x:-$(doc-lattice linear)}'",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -329,6 +358,7 @@
     },
     {
       "description": "parameter text resembling heredoc",
+      "source": "echo ${x:-<<EOF}\ndoc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -342,6 +372,7 @@
     },
     {
       "description": "parameter arithmetic shift",
+      "source": "x=abcdef; echo ${x:1<<2}\ndoc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -355,6 +386,7 @@
     },
     {
       "description": "arithmetic expansion shift",
+      "source": "echo $((1 << 2))\ndoc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -368,6 +400,7 @@
     },
     {
       "description": "arithmetic command shift",
+      "source": "((x = 1 << 2))\ndoc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -377,6 +410,7 @@
     },
     {
       "description": "legacy arithmetic shift",
+      "source": "echo $[1 << 2]\ndoc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -390,6 +424,7 @@
     },
     {
       "description": "modern substitution in arithmetic",
+      "source": "echo $(( $(doc-lattice check) + 1 ))",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -399,6 +434,7 @@
     },
     {
       "description": "legacy substitution in arithmetic",
+      "source": "echo $(( `doc-lattice check` + 1 ))",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -408,6 +444,7 @@
     },
     {
       "description": "substitution in legacy arithmetic",
+      "source": "echo $[ $(doc-lattice check) + 1 ]",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -417,6 +454,7 @@
     },
     {
       "description": "unbalanced dollar-arithmetic runs a command-substitution subshell",
+      "source": "x=$((doc-lattice linear) )",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -426,6 +464,7 @@
     },
     {
       "description": "unbalanced arithmetic command runs a nested subshell",
+      "source": "((doc-lattice linear) )",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -435,6 +474,7 @@
     },
     {
       "description": "unbalanced dollar-arithmetic subshell without an invocation",
+      "source": "echo out $((true INNER) )",
       "label": "outside-direct-marker-contract",
       "expected_status": "not_applicable",
       "expected_invocations": [],
@@ -443,6 +483,7 @@
     },
     {
       "description": "balanced dollar-arithmetic is not a command",
+      "source": "echo $((rc_audit + 1))",
       "label": "outside-direct-marker-contract",
       "expected_status": "not_applicable",
       "expected_invocations": [],
@@ -451,6 +492,7 @@
     },
     {
       "description": "balanced dollar-arithmetic assignment is not a command",
+      "source": "x=$((1 + 2))",
       "label": "outside-direct-marker-contract",
       "expected_status": "not_applicable",
       "expected_invocations": [],
@@ -459,6 +501,7 @@
     },
     {
       "description": "nested balanced dollar-arithmetic is not a command",
+      "source": "echo $(( (rc_audit + 1) * 2 ))",
       "label": "outside-direct-marker-contract",
       "expected_status": "not_applicable",
       "expected_invocations": [],
@@ -467,6 +510,7 @@
     },
     {
       "description": "unterminated dollar-arithmetic yields no command",
+      "source": "echo $((1 + 2",
       "label": "outside-direct-marker-contract",
       "expected_status": "not_applicable",
       "expected_invocations": [],
@@ -475,6 +519,7 @@
     },
     {
       "description": "plain heredoc body is data",
+      "source": "cat <<EOF\ndoc-lattice linear\nEOF\ndoc-lattice check",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -488,6 +533,7 @@
     },
     {
       "description": "unquoted heredoc expands modern substitution",
+      "source": "cat <<EOF\n$(doc-lattice linear)\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -501,6 +547,7 @@
     },
     {
       "description": "quote characters do not quote unquoted heredoc body",
+      "source": "cat <<EOF\n'$(doc-lattice linear)'\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -514,6 +561,7 @@
     },
     {
       "description": "escaped dollar in unquoted heredoc",
+      "source": "cat <<EOF\n\\$(doc-lattice linear)\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -522,6 +570,7 @@
     },
     {
       "description": "quoted heredoc suppresses modern substitution",
+      "source": "cat <<'EOF'\n$(doc-lattice linear)\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -530,6 +579,7 @@
     },
     {
       "description": "unquoted heredoc delimiter word removes continuation",
+      "source": "cat <<E\\\nOF\nharmless\nEOF\ndoc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -539,6 +589,7 @@
     },
     {
       "description": "double-quoted heredoc delimiter word removes continuation",
+      "source": "cat <<\"E\\\nOF\"\nharmless\nEOF\ndoc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -548,6 +599,7 @@
     },
     {
       "description": "single-quoted heredoc delimiter word preserves continuation",
+      "source": "cat <<'E\\\nOF'\nharmless\nEOF\ndoc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -557,6 +609,7 @@
     },
     {
       "description": "ansi-quoted heredoc suppresses substitution",
+      "source": "cat <<$'EOF'\n$(doc-lattice linear)\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -565,6 +618,7 @@
     },
     {
       "description": "unquoted heredoc expands backticks",
+      "source": "cat <<EOF\n`doc-lattice linear`\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -578,6 +632,7 @@
     },
     {
       "description": "quoted heredoc suppresses backticks",
+      "source": "cat <<'EOF'\n`doc-lattice linear`\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -586,6 +641,7 @@
     },
     {
       "description": "hash does not comment unquoted heredoc expansion",
+      "source": "cat <<EOF\n# $(doc-lattice linear)\nEOF",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -599,6 +655,7 @@
     },
     {
       "description": "nested unquoted heredoc",
+      "source": "echo \"$(cat <<EOF\n$(doc-lattice linear)\nEOF\n)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -612,6 +669,7 @@
     },
     {
       "description": "nested quoted heredoc",
+      "source": "echo \"$(cat <<'EOF'\n$(doc-lattice linear)\nEOF\n)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -620,6 +678,7 @@
     },
     {
       "description": "multiple heredocs retain expansion policy and ordering",
+      "source": "cat <<A <<'B'\n$(doc-lattice linear)\nA\n$(doc-lattice reconcile --all)\nB\ndoc-lattice lint",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -637,6 +696,7 @@
     },
     {
       "description": "unquoted heredoc continuation suppresses physical delimiter",
+      "source": "cat <<EOF\nbody \\\nEOF\ndoc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -646,6 +706,7 @@
     },
     {
       "description": "unquoted heredoc continuation forms delimiter",
+      "source": "cat <<EOF\nEO\\\nF\ndoc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -655,6 +716,7 @@
     },
     {
       "description": "unquoted heredoc continuation forms command substitution",
+      "source": "cat <<EOF\n$\\\n(doc-lattice linear)\nEOF",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -664,6 +726,7 @@
     },
     {
       "description": "here-string substitution",
+      "source": "cat <<< \"$(doc-lattice linear)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -677,6 +740,7 @@
     },
     {
       "description": "here-string literal",
+      "source": "cat <<< 'doc-lattice linear'",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -685,6 +749,7 @@
     },
     {
       "description": "input process substitution",
+      "source": "cat <(doc-lattice linear) >/dev/null",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -694,6 +759,7 @@
     },
     {
       "description": "output process substitution",
+      "source": "printf x > >(doc-lattice linear)",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -703,6 +769,7 @@
     },
     {
       "description": "process substitution literal argument",
+      "source": "cat <(printf '%s' 'doc-lattice linear') >/dev/null",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -712,6 +779,7 @@
     },
     {
       "description": "named-fd redirection before executable",
+      "source": "{fd}>/dev/null doc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -725,6 +793,7 @@
     },
     {
       "description": "redirection before subcommand",
+      "source": "doc-lattice >/dev/null linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -738,6 +807,7 @@
     },
     {
       "description": "redirection before uv payload",
+      "source": "uv run >/dev/null doc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -751,6 +821,7 @@
     },
     {
       "description": "dry-run is redirection target",
+      "source": "doc-lattice reconcile > --dry-run",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -764,6 +835,7 @@
     },
     {
       "description": "dry-run is here-string redirection word",
+      "source": "doc-lattice reconcile <<< --dry-run",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -777,6 +849,7 @@
     },
     {
       "description": "quoted dry-run remains an argv token",
+      "source": "doc-lattice reconcile '--dry-run'",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -790,6 +863,7 @@
     },
     {
       "description": "dynamically expanded dry-run is not a distinct lexical token",
+      "source": "FLAG=--dry-run; doc-lattice reconcile \"$FLAG\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -803,6 +877,7 @@
     },
     {
       "description": "substitution in redirection target executes",
+      "source": "printf x > \"$(doc-lattice check)\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [
@@ -816,6 +891,7 @@
     },
     {
       "description": "multiline double-quoted literal",
+      "source": "printf \"%s\" \"doc-lattice linear\nuv run doc-lattice reconcile\"",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -824,6 +900,7 @@
     },
     {
       "description": "multiline single-quoted literal",
+      "source": "printf '%s' 'doc-lattice linear\nuv run doc-lattice reconcile'",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -832,6 +909,7 @@
     },
     {
       "description": "complete command before malformed substitution",
+      "source": "doc-lattice check; echo \"$(",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [
@@ -846,6 +924,7 @@
     },
     {
       "description": "uv tool short option before selector is intentional exit 2",
+      "source": "uv tool -q run doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -855,6 +934,7 @@
     },
     {
       "description": "uv tool long option before selector is intentional exit 2",
+      "source": "uv tool --quiet run doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -864,6 +944,7 @@
     },
     {
       "description": "uv tool value option before selector is intentional exit 2",
+      "source": "uv tool --directory /tmp run doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -873,6 +954,7 @@
     },
     {
       "description": "uv tool option before non-run selector is intentional exit 2",
+      "source": "uv tool -q install doc-lattice",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -882,6 +964,7 @@
     },
     {
       "description": "uv tool dynamic value option before selector is intentional exit 2",
+      "source": "OPT=--directory; uv tool \"$OPT\" /tmp run doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -891,6 +974,7 @@
     },
     {
       "description": "bare uv tool install remains non-candidate",
+      "source": "uv tool install doc-lattice",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [],
@@ -899,6 +983,7 @@
     },
     {
       "description": "uvx no-sync is intentional exit 2",
+      "source": "uvx --no-sync doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -908,6 +993,7 @@
     },
     {
       "description": "uv tool run no-sync is intentional exit 2",
+      "source": "uv tool run --no-sync doc-lattice linear",
       "label": "intentional-exit-2",
       "expected_status": "uninspectable",
       "expected_invocations": [],
@@ -917,6 +1003,7 @@
     },
     {
       "description": "uv run no-sync remains certified",
+      "source": "uv run --no-sync doc-lattice linear",
       "label": "must-certify",
       "expected_status": "certified",
       "expected_invocations": [

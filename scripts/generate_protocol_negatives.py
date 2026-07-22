@@ -9,8 +9,10 @@ fixture is a legitimate, maximally sized request that pins the S4.2 per-source/a
 byte-cap composition; this script asserts that composition at generation time so a future
 change to the caps or the encoding rule is caught here rather than silently drifting.
 
-Run with ``python scripts/generate_protocol_negatives.py`` to regenerate all twelve fixtures
-in ``tests/fixtures/github_ci_successor_checkpoint/protocol/negative/``.
+Run with ``python scripts/generate_protocol_negatives.py`` to regenerate all fourteen negative
+fixtures in ``tests/fixtures/github_ci_successor_checkpoint/protocol/negative/`` and the
+at-limit boundary fixture in ``.../protocol/boundary/``. The boundary fixture is a valid
+at-cap input for the gate-9 harness and, unlike the negatives, carries a trailing newline.
 """
 
 import json
@@ -18,9 +20,12 @@ from pathlib import Path
 
 CHECKPOINT = Path(__file__).parent.parent / "tests" / "fixtures" / "github_ci_successor_checkpoint"
 NEGATIVE = CHECKPOINT / "protocol" / "negative"
+BOUNDARY = CHECKPOINT / "protocol" / "boundary"
 
 AGGREGATE_REQUEST_CAP_BYTES = 8_388_608
 PER_SOURCE_CHARACTER_CAP = 1_048_576
+MAX_SOURCES_PER_BATCH = 4_096
+JSON_MAX_DEPTH = 64
 
 
 def write_text(name: str, content: str) -> None:
@@ -202,8 +207,39 @@ def generate_max_length_four_byte_source() -> None:
     write_bytes("max-length-four-byte-source.json", encoded)
 
 
+def _sources_request(count: int) -> str:
+    """Encode a canonical request carrying ``count`` trivial ``true`` sources, ids 0..count-1."""
+    request = {
+        "protocol_version": 1,
+        "sources": [{"id": index, "source": "true"} for index in range(count)],
+    }
+    return json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+
+
+def generate_source_count_over_limit() -> None:
+    """Request: a valid document with one source past the S4.4 per-batch source cap (4,097)."""
+    write_text("source-count-over-limit.json", _sources_request(MAX_SOURCES_PER_BATCH + 1))
+
+
+def generate_json_depth_over_limit() -> None:
+    """Request bytes: nesting one array past the S4.4 JSON depth cap (65 arrays deep)."""
+    depth = JSON_MAX_DEPTH + 1
+    write_text("json-depth-over-limit.json", "[" * depth + "]" * depth)
+
+
+def generate_source_count_at_limit() -> None:
+    """Boundary: a valid document at exactly the S4.4 per-batch source cap (4,096 sources).
+
+    Unlike the negatives, this is a legitimate at-cap input for the gate-9 harness, so it is
+    written with a trailing newline into the sibling ``boundary/`` directory.
+    """
+    BOUNDARY.mkdir(parents=True, exist_ok=True)
+    encoded = _sources_request(MAX_SOURCES_PER_BATCH)
+    (BOUNDARY / "source-count-at-limit.json").write_text(encoded + "\n", encoding="utf-8")
+
+
 def main() -> None:
-    """Regenerate every negative fixture."""
+    """Regenerate every negative fixture and the at-limit boundary fixture."""
     NEGATIVE.mkdir(parents=True, exist_ok=True)
     generate_duplicate_keys()
     generate_invalid_utf8()
@@ -217,6 +253,9 @@ def main() -> None:
     generate_out_of_order_results()
     generate_span_out_of_range()
     generate_max_length_four_byte_source()
+    generate_source_count_over_limit()
+    generate_json_depth_over_limit()
+    generate_source_count_at_limit()
 
 
 if __name__ == "__main__":

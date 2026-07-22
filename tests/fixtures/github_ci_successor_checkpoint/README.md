@@ -43,12 +43,13 @@ tables say and nothing more.
 
 The helper wire protocol: the strict draft-2020-12 JSON Schema (protocol_version 1, all
 objects closed), the canonical encoder rules, the digest-input manifest that defines the
-helper-identity hash, positive conformance fixtures, and raw negative fixtures enumerating
-every rejection the schema must catch. These freeze the byte-exact contract between the
-Python engine and the Go helper before either is written. The conformance fixtures'
-`helper_version` is a synthetic 64-hex placeholder and their `work_units` values are wire-shape
-data for byte-exact marshal tests, not values derived from the `limits.json` work-unit
-definition.
+helper-identity hash, seven positive conformance fixtures, fourteen raw negative fixtures
+enumerating every rejection the schema and decoders must catch, and a `boundary/` directory
+of valid at-cap inputs (a source batch at exactly the 4,096-source limit) for the gate-9
+harness. These freeze the byte-exact contract between the Python engine and the Go helper
+before either is written. The conformance fixtures' `helper_version` is a synthetic 64-hex
+placeholder and their `work_units` values are wire-shape data for byte-exact marshal tests,
+not values derived from the `limits.json` work-unit definition.
 
 ### `corpus/`
 
@@ -128,10 +129,12 @@ the remainder are presented for ratification.
   indeterminate with false-positive and false-safe exactly zero. The predeclared expectations
   already sit at 2 of 20 indeterminate (fixtures 05 and 14), so there is zero headroom; any
   additional indeterminate fixture fails the gate.
-- **Fixture-14 provisional category.** Tier 3B fixture 14's reason category is marked
-  provisional in the frozen artifact: its indeterminate status is firm and counts against the
-  budget, but the specific reason-category label is pending confirmation against the runtime
-  helper. Fixture 05 (splitting-unsafe-word) is firm.
+- **Fixture-14 resolved category.** Tier 3B fixture 14's reason category is resolved to
+  `syntax-error` in the frozen artifact: the pinned parser raises `invalid parameter name` at
+  parse time for the `${{` sequence (mvdan.cc/sh/v3@v3.13.1 syntax/parser.go:1729), so the
+  source never parses, no command site is built, and the refusal is a terminal syntax-error
+  with no retained invocation. The indeterminate status and the 2/20 count are unchanged.
+  Fixture 05 (splitting-unsafe-word) is firm.
 - **Acceptance-corpus adjudication rows (Task 6, cap 12, zero headroom).** The acceptance
   corpus carries exactly 12 `owner_adjudicate` rows (the cap): rows 1, 32, 37, 38, 49, 50,
   51, 60, 61, 62, 63, 71. The cap has zero headroom; a thirteenth judgment call fails the
@@ -177,6 +180,24 @@ the remainder are presented for ratification.
   to the dynamic `VAR="naïve $X"`, so the fixture continues to exercise an assignment-prefix
   refusal. `expected_refusal_raw_index` (13) is unchanged since the prefix up to `VAR` is
   unchanged. `MANIFEST.sha256` was regenerated in the same revision.
+- **2026-07-21 (adversarial review): five verified findings.** An adversarial review of the
+  frozen checkpoint produced five fixes, folded in here with the spec amendments to sections
+  3.3 and 4.4:
+  1. Assignment facts now carry `start_byte`/`end_byte` on the wire (schema `$defs.assignment`
+     plus every conformance fixture using assignments), because the amended S5.2 refusal
+     anchors at the earliest dynamic assignment; a new `multi-prefix.json` conformance fixture
+     exercises a mixed literal-and-dynamic prefix.
+  2. `corpus/acceptance_labels.json` now freezes each row's exact `source` script, so the
+     acceptance derivation cannot silently drift from the acceptance corpus.
+  3. `limits.json` freezes the four decoder bounds (`max_sources_per_batch` 4096,
+     `json_max_depth` 64, `max_argv_words_per_site` 4096, `max_assignments_per_site` 256) with
+     two new over-limit negative fixtures and a `boundary/` at-limit fixture.
+  4. The `offset_oracle` `multibyte-assignment-prefix` fixture pins the retain-argv half of the
+     amended S5.2 dynamic rule with `expected_invocations` `[["check", false]]`.
+  5. Tier 3B fixture 14's reason category is resolved from provisional `unsupported-expansion`
+     to terminal `syntax-error`, the pinned parser raising `invalid parameter name` at parse
+     time for `${{` so the source never parses.
+  `MANIFEST.sha256` was regenerated in the same revision.
 
 ## Handoff
 

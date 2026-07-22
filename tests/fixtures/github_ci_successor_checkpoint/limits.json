@@ -4,6 +4,10 @@
   "aggregate_request_cap_bytes": 8388608,
   "stdout_cap_bytes": 16777216,
   "stderr_capture_cap_bytes": 65536,
+  "max_sources_per_batch": 4096,
+  "json_max_depth": 64,
+  "max_argv_words_per_site": 4096,
+  "max_assignments_per_site": 256,
   "deadline_ms": {
     "base": 2000,
     "per_source": 25,
