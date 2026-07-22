@@ -15,12 +15,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Read-only `ci audit` policy checks and interactive `ci refresh` support for managed upgrades,
   repository renames, and transfers.
 
-### Removed
-
-- The dormant, never-released D3 recognizer evaluation modules (`direct_marker_scanner.py`,
-  `launcher_policy.py`) and their evaluation harness, per the issue #100 retain decision. The
-  production `ci audit` scanner is unchanged.
-
 ### Security
 
 - The generated Linear workflow uses a dedicated environment-only credential, maps it only on the

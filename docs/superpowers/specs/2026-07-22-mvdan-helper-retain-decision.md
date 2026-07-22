@@ -155,13 +155,18 @@ Per spec section 9, executed by the pull request that carries this record:
    `scripts/bench_recognizer_replay.py`, and the corresponding sdist-exclusion entries. The
    scanner-versus-policy parity test in `test_github_ci_shell_scanner.py` is converted to
    direct expected-outcome assertions so the issue #102 fixtures stay pinned against the
-   production scanner.
-3. **Retained deliberately:** `reachability.py` and its tests (candidate-independent,
-   contract-ratified D1 logic with no duplicate implementation and no drift hazard), the D4
-   and D5 model types (`BlockScan`, `AuditDiagnostic`, `AuditResult`) and their constants
-   domains (ratified contracts shared with future audit hardening), and the frozen D3
-   checkpoint fixtures with their integrity test (the corpus history; the live scanner's own
-   acceptance corpus remains in `test_github_ci_shell_scanner.py`).
+   production scanner. A follow-up review finding extended the sweep to the dormant D1
+   reachability module (`reachability.py` and its tests), the D4 and D5 model types
+   (`BlockScan`, `AuditDiagnostic`, `AuditResult`, and `diagnostic_sort_key`), and their four
+   constants domains (`BlockScanStatus`, `ScanReasonCategory`, `AuditSourceKind`, and
+   `AuditDiagnosticCode` with their `VALID_*` sets): all were likewise never-released
+   speculative contracts with no production consumer, so they are removed rather than carried
+   as unreferenced surface.
+3. **Retained deliberately:** the frozen D3 checkpoint fixtures with their integrity test (the
+   corpus history), and the live scanner's own acceptance corpus in
+   `test_github_ci_shell_scanner.py`. The removed contract designs (the D1 reachability logic,
+   the D4 and D5 model types, and their constants domains) remain available on the evidence
+   branch.
 4. **Release freeze lifted.** The freeze declared by the predecessor record ends when this
    record merges. Versioning of the accumulated unreleased work follows the normal release
    procedure; this record selects no version.
