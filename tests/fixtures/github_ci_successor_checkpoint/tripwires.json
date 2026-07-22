@@ -1,19 +1,21 @@
 {
-  "owned_production_surface_max_lines": 2200,
-  "net_production_reduction_min_lines": 1400,
-  "deletion_baseline_lines": 3704,
-  "helper_binary_max_bytes": 12582912,
-  "platform_wheel_max_bytes": 16777216,
-  "ci_native_target_executions_max": 5,
   "artifact_retention_days": 7,
-  "owned_surface_definition": "owned surface (full successor-owned files, changed symbols in shared modules, and all schema, build, and packaging logic) at most 2,200 production lines",
-  "net_reduction_definition": "net reduction (production size at be4b7b1 minus the projected integrated PR B tree) at least 1,400 lines against the 3,704-line deletion baseline (shell_scanner.py 3,031 plus direct_marker_scanner.py 673)",
+  "ci_native_target_executions_max": 5,
+  "deletion_baseline_lines": 3704,
   "frozen_path_set": [
     "src/doc_lattice/github_ci/",
     "helper/doc-lattice-shell-parser/",
     "src/doc_lattice/constants.py",
     "pyproject.toml"
   ],
+  "helper_binary_max_bytes": 12582912,
+  "net_production_reduction_min_lines": 1400,
+  "net_reduction_definition": "net reduction (production size at be4b7b1 minus the projected integrated PR B tree) at least 1,400 lines against the 3,704-line deletion baseline (shell_scanner.py 3,031 plus direct_marker_scanner.py 673)",
+  "owned_production_surface_max_lines": 2200,
+  "owned_surface_definition": "owned surface (full successor-owned files, changed symbols in shared modules, and all schema, build, and packaging logic) at most 2,200 production lines",
+  "platform_wheel_max_bytes": 16777216,
+  "ratification": "ratified by the owner on 2026-07-22 at checkpoint review, after three adversarial review rounds; this review-approved amendment commit is the ratification revision",
+  "ratified": true,
   "separate_reporting": [
     "tests",
     "fixtures",
@@ -21,7 +23,5 @@
     "go.mod",
     "go.sum",
     "CI surface"
-  ],
-  "ratified": false,
-  "ratification": "owner ratifies at checkpoint review; flip to true only in the review-approved amendment commit"
+  ]
 }

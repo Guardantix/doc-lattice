@@ -267,7 +267,7 @@ def test_budgets_and_tripwires():
     assert trip["platform_wheel_max_bytes"] == 16 * 1024 * 1024
     assert trip["ci_native_target_executions_max"] == 5
     assert trip["artifact_retention_days"] == 7
-    assert trip["ratified"] is False
+    assert trip["ratified"] is True
 
 
 _LABELS = frozenset({"must-certify", "intentional-exit-2", "outside-direct-marker-contract"})

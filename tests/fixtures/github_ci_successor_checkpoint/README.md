@@ -117,9 +117,14 @@ the remainder are presented for ratification.
   carries a literal-assignment-prefix-plus-argv marker command. The pre-policy matrix row
   `assignments-plus-argv-dynamic` records the retained-argv refusal.
 
-### Presented for ratification at checkpoint review
+### Ratified by the owner on 2026-07-22 at checkpoint review
 
-- **Tripwire numbers (`tripwires.json`, `"ratified": false`).** Owned production surface at
+Every item in this section, including the tripwire numbers and all `owner_adjudicate`
+rows and groups below, was ratified as frozen by the owner on 2026-07-22 after three
+adversarial review rounds. `tripwires.json` `"ratified"` is true as of the ratification
+revision; the items remain listed with their original framing for the record.
+
+- **Tripwire numbers (`tripwires.json`).** Owned production surface at
   most 2,200 lines; net production reduction at least 1,400 lines against the 3,704-line
   deletion baseline (`shell_scanner.py` 3,031 plus `direct_marker_scanner.py` 673); helper
   binary at most 12 MiB; platform wheel at most 16 MiB; at most 5 CI native-target
@@ -253,3 +258,8 @@ Do not push, open a PR, or start implementation from this checkpoint. Implementa
 begins only after the owner approves the checkpoint and ratifies the tripwires (S10), recorded
 by flipping `tripwires.json` `"ratified"` to true in a review-approved amendment commit, which
 per S8 is a new checkpoint revision that regenerates `MANIFEST.sha256` in the same commit.
+- **2026-07-22 (ratification revision).** The owner ratified the checkpoint at review:
+  `tripwires.json` `"ratified"` flipped to true, the ratification list retitled to record
+  the decision, and its validator updated to assert the ratified state. No corpus, table,
+  protocol, tier, limit, or pin content changed in this revision. `MANIFEST.sha256` was
+  regenerated in the same commit, per the section 8 revision contract.
