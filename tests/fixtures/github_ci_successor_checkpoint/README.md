@@ -139,14 +139,23 @@ the remainder are presented for ratification.
   corpus carries exactly 12 `owner_adjudicate` rows (the cap): rows 1, 32, 37, 38, 49, 50,
   51, 60, 61, 62, 63, 71. The cap has zero headroom; a thirteenth judgment call fails the
   corpus validator.
-- **Legacy normalization adjudications (Task 9, 4 group decisions, 113 entries).** The 580
-  legacy entries carry 113 `owner_adjudicate` entries, all category-label-only, resolved as 4
-  group decisions over the tied legacy strings: env-split-string (62 entries, pinned to
-  `unsupported-construct`), command-position expansion (42 entries, pinned to
-  `unquoted-expansion-in-command-word`), extglob expansion (5 entries, pinned to
-  `unsupported-construct`), and dynamic-relative doc-lattice executable (4 entries, pinned to
-  `policy-unresolvable`). Per-entry provenance lives in the `_ADJUDICATED` frozenset of
-  `scripts/normalize_legacy_reasons.py`, not in the artifact JSON.
+- **Legacy normalization adjudications (Task 9, per-entry contextual classification, 79
+  entries).** The 580 legacy entries carry 79 `owner_adjudicate` entries, all
+  category-label-only. Four legacy strings collapse successor-distinct constructs into one
+  bucket; the second adversarial-review round replaced their global group pins with deterministic
+  per-entry classification over each entry's source text (`_classify_contextual` in
+  `scripts/normalize_legacy_reasons.py`, sub-rules frozen in the artifact's `contextual_mapping`).
+  Of the former 113 collapsed entries, 34 are now resolved (owner_adjudicate false) and 33 change
+  category: command-position expansion (42) splits into 14 `policy-unresolvable`, 6
+  `splitting-unsafe-word`, 1 `unstable-first-word`, and 21 kept at the conservative
+  `unquoted-expansion-in-command-word` pin; env-split-string (62) splits into 4
+  `assignment-prefix`, 7 `splitting-unsafe-word`, 1 `unstable-first-word`, and 50 kept at the
+  conservative `unsupported-construct` pin; dynamic-relative doc-lattice executable (4) splits
+  into 1 `policy-unresolvable` (the `uv run` payload form) and 3 kept at the conservative
+  `policy-unresolvable` pin; extglob expansion (5) is a single construct and stays at the
+  conservative `unsupported-construct` pin. Unresolved entries (unquoted `$VAR` expansions,
+  command substitutions, control-flow-keyword heads, off-floor wrapper heads) keep their
+  conservative pin with `owner_adjudicate: true` pending ratification.
 - **Uncertain-container rows (Task 6).** Rows 24, 25, 27, 34, 35, 36 refuse reading their
   container today; they flip to must-certify if the ratified traversal convention is later
   found to traverse those containers. (Row 10 was in this set and is now resolved by the
@@ -197,6 +206,29 @@ the remainder are presented for ratification.
   5. Tier 3B fixture 14's reason category is resolved from provisional `unsupported-expansion`
      to terminal `syntax-error`, the pinned parser raising `invalid parameter name` at parse
      time for `${{` so the source never parses.
+  `MANIFEST.sha256` was regenerated in the same revision.
+- **2026-07-21 (adversarial review, round 2): three verified findings.** A second adversarial
+  review of the frozen checkpoint produced three fixes, folded in here with the S6.2 ordering
+  clarification:
+  1. D2 reachability. A source whose authored raw text carries no marker is dropped at collection
+     and can never reach the certifier, and a source with a raw match anywhere is batched. Five
+     rows violated this and were corrected: acceptance corpus row 1 (`doc-"lattice" l"inear"`,
+     no raw marker) was relabeled from must-certify back to `outside-direct-marker-contract` /
+     `not_applicable`, which restores the D3 checkpoint's disposition for this row; the
+     `dispatcher` fixture `marker-free-dispatch` (whose comment carries the marker, so it is
+     batched) was relabeled to must-certify with zero invocations; and the three `offset_oracle`
+     template rows, which were raw-marker-free and unreachable, were redesigned to be genuinely
+     batched while preserving each oracle's before/inside/after-`{0}` purpose
+     (`bash $PRE {0} doc-lattice`, `doc-lattice {0}`, `bash -e {0} $EXTRA # doc-lattice`). A new
+     `test_d2_reachability_bidirectional_consistency` validator enforces the biconditional over
+     every labeled source.
+  2. Per-entry legacy normalization. The four collapsed legacy strings are now classified per
+     entry from source text rather than pinned globally (see the legacy adjudication bullet
+     above); `owner_adjudicate` falls from 113 to 79.
+  3. Escaped lone surrogate. A fifteenth negative fixture `escaped-lone-surrogate.json` (byte-exact
+     ASCII JSON carrying a `\uD800` escape) covers the decoder-level escaped lone surrogate that
+     Go's `encoding/json` would silently replace with U+FFFD, complementing `lone-surrogate.bin`
+     (raw CESU-8 surrogate bytes).
   `MANIFEST.sha256` was regenerated in the same revision.
 
 ## Handoff

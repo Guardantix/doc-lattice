@@ -59,10 +59,10 @@
       {
         "id": "marker-free-dispatch",
         "source": "bash -c 'echo hello'  # doc-lattice check runs elsewhere",
-        "label": "outside-direct-marker-contract",
-        "expected_status": "not_applicable",
+        "label": "must-certify",
+        "expected_status": "certified",
         "expected_invocations": [],
-        "spec": "S6.1 last sentence: the dispatcher command bash -c 'echo hello' is marker-free so it stays outside the direct-invocation contract; the doc-lattice text lives only in the trailing comment, which is inert raw text and not a command word, so the source is not_applicable with no invocation and no refusal."
+        "spec": "S6.1 last sentence / S6.2: the trailing comment carries the doc-lattice marker in the authored raw text, so D2 batches this source (comments count; a raw match anywhere makes the source reachable). The dispatcher command bash -c 'echo hello' is itself marker-free under S6.2 synthetic-safe provenance because no command word carries the marker, so the argv-wide dispatcher rule does not fire and bash is an ordinary not_candidate. With no marker-bearing command word the source certifies with zero invocations. This pins that a marker-free dispatch argv never triggers the dispatcher rule even when the enclosing source is batched by an inert comment marker."
       },
       {
         "id": "source-plain-head-marker-argv",
@@ -214,33 +214,33 @@
       },
       {
         "id": "template-before-sentinel",
-        "source": "bash $PRE {0}",
+        "source": "bash $PRE {0} doc-lattice",
         "label": "intentional-exit-2",
         "expected_status": "uninspectable",
         "expected_refusal_raw_index": 5,
         "reason_category": "policy-unresolvable",
         "template": true,
-        "spec": "S5.2 / S6.1 / S9 gate 8 (before {0}): the authored shell template is bash $PRE {0}; $PRE is dynamic selector syntax preceding the payload in a marker-bearing dispatcher command (the run body {0} carries the marker), so it refuses dispatcher-selector-unresolved. The refusal precedes {0} and uses the identity projection, mapping to raw character index 5: b0 a1 s2 h3 space4 dollar5. Code dispatcher-selector-unresolved maps to scan_reason_category policy-unresolvable (tables/reason_codes.json), which is the value this row's reason_category records."
+        "spec": "S5.2 / S6.1 / S9 gate 8 (before {0}): the authored shell template is bash $PRE {0} doc-lattice. D2 batches it because the trailing operand word doc-lattice carries the marker in its authored raw-source segment; the {0} sentinel content is excluded from marker provenance (S6.2), so the operand is what makes the command marker-bearing (mirroring the frozen bash-dynamic-selector fixture bash $OPT 'doc-lattice lint'). bash is a recognized shell dispatcher head; the selector $PRE is dynamic selector syntax that is not statically resolvable, so per the dispatcher grammar (tables/dispatcher_grammar.json c_option_grammar.value_options_before_c) the command refuses dispatcher-selector-unresolved rather than silently missing -c. The refusal anchors at the selector word $PRE, which precedes {0} and uses the identity projection, mapping to raw character index 5: b0 a1 s2 h3 space4 dollar5 (P6 R7 E8 space9 brace10 zero11 brace12 space13 d14). Code dispatcher-selector-unresolved maps to scan_reason_category policy-unresolvable (tables/reason_codes.json), which is the value this row's reason_category records. Redesigned in the second adversarial-review round: the prior source bash $PRE {0} carried no authored marker and was unreachable under D2, so the trailing marker operand was appended to make it genuinely batched with the $PRE refusal index unchanged."
       },
       {
         "id": "template-inside-sentinel",
-        "source": "bash -c {0}",
+        "source": "doc-lattice {0}",
         "label": "intentional-exit-2",
         "expected_status": "uninspectable",
-        "expected_refusal_raw_index": 8,
-        "reason_category": "dispatcher-payload",
+        "expected_refusal_raw_index": 12,
+        "reason_category": "policy-unresolvable",
         "template": true,
-        "spec": "S5.2 / S6.1 / S9 gate 8 (inside {0}): bash -c {0} is a dispatcher (bash plus -c) whose payload is the run body that {0} represents. When that run body carries the marker, the dispatcher-payload refusal span lands inside the substituted sentinel; per S5.2 an offset inside a synthetic sentinel maps to the corresponding {0} start, so the raw index is 8, the brace of {0}: b0 a1 s2 h3 space4 dash5 c6 space7 brace8. The sentinel's own literal content is excluded from marker provenance (S6.2); the payload refusal comes from the authored run body."
+        "spec": "S5.2 / S6.5 / S9 gate 8 (inside {0}): the authored template is doc-lattice {0}. D2 batches it because the head word doc-lattice carries the marker in its authored raw text. The head resolves as the doc-lattice executable (launcher_policy _DOC_LATTICE_HEADS), and the payload word is the run body that {0} represents; after substitution that word is the sentinel __doc_lattice_script__, an unrecognized subcommand (not in _SUBCOMMANDS), so launcher-policy resolution refuses it policy-unresolvable at the subcommand word (launcher_policy.py:_resolve_subcommand returns _refused for an unknown subcommand). The refusal span lands inside the substituted sentinel; per S5.2 an offset inside a synthetic sentinel maps to the corresponding {0} start, so the raw index is 12, the brace of {0}: d0 o1 c2 dash3 l4 a5 t6 t7 i8 c9 e10 space11 brace12 zero13 brace14. The sentinel's own text is excluded from marker provenance (S6.2), so the head marker, not the sentinel, is what batches the source. Redesigned in the second adversarial-review round: the prior source bash -c {0} carried no authored marker and was unreachable under D2; this construction refuses genuinely inside the sentinel region and projects to the {0} start."
       },
       {
         "id": "template-after-sentinel",
-        "source": "bash -e {0} $EXTRA",
+        "source": "bash -e {0} $EXTRA # doc-lattice",
         "label": "intentional-exit-2",
         "expected_status": "uninspectable",
         "expected_refusal_raw_index": 12,
         "reason_category": "splitting-unsafe-word",
         "template": true,
-        "spec": "S5.2 / S9 gate 8 (after {0}): the authored template is bash -e {0} $EXTRA; {0} substitutes the run-body sentinel. The trailing unquoted expansion $EXTRA has single=False so it refuses splitting-unsafe-word at that word; the refusal lies in the run-body region after the sentinel and uses the identity projection, mapping to raw character index 12: b0 a1 s2 h3 space4 dash5 e6 space7 brace8 zero9 brace10 space11 dollar12."
+        "spec": "S5.2 / S9 gate 8 (after {0}): the authored template is bash -e {0} $EXTRA # doc-lattice; {0} substitutes the run-body sentinel. D2 batches the source because the trailing comment carries the doc-lattice marker in the authored raw text (comments count). bash -e has no -c, so bash is not a recognized dispatcher and the command is an ordinary non-candidate; the pre-policy precheck (S5.2 multi-cardinality-word) still runs over every command word, and the trailing unquoted expansion $EXTRA has single=False, so it refuses splitting-unsafe-word at that word. The refusal lies in the run-body region after the sentinel and uses the identity projection, mapping to raw character index 12: b0 a1 s2 h3 space4 dash5 e6 space7 brace8 zero9 brace10 space11 dollar12 (E13 X14 T15 R16 A17 space18 hash19). Redesigned in the second adversarial-review round: the prior source bash -e {0} $EXTRA carried no authored marker and was unreachable under D2, so an inert trailing comment marker was appended to make it genuinely batched with the $EXTRA refusal index unchanged."
       },
       {
         "id": "parse-error-cmdsubst",

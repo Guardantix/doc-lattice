@@ -8,11 +8,21 @@ static mapping. The mapping is embedded in the artifact so the future gate harne
 re-infers a category from a legacy error substring (S6.4).
 
 The mapping is total for the strings the 580-entry inventory produces: an ``incomplete_reason``
-absent from ``_REASON_MAP`` aborts generation rather than falling into a silent bucket, so any
-future scanner string is a deliberate addition. Where one legacy string could map to two
-successor codes, the affected entries carry ``owner_adjudicate: true`` and the conservative
-(broadest-refusal, fail-closed) code is pinned pending owner ratification. Legacy scanner resource
+absent from ``_REASON_MAP`` or ``_CONTEXTUAL_PINS`` aborts generation rather than falling into a
+silent bucket, so any future scanner string is a deliberate addition. Legacy scanner resource
 bounds that no successor code models are recorded under ``legacy_only_categories``.
+
+Four legacy strings collapse several successor-distinct constructs into one bucket, so they are
+classified per entry from the entry's source text rather than mapped globally (S6.4: adjudication
+happens now, at generation, never at gate time). ``_classify_contextual`` inspects the leading
+command structure with deterministic rules (see ``_CONTEXTUAL_RULES``): a dynamic assignment
+prefix maps to ``assignment-prefix``; a multi-cardinality ``$@``/array-splat word maps to
+``splitting-unsafe-word``; a quoted dynamic selector or subcommand under a stable ``doc-lattice``,
+``uv``, or ``uvx`` head maps to ``policy-unresolvable``; a glob head maps to
+``unstable-first-word``. Anything the rules do not unambiguously resolve (unquoted ``$VAR``
+expansions, command
+substitutions, control-flow-keyword heads, off-floor wrapper heads) keeps its conservative pin
+with ``owner_adjudicate: true`` pending owner ratification. Every result is frozen in the artifact.
 
 Run ``env -u VIRTUAL_ENV uv run --group dev python scripts/normalize_legacy_reasons.py``. The
 output is deterministic: identical inputs produce byte-identical output.
@@ -21,6 +31,7 @@ output is deterministic: identical inputs produce byte-identical output.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -72,33 +83,177 @@ _REASON_MAP: dict[str, str] = {
     "env option value cannot be scanned safely": "unsupported-construct",
     "external time option cannot be scanned safely": "unsupported-construct",
     "dynamic external time prefix cannot be scanned safely": "unsupported-construct",
-    # --- Owner-adjudicated ties (see _ADJUDICATED). ---
-    # env --split-string / -S both reads as an unmodeled option and as word splitting. Conservative
-    # pin: terminal unsupported-construct (broadest refusal, matching the legacy terminal stop).
-    "env split-string option cannot be scanned safely": "unsupported-construct",
-    # An expansion at the command-word position reads as both an unquoted expansion in the command
-    # word and an unstable first word. Conservative pin: unquoted-expansion-in-command-word.
-    "command-position expansion cannot be scanned safely": "unquoted-expansion-in-command-word",
-    # Extglob reads as both an unmodeled expansion (subtree-local) and an unmodeled construct.
-    # Conservative pin: terminal unsupported-construct (broadest refusal).
-    "extglob expansion cannot be scanned safely": "unsupported-construct",
-    # A dynamic relative ./doc-lattice executable reads as both a doc-lattice launch that cannot be
-    # resolved and an unstable first word. Conservative pin: policy-unresolvable.
-    "dynamic relative doc-lattice executable cannot be scanned safely": "policy-unresolvable",
     # Legacy scanner recursion bound: no successor reason code models it.
     "recursion limit exceeded": LEGACY_SCAN_BUDGET,
 }
 
-# Legacy strings a single string could reasonably assign to two successor codes; the entries they
-# produce carry owner_adjudicate: true so the owner ratifies the conservative pin above.
-_ADJUDICATED: frozenset[str] = frozenset(
+# Legacy strings that collapse several successor-distinct constructs into one bucket. Each is
+# classified per entry from the source text by _classify_contextual; the value is the conservative
+# pin an entry keeps (with owner_adjudicate: true) when the deterministic rules do not resolve it.
+_CONTEXTUAL_PINS: dict[str, str] = {
+    # The command-position expansion collapse spans a dynamic-value assignment prefix, a
+    # multi-cardinality splat, a quoted dynamic selector or subcommand under a launcher head, and
+    # a glob head. Conservative pin: unquoted-expansion-in-command-word.
+    "command-position expansion cannot be scanned safely": "unquoted-expansion-in-command-word",
+    # env -S / --split-string over off-floor env; some entries instead lead with a dynamic
+    # assignment prefix, a splat head, or a glob head. Conservative pin: unsupported-construct.
+    "env split-string option cannot be scanned safely": "unsupported-construct",
+    # Extglob subcommand patterns; every entry is the same construct (doc-lattice PAT(...) --all),
+    # so none splits. Conservative pin: unsupported-construct.
+    "extglob expansion cannot be scanned safely": "unsupported-construct",
+    # A dynamic relative doc-lattice path in head position (unstable first word) versus in a uv run
+    # payload position (policy-unresolvable). Conservative pin: policy-unresolvable.
+    "dynamic relative doc-lattice executable cannot be scanned safely": "policy-unresolvable",
+}
+
+# Successor reason categories the contextual classifier can assign, plus the conservative pins.
+_CONTEXTUAL_CATEGORIES: frozenset[str] = frozenset(
     {
-        "env split-string option cannot be scanned safely",
-        "command-position expansion cannot be scanned safely",
-        "extglob expansion cannot be scanned safely",
-        "dynamic relative doc-lattice executable cannot be scanned safely",
+        "assignment-prefix",
+        "splitting-unsafe-word",
+        "policy-unresolvable",
+        "unstable-first-word",
+        "unquoted-expansion-in-command-word",
+        "unsupported-construct",
     }
 )
+
+# Deterministic contextual sub-rules, recorded verbatim in the artifact so the future gate never
+# re-derives a category. Applied in listed priority order; the first match wins.
+_CONTEXTUAL_RULES: tuple[dict[str, str], ...] = (
+    {
+        "rule": "control-flow-keyword-head",
+        "category": "conservative-pin",
+        "spec": "A statement head that is a control-flow keyword (time, coproc, and the reserved "
+        "words) refuses control-flow-keyword before the expansion under S5.2, a re-categorization "
+        "left for owner ratification, so the entry keeps its conservative pin with "
+        "owner_adjudicate true.",
+    },
+    {
+        "rule": "dynamic-assignment-prefix",
+        "category": "assignment-prefix",
+        "spec": "A leading NAME= assignment with a dynamic value ($ in the value) refuses "
+        "assignment-prefix at the earliest assignment while the argv stays resolved (S5.2 amended "
+        "assignments-plus-argv-dynamic).",
+    },
+    {
+        "rule": "multi-cardinality-splat",
+        "category": "splitting-unsafe-word",
+        "spec": 'A command word that is a $@, "$@", ${@...}, or array [@]/[*] splat is '
+        "multi-cardinality (single=False) and refuses splitting-unsafe-word at that word (S5.2 "
+        "multi-cardinality-word).",
+    },
+    {
+        "rule": "quoted-dynamic-selector-under-launcher-head",
+        "category": "policy-unresolvable",
+        "spec": "A stable doc-lattice, uv, or uvx head followed by a quoted dynamic word (text "
+        "unknown, single=True) passes the pre-policy precheck and refuses policy-unresolvable at "
+        "the unstable selector or subcommand under launcher-policy parity (S5.2 / S6.5).",
+    },
+    {
+        "rule": "glob-head",
+        "category": "unstable-first-word",
+        "spec": "A statement head carrying an unquoted glob (*, ?, [) is not statically known and "
+        "refuses unstable-first-word with no string-based head logic (S5.2 first-word-unknown).",
+    },
+    {
+        "rule": "conservative-pin",
+        "category": "conservative-pin",
+        "spec": "Any other shape (an unquoted $VAR expansion, a command substitution, or an "
+        "off-floor wrapper head) is not unambiguously resolved by the rules above, so the entry "
+        "keeps its conservative pin with owner_adjudicate true.",
+    },
+)
+
+# Detection primitives for _classify_contextual, matched against the entry's raw source text.
+_ASSIGN_DYNAMIC_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\+?="?\$')
+_LEADING_LITERAL_ASSIGN_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*\+?=(?:'[^']*'|\"[^\"$]*\"|[^\s;$]*)\s*;\s*"
+)
+_SPLAT_TOKENS: tuple[str, ...] = ('"$@"', '"${@', '[@]}"', '[*]}"')
+_GLOB_CHARS: frozenset[str] = frozenset("*?[")
+_CONTROL_FLOW_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "if",
+        "then",
+        "elif",
+        "else",
+        "fi",
+        "while",
+        "until",
+        "do",
+        "done",
+        "for",
+        "in",
+        "select",
+        "case",
+        "esac",
+        "function",
+        "!",
+        "time",
+        "coproc",
+    }
+)
+_LAUNCHER_HEADS: frozenset[str] = frozenset({"doc-lattice", "uv", "uvx"})
+
+
+def _statement_heads(source: str) -> list[str]:
+    """Return the first word of every statement, split on ; newline && and ||."""
+    heads: list[str] = []
+    for part in re.split(r"[;\n]|&&|\|\|", source):
+        stripped = part.strip()
+        if stripped:
+            heads.append(stripped.split(None, 1)[0])
+    return heads
+
+
+def _stable_launcher_head(source: str) -> bool:
+    """Return whether the leading command head is a stable doc-lattice, uv, or uvx launcher."""
+    stripped = _LEADING_LITERAL_ASSIGN_RE.sub("", source, count=1).lstrip()
+    tokens = stripped.split(None, 1)
+    if not tokens:
+        return False
+    first = tokens[0]
+    if "$" in first or any(char in _GLOB_CHARS for char in first):
+        return False
+    return first.rsplit("/", 1)[-1] in _LAUNCHER_HEADS
+
+
+def _has_glob_head(source: str) -> bool:
+    """Return whether any statement head carries an unquoted glob and no expansion."""
+    for head in _statement_heads(source):
+        if head in ("[", "]") or "$" in head:
+            continue
+        if any(char in _GLOB_CHARS for char in head):
+            return True
+    return False
+
+
+def _classify_contextual(source: str, conservative_pin: str) -> tuple[str, bool]:
+    """Classify one contextual-collapse entry into a successor category and adjudication flag.
+
+    The deterministic rules of ``_CONTEXTUAL_RULES`` are applied in priority order to the raw
+    source text. A rule that resolves the entry returns its category with ``owner_adjudicate``
+    False; an unresolved entry keeps ``conservative_pin`` with ``owner_adjudicate`` True.
+
+    Args:
+        source: The entry's raw execution source text.
+        conservative_pin: The successor category to keep when no rule resolves the entry.
+
+    Returns:
+        The ``(reason_category, owner_adjudicate)`` pair frozen for this entry.
+    """
+    if any(head in _CONTROL_FLOW_KEYWORDS for head in _statement_heads(source)):
+        return conservative_pin, True
+    if _ASSIGN_DYNAMIC_RE.match(source):
+        return "assignment-prefix", False
+    if any(token in source for token in _SPLAT_TOKENS):
+        return "splitting-unsafe-word", False
+    if _stable_launcher_head(source) and '"$' in source:
+        return "policy-unresolvable", False
+    if _has_glob_head(source):
+        return "unstable-first-word", False
+    return conservative_pin, True
 
 
 def _verify_baseline() -> None:
@@ -138,12 +293,13 @@ def _validate_mapping(valid_codes: set[str]) -> None:
         SystemExit: If a mapping target is neither a successor code nor a legacy-only category.
     """
     allowed = valid_codes | set(_LEGACY_ONLY_CATEGORIES)
-    unknown = sorted({category for category in _REASON_MAP.values() if category not in allowed})
+    targets = set(_REASON_MAP.values()) | set(_CONTEXTUAL_PINS.values()) | _CONTEXTUAL_CATEGORIES
+    unknown = sorted({category for category in targets if category not in allowed})
     if unknown:
         raise SystemExit(f"mapping targets are not valid categories: {unknown}")
-    missing = sorted(_ADJUDICATED - set(_REASON_MAP))
-    if missing:
-        raise SystemExit(f"adjudicated strings absent from the mapping: {missing}")
+    collision = sorted(set(_REASON_MAP) & set(_CONTEXTUAL_PINS))
+    if collision:
+        raise SystemExit(f"strings are both globally mapped and contextual: {collision}")
 
 
 def _normalize_entries(entries_in: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -177,18 +333,27 @@ def _normalize_entries(entries_in: list[dict[str, object]]) -> list[dict[str, ob
                 "reason_category": None,
                 "owner_adjudicate": False,
             }
+        elif reason in _CONTEXTUAL_PINS:
+            category, adjudicate = _classify_contextual(source, _CONTEXTUAL_PINS[reason])
+            record = {
+                "id": entry["id"],
+                "status": "incomplete",
+                "invocations": invocations,
+                "reason_category": category,
+                "owner_adjudicate": adjudicate,
+            }
         else:
             if reason not in _REASON_MAP:
                 raise SystemExit(
                     f"unmapped incomplete_reason {reason!r} for entry {entry['id']!r}; add it to "
-                    "_REASON_MAP deliberately"
+                    "_REASON_MAP or _CONTEXTUAL_PINS deliberately"
                 )
             record = {
                 "id": entry["id"],
                 "status": "incomplete",
                 "invocations": invocations,
                 "reason_category": _REASON_MAP[reason],
-                "owner_adjudicate": reason in _ADJUDICATED,
+                "owner_adjudicate": False,
             }
         records.append(record)
     return records
@@ -231,6 +396,14 @@ def main() -> None:
     artifact = {
         "baseline_commit": BASELINE_COMMIT,
         "mapping": {reason: _REASON_MAP[reason] for reason in sorted(_REASON_MAP)},
+        "contextual_mapping": {
+            "note": "Four legacy strings collapse successor-distinct constructs; each entry is "
+            "classified from its source text at generation, never at gate time (S6.4). Rules are "
+            "applied in listed priority order, first match wins; an unresolved entry keeps its "
+            "conservative pin with owner_adjudicate true.",
+            "strings": {reason: _CONTEXTUAL_PINS[reason] for reason in sorted(_CONTEXTUAL_PINS)},
+            "rules": list(_CONTEXTUAL_RULES),
+        },
         "legacy_only_categories": sorted(_LEGACY_ONLY_CATEGORIES),
         "entries": entries,
     }

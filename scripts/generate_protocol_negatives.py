@@ -9,7 +9,7 @@ fixture is a legitimate, maximally sized request that pins the S4.2 per-source/a
 byte-cap composition; this script asserts that composition at generation time so a future
 change to the caps or the encoding rule is caught here rather than silently drifting.
 
-Run with ``python scripts/generate_protocol_negatives.py`` to regenerate all fourteen negative
+Run with ``python scripts/generate_protocol_negatives.py`` to regenerate all fifteen negative
 fixtures in ``tests/fixtures/github_ci_successor_checkpoint/protocol/negative/`` and the
 at-limit boundary fixture in ``.../protocol/boundary/``. The boundary fixture is a valid
 at-cap input for the gate-9 harness and, unlike the negatives, carries a trailing newline.
@@ -54,10 +54,30 @@ def generate_invalid_utf8() -> None:
 
 
 def generate_lone_surrogate() -> None:
-    """Request: a UTF-8-shaped encoding of the lone surrogate U+D800 (ED A0 80)."""
+    """Request: a UTF-8-shaped encoding of the lone surrogate U+D800 (ED A0 80).
+
+    This covers the raw invalid-UTF-8 form (CESU-8 surrogate bytes) that breaks strict UTF-8
+    decoding before any JSON parse. Its sibling ``escaped-lone-surrogate.json`` covers the
+    decoder-level escaped form (a ``\\uD800`` escape inside valid ASCII JSON) that Go's
+    encoding/json would silently replace with U+FFFD.
+    """
     prefix = b'{"protocol_version":1,"sources":[{"id":0,"source":"X'
     suffix = b'X"}]}'
     write_bytes("lone-surrogate.bin", prefix + b"\xed\xa0\x80" + suffix)
+
+
+def generate_escaped_lone_surrogate() -> None:
+    """Request: a byte-exact ASCII JSON ``\\uD800`` escape decoding to a lone surrogate.
+
+    Unlike ``lone-surrogate.bin`` (raw invalid UTF-8), this fixture is valid ASCII JSON whose
+    single source value carries the six-character escape sequence backslash-u-D-8-0-0. The bytes
+    are written literally so no JSON library normalizes the escape. A strict decoder must reject
+    it, because Go's encoding/json silently replaces the decoded lone surrogate with U+FFFD.
+    """
+    write_text(
+        "escaped-lone-surrogate.json",
+        '{"protocol_version":1,"sources":[{"id":0,"source":"X\\uD800X"}]}',
+    )
 
 
 def generate_trailing_document() -> None:
@@ -244,6 +264,7 @@ def main() -> None:
     generate_duplicate_keys()
     generate_invalid_utf8()
     generate_lone_surrogate()
+    generate_escaped_lone_surrogate()
     generate_trailing_document()
     generate_wrong_type_bool_as_int()
     generate_non_contiguous_ids()

@@ -5,9 +5,9 @@ Deterministic output; see `scripts/derive_successor_labels.py`.
 
 ## Label counts
 
-- must-certify: 54
+- must-certify: 53
 - intentional-exit-2: 28
-- outside-direct-marker-contract: 5
+- outside-direct-marker-contract: 6
 
 ## Applied-delta counts
 
@@ -17,17 +17,16 @@ Deterministic output; see `scripts/derive_successor_labels.py`.
 - rule5-heredoc-guard: 6
 - rule6-carried: 12
 - s3.3-word-text: 1
-- s6.2-marker-final-text: 1
+- s6.2-d2-reachability: 1
 - s6.5-launcher-parity: 9
 - scope-gap: 1
 - table-refuse: 11
 
-## Rows changed versus D3/live baseline (68)
+## Rows changed versus D3/live baseline (67)
 
 | # | description | baseline | successor | invocations | delta |
 | - | ----------- | -------- | --------- | ----------- | ----- |
 | 0 | ansi-c executable | intentional-exit-2 | must-certify | [["linear", false]] | s3.3-word-text |
-| 1 | concatenated quoted words | outside-direct-marker-contract | must-certify | [["linear", false]] | s6.2-marker-final-text |
 | 2 | elif condition | intentional-exit-2 | must-certify | [["linear", false]] | rule1-traverse |
 | 3 | while condition | intentional-exit-2 | must-certify | [["check", false]] | rule1-traverse |
 | 4 | until condition | intentional-exit-2 | must-certify | [["check", false]] | rule1-traverse |
@@ -100,7 +99,7 @@ Deterministic output; see `scripts/derive_successor_labels.py`.
 These rows are not fully determined by the frozen contracts and carry a
 fail-closed proposal for Rick's checkpoint review.
 
-- Row 1 (concatenated quoted words): proposed must-certify. S3.3 resolves the Lit and DblQuoted word parts by concatenation to the known final text doc-lattice; the marker match makes the source a candidate and certifies (flip from not_applicable).
+- Row 1 (concatenated quoted words): proposed outside-direct-marker-contract. D2 gates on authored raw text, and the concatenation doc-"lattice" carries no doc[-_.]+lattice marker in that raw text, so the source is dropped at collection (S5.1) before any helper runs. The S6.2 ordering clarification confirms the word-level marker rule never resurrects a source D2 did not batch, so the doc-quote contraction stays a named D2 contract removal ratified in the predecessor evaluation. This restores the D3 checkpoint's not_applicable disposition for this row.
 - Row 32 (arithmetic command shift): proposed intentional-exit-2. S3.2 ArithmCmd (( )) is a refuse construct; unsupported-construct is fixed terminal scope in the frozen reason-code table, but the table does not fix which code an ArithmCmd refusal emits, deciding whether the sibling doc-lattice linear is retained. Proposed fail-closed: terminal, no retained invocation.
 - Row 37 (unbalanced dollar-arithmetic runs a command-substitution subshell): proposed intentional-exit-2. S3.2 Assign value is refuse and the $(( )) fallback to a command-substitution subshell is parser-behavior dependent; fail-closed intentional-exit-2 drops the old-scanner linear.
 - Row 38 (unbalanced arithmetic command runs a nested subshell): proposed intentional-exit-2. Whether mvdan/sh parses (( )) as an ArithmCmd refuse or as a nested subshell traverse is parser-behavior dependent; fail-closed intentional-exit-2 drops the old-scanner linear.

@@ -173,12 +173,13 @@ def test_conformance_and_negative_fixture_sets():
     conformance = sorted((CHECKPOINT / "protocol" / "conformance").iterdir())
     negative = sorted((CHECKPOINT / "protocol" / "negative").iterdir())
     assert len(conformance) == 7
-    assert len(negative) == 14
+    assert len(negative) == 15
     names = {p.stem for p in negative}
     assert {
         "duplicate-keys",
         "invalid-utf8",
         "lone-surrogate",
+        "escaped-lone-surrogate",
         "trailing-document",
         "wrong-type-bool-as-int",
         "non-contiguous-ids",
@@ -320,6 +321,40 @@ def test_new_fixture_families_present_and_labeled():
     assert canonical["pin_upgrade_tripwire"] is True
 
 
+def _labeled_sources() -> list[tuple[str, str, str]]:
+    """Collect (origin, label, source) for every corpus case and fixture row with a source."""
+    rows: list[tuple[str, str, str]] = []
+    for case in _load("corpus/acceptance_labels.json")["cases"]:
+        if "source" in case:
+            rows.append((f"corpus:{case['description']}", case["label"], case["source"]))
+    for name, fixtures in _load("corpus/new_fixtures.json")["families"].items():
+        for row in fixtures:
+            if "source" in row:
+                rows.append((f"{name}:{row['id']}", row["label"], row["source"]))
+    return rows
+
+
+def test_d2_reachability_bidirectional_consistency():
+    """A labeled source is outside-direct-marker-contract iff its raw text has no marker (S6.2).
+
+    D2 gates on authored raw text: a source with no ``DIRECT_MARKER_RE`` match is dropped at
+    collection (S5.1) and can never reach the certifier, so it must be labeled
+    ``outside-direct-marker-contract``. Conversely a source whose raw text matches the marker
+    anywhere (comments count; template sources keep the literal ``{0}``, whose eventual synthetic
+    sentinel never counts) is batched and must not carry that label. This guards against a
+    fixture predeclaring an unreachable expectation or mislabeling a batched source.
+    """
+    from doc_lattice.github_ci.direct_marker_scanner import DIRECT_MARKER_RE  # noqa: PLC0415
+
+    violations = []
+    for origin, label, source in _labeled_sources():
+        has_marker = DIRECT_MARKER_RE.search(source) is not None
+        is_outside = label == "outside-direct-marker-contract"
+        if is_outside == has_marker:
+            violations.append((origin, label, has_marker, source))
+    assert not violations, f"D2 reachability inconsistencies: {violations}"
+
+
 def test_tier1_and_tier2_expectations_are_exact():
     """Tier 1 pins the exact managed findings; Tier 2 pins the repo workflow outcome."""
     tier1 = _load("tiers/tier1_expected.json")
@@ -366,6 +401,24 @@ def test_legacy_normalization_covers_inventory():
         assert entry["status"] in {"complete", "incomplete"}
         if entry["status"] == "incomplete":
             assert entry["reason_category"] in categories | legacy
+    # The four contextual-collapse strings are classified per entry from source text (S6.4), so
+    # their sub-rules are frozen, not a single global category.
+    contextual = artifact["contextual_mapping"]
+    assert contextual["strings"], "the contextual pins must be recorded"
+    assert contextual["rules"], "the contextual sub-rules must be recorded"
+    # One representative individual entry per resolved context class, pinned by id.
+    by_id = {entry["id"]: entry for entry in artifact["entries"]}
+    assert by_id["replay-0023"]["reason_category"] == "assignment-prefix"  # dynamic env prefix
+    assert not by_id["replay-0023"]["owner_adjudicate"]
+    assert by_id["replay-0532"]["reason_category"] == "splitting-unsafe-word"  # "$@" splat head
+    assert not by_id["replay-0532"]["owner_adjudicate"]
+    assert by_id["replay-0073"]["reason_category"] == "policy-unresolvable"  # quoted subcommand
+    assert not by_id["replay-0073"]["owner_adjudicate"]
+    assert by_id["replay-0057"]["reason_category"] == "unstable-first-word"  # glob head
+    assert not by_id["replay-0057"]["owner_adjudicate"]
+    # An unresolved shape keeps the conservative pin with owner_adjudicate true.
+    assert by_id["replay-0060"]["reason_category"] == "unquoted-expansion-in-command-word"
+    assert by_id["replay-0060"]["owner_adjudicate"]
 
 
 def _manifest_lines() -> list[str]:

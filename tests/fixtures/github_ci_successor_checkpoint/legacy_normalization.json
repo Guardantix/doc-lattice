@@ -2,16 +2,12 @@
   "baseline_commit": "be4b7b16d46353ee6a38502cdc7c4ceef3487567",
   "mapping": {
     "ANSI-C quoted word decodes to NUL": "unsupported-construct",
-    "command-position expansion cannot be scanned safely": "unquoted-expansion-in-command-word",
     "dynamic env prefix cannot be scanned safely": "assignment-prefix",
     "dynamic external time prefix cannot be scanned safely": "unsupported-construct",
-    "dynamic relative doc-lattice executable cannot be scanned safely": "policy-unresolvable",
     "env option value cannot be scanned safely": "unsupported-construct",
-    "env split-string option cannot be scanned safely": "unsupported-construct",
     "executable word uses brace or glob expansion": "splitting-unsafe-word",
     "expandable env prefix cannot be scanned safely": "assignment-prefix",
     "external time option cannot be scanned safely": "unsupported-construct",
-    "extglob expansion cannot be scanned safely": "unsupported-construct",
     "locale-translated executable cannot be scanned safely": "unsupported-construct",
     "locale-translated heredoc delimiter cannot be scanned safely": "unsupported-construct",
     "quoted dynamic env assignment cannot be scanned safely": "assignment-prefix",
@@ -24,6 +20,47 @@
     "unsupported env option cannot be scanned safely": "unsupported-construct",
     "unsupported exec option cannot be scanned safely": "unsupported-construct",
     "uv command word uses brace or glob expansion": "splitting-unsafe-word"
+  },
+  "contextual_mapping": {
+    "note": "Four legacy strings collapse successor-distinct constructs; each entry is classified from its source text at generation, never at gate time (S6.4). Rules are applied in listed priority order, first match wins; an unresolved entry keeps its conservative pin with owner_adjudicate true.",
+    "strings": {
+      "command-position expansion cannot be scanned safely": "unquoted-expansion-in-command-word",
+      "dynamic relative doc-lattice executable cannot be scanned safely": "policy-unresolvable",
+      "env split-string option cannot be scanned safely": "unsupported-construct",
+      "extglob expansion cannot be scanned safely": "unsupported-construct"
+    },
+    "rules": [
+      {
+        "rule": "control-flow-keyword-head",
+        "category": "conservative-pin",
+        "spec": "A statement head that is a control-flow keyword (time, coproc, and the reserved words) refuses control-flow-keyword before the expansion under S5.2, a re-categorization left for owner ratification, so the entry keeps its conservative pin with owner_adjudicate true."
+      },
+      {
+        "rule": "dynamic-assignment-prefix",
+        "category": "assignment-prefix",
+        "spec": "A leading NAME= assignment with a dynamic value ($ in the value) refuses assignment-prefix at the earliest assignment while the argv stays resolved (S5.2 amended assignments-plus-argv-dynamic)."
+      },
+      {
+        "rule": "multi-cardinality-splat",
+        "category": "splitting-unsafe-word",
+        "spec": "A command word that is a $@, \"$@\", ${@...}, or array [@]/[*] splat is multi-cardinality (single=False) and refuses splitting-unsafe-word at that word (S5.2 multi-cardinality-word)."
+      },
+      {
+        "rule": "quoted-dynamic-selector-under-launcher-head",
+        "category": "policy-unresolvable",
+        "spec": "A stable doc-lattice, uv, or uvx head followed by a quoted dynamic word (text unknown, single=True) passes the pre-policy precheck and refuses policy-unresolvable at the unstable selector or subcommand under launcher-policy parity (S5.2 / S6.5)."
+      },
+      {
+        "rule": "glob-head",
+        "category": "unstable-first-word",
+        "spec": "A statement head carrying an unquoted glob (*, ?, [) is not statically known and refuses unstable-first-word with no string-based head logic (S5.2 first-word-unknown)."
+      },
+      {
+        "rule": "conservative-pin",
+        "category": "conservative-pin",
+        "spec": "Any other shape (an unquoted $VAR expansion, a command substitution, or an off-floor wrapper head) is not unambiguously resolved by the rules above, so the entry keeps its conservative pin with owner_adjudicate true."
+      }
+    ]
   },
   "legacy_only_categories": [
     "legacy-scan-budget"
@@ -242,8 +279,8 @@
       "id": "replay-0023",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "assignment-prefix",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0024",
@@ -503,8 +540,8 @@
       "id": "replay-0049",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0050",
@@ -579,8 +616,8 @@
       "id": "replay-0057",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "unstable-first-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0058",
@@ -741,8 +778,8 @@
       "id": "replay-0073",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0074",
@@ -1026,8 +1063,8 @@
       "id": "replay-0102",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0103",
@@ -1200,15 +1237,15 @@
       "id": "replay-0119",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0120",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0121",
@@ -1621,8 +1658,8 @@
       "id": "replay-0162",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0163",
@@ -1640,8 +1677,8 @@
       "id": "replay-0164",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0165",
@@ -1659,8 +1696,8 @@
       "id": "replay-0166",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0167",
@@ -1678,8 +1715,8 @@
       "id": "replay-0168",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0169",
@@ -1849,8 +1886,8 @@
       "id": "replay-0186",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0187",
@@ -1911,8 +1948,8 @@
       "id": "replay-0192",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0193",
@@ -1930,15 +1967,15 @@
       "id": "replay-0194",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "assignment-prefix",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0195",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0196",
@@ -2089,8 +2126,8 @@
       "id": "replay-0211",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0212",
@@ -2428,8 +2465,8 @@
       "id": "replay-0248",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0249",
@@ -2660,7 +2697,7 @@
       "status": "incomplete",
       "invocations": [],
       "reason_category": "policy-unresolvable",
-      "owner_adjudicate": true
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0270",
@@ -2716,8 +2753,8 @@
       "id": "replay-0275",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "assignment-prefix",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0276",
@@ -2891,8 +2928,8 @@
       "id": "replay-0295",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0296",
@@ -3059,8 +3096,8 @@
       "id": "replay-0312",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0313",
@@ -3190,8 +3227,8 @@
       "id": "replay-0325",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0326",
@@ -3323,8 +3360,8 @@
       "id": "replay-0339",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0340",
@@ -3425,8 +3462,8 @@
       "id": "replay-0350",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "assignment-prefix",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0351",
@@ -3866,8 +3903,8 @@
       "id": "replay-0398",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0399",
@@ -4134,8 +4171,8 @@
       "id": "replay-0425",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0426",
@@ -4217,8 +4254,8 @@
       "id": "replay-0434",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0435",
@@ -4357,8 +4394,8 @@
       "id": "replay-0447",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0448",
@@ -4371,8 +4408,8 @@
       "id": "replay-0449",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "policy-unresolvable",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0450",
@@ -4496,8 +4533,8 @@
       "id": "replay-0464",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0465",
@@ -4819,8 +4856,8 @@
       "id": "replay-0498",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0499",
@@ -5125,8 +5162,8 @@
       "id": "replay-0529",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "unstable-first-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0530",
@@ -5156,8 +5193,8 @@
       "id": "replay-0532",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unquoted-expansion-in-command-word",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0533",
@@ -5222,8 +5259,8 @@
       "id": "replay-0540",
       "status": "incomplete",
       "invocations": [],
-      "reason_category": "unsupported-construct",
-      "owner_adjudicate": true
+      "reason_category": "splitting-unsafe-word",
+      "owner_adjudicate": false
     },
     {
       "id": "replay-0541",

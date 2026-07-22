@@ -80,14 +80,17 @@ _DECISIONS: tuple[Decision, ...] = (
         "narrow D3 floor refused.",
     ),
     Decision(
-        MC,
-        L,
+        OC,
+        NONE,
         None,
         True,
-        "s6.2-marker-final-text",
-        "S3.3 resolves the Lit and DblQuoted word parts by concatenation to the known final text "
-        "doc-lattice; the marker match makes the source a candidate and certifies (flip from "
-        "not_applicable).",
+        "s6.2-d2-reachability",
+        'D2 gates on authored raw text, and the concatenation doc-"lattice" carries no '
+        "doc[-_.]+lattice marker in that raw text, so the source is dropped at collection (S5.1) "
+        "before any helper runs. The S6.2 ordering clarification confirms the word-level marker "
+        "rule never resurrects a source D2 did not batch, so the doc-quote contraction stays a "
+        "named D2 contract removal ratified in the predecessor evaluation. This restores the D3 "
+        "checkpoint's not_applicable disposition for this row.",
     ),
     Decision(
         MC,
