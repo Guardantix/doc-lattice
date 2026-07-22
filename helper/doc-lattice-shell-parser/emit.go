@@ -492,11 +492,7 @@ func wordHasActiveGlob(word *syntax.Word, src string) bool {
 		case '*', '?':
 			return true
 		case '[':
-			closeStart := index + 2
-			if index+1 < len(tokens) && tokens[index+1].unquoted && (tokens[index+1].value == '!' || tokens[index+1].value == '^') {
-				closeStart++
-			}
-			for close := closeStart; close < len(tokens); close++ {
+			for close := index + 1; close < len(tokens); close++ {
 				if tokens[close].unquoted && tokens[close].value == ']' {
 					return true
 				}

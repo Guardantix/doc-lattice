@@ -115,6 +115,110 @@ func TestWalkParameterOperandProcessSubstitutionContexts(t *testing.T) {
 	}
 }
 
+func TestWalkRefusesReplacementProcessSubstitutionBeforeLaterCommand(t *testing.T) {
+	const src = `echo ${x/a/<(doc-lattice check)}; doc-lattice later`
+	stmts, parseRefusal := parseStatements(src)
+	if parseRefusal != nil {
+		t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+	}
+	sites, refusals, work := walk(stmts, src)
+	if len(sites) != 1 || len(refusals) != 1 || refusals[0].code != "unsupported-construct" {
+		var debug strings.Builder
+		for _, stmt := range stmts {
+			_ = syntax.DebugPrint(&debug, stmt)
+		}
+		t.Fatalf("walk returned %d sites, refusals %#v, work %d; want outer site, terminal replacement refusal, and no later site; AST:\n%s", len(sites), refusals, work, debug.String())
+	}
+	wantStart := strings.Index(src, "<(")
+	wantEnd := strings.Index(src, ")}") + 1
+	if refusals[0].startByte != wantStart || refusals[0].endByte != wantEnd {
+		t.Fatalf("refusal = %#v, want current raw replacement span [%d, %d)", refusals[0], wantStart, wantEnd)
+	}
+	if work != 19 {
+		t.Fatalf("work = %d, want current raw Task 5 accounting 19", work)
+	}
+
+	const escaped = `echo ${x/a/\<(doc-lattice check)}; doc-lattice later`
+	escapedStmts, escapedParseRefusal := parseStatements(escaped)
+	if escapedParseRefusal != nil {
+		t.Fatalf("escaped parse refusal = %#v, want none", escapedParseRefusal)
+	}
+	escapedSites, escapedRefusals, escapedWork := walk(escapedStmts, escaped)
+	if len(escapedSites) != 2 || len(escapedRefusals) != 0 || escapedWork != work {
+		t.Fatalf("escaped walk = %d sites, refusals %#v, work %d; want two sites, no refusal, and stable work %d", len(escapedSites), escapedRefusals, escapedWork, work)
+	}
+}
+
+func TestWalkRefusesCollapsedProcessSubstitutionInParameterWordFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{name: "expansion word", source: `echo ${x#<(doc-lattice check)}`},
+		{name: "replacement original", source: `echo ${x/<(doc-lattice check)/safe}`},
+		{name: "replacement with", source: `echo ${x/safe/<(doc-lattice check)}`},
+		{name: "replacement output", source: `echo ${x/safe/>(doc-lattice check)}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stmts, parseRefusal := parseStatements(test.source)
+			if parseRefusal != nil {
+				t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+			}
+			sites, refusals, _ := walk(stmts, test.source)
+			if len(sites) != 1 || len(refusals) != 1 || refusals[0].code != "unsupported-construct" {
+				var debug strings.Builder
+				_ = syntax.DebugPrint(&debug, stmts[0])
+				t.Fatalf("walk returned %d sites and refusals %#v, want outer site and terminal refusal; AST:\n%s", len(sites), refusals, debug.String())
+			}
+		})
+	}
+}
+
+func TestWalkParameterWordProcessSubstitutionLookalikes(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{name: "replacement escaped redirect", source: `echo ${x/safe/\<(doc-lattice check)}`},
+		{name: "replacement escaped paren", source: `echo ${x/safe/<\(doc-lattice check)}`},
+		{name: "replacement quoted redirect", source: `echo ${x/safe/"<"(doc-lattice check)}`},
+		{name: "original escaped redirect", source: `echo ${x/\<(doc-lattice check)/safe}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stmts, parseRefusal := parseStatements(test.source)
+			if parseRefusal != nil {
+				t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+			}
+			sites, refusals, _ := walk(stmts, test.source)
+			if len(sites) != 1 || len(refusals) != 0 {
+				t.Fatalf("walk returned %d sites and refusals %#v, want clean outer site", len(sites), refusals)
+			}
+		})
+	}
+}
+
+func TestParseRejectsProcessSubstitutionInParameterIndex(t *testing.T) {
+	const src = `echo ${x[<(doc-lattice check)]}`
+	_, refusal := parseStatements(src)
+	if refusal == nil || refusal.code != "syntax-error" {
+		t.Fatalf("parse refusal = %#v, want pinned parser syntax-error before walking arithmetic index", refusal)
+	}
+}
+
+func TestWalkTraversesCommandSubstitutionInReplacementWord(t *testing.T) {
+	const src = `echo ${x/safe/$(doc-lattice check)}`
+	stmts, parseRefusal := parseStatements(src)
+	if parseRefusal != nil {
+		t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+	}
+	sites, refusals, _ := walk(stmts, src)
+	if len(sites) != 2 || len(refusals) != 0 {
+		t.Fatalf("walk returned %d sites and refusals %#v, want outer and nested command sites", len(sites), refusals)
+	}
+}
+
 func btoi(value bool) int {
 	if value {
 		return 1

@@ -396,11 +396,13 @@ func TestEmitCrossPartGlobMatrix(t *testing.T) {
 		{word: `["a"`, text: stringPointer(`[a`), single: true},
 		{word: `"["a]`, text: stringPointer(`[a]`), single: true},
 		{word: `[a"]"`, text: stringPointer(`[a]`), single: true},
-		{word: `[]`, text: stringPointer(`[]`), single: true},
-		{word: `[!]`, text: stringPointer(`[!]`), single: true},
-		{word: `[^]`, text: stringPointer(`[^]`), single: true},
-		{word: `[""]`, text: stringPointer(`[]`), single: true},
-		{word: `['']`, text: stringPointer(`[]`), single: true},
+		{word: `[]`, text: nil, single: false},
+		{word: `[!]`, text: nil, single: false},
+		{word: `[^]`, text: nil, single: false},
+		{word: `[""]`, text: nil, single: false},
+		{word: `['']`, text: nil, single: false},
+		{word: `[!`, text: stringPointer(`[!`), single: true},
+		{word: `[^`, text: stringPointer(`[^`), single: true},
 		{word: `a"*"b`, text: stringPointer(`a*b`), single: true},
 		{word: `a\?b`, text: stringPointer(`a?b`), single: true},
 	}
@@ -419,7 +421,7 @@ func TestEmitCrossPartGlobMatrix(t *testing.T) {
 }
 
 func TestEmitGlobLookalikeCorpusDoesNotPanic(t *testing.T) {
-	words := []string{`[`, `]`, `[]`, `[[`, `]]`, `[a`, `a]`, `["a"]`, `\[\]`, `[\]]`, `a"*"b`, `a\?b`}
+	words := []string{`[`, `]`, `[]`, `[!]`, `[^]`, `[!`, `[^`, `[[`, `]]`, `[a`, `a]`, `["a"]`, `[""]`, `['']`, `\[\]`, `[\]]`, `a"*"b`, `a\?b`}
 	for _, raw := range words {
 		t.Run(raw, func(t *testing.T) {
 			response, err := Certify(mustRequest(t, `echo `+raw))
@@ -597,6 +599,26 @@ func TestCertifyParameterOperandProcessSubstitutionEndsInRefusal(t *testing.T) {
 	wantStart, wantEnd := len(`echo ${x:+`), len(src)-1
 	if got := events[1]; got.Kind != "refusal" || got.Code != "unsupported-construct" || got.StartByte != wantStart || got.EndByte != wantEnd {
 		t.Fatalf("terminal event = %#v, want unsupported process-substitution span [%d, %d)", got, wantStart, wantEnd)
+	}
+}
+
+func TestCertifyReplacementProcessSubstitutionStopsBeforeLaterSite(t *testing.T) {
+	const src = `echo ${x/a/<(doc-lattice check)}; doc-lattice later`
+	response, err := Certify(mustRequest(t, src))
+	if err != nil {
+		t.Fatalf("Certify error = %v", err)
+	}
+	result := response.Results[0]
+	if len(result.Events) != 2 || result.Events[0].Kind != "command_site" || result.Events[0].Ordinal != 0 {
+		t.Fatalf("events = %#v, want outer command site then terminal refusal only", result.Events)
+	}
+	wantStart := len(`echo ${x/a/`)
+	wantEnd := wantStart + len(`<(doc-lattice check)`)
+	if got := result.Events[1]; got.Kind != "refusal" || got.Code != "unsupported-construct" || got.StartByte != wantStart || got.EndByte != wantEnd {
+		t.Fatalf("terminal event = %#v, want raw replacement refusal [%d, %d)", got, wantStart, wantEnd)
+	}
+	if result.WorkUnits != 20 {
+		t.Fatalf("work_units = %d, want current raw Task 5 accounting 20", result.WorkUnits)
 	}
 }
 

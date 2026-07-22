@@ -346,8 +346,8 @@ func (w *walker) consumeNestedExecutionIn(node syntax.Node, depth int, parameter
 			return
 		}
 		childIsParameterOperand := false
-		if parameter, ok := node.(*syntax.ParamExp); ok && parameter.Exp != nil && child == parameter.Exp.Word {
-			childIsParameterOperand = true
+		if parameter, ok := node.(*syntax.ParamExp); ok {
+			childIsParameterOperand = parameterWordOperand(parameter, child)
 		}
 		switch child := child.(type) {
 		case *syntax.CmdSubst:
@@ -365,6 +365,17 @@ func (w *walker) consumeNestedExecutionIn(node syntax.Node, depth int, parameter
 			return
 		}
 	}
+}
+
+func parameterWordOperand(parameter *syntax.ParamExp, child syntax.Node) bool {
+	word, ok := child.(*syntax.Word)
+	if !ok || word == nil || parameter == nil {
+		return false
+	}
+	if parameter.Exp != nil && word == parameter.Exp.Word {
+		return true
+	}
+	return parameter.Repl != nil && (word == parameter.Repl.Orig || word == parameter.Repl.With)
 }
 
 func literalHasProcessSubstitution(literal *syntax.Lit, src string) bool {
