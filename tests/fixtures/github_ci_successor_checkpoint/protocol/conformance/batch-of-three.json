@@ -4,7 +4,7 @@
     "sources": [
       {
         "id": 0,
-        "source": "true"
+        "source": ""
       },
       {
         "id": 1,
@@ -81,7 +81,7 @@
             "kind": "refusal",
             "code": "syntax-error",
             "start_byte": 25,
-            "end_byte": 27
+            "end_byte": 25
           }
         ],
         "work_units": 3

@@ -205,6 +205,32 @@ def test_conformance_and_negative_fixture_sets():
     assert len(max_length_request["sources"][0]["source"]) == 1_048_576
 
 
+def test_conformance_fixtures_align_with_syntax_only_helper():
+    """Empty-event and parse-error fixtures pin syntax-only helper behavior (S3.1, S3.3)."""
+    empty = _load("protocol/conformance/empty-events.json")
+    assert empty["request"]["sources"] == [{"id": 0, "source": ""}]
+    assert empty["response"]["results"][0]["id"] == 0
+    assert empty["response"]["results"][0]["events"] == []
+
+    single = _load("protocol/conformance/single-refusal.json")
+    canonical_source = 'doc-lattice check; echo "$('
+    assert single["request"]["sources"] == [{"id": 0, "source": canonical_source}]
+    single_events = single["response"]["results"][0]["events"]
+    assert single_events[-1] == {
+        "kind": "refusal",
+        "code": "syntax-error",
+        "start_byte": 25,
+        "end_byte": 25,
+    }
+
+    batch = _load("protocol/conformance/batch-of-three.json")
+    assert batch["request"]["sources"][0] == {"id": 0, "source": ""}
+    assert batch["response"]["results"][0]["id"] == 0
+    assert batch["response"]["results"][0]["events"] == []
+    assert batch["request"]["sources"][2] == {"id": 2, "source": canonical_source}
+    assert batch["response"]["results"][2]["events"] == single_events
+
+
 def test_encoder_rules_and_digest_manifest():
     """Canonical encoder rules and the digest-input manifest are frozen (S4.2, S4.3)."""
     encoder = _load("protocol/encoder.json")

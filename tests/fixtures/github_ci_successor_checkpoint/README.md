@@ -263,6 +263,12 @@ revision; the items remain listed with their original framing for the record.
   already-non-adjudicated row 59, reducing `owner_adjudicate` from 12 to 10 with two-row headroom
   under the cap. The owner authorized this post-ratification checkpoint revision, and
   `MANIFEST.sha256` was regenerated after all checkpoint edits.
+- **2026-07-22 (Task 10 conformance-alignment revision): owner-authorized fixture
+  corrections.** The two empty-event conformance inputs now use an empty source rather than
+  marker-free `true`, preserving S3.3's syntax-only command-site emission. The canonical
+  unterminated-tail refusal now uses the zero-width `[25, 25)` first-error-position span in
+  both fixtures, matching S3.1 and the pinned Task 3 parser contract. No corpus labels or
+  other protocol expectations changed; `MANIFEST.sha256` was regenerated last.
 
 ## Handoff
 
