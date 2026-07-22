@@ -64,6 +64,64 @@ func TestWalkTraversesCommandSubstInsideParameterOperand(t *testing.T) {
 	}
 }
 
+func TestWalkRefusesProcessSubstInsideParameterOperand(t *testing.T) {
+	const src = `echo ${x:+<(doc-lattice check)}`
+	stmts, refusal := parseStatements(src)
+	if refusal != nil {
+		t.Fatalf("parseStatements refusal = %#v, want none", refusal)
+	}
+
+	sites, refusals, _ := walk(stmts, src)
+	if len(sites) != 1 || len(refusals) != 1 || refusals[0].code != "unsupported-construct" {
+		var debug strings.Builder
+		if len(stmts) > 0 {
+			_ = syntax.DebugPrint(&debug, stmts[0])
+		}
+		t.Fatalf("walk returned %d sites and refusals %#v, want outer site and one ProcSubst refusal; AST:\n%s", len(sites), refusals, debug.String())
+	}
+	wantStart, wantEnd := strings.Index(src, "<("), strings.LastIndex(src, "}")
+	if refusals[0].startByte != wantStart || refusals[0].endByte != wantEnd {
+		t.Fatalf("refusal = %#v, want table-owned literal span [%d, %d)", refusals[0], wantStart, wantEnd)
+	}
+}
+
+func TestWalkParameterOperandProcessSubstitutionContexts(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		refuse bool
+	}{
+		{name: "input", source: `echo ${x:+<(doc-lattice check)}`, refuse: true},
+		{name: "output", source: `echo ${x:+>(doc-lattice check)}`, refuse: true},
+		{name: "continued opener", source: "echo ${x:+<\\\n(doc-lattice check)}", refuse: true},
+		{name: "escaped redirect", source: `echo ${x:+\<(doc-lattice check)}`},
+		{name: "escaped paren", source: `echo ${x:+<\(doc-lattice check)}`},
+		{name: "quoted redirect", source: `echo ${x:+"<"(doc-lattice check)}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stmts, parseRefusal := parseStatements(test.source)
+			if parseRefusal != nil {
+				t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+			}
+			sites, refusals, _ := walk(stmts, test.source)
+			if len(sites) != 1 || len(refusals) != btoi(test.refuse) {
+				t.Fatalf("walk returned %d sites and refusals %#v, want outer site and refuse=%t", len(sites), refusals, test.refuse)
+			}
+			if test.refuse && refusals[0].code != "unsupported-construct" {
+				t.Fatalf("refusal = %#v, want unsupported-construct", refusals[0])
+			}
+		})
+	}
+}
+
+func btoi(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func TestWalkAcceptsParsedEmptyCommandSubstitution(t *testing.T) {
 	const src = `echo "$()"`
 	stmts, refusal := parseStatements(src)

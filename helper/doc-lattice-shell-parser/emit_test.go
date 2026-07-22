@@ -170,12 +170,25 @@ func TestEmitArgvTildeContexts(t *testing.T) {
 	}{
 		{word: `x=~`, text: nil, single: true},
 		{word: `x=a:~user`, text: nil, single: true},
+		{word: `x+=~`, text: nil, single: true},
+		{word: `_x2+=~user`, text: nil, single: true},
+		{word: `x+=a:~user`, text: nil, single: true},
+		{word: "x+\\\n=~", text: nil, single: true},
+		{word: "x\\\n+=~", text: nil, single: true},
+		{word: "x+=\\\n~", text: nil, single: true},
 		{word: `_x2=~`, text: nil, single: true},
 		{word: `name9=~user`, text: nil, single: true},
 		{word: "x=\\\n~", text: nil, single: true},
 		{word: "x\\\n=~", text: nil, single: true},
 		{word: `bad-name=~`, text: stringPointer(`bad-name=~`), single: true},
 		{word: `2x=~`, text: stringPointer(`2x=~`), single: true},
+		{word: `bad-name+=~`, text: stringPointer(`bad-name+=~`), single: true},
+		{word: `2x+=~`, text: stringPointer(`2x+=~`), single: true},
+		{word: `x++=~`, text: stringPointer(`x++=~`), single: true},
+		{word: `x\+=~`, text: stringPointer(`x+=~`), single: true},
+		{word: `x+\=~`, text: stringPointer(`x+=~`), single: true},
+		{word: `x"+"=~`, text: stringPointer(`x+=~`), single: true},
+		{word: `x+"="~`, text: stringPointer(`x+=~`), single: true},
 		{word: `x\=~`, text: stringPointer(`x=~`), single: true},
 		{word: `x"="~`, text: stringPointer(`x=~`), single: true},
 		{word: `x=\~`, text: stringPointer(`x=~`), single: true},
@@ -362,6 +375,65 @@ func TestEmitEscapedAndQuotedLiteralMetacharacters(t *testing.T) {
 	}
 }
 
+func TestEmitCrossPartGlobMatrix(t *testing.T) {
+	tests := []struct {
+		word   string
+		text   *string
+		single bool
+	}{
+		{word: `["a"]`, text: nil, single: false},
+		{word: `a["b"]c`, text: nil, single: false},
+		{word: `[a"b"]`, text: nil, single: false},
+		{word: `[\]]`, text: nil, single: false},
+		{word: `[!a]`, text: nil, single: false},
+		{word: `[!]]`, text: nil, single: false},
+		{word: "[\\\n\"a\"]", text: nil, single: false},
+		{word: `a"b"*`, text: nil, single: false},
+		{word: `a"b"?`, text: nil, single: false},
+		{word: `"[a]"`, text: stringPointer(`[a]`), single: true},
+		{word: `\["a"]`, text: stringPointer(`[a]`), single: true},
+		{word: `["a"\]`, text: stringPointer(`[a]`), single: true},
+		{word: `["a"`, text: stringPointer(`[a`), single: true},
+		{word: `"["a]`, text: stringPointer(`[a]`), single: true},
+		{word: `[a"]"`, text: stringPointer(`[a]`), single: true},
+		{word: `[]`, text: stringPointer(`[]`), single: true},
+		{word: `[!]`, text: stringPointer(`[!]`), single: true},
+		{word: `[^]`, text: stringPointer(`[^]`), single: true},
+		{word: `[""]`, text: stringPointer(`[]`), single: true},
+		{word: `['']`, text: stringPointer(`[]`), single: true},
+		{word: `a"*"b`, text: stringPointer(`a*b`), single: true},
+		{word: `a\?b`, text: stringPointer(`a?b`), single: true},
+	}
+	for _, test := range tests {
+		t.Run(test.word, func(t *testing.T) {
+			response, err := Certify(mustRequest(t, `echo `+test.word))
+			if err != nil {
+				t.Fatalf("Certify error = %v", err)
+			}
+			word := findCommandSite(t, response.Results[0], 0).Argv[1]
+			if word.Single != test.single || (word.Text == nil) != (test.text == nil) || word.Text != nil && *word.Text != *test.text {
+				t.Fatalf("word facts = %#v, want text %v and single=%t", word, test.text, test.single)
+			}
+		})
+	}
+}
+
+func TestEmitGlobLookalikeCorpusDoesNotPanic(t *testing.T) {
+	words := []string{`[`, `]`, `[]`, `[[`, `]]`, `[a`, `a]`, `["a"]`, `\[\]`, `[\]]`, `a"*"b`, `a\?b`}
+	for _, raw := range words {
+		t.Run(raw, func(t *testing.T) {
+			response, err := Certify(mustRequest(t, `echo `+raw))
+			if err != nil {
+				t.Fatalf("Certify valid source error = %v", err)
+			}
+			events := response.Results[0].Events
+			if len(events) != 1 || events[0].Kind != "command_site" {
+				t.Fatalf("events = %#v, want one stable command site", events)
+			}
+		})
+	}
+}
+
 func TestEmitIncompleteBraceSequenceIsLiteral(t *testing.T) {
 	response, err := Certify(mustRequest(t, `echo {a..}`))
 	if err != nil {
@@ -509,6 +581,22 @@ func TestCertifyNestedSitesKeepWalkerOrdinalsInSourceOrder(t *testing.T) {
 		if event.Kind != "command_site" || event.Ordinal != index || event.StartByte != wantStarts[index] {
 			t.Errorf("event %d = %#v, want command ordinal %d at %d", index, event, index, wantStarts[index])
 		}
+	}
+}
+
+func TestCertifyParameterOperandProcessSubstitutionEndsInRefusal(t *testing.T) {
+	const src = `echo ${x:+<(doc-lattice check)}`
+	response, err := Certify(mustRequest(t, src))
+	if err != nil {
+		t.Fatalf("Certify error = %v", err)
+	}
+	events := response.Results[0].Events
+	if len(events) != 2 || events[0].Kind != "command_site" || events[0].Ordinal != 0 {
+		t.Fatalf("events = %#v, want outer command site then refusal", events)
+	}
+	wantStart, wantEnd := len(`echo ${x:+`), len(src)-1
+	if got := events[1]; got.Kind != "refusal" || got.Code != "unsupported-construct" || got.StartByte != wantStart || got.EndByte != wantEnd {
+		t.Fatalf("terminal event = %#v, want unsupported process-substitution span [%d, %d)", got, wantStart, wantEnd)
 	}
 }
 

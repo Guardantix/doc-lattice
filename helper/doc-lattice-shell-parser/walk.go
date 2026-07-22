@@ -332,6 +332,10 @@ func (w *walker) consumeWordPart(part syntax.WordPart, depth int) {
 }
 
 func (w *walker) consumeNestedExecution(node syntax.Node, depth int) {
+	w.consumeNestedExecutionIn(node, depth, false)
+}
+
+func (w *walker) consumeNestedExecutionIn(node syntax.Node, depth int, parameterOperand bool) {
 	next := 0
 	for {
 		child, ok := nextStructuralChild(node, &next)
@@ -341,18 +345,58 @@ func (w *walker) consumeNestedExecution(node syntax.Node, depth int) {
 		if !w.enterChild() {
 			return
 		}
+		childIsParameterOperand := false
+		if parameter, ok := node.(*syntax.ParamExp); ok && parameter.Exp != nil && child == parameter.Exp.Word {
+			childIsParameterOperand = true
+		}
 		switch child := child.(type) {
 		case *syntax.CmdSubst:
 			w.dispatch(child, "body-statements", depth+1)
 		case *syntax.ProcSubst:
 			w.dispatch(child, "word-part", depth+1)
+		case *syntax.Lit:
+			if parameterOperand && literalHasProcessSubstitution(child, w.src) {
+				w.dispatch(child, "parameter-operand-process-substitution", depth+1)
+			}
 		default:
-			w.consumeNestedExecution(child, depth+1)
+			w.consumeNestedExecutionIn(child, depth+1, childIsParameterOperand)
 		}
 		if w.stop {
 			return
 		}
 	}
+}
+
+func literalHasProcessSubstitution(literal *syntax.Lit, src string) bool {
+	if literal == nil || !literal.Pos().IsValid() || !literal.End().IsValid() {
+		return true
+	}
+	start, end := int(literal.Pos().Offset()), int(literal.End().Offset())
+	if start < 0 || start > end || end > len(src) {
+		return true
+	}
+	raw := src[start:end]
+	var opener byte
+	for index := 0; index < len(raw); index++ {
+		if raw[index] == '\\' {
+			if index+1 < len(raw) && raw[index+1] == '\n' {
+				index++
+				continue
+			}
+			opener = 0
+			index++
+			continue
+		}
+		if raw[index] == '(' && opener != 0 {
+			return true
+		}
+		if raw[index] == '<' || raw[index] == '>' {
+			opener = raw[index]
+		} else {
+			opener = 0
+		}
+	}
+	return false
 }
 
 func (w *walker) enterChild() bool {
