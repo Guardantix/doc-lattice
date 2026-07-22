@@ -1,6 +1,9 @@
 // Command shell-parser certifies Bash sources for the doc-lattice GitHub CI audit.
 package main
 
+//go:generate /usr/local/go/bin/go run gen_limits.go
+//go:generate /usr/local/go/bin/go run gen_tables.go
+
 import (
 	"errors"
 	"io"
@@ -18,7 +21,7 @@ func main() { os.Exit(run(os.Stdin, os.Stdout, os.Stderr)) }
 // code. A malformed request or any internal failure yields exit code 2 and no stdout bytes.
 func run(in io.Reader, out, errOut io.Writer) int {
 	_ = errOut
-	data, err := io.ReadAll(io.LimitReader(in, aggregateRequestCapBytes+1))
+	data, err := io.ReadAll(io.LimitReader(in, int64(aggregateRequestCapBytes)+1))
 	if err != nil {
 		return 2
 	}

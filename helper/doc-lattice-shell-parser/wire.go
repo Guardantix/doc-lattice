@@ -10,14 +10,6 @@ import (
 	"unicode/utf8"
 )
 
-const (
-	// TODO(task2): source from limits_gen.
-	maxSourcesPerBatch       = 4_096
-	helperSourceCapBytes     = 4_194_304
-	aggregateRequestCapBytes = 8_388_608
-	jsonMaxDepth             = 64
-)
-
 // Request is one batch of shell sources to certify.
 type Request struct {
 	// ProtocolVersion identifies the frozen wire protocol.
