@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             paths = "\n".join(f"  {path.as_posix()}" for path in uncovered)
             raise DigestManifestError(f"uncovered non-test Go sources:\n{paths}")
         digest = compute_digest(arguments.repo_root)
-    except DigestManifestError as error:
+    except (DigestManifestError, OSError) as error:
         print(f"helper digest: {error}", file=sys.stderr)
         return 2
     print(digest)

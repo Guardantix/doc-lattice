@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from scripts.check_helper_digest import compute_digest, covered_paths
+from scripts.check_helper_digest import main as digest_main
 
 REPO = Path(__file__).resolve().parents[1]
 CHECKPOINT_MANIFEST = Path(
@@ -117,6 +118,21 @@ def _overlay_attack(tmp_path: Path) -> Path:
     return overlay
 
 
+def _run_build_to(output: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the build wrapper with a neutral test cache and an explicit output."""
+    environment = os.environ.copy()
+    environment.update({"GOCACHE": str(tmp_path / "gocache"), "GOTOOLCHAIN": "local"})
+    return subprocess.run(  # noqa: S603 - fixed repository build wrapper
+        [str(REPO / "scripts/build_successor_helper.sh"), str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        env=environment,
+        timeout=30,
+    )
+
+
 def test_digest_manifest_covers_all_non_test_go_sources() -> None:
     """Every non-test Go source under the helper module is a digest input."""
     covered = set(covered_paths(REPO))
@@ -187,6 +203,39 @@ def test_cli_rejects_changed_completeness_rule(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert result.stdout == ""
     assert "completeness_rule" in result.stderr
+
+
+def test_cli_reports_digest_input_read_error(monkeypatch, capsys) -> None:
+    """A digest-input filesystem failure is a clear status-2 CLI error."""
+
+    def fail_read(_path: Path) -> bytes:
+        raise OSError("injected digest read failure")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+
+    assert digest_main(["--repo-root", str(REPO)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "helper digest: injected digest read failure" in captured.err
+
+
+def test_build_wrapper_rejects_device_output(tmp_path: Path) -> None:
+    """The build wrapper rejects an existing character device as output."""
+    result = _run_build_to(Path("/dev/null"), tmp_path)
+
+    assert result.returncode == 2
+    assert "regular" in result.stderr
+
+
+def test_build_wrapper_rejects_fifo_output(tmp_path: Path) -> None:
+    """The build wrapper rejects an existing FIFO as output."""
+    fifo = tmp_path / "helper.fifo"
+    os.mkfifo(fifo)
+
+    result = _run_build_to(fifo, tmp_path)
+
+    assert result.returncode == 2
+    assert "regular" in result.stderr
 
 
 def test_build_wrapper_injects_computed_digest(tmp_path: Path) -> None:
@@ -275,6 +324,31 @@ def test_build_wrapper_ignores_workspace_parser_replacement(tmp_path: Path) -> N
         environment_updates={"GOWORK": str(workspace)},
     )
 
+    assert response["parser_version"] == PINNED_PARSER_VERSION
+    results = response["results"]
+    assert isinstance(results, list)
+    result = _string_dict(results[0])
+    events = result["events"]
+    assert isinstance(events, list)
+    assert events
+    event = _string_dict(events[0])
+    assert event["kind"] == "command_site"
+
+
+def test_build_wrapper_ignores_combined_hostile_runtime_environment(tmp_path: Path) -> None:
+    """Python and Go runtime environment cannot redirect or disable a release build."""
+    poisoned_root = tmp_path / "poisoned-runtime"
+
+    response = _build_response(
+        tmp_path,
+        environment_updates={
+            "GO111MODULE": "off",
+            "GOROOT": str(poisoned_root / "go"),
+            "PYTHONHOME": str(poisoned_root / "python"),
+        },
+    )
+
+    assert response["helper_version"] == compute_digest(REPO)
     assert response["parser_version"] == PINNED_PARSER_VERSION
     results = response["results"]
     assert isinstance(results, list)
