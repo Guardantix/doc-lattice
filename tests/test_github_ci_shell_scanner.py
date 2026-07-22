@@ -2286,6 +2286,9 @@ DISPATCHER_FAIL_CLOSED_CASES = [
     ("coproc name before dispatcher", "coproc worker bash -c 'doc-lattice reconcile'"),
     ("plus cluster inline command", "bash +c 'doc-lattice linear'"),
     ("plus cluster after value option", "bash +O extglob +c 'doc-lattice reconcile'"),
+    ("zsh emulate mode before -c", "zsh --emulate sh -c 'doc-lattice linear'"),
+    ("windows shell launcher", "bash.exe -c 'doc-lattice linear'"),
+    ("windows shell launcher casefolds", "SH.EXE -c 'doc-lattice reconcile'"),
 ]
 
 
@@ -2315,6 +2318,8 @@ DISPATCHER_CERTIFY_CASES = [
     ("command wrapper external script file", "command bash ./doc-lattice-runner.sh"),
     ("env wrapper external script file", "env bash ./doc-lattice-runner.sh"),
     ("command query never executes marker", "command -v doc-lattice"),
+    ("emulate mode then external script file", "zsh --emulate sh ./doc-lattice-runner.sh"),
+    ("windows launcher external script file", "bash.exe ./doc-lattice-runner.sh"),
 ]
 
 

@@ -274,9 +274,10 @@ _RECONCILE_NON_MUTATING_OPTIONS = frozenset({"--dry-run"})
 _DISPATCHER_MARKER_RE = re.compile(r"doc[-_.]+lattice", re.IGNORECASE)
 _PLAIN_DISPATCHER_HEADS = frozenset({"eval", "source", "."})
 _SHELL_DISPATCHER_HEADS = frozenset({"bash", "sh", "dash", "zsh"})
-# The only bash long options that consume the following word; every other long option is
-# value-less and precedes -c without ending option parsing.
-_SHELL_LONG_OPTIONS_WITH_ARGUMENTS = frozenset({"--rcfile", "--init-file"})
+# Long options that consume the following word across the recognized shells: bash --rcfile and
+# --init-file, zsh --emulate (which takes a mode word and still honors a following -c). Every
+# other long option is value-less and precedes -c without ending option parsing.
+_SHELL_LONG_OPTIONS_WITH_ARGUMENTS = frozenset({"--rcfile", "--init-file", "--emulate"})
 
 
 class _CommandDisposition(Enum):
@@ -1724,7 +1725,9 @@ def _reject_marker_bearing_dispatcher(words: list[_ShellWord]) -> None:
         argv = words[head_index + 1 :]
         if not any(_DISPATCHER_MARKER_RE.search(word.literal) for word in argv):
             continue
-        name = _basename(words[head_index].literal).casefold()
+        # Windows runners launch the same shells as bash.exe/sh.exe; the scanner already accepts
+        # doc-lattice.exe as the doc-lattice executable, so dispatcher heads strip the suffix too.
+        name = _basename(words[head_index].literal).casefold().removesuffix(".exe")
         if name in _PLAIN_DISPATCHER_HEADS or (
             name in _SHELL_DISPATCHER_HEADS and _shell_dispatcher_runs_inline_command(argv)
         ):
