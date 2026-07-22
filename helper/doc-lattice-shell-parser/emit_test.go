@@ -256,6 +256,55 @@ func TestEmitAssignmentBraceValueIsExactLiteral(t *testing.T) {
 	}
 }
 
+func TestEmitAssignmentExtGlobContexts(t *testing.T) {
+	tests := []struct {
+		source string
+		text   string
+		known  bool
+	}{
+		{source: `A=*(a|b)`, text: `*(a|b)`, known: true},
+		{source: `A=@(a|b)`, text: `@(a|b)`, known: true},
+		{source: `A=?(a|b)`, text: `?(a|b)`, known: true},
+		{source: `A=+(a|b)`, text: `+(a|b)`, known: true},
+		{source: `A=!(a|b)`, text: `!(a|b)`, known: true},
+		{source: `A=*(a|@(b|c))`, text: `*(a|@(b|c))`, known: true},
+		{source: `A=*(a|"b")`, text: `*(a|b)`, known: true},
+		{source: `A=*(a|\|)`, text: `*(a||)`, known: true},
+		{source: `A=*($X|b)`, known: false},
+		{source: `A=*($(printf a)|b)`, known: false},
+		{source: `A=*($((1+2))|b)`, known: false},
+		{source: `A=*(<(printf a)|b)`, known: false},
+		{source: `A=~/*(a|b)`, known: false},
+	}
+	for _, test := range tests {
+		t.Run(test.source, func(t *testing.T) {
+			statements, parseRefusal := parseStatements(test.source)
+			if parseRefusal != nil {
+				t.Fatalf("parse refusal = %#v", parseRefusal)
+			}
+			sites, refusals, _ := walk(statements, test.source)
+			if len(refusals) != 0 || len(sites) != 1 || len(sites[0].assignments) != 1 {
+				t.Fatalf("walk = sites %#v, refusals %#v", sites, refusals)
+			}
+			value, known := literalWordInContext(sites[0].assignments[0].Value, test.source, assignmentExpansion)
+			if known != test.known || known && value != test.text {
+				t.Fatalf("assignment value = %q, known=%t; want %q, known=%t", value, known, test.text, test.known)
+			}
+		})
+	}
+}
+
+func TestEmitArgvExtGlobRemainsDynamicAndNonSingle(t *testing.T) {
+	response, err := Certify(mustRequest(t, `echo @(a|b)`))
+	if err != nil {
+		t.Fatalf("Certify error = %v", err)
+	}
+	word := findCommandSite(t, response.Results[0], 0).Argv[1]
+	if word.Text != nil || word.Single {
+		t.Fatalf("argv extglob facts = %#v, want unknown text and cardinality", word)
+	}
+}
+
 func TestEmitUnquotedExpansionFacts(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -320,6 +369,62 @@ func TestEmitQuotedParameterOperandAtIsNotSingle(t *testing.T) {
 	word := findCommandSite(t, response.Results[0], 0).Argv[1]
 	if word.Text != nil || word.Single {
 		t.Fatalf("quoted parameter operand = %#v, want unknown text and cardinality", word)
+	}
+}
+
+func TestEmitQuotedIndirectParameterNeverOverclaimsSingle(t *testing.T) {
+	tests := []struct {
+		word   string
+		single bool
+	}{
+		{word: `"${ref}"`, single: true},
+		{word: `"${!scalar_ref}"`, single: false},
+		{word: `"${!array_ref}"`, single: false},
+		{word: `"prefix-${!ref}-suffix"`, single: false},
+	}
+	for _, test := range tests {
+		t.Run(test.word, func(t *testing.T) {
+			response, err := Certify(mustRequest(t, `echo `+test.word))
+			if err != nil {
+				t.Fatalf("Certify error = %v", err)
+			}
+			word := findCommandSite(t, response.Results[0], 0).Argv[1]
+			if word.Text != nil || word.Single != test.single {
+				t.Fatalf("indirect parameter facts = %#v, want nil text and single=%t", word, test.single)
+			}
+		})
+	}
+}
+
+func TestEmitArithmeticExpansionIsSingleScalar(t *testing.T) {
+	tests := []string{`$((1+2))`, `pre$((1+2))post`, `"$((1+2))"`}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			response, err := Certify(mustRequest(t, `echo `+raw))
+			if err != nil {
+				t.Fatalf("Certify error = %v", err)
+			}
+			word := findCommandSite(t, response.Results[0], 0).Argv[1]
+			if word.Text != nil || !word.Single {
+				t.Fatalf("arithmetic facts = %#v, want nil text and one field", word)
+			}
+		})
+	}
+}
+
+func TestEmitArithmeticExpansionStillTraversesNestedExecution(t *testing.T) {
+	const src = `echo $(( $(doc-lattice check) + 1 ))`
+	response, err := Certify(mustRequest(t, src))
+	if err != nil {
+		t.Fatalf("Certify error = %v", err)
+	}
+	events := response.Results[0].Events
+	if len(events) != 2 || events[0].Kind != "command_site" || events[1].Kind != "command_site" {
+		t.Fatalf("events = %#v, want outer and nested command sites", events)
+	}
+	word := events[0].Argv[1]
+	if word.Text != nil || !word.Single {
+		t.Fatalf("outer arithmetic facts = %#v, want nil text and one field", word)
 	}
 }
 

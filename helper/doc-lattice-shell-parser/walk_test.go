@@ -199,6 +199,31 @@ func TestWalkParameterWordProcessSubstitutionLookalikes(t *testing.T) {
 	}
 }
 
+func TestWalkOuterQuotedParameterProcessSubstitutionIsLiteral(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{name: "expansion", source: `echo "${x:+<(doc-lattice check)}"; echo later`},
+		{name: "replacement original", source: `echo "${x/<(doc-lattice check)/safe}"; echo later`},
+		{name: "replacement with", source: `echo "${x/safe/<(doc-lattice check)}"; echo later`},
+		{name: "continued expansion", source: "echo \"${x:+<\\\n(doc-lattice check)}\"; echo later"},
+		{name: "escaped replacement", source: `echo "${x/safe/\<(doc-lattice check)}"; echo later`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stmts, parseRefusal := parseStatements(test.source)
+			if parseRefusal != nil {
+				t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+			}
+			sites, refusals, _ := walk(stmts, test.source)
+			if len(sites) != 2 || len(refusals) != 0 {
+				t.Fatalf("walk returned %d sites and refusals %#v, want quoted literal outer site and later site", len(sites), refusals)
+			}
+		})
+	}
+}
+
 func TestParseRejectsProcessSubstitutionInParameterIndex(t *testing.T) {
 	const src = `echo ${x[<(doc-lattice check)]}`
 	_, refusal := parseStatements(src)

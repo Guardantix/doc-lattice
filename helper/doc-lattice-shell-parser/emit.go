@@ -256,8 +256,91 @@ func literalWordPart(part syntax.WordPart, src string, quoted bool, context word
 			value.WriteString(nestedValue)
 		}
 		return value.String(), true
+	case *syntax.ExtGlob:
+		if part != nil && context == assignmentExpansion {
+			return literalAssignmentExtGlob(part, src)
+		}
 	}
 	return "", false
+}
+
+func literalAssignmentExtGlob(extglob *syntax.ExtGlob, src string) (string, bool) {
+	if extglob == nil {
+		return "", false
+	}
+	start, end, err := validatedSpan(extglob, len(src))
+	if err != nil {
+		return "", false
+	}
+	raw := src[start:end]
+	const (
+		unquoted = iota
+		singleQuoted
+		doubleQuoted
+	)
+	quote := unquoted
+	var value strings.Builder
+	for index := 0; index < len(raw); index++ {
+		char := raw[index]
+		switch quote {
+		case singleQuoted:
+			if char == '\'' {
+				quote = unquoted
+			} else {
+				value.WriteByte(char)
+			}
+			continue
+		case doubleQuoted:
+			if char == '"' {
+				quote = unquoted
+				continue
+			}
+			if char == '$' || char == '`' {
+				return "", false
+			}
+			if char == '\\' && index+1 < len(raw) {
+				next := raw[index+1]
+				if next == '\n' {
+					index++
+					continue
+				}
+				if next == '$' || next == '`' || next == '"' || next == '\\' {
+					value.WriteByte(next)
+					index++
+					continue
+				}
+			}
+			value.WriteByte(char)
+			continue
+		}
+		switch char {
+		case '\'':
+			quote = singleQuoted
+		case '"':
+			quote = doubleQuoted
+		case '$', '`':
+			return "", false
+		case '\\':
+			if index+1 >= len(raw) {
+				return "", false
+			}
+			index++
+			if raw[index] != '\n' {
+				value.WriteByte(raw[index])
+			}
+		case '<', '>':
+			if index+1 < len(raw) && raw[index+1] == '(' {
+				return "", false
+			}
+			value.WriteByte(char)
+		default:
+			value.WriteByte(char)
+		}
+	}
+	if quote != unquoted {
+		return "", false
+	}
+	return value.String(), true
 }
 
 func decodedLiteral(literal *syntax.Lit, src string, doubleQuoted bool) (string, bool) {
@@ -309,6 +392,10 @@ func wordIsSingle(word *syntax.Word, src string) bool {
 				return false
 			}
 		case *syntax.ProcSubst:
+			if part == nil {
+				return false
+			}
+		case *syntax.ArithmExp:
 			if part == nil {
 				return false
 			}
@@ -418,6 +505,9 @@ func quotedParameterMayExpandToManyAtDepth(parameter *syntax.ParamExp, depth int
 		return true
 	}
 	if depth > visitorDepthCap {
+		return true
+	}
+	if parameter.Excl {
 		return true
 	}
 	if parameter.Length || parameter.Width || parameter.IsSet {

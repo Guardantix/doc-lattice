@@ -293,14 +293,14 @@ func (w *walker) consumeWord(word *syntax.Word, depth int) {
 		if !w.enterChild() {
 			return
 		}
-		w.consumeWordPart(part, depth+1)
+		w.consumeWordPart(part, depth+1, false)
 		if w.stop {
 			return
 		}
 	}
 }
 
-func (w *walker) consumeWordPart(part syntax.WordPart, depth int) {
+func (w *walker) consumeWordPart(part syntax.WordPart, depth int, quoted bool) {
 	if part == nil || w.stop || syntaxNodeIsNil(part) {
 		return
 	}
@@ -315,7 +315,7 @@ func (w *walker) consumeWordPart(part syntax.WordPart, depth int) {
 			if !w.enterChild() {
 				return
 			}
-			w.consumeWordPart(nested, depth+1)
+			w.consumeWordPart(nested, depth+1, true)
 			if w.stop {
 				return
 			}
@@ -326,16 +326,16 @@ func (w *walker) consumeWordPart(part syntax.WordPart, depth int) {
 		w.dispatch(part, "word-part", depth)
 	default:
 		if w.visit(part, depth) {
-			w.consumeNestedExecution(part, depth)
+			w.consumeNestedExecution(part, depth, quoted)
 		}
 	}
 }
 
-func (w *walker) consumeNestedExecution(node syntax.Node, depth int) {
-	w.consumeNestedExecutionIn(node, depth, false)
+func (w *walker) consumeNestedExecution(node syntax.Node, depth int, quoted bool) {
+	w.consumeNestedExecutionIn(node, depth, false, quoted)
 }
 
-func (w *walker) consumeNestedExecutionIn(node syntax.Node, depth int, parameterOperand bool) {
+func (w *walker) consumeNestedExecutionIn(node syntax.Node, depth int, parameterOperand, quoted bool) {
 	next := 0
 	for {
 		child, ok := nextStructuralChild(node, &next)
@@ -355,11 +355,11 @@ func (w *walker) consumeNestedExecutionIn(node syntax.Node, depth int, parameter
 		case *syntax.ProcSubst:
 			w.dispatch(child, "word-part", depth+1)
 		case *syntax.Lit:
-			if parameterOperand && literalHasProcessSubstitution(child, w.src) {
+			if parameterOperand && !quoted && literalHasProcessSubstitution(child, w.src) {
 				w.dispatch(child, "parameter-operand-process-substitution", depth+1)
 			}
 		default:
-			w.consumeNestedExecutionIn(child, depth+1, childIsParameterOperand)
+			w.consumeNestedExecutionIn(child, depth+1, childIsParameterOperand, quoted)
 		}
 		if w.stop {
 			return
