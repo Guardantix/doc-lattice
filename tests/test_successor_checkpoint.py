@@ -173,7 +173,7 @@ def test_conformance_and_negative_fixture_sets():
     conformance = sorted((CHECKPOINT / "protocol" / "conformance").iterdir())
     negative = sorted((CHECKPOINT / "protocol" / "negative").iterdir())
     assert len(conformance) == 7
-    assert len(negative) == 15
+    assert len(negative) == 14
     names = {p.stem for p in negative}
     assert {
         "duplicate-keys",
@@ -188,16 +188,21 @@ def test_conformance_and_negative_fixture_sets():
         "unknown-field",
         "out-of-order-results",
         "span-out-of-range",
-        "max-length-four-byte-source",
         "source-count-over-limit",
         "json-depth-over-limit",
     } <= names
+    assert "max-length-four-byte-source" not in names
     boundary = CHECKPOINT / "protocol" / "boundary"
     assert boundary.is_dir()
     at_limit = boundary / "source-count-at-limit.json"
     assert at_limit.is_file()
     request = json.loads(at_limit.read_text(encoding="utf-8"))
     assert len(request["sources"]) == 4096
+    max_length_source = boundary / "max-length-four-byte-source.json"
+    assert max_length_source.is_file()
+    max_length_request = json.loads(max_length_source.read_text(encoding="utf-8"))
+    assert len(max_length_request["sources"]) == 1
+    assert len(max_length_request["sources"][0]["source"]) == 1_048_576
 
 
 def test_encoder_rules_and_digest_manifest():
@@ -211,12 +216,12 @@ def test_encoder_rules_and_digest_manifest():
     manifest = _load("protocol/digest_manifest.json")
     assert manifest["ordering"] == "path-lexicographic"
     included = manifest["include"]
-    assert "helper/doc-lattice-shell-parser/main.go" in included
-    assert "helper/doc-lattice-shell-parser/internal/certify/" in included
+    assert "helper/doc-lattice-shell-parser/" in included
     assert "tests/fixtures/github_ci_successor_checkpoint/protocol/schema.json" in included
     assert "tests/fixtures/github_ci_successor_checkpoint/tables/" in included
     assert "tests/fixtures/github_ci_successor_checkpoint/limits.json" in included
-    assert {"exclude_globs", "include"} <= set(manifest)
+    assert manifest["completeness_rule"]
+    assert {"exclude_globs", "include", "completeness_rule"} <= set(manifest)
 
 
 def test_limits_freeze_spec_numbers():

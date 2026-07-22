@@ -281,12 +281,12 @@
     "encoder_composition": [
       {
         "id": "max-length-four-byte-source",
-        "fixture_path": "protocol/negative/max-length-four-byte-source",
+        "fixture_path": "protocol/boundary/max-length-four-byte-source",
         "assertion": "encoded request byte length < 8388608",
         "label": "outside-direct-marker-contract",
         "expected_status": "not_applicable",
         "expected_invocations": [],
-        "spec": "S4.2 / S5.1: the max-length four-byte-character source (1,048,576 astral characters = 4,194,304 UTF-8 bytes) pins the encoder composition. With ensure_ascii=False the canonical request encodes to 4,194,359 bytes, under the 8,388,608 aggregate cap, so the per-source and aggregate byte caps compose; default ASCII escaping would break the four-bytes-per-character worst case. Per S5.1 the all-astral source is marker-free, so it stays outside the direct-invocation contract: not_applicable with no invocation, not a must-certify scan."
+        "spec": "S4.2 / S5.1: the max-length four-byte-character source (1,048,576 astral characters = 4,194,304 UTF-8 bytes) pins the encoder composition. With ensure_ascii=False the canonical request encodes to 4,194,359 bytes (4,194,360 with the boundary fixture's trailing newline), under the 8,388,608 aggregate cap, so the per-source and aggregate byte caps compose; default ASCII escaping would break the four-bytes-per-character worst case. Per S5.1 the all-astral source is marker-free, so it stays outside the direct-invocation contract: not_applicable with no invocation, not a must-certify scan. Round-3 reclassification: this is a valid at-limit input, not a must-reject one, and moved from protocol/negative/ to protocol/boundary/ accordingly; decoders must ACCEPT it."
       }
     ]
   }

@@ -4,15 +4,16 @@ Each fixture is a single document representing one malformed or edge-sized side 
 wire: either the request bytes a future Go decoder must reject, or the response bytes a
 future Python decoder must reject. The binary fixtures (``invalid-utf8.bin``,
 ``lone-surrogate.bin``) are written with explicit byte escapes because they are not valid
-UTF-8 text and cannot round-trip through ``json.dumps``. The ``max-length-four-byte-source``
-fixture is a legitimate, maximally sized request that pins the S4.2 per-source/aggregate
-byte-cap composition; this script asserts that composition at generation time so a future
-change to the caps or the encoding rule is caught here rather than silently drifting.
+UTF-8 text and cannot round-trip through ``json.dumps``.
 
-Run with ``python scripts/generate_protocol_negatives.py`` to regenerate all fifteen negative
-fixtures in ``tests/fixtures/github_ci_successor_checkpoint/protocol/negative/`` and the
-at-limit boundary fixture in ``.../protocol/boundary/``. The boundary fixture is a valid
-at-cap input for the gate-9 harness and, unlike the negatives, carries a trailing newline.
+Run with ``python scripts/generate_protocol_negatives.py`` to regenerate all fourteen negative
+fixtures in ``tests/fixtures/github_ci_successor_checkpoint/protocol/negative/`` and the two
+at-limit boundary fixtures in ``.../protocol/boundary/`` (``source-count-at-limit.json`` and
+``max-length-four-byte-source.json``). The boundary fixtures are legitimate, maximally sized
+requests that pin the S4.2 cap compositions; this script asserts each composition at
+generation time so a future change to the caps or the encoding rule is caught here rather
+than silently drifting. Unlike the negatives, boundary fixtures are valid at-cap inputs for
+the gate-9 harness and carry a trailing newline.
 """
 
 import json
@@ -209,22 +210,26 @@ def generate_span_out_of_range() -> None:
 
 
 def generate_max_length_four_byte_source() -> None:
-    """Request: one source at the 1,048,576-character / 4,194,304-byte per-source cap.
+    """Boundary: one source at the 1,048,576-character / 4,194,304-byte per-source cap.
 
     Pins the S4.2 cap composition: the inherited Python character cap (four-byte-worst-case)
     composes with the aggregate request byte cap once the canonical encoder rules
-    (``ensure_ascii=False``, compact separators) are applied.
+    (``ensure_ascii=False``, compact separators) are applied. Unlike the negatives, this is a
+    legitimate at-cap input for the gate-9 harness, so it is written with a trailing newline
+    into the sibling ``boundary/`` directory.
     """
     source = "\U0001f600" * PER_SOURCE_CHARACTER_CAP
     assert len(source) == PER_SOURCE_CHARACTER_CAP
     assert len(source.encode("utf-8")) == 4 * PER_SOURCE_CHARACTER_CAP
     request = {"protocol_version": 1, "sources": [{"id": 0, "source": source}]}
-    encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    assert len(encoded) < AGGREGATE_REQUEST_CAP_BYTES, (
-        f"max-length-four-byte-source request is {len(encoded)} bytes, "
+    encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+    encoded_bytes = len(encoded.encode("utf-8"))
+    assert encoded_bytes < AGGREGATE_REQUEST_CAP_BYTES, (
+        f"max-length-four-byte-source request is {encoded_bytes} bytes, "
         f"at or over the aggregate cap of {AGGREGATE_REQUEST_CAP_BYTES}"
     )
-    write_bytes("max-length-four-byte-source.json", encoded)
+    BOUNDARY.mkdir(parents=True, exist_ok=True)
+    (BOUNDARY / "max-length-four-byte-source.json").write_text(encoded + "\n", encoding="utf-8")
 
 
 def _sources_request(count: int) -> str:
@@ -259,7 +264,7 @@ def generate_source_count_at_limit() -> None:
 
 
 def main() -> None:
-    """Regenerate every negative fixture and the at-limit boundary fixture."""
+    """Regenerate every negative fixture and both at-limit boundary fixtures."""
     NEGATIVE.mkdir(parents=True, exist_ok=True)
     generate_duplicate_keys()
     generate_invalid_utf8()
@@ -273,9 +278,9 @@ def main() -> None:
     generate_unknown_field()
     generate_out_of_order_results()
     generate_span_out_of_range()
-    generate_max_length_four_byte_source()
     generate_source_count_over_limit()
     generate_json_depth_over_limit()
+    generate_max_length_four_byte_source()
     generate_source_count_at_limit()
 
 

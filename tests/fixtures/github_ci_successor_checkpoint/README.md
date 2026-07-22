@@ -45,11 +45,12 @@ The helper wire protocol: the strict draft-2020-12 JSON Schema (protocol_version
 objects closed), the canonical encoder rules, the digest-input manifest that defines the
 helper-identity hash, seven positive conformance fixtures, fourteen raw negative fixtures
 enumerating every rejection the schema and decoders must catch, and a `boundary/` directory
-of valid at-cap inputs (a source batch at exactly the 4,096-source limit) for the gate-9
-harness. These freeze the byte-exact contract between the Python engine and the Go helper
-before either is written. The conformance fixtures' `helper_version` is a synthetic 64-hex
-placeholder and their `work_units` values are wire-shape data for byte-exact marshal tests,
-not values derived from the `limits.json` work-unit definition.
+of two valid at-cap inputs for the gate-9 harness (a source batch at exactly the 4,096-source
+limit, and a single source at exactly the 1,048,576-character / 4,194,304-byte per-source
+cap). These freeze the byte-exact contract between the Python engine and the Go helper before
+either is written. The conformance fixtures' `helper_version` is a synthetic 64-hex placeholder
+and their `work_units` values are wire-shape data for byte-exact marshal tests, not values
+derived from the `limits.json` work-unit definition.
 
 ### `corpus/`
 
@@ -229,6 +230,21 @@ the remainder are presented for ratification.
      ASCII JSON carrying a `\uD800` escape) covers the decoder-level escaped lone surrogate that
      Go's `encoding/json` would silently replace with U+FFFD, complementing `lone-surrogate.bin`
      (raw CESU-8 surrogate bytes).
+  `MANIFEST.sha256` was regenerated in the same revision.
+- **2026-07-22 (adversarial review, round 3): two verified findings.** A third adversarial
+  review of the frozen checkpoint produced two fixes:
+  1. Fixture reclassification. `max-length-four-byte-source.json` is a valid at-limit request
+     (exactly 1,048,576 characters / 4,194,304 UTF-8 bytes per source, under the aggregate cap),
+     not a must-reject fixture, so it moved from `protocol/negative/` to `protocol/boundary/`,
+     gaining the trailing newline the other boundary fixture already carries. Negative count
+     falls from 15 to 14; the `boundary/` directory now holds two at-limit fixtures.
+  2. Helper digest coverage gap. `protocol/digest_manifest.json`'s `include` list named only
+     `main.go` and `internal/certify/`, so a compiled module-root file (for example `wire.go`)
+     would escape the helper-identity digest. `include` now covers the whole module recursively
+     via a single `helper/doc-lattice-shell-parser/` entry (the now-redundant `go.mod`/`go.sum`
+     entries were removed), `exclude_globs` gained `helper/doc-lattice-shell-parser/**/*.md`, and
+     a new `completeness_rule` field requires CI to independently assert that every non-test
+     `.go` file under the helper module is covered by `include` minus `exclude_globs`.
   `MANIFEST.sha256` was regenerated in the same revision.
 
 ## Handoff
