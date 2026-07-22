@@ -6,7 +6,6 @@ from typer.main import get_command
 
 from doc_lattice.cli.application import create_app
 from doc_lattice.error_types import ConfigError, ProjectError
-from doc_lattice.github_ci.launcher_policy import ScanWord, resolve_command
 from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS,
     _DOC_LATTICE_ROOT_OPTIONS,
@@ -1806,44 +1805,33 @@ def test_uv_run_no_sync_still_resolves():
     assert direct_doc_lattice_invocations("uv run --no-sync doc-lattice linear") == LINEAR
 
 
-def _literal_policy_words(script: str) -> tuple[ScanWord, ...]:
-    offset = 0
-    words = []
-    for text in script.split():
-        words.append(ScanWord(text, offset, offset + len(text), unstable=False))
-        offset += len(text) + 1
-    return tuple(words)
-
-
 @pytest.mark.parametrize(
-    "script",
+    ("script", "expected_invocations", "complete"),
     [
-        "uv tool -q run doc-lattice linear",
-        "uv tool --offline run doc-lattice linear",
-        "uv tool --no-cache run doc-lattice linear",
-        "uv tool --frobnicate run doc-lattice linear",
-        "uv tool -q install doc-lattice",
-        "uv tool install doc-lattice",
-        "uv tool list",
-        "uvx --no-sync doc-lattice linear",
-        "uv tool run --no-sync doc-lattice linear",
-        "uv run --no-sync doc-lattice linear",
+        # Option before the run selector: fail closed with no invocation (PR #103).
+        ("uv tool -q run doc-lattice linear", NONE, False),
+        ("uv tool --offline run doc-lattice linear", NONE, False),
+        ("uv tool --no-cache run doc-lattice linear", NONE, False),
+        ("uv tool --frobnicate run doc-lattice linear", NONE, False),
+        ("uv tool -q install doc-lattice", NONE, False),
+        # Bare uv tool selectors that are not run: no invocation, resolved cleanly.
+        ("uv tool install doc-lattice", NONE, True),
+        ("uv tool list", NONE, True),
+        # Package-form launchers refuse --no-sync (PR #103): fail closed, no invocation.
+        ("uvx --no-sync doc-lattice linear", NONE, False),
+        ("uv tool run --no-sync doc-lattice linear", NONE, False),
+        # uv run keeps its project environment, so --no-sync resolves normally.
+        ("uv run --no-sync doc-lattice linear", LINEAR, True),
     ],
 )
-def test_scanner_matches_launcher_policy_on_issue_102_fixtures(script):
-    floor = resolve_command(_literal_policy_words(script))
-    scanner = scan_doc_lattice_invocations(script)
-    scanner_kind = (
-        "refused"
-        if scanner.incomplete_reason is not None
-        else "resolved"
-        if scanner.invocations
-        else "not_candidate"
-    )
+def test_scanner_issue_102_fixtures_stay_fail_closed(script, expected_invocations, complete):
+    result = scan_doc_lattice_invocations(script)
 
-    assert scanner_kind == floor.kind
-    if floor.invocation is not None:
-        assert scanner.invocations == (floor.invocation,)
+    assert result.invocations == expected_invocations
+    if complete:
+        assert result.incomplete_reason is None
+    else:
+        assert result.incomplete_reason is not None
 
 
 @pytest.mark.parametrize(
