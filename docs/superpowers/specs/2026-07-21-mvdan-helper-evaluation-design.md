@@ -493,12 +493,15 @@ Contents:
 - the re-derived corpus: the frozen 78-row prefix, the post-#103 appended rows, and new
   fixture families (dispatcher grammar, head look-alikes, heredoc guard, malformed tails
   and mixed evidence, offset oracle cases, the `StmtsSeq` canonical fixture), every case
-  labeled `must certify`, `intentional exit 2`, or `outside direct-invocation contract`;
+  labeled `must certify`, `intentional exit 2`, or `outside direct-invocation contract`,
+  together with the generated relabel report recording every delta from the D3 baseline;
+- the per-tier expected outcomes for gates 3 through 6 (managed workflows, checked-in PR
+  workflows, documented conformance, and the 20 envelope fixtures);
 - the legacy-reason normalization artifact (6.4) at baseline `be4b7b1`;
 - the certified-construct table, reason-code-to-scope table, stable-reason table,
-  dispatcher grammar, and pre-policy command matrix;
-- the protocol JSON Schema, cross-language conformance fixtures, and raw negative
-  fixtures;
+  dispatcher grammar, pre-policy command matrix, and policy precedence chain;
+- the protocol JSON Schema, the canonical encoder rules, cross-language conformance
+  fixtures, and raw negative fixtures;
 - the helper-identity digest-input manifest (section 4.3);
 - `limits.json`: every cap and formula in sections 3.5 and 4.4, work-unit definitions,
   and the performance and RSS ceilings of section 9;
@@ -506,7 +509,8 @@ Contents:
   wheel tags, and build-container digests, and exact pins:
   Go toolchain (exact version and per-builder sha256), `mvdan.cc/sh/v3` v3.13.1, bash
   5.2.21 with the container digest and binary sha256, shfmt 3.13.1 with sha256 and exact
-  command lines, and pinned CI action revisions.
+  command lines, and pinned CI action revisions with their tag provenance recorded
+  beside them.
 
 Gate results live outside the checkpoint and record: the checkpoint digest, the evaluated
 implementation commit and tree hash, helper and wheel hashes, actual hosted runner image
