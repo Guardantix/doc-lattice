@@ -246,6 +246,26 @@ func TestCertifiedConstructsMatchCheckpoint(t *testing.T) {
 	}
 	loadCheckpointJSON(t, checkpointTablesPath+"certified_constructs.json", &checkpoint)
 
+	expansionRefuseNodes := map[string]struct{}{
+		"ArithmExp": {}, "ArithmExpr": {}, "BinAritOperator": {}, "BinaryArithm": {},
+		"BraceExp": {}, "DblQuoted": {}, "Expansion": {}, "ExtGlob": {},
+		"FlagsArithm": {}, "GlobOperator": {}, "ParamExp": {}, "ParenArithm": {},
+		"ParExpOperator": {}, "ParNamesOperator": {}, "Replace": {}, "Slice": {},
+		"UnAritOperator": {}, "UnaryArithm": {}, "WordPart": {},
+	}
+	expectedCode := func(node, disposition string) string {
+		if disposition != "refuse" {
+			return ""
+		}
+		if node == "RedirOperator" {
+			return "redirect-unsupported"
+		}
+		if _, ok := expansionRefuseNodes[node]; ok {
+			return "expansion-unsupported"
+		}
+		return "unsupported-construct"
+	}
+
 	want := make(map[constructKey]string, len(checkpoint.Rows))
 	for _, row := range checkpoint.Rows {
 		key := constructKey{node: row.Node, role: row.Role}
@@ -263,15 +283,8 @@ func TestCertifiedConstructsMatchCheckpoint(t *testing.T) {
 			t.Errorf("certifiedConstructs[%+v] = %+v, want disposition %q", key, rule, disposition)
 			continue
 		}
-		if disposition != "refuse" {
-			if rule.code != "" {
-				t.Errorf("non-refuse certifiedConstructs[%+v] has code %q", key, rule.code)
-			}
-			continue
-		}
-		scope := reasonScopes[rule.code]
-		if scope != "terminal" && scope != "subtree-local" {
-			t.Errorf("refuse certifiedConstructs[%+v] has code %q with helper-unowned scope %q", key, rule.code, scope)
+		if wantCode := expectedCode(key.node, disposition); rule.code != wantCode {
+			t.Errorf("certifiedConstructs[%+v] code = %q, want exact code %q", key, rule.code, wantCode)
 		}
 	}
 	if certifiedNodeTypeCount != len(checkpoint.ExportedNodeTypes) {

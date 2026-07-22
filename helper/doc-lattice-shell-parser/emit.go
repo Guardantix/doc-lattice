@@ -100,23 +100,33 @@ func certifySource(source Source) (Result, error) {
 	resultEvents := make([]Event, len(combined))
 	for index, event := range combined {
 		resultEvents[index] = event.event
-		if event.event.Kind != "refusal" {
-			continue
-		}
-		scope := reasonScopes[event.event.Code]
-		if scope == "terminal" && index != len(combined)-1 {
-			return Result{}, errInvalidEmission
-		}
-		if scope != "subtree-local" {
-			continue
-		}
-		for _, later := range combined[index+1:] {
-			if later.event.Kind == "command_site" && later.event.StartByte < event.event.EndByte {
-				return Result{}, errInvalidEmission
-			}
-		}
+	}
+	if err := validateEventOrdering(resultEvents); err != nil {
+		return Result{}, err
 	}
 	return Result{ID: source.ID, Events: resultEvents, WorkUnits: work + 1}, nil
+}
+
+func validateEventOrdering(events []Event) error {
+	earliestLaterSiteStart := 0
+	hasLaterSite := false
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.Kind == "refusal" {
+			scope := reasonScopes[event.Code]
+			if scope == "terminal" && index != len(events)-1 {
+				return errInvalidEmission
+			}
+			if scope == "subtree-local" && hasLaterSite && earliestLaterSiteStart < event.EndByte {
+				return errInvalidEmission
+			}
+		}
+		if event.Kind == "command_site" && (!hasLaterSite || event.StartByte < earliestLaterSiteStart) {
+			earliestLaterSiteStart = event.StartByte
+			hasLaterSite = true
+		}
+	}
+	return nil
 }
 
 func eventKindOrdinal(kind string) int {

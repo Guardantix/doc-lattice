@@ -286,6 +286,92 @@ func TestMultipleLocalRefusalsAndLaterSiteStayInSourceOrder(t *testing.T) {
 	}
 }
 
+func TestManyLocalRefusalsPreserveOrderingAndLaterSites(t *testing.T) {
+	const localCount = 128
+	var source strings.Builder
+	for range localCount {
+		source.WriteString(`A=*($(doc-lattice hidden)|b) echo outer; `)
+	}
+	source.WriteString(`doc-lattice later`)
+
+	resp, err := Certify(mustRequest(t, source.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := resp.Results[0].Events
+	if len(events) != localCount*2+1 {
+		t.Fatalf("event count = %d, want %d", len(events), localCount*2+1)
+	}
+	if got := len(commandHeads(t, events)); got != localCount+1 {
+		t.Fatalf("command-site count = %d, want %d outer and later sites", got, localCount+1)
+	}
+	if got := refusalCodes(events); len(got) != localCount {
+		t.Fatalf("refusal count = %d, want %d", len(got), localCount)
+	}
+	lastStart := -1
+	for index, event := range events {
+		if event.StartByte < lastStart {
+			t.Fatalf("event %d is out of source order: %#v", index, events)
+		}
+		lastStart = event.StartByte
+		if event.Kind == "refusal" && (event.Code != "expansion-unsupported" || reasonScopes[event.Code] != "subtree-local") {
+			t.Fatalf("event %d = %#v, want subtree-local expansion refusal", index, event)
+		}
+	}
+	if last := events[len(events)-1]; last.Kind != "command_site" || last.StartByte < events[len(events)-2].EndByte {
+		t.Fatalf("final later site does not follow all local refusals: %#v", events[len(events)-2:])
+	}
+}
+
+func TestValidateEventOrderingChecksLaterSiteSuffix(t *testing.T) {
+	tests := []struct {
+		name    string
+		events  []Event
+		wantErr bool
+	}{
+		{
+			name: "same-start earlier site and boundary later site are valid",
+			events: []Event{
+				{Kind: "command_site", StartByte: 2, EndByte: 10},
+				{Kind: "refusal", Code: "expansion-unsupported", StartByte: 2, EndByte: 5},
+				{Kind: "command_site", StartByte: 5, EndByte: 8},
+			},
+		},
+		{
+			name: "non-adjacent later site overlaps local refusal",
+			events: []Event{
+				{Kind: "refusal", Code: "expansion-unsupported", StartByte: 2, EndByte: 9},
+				{Kind: "refusal", Code: "expansion-unsupported", StartByte: 4, EndByte: 5},
+				{Kind: "command_site", StartByte: 8, EndByte: 10},
+			},
+			wantErr: true,
+		},
+		{
+			name: "terminal refusal must be last",
+			events: []Event{
+				{Kind: "refusal", Code: "unsupported-construct", StartByte: 2, EndByte: 3},
+				{Kind: "command_site", StartByte: 4, EndByte: 5},
+			},
+			wantErr: true,
+		},
+		{
+			name: "terminal refusal last is valid",
+			events: []Event{
+				{Kind: "command_site", StartByte: 2, EndByte: 3},
+				{Kind: "refusal", Code: "unsupported-construct", StartByte: 4, EndByte: 5},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateEventOrdering(test.events)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateEventOrdering() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestUnsupportedRedirectOperatorRefusesLocallyAtCompleteSpan(t *testing.T) {
 	const src = `>x; doc-lattice later`
 	stmts, parseRefusal := parseStatements(src)
@@ -354,7 +440,7 @@ func TestInvalidGeneratedRuleCodeFailsClosed(t *testing.T) {
 			const src = `A=*($(doc-lattice hidden)|b) echo outer; doc-lattice later`
 			resp, err := Certify(mustRequest(t, src))
 			if err != nil {
-				return
+				t.Fatalf("Certify returned an internal error instead of an owned terminal refusal: %v", err)
 			}
 			events := resp.Results[0].Events
 			for _, event := range events {
@@ -365,6 +451,9 @@ func TestInvalidGeneratedRuleCodeFailsClosed(t *testing.T) {
 			last := events[len(events)-1]
 			if last.Kind != "refusal" || last.Code != "unsupported-construct" || reasonScopes[last.Code] != "terminal" {
 				t.Fatalf("invalid generated code did not fail closed with an owned terminal refusal: %#v", events)
+			}
+			if got := commandHeads(t, events); !reflect.DeepEqual(got, []string{"echo"}) {
+				t.Fatalf("command heads = %#v, want only the completed outer command before terminal fallback", got)
 			}
 		})
 	}

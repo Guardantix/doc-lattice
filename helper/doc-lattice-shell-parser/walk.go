@@ -1220,8 +1220,9 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 	stack := []endCandidate{{node: node}}
 	best := 0
 	resolved := false
+	positionsValid := true
 	for steps := 0; len(stack) > 0; steps++ {
-		if steps >= limit {
+		if steps >= limit || !positionsValid {
 			return 0, false
 		}
 		candidate := stack[len(stack)-1]
@@ -1234,22 +1235,49 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 			if !ok {
 				return 0, false
 			}
-			best = max(best, start+candidate.adjust)
+			result, ok := checkedAddInt(start, candidate.adjust)
+			if !ok {
+				return 0, false
+			}
+			best = max(best, result)
 			resolved = true
 			continue
 		}
 		addResult := func(pos syntax.Pos, adjust int) {
-			best = max(best, positionOffset(pos, candidate.adjust+adjust))
+			combined, ok := checkedAddInt(candidate.adjust, adjust)
+			if !ok {
+				positionsValid = false
+				return
+			}
+			result, ok := positionOffset(pos, combined)
+			if !ok {
+				positionsValid = false
+				return
+			}
+			best = max(best, result)
 			resolved = true
 		}
+		addTextEnd := func(pos syntax.Pos, text string) {
+			delta, ok := checkedAddInt(1, len(text))
+			if !ok {
+				positionsValid = false
+				return
+			}
+			addResult(pos, delta)
+		}
 		push := func(child syntax.Node, adjust int) {
-			stack = append(stack, endCandidate{node: child, adjust: candidate.adjust + adjust})
+			combined, ok := checkedAddInt(candidate.adjust, adjust)
+			if !ok {
+				positionsValid = false
+				return
+			}
+			stack = append(stack, endCandidate{node: child, adjust: combined})
 		}
 		switch node := candidate.node.(type) {
 		case *syntax.File:
 			if len(node.Last) > 0 {
 				comment := node.Last[len(node.Last)-1]
-				addResult(comment.Hash, 1+len(comment.Text))
+				addTextEnd(comment.Hash, comment.Text)
 			} else if len(node.Stmts) > 0 {
 				stmt := node.Stmts[len(node.Stmts)-1]
 				push(stmt, 0)
@@ -1260,7 +1288,7 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 				resolved = true
 			}
 		case *syntax.Comment:
-			addResult(node.Hash, 1+len(node.Text))
+			addTextEnd(node.Hash, node.Text)
 		case *syntax.Stmt:
 			if node.Semicolon.IsValid() {
 				delta := 1
@@ -1329,7 +1357,9 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 					return 0, false
 				}
 				addResult(node.Name.ValueEnd, 0)
-				addResult(node.InPos, 2)
+				if node.InPos.IsValid() {
+					addResult(node.InPos, 2)
+				}
 			}
 		case *syntax.CStyleLoop:
 			addResult(node.Rparen, 2)
@@ -1389,11 +1419,11 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 				addResult(node.OpPos, len(node.Op.String()))
 			} else if len(node.Last) > 0 {
 				comment := node.Last[len(node.Last)-1]
-				addResult(comment.Hash, 1+len(comment.Text))
+				addTextEnd(comment.Hash, comment.Text)
 			} else if len(node.Stmts) > 0 {
 				push(node.Stmts[len(node.Stmts)-1], 0)
 			} else {
-				resolved = true
+				return 0, false
 			}
 		case *syntax.TestClause:
 			addResult(node.Right, 2)
@@ -1415,7 +1445,12 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 			if node.Value != nil {
 				push(node.Value, 0)
 			} else {
-				stack = append(stack, endCandidate{node: node.Index, adjust: candidate.adjust + 1, useStart: true})
+				combined, ok := checkedAddInt(candidate.adjust, 1)
+				if !ok {
+					positionsValid = false
+					continue
+				}
+				stack = append(stack, endCandidate{node: node.Index, adjust: combined, useStart: true})
 			}
 		case *syntax.ExtGlob:
 			push(node.Pattern, 1)
@@ -1445,6 +1480,9 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 			return 0, false
 		}
 	}
+	if !positionsValid {
+		return 0, false
+	}
 	return best, resolved
 }
 
@@ -1463,18 +1501,18 @@ func boundedStart(node syntax.Node, limit int) (int, bool) {
 					return 0, false
 				}
 				if len(stmt.Comments) > 0 && stmt.Position.After(stmt.Comments[0].Hash) {
-					return positionOffset(stmt.Comments[0].Hash, adjust), true
+					return positionOffset(stmt.Comments[0].Hash, adjust)
 				}
-				return positionOffset(stmt.Position, adjust), true
+				return positionOffset(stmt.Position, adjust)
 			} else if len(node.Last) > 0 {
-				return positionOffset(node.Last[0].Hash, adjust), true
+				return positionOffset(node.Last[0].Hash, adjust)
 			} else {
 				return 0, true
 			}
 		case *syntax.Comment:
-			return positionOffset(node.Hash, adjust), true
+			return positionOffset(node.Hash, adjust)
 		case *syntax.Stmt:
-			return positionOffset(node.Position, adjust), true
+			return positionOffset(node.Position, adjust)
 		case *syntax.Assign:
 			if node.Name != nil {
 				current = node.Name
@@ -1485,7 +1523,7 @@ func boundedStart(node syntax.Node, limit int) (int, bool) {
 			if node.N != nil {
 				current = node.N
 			} else {
-				return positionOffset(node.OpPos, adjust), true
+				return positionOffset(node.OpPos, adjust)
 			}
 		case *syntax.CallExpr:
 			if len(node.Assigns) > 0 {
@@ -1496,77 +1534,81 @@ func boundedStart(node syntax.Node, limit int) (int, bool) {
 				return 0, false
 			}
 		case *syntax.Subshell:
-			return positionOffset(node.Lparen, adjust), true
+			return positionOffset(node.Lparen, adjust)
 		case *syntax.Block:
-			return positionOffset(node.Lbrace, adjust), true
+			return positionOffset(node.Lbrace, adjust)
 		case *syntax.IfClause:
-			return positionOffset(node.Position, adjust), true
+			return positionOffset(node.Position, adjust)
 		case *syntax.WhileClause:
-			return positionOffset(node.WhilePos, adjust), true
+			return positionOffset(node.WhilePos, adjust)
 		case *syntax.ForClause:
-			return positionOffset(node.ForPos, adjust), true
+			return positionOffset(node.ForPos, adjust)
 		case *syntax.WordIter:
 			current = node.Name
 		case *syntax.CStyleLoop:
-			return positionOffset(node.Lparen, adjust), true
+			return positionOffset(node.Lparen, adjust)
 		case *syntax.BinaryCmd:
 			current = node.X
 		case *syntax.FuncDecl:
-			return positionOffset(node.Position, adjust), true
+			return positionOffset(node.Position, adjust)
 		case *syntax.Word:
 			if len(node.Parts) == 0 {
 				return 0, false
 			}
 			current = node.Parts[0]
 		case *syntax.Lit:
-			return positionOffset(node.ValuePos, adjust), true
+			return positionOffset(node.ValuePos, adjust)
 		case *syntax.SglQuoted:
-			return positionOffset(node.Left, adjust), true
+			return positionOffset(node.Left, adjust)
 		case *syntax.DblQuoted:
-			return positionOffset(node.Left, adjust), true
+			return positionOffset(node.Left, adjust)
 		case *syntax.CmdSubst:
-			return positionOffset(node.Left, adjust), true
+			return positionOffset(node.Left, adjust)
 		case *syntax.ParamExp:
 			if node.Dollar.IsValid() {
-				return positionOffset(node.Dollar, adjust), true
+				return positionOffset(node.Dollar, adjust)
 			}
 			current = node.Param
 		case *syntax.ArithmExp:
-			return positionOffset(node.Left, adjust), true
+			return positionOffset(node.Left, adjust)
 		case *syntax.ArithmCmd:
-			return positionOffset(node.Left, adjust), true
+			return positionOffset(node.Left, adjust)
 		case *syntax.BinaryArithm:
 			current = node.X
 		case *syntax.UnaryArithm:
 			if node.Post {
 				current = node.X
 			} else {
-				return positionOffset(node.OpPos, adjust), true
+				return positionOffset(node.OpPos, adjust)
 			}
 		case *syntax.ParenArithm:
-			return positionOffset(node.Lparen, adjust), true
+			return positionOffset(node.Lparen, adjust)
 		case *syntax.FlagsArithm:
 			current = node.Flags
-			adjust--
+			var ok bool
+			adjust, ok = checkedAddInt(adjust, -1)
+			if !ok {
+				return 0, false
+			}
 		case *syntax.CaseClause:
-			return positionOffset(node.Case, adjust), true
+			return positionOffset(node.Case, adjust)
 		case *syntax.CaseItem:
 			if len(node.Patterns) == 0 {
 				return 0, false
 			}
 			current = node.Patterns[0]
 		case *syntax.TestClause:
-			return positionOffset(node.Left, adjust), true
+			return positionOffset(node.Left, adjust)
 		case *syntax.BinaryTest:
 			current = node.X
 		case *syntax.UnaryTest:
-			return positionOffset(node.OpPos, adjust), true
+			return positionOffset(node.OpPos, adjust)
 		case *syntax.ParenTest:
-			return positionOffset(node.Lparen, adjust), true
+			return positionOffset(node.Lparen, adjust)
 		case *syntax.DeclClause:
 			current = node.Variant
 		case *syntax.ArrayExpr:
-			return positionOffset(node.Lparen, adjust), true
+			return positionOffset(node.Lparen, adjust)
 		case *syntax.ArrayElem:
 			if node.Index != nil {
 				current = node.Index
@@ -1574,23 +1616,27 @@ func boundedStart(node syntax.Node, limit int) (int, bool) {
 				current = node.Value
 			}
 		case *syntax.ExtGlob:
-			return positionOffset(node.OpPos, adjust), true
+			return positionOffset(node.OpPos, adjust)
 		case *syntax.ProcSubst:
-			return positionOffset(node.OpPos, adjust), true
+			return positionOffset(node.OpPos, adjust)
 		case *syntax.TimeClause:
-			return positionOffset(node.Time, adjust), true
+			return positionOffset(node.Time, adjust)
 		case *syntax.CoprocClause:
-			return positionOffset(node.Coproc, adjust), true
+			return positionOffset(node.Coproc, adjust)
 		case *syntax.LetClause:
-			return positionOffset(node.Let, adjust), true
+			return positionOffset(node.Let, adjust)
 		case *syntax.BraceExp:
 			if len(node.Elems) == 0 {
 				return 0, false
 			}
 			current = node.Elems[0]
-			adjust--
+			var ok bool
+			adjust, ok = checkedAddInt(adjust, -1)
+			if !ok {
+				return 0, false
+			}
 		case *syntax.TestDecl:
-			return positionOffset(node.Position, adjust), true
+			return positionOffset(node.Position, adjust)
 		default:
 			return 0, false
 		}
@@ -1598,11 +1644,29 @@ func boundedStart(node syntax.Node, limit int) (int, bool) {
 	return 0, false
 }
 
-func positionOffset(pos syntax.Pos, adjust int) int {
-	if !pos.IsValid() {
-		return 0
+func checkedAddInt(left, right int) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	minInt := -maxInt - 1
+	if right > 0 && left > maxInt-right || right < 0 && left < minInt-right {
+		return 0, false
 	}
-	return max(int(pos.Offset())+adjust, 0)
+	return left + right, true
+}
+
+func positionOffset(pos syntax.Pos, adjust int) (int, bool) {
+	if !pos.IsValid() {
+		return 0, false
+	}
+	offset := pos.Offset()
+	maxInt := int(^uint(0) >> 1)
+	if offset > uint(maxInt) {
+		return 0, false
+	}
+	result, ok := checkedAddInt(int(offset), adjust)
+	if !ok || result < 0 {
+		return 0, false
+	}
+	return result, true
 }
 
 func commandRole(command syntax.Command) string {

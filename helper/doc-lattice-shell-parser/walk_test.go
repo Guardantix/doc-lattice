@@ -981,6 +981,140 @@ func TestWalkMalformedNodesFailClosedWithoutPanicking(t *testing.T) {
 	}
 }
 
+func TestWalkLocalRefusalRequiresCompleteValidOwnerSpan(t *testing.T) {
+	position := func(offset uint) syntax.Pos { return syntax.NewPos(offset, 1, offset+1) }
+	tests := []struct {
+		name   string
+		source string
+		code   string
+		owner  func([]*syntax.Stmt) syntax.Node
+		mutate func(syntax.Node)
+	}{
+		{
+			name:   "arithmetic invalid start",
+			source: `echo $(( $(doc-lattice hidden) + 1 )); doc-lattice later`,
+			code:   "expansion-unsupported",
+			owner: func(stmts []*syntax.Stmt) syntax.Node {
+				return stmts[0].Cmd.(*syntax.CallExpr).Args[1].Parts[0].(*syntax.ArithmExp)
+			},
+			mutate: func(node syntax.Node) { node.(*syntax.ArithmExp).Left = syntax.Pos{} },
+		},
+		{
+			name:   "arithmetic invalid end at zero start",
+			source: `echo $(( $(doc-lattice hidden) + 1 )); doc-lattice later`,
+			code:   "expansion-unsupported",
+			owner: func(stmts []*syntax.Stmt) syntax.Node {
+				return stmts[0].Cmd.(*syntax.CallExpr).Args[1].Parts[0].(*syntax.ArithmExp)
+			},
+			mutate: func(node syntax.Node) {
+				arithmetic := node.(*syntax.ArithmExp)
+				arithmetic.Left = position(0)
+				arithmetic.Right = syntax.Pos{}
+			},
+		},
+		{
+			name:   "extglob invalid start",
+			source: `A=*($(doc-lattice hidden)|b) echo outer; doc-lattice later`,
+			code:   "expansion-unsupported",
+			owner: func(stmts []*syntax.Stmt) syntax.Node {
+				return stmts[0].Cmd.(*syntax.CallExpr).Assigns[0].Value.Parts[0].(*syntax.ExtGlob)
+			},
+			mutate: func(node syntax.Node) { node.(*syntax.ExtGlob).OpPos = syntax.Pos{} },
+		},
+		{
+			name:   "extglob invalid end at zero start",
+			source: `A=*($(doc-lattice hidden)|b) echo outer; doc-lattice later`,
+			code:   "expansion-unsupported",
+			owner: func(stmts []*syntax.Stmt) syntax.Node {
+				return stmts[0].Cmd.(*syntax.CallExpr).Assigns[0].Value.Parts[0].(*syntax.ExtGlob)
+			},
+			mutate: func(node syntax.Node) {
+				extglob := node.(*syntax.ExtGlob)
+				extglob.OpPos = position(0)
+				extglob.Pattern.ValueEnd = syntax.Pos{}
+			},
+		},
+		{
+			name:   "redirect invalid start",
+			source: `>"$(doc-lattice hidden)"; doc-lattice later`,
+			code:   "redirect-unsupported",
+			owner:  func(stmts []*syntax.Stmt) syntax.Node { return stmts[0].Redirs[0] },
+			mutate: func(node syntax.Node) {
+				redirect := node.(*syntax.Redirect)
+				redirect.Op = syntax.RedirOperator(255)
+				redirect.OpPos = syntax.Pos{}
+			},
+		},
+		{
+			name:   "redirect invalid end at zero start",
+			source: `>"$(doc-lattice hidden)"; doc-lattice later`,
+			code:   "redirect-unsupported",
+			owner:  func(stmts []*syntax.Stmt) syntax.Node { return stmts[0].Redirs[0] },
+			mutate: func(node syntax.Node) {
+				redirect := node.(*syntax.Redirect)
+				redirect.Op = syntax.RedirOperator(255)
+				redirect.OpPos = position(0)
+				redirect.Word.Parts[0].(*syntax.DblQuoted).Right = syntax.Pos{}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stmts, parseRefusal := parseStatements(test.source)
+			if parseRefusal != nil {
+				t.Fatalf("parse refusal = %#v, want none", parseRefusal)
+			}
+			owner := test.owner(stmts)
+			test.mutate(owner)
+
+			w := newWalker(test.source)
+			for _, stmt := range stmts {
+				if !w.certifyTree(stmt, 1) {
+					t.Fatalf("structural certification failed early: %#v", w.refusals)
+				}
+			}
+			w.requestLocalRefusal(owner, test.code)
+			w.dispatch(stmts[1], "command-and-redirects", 1)
+
+			if len(w.sites) != 0 {
+				t.Fatalf("sites = %#v, want malformed local owner to suppress later sibling", w.sites)
+			}
+			if len(w.refusals) != 1 || w.refusals[0].code != "unsupported-construct" || reasonScopes[w.refusals[0].code] != "terminal" {
+				t.Fatalf("refusals = %#v, want one terminal unsupported-construct", w.refusals)
+			}
+			if refusal := w.refusals[0]; refusal.startByte != 0 || refusal.endByte != 0 {
+				t.Fatalf("terminal fallback span = [%d, %d), want [0, 0)", refusal.startByte, refusal.endByte)
+			}
+			if !w.stop {
+				t.Fatal("malformed local owner did not stop traversal")
+			}
+		})
+	}
+}
+
+func TestBoundedStartRejectsNegativeAdjustedOffset(t *testing.T) {
+	brace := &syntax.BraceExp{Elems: []*syntax.Word{{Parts: []syntax.WordPart{&syntax.Lit{
+		ValuePos: syntax.NewPos(0, 1, 1), ValueEnd: syntax.NewPos(1, 1, 2), Value: "x",
+	}}}}}
+	if start, ok := boundedStart(brace, visitorDepthCap); ok {
+		t.Fatalf("boundedStart = (%d, true), want unresolved negative adjusted offset", start)
+	}
+}
+
+func TestPositionAdjustmentRejectsIntegerOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	minInt := -maxInt - 1
+	if result, ok := checkedAddInt(maxInt, 1); ok {
+		t.Fatalf("checkedAddInt(maxInt, 1) = (%d, true), want overflow rejection", result)
+	}
+	if result, ok := checkedAddInt(minInt, -1); ok {
+		t.Fatalf("checkedAddInt(minInt, -1) = (%d, true), want overflow rejection", result)
+	}
+	if result, ok := positionOffset(syntax.NewPos(1, 1, 1), maxInt); ok {
+		t.Fatalf("positionOffset(1, maxInt) = (%d, true), want overflow rejection", result)
+	}
+}
+
 func TestWalkMalformedInteriorChildrenFailClosed(t *testing.T) {
 	lit := func(offset uint, value string) *syntax.Lit {
 		return &syntax.Lit{
