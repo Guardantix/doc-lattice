@@ -327,6 +327,7 @@ func TestEmitAssignmentExtGlobContexts(t *testing.T) {
 		{source: `A=*(${X:$(printf 1)}|b)`, known: false, refuse: true},
 		{source: `A=*(${X:1:$(printf 1)}|b)`, known: false, refuse: true},
 		{source: `A=*(${arr[$(printf 1)]}|b)`, known: false, refuse: true},
+		{source: `A=*(${#arr[$(printf 1)]}|b)`, known: false, refuse: true},
 		{source: `A=*($(( ${X:-<(printf a)} ))|b)`, known: false, refuse: true},
 		{source: `A=*("$((1<(2)))"|<(printf a))`, known: false, refuse: true},
 		{source: `A=*($((1) )|<(printf a))`, known: false, refuse: true},
@@ -334,7 +335,11 @@ func TestEmitAssignmentExtGlobContexts(t *testing.T) {
 		{source: `A=*($(( (1) ) )|<(printf a))`, known: false, refuse: true},
 		{source: "A=*($((1)\t)|<(printf a))", known: false, refuse: true},
 		{source: "A=*($((1)\n)|>(printf a))", known: false, refuse: true},
+		{source: "A=*($((1)\r)|<(printf a))", known: false, refuse: true},
+		{source: "A=*($((1)\v)|>(printf a))", known: false, refuse: true},
+		{source: "A=*($((1)\f)|<(printf a))", known: false, refuse: true},
 		{source: "A=*($((1) \\\n \t)|<(printf a))", known: false, refuse: true},
+		{source: "A=*($(( (1)\r\v) \f\t)|>(printf a))", known: false, refuse: true},
 		{source: `A=*($((1<(2)) )|<(printf a))`, known: false, refuse: true},
 		{source: `A=*($((1>(2)) )|>(printf a))`, known: false, refuse: true},
 		{source: `A=*($(( $(printf 1)) )|b)`, known: false, refuse: true},
@@ -389,8 +394,12 @@ func TestExtGlobExecutionClassificationNeverClaimsKnown(t *testing.T) {
 		`A=*(${X:$(printf 1)}|b)`,
 		`A=*(${X:1:$(printf 1)}|b)`,
 		`A=*(${arr[$(printf 1)]}|b)`,
+		`A=*(${#arr[$(printf 1)]}|b)`,
 		`A=*($((1) )|<(printf a))`,
 		`A=*($((1) )|>(printf a))`,
+		"A=*($((1)\r)|<(printf a))",
+		"A=*($((1)\v)|>(printf a))",
+		"A=*($((1)\f)|<(printf a))",
 		`A=*($((1<(2)) )|<(printf a))`,
 		`A=*($((1>(2)) )|>(printf a))`,
 		`A=*($(( $(printf 1)) )|b)`,
@@ -438,7 +447,7 @@ func TestExtGlobUnknownClassificationNeverLeaksPartialValue(t *testing.T) {
 }
 
 func TestExtGlobClassifierLookalikeCorpusDoesNotPanic(t *testing.T) {
-	raws := []string{"*(a|\\)", "*(a|'unterminated)", "*(a|\"unterminated)", "*(a|$\\\n)", "*(a|<\\\n()", "*(a|$'x\\'y')", "*(a|$\\\n')", "*(a|$\\\n'x\\')", "*(a|$[1<(2))", "*(a|$((1>[2]))", "*(a|${X:1<(2))", "*(a|$((1) )|<()", "*(a|$(( (1)\n ) )|>()"}
+	raws := []string{"*(a|\\)", "*(a|'unterminated)", "*(a|\"unterminated)", "*(a|$\\\n)", "*(a|<\\\n()", "*(a|$'x\\'y')", "*(a|$\\\n')", "*(a|$\\\n'x\\')", "*(a|$[1<(2))", "*(a|$((1>[2]))", "*(a|${X:1<(2))", "*(a|$((1) )|<()", "*(a|$(( (1)\n ) )|>()", "*(a|$(( (1)\r\v ) \f\t )|<()"}
 	for _, raw := range raws {
 		t.Run(raw, func(t *testing.T) {
 			patternEnd := len(raw) - 1
@@ -499,14 +508,30 @@ func TestEmitUnquotedExpansionFacts(t *testing.T) {
 	}
 }
 
-func TestEmitUnquotedLengthParameterIsOnlyPlainNamedScalar(t *testing.T) {
+func TestEmitUnquotedLengthParameterFamilyIsScalar(t *testing.T) {
 	tests := []struct {
 		word   string
 		single bool
 	}{
 		{word: `${#X}`, single: true},
 		{word: `${#_X2}`, single: true},
+		{word: `${#@}`, single: true},
+		{word: `${#*}`, single: true},
+		{word: `${#0}`, single: true},
+		{word: `${#1}`, single: true},
+		{word: `${#10}`, single: true},
+		{word: `${#?}`, single: true},
+		{word: `${##}`, single: true},
+		{word: `${#$}`, single: true},
+		{word: `${#!}`, single: true},
+		{word: `${#-}`, single: true},
+		{word: `${#array[@]}`, single: true},
+		{word: `${#array[*]}`, single: true},
+		{word: `${#array[0]}`, single: true},
+		{word: `$#`, single: true},
 		{word: `x${#X}y`, single: true},
+		{word: `x${#array[@]}y`, single: true},
+		{word: `x$#y`, single: true},
 		{word: `"${#X}"`, single: true},
 		{word: `x"${#X}"y`, single: true},
 		{word: `$X`},
@@ -515,9 +540,7 @@ func TestEmitUnquotedLengthParameterIsOnlyPlainNamedScalar(t *testing.T) {
 		{word: `${X:+alternate}`},
 		{word: `${X:1:2}`},
 		{word: `${array[@]}`},
-		{word: `${#array[@]}`},
 		{word: `$@`},
-		{word: `${#@}`},
 		{word: `${!X}`},
 	}
 	for _, test := range tests {
@@ -534,7 +557,7 @@ func TestEmitUnquotedLengthParameterIsOnlyPlainNamedScalar(t *testing.T) {
 	}
 }
 
-func TestUnquotedLengthParameterIsSingleRejectsAdjacentASTFlags(t *testing.T) {
+func TestUnquotedScalarParameterIsSingleRejectsAdjacentASTFlags(t *testing.T) {
 	plain := func() *syntax.ParamExp {
 		return &syntax.ParamExp{
 			Dollar: syntax.NewPos(0, 1, 1),
@@ -553,28 +576,63 @@ func TestUnquotedLengthParameterIsSingleRejectsAdjacentASTFlags(t *testing.T) {
 		want   bool
 	}{
 		{name: "plain length", mutate: func(*syntax.ParamExp) {}, want: true},
-		{name: "short", mutate: func(parameter *syntax.ParamExp) { parameter.Short = true }},
+		{name: "conflicting short", mutate: func(parameter *syntax.ParamExp) { parameter.Short = true }},
 		{name: "flags", mutate: func(parameter *syntax.ParamExp) { parameter.Flags = &syntax.Lit{} }},
 		{name: "indirect", mutate: func(parameter *syntax.ParamExp) { parameter.Excl = true }},
 		{name: "width", mutate: func(parameter *syntax.ParamExp) { parameter.Width = true }},
 		{name: "is set", mutate: func(parameter *syntax.ParamExp) { parameter.IsSet = true }},
-		{name: "special name", mutate: func(parameter *syntax.ParamExp) { parameter.Param.Value = "@" }},
+		{name: "invalid parameter span", mutate: func(parameter *syntax.ParamExp) { parameter.Param.ValuePos = syntax.Pos{} }},
+		{name: "special name", mutate: func(parameter *syntax.ParamExp) { parameter.Param.Value = "@" }, want: true},
 		{name: "nested", mutate: func(parameter *syntax.ParamExp) { parameter.NestedParam = &syntax.ParamExp{} }},
 		{name: "index", mutate: func(parameter *syntax.ParamExp) { parameter.Index = &syntax.Word{} }},
+		{name: "valid index", mutate: func(parameter *syntax.ParamExp) {
+			parameter.Index = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{
+				ValuePos: syntax.NewPos(5, 1, 6),
+				ValueEnd: syntax.NewPos(6, 1, 7),
+				Value:    "0",
+			}}}
+		}, want: true},
+		{name: "invalid index part span", mutate: func(parameter *syntax.ParamExp) {
+			parameter.Index = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "0"}}}
+		}},
 		{name: "modifier", mutate: func(parameter *syntax.ParamExp) { parameter.Modifiers = []*syntax.Lit{{}} }},
 		{name: "slice", mutate: func(parameter *syntax.ParamExp) { parameter.Slice = &syntax.Slice{} }},
 		{name: "replacement", mutate: func(parameter *syntax.ParamExp) { parameter.Repl = &syntax.Replace{} }},
 		{name: "names", mutate: func(parameter *syntax.ParamExp) { parameter.Names = syntax.NamesPrefix }},
 		{name: "operand", mutate: func(parameter *syntax.ParamExp) { parameter.Exp = &syntax.Expansion{} }},
 	}
+	shortCount := plain()
+	shortCount.Short = true
+	shortCount.Length = false
+	shortCount.Rbrace = syntax.Pos{}
+	shortCount.Param.Value = "#"
+	if !unquotedScalarParameterIsSingle(shortCount) {
+		t.Fatalf("short positional count = %#v, want scalar", shortCount)
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			parameter := plain()
 			test.mutate(parameter)
-			if got := unquotedLengthParameterIsSingle(parameter); got != test.want {
-				t.Fatalf("unquotedLengthParameterIsSingle(%#v) = %t, want %t", parameter, got, test.want)
+			if got := unquotedScalarParameterIsSingle(parameter); got != test.want {
+				t.Fatalf("unquotedScalarParameterIsSingle(%#v) = %t, want %t", parameter, got, test.want)
 			}
 		})
+	}
+}
+
+func TestEmitLengthParameterIndexTraversesNestedExecution(t *testing.T) {
+	const src = `echo ${#array[$(doc-lattice check)]}`
+	response, err := Certify(mustRequest(t, src))
+	if err != nil {
+		t.Fatalf("Certify error = %v", err)
+	}
+	events := response.Results[0].Events
+	if len(events) != 2 || events[0].Kind != "command_site" || events[1].Kind != "command_site" {
+		t.Fatalf("events = %#v, want outer and nested command sites", events)
+	}
+	word := events[0].Argv[1]
+	if word.Text != nil || !word.Single {
+		t.Fatalf("length parameter facts = %#v, want nil text and one field", word)
 	}
 }
 

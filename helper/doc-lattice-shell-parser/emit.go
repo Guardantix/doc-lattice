@@ -562,7 +562,7 @@ func logicalNextNonArithmeticWhitespace(raw string, index int) (byte, int) {
 			continue
 		}
 		switch raw[index] {
-		case ' ', '\t', '\n':
+		case ' ', '\t', '\n', '\r', '\v', '\f':
 			index++
 			continue
 		}
@@ -651,7 +651,7 @@ func wordIsSingle(word *syntax.Word, src string) bool {
 				return false
 			}
 		case *syntax.ParamExp:
-			if !unquotedLengthParameterIsSingle(part) {
+			if !unquotedScalarParameterIsSingle(part) {
 				return false
 			}
 		default:
@@ -661,13 +661,60 @@ func wordIsSingle(word *syntax.Word, src string) bool {
 	return true
 }
 
-func unquotedLengthParameterIsSingle(parameter *syntax.ParamExp) bool {
-	return parameter != nil &&
-		parameter.Dollar.IsValid() && parameter.Rbrace.IsValid() && !parameter.Short &&
-		parameter.Flags == nil && parameter.Length && !parameter.Excl && !parameter.Width && !parameter.IsSet &&
-		parameter.Param != nil && syntax.ValidName(parameter.Param.Value) && parameter.NestedParam == nil &&
-		parameter.Index == nil && len(parameter.Modifiers) == 0 && parameter.Slice == nil &&
-		parameter.Repl == nil && parameter.Names == 0 && parameter.Exp == nil
+func unquotedScalarParameterIsSingle(parameter *syntax.ParamExp) bool {
+	if parameter == nil || !parameter.Dollar.IsValid() || parameter.Flags != nil ||
+		parameter.Excl || parameter.Width || parameter.IsSet || parameter.Param == nil ||
+		parameter.NestedParam != nil || len(parameter.Modifiers) > 0 || parameter.Slice != nil ||
+		parameter.Repl != nil || parameter.Names != 0 || parameter.Exp != nil {
+		return false
+	}
+	if !parameter.Param.Pos().IsValid() || !parameter.Param.End().IsValid() ||
+		parameter.Param.Pos().Offset() > parameter.Param.End().Offset() {
+		return false
+	}
+	if parameter.Short {
+		return !parameter.Rbrace.IsValid() && !parameter.Length && parameter.Param.Value == "#" && parameter.Index == nil
+	}
+	if !parameter.Rbrace.IsValid() || !parameter.Length || !validBashParameterToken(parameter.Param.Value) {
+		return false
+	}
+	if parameter.Index == nil {
+		return true
+	}
+	if !syntax.ValidName(parameter.Param.Value) {
+		return false
+	}
+	index, ok := parameter.Index.(*syntax.Word)
+	if !ok || index == nil || syntaxNodeIsNil(index) || len(index.Parts) == 0 {
+		return false
+	}
+	for _, part := range index.Parts {
+		if part == nil || syntaxNodeIsNil(part) {
+			return false
+		}
+		start, end := part.Pos(), part.End()
+		if !start.IsValid() || !end.IsValid() || start.Offset() > end.Offset() {
+			return false
+		}
+	}
+	return true
+}
+
+func validBashParameterToken(value string) bool {
+	if syntax.ValidName(value) {
+		return true
+	}
+	if value == "" {
+		return false
+	}
+	digits := true
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			digits = false
+			break
+		}
+	}
+	return digits || len(value) == 1 && strings.ContainsRune("@*#$?!-", rune(value[0]))
 }
 
 func wordHasActiveTilde(word *syntax.Word, src string, context wordExpansionContext) bool {
