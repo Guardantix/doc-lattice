@@ -267,6 +267,17 @@ _RECONCILE_OPTIONS_WITH_ARGUMENTS = frozenset({"--config", "--format", "--ref"})
 _RECONCILE_FLAGS = frozenset({"--all", "--dry-run", "--recover"})
 _RECONCILE_NON_MUTATING_OPTIONS = frozenset({"--dry-run"})
 
+# Issue #105: inline shell dispatch fail-closed grammar. ``eval``, ``source``/``.``, and the
+# POSIX-ish shells run a payload the bounded scanner never parses, so a marker-bearing dispatch
+# is refused rather than certified clean. The marker matches the doc-lattice distribution spelling
+# family (see _is_doc_lattice_uv_tool_payload) so ``doc_lattice`` and ``doc.lattice`` are caught.
+_DISPATCHER_MARKER_RE = re.compile(r"doc[-_.]+lattice", re.IGNORECASE)
+_PLAIN_DISPATCHER_HEADS = frozenset({"eval", "source", "."})
+_SHELL_DISPATCHER_HEADS = frozenset({"bash", "sh", "dash", "zsh"})
+# The only bash long options that consume the following word; every other long option is
+# value-less and precedes -c without ending option parsing.
+_SHELL_LONG_OPTIONS_WITH_ARGUMENTS = frozenset({"--rcfile", "--init-file"})
+
 
 class _CommandDisposition(Enum):
     """Describe whether a recognized policy-sensitive command can run."""
@@ -1647,6 +1658,7 @@ def _invocation_in_simple_command(
     resolution = _LauncherResolutionState(budget)
     executable = _doc_lattice_command_index(words, 0, resolution)
     if executable.index is None:
+        _reject_marker_bearing_dispatcher(words)
         return None
     subcommand_resolution = _doc_lattice_subcommand_index(words, executable.index + 1)
     if executable.ambiguous or subcommand_resolution.ambiguous:
@@ -1688,6 +1700,79 @@ def _invocation_in_simple_command(
     if disposition is _CommandDisposition.NON_EXECUTING:
         return None
     return subcommand.literal, disposition is _CommandDisposition.NON_MUTATING
+
+
+def _reject_marker_bearing_dispatcher(words: list[_ShellWord]) -> None:
+    """Fail closed when a recognized inline dispatcher carries a doc-lattice marker.
+
+    ``eval``, ``source``/``.``, and ``bash``/``sh``/``dash``/``zsh -c`` run an inline payload the
+    bounded scanner deliberately does not parse. When such a command's argv literally names
+    doc-lattice the scanner cannot prove the payload never invokes a sensitive command, so it
+    refuses instead of certifying the source clean. The rule fires only on a literal marker; a
+    payload assembled from a variable is the disclosed executable-name limitation, not this one.
+
+    Args:
+        words: The decoded words of one simple command, including any leading assignments.
+
+    Raises:
+        _ShellScanIncomplete: If the command is a marker-bearing recognized dispatcher.
+    """
+    head_index = _dispatcher_head_index(words)
+    if head_index is None:
+        return
+    argv = words[head_index + 1 :]
+    if not any(_DISPATCHER_MARKER_RE.search(word.literal) for word in argv):
+        return
+    name = _basename(words[head_index].literal).casefold()
+    if name in _PLAIN_DISPATCHER_HEADS or (
+        name in _SHELL_DISPATCHER_HEADS and _shell_dispatcher_runs_inline_command(argv)
+    ):
+        raise _ShellScanIncomplete("inline dispatcher command cannot be scanned safely")
+
+
+def _dispatcher_head_index(words: list[_ShellWord]) -> int | None:
+    """Return the index of a command's executable word, skipping leading assignment prefixes."""
+    for index, word in enumerate(words):
+        if word.shell_assignment:
+            continue
+        return index
+    return None
+
+
+def _shell_dispatcher_runs_inline_command(argv: list[_ShellWord]) -> bool:
+    """Return whether a shell dispatcher argv selects an inline ``-c`` command.
+
+    Returns True when the option grammar contains ``-c`` (standalone or inside a short cluster) or
+    a dynamic selector word leaves the presence of ``-c`` unresolvable, both of which mean the
+    scanner cannot rule out an inline payload. Returns False when the options resolve to an operand
+    or ``--`` terminator, meaning the shell runs an external script file rather than inline source.
+    """
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        if _word_may_change_argv(word):
+            return True
+        literal = word.literal
+        if not _is_shell_option_token(literal):
+            return False
+        if literal.startswith("-") and not literal.startswith("--") and "c" in literal[1:]:
+            # A single-dash cluster containing c is the -c inline-command option. Long options
+            # such as --norc or --rcfile also contain the letter but never select -c.
+            return True
+        index += 2 if _shell_option_consumes_value(literal) else 1
+    return False
+
+
+def _is_shell_option_token(literal: str) -> bool:
+    """Return whether a word is a shell option cluster rather than an operand or terminator."""
+    return literal not in ("", "-", "--", "+") and literal[0] in "-+"
+
+
+def _shell_option_consumes_value(literal: str) -> bool:
+    """Return whether a shell option token consumes the following word as its value."""
+    if literal.startswith("--"):
+        return "=" not in literal and literal in _SHELL_LONG_OPTIONS_WITH_ARGUMENTS
+    return literal[-1] in "oO"
 
 
 def _classify_command_disposition(

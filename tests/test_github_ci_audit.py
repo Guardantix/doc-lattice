@@ -1204,6 +1204,36 @@ jobs:
     assert _finding_codes(audit_global_workflows((document,))) == {expected_code}
 
 
+@pytest.mark.parametrize(
+    "run_body",
+    [
+        "bash -c 'doc-lattice reconcile'",
+        'eval "doc-lattice $CMD"',
+        "sh -lc 'doc-lattice reconcile --all'",
+        "source ./scripts/doc-lattice-env.sh",
+    ],
+    ids=["bash-c", "eval", "sh-cluster", "source"],
+)
+def test_global_audit_fails_closed_on_inline_dispatch_run_body(run_body: str):
+    # Issue #105: a PR step that runs a marker-bearing doc-lattice command through an inline
+    # dispatcher must exit 2 rather than being certified clean, because the bounded scanner
+    # cannot see the payload the dispatcher executes.
+    document = _workflow(
+        f"""\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: {run_body}
+"""
+    )
+
+    with pytest.raises(ConfigError, match=r"shell scan incomplete.*inline dispatcher"):
+        audit_global_workflows((document,))
+
+
 @pytest.mark.parametrize("shell", ["bash -c {0}", "bash --init-file {0}"])
 def test_global_audit_rejects_command_string_or_startup_file_shells(shell: str):
     document = _workflow(

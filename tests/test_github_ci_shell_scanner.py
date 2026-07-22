@@ -2256,3 +2256,66 @@ def test_direct_doc_lattice_invocations_fails_closed_at_recursion_limit():
 
     with pytest.raises(ConfigError, match=r"shell scan.*recursion limit"):
         direct_doc_lattice_invocations(script)
+
+
+# Issue #105: inline shell dispatch of a marker-bearing doc-lattice command must fail closed
+# instead of being certified clean. These cases mirror the frozen ``dispatcher`` corpus family
+# from the successor evaluation, which is the ratified oracle for the expected outcomes.
+DISPATCHER_FAIL_CLOSED_CASES = [
+    ("bash -c marker payload", "bash -c 'doc-lattice reconcile'"),
+    ("eval marker payload", 'eval "doc-lattice $X"'),
+    ("sh short-option cluster", "sh -lc 'doc-lattice reconcile'"),
+    ("bash operand becomes arg0", "bash -c 'echo ok' doc-lattice"),
+    ("bash value-less long option before -c", "bash --norc -c 'doc-lattice check'"),
+    ("dynamic dispatcher selector", "bash $OPT 'doc-lattice lint'"),
+    ("source plain head marker argv", "source ./doc-lattice-env.sh"),
+    ("dot plain head marker argv", ". ./doc-lattice-env.sh"),
+    ("dash head inline command", "dash -c 'doc-lattice reconcile --all'"),
+    ("zsh head inline command", "zsh -c 'doc-lattice reconcile'"),
+    ("bash value option before -c", "bash -o pipefail -c 'doc-lattice reconcile'"),
+    ("assignment prefix before dispatcher", "FOO=1 bash -c 'doc-lattice reconcile'"),
+    ("nested command substitution dispatch", "echo $(bash -c 'doc-lattice reconcile')"),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script"),
+    DISPATCHER_FAIL_CLOSED_CASES,
+    ids=[case[0] for case in DISPATCHER_FAIL_CLOSED_CASES],
+)
+def test_marker_bearing_inline_dispatch_fails_closed(_description, script):
+    result = scan_doc_lattice_invocations(script)
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match=r"shell scan incomplete.*dispatcher"):
+        direct_doc_lattice_invocations(script)
+
+
+# The dispatcher rule fires only when a command word literally names doc-lattice. These sources
+# either carry no marker in the dispatcher argv or run an external script file, so they retain
+# their pre-existing certified-clean outcome (the external-wrapper limitation is disclosed, not
+# failed closed).
+DISPATCHER_CERTIFY_CASES = [
+    ("marker only in trailing comment", "bash -c 'echo hello'  # doc-lattice check runs here"),
+    ("marker-free inline command", "bash -c 'echo hello world'"),
+    ("external script file named for doc-lattice", "bash ./doc-lattice-runner.sh"),
+    ("non-dispatcher head echoes marker text", "echo doc-lattice reconcile"),
+    ("dispatcher head with no argv", "eval"),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script"),
+    DISPATCHER_CERTIFY_CASES,
+    ids=[case[0] for case in DISPATCHER_CERTIFY_CASES],
+)
+def test_marker_free_or_file_dispatch_stays_certified(_description, script):
+    result = scan_doc_lattice_invocations(script)
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_inline_dispatch_reason_names_the_dispatcher():
+    result = scan_doc_lattice_invocations("bash -c 'doc-lattice reconcile'")
+
+    assert result.incomplete_reason == "inline dispatcher command cannot be scanned safely"
