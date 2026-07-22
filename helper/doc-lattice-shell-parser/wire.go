@@ -227,7 +227,8 @@ func decodeSource(data []byte, expectedID int) (Source, error) {
 	if err := requireDecoderEOF(decoder); err != nil {
 		return Source{}, errors.New("source does not match the protocol schema")
 	}
-	if string(raw.ID) != strconv.Itoa(expectedID) {
+	id, ok := parseExactJSONInteger(raw.ID)
+	if !ok || id != int64(expectedID) {
 		return Source{}, errors.New("source ids must be contiguous integers starting at 0")
 	}
 	if len(raw.Source) == 0 || raw.Source[0] != '"' {
@@ -241,6 +242,26 @@ func decodeSource(data []byte, expectedID int) (Source, error) {
 		return Source{}, errors.New("source text exceeds byte limit")
 	}
 	return Source{ID: expectedID, Source: sourceText}, nil
+}
+
+func parseExactJSONInteger(data []byte) (int64, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	digitStart := 0
+	if data[0] == '-' {
+		digitStart = 1
+	}
+	if digitStart == len(data) {
+		return 0, false
+	}
+	for _, digit := range data[digitStart:] {
+		if digit < '0' || digit > '9' {
+			return 0, false
+		}
+	}
+	value, err := strconv.ParseInt(string(data), 10, 64)
+	return value, err == nil
 }
 
 func requireDecoderEOF(decoder *json.Decoder) error {

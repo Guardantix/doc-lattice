@@ -36,6 +36,16 @@ func TestDecodeRequestAcceptsValid(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestAcceptsNegativeZeroID(t *testing.T) {
+	req, err := DecodeRequest([]byte(`{"protocol_version":1,"sources":[{"id":-0,"source":"true"}]}`))
+	if err != nil {
+		t.Fatalf("negative zero ID rejected: %v", err)
+	}
+	if got := req.Sources[0].ID; got != 0 {
+		t.Fatalf("decoded ID = %d, want 0", got)
+	}
+}
+
 func TestDecodeRequestRejectsInvalidUnicode(t *testing.T) {
 	validPrefix := []byte(`{"protocol_version":1,"sources":[{"id":0,"source":"`)
 	validSuffix := []byte(`"}]}`)
