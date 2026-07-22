@@ -26,13 +26,13 @@ type walker struct {
 	depthCap   int
 	eventCap   int
 	stop       bool
-	certified  map[syntax.Node]struct{}
+	certified  map[syntax.Node]certificationState
 }
 
 func walk(stmts []*syntax.Stmt, src string) (sites []commandSite, refusals []rawRefusal, work int) {
 	w := newWalker(src)
 	for _, stmt := range stmts {
-		if !w.certifyGraph(stmt, 1) {
+		if !w.certifyTree(stmt, 1) {
 			return w.sites, w.refusals, w.work
 		}
 	}
@@ -54,7 +54,7 @@ func newWalker(src string) *walker {
 		workLimit: visitorNodeCap,
 		depthCap:  visitorDepthCap,
 		eventCap:  eventCap,
-		certified: make(map[syntax.Node]struct{}),
+		certified: make(map[syntax.Node]certificationState),
 	}
 }
 
@@ -66,7 +66,7 @@ func (w *walker) dispatch(node syntax.Node, role string, depth int) {
 	if known && name == "" {
 		return
 	}
-	if !w.certifyGraph(node, depth) {
+	if !w.consumeCertified(node, depth) {
 		return
 	}
 	if !known {
@@ -336,7 +336,7 @@ func (w *walker) enterChild() bool {
 }
 
 func (w *walker) visit(node syntax.Node, depth int) bool {
-	return w.certifyGraph(node, depth)
+	return w.consumeCertified(node, depth)
 }
 
 func (w *walker) emitSite(call *syntax.CallExpr) {
@@ -412,8 +412,16 @@ type certificationFrame struct {
 	next  int
 }
 
-// certifyGraph charges each real AST node once and caches that certification for semantic traversal.
-func (w *walker) certifyGraph(root syntax.Node, depth int) bool {
+type certificationState uint8
+
+const (
+	certificationUnseen certificationState = iota
+	certificationVisiting
+	certificationComplete
+)
+
+// certifyTree claims one AST tree, rejecting cycles and nodes owned by another edge or root.
+func (w *walker) certifyTree(root syntax.Node, depth int) bool {
 	if w.stop {
 		return false
 	}
@@ -428,18 +436,14 @@ func (w *walker) certifyGraph(root syntax.Node, depth int) bool {
 		}
 		frame := &stack[len(stack)-1]
 		if frame.next < 0 {
-			if w.nodeCertified(frame.node) {
-				if frame.depth > w.depthCap {
-					w.requestTerminal(frame.node, "depth-cap", false)
-					return false
-				}
-				stack = stack[:len(stack)-1]
-				continue
+			if w.nodeCertification(frame.node) != certificationUnseen {
+				w.requestTerminal(frame.node, "unsupported-construct", true)
+				return false
 			}
 			if !w.chargeNode(frame.node, frame.depth) {
 				return false
 			}
-			w.markNodeCertified(frame.node)
+			w.setNodeCertification(frame.node, certificationVisiting)
 			if !localStructureValid(frame.node) {
 				w.requestTerminal(frame.node, "unsupported-construct", true)
 				return false
@@ -448,6 +452,7 @@ func (w *walker) certifyGraph(root syntax.Node, depth int) bool {
 		}
 		child, ok := nextStructuralChild(frame.node, &frame.next)
 		if !ok {
+			w.setNodeCertification(frame.node, certificationComplete)
 			stack = stack[:len(stack)-1]
 			continue
 		}
@@ -458,6 +463,26 @@ func (w *walker) certifyGraph(root syntax.Node, depth int) bool {
 		stack = append(stack, certificationFrame{node: child, depth: frame.depth + 1, next: -1})
 	}
 	return true
+}
+
+// consumeCertified separates semantic reuse from structural ownership checks.
+func (w *walker) consumeCertified(node syntax.Node, depth int) bool {
+	if w.stop {
+		return false
+	}
+	switch w.nodeCertification(node) {
+	case certificationComplete:
+		if depth > w.depthCap {
+			w.requestTerminal(node, "depth-cap", false)
+			return false
+		}
+		return true
+	case certificationVisiting:
+		w.requestTerminal(node, "unsupported-construct", true)
+		return false
+	default:
+		return w.certifyTree(node, depth)
+	}
 }
 
 func (w *walker) chargeNode(node syntax.Node, depth int) bool {
@@ -479,18 +504,17 @@ func (w *walker) chargeNode(node syntax.Node, depth int) bool {
 	return true
 }
 
-func (w *walker) nodeCertified(node syntax.Node) bool {
+func (w *walker) nodeCertification(node syntax.Node) certificationState {
 	name, known := syntaxNodeName(node)
 	if !known || name == "" {
-		return false
+		return certificationUnseen
 	}
-	_, ok := w.certified[node]
-	return ok
+	return w.certified[node]
 }
 
-func (w *walker) markNodeCertified(node syntax.Node) {
+func (w *walker) setNodeCertification(node syntax.Node, state certificationState) {
 	if name, known := syntaxNodeName(node); known && name != "" {
-		w.certified[node] = struct{}{}
+		w.certified[node] = state
 	}
 }
 
@@ -507,6 +531,8 @@ func localStructureValid(node syntax.Node) bool {
 		return len(node.Assigns) > 0 || len(node.Args) > 0
 	case *syntax.FuncDecl:
 		return node.Body != nil
+	case *syntax.ForClause:
+		return present(node.Loop)
 	case *syntax.WordIter:
 		return node.Name != nil
 	case *syntax.BinaryCmd:
@@ -515,9 +541,15 @@ func localStructureValid(node syntax.Node) bool {
 		return len(node.Parts) > 0
 	case *syntax.ParamExp:
 		return (node.Dollar.IsValid() || node.Param != nil) && (!node.Short || node.Index != nil || node.Param != nil)
+	case *syntax.ArithmExp:
+		return present(node.X)
+	case *syntax.ArithmCmd:
+		return present(node.X)
 	case *syntax.BinaryArithm:
 		return present(node.X) && present(node.Y)
 	case *syntax.UnaryArithm:
+		return present(node.X)
+	case *syntax.ParenArithm:
 		return present(node.X)
 	case *syntax.FlagsArithm:
 		return node.Flags != nil
@@ -525,9 +557,13 @@ func localStructureValid(node syntax.Node) bool {
 		return node.Word != nil
 	case *syntax.CaseItem:
 		return len(node.Patterns) > 0
+	case *syntax.TestClause:
+		return present(node.X)
 	case *syntax.BinaryTest:
 		return present(node.X) && present(node.Y)
 	case *syntax.UnaryTest:
+		return present(node.X)
+	case *syntax.ParenTest:
 		return present(node.X)
 	case *syntax.DeclClause:
 		return node.Variant != nil
@@ -542,7 +578,7 @@ func localStructureValid(node syntax.Node) bool {
 	case *syntax.BraceExp:
 		return len(node.Elems) > 0
 	case *syntax.TestDecl:
-		return node.Body != nil
+		return node.Description != nil && node.Body != nil
 	}
 	return true
 }
@@ -557,7 +593,15 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			if index < len(node.Stmts) {
 				return node.Stmts[index], true
 			}
+			index -= len(node.Stmts)
+			if index < len(node.Last) {
+				return &node.Last[index], true
+			}
 		case *syntax.Stmt:
+			if index < len(node.Comments) {
+				return &node.Comments[index], true
+			}
+			index -= len(node.Comments)
 			if index == 0 {
 				if node.Cmd != nil {
 					return node.Cmd, true
@@ -619,28 +663,60 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			if index < len(node.Stmts) {
 				return node.Stmts[index], true
 			}
+			index -= len(node.Stmts)
+			if index < len(node.Last) {
+				return &node.Last[index], true
+			}
 		case *syntax.Block:
 			if index < len(node.Stmts) {
 				return node.Stmts[index], true
+			}
+			index -= len(node.Stmts)
+			if index < len(node.Last) {
+				return &node.Last[index], true
 			}
 		case *syntax.IfClause:
 			if index < len(node.Cond) {
 				return node.Cond[index], true
 			}
 			index -= len(node.Cond)
+			if index < len(node.CondLast) {
+				return &node.CondLast[index], true
+			}
+			index -= len(node.CondLast)
 			if index < len(node.Then) {
 				return node.Then[index], true
 			}
-			if index == len(node.Then) && node.Else != nil {
-				return node.Else, true
+			index -= len(node.Then)
+			if index < len(node.ThenLast) {
+				return &node.ThenLast[index], true
+			}
+			index -= len(node.ThenLast)
+			if index == 0 {
+				if node.Else != nil {
+					return node.Else, true
+				}
+				continue
+			}
+			index--
+			if index < len(node.Last) {
+				return &node.Last[index], true
 			}
 		case *syntax.WhileClause:
 			if index < len(node.Cond) {
 				return node.Cond[index], true
 			}
 			index -= len(node.Cond)
+			if index < len(node.CondLast) {
+				return &node.CondLast[index], true
+			}
+			index -= len(node.CondLast)
 			if index < len(node.Do) {
 				return node.Do[index], true
+			}
+			index -= len(node.Do)
+			if index < len(node.DoLast) {
+				return &node.DoLast[index], true
 			}
 		case *syntax.ForClause:
 			if index == 0 {
@@ -651,6 +727,10 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			}
 			if index-1 < len(node.Do) {
 				return node.Do[index-1], true
+			}
+			index -= 1 + len(node.Do)
+			if index < len(node.DoLast) {
+				return &node.DoLast[index], true
 			}
 		case *syntax.WordIter:
 			if index == 0 {
@@ -709,6 +789,10 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			if index < len(node.Stmts) {
 				return node.Stmts[index], true
 			}
+			index -= len(node.Stmts)
+			if index < len(node.Last) {
+				return &node.Last[index], true
+			}
 		case *syntax.ParamExp:
 			switch index {
 			case 0:
@@ -732,7 +816,31 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 				if modifierIndex < len(node.Modifiers) {
 					return node.Modifiers[modifierIndex], true
 				}
-				return nil, false
+				index = modifierIndex - len(node.Modifiers)
+				switch index {
+				case 0:
+					if node.Slice != nil && node.Slice.Offset != nil {
+						return node.Slice.Offset, true
+					}
+				case 1:
+					if node.Slice != nil && node.Slice.Length != nil {
+						return node.Slice.Length, true
+					}
+				case 2:
+					if node.Repl != nil && node.Repl.Orig != nil {
+						return node.Repl.Orig, true
+					}
+				case 3:
+					if node.Repl != nil && node.Repl.With != nil {
+						return node.Repl.With, true
+					}
+				case 4:
+					if node.Exp != nil && node.Exp.Word != nil {
+						return node.Exp.Word, true
+					}
+				default:
+					return nil, false
+				}
 			}
 			continue
 		case *syntax.ArithmExp:
@@ -772,13 +880,25 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			if index-1 < len(node.Items) {
 				return node.Items[index-1], true
 			}
+			index -= 1 + len(node.Items)
+			if index < len(node.Last) {
+				return &node.Last[index], true
+			}
 		case *syntax.CaseItem:
+			if index < len(node.Comments) {
+				return &node.Comments[index], true
+			}
+			index -= len(node.Comments)
 			if index < len(node.Patterns) {
 				return node.Patterns[index], true
 			}
 			index -= len(node.Patterns)
 			if index < len(node.Stmts) {
 				return node.Stmts[index], true
+			}
+			index -= len(node.Stmts)
+			if index < len(node.Last) {
+				return &node.Last[index], true
 			}
 		case *syntax.TestClause:
 			if index == 0 && node.X != nil {
@@ -810,6 +930,10 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			if index < len(node.Elems) {
 				return node.Elems[index], true
 			}
+			index -= len(node.Elems)
+			if index < len(node.Last) {
+				return &node.Last[index], true
+			}
 		case *syntax.ArrayElem:
 			if index == 0 && node.Index != nil {
 				return node.Index, true
@@ -817,8 +941,11 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 			if index == 1 && node.Value != nil {
 				return node.Value, true
 			}
-			if index == 0 {
+			if index < 2 {
 				continue
+			}
+			if index-2 >= 0 && index-2 < len(node.Comments) {
+				return &node.Comments[index-2], true
 			}
 		case *syntax.ExtGlob:
 			if index == 0 {
@@ -827,6 +954,10 @@ func nextStructuralChild(node syntax.Node, next *int) (syntax.Node, bool) {
 		case *syntax.ProcSubst:
 			if index < len(node.Stmts) {
 				return node.Stmts[index], true
+			}
+			index -= len(node.Stmts)
+			if index < len(node.Last) {
+				return &node.Last[index], true
 			}
 		case *syntax.TimeClause:
 			if index == 0 && node.Stmt != nil {
@@ -909,7 +1040,11 @@ func boundedEnd(node syntax.Node, limit int) (int, bool) {
 				comment := node.Last[len(node.Last)-1]
 				addResult(comment.Hash, 1+len(comment.Text))
 			} else if len(node.Stmts) > 0 {
-				push(node.Stmts[len(node.Stmts)-1], 0)
+				stmt := node.Stmts[len(node.Stmts)-1]
+				push(stmt, 0)
+				if stmt != nil && len(stmt.Comments) > 0 {
+					push(&stmt.Comments[0], 0)
+				}
 			} else {
 				resolved = true
 			}
@@ -1112,7 +1247,14 @@ func boundedStart(node syntax.Node, limit int) (int, bool) {
 		switch node := current.(type) {
 		case *syntax.File:
 			if len(node.Stmts) > 0 {
-				current = node.Stmts[0]
+				stmt := node.Stmts[0]
+				if stmt == nil {
+					return 0, false
+				}
+				if len(stmt.Comments) > 0 && stmt.Position.After(stmt.Comments[0].Hash) {
+					return positionOffset(stmt.Comments[0].Hash, adjust), true
+				}
+				return positionOffset(stmt.Position, adjust), true
 			} else if len(node.Last) > 0 {
 				return positionOffset(node.Last[0].Hash, adjust), true
 			} else {

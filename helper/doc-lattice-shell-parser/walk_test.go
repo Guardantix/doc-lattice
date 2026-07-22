@@ -694,15 +694,15 @@ func TestWalkTopLevelCertificationChargesBeforeCap(t *testing.T) {
 	}
 }
 
-func TestWalkCertificationChargesSharedNodesOnceAndBreaksCycles(t *testing.T) {
+func TestWalkCertificationAccountsAliasAndCycleTerminals(t *testing.T) {
 	lit := &syntax.Lit{
 		ValuePos: syntax.NewPos(0, 1, 1), ValueEnd: syntax.NewPos(1, 1, 2), Value: "x",
 	}
 	word := &syntax.Word{Parts: []syntax.WordPart{lit}}
 	w := newWalker("x")
 	w.dispatch(&syntax.CallExpr{Args: []*syntax.Word{word, word}}, "argv", 1)
-	if w.nodes != 3 || w.events != 1 || w.work != 4 {
-		t.Fatalf("shared nodes, events, work = (%d, %d, %d), want unique accounting (3, 1, 4)", w.nodes, w.events, w.work)
+	if w.nodes != 3 || w.events != 1 || w.work != 4 || len(w.refusals) != 1 {
+		t.Fatalf("alias accounting = nodes %d, events %d, work %d, refusals %#v; want 3, 1, 4, one", w.nodes, w.events, w.work, w.refusals)
 	}
 
 	cycle := &syntax.UnaryArithm{OpPos: syntax.NewPos(0, 1, 1)}
@@ -711,6 +711,234 @@ func TestWalkCertificationChargesSharedNodesOnceAndBreaksCycles(t *testing.T) {
 	w.dispatch(cycle, "word-part", 1)
 	if w.nodes != 1 || w.events != 1 || w.work != 2 || len(w.refusals) != 1 {
 		t.Fatalf("cycle accounting = nodes %d, events %d, work %d, refusals %#v; want 1, 1, 2, one", w.nodes, w.events, w.work, w.refusals)
+	}
+}
+
+func TestWalkRejectsStructuralCyclesAndAliasesBeforeSemanticTraversal(t *testing.T) {
+	litWord := func(value string) *syntax.Word {
+		return &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{
+			ValuePos: syntax.NewPos(0, 1, 1),
+			ValueEnd: syntax.NewPos(uint(len(value)), 1, uint(len(value))+1),
+			Value:    value,
+		}}}
+	}
+	callStmt := func(call *syntax.CallExpr) *syntax.Stmt {
+		return &syntax.Stmt{Position: syntax.NewPos(0, 1, 1), Cmd: call}
+	}
+
+	t.Run("traversed if else cycle", func(t *testing.T) {
+		body := callStmt(&syntax.CallExpr{Args: []*syntax.Word{litWord("nested")}})
+		clause := &syntax.IfClause{Then: []*syntax.Stmt{body}}
+		clause.Else = clause
+		w := newWalker("nested")
+		w.eventCap = 16
+		w.dispatch(clause, "condition-and-body", 1)
+		if len(w.sites) != 0 {
+			t.Fatalf("sites = %d, want none before cyclic tree certification", len(w.sites))
+		}
+		if len(w.refusals) != 1 || w.refusals[0].code != "unsupported-construct" {
+			t.Fatalf("refusals = %#v, want one unsupported-construct", w.refusals)
+		}
+	})
+
+	t.Run("wide argv alias", func(t *testing.T) {
+		word := litWord("x")
+		args := make([]*syntax.Word, 250_000)
+		for index := range args {
+			args[index] = word
+		}
+		w := newWalker("x")
+		w.dispatch(&syntax.CallExpr{Args: args}, "argv", 1)
+		if len(w.sites) != 0 || len(w.refusals) != 1 || w.refusals[0].code != "unsupported-construct" {
+			t.Fatalf("sites, refusals = (%d, %#v), want none and one alias refusal", len(w.sites), w.refusals)
+		}
+		if w.nodes != 3 || w.events != 1 || w.work != 4 || w.childSteps != 0 {
+			t.Fatalf("nodes, events, work, semantic steps = (%d, %d, %d, %d), want (3, 1, 4, 0)", w.nodes, w.events, w.work, w.childSteps)
+		}
+	})
+
+	t.Run("shared across top-level roots", func(t *testing.T) {
+		shared := &syntax.CallExpr{Args: []*syntax.Word{litWord("shared")}}
+		sites, refusals, work := walk([]*syntax.Stmt{callStmt(shared), callStmt(shared)}, "shared")
+		if len(sites) != 0 || len(refusals) != 1 || refusals[0].code != "unsupported-construct" {
+			t.Fatalf("sites, refusals = (%d, %#v), want none and one alias refusal", len(sites), refusals)
+		}
+		if work != 6 {
+			t.Fatalf("work = %d, want five unique nodes plus one event", work)
+		}
+	})
+}
+
+func TestWalkCertifiedTreeIsReusableOnlyBySemanticPhase(t *testing.T) {
+	const src = `echo "$(nested)"`
+	stmts, refusal := parseStatements(src)
+	if refusal != nil {
+		t.Fatalf("parseStatements refusal = %#v, want none", refusal)
+	}
+	w := newWalker(src)
+	if !w.certifyTree(stmts[0], 1) {
+		t.Fatalf("valid preflight refusals = %#v", w.refusals)
+	}
+	nodes := w.nodes
+	w.dispatch(stmts[0], "command-and-redirects", 1)
+	if len(w.sites) != 2 || len(w.refusals) != 0 {
+		t.Fatalf("semantic reuse returned %d sites and refusals %#v, want 2 and none", len(w.sites), w.refusals)
+	}
+	if w.nodes != nodes || w.work != w.nodes+w.events {
+		t.Fatalf("semantic reuse changed nodes/work to (%d, %d), want nodes %d and exact accounting", w.nodes, w.work, nodes)
+	}
+}
+
+func TestWalkRejectsMissingMandatoryPinnedChildrenBeforeSite(t *testing.T) {
+	litWord := func(value string) *syntax.Word {
+		return &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{
+			ValuePos: syntax.NewPos(0, 1, 1),
+			ValueEnd: syntax.NewPos(uint(len(value)), 1, uint(len(value))+1),
+			Value:    value,
+		}}}
+	}
+	commandWord := func(command syntax.Command) *syntax.Word {
+		return &syntax.Word{Parts: []syntax.WordPart{&syntax.CmdSubst{
+			Stmts: []*syntax.Stmt{{Position: syntax.NewPos(0, 1, 1), Cmd: command}},
+		}}}
+	}
+	validBody := &syntax.Stmt{
+		Position: syntax.NewPos(0, 1, 1),
+		Cmd:      &syntax.CallExpr{Args: []*syntax.Word{litWord("nested")}},
+	}
+	var typedNilLoop *syntax.WordIter
+	var typedNilWord *syntax.Word
+	tests := []struct {
+		name string
+		arg  *syntax.Word
+	}{
+		{name: "for loop", arg: commandWord(&syntax.ForClause{Do: []*syntax.Stmt{validBody}})},
+		{name: "arithmetic expansion", arg: &syntax.Word{Parts: []syntax.WordPart{&syntax.ArithmExp{}}}},
+		{name: "arithmetic command", arg: commandWord(&syntax.ArithmCmd{})},
+		{name: "parenthesized arithmetic", arg: &syntax.Word{Parts: []syntax.WordPart{&syntax.ArithmExp{X: &syntax.ParenArithm{}}}}},
+		{name: "test clause", arg: commandWord(&syntax.TestClause{})},
+		{name: "parenthesized test", arg: commandWord(&syntax.TestClause{X: &syntax.ParenTest{}})},
+		{name: "test declaration description", arg: commandWord(&syntax.TestDecl{Body: validBody})},
+		{name: "typed nil for loop", arg: commandWord(&syntax.ForClause{Loop: typedNilLoop, Do: []*syntax.Stmt{validBody}})},
+		{name: "typed nil arithmetic expansion", arg: &syntax.Word{Parts: []syntax.WordPart{&syntax.ArithmExp{X: typedNilWord}}}},
+		{name: "typed nil arithmetic command", arg: commandWord(&syntax.ArithmCmd{X: typedNilWord})},
+		{name: "typed nil parenthesized arithmetic", arg: &syntax.Word{Parts: []syntax.WordPart{&syntax.ArithmExp{X: &syntax.ParenArithm{X: typedNilWord}}}}},
+		{name: "typed nil test clause", arg: commandWord(&syntax.TestClause{X: typedNilWord})},
+		{name: "typed nil parenthesized test", arg: commandWord(&syntax.TestClause{X: &syntax.ParenTest{X: typedNilWord}})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := newWalker("nested")
+			w.dispatch(&syntax.CallExpr{Args: []*syntax.Word{litWord("outer"), test.arg}}, "argv", 1)
+			if len(w.sites) != 0 {
+				t.Fatalf("sites = %d, want none before mandatory-child certification", len(w.sites))
+			}
+			if len(w.refusals) != 1 || w.refusals[0].code != "unsupported-construct" {
+				t.Fatalf("refusals = %#v, want one unsupported-construct", w.refusals)
+			}
+		})
+	}
+}
+
+func TestWalkKeepCommentsFileParityAndAccounting(t *testing.T) {
+	for _, src := range []string{"# lead\necho x", "echo x # tail"} {
+		t.Run(src, func(t *testing.T) {
+			file, err := syntax.NewParser(syntax.KeepComments(true)).Parse(strings.NewReader(src), "")
+			if err != nil {
+				t.Fatalf("Parse returned %v", err)
+			}
+			w := newWalker(src)
+			w.dispatch(file, "top-level-statements", 1)
+			if len(w.sites) != 1 || len(w.refusals) != 0 {
+				t.Fatalf("sites, refusals = (%d, %#v), want one and none", len(w.sites), w.refusals)
+			}
+			gotStart, gotEnd := w.nodeSpan(file)
+			wantStart := int(file.Pos().Offset())
+			wantEnd := int(file.End().Offset())
+			if gotStart != wantStart || gotEnd != wantEnd {
+				t.Fatalf("File span = [%d, %d), want parsed [%d, %d)", gotStart, gotEnd, wantStart, wantEnd)
+			}
+			commentCount := 0
+			nodeCount := 0
+			syntax.Walk(file, func(node syntax.Node) bool {
+				if node != nil {
+					nodeCount++
+				}
+				if _, ok := node.(*syntax.Comment); ok {
+					commentCount++
+				}
+				return true
+			})
+			if commentCount != 1 {
+				t.Fatalf("parsed comments = %d, want 1", commentCount)
+			}
+			if w.nodes != nodeCount || w.work != w.nodes+w.events {
+				t.Fatalf("nodes, events, work = (%d, %d, %d), want parsed nodes %d plus events", w.nodes, w.events, w.work, nodeCount)
+			}
+		})
+	}
+
+	t.Run("comment-only file", func(t *testing.T) {
+		const src = `# only`
+		file, err := syntax.NewParser(syntax.KeepComments(true)).Parse(strings.NewReader(src), "")
+		if err != nil {
+			t.Fatalf("Parse returned %v", err)
+		}
+		w := newWalker(src)
+		w.dispatch(file, "top-level-statements", 1)
+		if len(w.sites) != 0 || len(w.refusals) != 0 || w.nodes != 2 || w.work != 2 {
+			t.Fatalf("sites, refusals, nodes, work = (%d, %#v, %d, %d), want no events and File+Comment", len(w.sites), w.refusals, w.nodes, w.work)
+		}
+	})
+}
+
+func TestWalkCertificationCoversPinnedCommentCollections(t *testing.T) {
+	comment := func(offset uint) syntax.Comment {
+		return syntax.Comment{Hash: syntax.NewPos(offset, 1, offset+1), Text: " c"}
+	}
+	word := func() *syntax.Word {
+		return &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{
+			ValuePos: syntax.NewPos(0, 1, 1), ValueEnd: syntax.NewPos(1, 1, 2), Value: "x",
+		}}}
+	}
+	tests := []struct {
+		name      string
+		node      syntax.Node
+		wantNodes int
+	}{
+		{name: "file last", node: &syntax.File{Last: []syntax.Comment{comment(0)}}, wantNodes: 2},
+		{name: "statement comments", node: &syntax.Stmt{Comments: []syntax.Comment{comment(0)}}, wantNodes: 2},
+		{name: "subshell last", node: &syntax.Subshell{Last: []syntax.Comment{comment(0)}}, wantNodes: 2},
+		{name: "block last", node: &syntax.Block{Last: []syntax.Comment{comment(0)}}, wantNodes: 2},
+		{name: "command substitution last", node: &syntax.CmdSubst{Last: []syntax.Comment{comment(0)}}, wantNodes: 2},
+		{name: "if comments", node: &syntax.IfClause{
+			CondLast: []syntax.Comment{comment(0)}, ThenLast: []syntax.Comment{comment(1)}, Last: []syntax.Comment{comment(2)},
+		}, wantNodes: 4},
+		{name: "while comments", node: &syntax.WhileClause{
+			CondLast: []syntax.Comment{comment(0)}, DoLast: []syntax.Comment{comment(1)},
+		}, wantNodes: 3},
+		{name: "for comments", node: &syntax.ForClause{
+			Loop:   &syntax.WordIter{Name: &syntax.Lit{ValuePos: syntax.NewPos(0, 1, 1), ValueEnd: syntax.NewPos(1, 1, 2), Value: "x"}},
+			DoLast: []syntax.Comment{comment(1)},
+		}, wantNodes: 4},
+		{name: "case clause last", node: &syntax.CaseClause{Word: word(), Last: []syntax.Comment{comment(1)}}, wantNodes: 4},
+		{name: "case item comments", node: &syntax.CaseItem{
+			Patterns: []*syntax.Word{word()}, Comments: []syntax.Comment{comment(1)}, Last: []syntax.Comment{comment(2)},
+		}, wantNodes: 5},
+		{name: "array expression last", node: &syntax.ArrayExpr{Last: []syntax.Comment{comment(0)}}, wantNodes: 2},
+		{name: "array element comments after absent value", node: &syntax.ArrayElem{Index: word(), Comments: []syntax.Comment{comment(1)}}, wantNodes: 4},
+		{name: "process substitution last", node: &syntax.ProcSubst{Last: []syntax.Comment{comment(0)}}, wantNodes: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := newWalker("xxx")
+			if !w.certifyTree(test.node, 1) {
+				t.Fatalf("certification refusals = %#v", w.refusals)
+			}
+			if w.nodes != test.wantNodes || w.work != test.wantNodes {
+				t.Fatalf("nodes, work = (%d, %d), want field-complete count %d", w.nodes, w.work, test.wantNodes)
+			}
+		})
 	}
 }
 
@@ -867,7 +1095,11 @@ func TestWalkStopsBeforeScanningRemainingRedirects(t *testing.T) {
 	stmt := &syntax.Stmt{
 		Position: syntax.NewPos(0, 1, 1),
 		Cmd: &syntax.ArithmCmd{
-			Left: syntax.NewPos(0, 1, 1), Right: syntax.NewPos(3, 1, 4),
+			Left:  syntax.NewPos(0, 1, 1),
+			Right: syntax.NewPos(3, 1, 4),
+			X: &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{
+				ValuePos: syntax.NewPos(2, 1, 3), ValueEnd: syntax.NewPos(3, 1, 4), Value: "1",
+			}}},
 		},
 		Redirs: []*syntax.Redirect{redirect(6), redirect(9), redirect(12)},
 	}
