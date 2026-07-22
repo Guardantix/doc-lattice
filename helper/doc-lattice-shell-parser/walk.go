@@ -512,7 +512,7 @@ func (w *walker) requestTerminal(node syntax.Node, code string, pointSpan bool) 
 	}
 	start, end := 0, 0
 	if !pointSpan {
-		start, end = w.nodeSpan(node)
+		start, end = w.terminalNodeSpan(node)
 	}
 	w.appendTerminalRefusal(start, end, code)
 }
@@ -573,12 +573,26 @@ func (w *walker) nodeSpan(node syntax.Node) (int, int) {
 	return start, end
 }
 
-func (w *walker) completeNodeSpan(node syntax.Node) (int, int, bool) {
-	if node == nil || syntaxNodeIsNil(node) {
-		return 0, 0, false
+func (w *walker) terminalNodeSpan(node syntax.Node) (int, int) {
+	// A terminal may be requested after work is exhausted. Recover its span
+	// with a separate fixed-depth budget so the final event can remain in source order.
+	start, end, ok := w.completeNodeSpanWithin(node, visitorDepthCap+1)
+	if !ok {
+		return 0, 0
 	}
+	return start, end
+}
+
+func (w *walker) completeNodeSpan(node syntax.Node) (int, int, bool) {
 	limit := min(max(w.depthCap+1, 1), visitorDepthCap+1)
 	limit = min(limit, max(w.workLimit-w.work+1, 1))
+	return w.completeNodeSpanWithin(node, limit)
+}
+
+func (w *walker) completeNodeSpanWithin(node syntax.Node, limit int) (int, int, bool) {
+	if node == nil || syntaxNodeIsNil(node) || limit < 1 {
+		return 0, 0, false
+	}
 	start, startOK := boundedStart(node, limit)
 	end, endOK := boundedEnd(node, limit)
 	if !startOK || !endOK {

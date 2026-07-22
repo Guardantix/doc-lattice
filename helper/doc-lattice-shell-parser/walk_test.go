@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -666,6 +667,64 @@ func TestWalkWorkCapIncludesEmittedEvents(t *testing.T) {
 	}
 	if w.nodes != 3 || w.events != 2 || w.work != 5 {
 		t.Fatalf("nodes, events, work = (%d, %d, %d), want (3, 2, 5)", w.nodes, w.events, w.work)
+	}
+}
+
+func TestWalkWorkCapTerminalSpanSurvivesExhaustedBudget(t *testing.T) {
+	const src = `A=*($(x)|b) echo outer; doc-lattice later`
+	stmts, parseRefusal := parseStatements(src)
+	if parseRefusal != nil {
+		t.Fatalf("parseStatements refusal = %#v, want none", parseRefusal)
+	}
+
+	w := newWalker(src)
+	for _, stmt := range stmts {
+		if !w.certifyTree(stmt, 1) {
+			t.Fatalf("pre-certification refusals = %#v, want none", w.refusals)
+		}
+	}
+	w.workLimit = w.work + 2 // Allow the first site and its local refusal only.
+	for _, stmt := range stmts {
+		w.dispatch(stmt, "command-and-redirects", 1)
+		if w.stop {
+			break
+		}
+	}
+
+	if len(w.sites) != 2 {
+		t.Fatalf("sites = %d, want the first and cap-crossing later sites", len(w.sites))
+	}
+	if len(w.refusals) != 2 || w.refusals[0].code != "expansion-unsupported" || w.refusals[1].code != "work-cap" {
+		t.Fatalf("refusals = %#v, want local expansion then terminal work-cap", w.refusals)
+	}
+	wantStart := strings.Index(src, "doc-lattice later")
+	wantEnd := len(src)
+	terminal := w.refusals[1]
+	if terminal.startByte != wantStart || terminal.endByte != wantEnd {
+		t.Errorf("terminal work-cap span = [%d, %d), want later command [%d, %d)", terminal.startByte, terminal.endByte, wantStart, wantEnd)
+	}
+
+	events, err := emitCommandSites(w.sites, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, refusal := range w.refusals {
+		events = append(events, Event{
+			Kind: "refusal", Code: refusal.code,
+			StartByte: refusal.startByte, EndByte: refusal.endByte,
+		})
+	}
+	sort.SliceStable(events, func(left, right int) bool {
+		if events[left].StartByte != events[right].StartByte {
+			return events[left].StartByte < events[right].StartByte
+		}
+		return eventKindOrdinal(events[left].Kind) < eventKindOrdinal(events[right].Kind)
+	})
+	if err := validateEventOrdering(events); err != nil {
+		t.Fatalf("assembled cap result failed ordering validation: %v; events %#v", err, events)
+	}
+	if last := events[len(events)-1]; last.Kind != "refusal" || last.Code != "work-cap" {
+		t.Fatalf("last event = %#v, want terminal work-cap", last)
 	}
 }
 
