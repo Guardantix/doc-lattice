@@ -275,6 +275,117 @@ type extGlobClassification struct {
 	execution bool
 }
 
+type extGlobContextKind uint8
+
+const (
+	extGlobModernArithmetic extGlobContextKind = iota
+	extGlobBracketArithmetic
+	extGlobParameter
+)
+
+type extGlobParameterPhase uint8
+
+const (
+	extGlobParameterHead extGlobParameterPhase = iota
+	extGlobParameterWord
+	extGlobParameterArithmetic
+)
+
+type extGlobScanContext struct {
+	kind           extGlobContextKind
+	quote          int
+	depth          int
+	parameterPhase extGlobParameterPhase
+	parameterName  bool
+}
+
+type extGlobScanContexts []extGlobScanContext
+
+func (contexts *extGlobScanContexts) push(kind extGlobContextKind, quote int) {
+	*contexts = append(*contexts, extGlobScanContext{kind: kind, quote: quote})
+}
+
+func (contexts *extGlobScanContexts) advance(raw string, index, quote int) int {
+	if len(*contexts) == 0 {
+		return index
+	}
+	context := &(*contexts)[len(*contexts)-1]
+	if context.quote != quote {
+		return index
+	}
+	char := raw[index]
+	switch context.kind {
+	case extGlobModernArithmetic:
+		switch char {
+		case '(':
+			context.depth++
+		case ')':
+			if context.depth > 0 {
+				context.depth--
+				return index
+			}
+			next, nextIndex := logicalNext(raw, index+1)
+			if next == ')' {
+				*contexts = (*contexts)[:len(*contexts)-1]
+				return nextIndex
+			}
+		}
+	case extGlobBracketArithmetic:
+		switch char {
+		case '[':
+			context.depth++
+		case ']':
+			if context.depth > 0 {
+				context.depth--
+			} else {
+				*contexts = (*contexts)[:len(*contexts)-1]
+			}
+		}
+	case extGlobParameter:
+		if char == '}' {
+			*contexts = (*contexts)[:len(*contexts)-1]
+			return index
+		}
+		if context.parameterPhase != extGlobParameterHead {
+			return index
+		}
+		if char == '[' && context.parameterName {
+			contexts.push(extGlobBracketArithmetic, quote)
+			return index
+		}
+		if char == ':' {
+			next, _ := logicalNext(raw, index+1)
+			if strings.ContainsRune("-=+?", rune(next)) {
+				context.parameterPhase = extGlobParameterWord
+			} else {
+				context.parameterPhase = extGlobParameterArithmetic
+			}
+			return index
+		}
+		if context.parameterName && strings.ContainsRune("-=+?/%^,@", rune(char)) {
+			context.parameterPhase = extGlobParameterWord
+			return index
+		}
+		if char != '!' && char != '#' {
+			context.parameterName = true
+		}
+	}
+	return index
+}
+
+func (contexts extGlobScanContexts) arithmetic() bool {
+	for index := len(contexts) - 1; index >= 0; index-- {
+		context := contexts[index]
+		switch context.kind {
+		case extGlobModernArithmetic, extGlobBracketArithmetic:
+			return true
+		case extGlobParameter:
+			return context.parameterPhase == extGlobParameterArithmetic
+		}
+	}
+	return false
+}
+
 func classifyExtGlob(extglob *syntax.ExtGlob, src string) extGlobClassification {
 	if extglob == nil {
 		return extGlobClassification{}
@@ -291,9 +402,16 @@ func classifyExtGlob(extglob *syntax.ExtGlob, src string) extGlobClassification 
 	)
 	quote := unquoted
 	known := true
+	var contexts extGlobScanContexts
 	var value strings.Builder
 	for index := 0; index < len(raw); index++ {
 		char := raw[index]
+		if char != '\\' && char != '\'' && char != '"' {
+			if consumed := contexts.advance(raw, index, quote); consumed != index {
+				index = consumed
+				continue
+			}
+		}
 		switch quote {
 		case singleQuoted:
 			if char == '\'' {
@@ -311,9 +429,28 @@ func classifyExtGlob(extglob *syntax.ExtGlob, src string) extGlobClassification 
 				return extGlobClassification{execution: true}
 			}
 			if char == '$' {
-				next, _ := logicalNext(raw, index+1)
+				next, nextIndex := logicalNext(raw, index+1)
 				if next == '(' {
+					after, afterIndex := logicalNext(raw, nextIndex+1)
+					if after == '(' {
+						known = false
+						contexts.push(extGlobModernArithmetic, quote)
+						index = afterIndex
+						continue
+					}
 					return extGlobClassification{execution: true}
+				}
+				if next == '[' {
+					known = false
+					contexts.push(extGlobBracketArithmetic, quote)
+					index = nextIndex
+					continue
+				}
+				if next == '{' {
+					known = false
+					contexts.push(extGlobParameter, quote)
+					index = nextIndex
+					continue
 				}
 				if next != '"' && dollarExpansionByte(next) {
 					known = false
@@ -353,7 +490,26 @@ func classifyExtGlob(extglob *syntax.ExtGlob, src string) extGlobClassification 
 				index = close
 			} else {
 				if next == '(' {
+					after, afterIndex := logicalNext(raw, nextIndex+1)
+					if after == '(' {
+						known = false
+						contexts.push(extGlobModernArithmetic, quote)
+						index = afterIndex
+						continue
+					}
 					return extGlobClassification{execution: true}
+				}
+				if next == '[' {
+					known = false
+					contexts.push(extGlobBracketArithmetic, quote)
+					index = nextIndex
+					continue
+				}
+				if next == '{' {
+					known = false
+					contexts.push(extGlobParameter, quote)
+					index = nextIndex
+					continue
 				}
 				if dollarExpansionByte(next) {
 					known = false
@@ -371,7 +527,7 @@ func classifyExtGlob(extglob *syntax.ExtGlob, src string) extGlobClassification 
 			}
 		case '<', '>':
 			next, _ := logicalNext(raw, index+1)
-			if next == '(' {
+			if next == '(' && !contexts.arithmetic() {
 				return extGlobClassification{execution: true}
 			}
 			value.WriteByte(char)
