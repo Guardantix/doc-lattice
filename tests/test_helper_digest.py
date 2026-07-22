@@ -288,7 +288,14 @@ def test_build_wrapper_ignores_workspace_parser_replacement(tmp_path: Path) -> N
     """An inherited workspace cannot replace parser behavior outside the digest."""
     neutral_environment = os.environ.copy()
     neutral_environment.update(
-        {"GOENV": "off", "GOFLAGS": "", "GOTOOLCHAIN": "local", "GOWORK": "off"}
+        {
+            "GO111MODULE": "on",
+            "GOENV": "off",
+            "GOFLAGS": "",
+            "GOROOT": "/usr/local/go",
+            "GOTOOLCHAIN": "local",
+            "GOWORK": "off",
+        }
     )
     parser_module = subprocess.run(
         ["/usr/local/go/bin/go", "list", "-m", "-f", "{{.Dir}}", "mvdan.cc/sh/v3"],
