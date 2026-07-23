@@ -2065,6 +2065,27 @@ def test_duplicate_dispatcher_candidates_classify_argv_once():
     assert resolution.budget.remaining_steps == 12
 
 
+def test_repeated_opaque_tail_heads_classify_each_argv_once():
+    # Repeated shell heads in an opaque tail dedup by start index, so each distinct argv is
+    # walked once. Dedup uses a set, keeping the sweep linear in the number of tail words.
+    words = [
+        _ShellWord("nohup"),
+        *[_ShellWord("bash") for _ in range(5)],
+        _ShellWord("doc-lattice"),
+    ]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(30),
+        executable_positions=[_ExecutableCandidate(0)],
+        opaque_tail_start=1,
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    # 7 marker-pass steps, then one walk per distinct start; each of the five heads is followed
+    # by an operand rather than an inline option, so no walk refuses.
+    assert resolution.budget.remaining_steps == 30 - 7 - 5
+
+
 def test_dispatcher_free_command_skips_marker_pass_budget():
     # The cheap head gate runs before the charged marker regex pass, so an ordinary
     # marker-bearing command with no dispatcher-shaped word consumes no budget at all.
@@ -2362,6 +2383,7 @@ DISPATCHER_FAIL_CLOSED_CASES = [
     ("env time chain before dispatcher", "env time bash -c 'doc-lattice reconcile'"),
     ("builtin eval head", "builtin eval 'doc-lattice reconcile'"),
     ("builtin source head", "builtin source ./doc-lattice-env.sh"),
+    ("coprocess plain dispatcher head", "coproc eval 'doc-lattice reconcile'"),
     ("marker-bearing assignment prefix", "CMD='doc-lattice reconcile' sh -c \"$CMD\""),
     ("env assignment carries marker", "env CMD='doc-lattice reconcile' sh -c \"$CMD\""),
     ("rbash restricted head inline command", "rbash -c 'doc-lattice reconcile'"),
@@ -2450,6 +2472,13 @@ DISPATCHER_FAIL_CLOSED_CASES = [
     ("exec set option can re-enable execution", "zsh -n -o exec -c 'doc-lattice reconcile'"),
     ("short dump mode is pushd-to-home in zsh", "bash -D -c 'doc-lattice reconcile'"),
     ("dynamic set option value beside noexec", "bash -n -o $X -c 'doc-lattice reconcile'"),
+    # Selecting -c does not end invocation-option parsing, so the pure-noexec certification has
+    # to survive the whole option region rather than only its prefix.
+    ("noexec re-enabled after inline selection", "bash -n -c +n 'doc-lattice reconcile --all'"),
+    ("set option re-enable after inline selection", "bash -n -c +o noexec 'doc-lattice lint'"),
+    ("exec set option after inline selection", "zsh -n -c -o exec 'doc-lattice reconcile'"),
+    ("impure option after inline selection", "bash -nc -x 'doc-lattice reconcile'"),
+    ("dynamic option value after inline selection", "bash -n -c -o $X 'doc-lattice reconcile'"),
 ]
 
 
@@ -2527,6 +2556,12 @@ DISPATCHER_CERTIFY_CASES = [
     ("stacked noexec setters before inline command", "bash -o noexec -n -c 'doc-lattice lint'"),
     ("dump strings mode before inline command", "bash --dump-strings -c 'doc-lattice reconcile'"),
     ("dump po strings mode before inline command", "bash --dump-po-strings -c 'doc-lattice lint'"),
+    ("noexec setter after inline selection", "bash -n -c -n 'doc-lattice reconcile'"),
+    ("set option noexec after inline selection", "bash -n -c -o noexec 'doc-lattice lint'"),
+    # ``builtin`` and ``coproc`` are shell grammar with no external binary, so an enclosing
+    # ``exec`` execve fails (exit 127) and the plain dispatcher behind them never runs.
+    ("exec wrapper before builtin dispatcher target", "exec builtin eval 'doc-lattice reconcile'"),
+    ("exec wrapper before coprocess dispatcher", "exec coproc eval 'doc-lattice reconcile'"),
 ]
 
 

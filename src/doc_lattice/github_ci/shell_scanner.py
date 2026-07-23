@@ -1829,6 +1829,10 @@ def _reachable_dispatcher_heads(
     """
     plain_dispatch = False
     walk_starts: list[int] = []
+    # Membership is tested per opaque-tail word, so it has to stay a set: an argv of many
+    # shell-looking words near the accepted source size limit would otherwise make this
+    # uncharged dedup quadratic and stall the scan before the budget can stop it.
+    seen_starts: set[int] = set()
     classified_candidates: set[_ExecutableCandidate] = set()
     for candidate in resolution.executable_positions:
         if candidate in classified_candidates:
@@ -1848,16 +1852,29 @@ def _reachable_dispatcher_heads(
             # without executing its argv and stays certified.
             plain_dispatch = plain_dispatch or not candidate.external_lookup
         elif _normalize_dispatcher_head(_basename(head)) in _SHELL_DISPATCHER_HEADS:
-            walk_starts.append(candidate.index + 1)
+            _record_walk_start(candidate.index + 1, walk_starts, seen_starts)
     if resolution.opaque_tail_start is not None:
         for index in range(resolution.opaque_tail_start, len(words)):
             word = words[index]
             if word.dynamic:
                 continue
             name = _normalize_dispatcher_head(_basename(word.literal))
-            if name in _SHELL_DISPATCHER_HEADS and index + 1 not in walk_starts:
-                walk_starts.append(index + 1)
+            if name in _SHELL_DISPATCHER_HEADS:
+                _record_walk_start(index + 1, walk_starts, seen_starts)
     return plain_dispatch, walk_starts
+
+
+def _record_walk_start(start: int, walk_starts: list[int], seen_starts: set[int]) -> None:
+    """Record one argv walk start, keeping the collected order and deduplicating in constant time.
+
+    Args:
+        start: The index of the first argv word following a shell dispatcher head.
+        walk_starts: The ordered starts collected so far.
+        seen_starts: The companion membership set; a list scan here would be quadratic.
+    """
+    if start not in seen_starts:
+        seen_starts.add(start)
+        walk_starts.append(start)
 
 
 def _normalize_dispatcher_head(head: str) -> str:
@@ -1884,9 +1901,12 @@ def _shell_dispatcher_runs_inline_command(
     when an eager stop (``--help``/``--version``/the bash dump modes) precedes ``-c``, meaning
     the shell prints and exits (or rejects the option) before any payload runs.
 
-    A pure noexec prefix is the one non-executing ``-c`` form this walk certifies: every option
-    word before a ``-``-signed ``c`` trigger is exactly ``-n`` or ``-o`` with the static value
-    ``noexec``, and the trigger cluster contains only the letters c and n. All matched shells
+    A pure noexec option region is the one non-executing ``-c`` form this walk certifies: every
+    option word up to the operand is exactly ``-n`` or ``-o`` with the static value ``noexec``,
+    and the ``-``-signed ``c`` trigger cluster contains only the letters c and n. The region
+    extends past the trigger because selecting ``-c`` does not end invocation-option parsing, so
+    a later re-enable such as ``bash -n -c +n 'payload'`` still executes the command string
+    (verified on bash, dash, sh, and zsh). All matched shells
     read but never execute the payload for that shape (verified for bash, dash, and rbash;
     documented NO_EXEC for zsh). Anything beyond it stays refused, because execution can be
     re-enabled downstream in shell-specific ways this walk does not model: ``+n`` and ``+o
@@ -1911,21 +1931,33 @@ def _shell_dispatcher_runs_inline_command(
     index = start
     noexec = False
     pure_noexec_prefix = True
+    inline_selected = False
     while index < len(words):
         budget.step()
         word = words[index]
         if _word_may_change_argv(word):
             return True
         literal = word.literal
-        if not _is_shell_option_token(literal):
-            return False
-        if literal in _SHELL_EAGER_STOP_OPTIONS:
+        if not _is_shell_option_token(literal) or literal in _SHELL_EAGER_STOP_OPTIONS:
+            # An operand or terminator means an external script file rather than inline source,
+            # and an eager stop means the shell prints and exits (or rejects the option) before
+            # any selected payload runs.
             return False
         if not literal.startswith("--") and "c" in literal[1:]:
             # A short cluster containing c selects the -c inline-command option; bash, sh, and
             # dash execute a + cluster such as +c the same way. Long options such as --norc or
             # --rcfile also contain the letter but never select -c.
-            return not _is_pure_noexec_trigger(literal, pure_noexec_prefix, noexec)
+            if not _is_pure_noexec_trigger(literal, pure_noexec_prefix, noexec):
+                return True
+            # Selecting -c does not end invocation-option parsing: the shells keep reading
+            # option words until an operand, so a later re-enable still executes the command
+            # string (``bash -n -c +n 'payload'`` verifiably runs the payload on bash, dash,
+            # sh, and zsh). The pure-noexec certification therefore has to hold for the whole
+            # option region, not just the prefix before the trigger.
+            inline_selected = True
+            noexec = True
+            index += 1
+            continue
         consumes_value = _shell_option_consumes_value(literal)
         value = words[index + 1] if consumes_value and index + 1 < len(words) else None
         if value is not None:
@@ -1939,6 +1971,8 @@ def _shell_dispatcher_runs_inline_command(
             noexec = True
         else:
             pure_noexec_prefix = False
+            if inline_selected:
+                return True
         index += 2 if consumes_value else 1
     return False
 
@@ -2138,15 +2172,18 @@ def _skip_shell_prefixes(
     start: int,
     *,
     executable_positions: list[_ExecutableCandidate],
+    external_lookup: bool = False,
 ) -> _ResolvedIndex:
-    """Skip literal shell prefixes and preserve dynamic command-position ambiguity."""
+    """Skip literal shell prefixes and preserve dynamic command-position ambiguity.
+
+    ``exec``, an ``env`` prefix, and an external ``time`` resolve their successor with a PATH
+    execve rather than shell command lookup; once crossed, no later position can reach a shell
+    builtin. The ``time`` keyword stays shell lookup: ``time eval ...`` runs the builtin.
+    Callers that resume resolution inside an already-resolved command pass the provenance in so
+    it is not lost at the restart.
+    """
     index = start
     ambiguous = False
-    # ``exec``, an ``env`` prefix, and an external ``time`` resolve their successor with a PATH
-    # execve rather than shell command lookup; once crossed, no later position can reach a
-    # shell builtin. The ``time`` keyword stays shell lookup: ``time eval ...`` runs the
-    # builtin.
-    external_lookup = False
     while index < len(words):
         word = words[index]
         if word.shell_assignment:
@@ -2181,7 +2218,10 @@ def _skip_shell_prefixes(
         if word.literal in {"builtin", "command", "exec"}:
             wrapper_literal = word.literal
             wrapper = _skip_shell_builtin_wrapper(
-                words, index, executable_positions=executable_positions
+                words,
+                index,
+                executable_positions=executable_positions,
+                external_lookup=external_lookup,
             )
             if wrapper.index is None:
                 return _ResolvedIndex(None, ambiguous or wrapper.ambiguous, external_lookup)
@@ -2209,11 +2249,17 @@ def _skip_shell_builtin_wrapper(
     index: int,
     *,
     executable_positions: list[_ExecutableCandidate],
+    external_lookup: bool,
 ) -> _ResolvedIndex:
     """Resolve one supported Bash wrapper beginning at ``index``."""
     literal = words[index].literal
     if literal == "builtin":
-        return _skip_builtin_wrapper(words, index + 1, executable_positions=executable_positions)
+        return _skip_builtin_wrapper(
+            words,
+            index + 1,
+            executable_positions=executable_positions,
+            external_lookup=external_lookup,
+        )
     if literal == "command":
         return _skip_command_builtin(words, index + 1)
     return _skip_exec_wrapper(words, index + 1)
@@ -2224,8 +2270,15 @@ def _skip_builtin_wrapper(
     start: int,
     *,
     executable_positions: list[_ExecutableCandidate],
+    external_lookup: bool,
 ) -> _ResolvedIndex:
-    """Expose a supported literal Bash builtin target or one ambiguous successor."""
+    """Expose a supported literal Bash builtin target or one ambiguous successor.
+
+    ``external_lookup`` records that an enclosing prefix already switched resolution to a PATH
+    execve. ``builtin`` is a shell builtin with no external binary, so ``exec builtin eval ...``
+    fails the execve (exit 127) and never reaches the dispatcher; the provenance rides along on
+    the recorded target so the fail-closed rule keeps certifying that shape.
+    """
     index = start
     if index < len(words) and not words[index].dynamic and words[index].literal == "--":
         index += 1
@@ -2241,7 +2294,9 @@ def _skip_builtin_wrapper(
         # executables, so ``builtin bash`` fails without executing its argv and any other
         # target resolves to no reachable dispatcher.
         if target.literal in _PLAIN_DISPATCHER_HEADS:
-            executable_positions.append(_ExecutableCandidate(index))
+            executable_positions.append(
+                _ExecutableCandidate(index, external_lookup=external_lookup)
+            )
         return _ResolvedIndex(None)
     return _ResolvedIndex(index)
 
@@ -2455,6 +2510,7 @@ def _doc_lattice_command_index(
             words,
             command_index + 1,
             resolution,
+            external_lookup=command.external_lookup,
         )
     else:
         payload_index = _doc_lattice_payload_index(
@@ -2474,9 +2530,13 @@ def _coproc_doc_lattice_command_index(
     words: list[_ShellWord],
     start: int,
     resolution: _LauncherResolutionState,
+    *,
+    external_lookup: bool,
 ) -> _ResolvedIndex:
     """Resolve the unnamed command or one optional literal coprocess name."""
-    unnamed = _doc_lattice_command_after_prefixes(words, start, resolution)
+    unnamed = _doc_lattice_command_after_prefixes(
+        words, start, resolution, external_lookup=external_lookup
+    )
     if unnamed.index is not None:
         return unnamed
     if start >= len(words):
@@ -2484,7 +2544,9 @@ def _coproc_doc_lattice_command_index(
     name = words[start]
     if name.dynamic or not _is_name(name.literal):
         return unnamed
-    named = _doc_lattice_command_after_prefixes(words, start + 1, resolution)
+    named = _doc_lattice_command_after_prefixes(
+        words, start + 1, resolution, external_lookup=external_lookup
+    )
     return _ResolvedIndex(named.index, unnamed.ambiguous or named.ambiguous)
 
 
@@ -2492,10 +2554,20 @@ def _doc_lattice_command_after_prefixes(
     words: list[_ShellWord],
     start: int,
     resolution: _LauncherResolutionState,
+    *,
+    external_lookup: bool = False,
 ) -> _ResolvedIndex:
-    """Reuse normal prefix, wrapper, and payload resolution from one command start."""
+    """Reuse normal prefix, wrapper, and payload resolution from one command start.
+
+    ``external_lookup`` carries provenance from the enclosing command so a coprocess body behind
+    a PATH-execve prefix keeps it; ``exec coproc eval ...`` execves ``coproc``, which is a shell
+    keyword with no external binary, so the dispatcher is never reached.
+    """
     executable = _skip_shell_prefixes(
-        words, start, executable_positions=resolution.executable_positions
+        words,
+        start,
+        executable_positions=resolution.executable_positions,
+        external_lookup=external_lookup,
     )
     if executable.index is None:
         return executable
