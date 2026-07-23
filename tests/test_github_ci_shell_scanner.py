@@ -2031,6 +2031,9 @@ def test_marker_free_dispatcher_candidates_consume_one_marker_pass_budget():
 
 
 def test_marker_bearing_external_shell_candidates_consume_shared_budget():
+    # One marker-pass step per word until the marker (6) plus one walk step per inspected
+    # dispatcher argv word (--norc, -o, its value, then the operand: 4). Head detection itself
+    # is uncharged frozenset gating.
     words = [
         _ShellWord("echo"),
         _ShellWord("bash"),
@@ -2040,7 +2043,7 @@ def test_marker_bearing_external_shell_candidates_consume_shared_budget():
         _ShellWord("doc-lattice-runner.sh"),
     ]
     resolution = _LauncherResolutionState(
-        _ScanBudget(12),
+        _ScanBudget(10),
         executable_positions=[_ExecutableCandidate(0), _ExecutableCandidate(1)],
     )
 
@@ -2050,6 +2053,7 @@ def test_marker_bearing_external_shell_candidates_consume_shared_budget():
 
 
 def test_duplicate_dispatcher_candidates_classify_argv_once():
+    # Six duplicate candidates still produce one walk: 2 marker-pass steps + 1 walk step.
     words = [_ShellWord("bash"), _ShellWord("doc-lattice-runner.sh")]
     resolution = _LauncherResolutionState(
         _ScanBudget(15),
@@ -2058,7 +2062,21 @@ def test_duplicate_dispatcher_candidates_classify_argv_once():
 
     _reject_marker_bearing_dispatcher(words, resolution)
 
-    assert resolution.budget.remaining_steps == 6
+    assert resolution.budget.remaining_steps == 12
+
+
+def test_dispatcher_free_command_skips_marker_pass_budget():
+    # The cheap head gate runs before the charged marker regex pass, so an ordinary
+    # marker-bearing command with no dispatcher-shaped word consumes no budget at all.
+    words = [_ShellWord("grep"), _ShellWord("-q"), _ShellWord("doc-lattice"), _ShellWord("log")]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(5),
+        executable_positions=[_ExecutableCandidate(0)],
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    assert resolution.budget.remaining_steps == 5
 
 
 def test_direct_doc_lattice_invocations_prefixes_context_on_incomplete_scan():
@@ -2405,6 +2423,20 @@ DISPATCHER_FAIL_CLOSED_CASES = [
         "uvx env@1.0 bash -c 'doc-lattice reconcile'",
     ),
     ("builtin dot head", "builtin . ./doc-lattice-env.sh"),
+    ("nohup wrapper before dispatcher", "nohup bash -c 'doc-lattice reconcile --all'"),
+    ("setsid wrapper before dispatcher", "setsid sh -lc 'doc-lattice reconcile'"),
+    ("xargs wrapper before dispatcher", "xargs -0 bash -c 'doc-lattice reconcile'"),
+    ("sudo wrapper before dispatcher", "sudo -u deploy bash -c 'doc-lattice reconcile'"),
+    ("unknown uv tool before dispatcher", "uvx sometool bash -c 'doc-lattice reconcile'"),
+    ("unrecognized head with dispatcher argv", "echo bash -c 'doc-lattice reconcile'"),
+    (
+        "dynamic word after wrapper before dispatcher",
+        "nohup \"$FLAG\" bash -c 'doc-lattice reconcile'",
+    ),
+    (
+        "coproc unrecognized program before dispatcher",
+        "coproc reader bash -c 'echo doc-lattice'",
+    ),
 ]
 
 
@@ -2421,10 +2453,11 @@ def test_marker_bearing_inline_dispatch_fails_closed(_description, script):
         direct_doc_lattice_invocations(script)
 
 
-# The dispatcher rule fires only when a command word literally names doc-lattice. These sources
-# either carry no marker in the dispatcher argv or run an external script file, so they retain
-# their pre-existing certified-clean outcome (the external-wrapper limitation is disclosed, not
-# failed closed).
+# The dispatcher rule fires only when a command word literally names doc-lattice AND a reachable
+# dispatcher head is present. These sources carry no marker in the dispatcher argv, run an
+# external script file, or place the marker where no shell head can dispatch it (including a
+# versioned env/time uv requirement, whose PyPI console script never resolves its arguments), so
+# they retain their certified-clean outcome.
 DISPATCHER_CERTIFY_CASES = [
     ("marker only in trailing comment", "bash -c 'echo hello'  # doc-lattice check runs here"),
     ("marker-free inline command", "bash -c 'echo hello world'"),
@@ -2448,6 +2481,18 @@ DISPATCHER_CERTIFY_CASES = [
     (
         "uvx direct requirement URL filename does not override declared name",
         "uvx 'not-bash @ file:///tmp/bash-1.0-py3-none-any.whl' -c 'doc-lattice reconcile'",
+    ),
+    ("wrapper before external script file", "nohup bash ./doc-lattice-runner.sh"),
+    ("find dot operand is not a dispatcher", "find . -name 'doc-lattice*'"),
+    ("wrapper argv marker without shell head", "xargs doc-lattice-formatter --all"),
+    ("marker argument after script operand", "bash ./run.sh doc-lattice"),
+    (
+        "versioned env requirement never resolves its arguments",
+        "uvx env@1.0 doc-lattice reconcile",
+    ),
+    (
+        "versioned time requirement never resolves its arguments",
+        "uv tool run time@2.0 doc-lattice reconcile",
     ),
 ]
 

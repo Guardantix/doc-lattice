@@ -561,10 +561,19 @@ class _LauncherResolutionState:
     # Every static executable-position candidate payload resolution visited; consumed by the
     # dispatcher fail-closed rule so it inherits the resolver's grammar rather than mirroring it.
     executable_positions: list[_ExecutableCandidate] = field(default_factory=list)
+    # First word index past a static executable the resolver does not recognize. Everything from
+    # there on is opaque argv the unrecognized program may re-dispatch (nohup, xargs, sudo, an
+    # unknown uv tool), so the dispatcher fail-closed rule sweeps it for shell heads.
+    opaque_tail_start: int | None = None
 
     def step(self) -> None:
         """Charge speculative launcher work to the shell scanner's declared budget."""
         self.budget.step()
+
+    def mark_opaque_tail(self, start: int) -> None:
+        """Record the earliest point where resolution stopped at an unrecognized executable."""
+        if self.opaque_tail_start is None or start < self.opaque_tail_start:
+            self.opaque_tail_start = start
 
 
 class _ShellScanner:
@@ -1653,10 +1662,11 @@ def direct_doc_lattice_invocations(
     The scanner is bounded, recursive, and non-executing. It intentionally does not resolve
     aliases, functions, variables used as executable names, external wrapper scripts, actions, or
     reusable workflows. It also never parses the payload of an inline dispatcher (``eval``,
-    ``source``/``.``, or ``sh``/``bash``/``dash``/``zsh -c``); when such a dispatcher's simple
-    command literally names doc-lattice the scan fails closed and raises ``ConfigError`` rather
-    than returning an empty complete result, while marker-free dispatch stays unresolved and
-    complete.
+    ``source``/``.``, or ``sh``/``bash``/``dash``/``zsh -c``, including a shell head sitting in
+    the argv of an unrecognized wrapper program such as ``nohup`` or ``xargs``); when such a
+    dispatcher's simple command literally names doc-lattice the scan fails closed and raises
+    ``ConfigError`` rather than returning an empty complete result, while marker-free dispatch
+    stays unresolved and complete.
 
     Args:
         script: Literal Bash source to scan.
@@ -1730,40 +1740,72 @@ def _reject_marker_bearing_dispatcher(
     words: list[_ShellWord],
     resolution: _LauncherResolutionState,
 ) -> None:
-    """Fail closed when a recognized inline dispatcher carries a doc-lattice marker.
+    """Fail closed when a reachable inline dispatcher carries a doc-lattice marker.
 
     ``eval``, ``source``/``.``, and ``bash``/``sh``/``dash``/``zsh -c`` run an inline payload the
     bounded scanner never parses. When such a dispatcher is reachable and the simple command
     literally names doc-lattice anywhere in its words (including leading assignment words, which
-    the child shell inherits), the scan refuses instead of certifying the source clean. The heads
-    are the executable-position candidates recorded by payload resolution itself
-    (``resolution.executable_positions``), so the rule inherits the assignment, keyword, wrapper,
-    ``coproc``, builtin-target, and launcher (``env``/``time``/``uv``/``uvx``) grammar instead of
-    mirroring it. A uv positional tool requirement head is compared after stripping the requirement
-    suffix, mirroring the console-script name uv resolves (so ``uvx bash@1.0 -c ...`` refuses like
-    ``uvx bash -c ...``). Only literal markers fire; a dynamic head or a payload fed from standard
-    input remains the disclosed executable-name limitation.
+    the child shell inherits), the scan refuses instead of certifying the source clean. Two
+    detections feed the rule:
+
+    - The executable-position candidates recorded by payload resolution itself
+      (``resolution.executable_positions``), so it inherits the assignment, keyword, wrapper,
+      ``coproc``, builtin-target, and launcher (``env``/``time``/``uv``/``uvx``) grammar instead
+      of mirroring it. A uv positional tool requirement head is compared after stripping the
+      requirement suffix, mirroring the console-script name uv resolves (so ``uvx bash@1.0 -c
+      ...`` refuses like ``uvx bash -c ...``).
+    - The opaque tail past the earliest unrecognized static executable
+      (``resolution.opaque_tail_start``). An unrecognized program such as ``nohup``, ``xargs``,
+      ``sudo``, or an unknown uv tool may re-dispatch its argv, so any shell head found there is
+      treated as reachable. Plain heads stay candidate-only in the tail: ``eval``/``source``/``.``
+      are shell builtins no external wrapper can execute, and sweeping them would fail closed on
+      benign words such as the ``.`` operand of ``find``.
+
+    Only literal markers fire; a dynamic head or a payload fed from standard input remains the
+    disclosed executable-name limitation. Head detection is a cheap frozenset test per word and
+    runs first, so the marker regex pass and its budget charges are skipped for the overwhelming
+    majority of commands, which contain no dispatcher-shaped word at all.
 
     Args:
         words: The decoded words of one simple command, including any leading assignments.
-        resolution: The launcher resolution state whose ``executable_positions`` record every
-            static executable-position candidate the payload resolver visited.
+        resolution: The launcher resolution state whose ``executable_positions`` and
+            ``opaque_tail_start`` record what payload resolution visited and where it stopped.
 
     Raises:
-        _ShellScanIncomplete: If the command is a marker-bearing recognized dispatcher.
+        _ShellScanIncomplete: If the command is a marker-bearing reachable dispatcher.
     """
-    marker_bearing = False
+    plain_dispatch, walk_starts = _reachable_dispatcher_heads(words, resolution)
+    if not plain_dispatch and not walk_starts:
+        return
+
     for word in words:
         resolution.step()
         if _DISPATCHER_MARKER_RE.search(word.literal):
-            marker_bearing = True
             break
-    if not marker_bearing:
+    else:
         return
 
+    if plain_dispatch:
+        raise _ShellScanIncomplete("inline dispatcher command cannot be scanned safely")
+    for start in walk_starts:
+        if _shell_dispatcher_runs_inline_command(words, start, resolution.budget):
+            raise _ShellScanIncomplete("inline dispatcher command cannot be scanned safely")
+
+
+def _reachable_dispatcher_heads(
+    words: list[_ShellWord],
+    resolution: _LauncherResolutionState,
+) -> tuple[bool, list[int]]:
+    """Collect reachable dispatcher heads: a plain-head flag and shell-head walk starts.
+
+    Combines the resolver-recorded executable candidates with a shell-head sweep of the opaque
+    tail past the earliest unrecognized executable. Uses only uncharged frozenset membership
+    tests so it can gate the charged marker pass.
+    """
+    plain_dispatch = False
+    walk_starts: list[int] = []
     classified_candidates: set[_ExecutableCandidate] = set()
     for candidate in resolution.executable_positions:
-        resolution.step()
         if candidate in classified_candidates:
             continue
         classified_candidates.add(candidate)
@@ -1773,20 +1815,29 @@ def _reject_marker_bearing_dispatcher(
             if candidate.uv_requirement
             else _basename(head_word.literal)
         )
-        # Windows runners launch the same shells as bash.exe/sh.exe; the scanner already
-        # accepts doc-lattice.exe as the doc-lattice executable, so dispatcher heads strip
-        # the suffix too.
-        name = head.casefold().removesuffix(".exe")
+        name = _normalize_dispatcher_head(head)
         if name in _PLAIN_DISPATCHER_HEADS:
-            inline = True
+            plain_dispatch = True
         elif name in _SHELL_DISPATCHER_HEADS:
-            inline = _shell_dispatcher_runs_inline_command(
-                words, candidate.index + 1, resolution.budget
-            )
-        else:
-            continue
-        if inline:
-            raise _ShellScanIncomplete("inline dispatcher command cannot be scanned safely")
+            walk_starts.append(candidate.index + 1)
+    if resolution.opaque_tail_start is not None:
+        for index in range(resolution.opaque_tail_start, len(words)):
+            word = words[index]
+            if word.dynamic:
+                continue
+            name = _normalize_dispatcher_head(_basename(word.literal))
+            if name in _SHELL_DISPATCHER_HEADS and index + 1 not in walk_starts:
+                walk_starts.append(index + 1)
+    return plain_dispatch, walk_starts
+
+
+def _normalize_dispatcher_head(head: str) -> str:
+    """Normalize a possible dispatcher head for comparison against the head sets.
+
+    Windows runners launch the same shells as bash.exe/sh.exe; the scanner already accepts
+    doc-lattice.exe as the doc-lattice executable, so dispatcher heads strip the suffix too.
+    """
+    return head.casefold().removesuffix(".exe")
 
 
 def _shell_dispatcher_runs_inline_command(
@@ -1847,9 +1898,13 @@ def _is_shell_option_token(literal: str) -> bool:
 
 
 def _shell_option_consumes_value(literal: str) -> bool:
-    """Return whether a shell option token consumes the following word as its value."""
+    """Return whether a shell option token consumes the following word as its value.
+
+    ``--opt=value`` forms carry their value inline and never consume the next word; they fail
+    the membership test because no recognized long option contains ``=``.
+    """
     if literal.startswith("--"):
-        return "=" not in literal and literal in _SHELL_LONG_OPTIONS_WITH_ARGUMENTS
+        return literal in _SHELL_LONG_OPTIONS_WITH_ARGUMENTS
     return literal[-1] in "oO"
 
 
@@ -1989,7 +2044,7 @@ def _skip_shell_prefixes(
     words: list[_ShellWord],
     start: int,
     *,
-    executable_positions: list[_ExecutableCandidate] | None = None,
+    executable_positions: list[_ExecutableCandidate],
 ) -> _ResolvedIndex:
     """Skip literal shell prefixes and preserve dynamic command-position ambiguity."""
     index = start
@@ -2053,7 +2108,7 @@ def _skip_shell_builtin_wrapper(
     words: list[_ShellWord],
     index: int,
     *,
-    executable_positions: list[_ExecutableCandidate] | None = None,
+    executable_positions: list[_ExecutableCandidate],
 ) -> _ResolvedIndex:
     """Resolve one supported Bash wrapper beginning at ``index``."""
     literal = words[index].literal
@@ -2068,7 +2123,7 @@ def _skip_builtin_wrapper(
     words: list[_ShellWord],
     start: int,
     *,
-    executable_positions: list[_ExecutableCandidate] | None = None,
+    executable_positions: list[_ExecutableCandidate],
 ) -> _ResolvedIndex:
     """Expose a supported literal Bash builtin target or one ambiguous successor."""
     index = start
@@ -2085,7 +2140,7 @@ def _skip_builtin_wrapper(
         # fail-closed check. Builtin lookup is by exact name and never resolves shell
         # executables, so ``builtin bash`` fails without executing its argv and any other
         # target resolves to no reachable dispatcher.
-        if executable_positions is not None and target.literal in _PLAIN_DISPATCHER_HEADS:
+        if target.literal in _PLAIN_DISPATCHER_HEADS:
             executable_positions.append(_ExecutableCandidate(index))
         return _ResolvedIndex(None)
     return _ResolvedIndex(index)
@@ -2391,6 +2446,7 @@ def _doc_lattice_payload_index(
                 launcher_depth=launcher_depth,
                 resolution=resolution,
             )
+        resolution.mark_opaque_tail(executable_index + 1)
     return _ResolvedIndex(None)
 
 
@@ -2692,8 +2748,12 @@ def _nested_launcher_payload_index(
     ``uv`` executes an argv payload directly, so Bash-only words such as ``command`` and
     ``exec`` are not wrappers here. ``env`` is an executable prefix, however, and nested
     ``uv``/``uvx`` launchers are also executable commands; those are resolved recursively.
-    A uv positional tool requirement resolves by the console-script name uv derives from it,
-    so ``uvx uv@0.8.0 run ...`` recurses like ``uvx uv run ...``.
+    A uv positional tool requirement recurses by the console-script name uv derives from it
+    only for the ``uv``/``uvx`` launchers themselves (so ``uvx uv@0.8.0 run ...`` recurses like
+    ``uvx uv run ...``, whose PyPI distribution genuinely is uv). ``env`` and ``time`` match on
+    the raw token instead: a suffixed requirement such as ``env@1.0`` installs a PyPI
+    distribution that merely shares GNU env's name, so resolving its arguments as an env prefix
+    would assert an invocation that never executes.
     """
     resolution.step()
     payload_index = payload_resolution.index
@@ -2706,11 +2766,8 @@ def _nested_launcher_payload_index(
     resolution.executable_positions.append(
         _ExecutableCandidate(payload_index, uv_requirement=strip_version)
     )
-    basename = (
-        _uv_requirement_executable_name(payload.literal)
-        if strip_version
-        else _basename(payload.literal)
-    )
+    raw_basename = _basename(payload.literal)
+    basename = _uv_requirement_executable_name(payload.literal) if strip_version else raw_basename
     is_doc_lattice = (
         _is_doc_lattice_uv_tool_payload(payload.literal)
         if strip_version
@@ -2720,7 +2777,7 @@ def _nested_launcher_payload_index(
         return _ResolvedIndex(payload_index, payload_resolution.ambiguous)
     if launcher_depth >= _MAX_LAUNCHER_NESTING_DEPTH:
         raise _ShellScanIncomplete("launcher nesting limit exceeded")
-    if basename == "env":
+    if raw_basename == "env":
         nested_start = _skip_env_prefix(words, payload_index + 1)
         nested = _nested_launcher_payload_index(
             words,
@@ -2729,7 +2786,7 @@ def _nested_launcher_payload_index(
             launcher_depth=launcher_depth + 1,
             resolution=resolution,
         )
-    elif basename == "time":
+    elif raw_basename == "time":
         nested_start = _skip_external_time_prefix(words, payload_index + 1)
         nested = _nested_launcher_payload_index(
             words,
@@ -2753,6 +2810,7 @@ def _nested_launcher_payload_index(
             resolution=resolution,
         )
     else:
+        resolution.mark_opaque_tail(payload_index + 1)
         return _ResolvedIndex(None, payload_resolution.ambiguous)
     return _ResolvedIndex(nested.index, payload_resolution.ambiguous or nested.ambiguous)
 
@@ -3197,6 +3255,22 @@ def _is_doc_lattice_executable_basename(value: str) -> bool:
     return value.casefold() in ("doc-lattice", "doc-lattice.exe")
 
 
+def _uv_requirement_distribution_name(value: str) -> str | None:
+    """Return the distribution name of a well-formed uv positional requirement, if any.
+
+    This is the single owner of the requirement-name grammar: a leading Python distribution
+    name followed by nothing or a recognized requirement suffix (version specifier, extras,
+    direct reference, or environment marker).
+    """
+    match = _PYTHON_DISTRIBUTION_NAME_RE.match(value)
+    if match is None:
+        return None
+    suffix = value[match.end() :].lstrip()
+    if not suffix or suffix[0] in _UV_REQUIREMENT_SUFFIX_STARTS:
+        return match.group()
+    return None
+
+
 def _uv_requirement_executable_name(value: str) -> str:
     """Return the console-script name uv derives from a positional tool requirement.
 
@@ -3205,11 +3279,9 @@ def _uv_requirement_executable_name(value: str) -> str:
     rather than the raw requirement token.
     """
     value = value.strip()
-    match = _PYTHON_DISTRIBUTION_NAME_RE.match(value)
-    if match is not None:
-        suffix = value[match.end() :].lstrip()
-        if not suffix or suffix[0] in _UV_REQUIREMENT_SUFFIX_STARTS:
-            return match.group()
+    distribution_name = _uv_requirement_distribution_name(value)
+    if distribution_name is not None:
+        return distribution_name
     name = _basename(value)
     stop = next(
         (position for position, char in enumerate(name) if char in _UV_REQUIREMENT_SUFFIX_STARTS),
@@ -3224,17 +3296,11 @@ def _is_doc_lattice_uv_tool_payload(value: str) -> bool:
     executable_name = _basename(value).split("@", 1)[0]
     if _is_doc_lattice_executable_basename(executable_name):
         return True
-    match = _PYTHON_DISTRIBUTION_NAME_RE.match(value)
-    if match is None:
+    distribution_name = _uv_requirement_distribution_name(value)
+    if distribution_name is None:
         return False
-    normalized_name = _PYTHON_DISTRIBUTION_SEPARATOR_RE.sub("-", match.group()).casefold()
-    if normalized_name != "doc-lattice":
-        return False
-    suffix = value[match.end() :]
-    if not suffix:
-        return True
-    suffix = suffix.lstrip()
-    return not suffix or suffix[0] in _UV_REQUIREMENT_SUFFIX_STARTS
+    normalized_name = _PYTHON_DISTRIBUTION_SEPARATOR_RE.sub("-", distribution_name).casefold()
+    return normalized_name == "doc-lattice"
 
 
 def _is_doc_lattice_executable(word: _ShellWord) -> bool:
