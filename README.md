@@ -647,6 +647,30 @@ conversion exit 2 because Bash discards the suffix after NUL instead of placing 
 argument. Known eager uv help/version options and effective command help stop without executing a
 payload and therefore do not produce policy findings. Audit cannot prove that an arbitrary script,
 local action, reusable workflow, or renamed wrapper eventually invokes a sensitive command.
+A recognized inline dispatcher (`eval`, `source`, or `bash`, `sh`, `dash`, or `zsh` in `-c`
+command-string form) cannot have its payload parsed, so when any word of the same command
+literally names doc-lattice it exits 2 rather than being certified clean. That includes
+dispatchers reached through the recognized wrapper and launcher grammar such as `uv run bash -c`
+or `builtin eval`, and a shell head appearing in the arguments of an unrecognized program that may
+re-dispatch its argv, as in `nohup bash -c 'doc-lattice ...'` or `xargs bash -c '... doc-lattice
+...'`. A uv tool requirement given as a local wheel path resolves by its filename's distribution
+name, which uv verifies against the wheel metadata, so `uvx ./bash-1.0.0-py3-none-any.whl -c ...`
+refuses exactly like `uvx bash -c ...`; a path or URL requirement whose executable cannot be
+derived statically (a source archive, a directory, or a Git or direct URL) also exits 2 whenever
+the same command literally names doc-lattice, because the tool it installs may itself be a shell
+or doc-lattice. A dispatcher whose payload is assembled rather than written literally as an
+argument word stays within the disclosed executable-name limitation even when the assembled text
+spells doc-lattice. That covers a variable executable name, a command, process, or arithmetic
+substitution that builds the payload, and source fed from standard input by a heredoc,
+herestring, or pipe. Provably non-executing shell invocations stay certified: a pure noexec
+prefix (`bash -n -c ...`, `-nc`, or `-o noexec` with nothing else before `-c`) and the bash
+string-dump modes (`--dump-strings`, `--dump-po-strings`) never run the payload in any
+recognized shell. Any mixed form still exits 2, because execution can be re-enabled in
+shell-specific ways (`+n`, `+o noexec`, zsh `-o exec` and its spelling aliases), and the short
+`-D` dump option stays refused because zsh reads it as `PUSHD_TO_HOME` and executes normally.
+An unrecognized wrapper likewise remains a disclosed limitation for the
+non-dispatch forms: one that runs a script file (`nohup bash ./task.sh`) or passes doc-lattice
+words to a program the scanner does not model (`xargs doc-lattice ...`) is not certified against.
 Malformed, oversized, or otherwise unreliably inspectable workflows also exit 2 instead of being
 treated as safe.
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it

@@ -34,6 +34,22 @@ _SHELL_ASSIGNMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PYTHON_DISTRIBUTION_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 _PYTHON_DISTRIBUTION_SEPARATOR_RE = re.compile(r"[-_.]+")
 _UV_REQUIREMENT_SUFFIX_STARTS = frozenset("([<>=!~@;")
+# Source-archive extensions uv accepts for a path requirement; a wheel (``.whl``) is handled
+# separately because its filename carries the authoritative distribution name.
+_UV_SOURCE_ARCHIVE_SUFFIXES: tuple[str, ...] = (
+    ".zip",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz",
+    ".tar.xz",
+    ".txz",
+    ".tar.zst",
+    ".tzst",
+    ".tar",
+)
+# PEP 427 forbids ``-`` inside the wheel name segment; ASCII only, matching the marker decision.
+_WHEEL_DISTRIBUTION_NAME_RE = re.compile(r"[A-Za-z0-9._]+", re.ASCII)
 _ENV_SPLIT_STRING_LONG_OPTION = "--split-string"
 _ENV_LONG_OPTION_KINDS = {
     "--argv0": "required",
@@ -267,6 +283,32 @@ _RECONCILE_OPTIONS_WITH_ARGUMENTS = frozenset({"--config", "--format", "--ref"})
 _RECONCILE_FLAGS = frozenset({"--all", "--dry-run", "--recover"})
 _RECONCILE_NON_MUTATING_OPTIONS = frozenset({"--dry-run"})
 
+# Issue #105: inline shell dispatch fail-closed grammar. ``eval``, ``source``/``.``, and the
+# POSIX-ish shells run a payload the bounded scanner never parses, so a marker-bearing dispatch
+# is refused rather than certified clean. The marker reuses the doc-lattice distribution separator
+# family (see _is_doc_lattice_uv_tool_payload) so ``doc_lattice`` and ``doc.lattice`` are caught.
+_DISPATCHER_MARKER_RE = re.compile(
+    rf"doc{_PYTHON_DISTRIBUTION_SEPARATOR_RE.pattern}lattice", re.ASCII | re.IGNORECASE
+)
+_PLAIN_DISPATCHER_HEADS = frozenset({"eval", "source", "."})
+# bash and zsh enter restricted mode when argv[0] starts with r (rbash/rzsh) and still parse the
+# same -c invocation grammar; rsh stays out because it names the remote shell, not a restricted sh.
+_SHELL_DISPATCHER_HEADS = frozenset({"bash", "sh", "dash", "zsh", "rbash", "rzsh"})
+# Long options that consume the following word across the recognized shells: bash --rcfile and
+# --init-file, zsh --emulate (which takes a mode word and still honors a following -c). Every
+# other long option is value-less and precedes -c without ending option parsing.
+_SHELL_LONG_OPTIONS_WITH_ARGUMENTS = frozenset({"--rcfile", "--init-file", "--emulate"})
+# bash and zsh handle these eagerly at startup, printing and exiting before any -c payload
+# runs; dash exits on the unrecognized long option (verified empirically for bash and dash).
+# Either way a payload behind an eager stop option never executes. The bash dump modes
+# (--dump-strings/--dump-po-strings) belong here too: bash prints translatable strings and
+# forces a sticky noexec that a later +n cannot undo, bash rejects them after any short option,
+# and dash and zsh reject the unknown long option, so no matched shell ever runs the payload.
+# The short -D form is deliberately absent: zsh reads -D as PUSHD_TO_HOME and executes normally.
+_SHELL_EAGER_STOP_OPTIONS = frozenset(
+    {"--help", "--version", "--dump-strings", "--dump-po-strings"}
+)
+
 
 class _CommandDisposition(Enum):
     """Describe whether a recognized policy-sensitive command can run."""
@@ -440,10 +482,16 @@ class _ShellExpansion:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedIndex:
-    """A static grammar position plus ambiguity inherited from prior syntax."""
+    """A static grammar position plus ambiguity inherited from prior syntax.
+
+    ``external_lookup`` marks a position reached through ``exec``, an ``env`` prefix, or an
+    external ``time``, where command resolution is a PATH ``execve`` that can never reach a
+    shell builtin.
+    """
 
     index: int | None
     ambiguous: bool = False
+    external_lookup: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,16 +572,44 @@ class _ScanBudget:
         self.remaining_steps -= 1
 
 
+@dataclass(frozen=True, slots=True)
+class _ExecutableCandidate:
+    """One static executable-position candidate recorded during payload resolution.
+
+    ``uv_requirement`` marks a uv positional tool requirement, whose console-script name uv
+    derives by stripping the requirement suffix (as in ``uvx bash@1.0``). ``external_lookup``
+    marks a candidate resolved by a PATH ``execve`` (behind ``exec``, ``env``, external
+    ``time``, or a uv launcher); the plain dispatcher builtins have no external binaries, so
+    such a candidate can never reach ``eval``/``source``/``.``.
+    """
+
+    index: int
+    uv_requirement: bool = False
+    external_lookup: bool = False
+
+
 @dataclass(slots=True)
 class _LauncherResolutionState:
     """Shared budget and memoized states for one simple command's launcher grammar."""
 
     budget: _ScanBudget
     cache: dict[tuple[str, int, int], _ResolvedIndex] = field(default_factory=dict)
+    # Every static executable-position candidate payload resolution visited; consumed by the
+    # dispatcher fail-closed rule so it inherits the resolver's grammar rather than mirroring it.
+    executable_positions: list[_ExecutableCandidate] = field(default_factory=list)
+    # First word index past a static executable the resolver does not recognize. Everything from
+    # there on is opaque argv the unrecognized program may re-dispatch (nohup, xargs, sudo, an
+    # unknown uv tool), so the dispatcher fail-closed rule sweeps it for shell heads.
+    opaque_tail_start: int | None = None
 
     def step(self) -> None:
         """Charge speculative launcher work to the shell scanner's declared budget."""
         self.budget.step()
+
+    def mark_opaque_tail(self, start: int) -> None:
+        """Record the earliest point where resolution stopped at an unrecognized executable."""
+        if self.opaque_tail_start is None or start < self.opaque_tail_start:
+            self.opaque_tail_start = start
 
 
 class _ShellScanner:
@@ -1620,8 +1696,13 @@ def direct_doc_lattice_invocations(
     """Return conservative direct doc-lattice commands from literal Bash syntax.
 
     The scanner is bounded, recursive, and non-executing. It intentionally does not resolve
-    aliases, functions, variables used as executable names, ``eval``/``source``, ``sh -c`` or
-    ``bash -c``, external wrapper scripts, actions, or reusable workflows.
+    aliases, functions, variables used as executable names, external wrapper scripts, actions, or
+    reusable workflows. It also never parses the payload of an inline dispatcher (``eval``,
+    ``source``/``.``, or ``sh``/``bash``/``dash``/``zsh -c``, including a shell head sitting in
+    the argv of an unrecognized wrapper program such as ``nohup`` or ``xargs``); when such a
+    dispatcher's simple command literally names doc-lattice the scan fails closed and raises
+    ``ConfigError`` rather than returning an empty complete result, while marker-free dispatch
+    stays unresolved and complete.
 
     Args:
         script: Literal Bash source to scan.
@@ -1647,6 +1728,7 @@ def _invocation_in_simple_command(
     resolution = _LauncherResolutionState(budget)
     executable = _doc_lattice_command_index(words, 0, resolution)
     if executable.index is None:
+        _reject_marker_bearing_dispatcher(words, resolution)
         return None
     subcommand_resolution = _doc_lattice_subcommand_index(words, executable.index + 1)
     if executable.ambiguous or subcommand_resolution.ambiguous:
@@ -1688,6 +1770,297 @@ def _invocation_in_simple_command(
     if disposition is _CommandDisposition.NON_EXECUTING:
         return None
     return subcommand.literal, disposition is _CommandDisposition.NON_MUTATING
+
+
+def _reject_marker_bearing_dispatcher(
+    words: list[_ShellWord],
+    resolution: _LauncherResolutionState,
+) -> None:
+    """Fail closed when a reachable inline dispatcher carries a doc-lattice marker.
+
+    ``eval``, ``source``/``.``, and ``bash``/``sh``/``dash``/``zsh -c`` run an inline payload the
+    bounded scanner never parses. When such a dispatcher is reachable and the simple command
+    literally names doc-lattice anywhere in its words (including leading assignment words, which
+    the child shell inherits), the scan refuses instead of certifying the source clean. Two
+    detections feed the rule:
+
+    - The executable-position candidates recorded by payload resolution itself
+      (``resolution.executable_positions``), so it inherits the assignment, keyword, wrapper,
+      ``coproc``, builtin-target, and launcher (``env``/``time``/``uv``/``uvx``) grammar instead
+      of mirroring it. A uv positional tool requirement head is compared after stripping the
+      requirement suffix, mirroring the console-script name uv resolves (so ``uvx bash@1.0 -c
+      ...`` refuses like ``uvx bash -c ...``). A uv wheel-path requirement resolves by its
+      filename's distribution segment (uv enforces filename/metadata name agreement); other path
+      or URL requirements are statically underivable and refuse whenever marker-bearing. Plain
+      heads match only the exact command words
+      ``eval``/``source``/``.``: shells run those builtins for no other spelling, so a
+      slash-qualified ``./eval`` is a path execution of an external file (the disclosed wrapper
+      limitation) and ``EVAL`` or ``eval.exe`` PATH-search external names the builtins never
+      own. Shell heads keep basename matching because ``/bin/bash -c`` dispatches exactly like
+      ``bash -c``.
+    - The opaque tail past the earliest unrecognized static executable
+      (``resolution.opaque_tail_start``). An unrecognized program such as ``nohup``, ``xargs``,
+      ``sudo``, or an unknown uv tool may re-dispatch its argv, so any shell head found there is
+      treated as reachable. Plain heads stay candidate-only in the tail: ``eval``/``source``/``.``
+      are shell builtins no external wrapper can execute, and sweeping them would fail closed on
+      benign words such as the ``.`` operand of ``find``.
+
+    Only literal markers fire; a dynamic head or a payload fed from standard input remains the
+    disclosed executable-name limitation. Head detection is a cheap frozenset test per word and
+    runs first, so the marker regex pass and its budget charges are skipped for the overwhelming
+    majority of commands, which contain no dispatcher-shaped word at all.
+
+    Args:
+        words: The decoded words of one simple command, including any leading assignments.
+        resolution: The launcher resolution state whose ``executable_positions`` and
+            ``opaque_tail_start`` record what payload resolution visited and where it stopped.
+
+    Raises:
+        _ShellScanIncomplete: If the command is a marker-bearing reachable dispatcher.
+    """
+    plain_dispatch, walk_starts = _reachable_dispatcher_heads(words, resolution)
+    if not plain_dispatch and not walk_starts:
+        return
+
+    for word in words:
+        resolution.step()
+        if _DISPATCHER_MARKER_RE.search(word.literal):
+            break
+    else:
+        return
+
+    if plain_dispatch:
+        raise _ShellScanIncomplete("inline dispatcher command cannot be scanned safely")
+    for start in walk_starts:
+        if _shell_dispatcher_runs_inline_command(words, start, resolution.budget):
+            raise _ShellScanIncomplete("inline dispatcher command cannot be scanned safely")
+
+
+def _reachable_dispatcher_heads(
+    words: list[_ShellWord],
+    resolution: _LauncherResolutionState,
+) -> tuple[bool, list[int]]:
+    """Collect reachable dispatcher heads: a plain-head flag and shell-head walk starts.
+
+    Combines the resolver-recorded executable candidates with a shell-head sweep of the opaque
+    tail past the earliest unrecognized executable. Uses only uncharged frozenset membership
+    tests so it can gate the charged marker pass. A uv wheel-path requirement resolves by its
+    filename's distribution segment, but a source archive, directory, or URL requirement is a
+    statically underivable head that fails closed like a plain dispatcher when marker-bearing.
+    """
+    plain_dispatch = False
+    walk_starts: list[int] = []
+    # Membership is tested per opaque-tail word, so it has to stay a set: an argv of many
+    # shell-looking words near the accepted source size limit would otherwise make this
+    # uncharged dedup quadratic and stall the scan before the budget can stop it.
+    seen_starts: set[int] = set()
+    classified_candidates: set[_ExecutableCandidate] = set()
+    for candidate in resolution.executable_positions:
+        if candidate in classified_candidates:
+            continue
+        classified_candidates.add(candidate)
+        head_word = words[candidate.index]
+        head = (
+            _uv_requirement_executable_name(head_word.literal)
+            if candidate.uv_requirement
+            else head_word.literal
+        )
+        if head is None:
+            # A uv path requirement whose executable is statically underivable (source archive,
+            # directory, or URL). uv genuinely runs the tool and its identity is unknowable (it may
+            # itself be doc-lattice or a shell), so provenance gating cannot apply; a marker
+            # anywhere in the command must fail closed exactly like a plain dispatcher.
+            plain_dispatch = True
+            continue
+        if head in _PLAIN_DISPATCHER_HEADS:
+            # Shells run the plain dispatcher builtins only for the exact command words
+            # eval/source/.; a slash-qualified word such as ./eval is a path execution of an
+            # external file, and eval/source/. have no external binaries, so a candidate
+            # resolved by a PATH execve (exec eval, env source, uv run eval) fails at runtime
+            # without executing its argv and stays certified.
+            plain_dispatch = plain_dispatch or not candidate.external_lookup
+        elif _normalize_dispatcher_head(_basename(head)) in _SHELL_DISPATCHER_HEADS:
+            _record_walk_start(candidate.index + 1, walk_starts, seen_starts)
+    if resolution.opaque_tail_start is not None:
+        for index in range(resolution.opaque_tail_start, len(words)):
+            word = words[index]
+            if word.dynamic:
+                continue
+            name = _normalize_dispatcher_head(_basename(word.literal))
+            if name in _SHELL_DISPATCHER_HEADS:
+                _record_walk_start(index + 1, walk_starts, seen_starts)
+    return plain_dispatch, walk_starts
+
+
+def _record_walk_start(start: int, walk_starts: list[int], seen_starts: set[int]) -> None:
+    """Record one argv walk start, keeping the collected order and deduplicating in constant time.
+
+    Args:
+        start: The index of the first argv word following a shell dispatcher head.
+        walk_starts: The ordered starts collected so far.
+        seen_starts: The companion membership set; a list scan here would be quadratic.
+    """
+    if start not in seen_starts:
+        seen_starts.add(start)
+        walk_starts.append(start)
+
+
+def _normalize_dispatcher_head(head: str) -> str:
+    """Normalize a possible dispatcher head for comparison against the head sets.
+
+    Windows runners launch the same shells as bash.exe/sh.exe; the scanner already accepts
+    doc-lattice.exe as the doc-lattice executable, so dispatcher heads strip the suffix too.
+    """
+    return head.casefold().removesuffix(".exe")
+
+
+def _shell_dispatcher_runs_inline_command(
+    words: list[_ShellWord], start: int, budget: _ScanBudget
+) -> bool:
+    """Return whether a shell dispatcher argv selects an inline ``-c`` command.
+
+    Returns True when the option grammar contains ``-c`` (standalone, inside a short cluster, or
+    as a ``+c`` cluster, which Bash-family shells also execute as an inline command) or a dynamic
+    selector word leaves the presence of ``-c`` unresolvable, both of which mean the scanner
+    cannot rule out an inline payload. A value-consuming option whose value can add or remove argv
+    fields (for example ``-o $X``) is equally unresolvable, because the expansion can smuggle a
+    later ``-c`` past this walk. Returns False when the options resolve to an operand or ``--``
+    terminator, meaning the shell runs an external script file rather than inline source, and
+    when an eager stop (``--help``/``--version``/the bash dump modes) precedes ``-c``, meaning
+    the shell prints and exits (or rejects the option) before any payload runs.
+
+    A pure noexec option region is the one non-executing ``-c`` form this walk certifies: every
+    option word up to the operand is exactly ``-n`` or ``-o`` with the static value ``noexec``,
+    and the ``-``-signed ``c`` trigger cluster contains only the letters c and n. The region
+    extends past the trigger because selecting ``-c`` does not end invocation-option parsing, so
+    a later re-enable such as ``bash -n -c +n 'payload'`` still executes the command string
+    (verified on bash, dash, sh, and zsh). All matched shells
+    read but never execute the payload for that shape (verified for bash, dash, and rbash;
+    documented NO_EXEC for zsh). Anything beyond it stays refused, because execution can be
+    re-enabled downstream in shell-specific ways this walk does not model: ``+n`` and ``+o
+    noexec`` verifiably re-enable, and zsh aliases the option as ``-o exec``/``--exec``/``-o
+    no_exec`` (case and underscores ignored, ``no`` prefixes invert), so only the exact-spelling,
+    setter-only prefix is provably inert across the head set.
+
+    zsh's ``-b``/``+b`` invocation flag diverges like the lone ``+`` recorded on
+    ``_is_shell_option_token``: it ends option processing for the following words, so
+    ``zsh -b -c 'cmd'`` reads ``-c`` as a script operand and never dispatches (verified on zsh
+    5.9, including under an ``sh`` argv[0]). This walk deliberately does not stop there: bash,
+    dash, and sh all execute the ``-b -c`` payload (verified), ``zsh -bc`` executes because the
+    terminator only affects later words, and head-scoping the stop would buy a certified-clean
+    path for a construct no workflow writes. The divergence only ever makes this walk
+    over-refuse, never miss a dispatch.
+
+    Args:
+        words: The decoded words of the whole simple command.
+        start: The index of the first word following the shell dispatcher head.
+        budget: The shared scan budget to charge for each inspected argv word.
+    """
+    index = start
+    noexec = False
+    pure_noexec_prefix = True
+    inline_selected = False
+    while index < len(words):
+        budget.step()
+        word = words[index]
+        if _word_may_change_argv(word):
+            return True
+        literal = word.literal
+        if not _is_shell_option_token(literal) or literal in _SHELL_EAGER_STOP_OPTIONS:
+            # An operand or terminator means an external script file rather than inline source,
+            # and an eager stop means the shell prints and exits (or rejects the option) before
+            # any selected payload runs.
+            return False
+        if not literal.startswith("--") and "c" in literal[1:]:
+            # A short cluster containing c selects the -c inline-command option; bash, sh, and
+            # dash execute a + cluster such as +c the same way. Long options such as --norc or
+            # --rcfile also contain the letter but never select -c.
+            if not _is_pure_noexec_trigger(literal, pure_noexec_prefix, noexec):
+                return True
+            # Selecting -c does not end invocation-option parsing: the shells keep reading
+            # option words until an operand, so a later re-enable still executes the command
+            # string (``bash -n -c +n 'payload'`` verifiably runs the payload on bash, dash,
+            # sh, and zsh). The pure-noexec certification therefore has to hold for the whole
+            # option region, not just the prefix before the trigger.
+            inline_selected = True
+            noexec = True
+            index += 1
+            continue
+        consumes_value = _shell_option_consumes_value(literal)
+        value = words[index + 1] if consumes_value and index + 1 < len(words) else None
+        if value is not None:
+            budget.step()
+            if _word_may_change_option_value_shape(value):
+                # An unquoted dynamic value such as ``-o $X`` can expand into extra words
+                # (``-o errexit -c``), smuggling -c past this walk, so its presence leaves
+                # the grammar unresolvable.
+                return True
+        if _is_noexec_setter(literal, value):
+            noexec = True
+        else:
+            pure_noexec_prefix = False
+            if inline_selected:
+                return True
+        index += 2 if consumes_value else 1
+    return False
+
+
+def _is_noexec_setter(literal: str, value: _ShellWord | None) -> bool:
+    """Return whether an option word verbatim enables noexec in every recognized shell.
+
+    Only the exact spellings ``-n`` and ``-o`` with the static value ``noexec`` qualify; looser
+    spellings that some shells alias (case, underscores, ``no`` prefixes) are not treated as
+    setters because certification requires uniform behavior across the whole head set.
+    """
+    if literal == "-n":
+        return True
+    return literal == "-o" and value is not None and not value.dynamic and value.literal == "noexec"
+
+
+def _is_pure_noexec_trigger(literal: str, pure_noexec_prefix: bool, noexec: bool) -> bool:
+    """Return whether a c-selecting cluster completes a provably non-executing invocation.
+
+    The trigger must be ``-``-signed (bash runs ``+nc`` despite the noexec letter because ``+``
+    unsets n), contain only the letters c and n, and follow a prefix made purely of noexec
+    setters, with noexec enabled by the prefix or by the trigger's own n.
+    """
+    cluster = set(literal[1:])
+    return (
+        literal.startswith("-")
+        and pure_noexec_prefix
+        and cluster <= {"c", "n"}
+        and (noexec or "n" in cluster)
+    )
+
+
+def _is_shell_option_token(literal: str) -> bool:
+    """Return whether a word is a shell option cluster rather than an operand or terminator.
+
+    Bash-family shells consume a lone ``+`` as a no-op options word and keep parsing options, so
+    it is an (empty) option cluster here (verified: ``bash + -c`` and ``dash + -c`` both execute
+    the payload). A lone ``-`` or ``--`` instead ends option parsing, so the next word is an
+    operand rather than a later ``-c``.
+
+    The check stays head-agnostic even though zsh diverges: ``zsh + -c`` and ``zsh +- -c`` end
+    option processing in any position, so ``-c`` becomes a script operand and the payload never
+    runs (verified on zsh 5.9; a non-empty cluster such as ``zsh +x -c`` still executes). That
+    divergence only ever makes this walk over-refuse, and scoping ``+`` to the zsh heads would
+    buy a certified-clean path for a construct no workflow writes while leaving ``sh`` (which
+    may itself be zsh) refused anyway. Refusing a no-op ``+`` costs an author one deletable
+    character; the head-agnostic rule is the cheaper side of the trade.
+    """
+    return literal not in ("", "-", "--") and literal[0] in "-+"
+
+
+def _shell_option_consumes_value(literal: str) -> bool:
+    """Return whether a shell option token consumes the following word as its value.
+
+    ``--opt=value`` forms carry their value inline and never consume the next word; they fail
+    the membership test because no recognized long option contains ``=``.
+    """
+    if literal.startswith("--"):
+        return literal in _SHELL_LONG_OPTIONS_WITH_ARGUMENTS
+    return literal[-1] in "oO"
 
 
 def _classify_command_disposition(
@@ -1822,8 +2195,21 @@ def _has_active_argv_expansion(syntax: str) -> bool:
     return False
 
 
-def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
-    """Skip literal shell prefixes and preserve dynamic command-position ambiguity."""
+def _skip_shell_prefixes(
+    words: list[_ShellWord],
+    start: int,
+    *,
+    executable_positions: list[_ExecutableCandidate],
+    external_lookup: bool = False,
+) -> _ResolvedIndex:
+    """Skip literal shell prefixes and preserve dynamic command-position ambiguity.
+
+    ``exec``, an ``env`` prefix, and an external ``time`` resolve their successor with a PATH
+    execve rather than shell command lookup; once crossed, no later position can reach a shell
+    builtin. The ``time`` keyword stays shell lookup: ``time eval ...`` runs the builtin.
+    Callers that resume resolution inside an already-resolved command pass the provenance in so
+    it is not lost at the restart.
+    """
     index = start
     ambiguous = False
     while index < len(words):
@@ -1836,7 +2222,7 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
             index += 1
             continue
         if word.dynamic:
-            return _ResolvedIndex(index, ambiguous)
+            return _ResolvedIndex(index, ambiguous, external_lookup)
         if word.keyword_eligible and word.literal in _COMMAND_PREFIXES:
             index += 1
             continue
@@ -1856,14 +2242,20 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
                 index += 1
             continue
         if _basename(word.literal) == "env":
-            return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous)
+            return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous, True)
         if word.literal in {"builtin", "command", "exec"}:
             wrapper_literal = word.literal
-            wrapper = _skip_shell_builtin_wrapper(words, index)
+            wrapper = _skip_shell_builtin_wrapper(
+                words,
+                index,
+                executable_positions=executable_positions,
+                external_lookup=external_lookup,
+            )
             if wrapper.index is None:
-                return _ResolvedIndex(None, ambiguous or wrapper.ambiguous)
+                return _ResolvedIndex(None, ambiguous or wrapper.ambiguous, external_lookup)
             index = wrapper.index
             ambiguous = ambiguous or wrapper.ambiguous
+            external_lookup = external_lookup or wrapper_literal == "exec"
             if (
                 wrapper_literal in {"command", "exec"}
                 and index < len(words)
@@ -1873,24 +2265,48 @@ def _skip_shell_prefixes(words: list[_ShellWord], start: int) -> _ResolvedIndex:
                 return _ResolvedIndex(
                     _skip_external_time_prefix(words, index + 1),
                     ambiguous,
+                    True,
                 )
             continue
-        return _ResolvedIndex(index, ambiguous)
-    return _ResolvedIndex(index, ambiguous)
+        return _ResolvedIndex(index, ambiguous, external_lookup)
+    return _ResolvedIndex(index, ambiguous, external_lookup)
 
 
-def _skip_shell_builtin_wrapper(words: list[_ShellWord], index: int) -> _ResolvedIndex:
+def _skip_shell_builtin_wrapper(
+    words: list[_ShellWord],
+    index: int,
+    *,
+    executable_positions: list[_ExecutableCandidate],
+    external_lookup: bool,
+) -> _ResolvedIndex:
     """Resolve one supported Bash wrapper beginning at ``index``."""
     literal = words[index].literal
     if literal == "builtin":
-        return _skip_builtin_wrapper(words, index + 1)
+        return _skip_builtin_wrapper(
+            words,
+            index + 1,
+            executable_positions=executable_positions,
+            external_lookup=external_lookup,
+        )
     if literal == "command":
         return _skip_command_builtin(words, index + 1)
     return _skip_exec_wrapper(words, index + 1)
 
 
-def _skip_builtin_wrapper(words: list[_ShellWord], start: int) -> _ResolvedIndex:
-    """Expose a supported literal Bash builtin target or one ambiguous successor."""
+def _skip_builtin_wrapper(
+    words: list[_ShellWord],
+    start: int,
+    *,
+    executable_positions: list[_ExecutableCandidate],
+    external_lookup: bool,
+) -> _ResolvedIndex:
+    """Expose a supported literal Bash builtin target or one ambiguous successor.
+
+    ``external_lookup`` records that an enclosing prefix already switched resolution to a PATH
+    execve. ``builtin`` is a shell builtin with no external binary, so ``exec builtin eval ...``
+    fails the execve (exit 127) and never reaches the dispatcher; the provenance rides along on
+    the recorded target so the fail-closed rule keeps certifying that shape.
+    """
     index = start
     if index < len(words) and not words[index].dynamic and words[index].literal == "--":
         index += 1
@@ -1900,6 +2316,15 @@ def _skip_builtin_wrapper(words: list[_ShellWord], start: int) -> _ResolvedIndex
     if _command_boundary_word_may_disappear(target) or target.dynamic:
         return _ResolvedIndex(index + 1, ambiguous=True)
     if target.literal not in {"builtin", "command", "exec"}:
+        # ``builtin eval``/``builtin source``/``builtin .`` execute a dispatcher builtin the
+        # doc-lattice resolver cannot parse, so record those targets for the dispatcher
+        # fail-closed check. Builtin lookup is by exact name and never resolves shell
+        # executables, so ``builtin bash`` fails without executing its argv and any other
+        # target resolves to no reachable dispatcher.
+        if target.literal in _PLAIN_DISPATCHER_HEADS:
+            executable_positions.append(
+                _ExecutableCandidate(index, external_lookup=external_lookup)
+            )
         return _ResolvedIndex(None)
     return _ResolvedIndex(index)
 
@@ -2097,12 +2522,28 @@ def _doc_lattice_command_index(
     resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve one direct command, including an optional named Bash coprocess."""
-    command = _skip_shell_prefixes(words, start)
+    command = _skip_shell_prefixes(
+        words, start, executable_positions=resolution.executable_positions
+    )
     if command.index is None:
         return command
     command_index = command.index
     if (
+        command.external_lookup
+        and not command.ambiguous
+        and command_index < len(words)
+        and not words[command_index].dynamic
+        and words[command_index].literal == "coproc"
+    ):
+        # A PATH-execve prefix (exec, env prefix, external time) executes the word ``coproc``
+        # itself; coproc is a shell keyword with no external binary, so the execve fails with
+        # exit 127 before any later word runs. Exact literal only, no keyword-eligibility
+        # requirement: quoting cannot change an execve argument, and ``./coproc`` names a real
+        # file that may re-dispatch, mirroring the exact-literal plain-head posture.
+        return _ResolvedIndex(None)
+    if (
         command_index < len(words)
+        and not command.external_lookup
         and not words[command_index].dynamic
         and words[command_index].keyword_eligible
         and words[command_index].literal == "coproc"
@@ -2111,9 +2552,12 @@ def _doc_lattice_command_index(
             words,
             command_index + 1,
             resolution,
+            external_lookup=command.external_lookup,
         )
     else:
-        payload_index = _doc_lattice_payload_index(words, command_index, resolution)
+        payload_index = _doc_lattice_payload_index(
+            words, command_index, resolution, external_lookup=command.external_lookup
+        )
     if payload_index.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2128,9 +2572,13 @@ def _coproc_doc_lattice_command_index(
     words: list[_ShellWord],
     start: int,
     resolution: _LauncherResolutionState,
+    *,
+    external_lookup: bool,
 ) -> _ResolvedIndex:
     """Resolve the unnamed command or one optional literal coprocess name."""
-    unnamed = _doc_lattice_command_after_prefixes(words, start, resolution)
+    unnamed = _doc_lattice_command_after_prefixes(
+        words, start, resolution, external_lookup=external_lookup
+    )
     if unnamed.index is not None:
         return unnamed
     if start >= len(words):
@@ -2138,7 +2586,9 @@ def _coproc_doc_lattice_command_index(
     name = words[start]
     if name.dynamic or not _is_name(name.literal):
         return unnamed
-    named = _doc_lattice_command_after_prefixes(words, start + 1, resolution)
+    named = _doc_lattice_command_after_prefixes(
+        words, start + 1, resolution, external_lookup=external_lookup
+    )
     return _ResolvedIndex(named.index, unnamed.ambiguous or named.ambiguous)
 
 
@@ -2146,12 +2596,28 @@ def _doc_lattice_command_after_prefixes(
     words: list[_ShellWord],
     start: int,
     resolution: _LauncherResolutionState,
+    *,
+    external_lookup: bool = False,
 ) -> _ResolvedIndex:
-    """Reuse normal prefix, wrapper, and payload resolution from one command start."""
-    executable = _skip_shell_prefixes(words, start)
+    """Reuse normal prefix, wrapper, and payload resolution from one command start.
+
+    ``external_lookup`` carries provenance from the enclosing command so a coprocess body behind
+    a PATH-execve prefix keeps it. In the unambiguous case ``exec coproc eval ...`` is certified by
+    the early return in ``_doc_lattice_command_index``, which execves ``coproc`` (a shell keyword
+    with no external binary) so the dispatcher is never reached; the parameter still carries
+    provenance for the ambiguous fall-through and for resolving a coprocess body.
+    """
+    executable = _skip_shell_prefixes(
+        words,
+        start,
+        executable_positions=resolution.executable_positions,
+        external_lookup=external_lookup,
+    )
     if executable.index is None:
         return executable
-    payload = _doc_lattice_payload_index(words, executable.index, resolution)
+    payload = _doc_lattice_payload_index(
+        words, executable.index, resolution, external_lookup=executable.external_lookup
+    )
     if payload.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2167,6 +2633,7 @@ def _doc_lattice_payload_index(
     executable_index: int,
     resolution: _LauncherResolutionState,
     *,
+    external_lookup: bool = False,
     launcher_depth: int = 0,
 ) -> _ResolvedIndex:
     if executable_index >= len(words):
@@ -2176,6 +2643,9 @@ def _doc_lattice_payload_index(
     if _is_doc_lattice_executable(executable_word):
         return _ResolvedIndex(executable_index)
     if not executable_word.dynamic:
+        resolution.executable_positions.append(
+            _ExecutableCandidate(executable_index, external_lookup=external_lookup)
+        )
         executable = _basename(executable_word.literal)
         if executable in {"env", "time"}:
             return _nested_launcher_payload_index(
@@ -2199,6 +2669,7 @@ def _doc_lattice_payload_index(
                 launcher_depth=launcher_depth,
                 resolution=resolution,
             )
+        resolution.mark_opaque_tail(executable_index + 1)
     return _ResolvedIndex(None)
 
 
@@ -2500,6 +2971,12 @@ def _nested_launcher_payload_index(
     ``uv`` executes an argv payload directly, so Bash-only words such as ``command`` and
     ``exec`` are not wrappers here. ``env`` is an executable prefix, however, and nested
     ``uv``/``uvx`` launchers are also executable commands; those are resolved recursively.
+    A uv positional tool requirement recurses by the console-script name uv derives from it
+    only for the ``uv``/``uvx`` launchers themselves (so ``uvx uv@0.8.0 run ...`` recurses like
+    ``uvx uv run ...``, whose PyPI distribution genuinely is uv). ``env`` and ``time`` match on
+    the raw token instead: a suffixed requirement such as ``env@1.0`` installs a PyPI
+    distribution that merely shares GNU env's name, so resolving its arguments as an env prefix
+    would assert an invocation that never executes.
     """
     resolution.step()
     payload_index = payload_resolution.index
@@ -2509,17 +2986,23 @@ def _nested_launcher_payload_index(
     _reject_unsafe_executable_word(payload)
     if payload.dynamic:
         return _ResolvedIndex(None, payload_resolution.ambiguous)
-    basename = _basename(payload.literal)
+    # uv, env, and external time all execve their payloads, so a plain dispatcher builtin is
+    # never reachable from a nested launcher position.
+    resolution.executable_positions.append(
+        _ExecutableCandidate(payload_index, uv_requirement=strip_version, external_lookup=True)
+    )
+    raw_basename = _basename(payload.literal)
+    basename = _uv_requirement_executable_name(payload.literal) if strip_version else raw_basename
     is_doc_lattice = (
         _is_doc_lattice_uv_tool_payload(payload.literal)
         if strip_version
-        else _is_doc_lattice_executable_basename(basename)
+        else _is_doc_lattice_executable_basename(raw_basename)
     )
     if is_doc_lattice:
         return _ResolvedIndex(payload_index, payload_resolution.ambiguous)
     if launcher_depth >= _MAX_LAUNCHER_NESTING_DEPTH:
         raise _ShellScanIncomplete("launcher nesting limit exceeded")
-    if basename == "env":
+    if raw_basename == "env":
         nested_start = _skip_env_prefix(words, payload_index + 1)
         nested = _nested_launcher_payload_index(
             words,
@@ -2528,7 +3011,7 @@ def _nested_launcher_payload_index(
             launcher_depth=launcher_depth + 1,
             resolution=resolution,
         )
-    elif basename == "time":
+    elif raw_basename == "time":
         nested_start = _skip_external_time_prefix(words, payload_index + 1)
         nested = _nested_launcher_payload_index(
             words,
@@ -2552,6 +3035,7 @@ def _nested_launcher_payload_index(
             resolution=resolution,
         )
     else:
+        resolution.mark_opaque_tail(payload_index + 1)
         return _ResolvedIndex(None, payload_resolution.ambiguous)
     return _ResolvedIndex(nested.index, payload_resolution.ambiguous or nested.ambiguous)
 
@@ -2996,23 +3480,117 @@ def _is_doc_lattice_executable_basename(value: str) -> bool:
     return value.casefold() in ("doc-lattice", "doc-lattice.exe")
 
 
+def _uv_requirement_distribution_name(value: str) -> str | None:
+    """Return the distribution name of a well-formed uv positional requirement, if any.
+
+    This is the single owner of the requirement-name grammar: a leading Python distribution
+    name followed by nothing or a recognized requirement suffix (version specifier, extras,
+    direct reference, or environment marker).
+    """
+    match = _PYTHON_DISTRIBUTION_NAME_RE.match(value)
+    if match is None:
+        return None
+    suffix = value[match.end() :].lstrip()
+    if not suffix or suffix[0] in _UV_REQUIREMENT_SUFFIX_STARTS:
+        return match.group()
+    return None
+
+
+def _uv_requirement_is_path(value: str) -> bool:
+    """Return whether a uv positional requirement is a filesystem path rather than a bare name.
+
+    uv treats ``.``/``..``, any token containing a path separator, and any token whose casefolded
+    name ends in a wheel or source-archive suffix as a local path requirement.
+    """
+    if value in (".", ".."):
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    folded = value.casefold()
+    return folded.endswith(".whl") or folded.endswith(_UV_SOURCE_ARCHIVE_SUFFIXES)
+
+
+def _wheel_distribution_name(value: str) -> str | None:
+    """Return the distribution name a wheel filename declares, or None if it does not parse.
+
+    uv rejects a wheel whose filename-derived name disagrees with the packaged metadata name, so
+    the wheel filename's distribution segment is the authoritative console-script identity. The
+    filename must follow PEP 427 (``name-version[-build]-python-abi-platform``); the name segment
+    is ASCII ``[A-Za-z0-9._]+`` because PEP 427 escaping forbids ``-`` inside it.
+    """
+    basename = _basename(value.replace("\\", "/"))
+    if not basename.casefold().endswith(".whl"):
+        return None
+    stem = basename[:-4]
+    segments = stem.split("-")
+    if len(segments) not in (5, 6):
+        return None
+    name = segments[0]
+    if not name or _WHEEL_DISTRIBUTION_NAME_RE.fullmatch(name) is None:
+        return None
+    return name
+
+
+def _uv_requirement_executable_name(value: str) -> str | None:
+    """Return the console-script name uv derives from a positional tool requirement, or None.
+
+    ``uvx bash@1.0`` and the ``uv tool run`` long form strip the requirement suffix and run
+    the console script named ``bash``, so dispatcher-head matching compares the stripped name
+    rather than the raw requirement token. A wheel path resolves by its filename's distribution
+    segment, because uv enforces filename/metadata name agreement for wheels. None means a path
+    requirement whose executable cannot be derived statically (a source archive, a directory, or a
+    URL), which callers must treat as fail-closed when marker-bearing.
+    """
+    value = value.strip()
+    distribution_name = _uv_requirement_distribution_name(value)
+    # A declared name in a direct reference (``bash@...``, ``not-bash @ file://...``) leaves a
+    # requirement suffix, so the grammar match is a proper prefix; that declared name wins. A bare
+    # wheel or archive filename is itself a valid PEP 503 name the grammar consumes whole, but uv
+    # treats it as a path, so it is routed to the path branch below rather than resolved by name.
+    if distribution_name is not None and not (
+        distribution_name == value and _uv_requirement_is_path(value)
+    ):
+        return distribution_name
+    if _uv_requirement_is_path(value):
+        wheel_name = _wheel_distribution_name(value)
+        if wheel_name is not None:
+            return wheel_name
+        fallback = _uv_requirement_basename_fallback(value)
+        return fallback if _is_doc_lattice_executable_basename(fallback) else None
+    return _uv_requirement_basename_fallback(value)
+
+
+def _uv_requirement_basename_fallback(value: str) -> str:
+    """Return the basename with a trailing requirement suffix stripped (non-grammar fallback)."""
+    name = _basename(value)
+    stop = next(
+        (position for position, char in enumerate(name) if char in _UV_REQUIREMENT_SUFFIX_STARTS),
+        None,
+    )
+    return name if stop is None else name[:stop].rstrip()
+
+
 def _is_doc_lattice_uv_tool_payload(value: str) -> bool:
-    """Return whether a uv tool payload names the doc-lattice executable or distribution."""
+    """Return whether a uv tool payload names the doc-lattice executable or distribution.
+
+    A wheel path is matched by its filename's distribution segment: uv verifies the wheel metadata
+    name against the filename, so ``uvx ./dist/doc_lattice-2.0.0-py3-none-any.whl`` is the
+    project's own console script and its mutating invocation is not silently certified.
+    """
     value = value.lstrip()
     executable_name = _basename(value).split("@", 1)[0]
     if _is_doc_lattice_executable_basename(executable_name):
         return True
-    match = _PYTHON_DISTRIBUTION_NAME_RE.match(value)
-    if match is None:
+    distribution_name = _uv_requirement_distribution_name(value)
+    # A bare wheel filename is itself a valid PEP 503 name the grammar consumes whole, but uv
+    # treats it as a path, so it resolves by its filename's distribution segment exactly like the
+    # slash-qualified form.
+    if _uv_requirement_is_path(value) and distribution_name in (None, value):
+        distribution_name = _wheel_distribution_name(value)
+    if distribution_name is None:
         return False
-    normalized_name = _PYTHON_DISTRIBUTION_SEPARATOR_RE.sub("-", match.group()).casefold()
-    if normalized_name != "doc-lattice":
-        return False
-    suffix = value[match.end() :]
-    if not suffix:
-        return True
-    suffix = suffix.lstrip()
-    return not suffix or suffix[0] in _UV_REQUIREMENT_SUFFIX_STARTS
+    normalized_name = _PYTHON_DISTRIBUTION_SEPARATOR_RE.sub("-", distribution_name).casefold()
+    return normalized_name == "doc-lattice"
 
 
 def _is_doc_lattice_executable(word: _ShellWord) -> bool:

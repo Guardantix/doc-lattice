@@ -11,9 +11,16 @@ from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_ROOT_OPTIONS,
     _RECONCILE_FLAGS,
     _RECONCILE_OPTIONS_WITH_ARGUMENTS,
+    _ExecutableCandidate,
+    _LauncherResolutionState,
+    _reject_marker_bearing_dispatcher,
     _ScanBudget,
     _ShellScanIncomplete,
     _ShellScanner,
+    _ShellWord,
+    _uv_requirement_executable_name,
+    _uv_requirement_is_path,
+    _wheel_distribution_name,
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
 )
@@ -547,6 +554,10 @@ def test_direct_doc_lattice_invocations_fails_closed_on_dynamic_relative_executa
         ("uvx /usr/bin/time -p doc-lattice linear", LINEAR),
         ("uv run env X=1 time doc-lattice linear", LINEAR),
         ("uv run uvx doc-lattice linear", LINEAR),
+        ("uvx uv@0.8.0 run doc-lattice linear", LINEAR),
+        ("uv tool run uvx@0.8.0 doc-lattice reconcile --all", RECONCILE),
+        ("uvx ./dist/doc_lattice-2.0.0-py3-none-any.whl reconcile", RECONCILE),
+        ("uvx doc_lattice-2.0.0-py3-none-any.whl reconcile", RECONCILE),
         ("/usr/bin/time doc-lattice linear", LINEAR),
         ("env /usr/bin/time -p doc-lattice linear", LINEAR),
         ("env time -- doc-lattice linear", LINEAR),
@@ -561,6 +572,70 @@ def test_direct_doc_lattice_invocations_handles_root_options_and_compound_gramma
     expected,
 ):
     assert direct_doc_lattice_invocations(script) == expected
+
+
+def test_direct_doc_lattice_invocations_certifies_exec_coproc_word():
+    # A PATH-execve prefix runs the shell keyword ``coproc`` itself, which has no external binary,
+    # so the execve fails (exit 127) and no later word runs: no invocation, scan completes.
+    script = "exec coproc doc-lattice reconcile"
+    result = scan_doc_lattice_invocations(script)
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+    assert direct_doc_lattice_invocations(script) == NONE
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("bash-1.0.0-py3-none-any.whl", "bash"),
+        ("bash-1.0.0-py2.py3-none-any.whl", "bash"),
+        ("./dist/doc_lattice-2.0.0-py3-none-any.whl", "doc_lattice"),
+        ("bash-1.0.0-1-py3-none-any.whl", "bash"),
+        (".\\dist\\bash-1.0.0-py3-none-any.whl", "bash"),
+        ("bash-1.0.0-py3-none-any.WHL", "bash"),
+        ("bash-1.0.0-py3-none.whl", None),
+        ("bash-1.0.0-1-extra-py3-none-any.whl", None),
+        ("café-1.0.0-py3-none-any.whl", None),
+        ("-1.0.0-py3-none-any.whl", None),
+        ("bash-1.0.0.tar.gz", None),
+        ("bash", None),
+    ],
+)
+def test_wheel_distribution_name_parses_pep427_filenames(value, expected):
+    assert _wheel_distribution_name(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (".", True),
+        ("..", True),
+        ("./tools/shellkit", True),
+        (".\\dist\\bash", True),
+        ("bash-1.0.0-py3-none-any.whl", True),
+        ("bash-1.0.0.tar.gz", True),
+        ("bash-1.0.0.ZIP", True),
+        ("bash", False),
+        ("bash@1.0", False),
+    ],
+)
+def test_uv_requirement_is_path_recognizes_paths_and_archives(value, expected):
+    assert _uv_requirement_is_path(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("bash@1.0", "bash"),
+        ("./bash-1.0.0-py3-none-any.whl", "bash"),
+        ("./doc-lattice", "doc-lattice"),
+        ("./bash-1.0.0.tar.gz", None),
+        ("./tools/shellkit", None),
+        (".", None),
+    ],
+)
+def test_uv_requirement_executable_name_resolves_paths_and_names(value, expected):
+    assert _uv_requirement_executable_name(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -2012,6 +2087,88 @@ def test_nested_dynamic_uv_resolution_charges_shared_scan_budget():
         scanner.scan()
 
 
+def test_marker_free_dispatcher_candidates_consume_one_marker_pass_budget():
+    words = [word for _ in range(6) for word in (_ShellWord("bash"), _ShellWord("-c"))]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(len(words)),
+        executable_positions=[_ExecutableCandidate(index) for index in range(0, len(words), 2)],
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    assert resolution.budget.remaining_steps == 0
+
+
+def test_marker_bearing_external_shell_candidates_consume_shared_budget():
+    # One marker-pass step per word until the marker (6) plus one walk step per inspected
+    # dispatcher argv word (--norc, -o, its value, then the operand: 4). Head detection itself
+    # is uncharged frozenset gating.
+    words = [
+        _ShellWord("echo"),
+        _ShellWord("bash"),
+        _ShellWord("--norc"),
+        _ShellWord("-o"),
+        _ShellWord("pipefail"),
+        _ShellWord("doc-lattice-runner.sh"),
+    ]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(10),
+        executable_positions=[_ExecutableCandidate(0), _ExecutableCandidate(1)],
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    assert resolution.budget.remaining_steps == 0
+
+
+def test_duplicate_dispatcher_candidates_classify_argv_once():
+    # Six duplicate candidates still produce one walk: 2 marker-pass steps + 1 walk step.
+    words = [_ShellWord("bash"), _ShellWord("doc-lattice-runner.sh")]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(15),
+        executable_positions=[_ExecutableCandidate(0) for _ in range(6)],
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    assert resolution.budget.remaining_steps == 12
+
+
+def test_repeated_opaque_tail_heads_classify_each_argv_once():
+    # Repeated shell heads in an opaque tail dedup by start index, so each distinct argv is
+    # walked once. Dedup uses a set, keeping the sweep linear in the number of tail words.
+    words = [
+        _ShellWord("nohup"),
+        *[_ShellWord("bash") for _ in range(5)],
+        _ShellWord("doc-lattice"),
+    ]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(30),
+        executable_positions=[_ExecutableCandidate(0)],
+        opaque_tail_start=1,
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    # 7 marker-pass steps, then one walk per distinct start; each of the five heads is followed
+    # by an operand rather than an inline option, so no walk refuses.
+    assert resolution.budget.remaining_steps == 30 - 7 - 5
+
+
+def test_dispatcher_free_command_skips_marker_pass_budget():
+    # The cheap head gate runs before the charged marker regex pass, so an ordinary
+    # marker-bearing command with no dispatcher-shaped word consumes no budget at all.
+    words = [_ShellWord("grep"), _ShellWord("-q"), _ShellWord("doc-lattice"), _ShellWord("log")]
+    resolution = _LauncherResolutionState(
+        _ScanBudget(5),
+        executable_positions=[_ExecutableCandidate(0)],
+    )
+
+    _reject_marker_bearing_dispatcher(words, resolution)
+
+    assert resolution.budget.remaining_steps == 5
+
+
 def test_direct_doc_lattice_invocations_prefixes_context_on_incomplete_scan():
     script = 'echo "' + ("$(" * 65) + "doc-lattice linear" + (")" * 65) + '"'
 
@@ -2256,3 +2413,288 @@ def test_direct_doc_lattice_invocations_fails_closed_at_recursion_limit():
 
     with pytest.raises(ConfigError, match=r"shell scan.*recursion limit"):
         direct_doc_lattice_invocations(script)
+
+
+# Issue #105: inline shell dispatch of a marker-bearing doc-lattice command must fail closed
+# instead of being certified clean. These cases mirror the frozen ``dispatcher`` corpus family
+# from the successor evaluation, which is the ratified oracle for the expected outcomes.
+DISPATCHER_FAIL_CLOSED_CASES = [
+    ("bash -c marker payload", "bash -c 'doc-lattice reconcile'"),
+    ("eval marker payload", 'eval "doc-lattice $X"'),
+    ("sh short-option cluster", "sh -lc 'doc-lattice reconcile'"),
+    ("bash operand becomes arg0", "bash -c 'echo ok' doc-lattice"),
+    ("bash value-less long option before -c", "bash --norc -c 'doc-lattice check'"),
+    ("dynamic dispatcher selector", "bash $OPT 'doc-lattice lint'"),
+    ("source plain head marker argv", "source ./doc-lattice-env.sh"),
+    ("dot plain head marker argv", ". ./doc-lattice-env.sh"),
+    ("dash head inline command", "dash -c 'doc-lattice reconcile --all'"),
+    ("zsh head inline command", "zsh -c 'doc-lattice reconcile'"),
+    ("bash value option before -c", "bash -o pipefail -c 'doc-lattice reconcile'"),
+    ("assignment prefix before dispatcher", "FOO=1 bash -c 'doc-lattice reconcile'"),
+    ("nested command substitution dispatch", "echo $(bash -c 'doc-lattice reconcile')"),
+    ("command wrapper before dispatcher", "command bash -c 'doc-lattice reconcile'"),
+    ("env wrapper before dispatcher", "env bash -c 'doc-lattice linear'"),
+    ("exec wrapper before dispatcher", "exec bash -c 'doc-lattice reconcile'"),
+    ("time keyword before dispatcher", "time bash -c 'doc-lattice reconcile'"),
+    ("env options and assignment before dispatcher", "env -i PATH=/x bash -c 'doc-lattice lint'"),
+    ("command wrapper before plain eval head", "command eval 'doc-lattice reconcile'"),
+    ("builtin chain before dispatcher", "builtin command bash -c 'doc-lattice reconcile'"),
+    ("coproc before dispatcher", "coproc bash -c 'doc-lattice reconcile'"),
+    ("coproc name before dispatcher", "coproc worker bash -c 'doc-lattice reconcile'"),
+    ("plus cluster inline command", "bash +c 'doc-lattice linear'"),
+    ("plus cluster after value option", "bash +O extglob +c 'doc-lattice reconcile'"),
+    ("zsh emulate mode before -c", "zsh --emulate sh -c 'doc-lattice linear'"),
+    ("windows shell launcher", "bash.exe -c 'doc-lattice linear'"),
+    ("windows shell launcher casefolds", "SH.EXE -c 'doc-lattice reconcile'"),
+    ("uv run launcher before dispatcher", "uv run bash -c 'doc-lattice reconcile'"),
+    ("uvx launcher before dispatcher", "uvx bash -c 'doc-lattice reconcile'"),
+    ("uv tool run launcher before dispatcher", "uv tool run bash -c 'doc-lattice reconcile'"),
+    ("env time chain before dispatcher", "env time bash -c 'doc-lattice reconcile'"),
+    ("builtin eval head", "builtin eval 'doc-lattice reconcile'"),
+    ("builtin source head", "builtin source ./doc-lattice-env.sh"),
+    ("coprocess plain dispatcher head", "coproc eval 'doc-lattice reconcile'"),
+    ("marker-bearing assignment prefix", "CMD='doc-lattice reconcile' sh -c \"$CMD\""),
+    ("env assignment carries marker", "env CMD='doc-lattice reconcile' sh -c \"$CMD\""),
+    ("rbash restricted head inline command", "rbash -c 'doc-lattice reconcile'"),
+    ("rzsh restricted head inline command", "rzsh -c 'doc-lattice linear'"),
+    ("dynamic short option value smuggles inline", "bash -o $X 'doc-lattice reconcile'"),
+    ("dynamic long option value smuggles inline", "bash --rcfile $X 'doc-lattice reconcile'"),
+    ("quoted unbraced option value smuggles inline", "bash -o \"$X\" 'doc-lattice reconcile'"),
+    ("lone plus before -c", "bash + -c 'doc-lattice reconcile'"),
+    ("sh lone plus before cluster", "sh + -lc 'doc-lattice reconcile'"),
+    ("zsh lone plus before -c", "zsh + -c 'doc-lattice reconcile'"),
+    ("zsh -b terminator before -c", "zsh -b -c 'doc-lattice reconcile'"),
+    ("uvx requirement launcher before dispatcher", "uvx bash@1.0 -c 'doc-lattice reconcile'"),
+    (
+        "dynamic uv provenance-distinct requirement head",
+        "uv $X bash@1.0 -c 'doc-lattice reconcile'",
+    ),
+    ("uv tool run requirement head", "uv tool run bash@1.0 -c 'doc-lattice reconcile'"),
+    ("uvx requirement specifier before dispatcher", "uvx 'bash==1.0' -c 'doc-lattice reconcile'"),
+    (
+        "uvx named direct requirement before dispatcher",
+        "uvx 'bash@file:///tmp/bash-1.0-py3-none-any.whl' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uv tool run spaced named direct requirement before dispatcher",
+        "uv tool run 'bash @ file:///tmp/bash-1.0-py3-none-any.whl' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uvx trailing-whitespace requirement before dispatcher",
+        "uvx 'bash ' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uv tool run surrounding-whitespace requirement before dispatcher",
+        "uv tool run ' bash ' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uvx path-only requirement with at-sign parent before dispatcher",
+        "uvx '/tmp/@scope/bash' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uv tool run path-only requirement with bracketed parent before dispatcher",
+        "uv tool run '/tmp/[cache]/bash' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uvx file URL requirement with at-sign parent before dispatcher",
+        "uvx 'file:///tmp/@scope/bash' -c 'doc-lattice reconcile'",
+    ),
+    (
+        "versioned nested uv requirement before dispatcher",
+        "uvx uv@0.8.0 run bash -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uv tool run versioned nested uv requirement before dispatcher",
+        "uv tool run uv@0.8.0 run bash -c 'doc-lattice reconcile'",
+    ),
+    (
+        "versioned nested uvx requirement before dispatcher",
+        "uvx uvx@0.8.0 bash -c 'doc-lattice reconcile'",
+    ),
+    (
+        "versioned env requirement before dispatcher",
+        "uvx env@1.0 bash -c 'doc-lattice reconcile'",
+    ),
+    ("builtin dot head", "builtin . ./doc-lattice-env.sh"),
+    ("nohup wrapper before dispatcher", "nohup bash -c 'doc-lattice reconcile --all'"),
+    ("setsid wrapper before dispatcher", "setsid sh -lc 'doc-lattice reconcile'"),
+    ("xargs wrapper before dispatcher", "xargs -0 bash -c 'doc-lattice reconcile'"),
+    ("sudo wrapper before dispatcher", "sudo -u deploy bash -c 'doc-lattice reconcile'"),
+    ("unknown uv tool before dispatcher", "uvx sometool bash -c 'doc-lattice reconcile'"),
+    ("unrecognized head with dispatcher argv", "echo bash -c 'doc-lattice reconcile'"),
+    (
+        "dynamic word after wrapper before dispatcher",
+        "nohup \"$FLAG\" bash -c 'doc-lattice reconcile'",
+    ),
+    (
+        "coproc unrecognized program before dispatcher",
+        "coproc reader bash -c 'echo doc-lattice'",
+    ),
+    ("time keyword before plain eval head", "time eval 'doc-lattice reconcile'"),
+    ("inline selection before eager stop option", "bash -c 'doc-lattice reconcile' --help"),
+    ("path-qualified shell head inline command", "/bin/bash -c 'doc-lattice reconcile'"),
+    ("noexec toggled back off before inline command", "bash -n +n -c 'doc-lattice reconcile'"),
+    ("set option clears noexec before inline command", "bash -n +o noexec -c 'doc-lattice lint'"),
+    ("plus cluster unsets noexec letter", "bash +nc 'doc-lattice reconcile'"),
+    ("interactive flag beside noexec", "bash -i -n -c 'doc-lattice reconcile'"),
+    ("impure cluster beside noexec", "bash -n -lc 'doc-lattice reconcile'"),
+    ("exec set option can re-enable execution", "zsh -n -o exec -c 'doc-lattice reconcile'"),
+    ("short dump mode is pushd-to-home in zsh", "bash -D -c 'doc-lattice reconcile'"),
+    ("dynamic set option value beside noexec", "bash -n -o $X -c 'doc-lattice reconcile'"),
+    # Selecting -c does not end invocation-option parsing, so the pure-noexec certification has
+    # to survive the whole option region rather than only its prefix.
+    ("noexec re-enabled after inline selection", "bash -n -c +n 'doc-lattice reconcile --all'"),
+    ("set option re-enable after inline selection", "bash -n -c +o noexec 'doc-lattice lint'"),
+    ("exec set option after inline selection", "zsh -n -c -o exec 'doc-lattice reconcile'"),
+    ("impure option after inline selection", "bash -nc -x 'doc-lattice reconcile'"),
+    ("dynamic option value after inline selection", "bash -n -c -o $X 'doc-lattice reconcile'"),
+    (
+        "local wheel shell requirement",
+        "uvx ./bash-1.0.0-py3-none-any.whl -c 'doc-lattice reconcile'",
+    ),
+    (
+        "bare wheel filename shell requirement",
+        "uvx bash-1.0.0-py2.py3-none-any.whl -c 'doc-lattice reconcile'",
+    ),
+    (
+        "uv tool run local wheel shell requirement",
+        "uv tool run ./bash-1.0.0-py3-none-any.whl -c 'doc-lattice lint'",
+    ),
+    (
+        "wheel build-tag shell requirement",
+        "uvx ./bash-1.0.0-1-py3-none-any.whl -c 'doc-lattice reconcile'",
+    ),
+    ("sdist requirement with marker payload", "uvx ./bash-1.0.0.tar.gz -c 'doc-lattice reconcile'"),
+    (
+        "directory requirement with marker payload",
+        "uvx ./tools/shellkit -c 'doc-lattice reconcile'",
+    ),
+    ("dot directory requirement with marker payload", "uvx . -c 'doc-lattice reconcile'"),
+    (
+        "marker-bearing sdist doc-lattice requirement",
+        "uvx ./dist/doc_lattice-2.0.0.tar.gz reconcile",
+    ),
+    (
+        "local uv wheel nested launcher",
+        "uvx ./uv-0.8.0-py3-none-any.whl run bash -c 'doc-lattice reconcile'",
+    ),
+    ("path-qualified coproc after exec", "exec ./coproc bash -c 'doc-lattice reconcile'"),
+    ("ambiguous word before external coproc", "exec $MAYBE coproc bash -c 'doc-lattice reconcile'"),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script"),
+    DISPATCHER_FAIL_CLOSED_CASES,
+    ids=[case[0] for case in DISPATCHER_FAIL_CLOSED_CASES],
+)
+def test_marker_bearing_inline_dispatch_fails_closed(_description, script):
+    result = scan_doc_lattice_invocations(script)
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match=r"shell scan incomplete.*dispatcher"):
+        direct_doc_lattice_invocations(script)
+
+
+# The dispatcher rule fires only when a command word literally names doc-lattice AND a reachable
+# dispatcher head is present. These sources carry no marker in the dispatcher argv, run an
+# external script file, or place the marker where no shell head can dispatch it (including a
+# versioned env/time uv requirement, whose PyPI console script never resolves its arguments), so
+# they retain their certified-clean outcome.
+DISPATCHER_CERTIFY_CASES = [
+    ("marker only in trailing comment", "bash -c 'echo hello'  # doc-lattice check runs here"),
+    ("marker-free inline command", "bash -c 'echo hello world'"),
+    ("Unicode dotless i is not an ASCII marker", "bash -c 'doc-latt\u0131ce reconcile'"),
+    ("external script file named for doc-lattice", "bash ./doc-lattice-runner.sh"),
+    ("non-dispatcher head echoes marker text", "echo doc-lattice reconcile"),
+    ("dispatcher head with no argv", "eval"),
+    ("command wrapper external script file", "command bash ./doc-lattice-runner.sh"),
+    ("env wrapper external script file", "env bash ./doc-lattice-runner.sh"),
+    ("command query never executes marker", "command -v doc-lattice"),
+    ("emulate mode then external script file", "zsh --emulate sh ./doc-lattice-runner.sh"),
+    ("windows launcher external script file", "bash.exe ./doc-lattice-runner.sh"),
+    ("uv run external script file", "uv run bash ./doc-lattice-runner.sh"),
+    ("builtin non-dispatcher target", "builtin echo doc-lattice"),
+    ("builtin shell target is not a builtin", "builtin bash -c 'doc-lattice reconcile'"),
+    ("braced quoted option value stays resolvable", 'bash -o "${X}" ./doc-lattice-runner.sh'),
+    ("rbash external script file", "rbash ./doc-lattice-runner.sh"),
+    ("assignment marker without dispatcher head", "CMD='doc-lattice reconcile' echo done"),
+    ("lone dash ends options before operand", "bash - -c 'doc-lattice reconcile'"),
+    ("requirement-suffixed plain head is not a dispatcher", "bash@1.0 -c 'doc-lattice reconcile'"),
+    ("uvx requirement external script file", "uvx bash@1.0 ./doc-lattice-runner.sh"),
+    (
+        "uvx direct requirement URL filename does not override declared name",
+        "uvx 'not-bash @ file:///tmp/bash-1.0-py3-none-any.whl' -c 'doc-lattice reconcile'",
+    ),
+    ("wrapper before external script file", "nohup bash ./doc-lattice-runner.sh"),
+    ("find dot operand is not a dispatcher", "find . -name 'doc-lattice*'"),
+    ("wrapper argv marker without shell head", "xargs doc-lattice-formatter --all"),
+    ("marker argument after script operand", "bash ./run.sh doc-lattice"),
+    (
+        "versioned env requirement never resolves its arguments",
+        "uvx env@1.0 doc-lattice reconcile",
+    ),
+    (
+        "versioned time requirement never resolves its arguments",
+        "uv tool run time@2.0 doc-lattice reconcile",
+    ),
+    ("exec wrapper before plain eval head", "exec eval 'doc-lattice reconcile'"),
+    ("env wrapper before plain source head", "env source ./doc-lattice-env.sh"),
+    ("external time before plain eval head", "command time -p eval 'doc-lattice reconcile'"),
+    ("uv run before plain eval head", "uv run eval 'doc-lattice reconcile'"),
+    ("eager help stop before inline command", "bash --help -c 'doc-lattice reconcile'"),
+    ("eager version stop before inline command", "zsh --version -c 'doc-lattice reconcile'"),
+    ("path-qualified eval is a path execution", "./eval 'doc-lattice reconcile'"),
+    ("path-qualified source is a path execution", "./source ./doc-lattice-env.sh"),
+    ("path-qualified dot is a path execution", "./. ./doc-lattice-env.sh"),
+    ("command wrapper before path-qualified eval", "command ./eval 'doc-lattice reconcile'"),
+    ("uppercase plain head is not the builtin", "EVAL 'doc-lattice reconcile'"),
+    ("suffixed plain head is not the builtin", "eval.exe 'doc-lattice reconcile'"),
+    ("syntax check noexec before inline command", "bash -n -c 'doc-lattice reconcile'"),
+    ("dash noexec before inline command", "dash -n -c 'doc-lattice reconcile'"),
+    ("noexec cluster inline command", "sh -nc 'doc-lattice reconcile'"),
+    ("reversed noexec cluster inline command", "bash -cn 'doc-lattice reconcile'"),
+    ("set option noexec before inline command", "bash -o noexec -c 'doc-lattice reconcile'"),
+    ("stacked noexec setters before inline command", "bash -o noexec -n -c 'doc-lattice lint'"),
+    ("dump strings mode before inline command", "bash --dump-strings -c 'doc-lattice reconcile'"),
+    ("dump po strings mode before inline command", "bash --dump-po-strings -c 'doc-lattice lint'"),
+    ("noexec setter after inline selection", "bash -n -c -n 'doc-lattice reconcile'"),
+    ("set option noexec after inline selection", "bash -n -c -o noexec 'doc-lattice lint'"),
+    # ``builtin`` and ``coproc`` are shell grammar with no external binary, so an enclosing
+    # ``exec`` execve fails (exit 127) and the plain dispatcher behind them never runs.
+    ("exec wrapper before builtin dispatcher target", "exec builtin eval 'doc-lattice reconcile'"),
+    ("exec wrapper before coprocess dispatcher", "exec coproc eval 'doc-lattice reconcile'"),
+    # A PATH-execve prefix runs the word ``coproc`` itself, which is a shell keyword with no
+    # external binary, so the execve fails (exit 127) before any later word runs.
+    ("exec wrapper before coproc word", "exec coproc bash -c 'doc-lattice reconcile'"),
+    ("env wrapper before coproc word", "env coproc bash -c 'doc-lattice reconcile'"),
+    ("quoted coproc word after exec", "exec 'coproc' bash -c 'doc-lattice reconcile'"),
+    # A wheel-path requirement resolves by its filename's distribution segment; a derived name that
+    # is neither a shell nor doc-lattice runs the rule past without refusing.
+    (
+        "local wheel non-shell requirement",
+        "uvx ./innocent-1.0.0-py3-none-any.whl -c 'doc-lattice reconcile'",
+    ),
+    (
+        "wheel requirement before external script operand",
+        "uvx ./bash-1.0.0-py3-none-any.whl ./doc-lattice-runner.sh",
+    ),
+    ("directory requirement without marker", "uvx ./tools/shellkit -c 'echo hello'"),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script"),
+    DISPATCHER_CERTIFY_CASES,
+    ids=[case[0] for case in DISPATCHER_CERTIFY_CASES],
+)
+def test_marker_free_or_file_dispatch_stays_certified(_description, script):
+    result = scan_doc_lattice_invocations(script)
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_inline_dispatch_reason_names_the_dispatcher():
+    result = scan_doc_lattice_invocations("bash -c 'doc-lattice reconcile'")
+
+    assert result.incomplete_reason == "inline dispatcher command cannot be scanned safely"
