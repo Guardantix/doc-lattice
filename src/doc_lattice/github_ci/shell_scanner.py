@@ -385,6 +385,7 @@ _ANSI_C_SIMPLE_ESCAPES = {
 @dataclass(frozen=True, slots=True)
 class _ShellWord:
     literal: str
+    has_doc_lattice_marker: bool = False
     dynamic: bool = False
     locale_translated: bool = False
     unquoted_dynamic: bool = False
@@ -444,8 +445,10 @@ class _ShellWordBuilder:
 
     def build(self) -> _ShellWord:
         """Build the immutable decoded word and its expansion provenance."""
+        literal = "".join(self.characters)
         return _ShellWord(
-            literal="".join(self.characters),
+            literal=literal,
+            has_doc_lattice_marker=_DISPATCHER_MARKER_RE.search(literal) is not None,
             dynamic=self.dynamic,
             locale_translated=self.locale_translated,
             unquoted_dynamic=self.unquoted_dynamic,
@@ -530,6 +533,7 @@ class _CommandScanState:
     prefix_mode: str = "normal"
     prefix_pending: int = 0
     at_command_position: bool = True
+    command_has_marker: bool = False
 
     def reset_command(self) -> None:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
@@ -537,6 +541,7 @@ class _CommandScanState:
         self.prefix_mode = "normal"
         self.prefix_pending = 0
         self.at_command_position = True
+        self.command_has_marker = False
 
 
 @dataclass(slots=True)
@@ -802,6 +807,7 @@ class _ShellScanner:
         return index
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
+        state.command_has_marker = state.command_has_marker or word.has_doc_lattice_marker
         command_position = state.at_command_position
         if (
             not word.dynamic

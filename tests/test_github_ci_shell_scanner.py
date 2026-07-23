@@ -11,6 +11,7 @@ from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_ROOT_OPTIONS,
     _RECONCILE_FLAGS,
     _RECONCILE_OPTIONS_WITH_ARGUMENTS,
+    _CommandScanState,
     _ExecutableCandidate,
     _LauncherResolutionState,
     _reject_marker_bearing_dispatcher,
@@ -2085,6 +2086,51 @@ def test_nested_dynamic_uv_resolution_charges_shared_scan_budget():
 
     with pytest.raises(_ShellScanIncomplete, match="step limit exceeded"):
         scanner.scan()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('doc-"lattice"', True),
+        ("DOC_LATTICE", True),
+        ("doc...lattice", True),
+        ("doc-lattıce", False),  # noqa: RUF001 -- intentional dotless-i regression case
+    ],
+    ids=["composed-fragments", "ascii-casefold", "repeated-separators", "dotless-i"],
+)
+def test_shell_word_marker_fact_matches_composed_ascii_regex(source, expected):
+    scanner = _ShellScanner(source, classify_commands=False)
+
+    word, end = scanner._parse_word(0, len(source), 0)
+
+    assert end == len(source)
+    assert word.has_doc_lattice_marker is expected
+
+
+def test_command_marker_fact_aggregates_and_resets():
+    source = "doc-lattice"
+    scanner = _ShellScanner(source, classify_commands=False)
+    state = _CommandScanState(words=[], heredocs=[], cases=[])
+    word, end = scanner._parse_word(0, len(source), 0)
+
+    scanner._record_word(state, word)
+
+    assert end == len(source)
+    assert state.command_has_marker is True
+    state.reset_command()
+    assert state.words == []
+    assert state.command_has_marker is False
+
+
+@pytest.mark.parametrize("suffix", ["", "doc-lattice"], ids=["marker-free", "marker-bearing"])
+def test_long_finalized_word_marker_scan_does_not_charge_step_budget(suffix):
+    source = "'" + ("x" * 100_000) + suffix + "'"
+    budget = _ScanBudget(3)
+    scanner = _ShellScanner(source, budget=budget, classify_commands=False)
+
+    scanner.scan()
+
+    assert budget.remaining_steps == 1
 
 
 def test_marker_free_dispatcher_candidates_consume_one_marker_pass_budget():
