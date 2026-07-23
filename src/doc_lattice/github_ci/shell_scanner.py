@@ -1966,8 +1966,17 @@ def _is_shell_option_token(literal: str) -> bool:
     """Return whether a word is a shell option cluster rather than an operand or terminator.
 
     Bash-family shells consume a lone ``+`` as a no-op options word and keep parsing options, so
-    it is an (empty) option cluster here. A lone ``-`` or ``--`` instead ends option parsing, so
-    the next word is an operand rather than a later ``-c``.
+    it is an (empty) option cluster here (verified: ``bash + -c`` and ``dash + -c`` both execute
+    the payload). A lone ``-`` or ``--`` instead ends option parsing, so the next word is an
+    operand rather than a later ``-c``.
+
+    The check stays head-agnostic even though zsh diverges: ``zsh + -c`` and ``zsh +- -c`` end
+    option processing in any position, so ``-c`` becomes a script operand and the payload never
+    runs (verified on zsh 5.9; a non-empty cluster such as ``zsh +x -c`` still executes). That
+    divergence only ever makes this walk over-refuse, and scoping ``+`` to the zsh heads would
+    buy a certified-clean path for a construct no workflow writes while leaving ``sh`` (which
+    may itself be zsh) refused anyway. Refusing a no-op ``+`` costs an author one deletable
+    character; the head-agnostic rule is the cheaper side of the trade.
     """
     return literal not in ("", "-", "--") and literal[0] in "-+"
 

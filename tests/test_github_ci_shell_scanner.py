@@ -2371,6 +2371,7 @@ DISPATCHER_FAIL_CLOSED_CASES = [
     ("quoted unbraced option value smuggles inline", "bash -o \"$X\" 'doc-lattice reconcile'"),
     ("lone plus before -c", "bash + -c 'doc-lattice reconcile'"),
     ("sh lone plus before cluster", "sh + -lc 'doc-lattice reconcile'"),
+    ("zsh lone plus before -c", "zsh + -c 'doc-lattice reconcile'"),
     ("uvx requirement launcher before dispatcher", "uvx bash@1.0 -c 'doc-lattice reconcile'"),
     (
         "dynamic uv provenance-distinct requirement head",
