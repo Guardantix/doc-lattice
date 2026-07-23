@@ -2437,6 +2437,8 @@ DISPATCHER_FAIL_CLOSED_CASES = [
         "coproc unrecognized program before dispatcher",
         "coproc reader bash -c 'echo doc-lattice'",
     ),
+    ("time keyword before plain eval head", "time eval 'doc-lattice reconcile'"),
+    ("inline selection before eager stop option", "bash -c 'doc-lattice reconcile' --help"),
 ]
 
 
@@ -2494,6 +2496,12 @@ DISPATCHER_CERTIFY_CASES = [
         "versioned time requirement never resolves its arguments",
         "uv tool run time@2.0 doc-lattice reconcile",
     ),
+    ("exec wrapper before plain eval head", "exec eval 'doc-lattice reconcile'"),
+    ("env wrapper before plain source head", "env source ./doc-lattice-env.sh"),
+    ("external time before plain eval head", "command time -p eval 'doc-lattice reconcile'"),
+    ("uv run before plain eval head", "uv run eval 'doc-lattice reconcile'"),
+    ("eager help stop before inline command", "bash --help -c 'doc-lattice reconcile'"),
+    ("eager version stop before inline command", "zsh --version -c 'doc-lattice reconcile'"),
 ]
 
 

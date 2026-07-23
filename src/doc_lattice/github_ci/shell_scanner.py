@@ -282,6 +282,10 @@ _SHELL_DISPATCHER_HEADS = frozenset({"bash", "sh", "dash", "zsh", "rbash", "rzsh
 # --init-file, zsh --emulate (which takes a mode word and still honors a following -c). Every
 # other long option is value-less and precedes -c without ending option parsing.
 _SHELL_LONG_OPTIONS_WITH_ARGUMENTS = frozenset({"--rcfile", "--init-file", "--emulate"})
+# bash and zsh handle these eagerly at startup, printing and exiting before any -c payload
+# runs; dash exits on the unrecognized long option (verified empirically for bash and dash).
+# Either way a payload behind an eager stop option never executes.
+_SHELL_EAGER_STOP_OPTIONS = frozenset({"--help", "--version"})
 
 
 class _CommandDisposition(Enum):
@@ -456,10 +460,16 @@ class _ShellExpansion:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedIndex:
-    """A static grammar position plus ambiguity inherited from prior syntax."""
+    """A static grammar position plus ambiguity inherited from prior syntax.
+
+    ``external_lookup`` marks a position reached through ``exec``, an ``env`` prefix, or an
+    external ``time``, where command resolution is a PATH ``execve`` that can never reach a
+    shell builtin.
+    """
 
     index: int | None
     ambiguous: bool = False
+    external_lookup: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,11 +555,15 @@ class _ExecutableCandidate:
     """One static executable-position candidate recorded during payload resolution.
 
     ``uv_requirement`` marks a uv positional tool requirement, whose console-script name uv
-    derives by stripping the requirement suffix (as in ``uvx bash@1.0``).
+    derives by stripping the requirement suffix (as in ``uvx bash@1.0``). ``external_lookup``
+    marks a candidate resolved by a PATH ``execve`` (behind ``exec``, ``env``, external
+    ``time``, or a uv launcher); the plain dispatcher builtins have no external binaries, so
+    such a candidate can never reach ``eval``/``source``/``.``.
     """
 
     index: int
     uv_requirement: bool = False
+    external_lookup: bool = False
 
 
 @dataclass(slots=True)
@@ -1817,7 +1831,10 @@ def _reachable_dispatcher_heads(
         )
         name = _normalize_dispatcher_head(head)
         if name in _PLAIN_DISPATCHER_HEADS:
-            plain_dispatch = True
+            # eval/source/. are shell builtins with no external binaries, so a candidate
+            # resolved by a PATH execve (exec eval, env source, uv run eval) fails at runtime
+            # without executing its argv and stays certified.
+            plain_dispatch = plain_dispatch or not candidate.external_lookup
         elif name in _SHELL_DISPATCHER_HEADS:
             walk_starts.append(candidate.index + 1)
     if resolution.opaque_tail_start is not None:
@@ -1851,7 +1868,9 @@ def _shell_dispatcher_runs_inline_command(
     cannot rule out an inline payload. A value-consuming option whose value can add or remove argv
     fields (for example ``-o $X``) is equally unresolvable, because the expansion can smuggle a
     later ``-c`` past this walk. Returns False when the options resolve to an operand or ``--``
-    terminator, meaning the shell runs an external script file rather than inline source.
+    terminator, meaning the shell runs an external script file rather than inline source, and
+    when an eager ``--help``/``--version`` stop precedes ``-c``, meaning the shell prints and
+    exits (or rejects the option) before any payload runs.
 
     Args:
         words: The decoded words of the whole simple command.
@@ -1866,6 +1885,8 @@ def _shell_dispatcher_runs_inline_command(
             return True
         literal = word.literal
         if not _is_shell_option_token(literal):
+            return False
+        if literal in _SHELL_EAGER_STOP_OPTIONS:
             return False
         if not literal.startswith("--") and "c" in literal[1:]:
             # A short cluster containing c selects the -c inline-command option; bash, sh, and
@@ -2049,6 +2070,11 @@ def _skip_shell_prefixes(
     """Skip literal shell prefixes and preserve dynamic command-position ambiguity."""
     index = start
     ambiguous = False
+    # ``exec``, an ``env`` prefix, and an external ``time`` resolve their successor with a PATH
+    # execve rather than shell command lookup; once crossed, no later position can reach a
+    # shell builtin. The ``time`` keyword stays shell lookup: ``time eval ...`` runs the
+    # builtin.
+    external_lookup = False
     while index < len(words):
         word = words[index]
         if word.shell_assignment:
@@ -2059,7 +2085,7 @@ def _skip_shell_prefixes(
             index += 1
             continue
         if word.dynamic:
-            return _ResolvedIndex(index, ambiguous)
+            return _ResolvedIndex(index, ambiguous, external_lookup)
         if word.keyword_eligible and word.literal in _COMMAND_PREFIXES:
             index += 1
             continue
@@ -2079,16 +2105,17 @@ def _skip_shell_prefixes(
                 index += 1
             continue
         if _basename(word.literal) == "env":
-            return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous)
+            return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous, True)
         if word.literal in {"builtin", "command", "exec"}:
             wrapper_literal = word.literal
             wrapper = _skip_shell_builtin_wrapper(
                 words, index, executable_positions=executable_positions
             )
             if wrapper.index is None:
-                return _ResolvedIndex(None, ambiguous or wrapper.ambiguous)
+                return _ResolvedIndex(None, ambiguous or wrapper.ambiguous, external_lookup)
             index = wrapper.index
             ambiguous = ambiguous or wrapper.ambiguous
+            external_lookup = external_lookup or wrapper_literal == "exec"
             if (
                 wrapper_literal in {"command", "exec"}
                 and index < len(words)
@@ -2098,10 +2125,11 @@ def _skip_shell_prefixes(
                 return _ResolvedIndex(
                     _skip_external_time_prefix(words, index + 1),
                     ambiguous,
+                    True,
                 )
             continue
-        return _ResolvedIndex(index, ambiguous)
-    return _ResolvedIndex(index, ambiguous)
+        return _ResolvedIndex(index, ambiguous, external_lookup)
+    return _ResolvedIndex(index, ambiguous, external_lookup)
 
 
 def _skip_shell_builtin_wrapper(
@@ -2357,7 +2385,9 @@ def _doc_lattice_command_index(
             resolution,
         )
     else:
-        payload_index = _doc_lattice_payload_index(words, command_index, resolution)
+        payload_index = _doc_lattice_payload_index(
+            words, command_index, resolution, external_lookup=command.external_lookup
+        )
     if payload_index.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2397,7 +2427,9 @@ def _doc_lattice_command_after_prefixes(
     )
     if executable.index is None:
         return executable
-    payload = _doc_lattice_payload_index(words, executable.index, resolution)
+    payload = _doc_lattice_payload_index(
+        words, executable.index, resolution, external_lookup=executable.external_lookup
+    )
     if payload.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2413,6 +2445,7 @@ def _doc_lattice_payload_index(
     executable_index: int,
     resolution: _LauncherResolutionState,
     *,
+    external_lookup: bool = False,
     launcher_depth: int = 0,
 ) -> _ResolvedIndex:
     if executable_index >= len(words):
@@ -2422,7 +2455,9 @@ def _doc_lattice_payload_index(
     if _is_doc_lattice_executable(executable_word):
         return _ResolvedIndex(executable_index)
     if not executable_word.dynamic:
-        resolution.executable_positions.append(_ExecutableCandidate(executable_index))
+        resolution.executable_positions.append(
+            _ExecutableCandidate(executable_index, external_lookup=external_lookup)
+        )
         executable = _basename(executable_word.literal)
         if executable in {"env", "time"}:
             return _nested_launcher_payload_index(
@@ -2763,8 +2798,10 @@ def _nested_launcher_payload_index(
     _reject_unsafe_executable_word(payload)
     if payload.dynamic:
         return _ResolvedIndex(None, payload_resolution.ambiguous)
+    # uv, env, and external time all execve their payloads, so a plain dispatcher builtin is
+    # never reachable from a nested launcher position.
     resolution.executable_positions.append(
-        _ExecutableCandidate(payload_index, uv_requirement=strip_version)
+        _ExecutableCandidate(payload_index, uv_requirement=strip_version, external_lookup=True)
     )
     raw_basename = _basename(payload.literal)
     basename = _uv_requirement_executable_name(payload.literal) if strip_version else raw_basename
