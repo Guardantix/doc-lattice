@@ -644,35 +644,27 @@ of being interpreted as Bash. Active brace or glob expansion in an executable or
 and unsupported active extglob syntax anywhere in a command, also exit 2 because the resulting argv
 cannot be certified statically. ANSI-C quoted words that decode to NUL after Bash's eight-bit octal
 conversion exit 2 because Bash discards the suffix after NUL instead of placing that byte in an
-argument. Known eager uv help/version options and effective command help stop without executing a
-payload and therefore do not produce policy findings. Audit cannot prove that an arbitrary script,
-local action, reusable workflow, or renamed wrapper eventually invokes a sensitive command.
-A recognized inline dispatcher (`eval`, `source`, or `bash`, `sh`, `dash`, or `zsh` in `-c`
-command-string form) cannot have its payload parsed, so when any word of the same command
-literally names doc-lattice it exits 2 rather than being certified clean. That includes
-dispatchers reached through the recognized wrapper and launcher grammar such as `uv run bash -c`
-or `builtin eval`, and a shell head appearing in the arguments of an unrecognized program that may
-re-dispatch its argv, as in `nohup bash -c 'doc-lattice ...'` or `xargs bash -c '... doc-lattice
-...'`. A uv tool requirement given as a local wheel path resolves by its filename's distribution
-name, which uv verifies against the wheel metadata, so `uvx ./bash-1.0.0-py3-none-any.whl -c ...`
-refuses exactly like `uvx bash -c ...`; a path or URL requirement whose executable cannot be
-derived statically (a source archive, a directory, or a Git or direct URL) also exits 2 whenever
-the same command literally names doc-lattice, because the tool it installs may itself be a shell
-or doc-lattice. A dispatcher whose payload is assembled rather than written literally as an
-argument word stays within the disclosed executable-name limitation even when the assembled text
-spells doc-lattice. That covers a variable executable name, a command, process, or arithmetic
-substitution that builds the payload, and source fed from standard input by a heredoc,
-herestring, or pipe. Provably non-executing shell invocations stay certified: a pure noexec
-prefix (`bash -n -c ...`, `-nc`, or `-o noexec` with nothing else before `-c`) and the bash
-string-dump modes (`--dump-strings`, `--dump-po-strings`) never run the payload in any
-recognized shell. Any mixed form still exits 2, because execution can be re-enabled in
-shell-specific ways (`+n`, `+o noexec`, zsh `-o exec` and its spelling aliases), and the short
-`-D` dump option stays refused because zsh reads it as `PUSHD_TO_HOME` and executes normally.
-An unrecognized wrapper likewise remains a disclosed limitation for the
-non-dispatch forms: one that runs a script file (`nohup bash ./task.sh`) or passes doc-lattice
-words to a program the scanner does not model (`xargs doc-lattice ...`) is not certified against.
-Malformed, oversized, or otherwise unreliably inspectable workflows also exit 2 instead of being
-treated as safe.
+argument. A resolved doc-lattice executable with no effective command, including bare `doc-lattice`,
+`doc-lattice --help`, and `doc-lattice --version`, produces no policy finding. Launcher
+help/version forms that leave a retained doc-lattice marker under an unresolved command instead
+exit 2.
+
+For each simple command, audit decodes retained assignment-prefix and argv words and applies the
+ASCII marker `doc[-_.]+lattice` case-insensitively. If the existing resolver classifies the
+effective executable as doc-lattice, its launcher, subcommand, and fail-closed checks continue
+unchanged. Otherwise any retained marker exits 2, regardless of the apparent command head or
+whether that concrete spelling would execute on one host. Consequently forms such as
+`echo doc-lattice reconcile`, `command -v doc-lattice`,
+`bash --help -c 'doc-lattice reconcile'`, and `nohup bash ./doc-lattice-runner.sh` are not
+certified as non-invocations. Comments and discarded redirection targets are not retained command
+words.
+
+Executable classification is syntactic basename resolution, not proof of runtime identity. Audit
+does not model function, alias, or `PATH` shadowing; variables used as executable names; arbitrary
+scripts, actions, reusable workflows, or renamed wrappers; or cross-command data flow such as file
+handoff, variable-plus-`eval`, pipelines, heredoc/herestring bodies, and markers assembled across
+words. Malformed, oversized, or otherwise unreliably inspectable workflows also exit 2 instead of
+being treated as safe.
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
 access because it forwards every available caller secret, so it always produces a

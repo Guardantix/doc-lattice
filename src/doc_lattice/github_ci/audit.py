@@ -92,9 +92,8 @@ _BASH_DEFAULT_RUNNERS = frozenset(
 )
 _SCRIPT_PLACEHOLDER = "{0}"
 # The run-body placeholder must be inert: it stands in for the ``{0}`` script argument when the
-# shell template is scanned, so it must not itself match a doc-lattice marker (which would let the
-# scanner treat every ``{0}``-bearing template as marker-bearing, including firing the inline
-# dispatcher fail-closed rule on the substituted sentinel). See issue #105.
+# shell template is scanned, so it must not itself match the doc-lattice marker and make every
+# placeholder-bearing template fail the inverted unresolved-command certification rule.
 _SCRIPT_SENTINEL = "__run_body_script__"
 _CANONICAL_LINEAR_PATH = LINEAR_WORKFLOW_PATH.as_posix()
 _WORKFLOW_DIRECTORY = LINEAR_WORKFLOW_PATH.parent.as_posix()

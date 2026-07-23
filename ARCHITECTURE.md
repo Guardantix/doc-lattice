@@ -354,3 +354,27 @@ while managed refresh owns byte-level comparison and replacement. None of the lo
 observe GitHub environment or organization-policy drift, so the bootstrap verifier remains
 necessary. Workflow and branch governance for trusted `main` remains the residual authorization
 boundary.
+
+### AD-17: CI shell marker certification is inverted
+
+**Date:** 2026-07-23
+**Status:** Accepted
+**Context:** The retained CI shell scanner previously refused marker-bearing commands only when
+an open enumeration recognized a reachable inline dispatcher. Unrecognized wrappers, script-file
+forms, query commands, and ordinary-looking heads could therefore carry a doc-lattice marker while
+being certified by omission. A trusted inert-head list would have the same flaw because shell
+functions, aliases, and `PATH` can shadow bare names.
+**Decision:** Each finalized decoded assignment-prefix or argv word records whether it matches the
+ASCII, case-insensitive `doc[-_.]+lattice` marker, and simple-command state aggregates that fact.
+When the existing resolver does not classify the effective executable as doc-lattice, any retained
+marker fails closed. Resolved doc-lattice commands keep the existing launcher, option,
+subcommand, and post-resolution behavior, including certified-empty root help/version forms. The
+dispatcher head sets, shell `-c`/noexec option walk, executable-candidate recording, and opaque-tail
+provenance are removed; `_ResolvedIndex.external_lookup` and uv requirement-name derivation remain
+where the invocation-finding path uses them.
+**Consequences:** Unknown marker-bearing heads refuse by construction, with no inert-command
+allowlist. Marker detection adds one source-cap-bounded scan of each finalized decoded word and an
+O(1) aggregate check at command flush. The resolver remains syntactic and does not prove runtime
+identity or model function/alias/`PATH` shadowing or cross-command data flow; comments and
+discarded redirection operands remain outside retained-word certification. Frozen evaluation
+checkpoints stay immutable, while live scanner and audit tests own the changed expectations.
