@@ -102,6 +102,19 @@ def test_variable_assignment_and_append_compose_in_the_fixed_point() -> None:
     assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
 
 
+def test_append_before_assignment_revisits_its_implicit_destination_dependency() -> None:
+    solved = _solve_flow_definitions(
+        _FlowDefinitions(
+            variable_writes=(
+                _FlowWrite("X", LiteralTransfer("lattice"), append=True),
+                _FlowWrite("X", LiteralTransfer("doc-")),
+            )
+        )
+    )
+
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
+
+
 def test_competing_variable_definitions_join_without_composing() -> None:
     solved = _solve_flow_definitions(
         _FlowDefinitions(

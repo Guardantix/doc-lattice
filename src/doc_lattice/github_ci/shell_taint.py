@@ -311,18 +311,6 @@ def _definition_counts(definitions: _FlowDefinitions) -> tuple[int, int, int]:
     return nodes, edges, entries
 
 
-def _expression_references(expression: ContentExpr) -> frozenset[tuple[str, str | int]]:
-    if isinstance(expression, VariableRef):
-        return frozenset({("variable", expression.name)})
-    if isinstance(expression, ResourceRef):
-        return frozenset({("resource", expression.key)})
-    if isinstance(expression, StreamRef):
-        return frozenset({("stream", expression.scope_id)})
-    if isinstance(expression, Choice | Concat):
-        return frozenset().union(*(_expression_references(part) for part in expression.parts))
-    return frozenset()
-
-
 def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
     if isinstance(expression, LiteralTransfer):
         return frozenset({_TransferSummary.literal(expression.text)})
@@ -414,15 +402,12 @@ def _solve_flow_definitions(
         *(("resource", write) for write in definitions.resource_writes),
         *(("stream", write) for write in definitions.stream_writes),
     )
-    references = tuple(_expression_references(write.expression) for _, write in writes)
-    active = frozenset(range(len(writes)))
     updates = 0
 
-    while active:
-        changed_keys: set[tuple[str, str | int]] = set()
-        for index, (kind, write) in enumerate(writes):
-            if index not in active:
-                continue
+    changed = True
+    while changed:
+        changed = False
+        for kind, write in writes:
             table = {
                 "variable": variables,
                 "resource": resources,
@@ -442,12 +427,6 @@ def _solve_flow_definitions(
             updates += 1
             if updates > limits.max_fixed_point_updates:
                 raise _TaintLimitExceeded("shell taint fixed-point update limit exceeded")
-            changed_keys.add((kind, write.key))
-
-        active = frozenset(
-            index
-            for index, expression_references in enumerate(references)
-            if expression_references & changed_keys
-        )
+            changed = True
 
     return _SolvedFlow(variables, resources, streams, limits)
