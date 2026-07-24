@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
+from doc_lattice.github_ci.shell_taint import _ExecutableEvidence
 
 _Invocation = tuple[str, bool]
 _MAX_SHELL_SOURCE_CHARS = 1_048_576
@@ -479,6 +480,16 @@ class _ResolvedIndex:
 
 
 @dataclass(frozen=True, slots=True)
+class _ExecutableCandidate:
+    """One executable position reached while resolving a launcher chain."""
+
+    index: int
+    uv_requirement: bool = False
+    external_lookup: bool = False
+    ambiguous: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class _UvGlobalResolution:
     """The static uv subcommand plus alternate launcher starts from dynamic grammar."""
 
@@ -564,10 +575,24 @@ class _LauncherResolutionState:
 
     budget: _ScanBudget
     cache: dict[tuple[str, int, int], _ResolvedIndex] = field(default_factory=dict)
+    executable_positions: list[_ExecutableCandidate] = field(default_factory=list)
 
     def step(self) -> None:
         """Charge speculative launcher work to the shell scanner's declared budget."""
         self.budget.step()
+
+    def record_executable(
+        self,
+        index: int,
+        *,
+        uv_requirement: bool = False,
+        external_lookup: bool = False,
+        ambiguous: bool = False,
+    ) -> None:
+        """Retain one resolved executable position as taint-analysis evidence."""
+        candidate = _ExecutableCandidate(index, uv_requirement, external_lookup, ambiguous)
+        if candidate not in self.executable_positions:
+            self.executable_positions.append(candidate)
 
 
 class _ShellScanner:
@@ -1746,6 +1771,52 @@ def _invocation_in_simple_command(
     return subcommand.literal, disposition is _CommandDisposition.NON_MUTATING
 
 
+def _candidate_name(candidate: _ExecutableCandidate, words: list[_ShellWord]) -> str | None:
+    """Return the executable basename represented by one recorded candidate."""
+    literal = words[candidate.index].literal
+    if candidate.uv_requirement:
+        return _uv_requirement_executable_name(literal)
+    return _basename(literal)
+
+
+def _effective_executable_evidence(
+    words: list[_ShellWord], budget: _ScanBudget
+) -> _ExecutableEvidence | None:
+    """Resolve launcher-chain executable evidence for one simple command."""
+    resolution = _LauncherResolutionState(budget)
+    result = _doc_lattice_command_index(words, 0, resolution)
+    candidates = resolution.executable_positions
+    if not candidates and result.index is not None:
+        candidates = [
+            _ExecutableCandidate(
+                result.index,
+                external_lookup=result.external_lookup,
+                ambiguous=result.ambiguous,
+            )
+        ]
+    if not candidates:
+        return None
+    converted = tuple(
+        _ExecutableEvidence(
+            argv_index=candidate.index,
+            name=_candidate_name(candidate, words),
+            literal=words[candidate.index].literal,
+            external_lookup=candidate.external_lookup,
+            ambiguous=candidate.ambiguous or result.ambiguous,
+        )
+        for candidate in candidates
+    )
+    primary = converted[-1]
+    return _ExecutableEvidence(
+        argv_index=primary.argv_index,
+        name=primary.name,
+        literal=primary.literal,
+        external_lookup=primary.external_lookup,
+        ambiguous=primary.ambiguous,
+        alternates=converted[:-1],
+    )
+
+
 def _reject_marker_bearing_non_invocation(command_has_marker: bool) -> None:
     """Fail closed when an unresolved command contains a retained doc-lattice marker."""
     if command_has_marker:
@@ -1889,6 +1960,9 @@ def _has_active_argv_expansion(syntax: str) -> bool:
 def _skip_shell_prefixes(
     words: list[_ShellWord],
     start: int,
+    resolution: _LauncherResolutionState,
+    *,
+    inherited_external_lookup: bool = False,
 ) -> _ResolvedIndex:
     """Skip literal shell prefixes and preserve dynamic command-position ambiguity.
 
@@ -1898,7 +1972,7 @@ def _skip_shell_prefixes(
     """
     index = start
     ambiguous = False
-    external_lookup = False
+    external_lookup = inherited_external_lookup
     while index < len(words):
         word = words[index]
         if word.shell_assignment:
@@ -1932,7 +2006,12 @@ def _skip_shell_prefixes(
             return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous, True)
         if word.literal in {"builtin", "command", "exec"}:
             wrapper_literal = word.literal
-            wrapper = _skip_shell_builtin_wrapper(words, index)
+            wrapper = _skip_shell_builtin_wrapper(
+                words,
+                index,
+                resolution,
+                external_lookup=external_lookup,
+            )
             if wrapper.index is None:
                 return _ResolvedIndex(None, ambiguous or wrapper.ambiguous, external_lookup)
             index = wrapper.index
@@ -1957,11 +2036,19 @@ def _skip_shell_prefixes(
 def _skip_shell_builtin_wrapper(
     words: list[_ShellWord],
     index: int,
+    resolution: _LauncherResolutionState,
+    *,
+    external_lookup: bool,
 ) -> _ResolvedIndex:
     """Resolve one supported Bash wrapper beginning at ``index``."""
     literal = words[index].literal
     if literal == "builtin":
-        return _skip_builtin_wrapper(words, index + 1)
+        return _skip_builtin_wrapper(
+            words,
+            index + 1,
+            resolution,
+            external_lookup=external_lookup,
+        )
     if literal == "command":
         return _skip_command_builtin(words, index + 1)
     return _skip_exec_wrapper(words, index + 1)
@@ -1970,6 +2057,9 @@ def _skip_shell_builtin_wrapper(
 def _skip_builtin_wrapper(
     words: list[_ShellWord],
     start: int,
+    resolution: _LauncherResolutionState,
+    *,
+    external_lookup: bool,
 ) -> _ResolvedIndex:
     """Expose a supported literal Bash builtin target or one ambiguous successor."""
     index = start
@@ -1981,6 +2071,7 @@ def _skip_builtin_wrapper(
     if _command_boundary_word_may_disappear(target) or target.dynamic:
         return _ResolvedIndex(index + 1, ambiguous=True)
     if target.literal not in {"builtin", "command", "exec"}:
+        resolution.record_executable(index, external_lookup=external_lookup)
         return _ResolvedIndex(None)
     return _ResolvedIndex(index)
 
@@ -2178,7 +2269,7 @@ def _doc_lattice_command_index(
     resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Resolve one direct command, including an optional named Bash coprocess."""
-    command = _skip_shell_prefixes(words, start)
+    command = _skip_shell_prefixes(words, start, resolution)
     if command.index is None:
         return command
     command_index = command.index
@@ -2208,7 +2299,12 @@ def _doc_lattice_command_index(
             resolution,
         )
     else:
-        payload_index = _doc_lattice_payload_index(words, command_index, resolution)
+        payload_index = _doc_lattice_payload_index(
+            words,
+            command_index,
+            resolution,
+            external_lookup=command.external_lookup,
+        )
     if payload_index.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2243,10 +2339,15 @@ def _doc_lattice_command_after_prefixes(
     resolution: _LauncherResolutionState,
 ) -> _ResolvedIndex:
     """Reuse prefix, wrapper, and payload resolution for unnamed or named coprocess bodies."""
-    executable = _skip_shell_prefixes(words, start)
+    executable = _skip_shell_prefixes(words, start, resolution)
     if executable.index is None:
         return executable
-    payload = _doc_lattice_payload_index(words, executable.index, resolution)
+    payload = _doc_lattice_payload_index(
+        words,
+        executable.index,
+        resolution,
+        external_lookup=executable.external_lookup,
+    )
     if payload.index is None:
         _reject_unresolved_unsafe_executable(
             words,
@@ -2262,12 +2363,14 @@ def _doc_lattice_payload_index(
     executable_index: int,
     resolution: _LauncherResolutionState,
     *,
+    external_lookup: bool = False,
     launcher_depth: int = 0,
 ) -> _ResolvedIndex:
     if executable_index >= len(words):
         return _ResolvedIndex(None)
     executable_word = words[executable_index]
     _reject_unsafe_executable_word(executable_word)
+    resolution.record_executable(executable_index, external_lookup=external_lookup)
     if _is_doc_lattice_executable(executable_word):
         return _ResolvedIndex(executable_index)
     if not executable_word.dynamic:
@@ -2611,6 +2714,12 @@ def _nested_launcher_payload_index(
     if payload.dynamic:
         return _ResolvedIndex(None, payload_resolution.ambiguous)
     raw_basename = _basename(payload.literal)
+    resolution.record_executable(
+        payload_index,
+        uv_requirement=strip_version,
+        external_lookup=True,
+        ambiguous=payload_resolution.ambiguous,
+    )
     basename = _uv_requirement_executable_name(payload.literal) if strip_version else raw_basename
     is_doc_lattice = (
         _is_doc_lattice_uv_tool_payload(payload.literal)

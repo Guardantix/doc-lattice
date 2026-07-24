@@ -127,6 +127,7 @@ class _ExecutableEvidence:
     literal: str | None
     external_lookup: bool = False
     ambiguous: bool = False
+    alternates: tuple[_ExecutableEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,9 +925,9 @@ def _build_flow_definitions(
     )
 
 
-def _eval_arguments(command: _CommandEvidence) -> ContentExpr:
+def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvidence) -> ContentExpr:
     """Return eval arguments joined by the literal shell argument separator."""
-    head_index = command.executable.argv_index
+    head_index = executable.argv_index
     if head_index is None:
         return LiteralTransfer("")
     arguments = command.argv[head_index + 1 :]
@@ -956,13 +957,13 @@ def _shell_script_source_expression(
     return _script_port_expression(port)
 
 
-def _sink_expressions(  # noqa: PLR0911, PLR0912
+def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
     command: _CommandEvidence,
+    executable: _ExecutableEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
 ) -> tuple[ContentExpr, ...]:
-    """Return every conservative execution sink expression for one command."""
-    executable = command.executable
+    """Return conservative sink expressions for one resolved executable candidate."""
     if executable.argv_index is None or executable.name is None:
         return ()
     name = executable.name
@@ -973,7 +974,7 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
         if key is not None:
             direct_sinks = (ResourceRef(key),)
     if name == "eval" and literal == "eval" and not executable.external_lookup:
-        return (_eval_arguments(command),)
+        return (_eval_arguments_from(command, executable),)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
         operand_index = executable.argv_index + 1
         if operand_index >= len(command.argv):
@@ -1007,6 +1008,21 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
             candidates.append(stdin)
         return (choice(*candidates), *direct_sinks)
     return direct_sinks
+
+
+def _sink_expressions(
+    command: _CommandEvidence,
+    stdin: ContentExpr,
+    process_resources: dict[int, _ProcessResourceEvidence],
+) -> tuple[ContentExpr, ...]:
+    """Return every conservative execution sink expression for all candidates."""
+    candidates = (*command.executable.alternates, command.executable)
+    expressions: list[ContentExpr] = []
+    for executable in candidates:
+        expressions.extend(
+            _candidate_sink_expressions(command, executable, stdin, process_resources)
+        )
+    return tuple(expressions)
 
 
 def analyze_marker_taint(  # noqa: PLR0911

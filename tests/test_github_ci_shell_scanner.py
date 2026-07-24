@@ -12,9 +12,12 @@ from doc_lattice.github_ci.shell_scanner import (
     _RECONCILE_FLAGS,
     _RECONCILE_OPTIONS_WITH_ARGUMENTS,
     _CommandScanState,
+    _effective_executable_evidence,
+    _ExecutableCandidate,  # noqa: F401 - private evidence API under test
     _ScanBudget,
     _ShellScanIncomplete,
     _ShellScanner,
+    _ShellWord,
     _uv_requirement_executable_name,
     _uv_requirement_is_path,
     _wheel_distribution_name,
@@ -29,6 +32,73 @@ RECONCILE_DRY = (("reconcile", True),)
 CHECK = (("check", False),)
 LINEAR_LINT = (("linear", False), ("lint", False))
 INCOMPLETE = object()
+
+
+def _static_word(literal: str, *, assignment: bool = False) -> _ShellWord:
+    return _ShellWord(literal=literal, shell_assignment=assignment)
+
+
+@pytest.mark.parametrize(
+    ("words", "expected_name", "expected_external_lookup"),
+    [
+        ([_static_word("eval"), _static_word("$X")], "eval", False),
+        ([_static_word("command"), _static_word("eval"), _static_word("$X")], "eval", False),
+        ([_static_word("env"), _static_word("eval"), _static_word("$X")], "eval", True),
+        ([_static_word("exec"), _static_word("eval"), _static_word("$X")], "eval", True),
+        (
+            [
+                _static_word("uv"),
+                _static_word("run"),
+                _static_word("bash"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            "bash",
+            True,
+        ),
+        (
+            [_static_word("uvx"), _static_word("bash@5.2"), _static_word("-c"), _static_word("$X")],
+            "bash",
+            True,
+        ),
+        ([_static_word("/bin/bash"), _static_word("-c"), _static_word("$X")], "bash", False),
+        ([_static_word("./task.sh")], "task.sh", False),
+    ],
+    ids=(
+        "builtin-eval",
+        "command-eval",
+        "env-eval",
+        "exec-eval",
+        "uv-run-shell",
+        "uvx-versioned-shell",
+        "path-shell",
+        "direct-path",
+    ),
+)
+def test_effective_executable_evidence_resolves_launcher_payload(
+    words: list[_ShellWord], expected_name: str, expected_external_lookup: bool
+) -> None:
+    evidence = _effective_executable_evidence(words, _ScanBudget())
+
+    assert evidence is not None
+    assert evidence.name == expected_name
+    assert evidence.external_lookup is expected_external_lookup
+
+
+def test_effective_executable_evidence_marks_prefix_ambiguity() -> None:
+    evidence = _effective_executable_evidence(
+        [
+            _ShellWord(literal="", dynamic=True, unquoted_dynamic=True),
+            _static_word("bash"),
+            _static_word("-c"),
+            _static_word("$X"),
+        ],
+        _ScanBudget(),
+    )
+
+    assert evidence is not None
+    assert evidence.name == "bash"
+    assert evidence.ambiguous is True
 
 
 def assert_marker_refusal(script: str) -> None:
