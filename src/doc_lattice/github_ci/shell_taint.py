@@ -268,14 +268,16 @@ class _StreamScopeEvidence:
     output: OutputExpr
     redirections: tuple[_RedirectionEvent, ...] = ()
     loop_bindings: tuple[_AssignmentEvidence, ...] = ()
+    entry: OutputExpr | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _PipeEvidence:
-    """A producer scope piped to a consumer command."""
+    """A producer scope piped to a command or compound-scope consumer."""
 
     producer_scope_id: int
-    consumer_command_id: int
+    consumer_command_id: int | None = None
+    consumer_scope_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +407,24 @@ class _EvidenceBuilder:
             return
         raise ValueError("heredoc owner command is missing")
 
+    def attach_scope_redirection_content(
+        self,
+        scope_id: int,
+        ordinal: int,
+        content: ContentExpr,
+    ) -> None:
+        """Replace one compound-scope heredoc placeholder with authored content."""
+        for index, scope in enumerate(self.scopes):
+            if scope.scope_id != scope_id:
+                continue
+            redirections = tuple(
+                replace(event, target=ContentTarget(content)) if event.ordinal == ordinal else event
+                for event in scope.redirections
+            )
+            self.scopes[index] = replace(scope, redirections=redirections)
+            return
+        raise ValueError("heredoc owner scope is missing")
+
     def command_output_scope(self, command_id: int) -> int:
         """Return the stdout scope owned by one command."""
         for command in self.commands:
@@ -475,7 +495,14 @@ _OUTPUT_REDIRECTION_OPERATORS = frozenset({">", ">|", ">>", ">&", "<>", "&>", "&
 _APPEND_REDIRECTION_OPERATORS = frozenset({">>", "&>>"})
 _COMBINED_OUTPUT_REDIRECTION_OPERATORS = frozenset({"&>", "&>>"})
 _STREAM_SCOPE_KINDS = frozenset(
-    {"command", "command_substitution", "process_substitution", "subshell_group", "pipeline"}
+    {
+        "brace_group",
+        "command",
+        "command_substitution",
+        "process_substitution",
+        "subshell_group",
+        "pipeline",
+    }
 )
 _PROCESS_RESOURCE_DIRECTIONS = frozenset({"input", "output"})
 
@@ -931,21 +958,50 @@ def _solve_flow_definitions(
     return _SolvedFlow(variables, resources, streams, limits)
 
 
-def _first_commands(output: OutputExpr) -> tuple[int, ...]:
-    """Return command ids that can first write one structured stream."""
+def _output_entry_commands(  # noqa: PLR0911
+    output: OutputExpr,
+    scopes: dict[int, _StreamScopeEvidence],
+    command_scopes: dict[int, int],
+    visited: set[int],
+) -> tuple[int, ...]:
+    """Return recursive stream-entry commands without following scope cycles twice."""
     if isinstance(output, CommandOutput):
         return (output.command_id,)
     if isinstance(output, ScopeOutput):
-        return ()
+        command_id = command_scopes.get(output.scope_id)
+        if command_id is not None:
+            return (command_id,)
+        return _scope_entry_commands(output.scope_id, scopes, command_scopes, visited)
     if isinstance(output, SequenceOutput):
         for part in output.parts:
-            commands = _first_commands(part)
+            commands = _output_entry_commands(part, scopes, command_scopes, visited)
             if commands:
                 return commands
         return ()
     if isinstance(output, ChoiceOutput):
-        return tuple(command for part in output.parts for command in _first_commands(part))
-    return _first_commands(output.part)
+        return tuple(
+            command
+            for part in output.parts
+            for command in _output_entry_commands(part, scopes, command_scopes, visited.copy())
+        )
+    return _output_entry_commands(output.part, scopes, command_scopes, visited)
+
+
+def _scope_entry_commands(
+    scope_id: int,
+    scopes: dict[int, _StreamScopeEvidence],
+    command_scopes: dict[int, int],
+    visited: set[int] | None = None,
+) -> tuple[int, ...]:
+    """Return commands that consume one scope's inherited standard input."""
+    if scope_id in (visited or set()):
+        return ()
+    scope = scopes.get(scope_id)
+    if scope is None:
+        return ()
+    active = set() if visited is None else visited
+    active.add(scope_id)
+    return _output_entry_commands(scope.entry or scope.output, scopes, command_scopes, active)
 
 
 def _output_bindings(
@@ -968,13 +1024,63 @@ def _output_bindings(
     return bindings
 
 
+def _replay_input_bindings(
+    events: tuple[_RedirectionEvent, ...],
+    initial: ContentExpr,
+    process_resources: dict[int, _ProcessResourceEvidence],
+) -> ContentExpr:
+    """Replay ordered stdin bindings over one inherited descriptor-zero expression."""
+    bindings: dict[int, ContentExpr] = {0: initial}
+    for event in sorted(events, key=lambda candidate: candidate.ordinal):
+        if event.descriptor is None or event.operator not in _INPUT_REDIRECTION_OPERATORS:
+            continue
+        if isinstance(event.target, StaticResourceTarget):
+            expression = ResourceRef(event.target.key)
+        elif isinstance(event.target, ContentTarget):
+            expression = event.target.content
+        elif isinstance(event.target, ProcessResourceTarget):
+            expression = _process_resource_input(event.target.resource_id, process_resources)
+        elif isinstance(event.target, NullTarget):
+            expression = LiteralTransfer("")
+        elif isinstance(event.target, DescriptorTarget):
+            expression = bindings.get(event.target.descriptor, OutsideGap())
+        else:
+            expression = OutsideGap()
+        bindings[event.descriptor] = expression
+    return bindings[0]
+
+
+def _pipe_source(
+    scope_id: int,
+    commands: dict[int, _CommandEvidence],
+    scopes: dict[int, _StreamScopeEvidence],
+) -> ContentExpr:
+    """Return what a pipe receives after the producer replays descriptor-one redirects."""
+    command = next(
+        (candidate for candidate in commands.values() if candidate.output_scope_id == scope_id),
+        None,
+    )
+    scope = scopes.get(scope_id)
+    events = command.redirections if command is not None else scope.redirections if scope else ()
+    if _output_bindings(events).get(1) is not None:
+        return LiteralTransfer("")
+    return StreamRef(scope_id)
+
+
 def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
-    """Return initial stdin expressions from explicit pipes and output process resources."""
-    inputs: dict[int, ContentExpr] = {
-        pipe.consumer_command_id: StreamRef(pipe.producer_scope_id) for pipe in evidence.pipes
-    }
-    resources = {resource.resource_id: resource for resource in evidence.process_resources}
+    """Return stdin expressions from pipes and output process resources through scope entries."""
+    commands = {command.command_id: command for command in evidence.commands}
     scopes = {scope.scope_id: scope for scope in evidence.scopes}
+    command_scopes = {command.output_scope_id: command.command_id for command in evidence.commands}
+    command_inputs: dict[int, ContentExpr] = {}
+    scope_inputs: dict[int, ContentExpr] = {}
+    for pipe in evidence.pipes:
+        expression = _pipe_source(pipe.producer_scope_id, commands, scopes)
+        if pipe.consumer_command_id is not None:
+            command_inputs[pipe.consumer_command_id] = expression
+        if pipe.consumer_scope_id is not None:
+            scope_inputs[pipe.consumer_scope_id] = expression
+    resources = {resource.resource_id: resource for resource in evidence.process_resources}
     for writer in evidence.commands:
         binding = _output_bindings(writer.redirections).get(1)
         if binding is None or not isinstance(binding[0], ProcessResourceTarget):
@@ -985,9 +1091,38 @@ def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
         scope = scopes.get(resource.scope_id)
         if scope is None:
             continue
-        for command_id in _first_commands(scope.output):
-            inputs[command_id] = StreamRef(writer.output_scope_id)
-    return inputs
+        scope_inputs[scope.scope_id] = StreamRef(writer.output_scope_id)
+
+    memo: dict[int, ContentExpr] = {}
+
+    def scope_input(scope_id: int, active: set[int]) -> ContentExpr:
+        if scope_id in memo:
+            return memo[scope_id]
+        if scope_id in active:
+            return OutsideGap()
+        scope = scopes.get(scope_id)
+        if scope is None:
+            return OutsideGap()
+        inherited = scope_inputs.get(scope_id)
+        if inherited is None:
+            inherited = (
+                scope_input(scope.parent_scope_id, {*active, scope_id})
+                if scope.parent_scope_id is not None
+                else OutsideGap()
+            )
+        value = _replay_input_bindings(scope.redirections, inherited, resources)
+        memo[scope_id] = value
+        return value
+
+    active_scopes = {
+        scope_id
+        for scope_id, scope in scopes.items()
+        if scope_id in scope_inputs or scope.redirections
+    }
+    for scope_id in active_scopes:
+        for command_id in _scope_entry_commands(scope_id, scopes, command_scopes):
+            command_inputs.setdefault(command_id, scope_input(scope_id, set()))
+    return command_inputs
 
 
 def _process_resource_input(
@@ -1009,26 +1144,11 @@ def _input_expression(
     process_resources: dict[int, _ProcessResourceEvidence],
 ) -> ContentExpr:
     """Replay ordered input descriptor bindings and return descriptor zero."""
-    bindings: dict[int, ContentExpr] = {
-        0: pipe_inputs.get(command.command_id, OutsideGap()),
-    }
-    for event in sorted(command.redirections, key=lambda candidate: candidate.ordinal):
-        if event.descriptor is None or event.operator not in _INPUT_REDIRECTION_OPERATORS:
-            continue
-        if isinstance(event.target, StaticResourceTarget):
-            expression = ResourceRef(event.target.key)
-        elif isinstance(event.target, ContentTarget):
-            expression = event.target.content
-        elif isinstance(event.target, ProcessResourceTarget):
-            expression = _process_resource_input(event.target.resource_id, process_resources)
-        elif isinstance(event.target, NullTarget):
-            expression = LiteralTransfer("")
-        elif isinstance(event.target, DescriptorTarget):
-            expression = bindings.get(event.target.descriptor, OutsideGap())
-        else:
-            expression = OutsideGap()
-        bindings[event.descriptor] = expression
-    return bindings[0]
+    return _replay_input_bindings(
+        command.redirections,
+        pipe_inputs.get(command.command_id, OutsideGap()),
+        process_resources,
+    )
 
 
 def _producer_stdout(command: _CommandEvidence, stdin: ContentExpr) -> ContentExpr:
@@ -1127,10 +1247,110 @@ def stream_ref_ids(expression: ContentExpr) -> tuple[int, ...]:
     return tuple(stream_ids)
 
 
+def _scope_environment_ids(
+    scopes: tuple[_StreamScopeEvidence, ...],
+) -> tuple[dict[int, int], dict[int, int | None]]:
+    """Return lexical shell environments and their inherited parent environments."""
+    by_id = {scope.scope_id: scope for scope in scopes}
+    environments: dict[int, int] = {}
+    parents: dict[int, int | None] = {}
+
+    def environment(scope_id: int) -> int:
+        if scope_id in environments:
+            return environments[scope_id]
+        scope = by_id.get(scope_id)
+        if scope is None:
+            environments[scope_id] = scope_id
+            parents[scope_id] = None
+            return scope_id
+        parent = environment(scope.parent_scope_id) if scope.parent_scope_id is not None else None
+        if scope.kind == "brace_group" and parent is not None:
+            environments[scope_id] = parent
+            return parent
+        environments[scope_id] = scope_id
+        parents[scope_id] = parent
+        return scope_id
+
+    for scope in scopes:
+        environment(scope.scope_id)
+    return environments, parents
+
+
+def _scoped_variable_name(environment: int, name: str) -> str:
+    """Return an internal variable-table key that shell source cannot spell."""
+    return f"\0{environment}\0{name}"
+
+
+def _scope_expression(expression: ContentExpr, environment: int) -> ContentExpr:
+    """Bind first-pass shell variable references to one lexical environment."""
+    if isinstance(expression, VariableRef):
+        return VariableRef(_scoped_variable_name(environment, expression.name))
+    if isinstance(
+        expression,
+        LiteralTransfer | _SecondPassVariableRef | OutsideGap | ResourceRef | StreamRef,
+    ):
+        return expression
+    if isinstance(expression, Choice):
+        return choice(*(_scope_expression(part, environment) for part in expression.parts))
+    return concat(*(_scope_expression(part, environment) for part in expression.parts))
+
+
+def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidence:
+    """Bind command-local first-pass variable reads before solving global flow tables."""
+    if not evidence.scopes:
+        return evidence
+    environments, _parents = _scope_environment_ids(evidence.scopes)
+    commands = tuple(
+        replace(
+            command,
+            argv=tuple(
+                replace(
+                    port,
+                    content=_scope_expression(
+                        port.content,
+                        environments.get(command.container_scope_id, command.container_scope_id),
+                    ),
+                )
+                for port in command.argv
+            ),
+            assignments=tuple(
+                replace(
+                    assignment,
+                    content=_scope_expression(
+                        assignment.content,
+                        environments.get(command.container_scope_id, command.container_scope_id),
+                    ),
+                )
+                for assignment in command.assignments
+            ),
+            redirections=tuple(
+                replace(
+                    event,
+                    target=ContentTarget(
+                        _scope_expression(
+                            event.target.content,
+                            environments.get(
+                                command.container_scope_id,
+                                command.container_scope_id,
+                            ),
+                        )
+                    ),
+                )
+                if isinstance(event.target, ContentTarget)
+                else event
+                for event in command.redirections
+            ),
+        )
+        for command in evidence.commands
+    )
+    return replace(evidence, commands=commands)
+
+
 def _build_flow_definitions(
     evidence: _ShellTaintEvidence,
 ) -> tuple[_FlowDefinitions, dict[int, ContentExpr]]:
     """Lower typed shell evidence into fixed-point definitions and command stdin."""
+    environments, environment_parents = _scope_environment_ids(evidence.scopes)
     command_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
     pipe_inputs = _pipe_inputs(evidence)
@@ -1141,16 +1361,39 @@ def _build_flow_definitions(
     variable_writes: list[_FlowWrite] = []
     resource_writes: list[_FlowWrite] = []
     stream_writes: list[_FlowWrite] = []
-    root_command_scopes = {
-        scope.scope_id
-        for scope in evidence.scopes
-        if scope.kind == "command" and scope.parent_scope_id is None
+    scoped_variables = bool(evidence.scopes)
+    has_eval = any(_builtin_eval_candidates(command) for command in evidence.commands)
+    command_environments = {
+        command.command_id: environments.get(command.container_scope_id, command.container_scope_id)
+        for command in evidence.commands
     }
-    if not root_command_scopes:
-        root_command_scopes = {command.container_scope_id for command in evidence.commands}
+
+    def visible_environments(environment: int) -> set[int]:
+        visible: set[int] = set()
+        current: int | None = environment
+        while current is not None and current not in visible:
+            visible.add(current)
+            current = environment_parents.get(current)
+        return visible
 
     for command in evidence.commands:
-        if command.container_scope_id in root_command_scopes:
+        origin_environment = command_environments[command.command_id]
+        for target_environment in set(command_environments.values()):
+            if origin_environment not in visible_environments(target_environment):
+                continue
+            variable_writes.extend(
+                _FlowWrite(
+                    (
+                        _scoped_variable_name(target_environment, assignment.name)
+                        if scoped_variables
+                        else assignment.name
+                    ),
+                    assignment.content,
+                    append=assignment.append,
+                )
+                for assignment in command.assignments
+            )
+        if scoped_variables and has_eval and environment_parents.get(origin_environment) is None:
             variable_writes.extend(
                 _FlowWrite(assignment.name, assignment.content, append=assignment.append)
                 for assignment in command.assignments
@@ -1644,6 +1887,8 @@ def _eval_sink_marker_capable(
     """Return whether any builtin eval candidate reparses an authored marker flow."""
     for executable in _builtin_eval_candidates(command):
         raw = _eval_arguments_raw(command, executable)
+        if _marker_capable(_evaluate_with_tables(raw, raw_variables, {}, {}, limits)):
+            return True
         if any(
             summary.full.entries[_DFA_START][1]
             for summary, _quote in _eval_syntax_expression(
@@ -1771,6 +2016,7 @@ def analyze_marker_taint(  # noqa: PLR0911
     limits: TaintLimits = TaintLimits(),  # noqa: B008
 ) -> tuple[bool, str | None]:
     """Return a fail-closed verdict for authored marker flow in one run body."""
+    evidence = _contextualize_evidence(evidence)
     if any(scope.kind not in _STREAM_SCOPE_KINDS for scope in evidence.scopes):
         return True, "shell taint stream scope cannot be structured"
     if any(

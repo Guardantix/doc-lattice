@@ -612,6 +612,7 @@ class _Heredoc:
     descriptor: int | None
     ordinal: int
     owner_id: int | None = None
+    owner_scope_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1028,8 +1029,6 @@ class _ShellScanner:
         if operator == "|":
             self._begin_or_extend_pipeline(state, command_id)
             return index
-        self._finalize_pipeline(state)
-        self._advance_case_body(state, operator)
         if operator in {"(", "{"}:
             closing = ")" if operator == "(" else "}"
             return self._scan_compound_scope(
@@ -1038,11 +1037,14 @@ class _ShellScanner:
                 state,
                 terminator=closing,
                 depth=depth + 1,
+                kind="subshell_group" if operator == "(" else "brace_group",
             )
+        self._finalize_pipeline(state)
+        self._advance_case_body(state, operator)
         state.pending_compound_scope_id = None
         return index
 
-    def _scan_compound_scope(
+    def _scan_compound_scope(  # noqa: PLR0913
         self,
         start: int,
         limit: int,
@@ -1050,6 +1052,7 @@ class _ShellScanner:
         *,
         terminator: str,
         depth: int,
+        kind: str = "subshell_group",
     ) -> int:
         """Scan a real compound command and expose its stdout to the parent command list."""
         end, scope_id = self._scan_stream_scope(
@@ -1057,12 +1060,17 @@ class _ShellScanner:
             limit,
             terminator=terminator,
             depth=depth,
-            kind="subshell_group",
+            kind=kind,
         )
         if self.scope_stack:
             self.scope_stack[-1].outputs.append(ScopeOutput(scope_id))
         state.pending_compound_scope_id = scope_id
         state.compound_redirection_ordinal = 0
+        if state.pending_pipe_producer is not None and self.taint_builder is not None:
+            self.taint_builder.pipes.append(
+                _PipeEvidence(state.pending_pipe_producer, consumer_scope_id=scope_id)
+            )
+            state.pending_pipe_producer = None
         return end
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
@@ -1336,8 +1344,10 @@ class _ShellScanner:
         """Emit the completed pipeline scope after its final stage is flushed."""
         if state.pipeline is None or self.taint_builder is None:
             return
-        if state.last_command_id is not None:
+        final_scope = state.pending_compound_scope_id
+        if final_scope is None and state.last_command_id is not None:
             final_scope = self.taint_builder.command_output_scope(state.last_command_id)
+        if final_scope is not None:
             if not state.pipeline.stages or state.pipeline.stages[-1] != final_scope:
                 state.pipeline.stages.append(final_scope)
             if self.scope_stack and self.scope_stack[-1].outputs:
@@ -1353,6 +1363,9 @@ class _ShellScanner:
                 parent_scope_id,
                 None,
                 output,
+                entry=ScopeOutput(state.pipeline.stages[0])
+                if state.pipeline.stages
+                else SequenceOutput(()),
             )
         )
         if self.scope_stack:
@@ -1560,6 +1573,8 @@ class _ShellScanner:
                 ContentTarget(LiteralTransfer("")),
             )
             self._append_redirection(state, event)
+            if state.pending_compound_scope_id is not None:
+                state.heredocs[-1].owner_scope_id = state.pending_compound_scope_id
             return index
         target, index = self._parse_word(index, limit, depth)
         redirection_target: RedirectionTarget
@@ -1690,14 +1705,24 @@ class _ShellScanner:
                     break
             raw_body = self.source[body_start:body_end]
             body = _remove_active_line_continuations(raw_body) if heredoc.expand else raw_body
-            if self.taint_builder is not None and heredoc.owner_id is not None:
-                self.taint_builder.attach_redirection_content(
-                    heredoc.owner_id,
-                    heredoc.ordinal,
+            if self.taint_builder is not None:
+                content = (
                     self._heredoc_content_expression(body, depth + 1)
                     if heredoc.expand
-                    else LiteralTransfer(raw_body),
+                    else LiteralTransfer(raw_body)
                 )
+                if heredoc.owner_id is not None:
+                    self.taint_builder.attach_redirection_content(
+                        heredoc.owner_id,
+                        heredoc.ordinal,
+                        content,
+                    )
+                elif heredoc.owner_scope_id is not None:
+                    self.taint_builder.attach_scope_redirection_content(
+                        heredoc.owner_scope_id,
+                        heredoc.ordinal,
+                        content,
+                    )
             if heredoc.expand and self.taint_builder is None:
                 child = self._child_scanner(
                     body,

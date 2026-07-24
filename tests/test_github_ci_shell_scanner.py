@@ -3373,3 +3373,85 @@ def test_nested_scope_assignments_do_not_taint_outer_variable_flow(script: str):
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '{ bash; } <<<"doc-lattice reconcile"',
+        "{ bash; } < <(printf '%s%s\\n' doc- 'lattice reconcile')",
+        "{ bash; } <<'EOF'\ndoc-lattice reconcile\nEOF",
+    ],
+    ids=("here-string", "process-substitution", "heredoc"),
+)
+def test_compound_scope_entry_receives_redirected_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- 'lattice reconcile' | { bash; }",
+        "printf '%s%s\\n' doc- 'lattice reconcile' | ( cat | bash )",
+    ],
+    ids=("brace-group", "subshell-pipeline"),
+)
+def test_pipeline_reaches_compound_scope_entries(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- 'lattice reconcile' > >( { bash; } )",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > >(cat | bash)",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > >(bash | cat)",
+    ],
+    ids=("brace-group", "pipeline-sink-last", "pipeline-sink-first"),
+)
+def test_output_process_substitution_reaches_nested_scope_entries(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '{ X=doc-; X+=lattice; eval "$X reconcile"; }',
+        'echo "$(X=doc-; X+=lattice; eval "$X reconcile")"',
+        '{ X=doc-; }; eval "$X"lattice reconcile',
+    ],
+    ids=("brace-local-eval", "command-substitution-local-eval", "brace-parent-leak"),
+)
+def test_nested_assignments_reach_nested_and_brace_shared_eval_sinks(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '( X=doc-; ); eval "$X"lattice reconcile',
+        'echo "$(X=doc-)"; eval "$X"lattice reconcile',
+    ],
+    ids=("subshell", "command-substitution"),
+)
+def test_isolated_nested_assignments_do_not_leak_to_outer_eval(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- lattice >out | bash",
+        "printf '%s%s\\n' doc- lattice | cat >out | bash",
+        "{ printf doc-; printf lattice; } >out | bash",
+    ],
+    ids=("producer", "intermediate-consumer", "compound-producer"),
+)
+def test_stdout_redirection_detaches_pipeline_from_later_consumer(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
