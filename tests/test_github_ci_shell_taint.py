@@ -8,9 +8,17 @@ from doc_lattice.github_ci.shell_taint import (
     ContentExpr,
     LiteralTransfer,
     OutsideGap,
+    ResourceRef,
+    StreamRef,
+    TaintLimits,
+    VariableRef,
     _evaluate_closed,
+    _FlowDefinitions,
+    _FlowWrite,
     _marker_capable,
+    _solve_flow_definitions,
     _strip_trailing_newlines,
+    _TaintLimitExceeded,
     choice,
     concat,
 )
@@ -79,3 +87,128 @@ def test_command_substitution_strips_only_trailing_newlines() -> None:
     composed = frozenset(left.compose(after) for left in stripped_left for after in right)
 
     assert _marker_capable(composed) is True
+
+
+def test_variable_assignment_and_append_compose_in_the_fixed_point() -> None:
+    solved = _solve_flow_definitions(
+        _FlowDefinitions(
+            variable_writes=(
+                _FlowWrite("X", LiteralTransfer("doc-")),
+                _FlowWrite("X", LiteralTransfer("lattice"), append=True),
+            )
+        )
+    )
+
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
+
+
+def test_competing_variable_definitions_join_without_composing() -> None:
+    solved = _solve_flow_definitions(
+        _FlowDefinitions(
+            variable_writes=(
+                _FlowWrite("X", LiteralTransfer("doc-")),
+                _FlowWrite("X", LiteralTransfer("lattice")),
+            )
+        )
+    )
+
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is False
+
+
+def test_resource_append_and_stream_strip_resolve_through_typed_tables() -> None:
+    solved = _solve_flow_definitions(
+        _FlowDefinitions(
+            resource_writes=(
+                _FlowWrite("task.sh", LiteralTransfer("doc-")),
+                _FlowWrite("task.sh", LiteralTransfer("lattice\n"), append=True),
+            ),
+            stream_writes=(
+                _FlowWrite(
+                    7,
+                    Concat((ResourceRef("task.sh"), LiteralTransfer(""))),
+                    strip_trailing_newlines=True,
+                ),
+            ),
+        )
+    )
+
+    assert _marker_capable(solved.evaluate(ResourceRef("task.sh"))) is True
+    assert _marker_capable(solved.evaluate(StreamRef(7))) is True
+
+
+def test_mutually_referential_variables_converge_by_least_fixed_point() -> None:
+    solved = _solve_flow_definitions(
+        _FlowDefinitions(
+            variable_writes=(
+                _FlowWrite("X", LiteralTransfer("doc-")),
+                _FlowWrite("X", VariableRef("Y")),
+                _FlowWrite("Y", VariableRef("X")),
+            )
+        )
+    )
+
+    assert (
+        _marker_capable(solved.evaluate(Concat((VariableRef("Y"), LiteralTransfer("lattice")))))
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("definitions", "limits", "message"),
+    [
+        (
+            _FlowDefinitions(
+                variable_writes=(
+                    _FlowWrite("X", Choice((LiteralTransfer("a"), LiteralTransfer("b")))),
+                )
+            ),
+            TaintLimits(max_alternatives=1),
+            "shell taint alternative limit exceeded",
+        ),
+        (
+            _FlowDefinitions(
+                variable_writes=(
+                    _FlowWrite("X", Concat((LiteralTransfer("a"), LiteralTransfer("b")))),
+                )
+            ),
+            TaintLimits(max_expression_nodes=2),
+            "shell taint expression node limit exceeded",
+        ),
+        (
+            _FlowDefinitions(
+                variable_writes=(
+                    _FlowWrite("X", LiteralTransfer("a")),
+                    _FlowWrite("Y", LiteralTransfer("b")),
+                )
+            ),
+            TaintLimits(max_table_entries=1),
+            "shell taint table entry limit exceeded",
+        ),
+        (
+            _FlowDefinitions(
+                variable_writes=(
+                    _FlowWrite("X", LiteralTransfer("a")),
+                    _FlowWrite("Y", VariableRef("X")),
+                )
+            ),
+            TaintLimits(max_edges=1),
+            "shell taint edge limit exceeded",
+        ),
+        (
+            _FlowDefinitions(
+                variable_writes=(
+                    _FlowWrite("X", LiteralTransfer("a")),
+                    _FlowWrite("Y", VariableRef("X")),
+                )
+            ),
+            TaintLimits(max_fixed_point_updates=1),
+            "shell taint fixed-point update limit exceeded",
+        ),
+    ],
+    ids=("alternatives", "nodes", "tables", "edges", "updates"),
+)
+def test_every_flow_bound_fails_closed(
+    definitions: _FlowDefinitions, limits: TaintLimits, message: str
+) -> None:
+    with pytest.raises(_TaintLimitExceeded, match=message):
+        _solve_flow_definitions(definitions, limits=limits)

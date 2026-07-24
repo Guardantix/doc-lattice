@@ -60,6 +60,38 @@ ContentExpr: TypeAlias = (  # noqa: UP040
 )
 
 
+@dataclass(frozen=True, slots=True)
+class TaintLimits:
+    """Deterministic caps for one taint pass."""
+
+    max_alternatives: int = 256
+    max_expression_nodes: int = 100_000
+    max_table_entries: int = 10_000
+    max_edges: int = 50_000
+    max_fixed_point_updates: int = 100_000
+    max_brace_expansions: int = 256
+    max_brace_depth: int = 16
+
+
+class _TaintLimitExceeded(RuntimeError):
+    """A deterministic taint bound prevented certification."""
+
+
+@dataclass(frozen=True, slots=True)
+class _FlowWrite:
+    key: str | int
+    expression: ContentExpr
+    append: bool = False
+    strip_trailing_newlines: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _FlowDefinitions:
+    variable_writes: tuple[_FlowWrite, ...] = ()
+    resource_writes: tuple[_FlowWrite, ...] = ()
+    stream_writes: tuple[_FlowWrite, ...] = ()
+
+
 def concat(*parts: ContentExpr) -> ContentExpr:
     """Flatten concatenation and discard authored epsilon fragments."""
     flattened: list[ContentExpr] = []
@@ -245,6 +277,52 @@ def _marker_capable(value: _ContentValue) -> bool:
     return any(alternative.full.entries[_DFA_START][1] for alternative in value)
 
 
+def _expression_nodes(expression: ContentExpr) -> int:
+    if isinstance(expression, Choice | Concat):
+        return 1 + sum(_expression_nodes(part) for part in expression.parts)
+    return 1
+
+
+def _expression_edges(expression: ContentExpr) -> int:
+    if isinstance(expression, VariableRef | ResourceRef | StreamRef):
+        return 1
+    if isinstance(expression, Choice | Concat):
+        return sum(_expression_edges(part) for part in expression.parts)
+    return 0
+
+
+def _cap_value(value: _ContentValue, limits: TaintLimits) -> _ContentValue:
+    if len(value) > limits.max_alternatives:
+        raise _TaintLimitExceeded("shell taint alternative limit exceeded")
+    return value
+
+
+def _definition_counts(definitions: _FlowDefinitions) -> tuple[int, int, int]:
+    writes = definitions.variable_writes + definitions.resource_writes + definitions.stream_writes
+    nodes = sum(_expression_nodes(write.expression) for write in writes)
+    edges = len(writes) + sum(_expression_edges(write.expression) for write in writes)
+    entries = len(
+        {
+            *(("variable", write.key) for write in definitions.variable_writes),
+            *(("resource", write.key) for write in definitions.resource_writes),
+            *(("stream", write.key) for write in definitions.stream_writes),
+        }
+    )
+    return nodes, edges, entries
+
+
+def _expression_references(expression: ContentExpr) -> frozenset[tuple[str, str | int]]:
+    if isinstance(expression, VariableRef):
+        return frozenset({("variable", expression.name)})
+    if isinstance(expression, ResourceRef):
+        return frozenset({("resource", expression.key)})
+    if isinstance(expression, StreamRef):
+        return frozenset({("stream", expression.scope_id)})
+    if isinstance(expression, Choice | Concat):
+        return frozenset().union(*(_expression_references(part) for part in expression.parts))
+    return frozenset()
+
+
 def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
     if isinstance(expression, LiteralTransfer):
         return frozenset({_TransferSummary.literal(expression.text)})
@@ -258,3 +336,118 @@ def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
             value = _compose_values(value, _evaluate_closed(part))
         return value
     raise ValueError("closed content expression contains an unresolved reference")
+
+
+def _evaluate_with_tables(
+    expression: ContentExpr,
+    variables: dict[str | int, _ContentValue],
+    resources: dict[str | int, _ContentValue],
+    streams: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> _ContentValue:
+    if isinstance(expression, LiteralTransfer):
+        value = frozenset({_TransferSummary.literal(expression.text)})
+    elif isinstance(expression, OutsideGap):
+        value = _OUTSIDE_VALUE
+    elif isinstance(expression, VariableRef):
+        value = variables.get(expression.name, _OUTSIDE_VALUE)
+    elif isinstance(expression, ResourceRef):
+        value = resources.get(expression.key, _OUTSIDE_VALUE)
+    elif isinstance(expression, StreamRef):
+        value = streams.get(expression.scope_id, _OUTSIDE_VALUE)
+    elif isinstance(expression, Choice):
+        value = _join_values(
+            *(
+                _evaluate_with_tables(part, variables, resources, streams, limits)
+                for part in expression.parts
+            )
+        )
+    else:
+        value = frozenset({_EPSILON})
+        for part in expression.parts:
+            value = _cap_value(
+                _compose_values(
+                    value,
+                    _evaluate_with_tables(part, variables, resources, streams, limits),
+                ),
+                limits,
+            )
+    return _cap_value(value, limits)
+
+
+@dataclass(frozen=True, slots=True)
+class _SolvedFlow:
+    variables: dict[str | int, _ContentValue]
+    resources: dict[str | int, _ContentValue]
+    streams: dict[str | int, _ContentValue]
+    limits: TaintLimits
+
+    def evaluate(self, expression: ContentExpr) -> _ContentValue:
+        """Evaluate one expression against the solved typed tables."""
+        return _evaluate_with_tables(
+            expression,
+            self.variables,
+            self.resources,
+            self.streams,
+            self.limits,
+        )
+
+
+def _solve_flow_definitions(
+    definitions: _FlowDefinitions,
+    *,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
+) -> _SolvedFlow:
+    nodes, edges, entries = _definition_counts(definitions)
+    if nodes > limits.max_expression_nodes:
+        raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+    if edges > limits.max_edges:
+        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+    if entries > limits.max_table_entries:
+        raise _TaintLimitExceeded("shell taint table entry limit exceeded")
+
+    variables: dict[str | int, _ContentValue] = {}
+    resources: dict[str | int, _ContentValue] = {}
+    streams: dict[str | int, _ContentValue] = {}
+    writes = (
+        *(("variable", write) for write in definitions.variable_writes),
+        *(("resource", write) for write in definitions.resource_writes),
+        *(("stream", write) for write in definitions.stream_writes),
+    )
+    references = tuple(_expression_references(write.expression) for _, write in writes)
+    active = frozenset(range(len(writes)))
+    updates = 0
+
+    while active:
+        changed_keys: set[tuple[str, str | int]] = set()
+        for index, (kind, write) in enumerate(writes):
+            if index not in active:
+                continue
+            table = {
+                "variable": variables,
+                "resource": resources,
+                "stream": streams,
+            }[kind]
+            value = _evaluate_with_tables(write.expression, variables, resources, streams, limits)
+            if write.strip_trailing_newlines:
+                value = _cap_value(_strip_trailing_newlines(value), limits)
+            prior = table.get(write.key, frozenset())
+            if write.append:
+                base = prior or _OUTSIDE_VALUE
+                value = _cap_value(_compose_values(base, value), limits)
+            widened = _cap_value(_join_values(prior, value), limits)
+            if widened == prior:
+                continue
+            table[write.key] = widened
+            updates += 1
+            if updates > limits.max_fixed_point_updates:
+                raise _TaintLimitExceeded("shell taint fixed-point update limit exceeded")
+            changed_keys.add((kind, write.key))
+
+        active = frozenset(
+            index
+            for index, expression_references in enumerate(references)
+            if expression_references & changed_keys
+        )
+
+    return _SolvedFlow(variables, resources, streams, limits)
