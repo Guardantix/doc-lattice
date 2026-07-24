@@ -36,7 +36,10 @@ from doc_lattice.github_ci.shell_taint import (
     _select_shell_source,
     _ShellSourceKind,
     _StreamScopeEvidence,
+    _TaintLimitExceeded,
+    _WordContentPort,
     analyze_marker_taint,
+    choice,
     concat,
     normalize_static_resource,
     stream_ref_ids,
@@ -134,6 +137,7 @@ _COMMAND_OPERATORS = (
     "}",
 )
 _WORD_BREAKS = frozenset(" \t\n;&|()<>")
+_PARAMETER_OPERATORS = (":-", ":=", ":+", "-", "=", "+")
 
 _UV_SHARED_OPTIONS_WITH_ARGUMENTS = frozenset(
     {
@@ -418,6 +422,8 @@ class _ShellWord:
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
     process_resource_id: int | None = None
     keyword_eligible: bool = True
+    argv_ports: tuple[_WordContentPort, ...] = ()
+    brace_expansion_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -459,7 +465,7 @@ class _ShellWordBuilder:
 
     def append_active(self, character: str) -> None:
         """Append one unquoted, unescaped literal character."""
-        self.content.append_literal(character)
+        self.content.append_literal(character, brace_active=True)
         self.characters.append(character)
         self.active_syntax.append(character)
         if not self.assignment_name_is_literal or self.shell_assignment:
@@ -479,7 +485,7 @@ class _ShellWordBuilder:
     def build(self) -> _ShellWord:
         """Build the immutable decoded word and its expansion provenance."""
         literal = "".join(self.characters)
-        built_content = self.content.build()
+        built_content = self.content.build(defer_brace_errors=True)
         return _ShellWord(
             literal=literal,
             content=built_content.expression,
@@ -496,6 +502,8 @@ class _ShellWordBuilder:
             conditional_assignments=built_content.conditional_assignments,
             process_resource_id=built_content.process_resource_id,
             keyword_eligible=self.keyword_eligible,
+            argv_ports=built_content.argv_ports,
+            brace_expansion_error=built_content.brace_expansion_error,
         )
 
 
@@ -774,6 +782,10 @@ class _ShellScanner:
         )
         self.owns_taint_builder = collect_taint and taint_builder is None
         self.scope_stack: list[_ScopeFrame] = []
+        self._parameter_expansions: dict[int, _ShellExpansion] = {}
+        self._parameter_content_assignments: dict[
+            tuple[int, int], tuple[_AssignmentEvidence, ...]
+        ] = {}
 
     def scan(self) -> tuple[_Invocation, ...]:
         self._scan_stream_scope(
@@ -1400,6 +1412,9 @@ class _ShellScanner:
                 if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
                     raise _ShellScanIncomplete("invocation limit exceeded")
                 self.invocations.append(invocation)
+        for word in state.words:
+            if word.brace_expansion_error is not None:
+                raise _ShellScanIncomplete(word.brace_expansion_error)
         if self.taint_builder is not None:
             if state.words and not resolution_attempted:
                 _doc_lattice_command_index(state.words, 0, resolution)
@@ -1418,21 +1433,23 @@ class _ShellScanner:
                     )
             for word in state.words:
                 assignments.extend(word.conditional_assignments)
-            argv_indices = {
-                source_index: argv_index
-                for argv_index, source_index in enumerate(
-                    index for index in range(len(state.words)) if index not in assignment_indices
+            argv_indices: dict[int, int] = {}
+            argv_parts: list[_ArgPort] = []
+            for source_index, word in enumerate(state.words):
+                if source_index in assignment_indices:
+                    continue
+                argv_indices[source_index] = len(argv_parts)
+                ports = word.argv_ports or (_WordContentPort(word.literal, word.content),)
+                argv_parts.extend(
+                    _ArgPort(
+                        port.literal,
+                        port.content,
+                        dynamic=word.dynamic,
+                        process_resource_id=word.process_resource_id,
+                    )
+                    for port in ports
                 )
-            }
-            argv = tuple(
-                _ArgPort(
-                    state.words[source_index].literal,
-                    state.words[source_index].content,
-                    dynamic=state.words[source_index].dynamic,
-                    process_resource_id=state.words[source_index].process_resource_id,
-                )
-                for source_index in argv_indices
-            )
+            argv = tuple(argv_parts)
             command_id, output_scope_id = self.taint_builder.allocate_command()
             container_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else 0
             self.taint_builder.commands.append(
@@ -1821,6 +1838,13 @@ class _ShellScanner:
         reject_extglob: bool = True,
     ) -> tuple[_ShellWord, int]:
         builder = _ShellWordBuilder([], [])
+
+        def finish() -> _ShellWord:
+            try:
+                return builder.build()
+            except _TaintLimitExceeded as error:
+                raise _ShellScanIncomplete(str(error)) from error
+
         index = start
         while index < limit and self._word_component_at(index, limit):
             self.budget.step()
@@ -1852,7 +1876,7 @@ class _ShellScanner:
                 closing = self.source.find("'", index + 1, limit)
                 if closing == -1:
                     builder.append_protected(self.source[index + 1 : limit])
-                    return builder.build(), limit
+                    return finish(), limit
                 builder.append_protected(self.source[index + 1 : closing])
                 index = closing + 1
                 continue
@@ -1903,7 +1927,7 @@ class _ShellScanner:
             self.source[index : index + 1],
             enabled=reject_extglob,
         )
-        return builder.build(), index
+        return finish(), index
 
     def _word_component_at(self, index: int, limit: int) -> bool:
         """Return whether syntax at ``index`` continues the current shell word."""
@@ -2059,6 +2083,7 @@ class _ShellScanner:
                 double_quoted=double_quoted,
             )
             if expansion_end is not None:
+                self._parameter_expansions.setdefault(index, expansion_end)
                 quoted_zero_field_expansion = (
                     quoted_zero_field_expansion or expansion_end.quoted_zero_field_expansion
                 )
@@ -2073,10 +2098,115 @@ class _ShellScanner:
                 braces -= 1
                 index += 1
                 if braces == 0:
-                    return _ShellExpansion(index, quoted_zero_field_expansion)
+                    closing = index - 1
+                    name_end = _parameter_name_end(self.source, start, closing)
+                    name = self.source[start:name_end]
+                    operator, operand_start = _parameter_operator_at(self.source, name_end, closing)
+                    variable = VariableRef(name) if _is_name(name) else OutsideGap()
+                    if operator is None and name_end == closing and _is_name(name):
+                        return _ShellExpansion(index, quoted_zero_field_expansion, variable)
+                    operand_start = operand_start if operator is not None else name_end
+                    operand = self._parse_parameter_word_content(
+                        operand_start,
+                        closing,
+                        depth,
+                        double_quoted,
+                    )
+                    conditional_assignments = self._parameter_content_assignments.get(
+                        (operand_start, closing), ()
+                    )
+                    if operator in {"-", ":-"}:
+                        content = choice(variable, operand)
+                    elif operator in {"+", ":+"}:
+                        content = choice(LiteralTransfer(""), operand)
+                    elif operator in {"=", ":="} and _is_name(name):
+                        content = choice(variable, operand)
+                        conditional_assignments = (
+                            *conditional_assignments,
+                            _AssignmentEvidence(name, operand),
+                        )
+                    else:
+                        content = concat(OutsideGap(), operand)
+                    return _ShellExpansion(
+                        index,
+                        quoted_zero_field_expansion,
+                        content,
+                        conditional_assignments,
+                    )
                 continue
             index += 1
         return _ShellExpansion(index, quoted_zero_field_expansion)
+
+    def _parse_parameter_word_content(  # noqa: PLR0912, PLR0915
+        self,
+        start: int,
+        closing: int,
+        depth: int,
+        double_quoted: bool,
+    ) -> ContentExpr:
+        """Lower an authored parameter operand without activating brace expansion."""
+        content = ContentBuilder.empty()
+        index = start
+        quote: str | None = None
+        while index < closing:
+            self.budget.step()
+            character = self.source[index]
+            if quote == "'":
+                if character == "'":
+                    quote = None
+                else:
+                    content.append_literal(character)
+                index += 1
+                continue
+            if quote == '"':
+                if character == '"':
+                    quote = None
+                    index += 1
+                    continue
+                if character == "\\" and index + 1 < closing:
+                    escaped = self.source[index + 1]
+                    if escaped in {"$", '"', "\\", "`", "\n"}:
+                        content.append_literal(escaped)
+                        index += 2
+                        continue
+                expansion = self._parameter_expansions.get(index)
+                if expansion is None or expansion.end > closing:
+                    expansion = self._consume_active_expansion(
+                        index, closing, depth, double_quoted=True
+                    )
+                if expansion is not None:
+                    content.append_expression(expansion.content)
+                    for assignment in expansion.conditional_assignments:
+                        content.add_conditional_assignment(assignment)
+                    index = expansion.end
+                    continue
+                content.append_literal(character)
+                index += 1
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                index += 1
+                continue
+            if character == "\\" and index + 1 < closing:
+                content.append_literal(self.source[index + 1])
+                index += 2
+                continue
+            expansion = self._parameter_expansions.get(index)
+            if expansion is None or expansion.end > closing:
+                expansion = self._consume_active_expansion(
+                    index, closing, depth, double_quoted=double_quoted
+                )
+            if expansion is not None:
+                content.append_expression(expansion.content)
+                for assignment in expansion.conditional_assignments:
+                    content.add_conditional_assignment(assignment)
+                index = expansion.end
+                continue
+            content.append_literal(character)
+            index += 1
+        built = content.build()
+        self._parameter_content_assignments[(start, closing)] = built.conditional_assignments
+        return built.expression
 
     def _consume_parameter_quoted_character(
         self,
@@ -3856,6 +3986,14 @@ def _parameter_name_end(source: str, start: int, limit: int) -> int:
     while index < limit and (source[index].isalnum() or source[index] == "_"):
         index += 1
     return index
+
+
+def _parameter_operator_at(source: str, start: int, limit: int) -> tuple[str | None, int]:
+    """Return one supported parameter operator and its operand start."""
+    for operator in _PARAMETER_OPERATORS:
+        if source.startswith(operator, start, limit):
+            return operator, start + len(operator)
+    return None, start
 
 
 def _braced_parameter_may_expand_to_zero_fields(source: str, start: int, limit: int) -> bool:

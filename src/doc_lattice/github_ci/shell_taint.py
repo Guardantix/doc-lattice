@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
+_RANGE_PARTS_WITH_STEP = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,13 +322,164 @@ class _BuiltContent:
     assignment_append: bool = False
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
     process_resource_id: int | None = None
+    argv_ports: tuple[_WordContentPort, ...] = ()
+    brace_expansion_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ContentToken:
+    """One authored content fragment with brace-expansion provenance."""
+
+    expression: ContentExpr
+    literal: str
+    brace_active: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _WordContentPort:
+    """One concrete argv field produced from a lexical shell word."""
+
+    literal: str
+    content: ContentExpr
+
+
+def _token_content(tokens: list[_ContentToken]) -> ContentExpr:
+    """Join tokens while coalescing adjacent literal transfers."""
+    parts: list[ContentExpr] = []
+    literal: list[str] = []
+    for token in tokens:
+        if isinstance(token.expression, LiteralTransfer):
+            literal.append(token.expression.text)
+            continue
+        if literal:
+            parts.append(LiteralTransfer("".join(literal)))
+            literal.clear()
+        parts.append(token.expression)
+    if literal:
+        parts.append(LiteralTransfer("".join(literal)))
+    return concat(*parts)
+
+
+def _active_character(token: _ContentToken, character: str) -> bool:
+    """Return whether one token is an active, literal brace syntax character."""
+    return (
+        isinstance(token.expression, LiteralTransfer)
+        and token.brace_active
+        and token.literal == character
+    )
+
+
+def _literal_tokens(text: str) -> list[_ContentToken]:
+    return [_ContentToken(LiteralTransfer(character), character, True) for character in text]
+
+
+def _brace_alternatives(  # noqa: PLR0911, PLR0912
+    tokens: list[_ContentToken],
+) -> list[list[_ContentToken]] | None:
+    """Return bounded brace operands, or ``None`` for literal braces."""
+    depth = 0
+    comma_indices: list[int] = []
+    for index, token in enumerate(tokens):
+        if _active_character(token, "{"):
+            depth += 1
+        elif _active_character(token, "}"):
+            depth -= 1
+        elif _active_character(token, ",") and depth == 0:
+            comma_indices.append(index)
+    literal_text = "".join(token.literal for token in tokens)
+    range_parts = literal_text.split("..")
+    recognized_range = len(range_parts) in {2, 3} and all(
+        isinstance(token.expression, LiteralTransfer) for token in tokens
+    )
+    if not comma_indices and not recognized_range:
+        return None
+    if any(not isinstance(token.expression, LiteralTransfer) for token in tokens):
+        raise _TaintLimitExceeded("shell taint dynamic brace expansion cannot be bounded")
+    if comma_indices:
+        starts = [0, *(index + 1 for index in comma_indices)]
+        stops = [*comma_indices, len(tokens)]
+        return [tokens[start:stop] for start, stop in zip(starts, stops, strict=True)]
+    start, stop = range_parts[:2]
+    step_text = range_parts[2] if len(range_parts) == _RANGE_PARTS_WITH_STEP else None
+    if step_text is not None and not step_text.lstrip("+-").isdigit():
+        return None
+    if start.lstrip("+-").isdigit() and stop.lstrip("+-").isdigit():
+        first = int(start)
+        last = int(stop)
+        step = (
+            int(step_text) if step_text is not None and step_text.lstrip("+-").isdigit() else None
+        )
+        if step is None:
+            step = 1 if first <= last else -1
+        if step == 0:
+            return []
+        if (last - first) * step < 0:
+            return []
+        values = range(first, last + (1 if step > 0 else -1), step)
+        return [_literal_tokens(str(value)) for value in values]
+    if (
+        len(start) == len(stop) == 1
+        and start.isascii()
+        and stop.isascii()
+        and start.isalpha()
+        and stop.isalpha()
+    ):
+        first = ord(start)
+        last = ord(stop)
+        step = (
+            int(step_text) if step_text is not None and step_text.lstrip("+-").isdigit() else None
+        )
+        if step is None:
+            step = 1 if first <= last else -1
+        if step == 0 or (last - first) * step < 0:
+            return []
+        return [
+            _literal_tokens(chr(value))
+            for value in range(first, last + (1 if step > 0 else -1), step)
+        ]
+    return None
+
+
+def _expand_braces(
+    tokens: list[_ContentToken], limits: TaintLimits, depth: int = 0
+) -> list[list[_ContentToken]]:
+    """Expand active comma lists and bounded ranges into concrete argv ports."""
+    for start, token in enumerate(tokens):
+        if not _active_character(token, "{"):
+            continue
+        nested = 1
+        for stop in range(start + 1, len(tokens)):
+            if _active_character(tokens[stop], "{"):
+                nested += 1
+            elif _active_character(tokens[stop], "}"):
+                nested -= 1
+                if nested:
+                    continue
+                alternatives = _brace_alternatives(tokens[start + 1 : stop])
+                if alternatives is None:
+                    break
+                if depth >= limits.max_brace_depth:
+                    raise _TaintLimitExceeded("shell taint brace expansion depth limit exceeded")
+                expanded: list[list[_ContentToken]] = []
+                for alternative in alternatives:
+                    for result in _expand_braces(
+                        [*tokens[:start], *alternative, *tokens[stop + 1 :]],
+                        limits,
+                        depth + 1,
+                    ):
+                        expanded.append(result)
+                        if len(expanded) > limits.max_brace_expansions:
+                            raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+                return expanded
+        # An unrecognized outer brace can still contain a recognized nested expansion.
+    return [tokens]
 
 
 @dataclass(slots=True)
 class ContentBuilder:
     """Incrementally construct one word's authored content evidence."""
 
-    parts: list[ContentExpr] = field(default_factory=list)
+    tokens: list[_ContentToken] = field(default_factory=list)
     assignment_value_start: int | None = None
     assignment_name: str | None = None
     assignment_append: bool = False
@@ -338,27 +490,47 @@ class ContentBuilder:
     def empty(cls) -> ContentBuilder:
         return cls()
 
-    def append_literal(self, text: str) -> None:
+    def append_literal(self, text: str, *, brace_active: bool = False) -> None:
         if text:
-            self.parts.append(LiteralTransfer(text))
+            self.tokens.append(_ContentToken(LiteralTransfer(text), text, brace_active))
 
     def append_expression(self, expression: ContentExpr) -> None:
-        self.parts.append(expression)
+        self.tokens.append(_ContentToken(expression, "", False))
 
     def mark_assignment(self, name: str, *, append: bool) -> None:
         self.assignment_name = name
         self.assignment_append = append
-        self.assignment_value_start = len(self.parts)
+        self.assignment_value_start = len(self.tokens)
 
     def add_conditional_assignment(self, assignment: _AssignmentEvidence) -> None:
         self.conditional_assignments.append(assignment)
 
-    def build(self) -> _BuiltContent:
-        expression = concat(*self.parts)
+    def build(
+        self,
+        limits: TaintLimits = TaintLimits(),  # noqa: B008 - immutable limits value object
+        *,
+        defer_brace_errors: bool = False,
+    ) -> _BuiltContent:
+        expression = _token_content(self.tokens)
         assignment_content = (
-            concat(*self.parts[self.assignment_value_start :])
+            _token_content(self.tokens[self.assignment_value_start :])
             if self.assignment_value_start is not None
             else None
+        )
+        brace_expansion_error: str | None = None
+        try:
+            expanded_ports = _expand_braces(self.tokens, limits)
+        except _TaintLimitExceeded as error:
+            if not defer_brace_errors:
+                raise
+            brace_expansion_error = str(error)
+            expanded_ports = [self.tokens]
+        ports = tuple(
+            _WordContentPort(
+                "".join(token.literal for token in expanded),
+                _token_content(expanded),
+            )
+            for expanded in expanded_ports
         )
         return _BuiltContent(
             expression,
@@ -367,6 +539,8 @@ class ContentBuilder:
             assignment_append=self.assignment_append,
             conditional_assignments=tuple(self.conditional_assignments),
             process_resource_id=self.process_resource_id,
+            argv_ports=ports or (_WordContentPort("", LiteralTransfer("")),),
+            brace_expansion_error=brace_expansion_error,
         )
 
 

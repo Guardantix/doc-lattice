@@ -13,6 +13,7 @@ from doc_lattice.github_ci.shell_taint import (
     ChoiceOutput,
     CommandOutput,
     Concat,
+    ContentBuilder,
     ContentExpr,
     ContentTarget,
     LiteralTransfer,
@@ -108,6 +109,109 @@ def test_scope_output_lowers_to_its_stream_reference() -> None:
     lowered = _OutputLowering({1: 10}).lower(ScopeOutput(7), [])
 
     assert lowered == StreamRef(7)
+
+
+def test_content_builder_expands_active_braces_into_ordered_argv_ports() -> None:
+    builder = ContentBuilder.empty()
+    for character in "doc-{lattice,noop}":
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert [(port.literal, port.content) for port in built.argv_ports] == [
+        ("doc-lattice", LiteralTransfer("doc-lattice")),
+        ("doc-noop", LiteralTransfer("doc-noop")),
+    ]
+
+
+def test_content_builder_keeps_quoted_and_escaped_braces_literal() -> None:
+    builder = ContentBuilder.empty()
+    builder.append_literal("{doc-,lattice}")
+
+    built = builder.build()
+
+    assert [(port.literal, port.content) for port in built.argv_ports] == [
+        ("{doc-,lattice}", LiteralTransfer("{doc-,lattice}")),
+    ]
+
+
+def test_content_builder_expands_bounded_ranges_without_turning_word_content_into_choice() -> None:
+    builder = ContentBuilder.empty()
+    for character in "doc-{1..2}-lattice":
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert built.expression == LiteralTransfer("doc-{1..2}-lattice")
+    assert [port.literal for port in built.argv_ports] == [
+        "doc-1-lattice",
+        "doc-2-lattice",
+    ]
+
+
+def test_content_builder_leaves_malformed_brace_ranges_literal() -> None:
+    builder = ContentBuilder.empty()
+    for character in "{1..2..invalid}":
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert [port.literal for port in built.argv_ports] == ["{1..2..invalid}"]
+
+
+def test_content_builder_rejects_dynamic_recognized_brace_operand() -> None:
+    builder = ContentBuilder.empty()
+    for character in "{doc-,":
+        builder.append_literal(character, brace_active=True)
+    builder.append_expression(VariableRef("X"))
+    for character in "}lattice":
+        builder.append_literal(character, brace_active=True)
+
+    with pytest.raises(
+        _TaintLimitExceeded,
+        match="shell taint dynamic brace expansion cannot be bounded",
+    ):
+        builder.build()
+
+
+def test_content_builder_assignment_rhs_preserves_original_unexpanded_tokens() -> None:
+    builder = ContentBuilder.empty()
+    for character in "X=":
+        builder.append_literal(character, brace_active=True)
+    builder.mark_assignment("X", append=False)
+    for character in "{doc-,lattice}":
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert built.assignment_content == LiteralTransfer("{doc-,lattice}")
+
+
+@pytest.mark.parametrize(
+    ("source", "limits", "reason"),
+    [
+        (
+            "{1..3}",
+            TaintLimits(max_brace_expansions=2),
+            "shell taint brace expansion limit exceeded",
+        ),
+        (
+            "{a,{b,c}}",
+            TaintLimits(max_brace_depth=1),
+            "shell taint brace expansion depth limit exceeded",
+        ),
+    ],
+    ids=("range-cap", "nested-depth"),
+)
+def test_content_builder_brace_bounds_are_deterministic(
+    source: str, limits: TaintLimits, reason: str
+) -> None:
+    builder = ContentBuilder.empty()
+    for character in source:
+        builder.append_literal(character, brace_active=True)
+
+    with pytest.raises(_TaintLimitExceeded, match=reason):
+        builder.build(limits)
 
 
 def test_stream_ref_ids_descends_only_through_choice_and_concat() -> None:

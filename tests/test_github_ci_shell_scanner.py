@@ -27,7 +27,7 @@ from doc_lattice.github_ci.shell_scanner import (
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
 )
-from doc_lattice.github_ci.shell_taint import TAINT_REFUSAL_REASON
+from doc_lattice.github_ci.shell_taint import TAINT_REFUSAL_REASON, LiteralTransfer
 
 NONE = ()
 LINEAR = (("linear", False),)
@@ -3051,6 +3051,70 @@ def test_resolved_or_marker_free_command_stays_certified(_description, script, e
 
 def test_eval_taints_marker_split_across_cross_command_append_assignment():
     assert_taint_refusal("X=doc-\nX+='lattice reconcile'\neval \"$X\"")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'unset X; eval "${X:-doc-}lattice reconcile"',
+        'unset X; eval "${X:=doc-}lattice"; eval "$X"',
+        'unset X; : "${X:=doc-}"; X+=lattice; eval "$X"',
+        'eval "${X/pattern/doc-}lattice"',
+        "eval doc-{lattice,noop}",
+        "printf %s {doc-,lattice} | bash",
+        "X=doc-; bash <<EOF\n${X}lattice reconcile\nEOF",
+    ],
+    ids=(
+        "default-operand",
+        "conditional-assignment-later-eval",
+        "conditional-assignment-then-append",
+        "replacement-operand",
+        "brace-concatenation",
+        "brace-argv-ports",
+        "unquoted-heredoc-variable",
+    ),
+)
+def test_parameter_and_brace_synthesis_reaches_execution_sinks(script: str):
+    assert_taint_refusal(script)
+
+
+def test_parameter_alternate_never_concatenates_variable_and_operand():
+    result = scan_doc_lattice_invocations('X=doc-; eval "${X:+lattice}"')
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_parameter_operator_records_conditional_assignment_evidence():
+    source = "${X:=doc-}"
+    scanner = _ShellScanner(source, classify_commands=False)
+
+    word, end = scanner._parse_word(0, len(source), 0)
+
+    assert end == len(source)
+    assert word.conditional_assignments[0].name == "X"
+    assert word.conditional_assignments[0].content == LiteralTransfer("doc-")
+
+
+def test_brace_alternatives_become_separate_eval_argv_ports():
+    result = scan_doc_lattice_invocations("eval {doc-,lattice}")
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        ("eval doc-{1..1000}-lattice", "shell taint brace expansion limit exceeded"),
+        ("eval {doc-,$X}lattice", "shell taint dynamic brace expansion cannot be bounded"),
+    ],
+)
+def test_brace_expansion_bounds_fail_closed(script: str, reason: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == reason
 
 
 @pytest.mark.parametrize(
