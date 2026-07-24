@@ -19,8 +19,10 @@ from doc_lattice.github_ci.shell_taint import (
     NullTarget,
     OutputExpr,
     OutsideGap,
+    ProcessResourceTarget,
     RepeatOutput,
     ResourceRef,
+    ScopeOutput,
     SequenceOutput,
     StaticResourceTarget,
     StreamRef,
@@ -28,12 +30,14 @@ from doc_lattice.github_ci.shell_taint import (
     VariableRef,
     _ArgPort,
     _AssignmentEvidence,
+    _build_flow_definitions,
     _CommandEvidence,
     _evaluate_closed,
     _ExecutableEvidence,
     _FlowDefinitions,
     _FlowWrite,
     _marker_capable,
+    _OutputLowering,
     _PipeEvidence,
     _ProcessResourceEvidence,
     _RedirectionEvent,
@@ -46,6 +50,7 @@ from doc_lattice.github_ci.shell_taint import (
     choice,
     concat,
     normalize_static_resource,
+    stream_ref_ids,
 )
 
 
@@ -94,6 +99,47 @@ def _command(  # noqa: PLR0913
             external_lookup=external_lookup,
         ),
     )
+
+
+def test_scope_output_lowers_to_its_stream_reference() -> None:
+    lowered = _OutputLowering({1: 10}).lower(ScopeOutput(7), [])
+
+    assert lowered == StreamRef(7)
+
+
+def test_stream_ref_ids_descends_only_through_choice_and_concat() -> None:
+    expression = Concat((StreamRef(1), Choice((StreamRef(2), VariableRef("X")))))
+
+    assert stream_ref_ids(expression) == (1, 2)
+
+
+def test_output_process_substitution_binds_writer_scope_to_consumer_stdin() -> None:
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, ProcessResourceTarget(1)),),
+    )
+    consumer = _command(2, _arg("bash"), name="bash")
+    evidence = _ShellTaintEvidence(
+        commands=(writer, consumer),
+        scopes=(
+            _StreamScopeEvidence(
+                20,
+                "process_substitution",
+                None,
+                None,
+                CommandOutput(2),
+            ),
+        ),
+        process_resources=(_ProcessResourceEvidence(1, 20, "output"),),
+    )
+
+    definitions, inputs = _build_flow_definitions(evidence)
+
+    assert inputs[2] == StreamRef(writer.output_scope_id)
+    assert _marker_capable(_solve_flow_definitions(definitions).evaluate(StreamRef(2))) is True
 
 
 def test_eval_joins_dynamic_variable_assignment_and_append() -> None:

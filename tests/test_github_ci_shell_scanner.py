@@ -263,6 +263,57 @@ def assert_taint_refusal(script: str) -> None:
         direct_doc_lattice_invocations(script)
 
 
+def test_split_pipeline_stdout_reaches_shell_stdin():
+    assert_taint_refusal("printf '%s%s\\n' doc- 'lattice reconcile' | bash")
+
+
+def test_marker_free_unresolved_pipeline_stays_certified():
+    result = scan_doc_lattice_invocations("curl https://example.invalid/script | bash")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_later_herestring_rebinds_pipeline_stdin():
+    result = scan_doc_lattice_invocations(
+        "printf '%s%s\\n' doc- 'lattice reconcile' | bash <<<'true'"
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_input_process_substitution_redirection_reaches_stdin():
+    assert_taint_refusal("bash < <(printf '%s%s\\n' doc- 'lattice reconcile')")
+
+
+def test_input_process_substitution_script_operand_reaches_sink():
+    assert_taint_refusal("bash <(printf '%s%s\\n' doc- 'lattice reconcile')")
+
+
+def test_process_substitution_read_by_non_sink_is_not_overconnected():
+    result = scan_doc_lattice_invocations("grep x <(printf '%s%s' doc- lattice)")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_output_process_substitution_routes_writer_to_consumer_stdin():
+    assert_taint_refusal("printf '%s%s\\n' doc- 'lattice reconcile' > >(bash)")
+
+
+def test_multi_command_substitution_scope_sequences_stdout():
+    assert_taint_refusal("eval \"$(printf doc-; printf 'lattice reconcile')\"\n")
+
+
+def test_compound_group_stdout_reaches_written_resource():
+    assert_taint_refusal("{ printf doc-; printf 'lattice reconcile'; } > task.sh\nbash task.sh\n")
+
+
+def test_command_substitution_strips_trailing_newline_before_splice():
+    assert_taint_refusal("eval \"$(cat <<'EOF'\ndoc-\nEOF\n)lattice reconcile\"\n")
+
+
 ACCEPTANCE_CASES = [
     # Literal executable identity and control syntax.
     ("ansi-c executable", "$'doc-lattice' linear", LINEAR),

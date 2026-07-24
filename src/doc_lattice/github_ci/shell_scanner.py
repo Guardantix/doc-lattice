@@ -7,6 +7,7 @@ from enum import Enum, auto
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
     TAINT_REFUSAL_REASON,
+    CommandOutput,
     Concat,
     ContentBuilder,
     ContentExpr,
@@ -15,22 +16,30 @@ from doc_lattice.github_ci.shell_taint import (
     DynamicResourceTarget,
     LiteralTransfer,
     NullTarget,
+    OutputExpr,
     OutsideGap,
     ProcessResourceTarget,
     RedirectionTarget,
+    ScopeOutput,
+    SequenceOutput,
     StaticResourceTarget,
+    StreamRef,
     VariableRef,
     _ArgPort,
     _AssignmentEvidence,
     _CommandEvidence,
     _EvidenceBuilder,
     _ExecutableEvidence,
+    _PipeEvidence,
+    _ProcessResourceEvidence,
     _RedirectionEvent,
     _select_shell_source,
     _ShellSourceKind,
+    _StreamScopeEvidence,
     analyze_marker_taint,
     concat,
     normalize_static_resource,
+    stream_ref_ids,
 )
 
 _Invocation = tuple[str, bool]
@@ -605,6 +614,37 @@ class _Heredoc:
     owner_id: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ProcessSubstitution:
+    """One parsed process substitution and its typed resource evidence."""
+
+    end: int
+    resource_id: int
+    scope_id: int
+    direction: str
+
+
+@dataclass(slots=True)
+class _ScopeFrame:
+    """Mutable output evidence accumulated while scanning one stream scope."""
+
+    scope_id: int
+    kind: str
+    parent_scope_id: int | None
+    parent_command_id: int | None
+    outputs: list[OutputExpr]
+    redirections: list[_RedirectionEvent] = field(default_factory=list)
+    loop_bindings: list[_AssignmentEvidence] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _PipelineFrame:
+    """The pipeline presently being assembled in one command-list state."""
+
+    scope_id: int
+    stages: list[int]
+
+
 @dataclass(slots=True)
 class _CommandScanState:
     words: list[_ShellWord]
@@ -617,6 +657,10 @@ class _CommandScanState:
     prefix_pending: int = 0
     at_command_position: bool = True
     command_has_marker: bool = False
+    pending_pipe_producer: int | None = None
+    pipeline: _PipelineFrame | None = None
+    pending_compound_scope_id: int | None = None
+    compound_redirection_ordinal: int = 0
 
     def reset_command(self) -> None:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
@@ -728,9 +772,16 @@ class _ShellScanner:
             else (_EvidenceBuilder.empty() if collect_taint else None)
         )
         self.owns_taint_builder = collect_taint and taint_builder is None
+        self.scope_stack: list[_ScopeFrame] = []
 
     def scan(self) -> tuple[_Invocation, ...]:
-        self._scan_commands(0, len(self.source), terminator=None, depth=0)
+        self._scan_stream_scope(
+            0,
+            len(self.source),
+            terminator=None,
+            depth=0,
+            kind="command",
+        )
         if self.owns_taint_builder and self.taint_builder is not None:
             refused, reason = analyze_marker_taint(self.taint_builder.freeze())
             if refused:
@@ -755,6 +806,49 @@ class _ShellScanner:
         child.owns_taint_builder = False
         return child
 
+    def _scan_stream_scope(
+        self,
+        start: int,
+        limit: int,
+        *,
+        terminator: str | None,
+        depth: int,
+        kind: str,
+    ) -> tuple[int, int]:
+        """Scan one executable scope and retain its structured stdout evidence."""
+        if self.taint_builder is None:
+            return self._scan_commands(
+                start,
+                limit,
+                terminator=terminator,
+                depth=depth,
+            ), 0
+        scope_id = self.taint_builder.allocate_scope()
+        frame = _ScopeFrame(
+            scope_id,
+            kind,
+            self.scope_stack[-1].scope_id if self.scope_stack else None,
+            None,
+            [],
+        )
+        self.scope_stack.append(frame)
+        try:
+            end = self._scan_commands(start, limit, terminator=terminator, depth=depth)
+        finally:
+            completed = self.scope_stack.pop()
+        self.taint_builder.scopes.append(
+            _StreamScopeEvidence(
+                completed.scope_id,
+                completed.kind,
+                completed.parent_scope_id,
+                completed.parent_command_id,
+                SequenceOutput(tuple(completed.outputs)),
+                tuple(completed.redirections),
+                tuple(completed.loop_bindings),
+            )
+        )
+        return end, scope_id
+
     def _scan_commands(
         self,
         start: int,
@@ -775,6 +869,7 @@ class _ShellScanner:
                 continue
             if terminator is not None and character == terminator:
                 self._flush_command(state)
+                self._finalize_pipeline(state)
                 return index + 1
             boundary_end = self._consume_command_boundary(
                 index,
@@ -812,6 +907,7 @@ class _ShellScanner:
             self._record_word(state, word)
             index = next_index
         self._flush_command(state)
+        self._finalize_pipeline(state)
         return index
 
     def _consume_arithmetic_command(
@@ -870,9 +966,9 @@ class _ShellScanner:
             if character == "#" and at_word_start:
                 index = self._comment_end(index, limit)
                 continue
-            process_end = self._consume_process_substitution(index, limit, depth)
-            if process_end is not None:
-                index = process_end
+            process = self._consume_process_substitution(index, limit, depth)
+            if process is not None:
+                index = process.end
                 at_word_start = False
                 continue
             if character == "(":
@@ -922,18 +1018,31 @@ class _ShellScanner:
             and state.words[-1].literal.endswith("=")
         ):
             return self._consume_array_assignment(index, limit, state, depth + 1)
-        self._flush_command(state)
+        command_id = self._flush_command(state)
+        if operator == "|":
+            self._begin_or_extend_pipeline(state, command_id)
+            return index
+        self._finalize_pipeline(state)
         self._advance_case_body(state, operator)
-        if operator == "(":
-            return self._scan_nested_commands(
+        if operator in {"(", "{"}:
+            closing = ")" if operator == "(" else "}"
+            end, scope_id = self._scan_stream_scope(
                 index,
                 limit,
-                terminator=")",
+                terminator=closing,
                 depth=depth + 1,
+                kind="subshell_group",
             )
+            if self.scope_stack:
+                self.scope_stack[-1].outputs.append(ScopeOutput(scope_id))
+            state.pending_compound_scope_id = scope_id
+            return end
+        state.pending_compound_scope_id = None
         return index
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
+        state.pending_compound_scope_id = None
+        state.compound_redirection_ordinal = 0
         state.command_has_marker = state.command_has_marker or word.has_doc_lattice_marker
         command_position = state.at_command_position
         if (
@@ -1162,6 +1271,8 @@ class _ShellScanner:
         if character != "\n":
             return None
         self._flush_command(state)
+        self._finalize_pipeline(state)
+        state.pending_compound_scope_id = None
         index += 1
         if state.heredocs:
             index = self._consume_heredocs(
@@ -1174,7 +1285,52 @@ class _ShellScanner:
             state.owned_heredoc_count = 0
         return index
 
-    def _flush_command(self, state: _CommandScanState) -> int | None:
+    def _begin_or_extend_pipeline(
+        self,
+        state: _CommandScanState,
+        producer_command_id: int | None,
+    ) -> None:
+        """Record the command just flushed as one stage of a shell pipeline."""
+        if self.taint_builder is None or producer_command_id is None:
+            return
+        producer_scope = self.taint_builder.command_output_scope(producer_command_id)
+        if state.pipeline is None:
+            state.pipeline = _PipelineFrame(self.taint_builder.allocate_scope(), [producer_scope])
+        elif not state.pipeline.stages or state.pipeline.stages[-1] != producer_scope:
+            state.pipeline.stages.append(producer_scope)
+        state.pending_pipe_producer = producer_scope
+        if self.scope_stack and self.scope_stack[-1].outputs:
+            self.scope_stack[-1].outputs.pop()
+
+    def _finalize_pipeline(self, state: _CommandScanState) -> None:
+        """Emit the completed pipeline scope after its final stage is flushed."""
+        if state.pipeline is None or self.taint_builder is None:
+            return
+        if state.last_command_id is not None:
+            final_scope = self.taint_builder.command_output_scope(state.last_command_id)
+            if not state.pipeline.stages or state.pipeline.stages[-1] != final_scope:
+                state.pipeline.stages.append(final_scope)
+            if self.scope_stack and self.scope_stack[-1].outputs:
+                self.scope_stack[-1].outputs.pop()
+        output: OutputExpr = (
+            ScopeOutput(state.pipeline.stages[-1]) if state.pipeline.stages else SequenceOutput(())
+        )
+        parent_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else None
+        self.taint_builder.scopes.append(
+            _StreamScopeEvidence(
+                state.pipeline.scope_id,
+                "pipeline",
+                parent_scope_id,
+                None,
+                output,
+            )
+        )
+        if self.scope_stack:
+            self.scope_stack[-1].outputs.append(ScopeOutput(state.pipeline.scope_id))
+        state.pipeline = None
+        state.pending_pipe_producer = None
+
+    def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912
         if not state.words and not state.redirections:
             return None
         resolution = _LauncherResolutionState(self.budget)
@@ -1235,11 +1391,12 @@ class _ShellScanner:
                 for source_index in argv_indices
             )
             command_id, output_scope_id = self.taint_builder.allocate_command()
+            container_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else 0
             self.taint_builder.commands.append(
                 _CommandEvidence(
                     command_id,
                     output_scope_id,
-                    0,
+                    container_scope_id,
                     argv,
                     tuple(assignments),
                     tuple(state.redirections),
@@ -1247,6 +1404,16 @@ class _ShellScanner:
                 )
             )
             state.last_command_id = command_id
+            if self.scope_stack:
+                self.scope_stack[-1].outputs.append(CommandOutput(command_id))
+            if state.pending_pipe_producer is not None:
+                self.taint_builder.pipes.append(
+                    _PipeEvidence(state.pending_pipe_producer, command_id)
+                )
+                state.pending_pipe_producer = None
+            for word in state.words:
+                for scope_id in stream_ref_ids(word.content):
+                    self.taint_builder.attach_scope_parent(scope_id, command_id)
             for heredoc in state.heredocs[state.owned_heredoc_count :]:
                 heredoc.owner_id = command_id
             state.owned_heredoc_count = len(state.heredocs)
@@ -1258,15 +1425,24 @@ class _ShellScanner:
         index: int,
         limit: int,
         depth: int,
-    ) -> int | None:
+    ) -> _ProcessSubstitution | None:
         if not (self.source.startswith("<(", index) or self.source.startswith(">(", index)):
             return None
-        return self._scan_nested_commands(
+        direction = "input" if self.source.startswith("<(", index) else "output"
+        end, scope_id = self._scan_stream_scope(
             index + 2,
             limit,
             terminator=")",
             depth=depth + 1,
+            kind="process_substitution",
         )
+        if self.taint_builder is None:
+            return _ProcessSubstitution(end, 0, 0, direction)
+        resource_id = self.taint_builder.allocate_process_resource()
+        self.taint_builder.process_resources.append(
+            _ProcessResourceEvidence(resource_id, scope_id, direction)
+        )
+        return _ProcessSubstitution(end, resource_id, scope_id, direction)
 
     def _scan_nested_commands(
         self,
@@ -1329,7 +1505,11 @@ class _ShellScanner:
         index = redirection.operand_start
         while index < limit and self.source[index] in " \t":
             index += 1
-        ordinal = len(state.redirections)
+        ordinal = (
+            state.compound_redirection_ordinal
+            if state.pending_compound_scope_id is not None
+            else len(state.redirections)
+        )
         if redirection.operator in {"<<", "<<-"}:
             delimiter, quoted, index = self._parse_heredoc_delimiter(index, limit, depth)
             if delimiter is None:
@@ -1343,14 +1523,13 @@ class _ShellScanner:
                     ordinal=ordinal,
                 )
             )
-            state.redirections.append(
-                _RedirectionEvent(
-                    ordinal,
-                    redirection.operator,
-                    redirection.descriptor,
-                    ContentTarget(LiteralTransfer("")),
-                )
+            event = _RedirectionEvent(
+                ordinal,
+                redirection.operator,
+                redirection.descriptor,
+                ContentTarget(LiteralTransfer("")),
             )
+            self._append_redirection(state, event)
             return index
         target, index = self._parse_word(index, limit, depth)
         redirection_target: RedirectionTarget
@@ -1358,15 +1537,24 @@ class _ShellScanner:
             redirection_target = ContentTarget(concat(target.content, LiteralTransfer("\n")))
         else:
             redirection_target = self._redirection_target(target, redirection.operator)
-        state.redirections.append(
+        self._append_redirection(
+            state,
             _RedirectionEvent(
                 ordinal,
                 redirection.operator,
                 redirection.descriptor,
                 redirection_target,
-            )
+            ),
         )
         return index
+
+    def _append_redirection(self, state: _CommandScanState, event: _RedirectionEvent) -> None:
+        """Attach a redirection to the pending compound scope or simple command."""
+        if state.pending_compound_scope_id is not None and self.taint_builder is not None:
+            self.taint_builder.attach_scope_redirection(state.pending_compound_scope_id, event)
+            state.compound_redirection_ordinal += 1
+            return
+        state.redirections.append(event)
 
     def _parse_heredoc_delimiter(
         self,
@@ -1476,9 +1664,11 @@ class _ShellScanner:
                 self.taint_builder.attach_redirection_content(
                     heredoc.owner_id,
                     heredoc.ordinal,
-                    LiteralTransfer(body),
+                    self._heredoc_content_expression(body, depth + 1)
+                    if heredoc.expand
+                    else LiteralTransfer(raw_body),
                 )
-            if heredoc.expand:
+            if heredoc.expand and self.taint_builder is None:
                 child = self._child_scanner(
                     body,
                     invocations=self.invocations,
@@ -1487,6 +1677,37 @@ class _ShellScanner:
                 child._scan_heredoc_expansions(0, len(body), depth + 1)
             index = after_delimiter
         return min(index, limit)
+
+    def _heredoc_content_expression(self, body: str, depth: int) -> ContentExpr:
+        """Model active heredoc expansions while retaining all literal bytes."""
+        child = _ShellScanner(
+            body,
+            budget=self.budget,
+            invocations=self.invocations,
+            classify_commands=self.classify_commands,
+            taint_builder=self.taint_builder,
+            collect_taint=False,
+        )
+        child.scope_stack = self.scope_stack
+        content = ContentBuilder.empty()
+        index = 0
+        limit = len(body)
+        while index < limit:
+            child.budget.step()
+            if body[index] == "\\" and index + 1 < limit:
+                escaped = body[index + 1]
+                if escaped in {"$", "`", "\\"}:
+                    content.append_literal(escaped)
+                    index += 2
+                    continue
+            expansion = child._consume_active_expansion(index, limit, depth)
+            if expansion is not None:
+                content.append_expression(expansion.content)
+                index = expansion.end
+                continue
+            content.append_literal(body[index])
+            index += 1
+        return content.build().expression
 
     def _consume_unquoted_heredoc_line(
         self,
@@ -1613,10 +1834,12 @@ class _ShellScanner:
                 builder.append_protected("", dynamic=True, unquoted_dynamic=True)
                 index = expansion_end.end
                 continue
-            process_end = self._consume_process_substitution(index, limit, depth)
-            if process_end is not None:
+            process = self._consume_process_substitution(index, limit, depth)
+            if process is not None:
+                builder.content.append_expression(OutsideGap())
+                builder.content.process_resource_id = process.resource_id
                 builder.append_protected("", dynamic=True)
-                index = process_end
+                index = process.end
                 continue
             builder.append_active(character)
             index += 1
@@ -1702,19 +1925,23 @@ class _ShellScanner:
             if end is None:
                 # Not balanced arithmetic: Bash falls back to a command substitution whose
                 # first ( opens a subshell, so scan the region for inner invocations.
-                end = self._scan_nested_commands(
+                end, scope_id = self._scan_stream_scope(
                     index + 2,
                     limit,
                     terminator=")",
                     depth=depth + 1,
+                    kind="command_substitution",
                 )
+                content = StreamRef(scope_id) if self.taint_builder is not None else OutsideGap()
         elif self.source.startswith("$(", index):
-            end = self._scan_nested_commands(
+            end, scope_id = self._scan_stream_scope(
                 index + 2,
                 limit,
                 terminator=")",
                 depth=depth + 1,
+                kind="command_substitution",
             )
+            content = StreamRef(scope_id) if self.taint_builder is not None else OutsideGap()
         elif self.source.startswith("${", index):
             return self._consume_parameter(
                 index + 2,
@@ -1725,7 +1952,8 @@ class _ShellScanner:
         elif self.source.startswith("$[", index):
             end = self._consume_legacy_arithmetic(index + 2, limit, depth + 1)
         elif self.source[index] == "`":
-            end = self._consume_legacy_substitution(index, limit, depth + 1)
+            end, scope_id = self._consume_legacy_substitution(index, limit, depth + 1)
+            content = StreamRef(scope_id) if self.taint_builder is not None else OutsideGap()
         elif self.source[index] == "$":
             end = _consume_parameter_name(self.source, index, limit)
             content = (
@@ -1782,9 +2010,9 @@ class _ShellScanner:
                 index = expansion_end.end
                 continue
             if quote is None and not double_quoted:
-                process_end = self._consume_process_substitution(index, limit, depth)
-                if process_end is not None:
-                    index = process_end
+                process = self._consume_process_substitution(index, limit, depth)
+                if process is not None:
+                    index = process.end
                     continue
             if character == "}":
                 braces -= 1
@@ -1889,7 +2117,7 @@ class _ShellScanner:
         opening: int,
         limit: int,
         depth: int,
-    ) -> int:
+    ) -> tuple[int, int]:
         body: list[str] = []
         index = opening + 1
         while index < limit:
@@ -1901,13 +2129,17 @@ class _ShellScanner:
                     invocations=self.invocations,
                     classify_commands=self.classify_commands,
                 )
-                child._scan_commands(
+                child.taint_builder = self.taint_builder
+                child.owns_taint_builder = False
+                child.scope_stack = self.scope_stack
+                _end, scope_id = child._scan_stream_scope(
                     0,
                     len(child.source),
                     terminator=None,
                     depth=depth,
+                    kind="command_substitution",
                 )
-                return index + 1
+                return index + 1, scope_id
             if character == "\\" and index + 1 < limit:
                 escaped = self.source[index + 1]
                 if escaped == "`":
@@ -1918,7 +2150,7 @@ class _ShellScanner:
                 continue
             body.append(character)
             index += 1
-        return index
+        return index, 0
 
     def _command_operator_at(self, index: int, limit: int) -> str | None:
         for operator in _COMMAND_OPERATORS:

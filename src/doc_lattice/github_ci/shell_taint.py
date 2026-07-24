@@ -212,6 +212,13 @@ class CommandOutput:
 
 
 @dataclass(frozen=True, slots=True)
+class ScopeOutput:
+    """Output from one nested stream scope."""
+
+    scope_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class SequenceOutput:
     """Outputs concatenated in execution order."""
 
@@ -232,7 +239,9 @@ class RepeatOutput:
     part: OutputExpr
 
 
-OutputExpr: TypeAlias = CommandOutput | SequenceOutput | ChoiceOutput | RepeatOutput  # noqa: UP040
+OutputExpr: TypeAlias = (  # noqa: UP040
+    CommandOutput | ScopeOutput | SequenceOutput | ChoiceOutput | RepeatOutput
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +404,36 @@ class _EvidenceBuilder:
             self.commands[index] = replace(command, redirections=redirections)
             return
         raise ValueError("heredoc owner command is missing")
+
+    def command_output_scope(self, command_id: int) -> int:
+        """Return the stdout scope owned by one command."""
+        for command in self.commands:
+            if command.command_id == command_id:
+                return command.output_scope_id
+        raise ValueError("pipe producer command is missing")
+
+    def attach_scope_parent(self, scope_id: int, command_id: int) -> None:
+        """Record the command whose word expansion references one scope."""
+        for index, scope in enumerate(self.scopes):
+            if scope.scope_id == scope_id:
+                self.scopes[index] = replace(scope, parent_command_id=command_id)
+                return
+
+    def attach_scope_redirection(self, scope_id: int, event: _RedirectionEvent) -> None:
+        """Append a redirection owned by a compound command scope."""
+        for index, scope in enumerate(self.scopes):
+            if scope.scope_id == scope_id:
+                self.scopes[index] = replace(scope, redirections=(*scope.redirections, event))
+                return
+        raise ValueError("compound redirection owner scope is missing")
+
+    def replace_scope_output(self, scope_id: int, output: OutputExpr) -> None:
+        """Replace one frozen stream scope's structured stdout."""
+        for index, scope in enumerate(self.scopes):
+            if scope.scope_id == scope_id:
+                self.scopes[index] = replace(scope, output=output)
+                return
+        raise ValueError("compound output scope is missing")
 
     def freeze(self) -> _ShellTaintEvidence:
         return _ShellTaintEvidence(
@@ -892,9 +931,63 @@ def _solve_flow_definitions(
     return _SolvedFlow(variables, resources, streams, limits)
 
 
+def _first_commands(output: OutputExpr) -> tuple[int, ...]:
+    """Return command ids that can first write one structured stream."""
+    if isinstance(output, CommandOutput):
+        return (output.command_id,)
+    if isinstance(output, ScopeOutput):
+        return ()
+    if isinstance(output, SequenceOutput):
+        for part in output.parts:
+            commands = _first_commands(part)
+            if commands:
+                return commands
+        return ()
+    if isinstance(output, ChoiceOutput):
+        return tuple(command for part in output.parts for command in _first_commands(part))
+    return _first_commands(output.part)
+
+
+def _output_bindings(
+    events: tuple[_RedirectionEvent, ...],
+) -> dict[int, tuple[RedirectionTarget, bool]]:
+    """Replay output descriptor mutations left-to-right."""
+    bindings: dict[int, tuple[RedirectionTarget, bool]] = {}
+    for event in sorted(events, key=lambda candidate: candidate.ordinal):
+        if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
+            continue
+        if isinstance(event.target, DescriptorTarget):
+            binding = bindings.get(event.target.descriptor, (DynamicResourceTarget(), False))
+        else:
+            binding = (event.target, event.operator in _APPEND_REDIRECTION_OPERATORS)
+        if event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS:
+            bindings[1] = binding
+            bindings[2] = bindings[1]
+        else:
+            bindings[event.descriptor] = binding
+    return bindings
+
+
 def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
-    """Return the initial stdin expression for each pipe consumer."""
-    return {pipe.consumer_command_id: StreamRef(pipe.producer_scope_id) for pipe in evidence.pipes}
+    """Return initial stdin expressions from explicit pipes and output process resources."""
+    inputs: dict[int, ContentExpr] = {
+        pipe.consumer_command_id: StreamRef(pipe.producer_scope_id) for pipe in evidence.pipes
+    }
+    resources = {resource.resource_id: resource for resource in evidence.process_resources}
+    scopes = {scope.scope_id: scope for scope in evidence.scopes}
+    for writer in evidence.commands:
+        binding = _output_bindings(writer.redirections).get(1)
+        if binding is None or not isinstance(binding[0], ProcessResourceTarget):
+            continue
+        resource = resources.get(binding[0].resource_id)
+        if resource is None or resource.direction != "output":
+            continue
+        scope = scopes.get(resource.scope_id)
+        if scope is None:
+            continue
+        for command_id in _first_commands(scope.output):
+            inputs[command_id] = StreamRef(writer.output_scope_id)
+    return inputs
 
 
 def _process_resource_input(
@@ -960,21 +1053,7 @@ def _static_write_definitions(
             and event.operator not in _APPEND_REDIRECTION_OPERATORS
         ):
             writes.append(_FlowWrite(event.target.key, LiteralTransfer("")))
-        if isinstance(event.target, DescriptorTarget):
-            binding = bindings.get(
-                event.target.descriptor,
-                (DynamicResourceTarget(), False),
-            )
-        else:
-            binding = (
-                event.target,
-                event.operator in _APPEND_REDIRECTION_OPERATORS,
-            )
-        if event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS:
-            bindings[1] = binding
-            bindings[2] = bindings[1]
-        else:
-            bindings[event.descriptor] = binding
+    bindings = _output_bindings(events)
     for descriptor, (target, append) in bindings.items():
         if not isinstance(target, StaticResourceTarget):
             continue
@@ -1004,6 +1083,8 @@ class _OutputLowering:
             if isinstance(current, CommandOutput):
                 scope_id = self.command_scopes.get(current.command_id)
                 values.append(StreamRef(scope_id) if scope_id is not None else OutsideGap())
+            elif isinstance(current, ScopeOutput):
+                values.append(StreamRef(current.scope_id))
             elif expanded:
                 if isinstance(current, SequenceOutput | ChoiceOutput):
                     parts = values[-len(current.parts) :] if current.parts else []
@@ -1028,9 +1109,22 @@ class _OutputLowering:
                 pending.append((current, True))
                 if isinstance(current, SequenceOutput | ChoiceOutput):
                     pending.extend((part, False) for part in reversed(current.parts))
-                else:
+                elif isinstance(current, RepeatOutput):
                     pending.append((current.part, False))
         return values[0]
+
+
+def stream_ref_ids(expression: ContentExpr) -> tuple[int, ...]:
+    """Return stream references visible through authored content composition only."""
+    pending = [expression]
+    stream_ids: list[int] = []
+    while pending:
+        current = pending.pop()
+        if isinstance(current, StreamRef):
+            stream_ids.append(current.scope_id)
+        elif isinstance(current, Choice | Concat):
+            pending.extend(reversed(current.parts))
+    return tuple(stream_ids)
 
 
 def _build_flow_definitions(
@@ -1047,12 +1141,20 @@ def _build_flow_definitions(
     variable_writes: list[_FlowWrite] = []
     resource_writes: list[_FlowWrite] = []
     stream_writes: list[_FlowWrite] = []
+    root_command_scopes = {
+        scope.scope_id
+        for scope in evidence.scopes
+        if scope.kind == "command" and scope.parent_scope_id is None
+    }
+    if not root_command_scopes:
+        root_command_scopes = {command.container_scope_id for command in evidence.commands}
 
     for command in evidence.commands:
-        variable_writes.extend(
-            _FlowWrite(assignment.name, assignment.content, append=assignment.append)
-            for assignment in command.assignments
-        )
+        if command.container_scope_id in root_command_scopes:
+            variable_writes.extend(
+                _FlowWrite(assignment.name, assignment.content, append=assignment.append)
+                for assignment in command.assignments
+            )
         output = _producer_stdout(command, inputs[command.command_id])
         stream_writes.append(_FlowWrite(command.output_scope_id, output))
         resource_writes.extend(_static_write_definitions(command.redirections, output))
