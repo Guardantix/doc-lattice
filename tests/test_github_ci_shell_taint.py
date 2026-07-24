@@ -30,6 +30,7 @@ from doc_lattice.github_ci.shell_taint import (
     _FlowWrite,
     _marker_capable,
     _PipeEvidence,
+    _ProcessResourceEvidence,
     _RedirectionEvent,
     _ShellTaintEvidence,
     _solve_flow_definitions,
@@ -348,6 +349,84 @@ def test_empty_repeat_preserves_recursive_equation_for_node_limit_accounting() -
 
     assert analyze_marker_taint(
         _ShellTaintEvidence(scopes=(scope,)),
+        limits=TaintLimits(max_expression_nodes=3),
+    ) == (True, "shell taint expression node limit exceeded")
+
+
+def test_ambiguous_shell_selector_includes_static_script_candidate() -> None:
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),),
+    )
+    shell = _command(
+        2,
+        _arg("bash"),
+        _arg("$OPT", OutsideGap(), dynamic=True),
+        _arg("task.sh"),
+        name="bash",
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, shell))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_ambiguous_shell_selector_includes_input_process_script_candidate() -> None:
+    producer = _command(1, _arg("printf"), _arg("doc-lattice"), name="printf")
+    scope = _StreamScopeEvidence(
+        200,
+        "process_substitution",
+        None,
+        None,
+        CommandOutput(1),
+    )
+    shell = _command(
+        2,
+        _arg("bash"),
+        _arg("$OPT", OutsideGap(), dynamic=True),
+        _ArgPort("proc", LiteralTransfer("safe"), process_resource_id=7),
+        name="bash",
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(
+            commands=(producer, shell),
+            scopes=(scope,),
+            process_resources=(_ProcessResourceEvidence(7, 200, "input"),),
+        )
+    ) == (True, "authored marker flow reaches an execution sink")
+
+
+def test_relative_direct_executable_with_slash_reads_static_resource() -> None:
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("dir/task.sh")),),
+    )
+    reader = _command(2, _arg("dir/task.sh"), name="dir/task.sh")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, reader))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_deep_producer_content_hits_node_limit_without_recursion_error() -> None:
+    deep_concat = _deep_concat(1_200)
+    deep_choice: ContentExpr = LiteralTransfer("y")
+    for _ in range(1_200):
+        deep_choice = Choice((deep_choice,))
+    concat_producer = _command(1, _arg("printf"), _arg("x", deep_concat), name="printf")
+    choice_producer = _command(2, _arg("printf"), _arg("y", deep_choice), name="printf")
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(concat_producer, choice_producer)),
         limits=TaintLimits(max_expression_nodes=3),
     ) == (True, "shell taint expression node limit exceeded")
 

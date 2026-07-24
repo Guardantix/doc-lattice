@@ -389,16 +389,13 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
 def concat(*parts: ContentExpr) -> ContentExpr:
     """Flatten concatenation and discard authored epsilon fragments."""
     flattened: list[ContentExpr] = []
-
-    def append_part(part: ContentExpr) -> None:
+    pending = list(reversed(parts))
+    while pending:
+        part = pending.pop()
         if isinstance(part, Concat):
-            for nested_part in part.parts:
-                append_part(nested_part)
+            pending.extend(reversed(part.parts))
         elif not isinstance(part, LiteralTransfer) or part.text:
             flattened.append(part)
-
-    for part in parts:
-        append_part(part)
 
     if not flattened:
         return LiteralTransfer("")
@@ -410,16 +407,13 @@ def concat(*parts: ContentExpr) -> ContentExpr:
 def choice(*parts: ContentExpr) -> ContentExpr:
     """Flatten choices while retaining epsilon as a real alternative."""
     flattened: list[ContentExpr] = []
-
-    def append_part(part: ContentExpr) -> None:
+    pending = list(reversed(parts))
+    while pending:
+        part = pending.pop()
         if isinstance(part, Choice):
-            for nested_part in part.parts:
-                append_part(nested_part)
+            pending.extend(reversed(part.parts))
         else:
             flattened.append(part)
-
-    for part in parts:
-        append_part(part)
 
     if len(flattened) == 1:
         return flattened[0]
@@ -952,6 +946,16 @@ def _script_port_expression(port: _ArgPort) -> ContentExpr:
     return ResourceRef(key) if key is not None else OutsideGap()
 
 
+def _shell_script_source_expression(
+    port: _ArgPort,
+    process_resources: dict[int, _ProcessResourceEvidence],
+) -> ContentExpr:
+    """Return the source expression when one shell port becomes a script operand."""
+    if port.process_resource_id is not None:
+        return _process_resource_input(port.process_resource_id, process_resources)
+    return _script_port_expression(port)
+
+
 def _sink_expressions(  # noqa: PLR0911, PLR0912
     command: _CommandEvidence,
     stdin: ContentExpr,
@@ -987,14 +991,17 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
             if selection.argv_index is None:
                 return ()
             port = command.argv[selection.argv_index]
-            if port.process_resource_id is not None:
-                return (_process_resource_input(port.process_resource_id, process_resources),)
-            return (_script_port_expression(port),)
-        candidates = [command.argv[index].content for index in selection.candidate_indices]
+            return (_shell_script_source_expression(port, process_resources),)
+        candidates: list[ContentExpr] = []
+        for index in selection.candidate_indices:
+            port = command.argv[index]
+            candidates.extend(
+                (port.content, _shell_script_source_expression(port, process_resources))
+            )
         if selection.include_stdin:
             candidates.append(stdin)
         return (choice(*candidates),)
-    if literal is not None and (literal.startswith("/") or literal.startswith("./")):
+    if literal is not None and "/" in literal:
         key = normalize_static_resource(literal, dynamic=False)
         if key is not None:
             return (ResourceRef(key),)
