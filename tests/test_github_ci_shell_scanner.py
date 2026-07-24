@@ -314,6 +314,14 @@ def test_command_substitution_strips_trailing_newline_before_splice():
     assert_taint_refusal("eval \"$(cat <<'EOF'\ndoc-\nEOF\n)lattice reconcile\"\n")
 
 
+def test_arithmetic_subshell_fallback_stdout_reaches_pipeline_stdin():
+    assert_taint_refusal("((printf '%s%s\\n' doc- 'lattice reconcile') ) | bash")
+
+
+def test_arithmetic_subshell_fallback_stdout_reaches_written_resource():
+    assert_taint_refusal("((printf '%s%s\\n' doc- 'lattice reconcile') ) > task.sh\nbash task.sh")
+
+
 ACCEPTANCE_CASES = [
     # Literal executable identity and control syntax.
     ("ansi-c executable", "$'doc-lattice' linear", LINEAR),

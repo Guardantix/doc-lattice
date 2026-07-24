@@ -936,7 +936,13 @@ class _ShellScanner:
         arithmetic_end = self._consume_arithmetic(index + 2, limit, depth + 1)
         if arithmetic_end is not None:
             return arithmetic_end
-        return self._scan_nested_commands(index + 1, limit, terminator=")", depth=depth + 1)
+        return self._scan_compound_scope(
+            index + 1,
+            limit,
+            state,
+            terminator=")",
+            depth=depth + 1,
+        )
 
     def _consume_array_assignment(
         self,
@@ -1026,19 +1032,38 @@ class _ShellScanner:
         self._advance_case_body(state, operator)
         if operator in {"(", "{"}:
             closing = ")" if operator == "(" else "}"
-            end, scope_id = self._scan_stream_scope(
+            return self._scan_compound_scope(
                 index,
                 limit,
+                state,
                 terminator=closing,
                 depth=depth + 1,
-                kind="subshell_group",
             )
-            if self.scope_stack:
-                self.scope_stack[-1].outputs.append(ScopeOutput(scope_id))
-            state.pending_compound_scope_id = scope_id
-            return end
         state.pending_compound_scope_id = None
         return index
+
+    def _scan_compound_scope(
+        self,
+        start: int,
+        limit: int,
+        state: _CommandScanState,
+        *,
+        terminator: str,
+        depth: int,
+    ) -> int:
+        """Scan a real compound command and expose its stdout to the parent command list."""
+        end, scope_id = self._scan_stream_scope(
+            start,
+            limit,
+            terminator=terminator,
+            depth=depth,
+            kind="subshell_group",
+        )
+        if self.scope_stack:
+            self.scope_stack[-1].outputs.append(ScopeOutput(scope_id))
+        state.pending_compound_scope_id = scope_id
+        state.compound_redirection_ordinal = 0
+        return end
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
         state.pending_compound_scope_id = None
@@ -1291,14 +1316,19 @@ class _ShellScanner:
         producer_command_id: int | None,
     ) -> None:
         """Record the command just flushed as one stage of a shell pipeline."""
-        if self.taint_builder is None or producer_command_id is None:
+        if self.taint_builder is None:
             return
-        producer_scope = self.taint_builder.command_output_scope(producer_command_id)
+        producer_scope = state.pending_compound_scope_id
+        if producer_scope is None:
+            if producer_command_id is None:
+                return
+            producer_scope = self.taint_builder.command_output_scope(producer_command_id)
         if state.pipeline is None:
             state.pipeline = _PipelineFrame(self.taint_builder.allocate_scope(), [producer_scope])
         elif not state.pipeline.stages or state.pipeline.stages[-1] != producer_scope:
             state.pipeline.stages.append(producer_scope)
         state.pending_pipe_producer = producer_scope
+        state.pending_compound_scope_id = None
         if self.scope_stack and self.scope_stack[-1].outputs:
             self.scope_stack[-1].outputs.pop()
 
