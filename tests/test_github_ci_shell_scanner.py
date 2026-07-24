@@ -3190,6 +3190,62 @@ def test_eval_second_pass_cartesian_brace_words_obey_alternative_cap():
 @pytest.mark.parametrize(
     "script",
     [
+        'A=doc-{; B=lattice,noop}; eval "$A$B"',
+        'P=doc-; A={; B=lattice,x}; eval "$P$A$B"',
+        'A={doc-,x; B=}; C=lattice; eval "$A$B$C"',
+        "A='{doc-,x'; B='}{lattice,y}'; eval \"$A$B\"",
+        'A=doc-{; B=$A; C=$B; D=lattice,x}; eval "$C$D"',
+        'X=doc-{; X+=lat; X+=tice,x}; Y=$X; eval "$Y"',
+    ],
+    ids=(
+        "open-prefix",
+        "separate-prefix",
+        "separate-suffix",
+        "cartesian-groups",
+        "alias-chain",
+        "distinct-appends",
+    ),
+)
+def test_eval_second_pass_composes_brace_stream_across_variables(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '''A="doc-'{"; B="lattice,x}'"; eval "$A$B"''',
+        r'''A='doc-\{'; B='lattice,x\}'; eval "$A$B"''',
+        '''A='{doc-,'; B='lattice}'; eval "$A$B"''',
+        "A='{'; B=$A; C=$B; eval \"$C\"",
+        'X={; X+=x; Y=$X; X=$Y; eval "$X"',
+        'X={; X+=x; X+=y; Y=$X; X=$Y; eval "$X"',
+    ],
+    ids=(
+        "quoted-braces",
+        "escaped-braces",
+        "separate-argv",
+        "acyclic-alias-chain",
+        "single-append-alias",
+        "distinct-append-alias",
+    ),
+)
+def test_eval_second_pass_variable_stream_controls_stay_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_eval_second_pass_cyclic_variable_transition_fails_closed():
+    result = scan_doc_lattice_invocations('A={; B=$C; C=$B; eval "$A$B"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint eval syntax fixed-point update limit exceeded"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         '''eval "'doc-{lattice,noop}'"''',
         r'''eval "doc-\{lattice,noop\}"''',
     ],

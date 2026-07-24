@@ -2071,6 +2071,36 @@ class _EvalSyntaxState:
 
 
 _EvalSyntaxValue: TypeAlias = frozenset[_EvalSyntaxState]  # noqa: UP040
+_EvalSyntaxPrograms: TypeAlias = dict[  # noqa: UP040
+    str | int,
+    tuple[tuple[int, _FlowWrite], ...],
+]
+_EvalSyntaxTransitionKey: TypeAlias = tuple[str | int, _EvalSyntaxState]  # noqa: UP040
+
+
+@dataclass(slots=True)
+class _EvalSyntaxContext:
+    """Bounded tables shared while reparsing one family of eval expressions."""
+
+    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue]
+    raw_variables: dict[str | int, _ContentValue]
+    limits: TaintLimits
+    programs: _EvalSyntaxPrograms
+    transitions: dict[_EvalSyntaxTransitionKey, _EvalSyntaxValue] = field(default_factory=dict)
+    active_transitions: set[_EvalSyntaxTransitionKey] = field(default_factory=set)
+    transition_updates: int = 0
+
+    def invalidate_transitions(self) -> None:
+        """Discard memoized transitions after the solved variable table changes."""
+        self.transitions.clear()
+
+
+def _eval_syntax_programs(writes: tuple[_FlowWrite, ...]) -> _EvalSyntaxPrograms:
+    """Group indexed variable writes into source-ordered transition programs."""
+    grouped: dict[str | int, list[tuple[int, _FlowWrite]]] = {}
+    for write_index, write in enumerate(writes):
+        grouped.setdefault(write.key, []).append((write_index, write))
+    return {key: tuple(program) for key, program in grouped.items()}
 
 
 def _eval_reparse_content(
@@ -2387,12 +2417,79 @@ def _eval_syntax_token(
     return _cap_eval_syntax(value, limits)
 
 
-def _eval_syntax_append(  # noqa: PLR0911, PLR0913
+def _eval_syntax_variable_transition(
+    name: str | int,
+    state: _EvalSyntaxState,
+    context: _EvalSyntaxContext,
+    *,
+    depth: int,
+) -> _EvalSyntaxValue:
+    """Replay one variable's authored writes against an actual incoming eval state."""
+    key = (name, state)
+    cached = context.transitions.get(key)
+    if cached is not None:
+        return cached
+    if key in context.active_transitions:
+        raise _TaintLimitExceeded("shell taint eval syntax fixed-point update limit exceeded")
+    program = context.programs.get(name)
+    if program is None:
+        return _eval_syntax_token(
+            state,
+            _ContentToken(OutsideGap(), "", False),
+            context.raw_variables,
+            context.limits,
+        )
+    context.active_transitions.add(key)
+    try:
+        value: _EvalSyntaxValue | None = None
+        for write_index, write in program:
+            if write.append:
+                base = value
+                if base is None:
+                    base = _eval_syntax_token(
+                        state,
+                        _ContentToken(OutsideGap(), "", False),
+                        context.raw_variables,
+                        context.limits,
+                    )
+                value = _cap_eval_syntax(
+                    frozenset(
+                        after
+                        for current in base
+                        for after in _eval_syntax_append_write(
+                            write.expression,
+                            current,
+                            write_index,
+                            context,
+                            depth=depth + 1,
+                        )
+                    ),
+                    context.limits,
+                )
+            else:
+                value = _eval_syntax_append(
+                    write.expression,
+                    state,
+                    context,
+                    depth=depth + 1,
+                )
+        if value is None:
+            value = _eval_syntax_outside(state.quote)
+        context.transition_updates += 1
+        if context.transition_updates > context.limits.max_fixed_point_updates:
+            raise _TaintLimitExceeded("shell taint eval syntax fixed-point update limit exceeded")
+        if len(context.transitions) >= context.limits.max_table_entries:
+            raise _TaintLimitExceeded("shell taint eval syntax transition table limit exceeded")
+        context.transitions[key] = value
+        return value
+    finally:
+        context.active_transitions.remove(key)
+
+
+def _eval_syntax_append(  # noqa: PLR0911
     expression: ContentExpr,
     state: _EvalSyntaxState,
-    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
-    raw_variables: dict[str | int, _ContentValue],
-    limits: TaintLimits,
+    context: _EvalSyntaxContext,
     *,
     depth: int = 0,
 ) -> _EvalSyntaxValue:
@@ -2410,22 +2507,22 @@ def _eval_syntax_append(  # noqa: PLR0911, PLR0913
                     for after in _eval_syntax_token(
                         current,
                         token,
-                        raw_variables,
-                        limits,
+                        context.raw_variables,
+                        context.limits,
                     )
                 ),
-                limits,
+                context.limits,
             )
         return frozenset(replace(current, quote=resulting_quote) for current in value)
     if isinstance(expression, VariableRef):
         if state.brace_tokens:
-            return _eval_syntax_token(
+            return _eval_syntax_variable_transition(
+                expression.name,
                 state,
-                _ContentToken(OutsideGap(), "", False),
-                raw_variables,
-                limits,
+                context,
+                depth=depth + 1,
             )
-        suffixes = variables.get(
+        suffixes = context.variables.get(
             (expression.name, state.quote),
             _eval_syntax_outside(state.quote),
         )
@@ -2437,17 +2534,18 @@ def _eval_syntax_append(  # noqa: PLR0911, PLR0913
                     quote=suffix.quote,
                     brace_tokens=suffix.brace_tokens,
                     brace_depth=suffix.brace_depth,
+                    applied_appends=state.applied_appends | suffix.applied_appends,
                 )
                 for suffix in suffixes
             ),
-            limits,
+            context.limits,
         )
     if isinstance(expression, OutsideGap | ResourceRef | StreamRef):
         return _eval_syntax_token(
             state,
             _ContentToken(expression, "", False),
-            raw_variables,
-            limits,
+            context.raw_variables,
+            context.limits,
         )
     if isinstance(expression, Choice):
         value = frozenset(
@@ -2456,13 +2554,11 @@ def _eval_syntax_append(  # noqa: PLR0911, PLR0913
             for alternative in _eval_syntax_append(
                 part,
                 state,
-                variables,
-                raw_variables,
-                limits,
+                context,
                 depth=depth + 1,
             )
         )
-        return _cap_eval_syntax(value, limits)
+        return _cap_eval_syntax(value, context.limits)
     if not isinstance(expression, Concat):
         return _eval_syntax_outside(state.quote)
     value = frozenset({state})
@@ -2474,24 +2570,22 @@ def _eval_syntax_append(  # noqa: PLR0911, PLR0913
                 for after in _eval_syntax_append(
                     part,
                     current,
-                    variables,
-                    raw_variables,
-                    limits,
+                    context,
                     depth=depth + 1,
                 )
             ),
-            limits,
+            context.limits,
         )
     return value
 
 
-def _eval_syntax_append_write(  # noqa: PLR0913
+def _eval_syntax_append_write(
     expression: ContentExpr,
     state: _EvalSyntaxState,
     write_index: int,
-    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
-    raw_variables: dict[str | int, _ContentValue],
-    limits: TaintLimits,
+    context: _EvalSyntaxContext,
+    *,
+    depth: int = 0,
 ) -> _EvalSyntaxValue:
     """Apply one append write at most once to each fixed-point derivation."""
     write_mask = 1 << write_index
@@ -2502,19 +2596,16 @@ def _eval_syntax_append_write(  # noqa: PLR0913
         for after in _eval_syntax_append(
             expression,
             state,
-            variables,
-            raw_variables,
-            limits,
+            context,
+            depth=depth,
         )
     )
 
 
-def _eval_syntax_expression(  # noqa: PLR0913
+def _eval_syntax_expression(
     expression: ContentExpr,
     quote: str | None,
-    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
-    raw_variables: dict[str | int, _ContentValue],
-    limits: TaintLimits,
+    context: _EvalSyntaxContext,
     *,
     depth: int = 0,
 ) -> _EvalSyntaxValue:
@@ -2522,9 +2613,7 @@ def _eval_syntax_expression(  # noqa: PLR0913
     return _eval_syntax_append(
         expression,
         _EvalSyntaxState(_EPSILON, quote),
-        variables,
-        raw_variables,
-        limits,
+        context,
         depth=depth,
     )
 
@@ -2575,6 +2664,12 @@ def _ordered_eval_syntax_variables(
     variables = {
         (write.key, quote): frozenset() for write in writes for quote in _EVAL_QUOTE_STATES
     }
+    context = _EvalSyntaxContext(
+        variables,
+        raw_variables,
+        limits,
+        _eval_syntax_programs(writes),
+    )
     for write_index, write in enumerate(writes):
         for quote in _EVAL_QUOTE_STATES:
             if write.append:
@@ -2587,9 +2682,7 @@ def _ordered_eval_syntax_variables(
                             write.expression,
                             current,
                             write_index,
-                            variables,
-                            raw_variables,
-                            limits,
+                            context,
                         )
                     ),
                     limits,
@@ -2598,11 +2691,10 @@ def _ordered_eval_syntax_variables(
                 value = _eval_syntax_expression(
                     write.expression,
                     quote,
-                    variables,
-                    raw_variables,
-                    limits,
+                    context,
                 )
             variables[(write.key, quote)] = value
+            context.invalidate_transitions()
     return variables
 
 
@@ -2615,6 +2707,12 @@ def _solve_eval_syntax_variables(
     variables = {
         (write.key, quote): frozenset() for write in writes for quote in _EVAL_QUOTE_STATES
     }
+    context = _EvalSyntaxContext(
+        variables,
+        raw_variables,
+        limits,
+        _eval_syntax_programs(writes),
+    )
     updates = 0
     changed = True
     while changed:
@@ -2632,9 +2730,7 @@ def _solve_eval_syntax_variables(
                                 write.expression,
                                 current,
                                 write_index,
-                                variables,
-                                raw_variables,
-                                limits,
+                                context,
                             )
                         ),
                         limits,
@@ -2643,14 +2739,13 @@ def _solve_eval_syntax_variables(
                     value = _eval_syntax_expression(
                         write.expression,
                         quote,
-                        variables,
-                        raw_variables,
-                        limits,
+                        context,
                     )
                 widened = _cap_eval_syntax(prior | value, limits)
                 if widened == prior:
                     continue
                 variables[(write.key, quote)] = widened
+                context.invalidate_transitions()
                 updates += 1
                 if updates > limits.max_fixed_point_updates:
                     raise _TaintLimitExceeded(
@@ -2721,10 +2816,17 @@ def _reachable_eval_variable_writes(
 def _eval_sink_marker_capable(
     command: _CommandEvidence,
     variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
+    writes: tuple[_FlowWrite, ...],
     raw_variables: dict[str | int, _ContentValue],
     limits: TaintLimits,
 ) -> bool:
     """Return whether any builtin eval candidate reparses an authored marker flow."""
+    context = _EvalSyntaxContext(
+        variables,
+        raw_variables,
+        limits,
+        _eval_syntax_programs(writes),
+    )
     for executable in _builtin_eval_candidates(command):
         raw = _eval_arguments_raw(command, executable)
         if _marker_capable(_evaluate_with_tables(raw, raw_variables, {}, {}, limits)):
@@ -2734,9 +2836,7 @@ def _eval_sink_marker_capable(
             for state in _eval_syntax_expression(
                 raw,
                 None,
-                variables,
-                raw_variables,
-                limits,
+                context,
             )
             for summary in _finalize_eval_syntax(state, raw_variables, limits)
         ):
@@ -2924,6 +3024,7 @@ def analyze_marker_taint(  # noqa: PLR0911
             _eval_sink_marker_capable(
                 command,
                 ordered_eval_syntax_variables,
+                eval_writes,
                 solved.variables,
                 limits,
             )
@@ -2946,6 +3047,7 @@ def analyze_marker_taint(  # noqa: PLR0911
             if command in eval_commands and _eval_sink_marker_capable(
                 command,
                 eval_syntax_variables,
+                eval_writes,
                 solved.variables,
                 limits,
             ):

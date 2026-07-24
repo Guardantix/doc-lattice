@@ -544,6 +544,92 @@ def test_eval_variable_syntax_mutual_cycle_obeys_fixed_point_cap() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("assignments", "sink_names"),
+    [
+        (
+            (
+                _AssignmentEvidence("A", LiteralTransfer("doc-{")),
+                _AssignmentEvidence("B", LiteralTransfer("lattice,noop}")),
+            ),
+            ("A", "B"),
+        ),
+        (
+            (
+                _AssignmentEvidence("A", LiteralTransfer("{doc-,x")),
+                _AssignmentEvidence("B", LiteralTransfer("}{lattice,y}")),
+            ),
+            ("A", "B"),
+        ),
+        (
+            (
+                _AssignmentEvidence("A", LiteralTransfer("doc-{")),
+                _AssignmentEvidence("B", VariableRef("A")),
+                _AssignmentEvidence("C", VariableRef("B")),
+                _AssignmentEvidence("D", LiteralTransfer("lattice,x}")),
+            ),
+            ("C", "D"),
+        ),
+    ],
+    ids=("open-prefix", "cartesian-groups", "alias-chain"),
+)
+def test_eval_variable_syntax_composes_open_braces_across_variables(
+    assignments: tuple[_AssignmentEvidence, ...],
+    sink_names: tuple[str, ...],
+) -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg(
+            "$VARS",
+            Concat(tuple(VariableRef(name) for name in sink_names)),
+            dynamic=True,
+        ),
+        name="eval",
+        assignments=assignments,
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_variable_syntax_aliases_preserve_append_provenance() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("{")),
+            _AssignmentEvidence("X", LiteralTransfer("x"), append=True),
+            _AssignmentEvidence("Y", VariableRef("X")),
+            _AssignmentEvidence("X", VariableRef("Y")),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_eval_variable_syntax_distinct_appends_each_apply_once_through_aliases() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("{")),
+            _AssignmentEvidence("X", LiteralTransfer("x"), append=True),
+            _AssignmentEvidence("X", LiteralTransfer("y"), append=True),
+            _AssignmentEvidence("Y", VariableRef("X")),
+            _AssignmentEvidence("X", VariableRef("Y")),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
 def test_eval_brace_expansion_obeys_taint_cap() -> None:
     command = _command(
         1,
