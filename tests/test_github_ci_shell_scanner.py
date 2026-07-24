@@ -1,5 +1,7 @@
 """Tests for the bounded, non-executing doc-lattice shell invocation scanner."""
 
+import subprocess
+
 import pytest
 from typer.core import TyperGroup
 from typer.main import get_command
@@ -2982,6 +2984,40 @@ def test_eval_reparse_keeps_second_pass_single_quoted_variable_reference_literal
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+def test_eval_reparse_interprets_quotes_contributed_by_variable_value():
+    assert_taint_refusal('A="doc-\'"; eval "$A""lattice\'" --help')
+
+
+def test_eval_reparse_decodes_ansi_c_literal_escapes():
+    assert_taint_refusal(r'''eval "\$'doc-\x6cattice' --help"''')
+
+
+def test_eval_reparse_keeps_external_only_value_non_evidentiary():
+    result = scan_doc_lattice_invocations('eval "$EXTERNAL"')
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ('A="printf \'doc-"; eval "$A""lattice\'"', "doc-lattice"),
+        (r'''eval "printf \$'doc-\x6cattice'"''', "doc-lattice"),
+    ],
+    ids=("variable-contributed-quote", "ansi-c-escape"),
+)
+def test_eval_bash_probe_confirms_second_pass_marker_construction(script: str, expected: str):
+    result = subprocess.run(  # noqa: S603 - parameterized test scripts are literal safe probes
+        ["/bin/bash", "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == expected
 
 
 def test_eval_with_only_partial_marker_variable_stays_certified():

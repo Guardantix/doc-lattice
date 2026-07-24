@@ -157,6 +157,45 @@ def test_eval_reparse_keeps_second_pass_single_quoted_variable_reference_literal
     assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
+def test_eval_reparse_interprets_quotes_contributed_by_variable_value() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg(
+            "$Alattice' --help",
+            Concat((VariableRef("A"), LiteralTransfer("lattice' --help"))),
+            dynamic=True,
+        ),
+        name="eval",
+        assignments=(_AssignmentEvidence("A", LiteralTransfer("doc-'")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_reparse_decodes_ansi_c_literal_escapes() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$'doc-\\x6cattice' --help", LiteralTransfer("$'doc-\\x6cattice' --help")),
+        name="eval",
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_reparse_keeps_external_only_value_non_evidentiary() -> None:
+    command = _command(1, _arg("eval"), _arg("$EXTERNAL", VariableRef("EXTERNAL")), name="eval")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
 @pytest.mark.parametrize(
     ("words", "expected_index", "expected_name"),
     [

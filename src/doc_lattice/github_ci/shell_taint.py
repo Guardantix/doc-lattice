@@ -30,6 +30,13 @@ class VariableRef:
 
 
 @dataclass(frozen=True, slots=True)
+class _SecondPassVariableRef:
+    """A parameter expanded by eval's second shell parse, not by its input-producing shell."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class StreamRef:
     """Reference one stream scope's aggregated stdout."""
 
@@ -63,7 +70,14 @@ class OutsideGap:
 
 
 ContentExpr: TypeAlias = (  # noqa: UP040
-    LiteralTransfer | VariableRef | StreamRef | ResourceRef | Choice | Concat | OutsideGap
+    LiteralTransfer
+    | VariableRef
+    | _SecondPassVariableRef
+    | StreamRef
+    | ResourceRef
+    | Choice
+    | Concat
+    | OutsideGap
 )
 
 
@@ -684,7 +698,7 @@ def _expression_edges(expression: ContentExpr) -> int:
     edges = 0
     while pending:
         current = pending.pop()
-        if isinstance(current, VariableRef | ResourceRef | StreamRef):
+        if isinstance(current, VariableRef | _SecondPassVariableRef | ResourceRef | StreamRef):
             edges += 1
         elif isinstance(current, Choice | Concat):
             pending.extend(current.parts)
@@ -720,7 +734,7 @@ def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
             values.append(frozenset({_TransferSummary.literal(current.text)}))
         elif isinstance(current, OutsideGap):
             values.append(_OUTSIDE_VALUE)
-        elif isinstance(current, VariableRef | ResourceRef | StreamRef):
+        elif isinstance(current, VariableRef | _SecondPassVariableRef | ResourceRef | StreamRef):
             raise ValueError("closed content expression contains an unresolved reference")
         elif expanded:
             parts = values[-len(current.parts) :] if current.parts else []
@@ -754,7 +768,7 @@ def _evaluate_with_tables(
             values.append(frozenset({_TransferSummary.literal(current.text)}))
         elif isinstance(current, OutsideGap):
             values.append(_OUTSIDE_VALUE)
-        elif isinstance(current, VariableRef):
+        elif isinstance(current, VariableRef | _SecondPassVariableRef):
             values.append(variables.get(current.name, _OUTSIDE_VALUE))
         elif isinstance(current, ResourceRef):
             values.append(resources.get(current.key, _OUTSIDE_VALUE))
@@ -1027,8 +1041,8 @@ def _build_flow_definitions(
     )
 
 
-def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvidence) -> ContentExpr:
-    """Return second-pass eval input after joining argv with authored spaces."""
+def _eval_arguments_raw(command: _CommandEvidence, executable: _ExecutableEvidence) -> ContentExpr:
+    """Return eval arguments joined by the literal shell argument separator."""
     head_index = executable.argv_index
     if head_index is None:
         return LiteralTransfer("")
@@ -1038,11 +1052,38 @@ def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvide
         if index:
             parts.append(LiteralTransfer(" "))
         parts.append(argument.content)
-    return _eval_reparse_content(concat(*parts))
+    return concat(*parts)
+
+
+def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvidence) -> ContentExpr:
+    """Return second-pass eval input after joining argv with authored spaces."""
+    return _eval_reparse_content(_eval_arguments_raw(command, executable))
 
 
 _MAX_EVAL_REPARSE_BRANCHES = 256
 _MAX_EVAL_REPARSE_DEPTH = 512
+_EVAL_QUOTE_STATES = (None, "'", '"')
+_EVAL_ANSI_OCTAL_BASE = 8
+_EVAL_UNICODE_MAX = 0x10FFFF
+_EVAL_SURROGATE_MIN = 0xD800
+_EVAL_SURROGATE_MAX = 0xDFFF
+_EVAL_ANSI_C_SIMPLE_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+
+_EvalSyntaxValue: TypeAlias = frozenset[tuple[_TransferSummary, str | None]]  # noqa: UP040
 
 
 def _eval_reparse_content(expression: ContentExpr) -> ContentExpr:
@@ -1088,7 +1129,9 @@ def _eval_reparse_branches(
     return [(expression, quote)]
 
 
-def _eval_reparse_literal(text: str, quote: str | None) -> tuple[ContentExpr, str | None]:
+def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
+    text: str, quote: str | None
+) -> tuple[ContentExpr, str | None]:
     """Reparse quote, escape, and simple parameter syntax from one literal transfer."""
     parts: list[ContentExpr] = []
     literal: list[str] = []
@@ -1116,6 +1159,10 @@ def _eval_reparse_literal(text: str, quote: str | None) -> tuple[ContentExpr, st
             quote = character
             index += 1
             continue
+        if quote is None and text.startswith("$'", index):
+            decoded, index = _eval_ansi_c_literal(text, index)
+            literal.append(decoded)
+            continue
         if character == "\\":
             if index + 1 >= len(text):
                 literal.append(character)
@@ -1132,7 +1179,7 @@ def _eval_reparse_literal(text: str, quote: str | None) -> tuple[ContentExpr, st
             name, end = _eval_parameter_name(text, index)
             if name is not None:
                 flush_literal()
-                parts.append(VariableRef(name))
+                parts.append(_SecondPassVariableRef(name))
                 index = end
                 continue
         literal.append(character)
@@ -1162,6 +1209,242 @@ def _eval_identifier_end(text: str, start: int) -> int:
     while index < len(text) and (text[index].isalnum() or text[index] == "_"):
         index += 1
     return index
+
+
+def _eval_ansi_c_literal(text: str, start: int) -> tuple[str, int]:
+    """Decode one second-pass ANSI-C shell literal without importing the scanner."""
+    characters: list[str] = []
+    index = start + 2
+    while index < len(text):
+        character = text[index]
+        if character == "'":
+            return "".join(characters), index + 1
+        if character != "\\":
+            characters.append(character)
+            index += 1
+            continue
+        decoded, index = _eval_ansi_c_escape(text, index + 1)
+        characters.append(decoded)
+    raise _TaintLimitExceeded("unterminated eval ANSI-C quoted literal")
+
+
+def _eval_ansi_c_escape(text: str, start: int) -> tuple[str, int]:  # noqa: PLR0911
+    """Decode the scanner-supported ANSI-C escape surface for eval reparsing."""
+    if start >= len(text):
+        return "\\", start
+    character = text[start]
+    if character in _EVAL_ANSI_C_SIMPLE_ESCAPES:
+        return _EVAL_ANSI_C_SIMPLE_ESCAPES[character], start + 1
+    if character in "01234567":
+        return _eval_ansi_c_digits(text, start, 8, 3, byte_mask=True)
+    if character == "x":
+        return _eval_ansi_c_digits(text, start + 1, 16, 2, prefix="x")
+    if character == "u":
+        return _eval_ansi_c_digits(text, start + 1, 16, 4, prefix="u")
+    if character == "U":
+        return _eval_ansi_c_digits(text, start + 1, 16, 8, prefix="U")
+    if character == "c" and start + 1 < len(text):
+        controlled = text[start + 1]
+        value = 127 if controlled == "?" else ord(controlled.upper()) & 0x1F
+        return _eval_ansi_c_character(value), start + 2
+    return f"\\{character}", start + 1
+
+
+def _eval_ansi_c_digits(  # noqa: PLR0913
+    text: str,
+    start: int,
+    base: int,
+    limit: int,
+    *,
+    prefix: str | None = None,
+    byte_mask: bool = False,
+) -> tuple[str, int]:
+    """Decode a bounded octal or hexadecimal ANSI-C escape digit sequence."""
+    valid = "01234567" if base == _EVAL_ANSI_OCTAL_BASE else "0123456789abcdefABCDEF"
+    end = start
+    while end < len(text) and end - start < limit and text[end] in valid:
+        end += 1
+    if end == start:
+        return f"\\{prefix}" if prefix is not None else "\\", end
+    value = int(text[start:end], base)
+    if byte_mask:
+        value &= 0xFF
+    return _eval_ansi_c_character(value), end
+
+
+def _eval_ansi_c_character(value: int) -> str:
+    """Return a representable ANSI-C decoded character or fail closed."""
+    if (
+        value == 0
+        or value > _EVAL_UNICODE_MAX
+        or _EVAL_SURROGATE_MIN <= value <= _EVAL_SURROGATE_MAX
+    ):
+        raise _TaintLimitExceeded("eval ANSI-C escape cannot be represented")
+    return chr(value)
+
+
+def _eval_syntax_outside(quote: str | None) -> _EvalSyntaxValue:
+    """Keep unknown external text non-evidentiary without inventing quote syntax."""
+    return frozenset((summary, quote) for summary in _OUTSIDE_VALUE)
+
+
+def _cap_eval_syntax(value: _EvalSyntaxValue, limits: TaintLimits) -> _EvalSyntaxValue:
+    if len(value) > limits.max_alternatives:
+        raise _TaintLimitExceeded("shell taint eval syntax alternative limit exceeded")
+    return value
+
+
+def _eval_syntax_expression(  # noqa: PLR0913
+    expression: ContentExpr,
+    quote: str | None,
+    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+    *,
+    depth: int = 0,
+) -> _EvalSyntaxValue:
+    """Evaluate eval-reparsed syntax with quote-sensitive variable definitions."""
+    if depth > _MAX_EVAL_REPARSE_DEPTH:
+        raise _TaintLimitExceeded("shell taint eval syntax depth limit exceeded")
+    if isinstance(expression, LiteralTransfer):
+        reparsed, resulting_quote = _eval_reparse_literal(expression.text, quote)
+        return frozenset(
+            (summary, resulting_quote)
+            for summary in _evaluate_with_tables(reparsed, raw_variables, {}, {}, limits)
+        )
+    if isinstance(expression, VariableRef):
+        return variables.get((expression.name, quote), _eval_syntax_outside(quote))
+    if isinstance(expression, OutsideGap | ResourceRef | StreamRef):
+        return _eval_syntax_outside(quote)
+    if isinstance(expression, Choice):
+        value = frozenset(
+            alternative
+            for part in expression.parts
+            for alternative in _eval_syntax_expression(
+                part,
+                quote,
+                variables,
+                raw_variables,
+                limits,
+                depth=depth + 1,
+            )
+        )
+        return _cap_eval_syntax(value, limits)
+    if not isinstance(expression, Concat):
+        return _eval_syntax_outside(quote)
+    value: _EvalSyntaxValue = frozenset({(_EPSILON, quote)})
+    for part in _coalesced_eval_parts(expression.parts):
+        value = _cap_eval_syntax(
+            frozenset(
+                (summary.compose(after), resulting_quote)
+                for summary, current_quote in value
+                for after, resulting_quote in _eval_syntax_expression(
+                    part,
+                    current_quote,
+                    variables,
+                    raw_variables,
+                    limits,
+                    depth=depth + 1,
+                )
+            ),
+            limits,
+        )
+    return value
+
+
+def _coalesced_eval_parts(parts: tuple[ContentExpr, ...]) -> tuple[ContentExpr, ...]:
+    """Join adjacent literal transfers before syntax reparsing crosses their boundaries."""
+    coalesced: list[ContentExpr] = []
+    literal: list[str] = []
+    for part in parts:
+        if isinstance(part, LiteralTransfer):
+            literal.append(part.text)
+            continue
+        if literal:
+            coalesced.append(LiteralTransfer("".join(literal)))
+            literal.clear()
+        coalesced.append(part)
+    if literal:
+        coalesced.append(LiteralTransfer("".join(literal)))
+    return tuple(coalesced)
+
+
+def _solve_eval_syntax_variables(
+    writes: tuple[_FlowWrite, ...],
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> dict[tuple[str | int, str | None], _EvalSyntaxValue]:
+    """Solve quote-sensitive variable text only for eval's second parsing pass."""
+    variables = {
+        (write.key, quote): frozenset() for write in writes for quote in _EVAL_QUOTE_STATES
+    }
+    updates = 0
+    changed = True
+    while changed:
+        changed = False
+        for write in writes:
+            for quote in _EVAL_QUOTE_STATES:
+                prior = variables[(write.key, quote)]
+                if write.append:
+                    base = prior or _eval_syntax_outside(quote)
+                    value = _cap_eval_syntax(
+                        frozenset(
+                            (summary.compose(after), resulting_quote)
+                            for summary, current_quote in base
+                            for after, resulting_quote in _eval_syntax_expression(
+                                write.expression,
+                                current_quote,
+                                variables,
+                                raw_variables,
+                                limits,
+                            )
+                        ),
+                        limits,
+                    )
+                else:
+                    value = _eval_syntax_expression(
+                        write.expression,
+                        quote,
+                        variables,
+                        raw_variables,
+                        limits,
+                    )
+                widened = _cap_eval_syntax(prior | value, limits)
+                if widened == prior:
+                    continue
+                variables[(write.key, quote)] = widened
+                updates += 1
+                if updates > limits.max_fixed_point_updates:
+                    raise _TaintLimitExceeded(
+                        "shell taint eval syntax fixed-point update limit exceeded"
+                    )
+                changed = True
+    return variables
+
+
+def _eval_sink_marker_capable(
+    command: _CommandEvidence,
+    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether any builtin eval candidate reparses an authored marker flow."""
+    for executable in _iter_executable_evidence(command.executable):
+        if executable.name != "eval" or executable.literal != "eval" or executable.external_lookup:
+            continue
+        raw = _eval_arguments_raw(command, executable)
+        if any(
+            summary.full.entries[_DFA_START][1]
+            for summary, _quote in _eval_syntax_expression(
+                raw,
+                None,
+                variables,
+                raw_variables,
+                limits,
+            )
+        ):
+            return True
+    return False
 
 
 def _script_port_expression(port: _ArgPort) -> ContentExpr:
@@ -1304,10 +1587,22 @@ def analyze_marker_taint(  # noqa: PLR0911
     try:
         definitions, inputs = _build_flow_definitions(evidence)
         solved = _solve_flow_definitions(definitions, limits=limits)
+        eval_syntax_variables = _solve_eval_syntax_variables(
+            definitions.variable_writes,
+            solved.variables,
+            limits,
+        )
         process_resources = {
             resource.resource_id: resource for resource in evidence.process_resources
         }
         for command in evidence.commands:
+            if _eval_sink_marker_capable(
+                command,
+                eval_syntax_variables,
+                solved.variables,
+                limits,
+            ):
+                return True, TAINT_REFUSAL_REASON
             stdin = inputs[command.command_id]
             for expression in _sink_expressions(command, stdin, process_resources):
                 if _marker_capable(solved.evaluate(expression)):
