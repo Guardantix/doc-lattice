@@ -120,29 +120,37 @@ def test_eval_inserts_literal_spaces_between_argument_ports() -> None:
     assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
-def test_external_command_evidence_does_not_activate_shell_sink() -> None:
+@pytest.mark.parametrize(
+    ("words", "expected_index", "expected_name"),
+    [
+        (("exec", "command", "bash", "-c", "$X"), 1, "command"),
+        (("exec", "builtin", "bash", "-c", "$X"), 1, "builtin"),
+        (("exec", "exec", "bash", "-c", "$X"), 1, "exec"),
+        (("command", "exec", "exec", "bash", "-c", "$X"), 2, "exec"),
+    ],
+    ids=("command", "builtin", "exec", "command-exec"),
+)
+def test_external_wrapper_evidence_does_not_activate_shell_sink(
+    words: tuple[str, ...], expected_index: int, expected_name: str
+) -> None:
     executable = _effective_executable_evidence(
-        [
-            _ShellWord("exec"),
-            _ShellWord("command"),
-            _ShellWord("bash"),
-            _ShellWord("-c"),
-            _ShellWord("$X"),
-        ],
+        [_ShellWord(word) for word in words],
         _ScanBudget(),
     )
 
     assert executable is not None
+    assert (executable.argv_index, executable.name, executable.external_lookup) == (
+        expected_index,
+        expected_name,
+        True,
+    )
     command = _CommandEvidence(
         command_id=1,
         output_scope_id=1,
         container_scope_id=100,
-        argv=(
-            _arg("exec"),
-            _arg("command"),
-            _arg("bash"),
-            _arg("-c"),
-            _arg("$X", LiteralTransfer("doc-lattice"), dynamic=True),
+        argv=tuple(
+            _arg(word, LiteralTransfer("doc-lattice"), dynamic=True) if word == "$X" else _arg(word)
+            for word in words
         ),
         assignments=(),
         redirections=(),

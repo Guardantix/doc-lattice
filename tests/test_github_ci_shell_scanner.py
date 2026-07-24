@@ -101,20 +101,71 @@ def test_effective_executable_evidence_marks_prefix_ambiguity() -> None:
     assert evidence.ambiguous is True
 
 
-def test_effective_executable_evidence_stops_at_external_command_wrapper() -> None:
+@pytest.mark.parametrize(
+    ("words", "expected_index", "expected_name"),
+    [
+        (
+            [
+                _static_word("exec"),
+                _static_word("command"),
+                _static_word("bash"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            1,
+            "command",
+        ),
+        (
+            [
+                _static_word("exec"),
+                _static_word("builtin"),
+                _static_word("bash"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            1,
+            "builtin",
+        ),
+        (
+            [
+                _static_word("exec"),
+                _static_word("exec"),
+                _static_word("bash"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            1,
+            "exec",
+        ),
+        (
+            [
+                _static_word("command"),
+                _static_word("exec"),
+                _static_word("exec"),
+                _static_word("bash"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            2,
+            "exec",
+        ),
+    ],
+    ids=("command", "builtin", "exec", "command-exec"),
+)
+def test_effective_executable_evidence_stops_at_external_wrapper(
+    words: list[_ShellWord], expected_index: int, expected_name: str
+) -> None:
     evidence = _effective_executable_evidence(
-        [
-            _static_word("exec"),
-            _static_word("command"),
-            _static_word("bash"),
-            _static_word("-c"),
-            _static_word("$X"),
-        ],
+        words,
         _ScanBudget(),
     )
 
     assert evidence is not None
-    assert (evidence.argv_index, evidence.name, evidence.external_lookup) == (1, "command", True)
+    assert (evidence.argv_index, evidence.name, evidence.external_lookup) == (
+        expected_index,
+        expected_name,
+        True,
+    )
     assert evidence.alternates == ()
 
 

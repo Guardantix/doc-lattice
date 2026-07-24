@@ -2057,7 +2057,7 @@ def _record_external_wrapper_evidence(
     external_lookup: bool,
 ) -> None:
     """Stop evidence traversal when an external lookup names a shell-only wrapper."""
-    if external_lookup and literal in {"builtin", "command"}:
+    if external_lookup and literal in {"builtin", "command", "exec"}:
         resolution.stop_evidence_at(index, external_lookup=True)
 
 
