@@ -1611,6 +1611,14 @@ def _scoped_variable_name(environment: int, name: str) -> str:
     return f"\0{environment}\0{name}"
 
 
+def _unscoped_variable_name(name: str) -> str:
+    """Return the shell variable name from one internal scoped key."""
+    if not name.startswith("\0"):
+        return name
+    _environment, separator, unscoped = name[1:].partition("\0")
+    return unscoped if separator else name
+
+
 def _scope_expression(expression: ContentExpr, environment: int) -> ContentExpr:
     """Bind first-pass shell variable references to one lexical environment."""
     if isinstance(expression, VariableRef):
@@ -1712,6 +1720,8 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
 
 def _build_flow_definitions(
     evidence: _ShellTaintEvidence,
+    *,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
 ) -> tuple[_FlowDefinitions, dict[int, ContentExpr]]:
     """Lower typed shell evidence into fixed-point definitions and command stdin."""
     environments, environment_parents = _scope_environment_ids(evidence.scopes)
@@ -1767,11 +1777,28 @@ def _build_flow_definitions(
         resource_writes.extend(_static_write_definitions(command.redirections, output))
 
     lowering = _OutputLowering(command_scopes)
+    target_environments = set(environments.values())
+    visible_by_target = {
+        target_environment: visible_environments(target_environment)
+        for target_environment in target_environments
+    }
+    variable_keys = {write.key for write in variable_writes}
     for scope in evidence.scopes:
-        variable_writes.extend(
-            _FlowWrite(binding.name, binding.content, append=binding.append)
-            for binding in scope.loop_bindings
-        )
+        origin_environment = environments.get(scope.scope_id, scope.scope_id)
+        for target_environment, visible in visible_by_target.items():
+            if origin_environment not in visible:
+                continue
+            for binding in scope.loop_bindings:
+                key = _scoped_variable_name(
+                    target_environment,
+                    _unscoped_variable_name(binding.name),
+                )
+                if len(variable_writes) >= limits.max_edges:
+                    raise _TaintLimitExceeded("shell taint edge limit exceeded")
+                if key not in variable_keys and len(variable_keys) >= limits.max_table_entries:
+                    raise _TaintLimitExceeded("shell taint table entry limit exceeded")
+                variable_writes.append(_FlowWrite(key, binding.content, append=binding.append))
+                variable_keys.add(key)
         stream_writes.append(
             _FlowWrite(
                 scope.scope_id,
@@ -2412,7 +2439,7 @@ def analyze_marker_taint(  # noqa: PLR0911
     try:
         _validate_nested_evidence(evidence, limits)
         evidence = _contextualize_evidence(evidence)
-        definitions, inputs = _build_flow_definitions(evidence)
+        definitions, inputs = _build_flow_definitions(evidence, limits=limits)
         solved = _solve_flow_definitions(definitions, limits=limits)
         eval_commands = tuple(
             command for command in evidence.commands if _builtin_eval_candidates(command)
