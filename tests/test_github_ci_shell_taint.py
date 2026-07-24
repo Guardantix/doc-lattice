@@ -5,21 +5,36 @@ import pytest
 from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci.shell_taint import (
     Choice,
+    ChoiceOutput,
+    CommandOutput,
     Concat,
     ContentExpr,
+    ContentTarget,
     LiteralTransfer,
+    NullTarget,
     OutsideGap,
     ResourceRef,
+    SequenceOutput,
+    StaticResourceTarget,
     StreamRef,
     TaintLimits,
     VariableRef,
+    _ArgPort,
+    _AssignmentEvidence,
+    _CommandEvidence,
     _evaluate_closed,
+    _ExecutableEvidence,
     _FlowDefinitions,
     _FlowWrite,
     _marker_capable,
+    _PipeEvidence,
+    _RedirectionEvent,
+    _ShellTaintEvidence,
     _solve_flow_definitions,
+    _StreamScopeEvidence,
     _strip_trailing_newlines,
     _TaintLimitExceeded,
+    analyze_marker_taint,
     choice,
     concat,
 )
@@ -37,6 +52,206 @@ def _deep_concat(depth: int) -> ContentExpr:
     for _ in range(depth):
         expression = Concat((expression, LiteralTransfer("")))
     return expression
+
+
+def _arg(literal: str, expression: ContentExpr | None = None, *, dynamic: bool = False) -> _ArgPort:
+    return _ArgPort(
+        literal=literal,
+        content=expression or LiteralTransfer(literal),
+        dynamic=dynamic,
+    )
+
+
+def _command(  # noqa: PLR0913
+    command_id: int,
+    *argv: _ArgPort,
+    name: str,
+    head_index: int = 0,
+    external_lookup: bool = False,
+    assignments: tuple[_AssignmentEvidence, ...] = (),
+    redirections: tuple[_RedirectionEvent, ...] = (),
+) -> _CommandEvidence:
+    return _CommandEvidence(
+        command_id=command_id,
+        output_scope_id=command_id,
+        container_scope_id=100,
+        argv=argv,
+        assignments=assignments,
+        redirections=redirections,
+        executable=_ExecutableEvidence(
+            argv_index=head_index,
+            name=name,
+            literal=argv[head_index].literal,
+            external_lookup=external_lookup,
+        ),
+    )
+
+
+def test_eval_joins_dynamic_variable_assignment_and_append() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("doc-")),
+            _AssignmentEvidence("X", LiteralTransfer("lattice"), append=True),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_inserts_literal_spaces_between_argument_ports() -> None:
+    command = _command(1, _arg("eval"), _arg("doc-"), _arg("lattice"), name="eval")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_external_lookup_eval_is_not_treated_as_eval_sink() -> None:
+    command = _command(
+        1,
+        _arg("env"),
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        head_index=1,
+        external_lookup=True,
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("doc-")),
+            _AssignmentEvidence("X", LiteralTransfer("lattice"), append=True),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_shell_command_payload_wins_over_heredoc_stdin() -> None:
+    command = _command(
+        1,
+        _arg("bash"),
+        _arg("-c"),
+        _arg("echo ok"),
+        name="bash",
+        redirections=(
+            _RedirectionEvent(
+                0,
+                "<<",
+                0,
+                ContentTarget(LiteralTransfer("doc-lattice reconcile\n")),
+            ),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_dynamic_shell_selector_fails_closed_over_remaining_arguments() -> None:
+    command = _command(
+        1,
+        _arg("bash"),
+        _arg("$OPT", OutsideGap(), dynamic=True),
+        _arg("$X", Concat((LiteralTransfer("doc-"), LiteralTransfer("lattice"))), dynamic=True),
+        name="bash",
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_static_script_write_is_visible_to_reader_regardless_of_command_order() -> None:
+    reader = _command(1, _arg("bash"), _arg("./task.sh"), name="bash")
+    writer = _command(
+        2,
+        _arg("printf"),
+        _arg("doc-"),
+        _arg("lattice reconcile"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(reader, writer))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_later_descriptor_binding_overrides_earlier_static_stdout_target() -> None:
+    reader = _command(1, _arg("bash"), _arg("./task.sh"), name="bash")
+    writer = _command(
+        2,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(
+            _RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),
+            _RedirectionEvent(1, ">", 1, NullTarget()),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(reader, writer))) == (False, None)
+
+
+def test_explicit_stdin_redirection_overrides_pipe_input() -> None:
+    producer = _command(1, _arg("printf"), _arg("doc-lattice"), name="printf")
+    consumer = _command(
+        2,
+        _arg("bash"),
+        name="bash",
+        redirections=(_RedirectionEvent(0, "<<<", 0, ContentTarget(LiteralTransfer("true\n"))),),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(producer, consumer), pipes=(_PipeEvidence(1, 2),))
+    ) == (False, None)
+
+
+def test_command_substitution_sequence_is_not_a_choice() -> None:
+    first = _command(1, _arg("printf"), _arg("doc-"), name="printf")
+    second = _command(2, _arg("printf"), _arg("lattice"), name="printf")
+    sink = _command(3, _arg("eval"), _arg("$(...)", StreamRef(200), dynamic=True), name="eval")
+    sequence = _StreamScopeEvidence(
+        200,
+        "command_substitution",
+        None,
+        None,
+        SequenceOutput((CommandOutput(1), CommandOutput(2))),
+    )
+    choice_scope = _StreamScopeEvidence(
+        201,
+        "command_substitution",
+        None,
+        None,
+        ChoiceOutput((CommandOutput(1), CommandOutput(2))),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(first, second, sink), scopes=(sequence,))
+    ) == (True, "authored marker flow reaches an execution sink")
+
+    choice_sink = _command(
+        3,
+        _arg("eval"),
+        _arg("$(...)", StreamRef(201), dynamic=True),
+        name="eval",
+    )
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(first, second, choice_sink), scopes=(choice_scope,))
+    ) == (False, None)
+
+
+def test_evidence_edge_cap_counts_pipe_records() -> None:
+    evidence = _ShellTaintEvidence(pipes=(_PipeEvidence(1, 2), _PipeEvidence(2, 3)))
+
+    assert analyze_marker_taint(evidence, limits=TaintLimits(max_edges=1)) == (
+        True,
+        "shell taint edge limit exceeded",
+    )
 
 
 def test_concat_threads_dfa_state_across_fragment_boundaries() -> None:
