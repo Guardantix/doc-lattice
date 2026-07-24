@@ -61,13 +61,18 @@ ContentExpr: TypeAlias = (  # noqa: UP040
 
 
 def concat(*parts: ContentExpr) -> ContentExpr:
-    """Join adjacent content expressions, removing authored epsilon literals."""
+    """Flatten concatenation and discard authored epsilon fragments."""
     flattened: list[ContentExpr] = []
-    for part in parts:
+
+    def append_part(part: ContentExpr) -> None:
         if isinstance(part, Concat):
-            flattened.extend(part.parts)
+            for nested_part in part.parts:
+                append_part(nested_part)
         elif not isinstance(part, LiteralTransfer) or part.text:
             flattened.append(part)
+
+    for part in parts:
+        append_part(part)
 
     if not flattened:
         return LiteralTransfer("")
@@ -77,13 +82,18 @@ def concat(*parts: ContentExpr) -> ContentExpr:
 
 
 def choice(*parts: ContentExpr) -> ContentExpr:
-    """Join mutually exclusive content expressions while retaining epsilon alternatives."""
+    """Flatten choices while retaining epsilon as a real alternative."""
     flattened: list[ContentExpr] = []
-    for part in parts:
+
+    def append_part(part: ContentExpr) -> None:
         if isinstance(part, Choice):
-            flattened.extend(part.parts)
+            for nested_part in part.parts:
+                append_part(nested_part)
         else:
             flattened.append(part)
+
+    for part in parts:
+        append_part(part)
 
     if len(flattened) == 1:
         return flattened[0]
@@ -132,6 +142,8 @@ def _dfa_step(state: int, character: str) -> tuple[int, bool]:
 
 @dataclass(frozen=True, slots=True)
 class _DfaTransfer:
+    """Deterministic exit and acceptance result for every possible entry state."""
+
     entries: tuple[tuple[int, bool], ...]
 
     @classmethod
@@ -172,6 +184,8 @@ class _DfaTransfer:
 
 @dataclass(frozen=True, slots=True)
 class _TransferSummary:
+    """Raw and trailing-newline-stripped DFA effects for one alternative."""
+
     full: _DfaTransfer
     stripped: _DfaTransfer
     newline_only: bool

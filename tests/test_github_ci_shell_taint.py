@@ -1,4 +1,4 @@
-"""Tests for the pure GitHub CI shell marker-taint transfer domain."""
+"""Tests for pure authored-marker shell taint analysis."""
 
 import pytest
 
@@ -11,6 +11,8 @@ from doc_lattice.github_ci.shell_taint import (
     _evaluate_closed,
     _marker_capable,
     _strip_trailing_newlines,
+    choice,
+    concat,
 )
 
 
@@ -31,6 +33,22 @@ def test_choice_joins_alternatives_without_concatenating_them() -> None:
     expression = Choice((LiteralTransfer("doc-"), LiteralTransfer("lattice")))
 
     assert _can_mark(expression) is False
+
+
+def test_concat_recursively_flattens_and_discards_exposed_epsilon_literals() -> None:
+    expression = concat(
+        Concat((LiteralTransfer(""), Concat((LiteralTransfer("x"), LiteralTransfer("")))))
+    )
+
+    assert expression == LiteralTransfer("x")
+
+
+def test_choice_recursively_flattens_while_retaining_epsilon_alternatives() -> None:
+    expression = choice(
+        Choice((LiteralTransfer(""), Choice((LiteralTransfer("x"), LiteralTransfer("y")))))
+    )
+
+    assert expression == Choice((LiteralTransfer(""), LiteralTransfer("x"), LiteralTransfer("y")))
 
 
 @pytest.mark.parametrize(
