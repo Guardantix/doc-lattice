@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
+_MAX_BRACE_INTEGER_DIGITS = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,8 +374,25 @@ def _literal_tokens(text: str) -> list[_ContentToken]:
     return [_ContentToken(LiteralTransfer(character), character, True) for character in text]
 
 
+def _signed_decimal(value: str) -> str | None:
+    """Return unsigned decimal digits after at most one sign."""
+    digits = value[1:] if value[:1] in {"+", "-"} else value
+    return digits if digits and digits.isascii() and digits.isdigit() else None
+
+
+def _brace_integer(value: str) -> int:
+    """Convert one bounded signed brace integer or fail closed."""
+    digits = _signed_decimal(value)
+    if digits is None:
+        raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+    if len(digits) > _MAX_BRACE_INTEGER_DIGITS:
+        raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+    return int(value)
+
+
 def _brace_alternatives(  # noqa: PLR0911, PLR0912
     tokens: list[_ContentToken],
+    limits: TaintLimits,
 ) -> list[list[_ContentToken]] | None:
     """Return bounded brace operands, or ``None`` for literal braces."""
     depth = 0
@@ -401,20 +419,21 @@ def _brace_alternatives(  # noqa: PLR0911, PLR0912
         return [tokens[start:stop] for start, stop in zip(starts, stops, strict=True)]
     start, stop = range_parts[:2]
     step_text = range_parts[2] if len(range_parts) == _RANGE_PARTS_WITH_STEP else None
-    if step_text is not None and not step_text.lstrip("+-").isdigit():
+    if step_text is not None and _signed_decimal(step_text) is None:
         return None
-    if start.lstrip("+-").isdigit() and stop.lstrip("+-").isdigit():
-        first = int(start)
-        last = int(stop)
-        step = (
-            int(step_text) if step_text is not None and step_text.lstrip("+-").isdigit() else None
-        )
+    if _signed_decimal(start) is not None and _signed_decimal(stop) is not None:
+        first = _brace_integer(start)
+        last = _brace_integer(stop)
+        step = _brace_integer(step_text) if step_text is not None else None
         if step is None:
             step = 1 if first <= last else -1
         if step == 0:
             return []
         if (last - first) * step < 0:
             return []
+        expansion_count = abs(last - first) // abs(step) + 1
+        if expansion_count > limits.max_brace_expansions:
+            raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
         values = range(first, last + (1 if step > 0 else -1), step)
         return [_literal_tokens(str(value)) for value in values]
     if (
@@ -455,7 +474,7 @@ def _expand_braces(
                 nested -= 1
                 if nested:
                     continue
-                alternatives = _brace_alternatives(tokens[start + 1 : stop])
+                alternatives = _brace_alternatives(tokens[start + 1 : stop], limits)
                 if alternatives is None:
                     break
                 if depth >= limits.max_brace_depth:
@@ -2008,9 +2027,13 @@ def _eval_arguments_raw(command: _CommandEvidence, executable: _ExecutableEviden
     return concat(*parts)
 
 
-def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvidence) -> ContentExpr:
+def _eval_arguments_from(
+    command: _CommandEvidence,
+    executable: _ExecutableEvidence,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
+) -> ContentExpr:
     """Return second-pass eval input after joining argv with authored spaces."""
-    return _eval_reparse_content(_eval_arguments_raw(command, executable))
+    return _eval_reparse_content(_eval_arguments_raw(command, executable), limits)
 
 
 _MAX_EVAL_REPARSE_BRANCHES = 256
@@ -2040,9 +2063,12 @@ _EVAL_ANSI_C_SIMPLE_ESCAPES = {
 _EvalSyntaxValue: TypeAlias = frozenset[tuple[_TransferSummary, str | None]]  # noqa: UP040
 
 
-def _eval_reparse_content(expression: ContentExpr) -> ContentExpr:
+def _eval_reparse_content(
+    expression: ContentExpr,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
+) -> ContentExpr:
     """Interpret the minimal shell syntax that ``eval`` reparses from literal content."""
-    branches = _eval_reparse_branches(expression, quote=None, depth=0)
+    branches = _eval_reparse_branches(expression, quote=None, depth=0, limits=limits)
     return choice(*(branch for branch, _quote in branches))
 
 
@@ -2051,12 +2077,13 @@ def _eval_reparse_branches(
     *,
     quote: str | None,
     depth: int,
+    limits: TaintLimits,
 ) -> list[tuple[ContentExpr, str | None]]:
     """Reparse content while retaining quote state across symbolic expression boundaries."""
     if depth > _MAX_EVAL_REPARSE_DEPTH:
         raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
     if isinstance(expression, LiteralTransfer):
-        parsed, resulting_quote = _eval_reparse_literal(expression.text, quote)
+        parsed, resulting_quote = _eval_reparse_literal(expression.text, quote, limits)
         return [(parsed, resulting_quote)]
     if isinstance(expression, Concat):
         branches: list[tuple[ContentExpr, str | None]] = [(LiteralTransfer(""), quote)]
@@ -2067,6 +2094,7 @@ def _eval_reparse_branches(
                     part,
                     quote=current_quote,
                     depth=depth + 1,
+                    limits=limits,
                 ):
                     expanded.append((concat(prefix, suffix), resulting_quote))
                     if len(expanded) > _MAX_EVAL_REPARSE_BRANCHES:
@@ -2076,7 +2104,14 @@ def _eval_reparse_branches(
     if isinstance(expression, Choice):
         branches = []
         for part in expression.parts:
-            branches.extend(_eval_reparse_branches(part, quote=quote, depth=depth + 1))
+            branches.extend(
+                _eval_reparse_branches(
+                    part,
+                    quote=quote,
+                    depth=depth + 1,
+                    limits=limits,
+                )
+            )
             if len(branches) > _MAX_EVAL_REPARSE_BRANCHES:
                 raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
         return branches
@@ -2084,17 +2119,21 @@ def _eval_reparse_branches(
 
 
 def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
-    text: str, quote: str | None
+    text: str,
+    quote: str | None,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
 ) -> tuple[ContentExpr, str | None]:
     """Reparse quote, escape, and simple parameter syntax from one literal transfer."""
-    parts: list[ContentExpr] = []
-    literal: list[str] = []
+    tokens: list[_ContentToken] = []
     index = 0
 
-    def flush_literal() -> None:
-        if literal:
-            parts.append(LiteralTransfer("".join(literal)))
-            literal.clear()
+    def append_literal(text: str, *, brace_active: bool) -> None:
+        tokens.extend(
+            _ContentToken(LiteralTransfer(character), character, brace_active) for character in text
+        )
+
+    def append_expression(expression: ContentExpr) -> None:
+        tokens.append(_ContentToken(expression, "", False))
 
     while index < len(text):
         character = text[index]
@@ -2102,7 +2141,7 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
             if character == "'":
                 quote = None
             else:
-                literal.append(character)
+                append_literal(character, brace_active=False)
             index += 1
             continue
         if quote == '"' and character == '"':
@@ -2115,18 +2154,18 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
             continue
         if quote is None and text.startswith("$'", index):
             decoded, index = _eval_ansi_c_literal(text, index)
-            literal.append(decoded)
+            append_literal(decoded, brace_active=False)
             continue
         if character == "\\":
             if index + 1 >= len(text):
-                literal.append(character)
+                append_literal(character, brace_active=False)
                 index += 1
                 continue
             escaped = text[index + 1]
             if quote == '"' and escaped not in {"$", '"', "\\", "`", "\n"}:
-                literal.extend((character, escaped))
+                append_literal(f"{character}{escaped}", brace_active=False)
             elif escaped != "\n":
-                literal.append(escaped)
+                append_literal(escaped, brace_active=False)
             index += 2
             continue
         if character == "$":
@@ -2140,25 +2179,22 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
                     or contents.isdigit()
                     or _eval_identifier_end(contents, 0) != len(contents)
                 ):
-                    flush_literal()
-                    parts.append(OutsideGap())
+                    append_expression(OutsideGap())
                     index = closing + 1 if closing != -1 else len(text)
                     continue
             name, end = _eval_parameter_name(text, index)
             if name is not None:
-                flush_literal()
-                parts.append(_SecondPassVariableRef(name))
+                append_expression(_SecondPassVariableRef(name))
                 index = end
                 continue
             if index + 1 < len(text) and text[index + 1] in _EVAL_SPECIAL_PARAMETERS:
-                flush_literal()
-                parts.append(OutsideGap())
+                append_expression(OutsideGap())
                 index += 2
                 continue
-        literal.append(character)
+        append_literal(character, brace_active=quote is None)
         index += 1
-    flush_literal()
-    return concat(*parts), quote
+    reparsed = tuple(_token_content(expanded) for expanded in _expand_braces(tokens, limits))
+    return choice(*reparsed), quote
 
 
 def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
@@ -2280,7 +2316,7 @@ def _eval_syntax_expression(  # noqa: PLR0913
     if depth > _MAX_EVAL_REPARSE_DEPTH:
         raise _TaintLimitExceeded("shell taint eval syntax depth limit exceeded")
     if isinstance(expression, LiteralTransfer):
-        reparsed, resulting_quote = _eval_reparse_literal(expression.text, quote)
+        reparsed, resulting_quote = _eval_reparse_literal(expression.text, quote, limits)
         return frozenset(
             (summary, resulting_quote)
             for summary in _evaluate_with_tables(reparsed, raw_variables, {}, {}, limits)
@@ -2408,10 +2444,13 @@ def _builtin_eval_candidates(command: _CommandEvidence) -> tuple[_ExecutableEvid
     )
 
 
-def _eval_content_dependencies(expression: ContentExpr) -> set[str]:
+def _eval_content_dependencies(
+    expression: ContentExpr,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
+) -> set[str]:
     """Collect variable names that can enter eval syntax from one authored expression."""
     names: set[str] = set()
-    pending = [_eval_reparse_content(expression)]
+    pending = [_eval_reparse_content(expression, limits)]
     while pending:
         current = pending.pop()
         if isinstance(current, VariableRef):
@@ -2422,20 +2461,27 @@ def _eval_content_dependencies(expression: ContentExpr) -> set[str]:
 
 
 def _reachable_eval_variable_writes(
-    commands: tuple[_CommandEvidence, ...], writes: tuple[_FlowWrite, ...]
+    commands: tuple[_CommandEvidence, ...],
+    writes: tuple[_FlowWrite, ...],
+    limits: TaintLimits,
 ) -> tuple[_FlowWrite, ...]:
     """Retain only variable definitions reachable from exact builtin eval argument content."""
     names: set[str] = set()
     for command in commands:
         for executable in _builtin_eval_candidates(command):
-            names.update(_eval_content_dependencies(_eval_arguments_raw(command, executable)))
+            names.update(
+                _eval_content_dependencies(
+                    _eval_arguments_raw(command, executable),
+                    limits,
+                )
+            )
     changed = True
     while changed:
         changed = False
         for write in writes:
             if not isinstance(write.key, str) or write.key not in names:
                 continue
-            dependencies = _eval_content_dependencies(write.expression)
+            dependencies = _eval_content_dependencies(write.expression, limits)
             if dependencies <= names:
                 continue
             names.update(dependencies)
@@ -2491,6 +2537,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
     executable: _ExecutableEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
+    limits: TaintLimits,
 ) -> tuple[ContentExpr, ...]:
     """Return conservative sink expressions for one resolved executable candidate."""
     if executable.argv_index is None or executable.name is None:
@@ -2503,7 +2550,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
         if key is not None:
             direct_sinks = (ResourceRef(key),)
     if name == "eval" and literal == "eval" and not executable.external_lookup:
-        return (_eval_arguments_from(command, executable),)
+        return (_eval_arguments_from(command, executable, limits),)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
         operand_index = executable.argv_index + 1
         if operand_index >= len(command.argv):
@@ -2565,12 +2612,19 @@ def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
+    limits: TaintLimits,
 ) -> tuple[ContentExpr, ...]:
     """Return every conservative execution sink expression for all candidates."""
     expressions: list[ContentExpr] = []
     for executable in _iter_executable_evidence(command.executable):
         expressions.extend(
-            _candidate_sink_expressions(command, executable, stdin, process_resources)
+            _candidate_sink_expressions(
+                command,
+                executable,
+                stdin,
+                process_resources,
+                limits,
+            )
         )
     return tuple(expressions)
 
@@ -2620,7 +2674,11 @@ def analyze_marker_taint(  # noqa: PLR0911
         )
         eval_syntax_variables = (
             _solve_eval_syntax_variables(
-                _reachable_eval_variable_writes(eval_commands, definitions.variable_writes),
+                _reachable_eval_variable_writes(
+                    eval_commands,
+                    definitions.variable_writes,
+                    limits,
+                ),
                 solved.variables,
                 limits,
             )
@@ -2639,7 +2697,7 @@ def analyze_marker_taint(  # noqa: PLR0911
             ):
                 return True, TAINT_REFUSAL_REASON
             stdin = inputs[command.command_id]
-            for expression in _sink_expressions(command, stdin, process_resources):
+            for expression in _sink_expressions(command, stdin, process_resources, limits):
                 if _marker_capable(solved.evaluate(expression)):
                     return True, TAINT_REFUSAL_REASON
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:

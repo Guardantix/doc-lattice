@@ -3104,6 +3104,41 @@ def test_brace_alternatives_become_separate_eval_argv_ports():
 
 
 @pytest.mark.parametrize(
+    "script",
+    [
+        'X=doc-{lattice,noop}; eval "$X"',
+        'X=doc-; X+={lattice,noop}; eval "$X"',
+        "X='doc-{lattice,noop}'; eval \"$X\"",
+    ],
+    ids=("assignment", "append-assignment", "quoted-assignment"),
+)
+def test_eval_second_pass_expands_braces_from_variable_content(script: str):
+    assert_taint_refusal(script)
+
+
+def test_eval_second_pass_keeps_separate_brace_argv_clean():
+    result = scan_doc_lattice_invocations("X='{doc-,lattice}'; eval \"$X\"")
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '''eval "'doc-{lattice,noop}'"''',
+        r'''eval "doc-\{lattice,noop\}"''',
+    ],
+    ids=("quoted-eval-text", "escaped-eval-text"),
+)
+def test_eval_second_pass_keeps_inactive_braces_literal(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
     ("script", "reason"),
     [
         ("eval doc-{1..1000}-lattice", "shell taint brace expansion limit exceeded"),
@@ -3115,6 +3150,23 @@ def test_brace_expansion_bounds_fail_closed(script: str, reason: str):
 
     assert result.invocations == NONE
     assert result.incomplete_reason == reason
+
+
+@pytest.mark.parametrize(
+    "range_body",
+    [
+        f"1..{'9' * 5000}",
+        f"{'9' * 5000}..2",
+        f"1..2..{'9' * 5000}",
+        f"1..2..-{'9' * 5000}",
+    ],
+    ids=("stop", "start", "step", "signed-step"),
+)
+def test_oversized_numeric_brace_range_fails_closed(range_body: str):
+    result = scan_doc_lattice_invocations(f"eval {{{range_body}}}")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint brace expansion limit exceeded"
 
 
 @pytest.mark.parametrize(

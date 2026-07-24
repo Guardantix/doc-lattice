@@ -34,6 +34,7 @@ from doc_lattice.github_ci.shell_taint import (
     _build_flow_definitions,
     _CommandEvidence,
     _contextualize_evidence,
+    _eval_reparse_literal,
     _evaluate_closed,
     _ExecutableEvidence,
     _FlowDefinitions,
@@ -149,14 +150,36 @@ def test_content_builder_expands_bounded_ranges_without_turning_word_content_int
     ]
 
 
-def test_content_builder_leaves_malformed_brace_ranges_literal() -> None:
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("{-2..0}", ["-2", "-1", "0"]),
+        ("{+1..+3}", ["1", "2", "3"]),
+        ("{c..a..-1}", ["c", "b", "a"]),
+    ],
+    ids=("signed-numeric", "positive-numeric", "letter"),
+)
+def test_content_builder_preserves_signed_numeric_and_letter_ranges(
+    source: str, expected: list[str]
+) -> None:
     builder = ContentBuilder.empty()
-    for character in "{1..2..invalid}":
+    for character in source:
         builder.append_literal(character, brace_active=True)
 
     built = builder.build()
 
-    assert [port.literal for port in built.argv_ports] == ["{1..2..invalid}"]
+    assert [port.literal for port in built.argv_ports] == expected
+
+
+@pytest.mark.parametrize("source", ["{1..2..invalid}", "{1..²}"])
+def test_content_builder_leaves_malformed_brace_ranges_literal(source: str) -> None:
+    builder = ContentBuilder.empty()
+    for character in source:
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert [port.literal for port in built.argv_ports] == [source]
 
 
 def test_content_builder_rejects_dynamic_recognized_brace_operand() -> None:
@@ -347,6 +370,78 @@ def test_eval_reparse_keeps_external_only_value_non_evidentiary() -> None:
     command = _command(1, _arg("eval"), _arg("$EXTERNAL", VariableRef("EXTERNAL")), name="eval")
 
     assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "doc-{lattice,noop}",
+            Choice((LiteralTransfer("doc-lattice"), LiteralTransfer("doc-noop"))),
+        ),
+        (
+            "'doc-{lattice,noop}'",
+            LiteralTransfer("doc-{lattice,noop}"),
+        ),
+        (
+            r"doc-\{lattice,noop\}",
+            LiteralTransfer("doc-{lattice,noop}"),
+        ),
+        (
+            "{doc-,lattice}",
+            Choice((LiteralTransfer("doc-"), LiteralTransfer("lattice"))),
+        ),
+    ],
+    ids=("active", "single-quoted", "escaped", "separate-argv"),
+)
+def test_eval_literal_reparse_tracks_active_brace_syntax(text: str, expected: ContentExpr) -> None:
+    expression, quote = _eval_reparse_literal(text, None)
+
+    assert expression == expected
+    assert quote is None
+
+
+def test_eval_variable_syntax_expands_braces_after_assignment_flow() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-{lattice,noop}")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_brace_expansion_obeys_taint_cap() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("doc-{1..3}-lattice"),
+        name="eval",
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)),
+        limits=TaintLimits(max_brace_expansions=2),
+    ) == (True, "shell taint brace expansion limit exceeded")
+
+
+def test_eval_brace_expansion_honors_custom_higher_cap() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("{1..257}"),
+        name="eval",
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)),
+        limits=TaintLimits(max_alternatives=300, max_brace_expansions=257),
+    ) == (False, None)
 
 
 @pytest.mark.parametrize(
