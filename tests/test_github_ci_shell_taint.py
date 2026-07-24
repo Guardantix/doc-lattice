@@ -14,6 +14,7 @@ from doc_lattice.github_ci.shell_taint import (
     NullTarget,
     OutputExpr,
     OutsideGap,
+    RepeatOutput,
     ResourceRef,
     SequenceOutput,
     StaticResourceTarget,
@@ -334,6 +335,21 @@ def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
         True,
         "authored marker flow reaches an execution sink",
     )
+
+
+def test_empty_repeat_preserves_recursive_equation_for_node_limit_accounting() -> None:
+    scope = _StreamScopeEvidence(
+        200,
+        "pipeline",
+        None,
+        None,
+        RepeatOutput(SequenceOutput(())),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(scopes=(scope,)),
+        limits=TaintLimits(max_expression_nodes=3),
+    ) == (True, "shell taint expression node limit exceeded")
 
 
 def test_concat_threads_dfa_state_across_fragment_boundaries() -> None:

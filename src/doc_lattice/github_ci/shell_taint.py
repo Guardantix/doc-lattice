@@ -866,7 +866,7 @@ class _OutputLowering:
                     stream_writes.extend(
                         (
                             _FlowWrite(scope_id, LiteralTransfer("")),
-                            _FlowWrite(scope_id, concat(repeated, StreamRef(scope_id))),
+                            _FlowWrite(scope_id, Concat((repeated, StreamRef(scope_id)))),
                         )
                     )
                     values.append(StreamRef(scope_id))
