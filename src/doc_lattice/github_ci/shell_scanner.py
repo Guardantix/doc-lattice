@@ -39,6 +39,7 @@ _MAX_SHELL_SCAN_STEPS = 4_194_304
 _MAX_SHELL_RECURSION_DEPTH = 64
 _MAX_SHELL_INVOCATIONS = 10_000
 _MAX_LAUNCHER_NESTING_DEPTH = 64
+_MAX_SHELL_DESCRIPTOR_DIGITS = 64
 _OCTAL_BASE = 8
 _ANSI_C_OCTAL_BYTE_MASK = 0xFF
 _UNICODE_MAX = 0x10FFFF
@@ -647,6 +648,16 @@ class _ShellScanIncomplete(ProjectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="SHELL_SCAN_INCOMPLETE")
+
+
+def _parse_static_descriptor(digits: str) -> int:
+    """Parse one bounded static descriptor or stop the scan safely."""
+    if len(digits) > _MAX_SHELL_DESCRIPTOR_DIGITS:
+        raise _ShellScanIncomplete("file descriptor digit limit exceeded")
+    try:
+        return int(digits)
+    except ValueError as error:
+        raise _ShellScanIncomplete("file descriptor cannot be scanned safely") from error
 
 
 @dataclass(slots=True)
@@ -1283,7 +1294,7 @@ class _ShellScanner:
         if self.source[index].isdigit():
             while operator_index < limit and self.source[operator_index].isdigit():
                 operator_index += 1
-            descriptor = int(self.source[index:operator_index])
+            descriptor = _parse_static_descriptor(self.source[index:operator_index])
         elif self.source[index] == "{":
             closing = self.source.find("}", index + 1, limit)
             if closing != -1 and _is_name(self.source[index + 1 : closing]):
@@ -1300,7 +1311,7 @@ class _ShellScanner:
         if word.process_resource_id is not None:
             return ProcessResourceTarget(word.process_resource_id)
         if operator in {"<&", ">&"} and not word.dynamic and word.literal.isdigit():
-            return DescriptorTarget(int(word.literal))
+            return DescriptorTarget(_parse_static_descriptor(word.literal))
         resource = normalize_static_resource(word.literal, dynamic=word.dynamic)
         if resource == "/dev/null":
             return NullTarget()

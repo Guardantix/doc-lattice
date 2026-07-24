@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, TypeAlias
 
 from doc_lattice.error_types import ProjectError
@@ -410,11 +409,19 @@ def normalize_static_resource(literal: str, *, dynamic: bool) -> str | None:
     """Return a lexical static resource key without resolving filesystem state."""
     if dynamic or not literal:
         return None
-    path = PurePosixPath(literal.replace("\\", "/"))
-    if ".." in path.parts:
-        return None
-    absolute = path.is_absolute()
-    parts = tuple(part for part in path.parts if part not in ("", ".", "/") and part.strip("/"))
+    normalized = literal.replace("\\", "/")
+    absolute = normalized.startswith("/")
+    parts: list[str] = []
+    for part in normalized.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts and parts[-1] != "..":
+                parts.pop()
+            elif not absolute:
+                parts.append(part)
+            continue
+        parts.append(part)
     if not parts:
         return "/" if absolute else "."
     prefix = "/" if absolute else ""
@@ -907,10 +914,12 @@ def _input_expression(
     pipe_inputs: dict[int, ContentExpr],
     process_resources: dict[int, _ProcessResourceEvidence],
 ) -> ContentExpr:
-    """Replay ordered descriptor-zero input redirections for one command."""
-    expression = pipe_inputs.get(command.command_id, OutsideGap())
+    """Replay ordered input descriptor bindings and return descriptor zero."""
+    bindings: dict[int, ContentExpr] = {
+        0: pipe_inputs.get(command.command_id, OutsideGap()),
+    }
     for event in sorted(command.redirections, key=lambda candidate: candidate.ordinal):
-        if event.descriptor != 0 or event.operator not in _INPUT_REDIRECTION_OPERATORS:
+        if event.descriptor is None or event.operator not in _INPUT_REDIRECTION_OPERATORS:
             continue
         if isinstance(event.target, StaticResourceTarget):
             expression = ResourceRef(event.target.key)
@@ -920,9 +929,12 @@ def _input_expression(
             expression = _process_resource_input(event.target.resource_id, process_resources)
         elif isinstance(event.target, NullTarget):
             expression = LiteralTransfer("")
+        elif isinstance(event.target, DescriptorTarget):
+            expression = bindings.get(event.target.descriptor, OutsideGap())
         else:
             expression = OutsideGap()
-    return expression
+        bindings[event.descriptor] = expression
+    return bindings[0]
 
 
 def _producer_stdout(command: _CommandEvidence, stdin: ContentExpr) -> ContentExpr:
@@ -938,26 +950,34 @@ def _static_write_definitions(
 ) -> tuple[_FlowWrite, ...]:
     """Replay output descriptors and return static resource writes they receive."""
     writes: list[_FlowWrite] = []
-    final_output: dict[int, _RedirectionEvent] = {}
+    bindings: dict[int, tuple[RedirectionTarget, bool]] = {}
     for event in sorted(events, key=lambda candidate: candidate.ordinal):
         if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
             continue
-        if isinstance(event.target, StaticResourceTarget):
-            if event.operator not in _APPEND_REDIRECTION_OPERATORS:
-                writes.append(_FlowWrite(event.target.key, LiteralTransfer("")))
-            final_output[event.descriptor] = event
-        elif isinstance(event.target, NullTarget | DynamicResourceTarget | DescriptorTarget):
-            final_output[event.descriptor] = event
+        if (
+            isinstance(event.target, StaticResourceTarget)
+            and event.operator not in _APPEND_REDIRECTION_OPERATORS
+        ):
+            writes.append(_FlowWrite(event.target.key, LiteralTransfer("")))
+        if isinstance(event.target, DescriptorTarget):
+            binding = bindings.get(
+                event.target.descriptor,
+                (DynamicResourceTarget(), False),
+            )
         else:
-            final_output[event.descriptor] = event
-    for descriptor, event in final_output.items():
-        if not isinstance(event.target, StaticResourceTarget):
+            binding = (
+                event.target,
+                event.operator in _APPEND_REDIRECTION_OPERATORS,
+            )
+        bindings[event.descriptor] = binding
+    for descriptor, (target, append) in bindings.items():
+        if not isinstance(target, StaticResourceTarget):
             continue
         writes.append(
             _FlowWrite(
-                event.target.key,
+                target.key,
                 output if descriptor == 1 else OutsideGap(),
-                append=event.operator in _APPEND_REDIRECTION_OPERATORS,
+                append=append,
             )
         )
     return tuple(writes)

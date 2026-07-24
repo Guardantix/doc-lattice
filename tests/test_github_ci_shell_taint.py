@@ -501,6 +501,20 @@ def test_static_normalization_collapses_double_slash_absolute_resource_keys() ->
     )
 
 
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [
+        ("foo/../task.sh", "task.sh"),
+        ("foo/./bar/../task.sh", "foo/task.sh"),
+        ("../task.sh", "../task.sh"),
+        ("foo/../../task.sh", "../task.sh"),
+        ("/../../task.sh", "/task.sh"),
+    ],
+)
+def test_static_normalization_collapses_parent_segments(literal: str, expected: str) -> None:
+    assert normalize_static_resource(literal, dynamic=False) == expected
+
+
 def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
     output: OutputExpr = CommandOutput(1)
     for _ in range(1_200):

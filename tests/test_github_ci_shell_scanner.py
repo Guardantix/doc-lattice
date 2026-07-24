@@ -3017,6 +3017,14 @@ def test_static_descriptor_zero_read_reaches_shell_stdin_sink():
     assert_taint_refusal("printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash < task.sh")
 
 
+def test_duplicated_static_input_descriptor_reaches_shell_stdin_sink():
+    assert_taint_refusal("printf '%s%s' 'doc-' 'lattice reconcile' > task.sh; bash 3< task.sh 0<&3")
+
+
+def test_duplicated_static_output_descriptor_receives_stdout():
+    assert_taint_refusal("printf '%s%s' 'doc-' 'lattice reconcile' 3> task.sh 1>&3; bash task.sh")
+
+
 def test_nonzero_static_read_is_not_shell_stdin():
     result = scan_doc_lattice_invocations(
         "printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash 3< task.sh"
@@ -3041,11 +3049,48 @@ def test_overwritten_stdout_binding_leaves_only_empty_task():
     assert result.invocations == NONE
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        ("printf '%s%s' 'doc-' 'lattice reconcile' > task.sh; bash 3< task.sh 0<&3 </dev/null"),
+        ("printf '%s%s' 'doc-' 'lattice reconcile' 3> task.sh 1>&3 > /dev/null; bash task.sh"),
+    ],
+    ids=("stdin", "stdout"),
+)
+def test_later_redirection_overrides_duplicated_descriptor_binding(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 def test_nonzero_heredoc_is_not_shell_stdin():
     result = scan_doc_lattice_invocations("bash 3<<'EOF'\ndoc-lattice reconcile\nEOF")
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+def test_parent_path_alias_reaches_written_script_sink():
+    assert_taint_refusal(
+        "mkdir -p foo\nprintf '%s%s' 'doc-' 'lattice reconcile' > task.sh\nbash foo/../task.sh"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f"{'9' * 5000}> task.sh",
+        f"bash 0<&{'9' * 5000}",
+        f"printf x 1>&{'9' * 5000}",
+    ],
+    ids=("prefix", "input-operand", "output-operand"),
+)
+def test_oversized_descriptor_reports_structured_incomplete_reason(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "file descriptor digit limit exceeded"
 
 
 def test_eval_taint_is_order_insensitive_within_run_body():
