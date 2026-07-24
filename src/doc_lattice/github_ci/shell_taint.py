@@ -2067,6 +2067,7 @@ class _EvalSyntaxState:
     quote: str | None
     brace_tokens: tuple[_ContentToken, ...] = ()
     brace_depth: int = 0
+    applied_appends: int = 0
 
 
 _EvalSyntaxValue: TypeAlias = frozenset[_EvalSyntaxState]  # noqa: UP040
@@ -2331,11 +2332,10 @@ def _eval_syntax_token(
     if not state.brace_tokens and _active_character(token, "{"):
         return frozenset(
             {
-                _EvalSyntaxState(
-                    state.summary,
-                    state.quote,
-                    (token,),
-                    1,
+                replace(
+                    state,
+                    brace_tokens=(token,),
+                    brace_depth=1,
                 )
             }
         )
@@ -2353,38 +2353,29 @@ def _eval_syntax_token(
         if brace_depth:
             return frozenset(
                 {
-                    _EvalSyntaxState(
-                        state.summary,
-                        state.quote,
-                        brace_tokens,
-                        brace_depth,
+                    replace(
+                        state,
+                        brace_tokens=brace_tokens,
+                        brace_depth=brace_depth,
                     )
                 }
             )
         expanded_words = _expand_braces(list(brace_tokens), limits)
-        expanded_content = concat(
-            *(
-                part
-                for index, expanded in enumerate(expanded_words)
-                for part in (
-                    *((LiteralTransfer(" "),) if index else ()),
-                    _token_content(expanded),
-                )
-            )
-        )
         value = frozenset(
-            _EvalSyntaxState(state.summary.compose(after), state.quote)
+            replace(
+                state,
+                summary=state.summary.compose(after),
+                brace_tokens=(),
+                brace_depth=0,
+            )
+            for expanded in expanded_words
             for after in _evaluate_with_tables(
-                expanded_content,
-                raw_variables,
-                {},
-                {},
-                limits,
+                _token_content(expanded), raw_variables, {}, {}, limits
             )
         )
         return _cap_eval_syntax(value, limits)
     value = frozenset(
-        _EvalSyntaxState(state.summary.compose(after), state.quote)
+        replace(state, summary=state.summary.compose(after))
         for after in _evaluate_with_tables(
             token.expression,
             raw_variables,
@@ -2440,11 +2431,12 @@ def _eval_syntax_append(  # noqa: PLR0911, PLR0913
         )
         return _cap_eval_syntax(
             frozenset(
-                _EvalSyntaxState(
-                    state.summary.compose(suffix.summary),
-                    suffix.quote,
-                    suffix.brace_tokens,
-                    suffix.brace_depth,
+                replace(
+                    state,
+                    summary=state.summary.compose(suffix.summary),
+                    quote=suffix.quote,
+                    brace_tokens=suffix.brace_tokens,
+                    brace_depth=suffix.brace_depth,
                 )
                 for suffix in suffixes
             ),
@@ -2491,6 +2483,30 @@ def _eval_syntax_append(  # noqa: PLR0911, PLR0913
             limits,
         )
     return value
+
+
+def _eval_syntax_append_write(  # noqa: PLR0913
+    expression: ContentExpr,
+    state: _EvalSyntaxState,
+    write_index: int,
+    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> _EvalSyntaxValue:
+    """Apply one append write at most once to each fixed-point derivation."""
+    write_mask = 1 << write_index
+    if state.applied_appends & write_mask:
+        return frozenset()
+    return frozenset(
+        replace(after, applied_appends=after.applied_appends | write_mask)
+        for after in _eval_syntax_append(
+            expression,
+            state,
+            variables,
+            raw_variables,
+            limits,
+        )
+    )
 
 
 def _eval_syntax_expression(  # noqa: PLR0913
@@ -2559,7 +2575,7 @@ def _ordered_eval_syntax_variables(
     variables = {
         (write.key, quote): frozenset() for write in writes for quote in _EVAL_QUOTE_STATES
     }
-    for write in writes:
+    for write_index, write in enumerate(writes):
         for quote in _EVAL_QUOTE_STATES:
             if write.append:
                 base = variables[(write.key, quote)] or _eval_syntax_outside(quote)
@@ -2567,9 +2583,10 @@ def _ordered_eval_syntax_variables(
                     frozenset(
                         after
                         for current in base
-                        for after in _eval_syntax_append(
+                        for after in _eval_syntax_append_write(
                             write.expression,
                             current,
+                            write_index,
                             variables,
                             raw_variables,
                             limits,
@@ -2602,7 +2619,7 @@ def _solve_eval_syntax_variables(
     changed = True
     while changed:
         changed = False
-        for write in writes:
+        for write_index, write in enumerate(writes):
             for quote in _EVAL_QUOTE_STATES:
                 prior = variables[(write.key, quote)]
                 if write.append:
@@ -2611,9 +2628,10 @@ def _solve_eval_syntax_variables(
                         frozenset(
                             after
                             for current in base
-                            for after in _eval_syntax_append(
+                            for after in _eval_syntax_append_write(
                                 write.expression,
                                 current,
+                                write_index,
                                 variables,
                                 raw_variables,
                                 limits,

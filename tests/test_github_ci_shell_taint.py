@@ -46,6 +46,7 @@ from doc_lattice.github_ci.shell_taint import (
     _RedirectionEvent,
     _scoped_variable_name,
     _ShellTaintEvidence,
+    _solve_eval_syntax_variables,
     _solve_flow_definitions,
     _StreamScopeEvidence,
     _strip_trailing_newlines,
@@ -463,22 +464,84 @@ def test_eval_variable_syntax_preserves_braces_across_append_writes() -> None:
     )
 
 
-def test_eval_variable_syntax_append_cycle_obeys_taint_cap() -> None:
+@pytest.mark.parametrize(
+    "assignments",
+    [
+        (_AssignmentEvidence("X", LiteralTransfer("{doc-,x}lattice")),),
+        (
+            _AssignmentEvidence("X", LiteralTransfer("{doc-,x}")),
+            _AssignmentEvidence("X", LiteralTransfer("lattice"), append=True),
+        ),
+        (_AssignmentEvidence("X", LiteralTransfer("{doc-,x}{lattice,y}")),),
+    ],
+    ids=("same-write-suffix", "append-suffix", "cartesian-groups"),
+)
+def test_eval_variable_syntax_distributes_suffixes_across_brace_words(
+    assignments: tuple[_AssignmentEvidence, ...],
+) -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=assignments,
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_variable_syntax_keeps_cross_write_brace_words_separate() -> None:
     command = _command(
         1,
         _arg("eval"),
         _arg("$X", VariableRef("X"), dynamic=True),
         name="eval",
         assignments=(
-            _AssignmentEvidence("X", LiteralTransfer("{")),
-            _AssignmentEvidence("X", LiteralTransfer("x"), append=True),
+            _AssignmentEvidence("X", LiteralTransfer("{doc-,")),
+            _AssignmentEvidence("X", LiteralTransfer("lattice}"), append=True),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_eval_variable_syntax_cartesian_words_obey_alternative_cap() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("{d,do,doc}")),
+            _AssignmentEvidence("X", LiteralTransfer("{-,-l,-la}"), append=True),
         ),
     )
 
     assert analyze_marker_taint(
         _ShellTaintEvidence(commands=(command,)),
-        limits=TaintLimits(max_expression_nodes=4),
-    ) == (True, "shell taint expression node limit exceeded")
+        limits=TaintLimits(max_alternatives=3),
+    ) == (True, "shell taint eval syntax alternative limit exceeded")
+
+
+def test_eval_variable_syntax_mutual_cycle_obeys_fixed_point_cap() -> None:
+    writes = (
+        _FlowWrite("X", LiteralTransfer("{")),
+        _FlowWrite("X", VariableRef("Y")),
+        _FlowWrite("Y", VariableRef("X")),
+    )
+
+    with pytest.raises(
+        _TaintLimitExceeded,
+        match="shell taint eval syntax fixed-point update limit exceeded",
+    ):
+        _solve_eval_syntax_variables(
+            writes,
+            {},
+            TaintLimits(max_fixed_point_updates=1),
+        )
 
 
 def test_eval_brace_expansion_obeys_taint_cap() -> None:

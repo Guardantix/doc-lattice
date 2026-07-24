@@ -3138,6 +3138,35 @@ def test_eval_second_pass_preserves_active_braces_across_writes(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        'X={doc-,x}lattice; eval "$X"',
+        'X={doc-,x}; X+=lattice; eval "$X"',
+        'X={doc-,x}{lattice,y}; eval "$X"',
+        '''X='{doc-,x}"lattice"'; eval "$X"''',
+    ],
+    ids=("same-write-suffix", "append-suffix", "cartesian-groups", "quoted-suffix"),
+)
+def test_eval_second_pass_distributes_suffixes_across_brace_words(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '''X='{doc-,x} lattice'; eval "$X"''',
+        '''X='{doc-,x} "lattice"'; eval "$X"''',
+    ],
+    ids=("unquoted-next-word", "quoted-next-word"),
+)
+def test_eval_second_pass_word_separator_flushes_brace_words(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         '''X="doc-'{"; X+="lattice,noop}'"; eval "$X"''',
         r'''X='doc-\{'; X+='lattice,noop\}'; eval "$X"''',
         '''X='{doc-,'; X+='lattice}'; eval "$X"''',
@@ -3149,6 +3178,13 @@ def test_eval_second_pass_cross_write_brace_controls_stay_clean(script: str):
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+def test_eval_second_pass_cartesian_brace_words_obey_alternative_cap():
+    result = scan_doc_lattice_invocations('X="{a..q}{a..q}"; eval "$X"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint brace expansion limit exceeded"
 
 
 @pytest.mark.parametrize(
