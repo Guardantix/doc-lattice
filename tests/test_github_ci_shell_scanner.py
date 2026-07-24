@@ -101,6 +101,92 @@ def test_effective_executable_evidence_marks_prefix_ambiguity() -> None:
     assert evidence.ambiguous is True
 
 
+def test_effective_executable_evidence_stops_at_external_command_wrapper() -> None:
+    evidence = _effective_executable_evidence(
+        [
+            _static_word("exec"),
+            _static_word("command"),
+            _static_word("bash"),
+            _static_word("-c"),
+            _static_word("$X"),
+        ],
+        _ScanBudget(),
+    )
+
+    assert evidence is not None
+    assert (evidence.argv_index, evidence.name, evidence.external_lookup) == (1, "command", True)
+    assert evidence.alternates == ()
+
+
+def test_effective_executable_evidence_ignores_non_sink_builtin_target() -> None:
+    evidence = _effective_executable_evidence(
+        [_static_word("builtin"), _static_word("bash"), _static_word("-c"), _static_word("$X")],
+        _ScanBudget(),
+    )
+
+    assert evidence is None
+
+
+def test_effective_executable_evidence_preserves_builtin_eval_target() -> None:
+    evidence = _effective_executable_evidence(
+        [_static_word("builtin"), _static_word("eval"), _static_word("$X")], _ScanBudget()
+    )
+
+    assert evidence is not None
+    assert (evidence.argv_index, evidence.name, evidence.external_lookup) == (1, "eval", False)
+
+
+@pytest.mark.parametrize(
+    ("words", "primary_name", "primary_index", "expected_alternates"),
+    [
+        (
+            [
+                _static_word("uv"),
+                _ShellWord(literal="$UV", dynamic=True),
+                _static_word("run"),
+                _static_word("bash"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            "bash",
+            3,
+            ((0, "uv", False), (2, "run", True)),
+        ),
+        (
+            [
+                _static_word("uvx"),
+                _ShellWord(literal="$UVX", dynamic=True),
+                _static_word("bash@5.2"),
+                _static_word("-c"),
+                _static_word("$X"),
+            ],
+            "bash",
+            2,
+            ((0, "uvx", False),),
+        ),
+    ],
+    ids=("uv", "uvx"),
+)
+def test_dynamic_launcher_evidence_has_unique_ordered_alternates(
+    words: list[_ShellWord],
+    primary_name: str,
+    primary_index: int,
+    expected_alternates: tuple[tuple[int, str, bool], ...],
+) -> None:
+    evidence = _effective_executable_evidence(words, _ScanBudget())
+
+    assert evidence is not None
+    assert (evidence.argv_index, evidence.name, evidence.ambiguous) == (
+        primary_index,
+        primary_name,
+        True,
+    )
+    assert [
+        (alternate.argv_index, alternate.name, alternate.ambiguous)
+        for alternate in evidence.alternates
+    ] == list(expected_alternates)
+
+
 def assert_marker_refusal(script: str) -> None:
     result = scan_doc_lattice_invocations(script)
 

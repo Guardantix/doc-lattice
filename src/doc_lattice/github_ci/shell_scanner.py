@@ -576,6 +576,8 @@ class _LauncherResolutionState:
     budget: _ScanBudget
     cache: dict[tuple[str, int, int], _ResolvedIndex] = field(default_factory=dict)
     executable_positions: list[_ExecutableCandidate] = field(default_factory=list)
+    executable_position_set: set[_ExecutableCandidate] = field(default_factory=set)
+    evidence_suppressed: bool = False
 
     def step(self) -> None:
         """Charge speculative launcher work to the shell scanner's declared budget."""
@@ -590,9 +592,17 @@ class _LauncherResolutionState:
         ambiguous: bool = False,
     ) -> None:
         """Retain one resolved executable position as taint-analysis evidence."""
+        if self.evidence_suppressed:
+            return
         candidate = _ExecutableCandidate(index, uv_requirement, external_lookup, ambiguous)
-        if candidate not in self.executable_positions:
+        if candidate not in self.executable_position_set:
+            self.executable_position_set.add(candidate)
             self.executable_positions.append(candidate)
+
+    def stop_evidence_at(self, index: int, *, external_lookup: bool) -> None:
+        """Record an external wrapper name and suppress its resolver-only successors."""
+        self.record_executable(index, external_lookup=external_lookup)
+        self.evidence_suppressed = True
 
 
 class _ShellScanner:
@@ -1796,16 +1806,17 @@ def _effective_executable_evidence(
         ]
     if not candidates:
         return None
-    converted = tuple(
-        _ExecutableEvidence(
+    exported: dict[_ExecutableEvidence, None] = {}
+    for candidate in candidates:
+        evidence = _ExecutableEvidence(
             argv_index=candidate.index,
             name=_candidate_name(candidate, words),
             literal=words[candidate.index].literal,
             external_lookup=candidate.external_lookup,
-            ambiguous=candidate.ambiguous or result.ambiguous,
+            ambiguous=candidate.ambiguous,
         )
-        for candidate in candidates
-    )
+        exported.setdefault(evidence, None)
+    converted = tuple(exported)
     primary = converted[-1]
     return _ExecutableEvidence(
         argv_index=primary.argv_index,
@@ -2006,6 +2017,12 @@ def _skip_shell_prefixes(
             return _ResolvedIndex(_skip_env_prefix(words, index + 1), ambiguous, True)
         if word.literal in {"builtin", "command", "exec"}:
             wrapper_literal = word.literal
+            _record_external_wrapper_evidence(
+                resolution,
+                index,
+                wrapper_literal,
+                external_lookup,
+            )
             wrapper = _skip_shell_builtin_wrapper(
                 words,
                 index,
@@ -2031,6 +2048,17 @@ def _skip_shell_prefixes(
             continue
         return _ResolvedIndex(index, ambiguous, external_lookup)
     return _ResolvedIndex(index, ambiguous, external_lookup)
+
+
+def _record_external_wrapper_evidence(
+    resolution: _LauncherResolutionState,
+    index: int,
+    literal: str,
+    external_lookup: bool,
+) -> None:
+    """Stop evidence traversal when an external lookup names a shell-only wrapper."""
+    if external_lookup and literal in {"builtin", "command"}:
+        resolution.stop_evidence_at(index, external_lookup=True)
 
 
 def _skip_shell_builtin_wrapper(
@@ -2071,7 +2099,8 @@ def _skip_builtin_wrapper(
     if _command_boundary_word_may_disappear(target) or target.dynamic:
         return _ResolvedIndex(index + 1, ambiguous=True)
     if target.literal not in {"builtin", "command", "exec"}:
-        resolution.record_executable(index, external_lookup=external_lookup)
+        if target.literal in {"eval", "source", "."}:
+            resolution.record_executable(index, external_lookup=external_lookup)
         return _ResolvedIndex(None)
     return _ResolvedIndex(index)
 
@@ -2304,6 +2333,7 @@ def _doc_lattice_command_index(
             command_index,
             resolution,
             external_lookup=command.external_lookup,
+            ambiguous=command.ambiguous,
         )
     if payload_index.index is None:
         _reject_unresolved_unsafe_executable(
@@ -2347,6 +2377,7 @@ def _doc_lattice_command_after_prefixes(
         executable.index,
         resolution,
         external_lookup=executable.external_lookup,
+        ambiguous=executable.ambiguous,
     )
     if payload.index is None:
         _reject_unresolved_unsafe_executable(
@@ -2358,19 +2389,24 @@ def _doc_lattice_command_after_prefixes(
     return _ResolvedIndex(payload.index, executable.ambiguous or payload.ambiguous)
 
 
-def _doc_lattice_payload_index(
+def _doc_lattice_payload_index(  # noqa: PLR0913
     words: list[_ShellWord],
     executable_index: int,
     resolution: _LauncherResolutionState,
     *,
     external_lookup: bool = False,
+    ambiguous: bool = False,
     launcher_depth: int = 0,
 ) -> _ResolvedIndex:
     if executable_index >= len(words):
         return _ResolvedIndex(None)
     executable_word = words[executable_index]
     _reject_unsafe_executable_word(executable_word)
-    resolution.record_executable(executable_index, external_lookup=external_lookup)
+    resolution.record_executable(
+        executable_index,
+        external_lookup=external_lookup,
+        ambiguous=ambiguous,
+    )
     if _is_doc_lattice_executable(executable_word):
         return _ResolvedIndex(executable_index)
     if not executable_word.dynamic:
@@ -2667,7 +2703,10 @@ def _launcher_payload_index(
     )
     payload = _nested_launcher_payload_index(
         words,
-        option_resolution,
+        _ResolvedIndex(
+            option_resolution.index,
+            request.inherited_ambiguity or option_resolution.ambiguous,
+        ),
         strip_version=request.strip_version,
         launcher_depth=request.launcher_depth,
         resolution=resolution,

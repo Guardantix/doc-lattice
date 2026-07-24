@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import PurePosixPath
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from doc_lattice.error_types import ProjectError
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 
@@ -1010,15 +1013,36 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
     return direct_sinks
 
 
+def _iter_executable_evidence(executable: _ExecutableEvidence) -> Iterator[_ExecutableEvidence]:
+    """Yield nested alternates before their primary, without revisiting synthetic evidence."""
+    pending = [(executable, False)]
+    seen: set[int] = set()
+    while pending:
+        candidate, expanded = pending.pop()
+        candidate_id = id(candidate)
+        if expanded:
+            yield candidate
+            continue
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        pending.append((candidate, True))
+        pending.extend((alternate, False) for alternate in reversed(candidate.alternates))
+
+
+def _executable_alternate_count(executable: _ExecutableEvidence) -> int:
+    """Return distinct nested alternates without counting the primary command evidence."""
+    return sum(1 for _ in _iter_executable_evidence(executable)) - 1
+
+
 def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
 ) -> tuple[ContentExpr, ...]:
     """Return every conservative execution sink expression for all candidates."""
-    candidates = (*command.executable.alternates, command.executable)
     expressions: list[ContentExpr] = []
-    for executable in candidates:
+    for executable in _iter_executable_evidence(command.executable):
         expressions.extend(
             _candidate_sink_expressions(command, executable, stdin, process_resources)
         )
@@ -1047,7 +1071,10 @@ def analyze_marker_taint(  # noqa: PLR0911
     if evidence_edges > limits.max_edges:
         return True, "shell taint edge limit exceeded"
     evidence_entries = (
-        len(evidence.commands) + len(evidence.scopes) + len(evidence.process_resources)
+        len(evidence.commands)
+        + len(evidence.scopes)
+        + len(evidence.process_resources)
+        + sum(_executable_alternate_count(command.executable) for command in evidence.commands)
     )
     if evidence_entries > limits.max_table_entries:
         return True, "shell taint table entry limit exceeded"

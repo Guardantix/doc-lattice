@@ -3,6 +3,11 @@
 import pytest
 
 from doc_lattice.error_types import ProjectError
+from doc_lattice.github_ci.shell_scanner import (
+    _effective_executable_evidence,
+    _ScanBudget,
+    _ShellWord,
+)
 from doc_lattice.github_ci.shell_taint import (
     Choice,
     ChoiceOutput,
@@ -113,6 +118,96 @@ def test_eval_inserts_literal_spaces_between_argument_ports() -> None:
     command = _command(1, _arg("eval"), _arg("doc-"), _arg("lattice"), name="eval")
 
     assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_external_command_evidence_does_not_activate_shell_sink() -> None:
+    executable = _effective_executable_evidence(
+        [
+            _ShellWord("exec"),
+            _ShellWord("command"),
+            _ShellWord("bash"),
+            _ShellWord("-c"),
+            _ShellWord("$X"),
+        ],
+        _ScanBudget(),
+    )
+
+    assert executable is not None
+    command = _CommandEvidence(
+        command_id=1,
+        output_scope_id=1,
+        container_scope_id=100,
+        argv=(
+            _arg("exec"),
+            _arg("command"),
+            _arg("bash"),
+            _arg("-c"),
+            _arg("$X", LiteralTransfer("doc-lattice"), dynamic=True),
+        ),
+        assignments=(),
+        redirections=(),
+        executable=executable,
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_non_sink_builtin_target_does_not_activate_shell_sink() -> None:
+    executable = _effective_executable_evidence(
+        [
+            _ShellWord("builtin"),
+            _ShellWord("bash"),
+            _ShellWord("-c"),
+            _ShellWord("$X"),
+        ],
+        _ScanBudget(),
+    )
+
+    assert executable is None
+    command = _CommandEvidence(
+        command_id=1,
+        output_scope_id=1,
+        container_scope_id=100,
+        argv=(
+            _arg("builtin"),
+            _arg("bash"),
+            _arg("-c"),
+            _arg("$X", LiteralTransfer("doc-lattice"), dynamic=True),
+        ),
+        assignments=(),
+        redirections=(),
+        executable=_ExecutableEvidence(None, None, None),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_executable_alternates_count_against_table_limit() -> None:
+    command = _CommandEvidence(
+        command_id=1,
+        output_scope_id=1,
+        container_scope_id=100,
+        argv=(_arg("true"),),
+        assignments=(),
+        redirections=(),
+        executable=_ExecutableEvidence(
+            0,
+            "true",
+            "true",
+            alternates=(
+                _ExecutableEvidence(
+                    0,
+                    "eval",
+                    "eval",
+                    alternates=(_ExecutableEvidence(0, "source", "source"),),
+                ),
+            ),
+        ),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)), limits=TaintLimits(max_table_entries=2)
+    ) == (True, "shell taint table entry limit exceeded")
 
 
 def test_external_lookup_eval_is_not_treated_as_eval_sink() -> None:
