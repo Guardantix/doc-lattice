@@ -2,6 +2,7 @@
 
 import pytest
 
+from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci.shell_taint import (
     Choice,
     Concat,
@@ -29,6 +30,13 @@ def _can_mark(expression: ContentExpr, *, strip: bool = False) -> bool:
     if strip:
         value = _strip_trailing_newlines(value)
     return _marker_capable(value)
+
+
+def _deep_concat(depth: int) -> ContentExpr:
+    expression: ContentExpr = LiteralTransfer("x")
+    for _ in range(depth):
+        expression = Concat((expression, LiteralTransfer("")))
+    return expression
 
 
 def test_concat_threads_dfa_state_across_fragment_boundaries() -> None:
@@ -113,6 +121,58 @@ def test_append_before_assignment_revisits_its_implicit_destination_dependency()
     )
 
     assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
+
+
+def test_declared_forward_reference_uses_bottom_regardless_of_write_order() -> None:
+    expression = Concat((LiteralTransfer("doc-"), VariableRef("Y"), LiteralTransfer("lattice")))
+    first = _solve_flow_definitions(
+        _FlowDefinitions(
+            variable_writes=(
+                _FlowWrite("X", expression),
+                _FlowWrite("Y", LiteralTransfer("x")),
+            )
+        )
+    )
+    second = _solve_flow_definitions(
+        _FlowDefinitions(
+            variable_writes=(
+                _FlowWrite("Y", LiteralTransfer("x")),
+                _FlowWrite("X", expression),
+            )
+        )
+    )
+
+    assert first.evaluate(VariableRef("X")) == second.evaluate(VariableRef("X"))
+    assert _marker_capable(first.evaluate(VariableRef("X"))) is False
+
+
+def test_deep_expression_below_node_cap_evaluates_without_recursion_error() -> None:
+    expression = _deep_concat(1_100)
+
+    solved = _solve_flow_definitions(
+        _FlowDefinitions(variable_writes=(_FlowWrite("X", expression),)),
+        limits=TaintLimits(max_expression_nodes=3_000),
+    )
+
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is False
+
+
+def test_deep_expression_over_node_cap_raises_limit_error_without_recursion_error() -> None:
+    expression = _deep_concat(1_100)
+
+    with pytest.raises(_TaintLimitExceeded, match="shell taint expression node limit exceeded"):
+        _solve_flow_definitions(
+            _FlowDefinitions(variable_writes=(_FlowWrite("X", expression),)),
+            limits=TaintLimits(max_expression_nodes=100),
+        )
+
+
+def test_taint_limit_exception_is_a_coded_project_error() -> None:
+    error = _TaintLimitExceeded("shell taint alternative limit exceeded")
+
+    assert isinstance(error, ProjectError)
+    assert error.code == "SHELL_TAINT_LIMIT_EXCEEDED"
+    assert str(error) == "shell taint alternative limit exceeded"
 
 
 def test_competing_variable_definitions_join_without_composing() -> None:

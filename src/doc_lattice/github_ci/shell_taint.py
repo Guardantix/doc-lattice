@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TypeAlias
 
+from doc_lattice.error_types import ProjectError
+
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 
 
@@ -73,8 +75,11 @@ class TaintLimits:
     max_brace_depth: int = 16
 
 
-class _TaintLimitExceeded(RuntimeError):
+class _TaintLimitExceeded(ProjectError):
     """A deterministic taint bound prevented certification."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="SHELL_TAINT_LIMIT_EXCEEDED")
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,17 +283,26 @@ def _marker_capable(value: _ContentValue) -> bool:
 
 
 def _expression_nodes(expression: ContentExpr) -> int:
-    if isinstance(expression, Choice | Concat):
-        return 1 + sum(_expression_nodes(part) for part in expression.parts)
-    return 1
+    pending = [expression]
+    nodes = 0
+    while pending:
+        current = pending.pop()
+        nodes += 1
+        if isinstance(current, Choice | Concat):
+            pending.extend(current.parts)
+    return nodes
 
 
 def _expression_edges(expression: ContentExpr) -> int:
-    if isinstance(expression, VariableRef | ResourceRef | StreamRef):
-        return 1
-    if isinstance(expression, Choice | Concat):
-        return sum(_expression_edges(part) for part in expression.parts)
-    return 0
+    pending = [expression]
+    edges = 0
+    while pending:
+        current = pending.pop()
+        if isinstance(current, VariableRef | ResourceRef | StreamRef):
+            edges += 1
+        elif isinstance(current, Choice | Concat):
+            pending.extend(current.parts)
+    return edges
 
 
 def _cap_value(value: _ContentValue, limits: TaintLimits) -> _ContentValue:
@@ -312,18 +326,31 @@ def _definition_counts(definitions: _FlowDefinitions) -> tuple[int, int, int]:
 
 
 def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
-    if isinstance(expression, LiteralTransfer):
-        return frozenset({_TransferSummary.literal(expression.text)})
-    if isinstance(expression, OutsideGap):
-        return _OUTSIDE_VALUE
-    if isinstance(expression, Choice):
-        return _join_values(*(_evaluate_closed(part) for part in expression.parts))
-    if isinstance(expression, Concat):
-        value = frozenset({_EPSILON})
-        for part in expression.parts:
-            value = _compose_values(value, _evaluate_closed(part))
-        return value
-    raise ValueError("closed content expression contains an unresolved reference")
+    pending: list[tuple[ContentExpr, bool]] = [(expression, False)]
+    values: list[_ContentValue] = []
+    while pending:
+        current, expanded = pending.pop()
+        if isinstance(current, LiteralTransfer):
+            values.append(frozenset({_TransferSummary.literal(current.text)}))
+        elif isinstance(current, OutsideGap):
+            values.append(_OUTSIDE_VALUE)
+        elif isinstance(current, VariableRef | ResourceRef | StreamRef):
+            raise ValueError("closed content expression contains an unresolved reference")
+        elif expanded:
+            parts = values[-len(current.parts) :] if current.parts else []
+            if current.parts:
+                del values[-len(current.parts) :]
+            if isinstance(current, Choice):
+                values.append(_join_values(*parts))
+            else:
+                value = frozenset({_EPSILON})
+                for part in parts:
+                    value = _compose_values(value, part)
+                values.append(value)
+        else:
+            pending.append((current, True))
+            pending.extend((part, False) for part in reversed(current.parts))
+    return values[0]
 
 
 def _evaluate_with_tables(
@@ -333,34 +360,35 @@ def _evaluate_with_tables(
     streams: dict[str | int, _ContentValue],
     limits: TaintLimits,
 ) -> _ContentValue:
-    if isinstance(expression, LiteralTransfer):
-        value = frozenset({_TransferSummary.literal(expression.text)})
-    elif isinstance(expression, OutsideGap):
-        value = _OUTSIDE_VALUE
-    elif isinstance(expression, VariableRef):
-        value = variables.get(expression.name, _OUTSIDE_VALUE)
-    elif isinstance(expression, ResourceRef):
-        value = resources.get(expression.key, _OUTSIDE_VALUE)
-    elif isinstance(expression, StreamRef):
-        value = streams.get(expression.scope_id, _OUTSIDE_VALUE)
-    elif isinstance(expression, Choice):
-        value = _join_values(
-            *(
-                _evaluate_with_tables(part, variables, resources, streams, limits)
-                for part in expression.parts
-            )
-        )
-    else:
-        value = frozenset({_EPSILON})
-        for part in expression.parts:
-            value = _cap_value(
-                _compose_values(
-                    value,
-                    _evaluate_with_tables(part, variables, resources, streams, limits),
-                ),
-                limits,
-            )
-    return _cap_value(value, limits)
+    pending: list[tuple[ContentExpr, bool]] = [(expression, False)]
+    values: list[_ContentValue] = []
+    while pending:
+        current, expanded = pending.pop()
+        if isinstance(current, LiteralTransfer):
+            values.append(frozenset({_TransferSummary.literal(current.text)}))
+        elif isinstance(current, OutsideGap):
+            values.append(_OUTSIDE_VALUE)
+        elif isinstance(current, VariableRef):
+            values.append(variables.get(current.name, _OUTSIDE_VALUE))
+        elif isinstance(current, ResourceRef):
+            values.append(resources.get(current.key, _OUTSIDE_VALUE))
+        elif isinstance(current, StreamRef):
+            values.append(streams.get(current.scope_id, _OUTSIDE_VALUE))
+        elif expanded:
+            parts = values[-len(current.parts) :] if current.parts else []
+            if current.parts:
+                del values[-len(current.parts) :]
+            if isinstance(current, Choice):
+                values.append(_cap_value(_join_values(*parts), limits))
+            else:
+                value = frozenset({_EPSILON})
+                for part in parts:
+                    value = _cap_value(_compose_values(value, part), limits)
+                values.append(value)
+        else:
+            pending.append((current, True))
+            pending.extend((part, False) for part in reversed(current.parts))
+    return _cap_value(values[0], limits)
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,9 +422,15 @@ def _solve_flow_definitions(
     if entries > limits.max_table_entries:
         raise _TaintLimitExceeded("shell taint table entry limit exceeded")
 
-    variables: dict[str | int, _ContentValue] = {}
-    resources: dict[str | int, _ContentValue] = {}
-    streams: dict[str | int, _ContentValue] = {}
+    variables: dict[str | int, _ContentValue] = {
+        write.key: frozenset() for write in definitions.variable_writes
+    }
+    resources: dict[str | int, _ContentValue] = {
+        write.key: frozenset() for write in definitions.resource_writes
+    }
+    streams: dict[str | int, _ContentValue] = {
+        write.key: frozenset() for write in definitions.stream_writes
+    }
     writes = (
         *(("variable", write) for write in definitions.variable_writes),
         *(("resource", write) for write in definitions.resource_writes),
