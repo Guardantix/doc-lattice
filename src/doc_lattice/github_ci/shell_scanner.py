@@ -780,7 +780,7 @@ class _ShellScanner:
         arithmetic_end = self._consume_arithmetic(index + 2, limit, depth + 1)
         if arithmetic_end is not None:
             return arithmetic_end
-        return self._scan_commands(index + 1, limit, terminator=")", depth=depth + 1)
+        return self._scan_nested_commands(index + 1, limit, terminator=")", depth=depth + 1)
 
     def _consume_array_assignment(
         self,
@@ -865,7 +865,7 @@ class _ShellScanner:
         self._flush_command(state)
         self._advance_case_body(state, operator)
         if operator == "(":
-            return self._scan_commands(
+            return self._scan_nested_commands(
                 index,
                 limit,
                 terminator=")",
@@ -1184,12 +1184,28 @@ class _ShellScanner:
     ) -> int | None:
         if not (self.source.startswith("<(", index) or self.source.startswith(">(", index)):
             return None
-        return self._scan_commands(
+        return self._scan_nested_commands(
             index + 2,
             limit,
             terminator=")",
             depth=depth + 1,
         )
+
+    def _scan_nested_commands(
+        self,
+        start: int,
+        limit: int,
+        *,
+        terminator: str | None,
+        depth: int,
+    ) -> int:
+        """Scan an isolated shell scope without attaching it to top-level taint evidence."""
+        taint_builder = self.taint_builder
+        self.taint_builder = None
+        try:
+            return self._scan_commands(start, limit, terminator=terminator, depth=depth)
+        finally:
+            self.taint_builder = taint_builder
 
     def _redirection_at(
         self,
@@ -1567,14 +1583,14 @@ class _ShellScanner:
             if end is None:
                 # Not balanced arithmetic: Bash falls back to a command substitution whose
                 # first ( opens a subshell, so scan the region for inner invocations.
-                end = self._scan_commands(
+                end = self._scan_nested_commands(
                     index + 2,
                     limit,
                     terminator=")",
                     depth=depth + 1,
                 )
         elif self.source.startswith("$(", index):
-            end = self._scan_commands(
+            end = self._scan_nested_commands(
                 index + 2,
                 limit,
                 terminator=")",

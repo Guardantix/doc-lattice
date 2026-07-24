@@ -3013,3 +3013,19 @@ def test_literal_command_after_unrelated_fragments_remains_classified():
 
     assert result.incomplete_reason is None
     assert result.invocations == RECONCILE_DRY
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        ': $(X=doc-)\nX+=lattice\neval "$X"',
+        ': <(X=doc-)\nX+=lattice\neval "$X"',
+        '(X=doc-)\nX+=lattice\neval "$X"',
+    ],
+    ids=("command-substitution", "process-substitution", "subshell-group"),
+)
+def test_nested_scope_assignments_do_not_taint_outer_variable_flow(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
