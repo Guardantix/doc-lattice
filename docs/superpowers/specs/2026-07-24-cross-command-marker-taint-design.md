@@ -87,15 +87,16 @@ responsibilities:
   substitution, heredoc, herestring, and redirection links defined below.
 
 The scanner never learns what a marker residual is; the taint module never parses shell. This keeps
-the 3,031-line scanner focused and gives phase 2 an independently testable unit driven by synthetic
+the large scanner module focused and gives phase 2 an independently testable unit driven by synthetic
 evidence, mirrored at `tests/test_github_ci_shell_taint.py` per the repo convention.
 
-The taint pass runs once, after a top-level scan completes, and returns a pure
-`(verdict, reason)`. The translation to `_ShellScanIncomplete` happens inside
-`scan_doc_lattice_invocations` (`shell_scanner.py:1648-1659`), the common result path, so both it
-and `direct_doc_lattice_invocations` inherit the identical verdict and cannot diverge. A refusal
-becomes `ShellScanResult.incomplete_reason` on the `scan_*` API and a raised `_ShellScanIncomplete`
-on the `direct_*` API, exactly as bounded-scan exhaustion does today.
+The taint pass runs once, after a top-level scan completes, and returns a pure `(verdict, reason)`.
+The scanner turns a refusal verdict into an `_ShellScanIncomplete` inside
+`scan_doc_lattice_invocations` (`shell_scanner.py:1648-1659`), the common result path, so both APIs
+inherit the identical verdict and cannot diverge. A refusal therefore becomes
+`ShellScanResult.incomplete_reason` on the `scan_*` API and, exactly as bounded-scan exhaustion does
+today, a `ConfigError` raised by `direct_doc_lattice_invocations` when it observes that
+`incomplete_reason` (`shell_scanner.py:1688-1692`).
 
 ## 4. Two layers: symbolic content and evaluated domain
 
@@ -111,14 +112,18 @@ The content builder produces, per port, an immutable expression:
 ContentExpr =
     | LiteralTransfer(text)          # authored literal fragment
     | VariableRef(name)              # $X / ${X}
-    | SubstitutionRef(command_id)    # $(cmd) / `cmd`, spliced with trailing newlines stripped
+    | StreamRef(scope_id)            # stripped, aggregated stdout of a stream scope (section 4.6)
+    | Choice(parts...)               # in-word symbolic alternatives (section 4.7)
     | Concat(parts...)               # ordered, sequential composition
     | OutsideGap                     # authored-external boundary (section 4.4)
 ```
 
-`Concat` is the only operator that composes sequentially. Alternatives (competing definitions,
-truncating writes, branches) are represented by *joining* content values in the tables (section 5),
-never by `Concat`.
+`Concat` is the only operator that composes sequentially. Alternatives arise two ways, and neither
+is ever a `Concat`: across commands they are *joined* into content values in the tables (competing
+definitions, truncating writes, branches; section 5), and within a single word they are a `Choice`
+(parameter default/alternate expansion; section 4.7). A `StreamRef` names a stream scope whose
+aggregated stdout is defined in section 4.6, replacing a bare command ID so a substitution or group
+that contains several commands is representable.
 
 ### 4.2 Content channels are distinct ports
 
@@ -145,15 +150,22 @@ in, and whether the traversal passed through the accept state.
 An evaluated content value is a **set of alternatives**, each a transfer relation. This makes the
 join/compose distinction structural:
 
-- **Sequential composition** (`Concat`, ordered argv fragments, `X+=`, `>>`, a heredoc feeding its
-  command, pipe producer -> consumer): relational composition, elementwise across alternative sets;
-  the left's exit states feed the right's entry states. A marker straddling the boundary (`doc-`
-  then `lattice`) is caught because composition threads the mid-marker DFA state across the join.
-- **Join** (competing `X=`, truncating `>`, branches): set union of alternatives. Unrelated
-  `doc-` and `lattice` remain separate alternatives; neither alone reaches accept.
+- **Sequential composition** (`Concat`, ordered argv fragments, `X+=`, `>>`): relational
+  composition, elementwise across alternative sets; the left's exit states feed the right's entry
+  states. A marker straddling the boundary (`doc-` then `lattice`) is caught because composition
+  threads the mid-marker DFA state across the join.
+- **Join** (competing `X=`, truncating `>`, branches, `Choice` alternatives): set union of
+  alternatives. Unrelated `doc-` and `lattice` remain separate alternatives; neither alone reaches
+  accept.
 
 A value is **marker-capable** if some alternative, entered at the DFA start state, passes through
 accept.
+
+**Value transport is not composition.** Moving a value into a port -- a heredoc/herestring into its
+command's stdin, a producer's stdout into a pipe consumer's stdin, a scope's aggregated stdout into
+a `StreamRef` -- carries the value unchanged; it does not concatenate the two commands. Sequential
+composition only occurs where authored text is genuinely adjacent in one stream (`Concat` of ordered
+fragments, `X+=`, `>>`, or the ordered stdout aggregation of a stream scope in section 4.6).
 
 ### 4.4 `OUTSIDE` is a gap, not a barrier
 
@@ -175,13 +187,59 @@ adjacency. Resource-identity gaps (dynamic paths) are a distinct type in the res
 ### 4.5 Command-substitution trailing-newline stripping
 
 Bash removes all trailing newlines from command-substitution output before splicing
-(<https://www.gnu.org/software/bash/manual/bash.html#Command-Substitution>). So
-`eval "$(producer emitting 'doc-\n')lattice"` can execute `doc-lattice` even though raw-stdout
-composition would not match. `SubstitutionRef` therefore evaluates as `StripTrailingNewlines(stdout)`.
-A plain transfer relation loses suffix information, so the evaluated domain carries a **finite
-suffix-aware component**: a transducer summary recording the exit-state set reachable at trailing-
-newline-run boundaries, so strip-then-concat is representable. If that summary cannot be computed
-within caps, the pass fails closed.
+(<https://www.gnu.org/software/bash/manual/bash.html#Command-Substitution>). So a substitution that
+emits `doc-` followed by a newline, spliced against a following authored `lattice`, can execute
+`doc-lattice` even though raw-stdout composition would not match. A `StreamRef` therefore evaluates
+as `StripTrailingNewlines(stream_stdout)`. A plain transfer relation loses suffix information, so the
+evaluated domain carries a **finite suffix-aware component**: a transducer summary recording the
+exit-state set reachable at trailing-newline-run boundaries, so strip-then-concat is representable.
+If that summary cannot be computed within caps, the pass fails closed.
+
+### 4.6 Stream scopes and `StreamRef`
+
+A `StreamRef` names a **stream scope**, not a single command, so a substitution or group containing
+several commands is representable. A stream scope is any construct whose aggregated stdout can be
+captured or transported: a command substitution (`$(...)`, `` `...` ``), a process substitution
+(`<(...)`, `>(...)`), a subshell or brace group (`( ... )`, `{ ...; }`), and a compound pipeline. Its
+aggregated stdout is the ordered `Concat` of the stdout ports of the commands it contains that write
+to the scope's stdout, then `StripTrailingNewlines` when the scope is a command substitution. This
+closes the two compound classes a bare command ID could not represent:
+
+```bash
+eval "$(printf doc-; printf 'lattice reconcile')"   # two commands, one substitution scope -> refuse
+```
+
+```bash
+{ printf doc-; printf 'lattice reconcile'; } > task.sh   # group stdout redirected to a resource
+bash task.sh                                             # -> refuse
+```
+
+Command IDs remain the evidence attachment key (section 8); the scope ID is the aggregation key. A
+scope whose contained producers are all unresolved contributes each producer's may-output stdout
+(section 5.5) in order.
+
+### 4.7 Parameter expansion introduces in-word `Choice`
+
+Alternatives are not only cross-command. A default or alternate parameter expansion authors a branch
+inside one word:
+
+```bash
+unset X
+eval "${X:-doc-}lattice reconcile"   # the authored default "doc-" plus "lattice" must refuse
+```
+
+The scanner currently consumes parameter internals without surfacing their authored operands
+(`_consume_parameter`, `shell_scanner.py:1433-1485`). The content builder must instead return the
+default/alternate word as authored content wrapped in `Choice`. Supported forms are the default and
+alternate operators (`-`, `:-`, `+`, `:+`): `${X:-word}` and `${X-word}` evaluate to
+`Choice(VariableRef(X), <word>)`; `${X:+word}` and `${X+word}` evaluate to
+`Choice(OutsideGap, <word>)` (the word is authored, the taken-or-not branch is the choice). The
+remaining forms -- pattern replacement (`${X/a/b}`), substring (`${X:off:len}`), indirection
+(`${!X}`), and transformation (`${X@Q}`) -- are not modeled precisely: their authored literal
+operands (replacement text, patterns) are surfaced as authored fragments joined with an `OutsideGap`
+so authored marker text cannot hide inside them, while the variable-derived portion stays disclosed;
+if such a form cannot be bounded within caps, the pass fails closed. See
+<https://www.gnu.org/software/bash/manual/html_node/Shell-Parameter-Expansion.html>.
 
 ## 5. Flow tables and edges
 
@@ -207,9 +265,10 @@ are **not** modeled and stay disclosed. A dynamic redirection target is a distin
 
 ### 5.3 Pipe edges
 
-A `|` records producer-id -> consumer-id; the producer's stdout port becomes the consumer's stdin
-port. A producer whose stdout carries no authored marker (for example `curl`, whose stdout reduces
-to `OUTSIDE`) gives the consumer an `OUTSIDE` stdin, so `curl | bash` certifies.
+A `|` records producer-id -> consumer-id; the producer's stdout port (its stream-scope aggregation,
+section 4.6, when the producer side is itself compound) transports unchanged into the consumer's
+stdin port. A producer whose stdout carries no authored marker (for example `curl`, whose stdout
+reduces to `OUTSIDE`) gives the consumer an `OUTSIDE` stdin, so `curl | bash` certifies.
 
 ### 5.4 Process substitution edges
 
@@ -217,8 +276,9 @@ Input and output process substitutions (`cmd <(producer)`, `cmd >(consumer)`,
 `bash < <(producer)`) are modeled as **pipe-like producer/consumer stream edges**, since bash
 defines them as producer/consumer streams
 (<https://www.gnu.org/software/bash/manual/bash.html#Process-Substitution>) and the scanner already
-parses the constructs (`_consume_process_substitution`). An input process substitution feeding a
-shell stdin is a stream edge into that stdin port.
+parses the constructs (`_consume_process_substitution`). The producer is a stream scope (section
+4.6); an input process substitution feeding a shell stdin transports that scope's aggregated stdout
+into the stdin port.
 
 ### 5.5 Producer stdout (generic may-output; no producer-identity trust)
 
@@ -254,13 +314,30 @@ A **sink** is a port where authored content becomes executed shell in this body:
 decides, from the shell command's own arguments, which port is the code sink
 (<https://www.gnu.org/software/bash/manual/bash.html#Invoking-Bash>): `-c` selects the payload word;
 a remaining non-option argument selects a script-file operand; `-s` or no remaining argument selects
-stdin. So `bash -c 'echo ok' <<EOF...EOF` does not treat the heredoc as executed shell.
+stdin. So `bash -c 'echo ok' <<EOF...EOF` does not treat the heredoc as executed shell. The
+recognized shell heads are the phase-1 dispatch shells (`sh`, `bash`, `dash`, `zsh`, `ksh`, and their
+`.exe` and restricted variants); a head the classifier does not recognize as a shell is not a shell
+sink.
+
+**Ambiguous selection fails closed.** When the selector itself is not statically resolvable -- an
+option word that is dynamic or external, as in `bash "$OPT" "$X"` where `$OPT` could be `-c` -- the
+classifier cannot prove which port is the code sink. External data supplies no marker character
+here; it only chooses the sink. The rule is to **refuse whenever an unresolved selector could choose
+a marker-capable authored argv or stdin port**: the analysis considers every port the selector could
+select and refuses if any is marker-capable. A shell invocation whose candidate ports are all
+marker-free still certifies.
 
 **Static-path execution forms** (all read the resource's content into a sink): shell **script-file
-operand** (`bash task.sh`), **direct path head** (`./task.sh`, `/abs/task.sh`), **`source`/`.`**
-(`source task.sh`, `. task.sh`), and each of those behind supported `env` / `command` / `exec` /
-`time` wrappers. May-flow links a static execution sink to a matching write **anywhere** in the body,
-not only earlier, consistent with the scanner's deliberate reachability-insensitivity.
+operand** (`bash task.sh`), **direct path head** (`./task.sh`, `/abs/task.sh`), and **`source`/`.`**
+(`source task.sh`, `. task.sh`). May-flow links a static execution sink to a matching write
+**anywhere** in the body, not only earlier, consistent with the scanner's deliberate
+reachability-insensitivity.
+
+**Wrapper resolution applies to every sink kind.** The supported `env` / `command` / `exec` / `time`
+wrappers (the phase-1 launcher grammar) are peeled before classifying the effective head for all
+sinks -- `eval`, shell `-c`, shell stdin, and static-path execution alike -- not only static-file
+execution. `env bash -c "$PAYLOAD"` and `command bash task.sh` are classified after removing the
+wrapper.
 
 **Refusal rule (verbatim).** Refuse when authored fragments can compose `doc[-_.]+lattice` along a
 modeled content flow, and that content reaches an execution sink. Operationally: evaluate the sink
@@ -273,7 +350,7 @@ contribution, certify (the latter disclosed).
 ## 7. Cyclic references, caps, and fail-closed
 
 The evaluated domain is finite: finitely many transfer relations (with the bounded suffix-aware
-component) over a fixed DFA, alternative sets capped. Resolving `VariableRef` / `SubstitutionRef` /
+component) over a fixed DFA, alternative sets capped. Resolving `VariableRef` / `StreamRef` /
 resource reads is a monotone **least fixed point** over that finite lattice, computed by worklist
 iteration to convergence -- not by evaluation order. A self- or mutually-referential variable
 (`X="$X..."`, `X`->`Y`->`X`) converges to a finite value; the fixed point, not end-of-scan timing,
@@ -335,9 +412,20 @@ Mandatory REFUSE (each verified under real bash as a fixture row, all split so n
 the marker): the two-word `printf '%s%s\n' 'doc-' 'lattice reconcile' > task.sh; bash task.sh`; the
 same escape through the `./` variant `printf ... > task.sh; bash ./task.sh` (pinning that `task.sh`
 and `./task.sh` normalize to one resource key); the `cat > task.sh <<EOF` heredoc handoff; the split
-`X=doc-; X+='lattice reconcile'; eval "$X"`; a split pipeline producer -> `bash`; a split
-substitution `eval "$(...'doc-\n')lattice"`; a split herestring `bash <<< "$X"`; and the input
-process substitution `bash < <(printf '%s%s\n' doc- 'lattice reconcile')`.
+`X=doc-; X+='lattice reconcile'; eval "$X"`; a split pipeline producer -> `bash`; a split herestring
+`bash <<< "$X"`; the input process substitution `bash < <(printf '%s%s\n' doc- 'lattice reconcile')`;
+the multi-command substitution scope `eval "$(printf doc-; printf 'lattice reconcile')"`; the
+compound-group handoff `{ printf doc-; printf 'lattice reconcile'; } > task.sh; bash task.sh`; the
+in-word parameter default `unset X; eval "${X:-doc-}lattice reconcile"`; and the ambiguous selector
+`X=doc-; X+='lattice reconcile'; bash "$OPT" "$X"`. The trailing-newline-strip case uses an
+executable heredoc-backed substitution rather than relying on any one command's newline behavior:
+
+```bash
+eval "$(cat <<'EOF'
+doc-
+EOF
+)lattice reconcile"   # substitution output "doc-\n" strips to "doc-", spliced to "lattice" -> refuse
+```
 
 Mandatory CERTIFY (must not regress): `curl ... | bash`; `echo 'make build' > run.sh; bash run.sh`;
 `eval doc- lattice` (space barrier); `bash -c 'echo ok' <<EOF...EOF` (source selection -- stdin not a
@@ -359,6 +447,10 @@ Stated as absence of evidence, not trust:
   and `doc${EXTERNAL}lattice` (separator would come from outside) certify.
 - **Encoding / transform synthesis** -- `base64 -d`, `tr`, `sed` reconstructing a marker from
   non-marker authored text; no transducer models arbitrary transforms.
+- **Unsupported parameter-expansion forms** -- pattern replacement (`${X/a/b}`), substring
+  (`${X:off:len}`), indirection (`${!X}`), and transformation (`${X@Q}`): only their authored literal
+  operands are surfaced (section 4.7); the variable-derived result is disclosed, or the pass fails
+  closed when the form cannot be bounded.
 - **Dynamic resource identity** -- dynamic write / execution paths, `..` / `cd` directory changes,
   rename / symlink / FD aliasing.
 - **Pre-existing phase-1 disclosures** -- function / alias / `PATH` shadowing, dynamic executable
@@ -370,8 +462,10 @@ Stated as absence of evidence, not trust:
   means no authored marker composes to an execution sink within a `run:` body) and the section 10
   disclosure boundary, in those words rather than as a soundness claim.
 - ARCHITECTURE.md gains **AD-18** recording the authored-marker cross-command taint decision: the
-  step-local certification unit, the port-typed symbolic-plus-evaluated evidence model, the
-  join-vs-compose domain, the fixed-point and fail-closed caps, and the disclosed boundary.
+  step-local certification unit, the port-typed symbolic-plus-evaluated evidence model (including
+  stream-scope aggregation and in-word `Choice`), the join-vs-compose domain, the shell
+  source-selector and its ambiguous-selection fail-closed rule, the fixed-point and fail-closed caps,
+  and the disclosed boundary.
 - No CHANGELOG entry: `ci audit` is unreleased (`[Unreleased]`), consistent with the phase-1 and
   retain-decision precedent.
 - Branch off `main` (`93a9ee3`) referencing #110. Implementation via subagent-driven development per
