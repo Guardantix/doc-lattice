@@ -43,8 +43,10 @@ bash task.sh          # marker lives in a heredoc body the phase-1 word model do
 Phase 2 adds a bounded, order-insensitive taint analysis over one `run:` body. It refuses when
 authored fragments can compose the marker along a modeled content flow and that content reaches an
 execution sink. It changes no phase-1 outcome: resolved doc-lattice invocations are still found and
-emitted, and phase-1 in-word refusals still fire. Phase 2 only adds refusals for cross-command
-marker flow.
+emitted, and phase-1 in-word refusals still fire. Phase 2 adds refusals for marker synthesis the
+phase-1 literal-word model cannot see: cross-command data flow, and in-word synthesis (brace and
+parameter expansion) that composes a marker within a single command from words no one of which
+carries it whole.
 
 ## 2. Certification unit and posture (settled decisions)
 
@@ -112,27 +114,31 @@ The content builder produces, per port, an immutable expression:
 ContentExpr =
     | LiteralTransfer(text)          # authored literal fragment
     | VariableRef(name)              # $X / ${X}
-    | StreamRef(scope_id)            # stripped, aggregated stdout of a stream scope (section 4.6)
-    | Choice(parts...)               # in-word symbolic alternatives (section 4.7)
+    | StreamRef(scope_id)            # aggregated stdout of a stream scope (section 4.6)
+    | ResourceRef(key)               # content read from a static resource (section 5.2)
+    | Choice(parts...)               # mutually exclusive in-word alternatives (section 4.7)
     | Concat(parts...)               # ordered, sequential composition
     | OutsideGap                     # authored-external boundary (section 4.4)
 ```
 
-`Concat` is the only operator that composes sequentially. Alternatives arise two ways, and neither
-is ever a `Concat`: across commands they are *joined* into content values in the tables (competing
-definitions, truncating writes, branches; section 5), and within a single word they are a `Choice`
-(parameter default/alternate expansion; section 4.7). A `StreamRef` names a stream scope whose
-aggregated stdout is defined in section 4.6, replacing a bare command ID so a substitution or group
-that contains several commands is representable.
+`Concat` is the only operator that composes sequentially. Mutually exclusive alternatives arise two
+ways, and neither is ever a `Concat`: across commands they are *joined* into content values in the
+tables (competing definitions, truncating writes, branches; section 5), and within a single word
+they are a `Choice` (parameter default/alternate expansion; section 4.7). Brace expansion is neither
+join nor `Choice`: it fans one lexical word out into several ordered argv ports (section 4.7). A
+`StreamRef` names a stream scope whose aggregated stdout is defined in section 4.6, replacing a bare
+command ID so a substitution or group that contains several commands is representable.
 
 ### 4.2 Content channels are distinct ports
 
 `_CommandEvidence` does not carry one flat ordered summary. It carries typed ports that never
 compose across each other:
 
-- **argv** -- one `ContentExpr` per argv position, in order;
+- **argv** -- one `ContentExpr` per argv position, in order (a static brace expansion fans out into
+  several ordered argv positions, section 4.7);
 - **assignments** -- name -> `ContentExpr` for each assignment prefix or standalone assignment;
-- **stdin** -- a heredoc body, a herestring, or an incoming pipe / input process-substitution link;
+- **stdin** -- a heredoc body, a herestring, an incoming pipe / input process-substitution link, or a
+  static file read (`ResourceRef`), and only when the redirection targets descriptor 0 (section 5.2);
 - **redirection-written content** -- per static resource key (section 5.2);
 - **executable disposition** -- resolved doc-lattice, a shell dispatch with a source-selector
   result (section 6), a static script-file execution operand, `source`/`.`, or none.
@@ -209,10 +215,17 @@ several commands is representable. The scanner emits a `_StreamScopeEvidence` pe
 - **parent** -- the enclosing scope or command, so nested scopes resolve.
 - **output structure** -- how the contained commands' stdout ports combine, which is **not** a blind
   concatenation. Sequential commands (`;`, newline, `&&`, `||`) form a `Sequence` (sequential
-  composition). Mutually exclusive branches (`if`/`elif`/`else`, `case` arms) form a `Choice` (join,
-  consistent with section 4.3 -- branches must not concatenate). A loop body (`for`/`while`/`until`)
-  forms a `Repeat`, evaluated as the reflexive-transitive closure of its body's transfer relation in
-  the finite domain (so `for ...; do printf doc-; done; printf lattice` still composes to a marker).
+  composition). Mutually exclusive branches (`if`/`elif`/`else`, and `case` arms terminated by `;;`)
+  form a `Choice` (join, consistent with section 4.3 -- branches must not concatenate). **`case`
+  fallthrough is not mutually exclusive:** an arm terminated by `;&` executes the following arm, and
+  `;;&` may continue matching later arms (the terminators the scanner already distinguishes in
+  `_advance_case_body`, `shell_scanner.py:975-980`); fallthrough-connected arms compose as a
+  `Sequence`, or fail closed if the chain cannot be structured. A loop body
+  (`for`/`select`/`while`/`until`) forms a `Repeat`, evaluated as the reflexive-transitive closure of
+  its body's transfer relation in the finite domain. `Repeat` alone does not bind a loop variable, so
+  a `for`/`select` loop first adds **loop-binding evidence**: its variable is joined with the loop's
+  authored iteration words (section 5.1) before the closure applies, so
+  `for X in doc- lattice; do printf %s "$X"; done | bash` composes to a marker across iterations.
   Compound control flow the scanner cannot structure this way fails closed rather than blindly
   concatenating.
 
@@ -256,10 +269,15 @@ expanded. The content builder must surface these:
   default form, `Choice(VariableRef(X), <word>)`, **and** carry conditional-assignment evidence: the
   authored `word` is joined as a may-flow alternative into `X`'s variable-table entry (section 5.1),
   because the expansion also assigns it. Modeling only `Choice` would miss a later `eval "$X"`.
-- **Brace expansion** (`doc-{lattice,noop}`): evaluated as a `Choice` over the authored alternatives
-  (`doc-lattice`, `doc-noop`), so the marker-bearing alternative refuses. Sequence and nested brace
-  forms expand into the `Choice` set within the caps; a brace expansion that cannot be bounded
-  (numeric ranges beyond a cap, deep nesting) fails closed.
+- **Brace expansion** (`doc-{lattice,noop}`) is **argv fan-out, not `Choice`**. Bash emits every
+  brace result left-to-right as separate words, so a single lexical word expands into several ordered
+  argv ports, not one word with alternatives. `doc-{lattice,noop}` fans out to the argv words
+  `doc-lattice` `doc-noop` (the marker-bearing first word refuses), and crucially the results are
+  adjacent to their neighbors: `printf %s {doc-,lattice}` fans out to `printf %s doc- lattice`, whose
+  may-output composes `doc-` and `lattice` in order. A `Choice` would wrongly model these as one word
+  and never compose the two. Bounded static braces (comma lists, small numeric/char ranges) expand
+  into the ordered argv ports within the caps; a brace expansion that cannot be bounded (numeric
+  ranges beyond a cap, deep nesting, or a dynamic operand) fails closed.
 - **Remaining parameter forms** -- pattern replacement (`${X/a/b}`), substring (`${X:off:len}`),
   indirection (`${!X}`), transformation (`${X@Q}`) -- are not modeled precisely: their authored
   literal operands (replacement text, patterns) are surfaced as authored fragments joined with an
@@ -287,13 +305,18 @@ resolves through this table during evaluation.
 Static resource key -> content value. `> path` joins written content as an alternative; `>> path`
 appends via `Concat`. The written content is the producing command's **stdout port** (section 5.5).
 
-**Static reads are input edges.** A static `< path` redirection reads the resource: it produces a
-`ResourceRef(key)` transported into the reading command's **stdin port**. Combined with the shell
-source-selector (section 6), this connects the file-to-stdin sink:
+**Static reads are input edges, descriptor-aware.** A static input redirection reads the resource:
+it produces a `ResourceRef(key)`. It transports into the reading command's **stdin port only when the
+redirection targets descriptor 0** (an omitted descriptor defaults to 0 for `<`). A non-zero
+descriptor (`bash 3<task.sh`, `bash 3<<EOF`) opens the file on that descriptor, not stdin, and is
+**not** a shell-stdin sink; the descriptor must be recorded (section 8) so the routing is correct.
+Descriptor duplication (`<&`, `>&`) stays under the disclosed FD-alias limitation (section 10).
+Combined with the shell source-selector (section 6), a descriptor-0 read connects the file-to-stdin
+sink:
 
 ```bash
 printf '%s%s\n' doc- 'lattice reconcile' > task.sh
-bash < task.sh          # no script operand -> bash reads commands from stdin -> refuse
+bash < task.sh          # 0< (default) + no script operand -> bash reads commands from stdin -> refuse
 ```
 
 Resource-key identity: `task.sh` and `./task.sh` normalize to the same key when no modeled directory
@@ -376,19 +399,22 @@ operand** (`bash task.sh`), **direct path head** (`./task.sh`, `/abs/task.sh`), 
 **anywhere** in the body, not only earlier, consistent with the scanner's deliberate
 reachability-insensitivity.
 
-**Wrapper resolution applies to every sink kind, preserving lookup provenance.** The supported
-`env` / `command` / `exec` / `time` wrappers (the phase-1 launcher grammar) are peeled before
-classifying the effective head for all sinks -- `eval`, shell `-c`, shell stdin, and static-path
-execution alike -- not only static-file execution. `env bash -c "$PAYLOAD"` and `command bash
-task.sh` are classified after removing the wrapper. But peeling must preserve the existing
-`external_lookup` distinction (`_ResolvedIndex.external_lookup`, `shell_scanner.py:468`;
-`_skip_shell_prefixes`, `shell_scanner.py:1889`): `env`, `exec`, and external `time` cross to a PATH
-`execve` that can never reach a shell builtin, while `command` and the `time` keyword keep shell
-lookup. The builtin sinks `eval`, `source`, and `.` are therefore sinks only on a non-external
-lookup: `command eval "$X"` is an `eval` sink, but `env eval "$X"` and `exec eval "$X"` are not
-(there is no `eval` executable on `PATH`; the wrapper would fail or run an unrelated binary). The
-`-c` / stdin / script-file shell sinks are unaffected by this bit, since a shell resolves through
-`execve` regardless.
+**Effective-head resolution reuses the full phase-1 launcher grammar, preserving lookup provenance.**
+Sink classification must not hand-list a wrapper subset; a subset leaves the omitted launchers as
+sink bypasses (`builtin eval "$X"`, `uv run bash -c "$X"`). The effective head for every sink --
+`eval`, shell `-c`, shell stdin, and static-path execution alike -- is resolved by the same launcher
+and wrapper grammar the finding path already implements: `env`, `command`, `exec`, `time`, `builtin`
+(`shell_scanner.py:1933`), `coproc`, and the `uv run` / `uvx` / `uv tool run` chains
+(`shell_scanner.py:2175`, `:2260`). The resolver carries the existing `external_lookup` provenance
+(`_ResolvedIndex.external_lookup`, `shell_scanner.py:468`; `_skip_shell_prefixes`,
+`shell_scanner.py:1889`): `env`, `exec`, and external `time` cross to a PATH `execve` that can never
+reach a shell builtin, while `command`, `builtin`, and the `time` keyword keep shell lookup. The
+builtin sinks `eval`, `source`, and `.` are therefore sinks only on a non-external lookup:
+`command eval "$X"` and `builtin eval "$X"` are `eval` sinks, but `env eval "$X"` and `exec eval "$X"`
+are not (there is no `eval` executable on `PATH`; the wrapper would fail or run an unrelated binary).
+A shell reached through a launcher (`uv run bash -c "$X"`) is a `-c` sink after the launcher resolves
+its command; the `-c` / stdin / script-file shell sinks are otherwise unaffected by the provenance
+bit, since a shell resolves through `execve` regardless.
 
 **Refusal rule (verbatim).** Refuse when authored fragments can compose `doc[-_.]+lattice` along a
 modeled content flow, and that content reaches an execution sink. Operationally: evaluate the sink
@@ -432,7 +458,13 @@ flush, so evidence parsed after a command is gone can attach to its owner.
   (`shell_scanner.py:982-1008`), after the owning command flushed, and `reset_command` does not
   clear `state.heredocs` (`shell_scanner.py:519-525`), so `;`-separated commands can flush between a
   `<<EOF` and its newline. The owner ID is stamped onto **the heredocs a command registered since the
-  previous flush** (tracked by count at flush time), never onto a single "last flushed command."
+  previous flush** (tracked by count at flush time), never onto a single "last flushed command." A
+  heredoc routes to the owner's stdin port only when its descriptor is 0 (default); `3<<EOF` targets
+  descriptor 3 and is not a stdin sink.
+- **Redirection descriptor retention.** `_redirection_at` parses the numeric descriptor prefix but
+  discards it (`shell_scanner.py:1040-1056`); phase 2 must retain the effective descriptor on both
+  read and heredoc evidence so the stdin routing above is correct. Descriptor duplication forms
+  (`<&`, `>&`) are not resolved and stay under the disclosed FD-alias limitation (section 10).
 - **Pipe edges use a pending producer, not an eager consumer ID.** Because IDs are assigned at flush,
   the consumer does not exist when `|` is scanned (`shell_scanner.py:739-768`, `:1010`). At the `|`
   the just-flushed producer is recorded as a **pending producer edge**; the next command to flush
@@ -445,8 +477,8 @@ flush, so evidence parsed after a command is gone can attach to its owner.
   the control flow the scanner already tracks (sequence operators, `case` arms via the existing
   `_CaseScanState`, `if`/loop keywords); scopes whose structure cannot be derived fail closed.
 - **Static read edges.** A static `< path` redirection records a `ResourceRef` input on the reading
-  command's stdin port (section 5.2), parsed where `_consume_redirection` currently discards the
-  operand (`shell_scanner.py:1058-1080`).
+  command's stdin port when the descriptor is 0 (section 5.2), parsed where `_consume_redirection`
+  currently discards the operand (`shell_scanner.py:1058-1080`).
 
 No rewrite of the scan loop; the changes are localized to the flush, newline, operator, redirection,
 and scope-parsing boundaries the issue identifies.
@@ -481,8 +513,13 @@ the multi-command substitution scope `eval "$(printf doc-; printf 'lattice recon
 compound-group handoff `{ printf doc-; printf 'lattice reconcile'; } > task.sh; bash task.sh`; the
 in-word parameter default `unset X; eval "${X:-doc-}lattice reconcile"`; the assign-default form
 `unset X; eval "${X:=doc-}lattice"` (also pinning that the assigned `X` refuses a later `eval "$X"`);
-the brace expansion `eval doc-{lattice,noop}`; the static file read `printf ... > task.sh; bash <
-task.sh`; and the ambiguous selector `X=doc-; X+='lattice reconcile'; bash "$OPT" "$X"`. The
+the brace fan-out `eval doc-{lattice,noop}` and the adjacency fan-out
+`printf %s {doc-,lattice} | bash` (proving fan-out composes neighbors, which a `Choice` model would
+miss); the loop-binding case `for X in doc- lattice; do printf %s "$X"; done | bash`; the `case`
+fallthrough `case $Y in a) printf doc- ;& *) printf lattice ;; esac | bash` (`;&` composes across
+arms); the static file read `printf ... > task.sh; bash < task.sh`; the launcher-head bypasses
+`X=doc-; X+=lattice; builtin eval "$X"` and `X=doc-; X+=lattice; uv run bash -c "$X"`; and the
+ambiguous selector `X=doc-; X+='lattice reconcile'; bash "$OPT" "$X"`. The
 trailing-newline-strip case uses an executable heredoc-backed substitution rather than relying on any
 one command's newline behavior:
 
@@ -498,9 +535,11 @@ Mandatory CERTIFY (must not regress): `curl ... | bash`; `echo 'make build' > ru
 sink); `bash -c 'echo hi' > doc-lattice.log` (phase-1 redirection-operand pin);
 `doc${EXTERNAL}lattice` reaching a sink (disclosed external separator, certifies);
 `grep x <(printf '%s%s' doc- lattice)` (process substitution read by a non-sink is not over-connected
-to execution); and `env eval "$X"` with a marker-capable `X` (external lookup cannot reach the `eval`
-builtin, so it is not an `eval` sink), paired with `command eval "$X"` as the REFUSE counterpart that
-can.
+to execution); `env eval "$X"` with a marker-capable `X` (external lookup cannot reach the `eval`
+builtin, so it is not an `eval` sink), paired with `command eval "$X"` and `builtin eval "$X"` as the
+REFUSE counterparts that can; and the non-zero descriptor read `printf ... > task.sh; bash 3<
+task.sh` (descriptor 3, not stdin, so no shell-stdin sink), paired with the descriptor-0 form as the
+REFUSE counterpart.
 
 Full handoff verification set at ship: pytest at the repo coverage gate, Ruff check and format,
 `ty`, typing boundaries, version sync, plus the read-only `successor-evaluation` corpus battery
@@ -522,7 +561,10 @@ Stated as absence of evidence, not trust:
   operands are surfaced (section 4.7); the variable-derived result is disclosed, or the pass fails
   closed when the form cannot be bounded.
 - **Dynamic resource identity** -- dynamic write / execution paths, `..` / `cd` directory changes,
-  rename / symlink / FD aliasing.
+  rename / symlink aliasing.
+- **File-descriptor aliasing** -- descriptor duplication (`<&`, `>&`) and moving descriptors; only
+  the effective descriptor of a direct read / heredoc is modeled (section 5.2, section 8), not later
+  reassignment of descriptor 0.
 - **Pre-existing phase-1 disclosures** -- function / alias / `PATH` shadowing, dynamic executable
   names.
 
@@ -532,10 +574,12 @@ Stated as absence of evidence, not trust:
   means no authored marker composes to an execution sink within a `run:` body) and the section 10
   disclosure boundary, in those words rather than as a soundness claim.
 - ARCHITECTURE.md gains **AD-18** recording the authored-marker cross-command taint decision: the
-  step-local certification unit, the port-typed symbolic-plus-evaluated evidence model (including
-  stream-scope aggregation and in-word `Choice`), the join-vs-compose domain, the shell
-  source-selector and its ambiguous-selection fail-closed rule, the fixed-point and fail-closed caps,
-  and the disclosed boundary.
+  step-local certification unit, the port-typed symbolic-plus-evaluated evidence model (stream-scope
+  aggregation with `Sequence`/`Choice`/`Repeat` output structure, in-word `Choice` and brace
+  argv fan-out, loop-variable binding, descriptor-aware stdin routing), the join-vs-compose domain,
+  the effective-head resolver reusing the full launcher grammar with `external_lookup` provenance,
+  the shell source-selector and its ambiguous-selection fail-closed rule, the fixed-point and
+  fail-closed caps, and the disclosed boundary.
 - No CHANGELOG entry: `ci audit` is unreleased (`[Unreleased]`), consistent with the phase-1 and
   retain-decision precedent.
 - Branch off `main` (`93a9ee3`) referencing #110. Implementation via subagent-driven development per
