@@ -12,6 +12,7 @@ from doc_lattice.github_ci.shell_taint import (
     ContentTarget,
     LiteralTransfer,
     NullTarget,
+    OutputExpr,
     OutsideGap,
     ResourceRef,
     SequenceOutput,
@@ -37,6 +38,7 @@ from doc_lattice.github_ci.shell_taint import (
     analyze_marker_taint,
     choice,
     concat,
+    normalize_static_resource,
 )
 
 
@@ -251,6 +253,86 @@ def test_evidence_edge_cap_counts_pipe_records() -> None:
     assert analyze_marker_taint(evidence, limits=TaintLimits(max_edges=1)) == (
         True,
         "shell taint edge limit exceeded",
+    )
+
+
+def test_uppercase_eval_is_not_a_builtin_execution_sink() -> None:
+    command = _command(1, _arg("EVAL"), _arg("doc-lattice"), name="EVAL")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+def test_uppercase_source_is_not_a_builtin_execution_sink() -> None:
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),),
+    )
+    command = _command(2, _arg("SOURCE"), _arg("task.sh"), name="SOURCE")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, command))) == (False, None)
+
+
+@pytest.mark.parametrize("builtin", ["eval", "source"])
+def test_path_qualified_builtin_name_uses_static_direct_resource(builtin: str) -> None:
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget(builtin)),),
+    )
+    command = _command(2, _arg(f"./{builtin}"), _arg("safe"), name=builtin)
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, command))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_shell_plus_c_selects_the_command_payload() -> None:
+    command = _command(1, _arg("bash"), _arg("+c"), _arg("doc-lattice"), name="bash")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_static_normalization_collapses_double_slash_absolute_resource_keys() -> None:
+    assert normalize_static_resource("//task.sh", dynamic=False) == "/task.sh"
+    assert normalize_static_resource("///task.sh", dynamic=False) == "/task.sh"
+
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("/task.sh")),),
+    )
+    reader = _command(2, _arg("bash"), _arg("//task.sh"), name="bash")
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, reader))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
+    output: OutputExpr = CommandOutput(1)
+    for _ in range(1_200):
+        output = SequenceOutput((output,))
+    producer = _command(1, _arg("printf"), _arg("doc-lattice"), name="printf")
+    sink = _command(2, _arg("eval"), _arg("$(...)", StreamRef(200), dynamic=True), name="eval")
+    scope = _StreamScopeEvidence(200, "command_substitution", None, None, output)
+
+    evidence = _ShellTaintEvidence(commands=(producer, sink), scopes=(scope,))
+
+    assert analyze_marker_taint(evidence) == (
+        True,
+        "authored marker flow reaches an execution sink",
     )
 
 

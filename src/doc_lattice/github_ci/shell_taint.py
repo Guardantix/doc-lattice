@@ -279,7 +279,7 @@ def normalize_static_resource(literal: str, *, dynamic: bool) -> str | None:
     if ".." in path.parts:
         return None
     absolute = path.is_absolute()
-    parts = tuple(part for part in path.parts if part not in ("", ".", "/"))
+    parts = tuple(part for part in path.parts if part not in ("", ".", "/") and part.strip("/"))
     if not parts:
         return "/" if absolute else "."
     prefix = "/" if absolute else ""
@@ -358,7 +358,7 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             else:
                 index += 1
             continue
-        if literal.startswith("-"):
+        if literal and literal[0] in "-+":
             short_options = literal[1:]
             for option_index, option in enumerate(short_options):
                 if option == "c":
@@ -843,23 +843,40 @@ class _OutputLowering:
 
     def lower(self, output: OutputExpr, stream_writes: list[_FlowWrite]) -> ContentExpr:
         """Lower one output expression, adding repeat definitions when needed."""
-        if isinstance(output, CommandOutput):
-            scope_id = self.command_scopes.get(output.command_id)
-            return StreamRef(scope_id) if scope_id is not None else OutsideGap()
-        if isinstance(output, SequenceOutput):
-            return concat(*(self.lower(part, stream_writes) for part in output.parts))
-        if isinstance(output, ChoiceOutput):
-            return choice(*(self.lower(part, stream_writes) for part in output.parts))
-        repeated = self.lower(output.part, stream_writes)
-        scope_id = self.next_synthetic_scope
-        self.next_synthetic_scope -= 1
-        stream_writes.extend(
-            (
-                _FlowWrite(scope_id, LiteralTransfer("")),
-                _FlowWrite(scope_id, concat(repeated, StreamRef(scope_id))),
-            )
-        )
-        return StreamRef(scope_id)
+        pending: list[tuple[OutputExpr, bool]] = [(output, False)]
+        values: list[ContentExpr] = []
+        while pending:
+            current, expanded = pending.pop()
+            if isinstance(current, CommandOutput):
+                scope_id = self.command_scopes.get(current.command_id)
+                values.append(StreamRef(scope_id) if scope_id is not None else OutsideGap())
+            elif expanded:
+                if isinstance(current, SequenceOutput | ChoiceOutput):
+                    parts = values[-len(current.parts) :] if current.parts else []
+                    if current.parts:
+                        del values[-len(current.parts) :]
+                    expression = (
+                        concat(*parts) if isinstance(current, SequenceOutput) else choice(*parts)
+                    )
+                    values.append(expression)
+                else:
+                    repeated = values.pop()
+                    scope_id = self.next_synthetic_scope
+                    self.next_synthetic_scope -= 1
+                    stream_writes.extend(
+                        (
+                            _FlowWrite(scope_id, LiteralTransfer("")),
+                            _FlowWrite(scope_id, concat(repeated, StreamRef(scope_id))),
+                        )
+                    )
+                    values.append(StreamRef(scope_id))
+            else:
+                pending.append((current, True))
+                if isinstance(current, SequenceOutput | ChoiceOutput):
+                    pending.extend((part, False) for part in reversed(current.parts))
+                else:
+                    pending.append((current.part, False))
+        return values[0]
 
 
 def _build_flow_definitions(
@@ -944,10 +961,11 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
     executable = command.executable
     if executable.argv_index is None or executable.name is None:
         return ()
-    name = executable.name.casefold()
-    if name == "eval" and not executable.external_lookup:
+    name = executable.name
+    literal = executable.literal
+    if name == "eval" and literal == "eval" and not executable.external_lookup:
         return (_eval_arguments(command),)
-    if name in {"source", "."} and not executable.external_lookup:
+    if name in {"source", "."} and literal == name and not executable.external_lookup:
         operand_index = executable.argv_index + 1
         if operand_index >= len(command.argv):
             return ()
@@ -976,7 +994,6 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
         if selection.include_stdin:
             candidates.append(stdin)
         return (choice(*candidates),)
-    literal = executable.literal
     if literal is not None and (literal.startswith("/") or literal.startswith("./")):
         key = normalize_static_resource(literal, dynamic=False)
         if key is not None:
