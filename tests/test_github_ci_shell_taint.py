@@ -483,6 +483,65 @@ def test_evidence_edge_cap_counts_pipe_records() -> None:
     )
 
 
+def test_pipe_without_consumer_fails_closed() -> None:
+    producer = _command(1, _arg("printf"), name="printf")
+    evidence = _ShellTaintEvidence(commands=(producer,), pipes=(_PipeEvidence(1),))
+
+    assert analyze_marker_taint(evidence) == (
+        True,
+        "shell taint pipe cannot be structured",
+    )
+
+
+def test_pipe_with_command_and_scope_consumers_fails_closed() -> None:
+    producer = _command(1, _arg("printf"), name="printf")
+    consumer = _command(2, _arg("bash"), name="bash")
+    consumer_scope = _StreamScopeEvidence(
+        3,
+        "subshell_group",
+        None,
+        None,
+        SequenceOutput(()),
+    )
+    evidence = _ShellTaintEvidence(
+        commands=(producer, consumer),
+        scopes=(consumer_scope,),
+        pipes=(_PipeEvidence(1, consumer_command_id=2, consumer_scope_id=3),),
+    )
+
+    assert analyze_marker_taint(evidence) == (
+        True,
+        "shell taint pipe cannot be structured",
+    )
+
+
+def test_reverse_ordered_scope_chain_stays_within_declared_limits() -> None:
+    scopes = tuple(
+        _StreamScopeEvidence(
+            scope_id,
+            "subshell_group",
+            scope_id - 1 if scope_id > 1 else None,
+            None,
+            SequenceOutput(()),
+        )
+        for scope_id in range(1_100, 0, -1)
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(scopes=scopes)) == (False, None)
+
+
+def test_cyclic_scope_parents_fail_closed() -> None:
+    scopes = (
+        _StreamScopeEvidence(1, "subshell_group", 2, None, SequenceOutput(())),
+        _StreamScopeEvidence(2, "subshell_group", 1, None, SequenceOutput(())),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(scopes=scopes)) == (
+        True,
+        "shell taint stream scope cannot be structured",
+    )
+
+
 def test_uppercase_eval_is_not_a_builtin_execution_sink() -> None:
     command = _command(1, _arg("EVAL"), _arg("doc-lattice"), name="EVAL")
 

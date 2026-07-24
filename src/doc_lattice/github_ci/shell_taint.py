@@ -100,6 +100,13 @@ class _TaintLimitExceeded(ProjectError):
         super().__init__(message, code="SHELL_TAINT_LIMIT_EXCEEDED")
 
 
+class _MalformedTaintEvidence(ProjectError):
+    """Structured shell evidence cannot be analyzed safely."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="SHELL_TAINT_EVIDENCE_INVALID")
+
+
 @dataclass(frozen=True, slots=True)
 class _FlowWrite:
     key: str | int
@@ -1255,24 +1262,38 @@ def _scope_environment_ids(
     environments: dict[int, int] = {}
     parents: dict[int, int | None] = {}
 
-    def environment(scope_id: int) -> int:
-        if scope_id in environments:
-            return environments[scope_id]
-        scope = by_id.get(scope_id)
-        if scope is None:
-            environments[scope_id] = scope_id
-            parents[scope_id] = None
-            return scope_id
-        parent = environment(scope.parent_scope_id) if scope.parent_scope_id is not None else None
-        if scope.kind == "brace_group" and parent is not None:
-            environments[scope_id] = parent
-            return parent
-        environments[scope_id] = scope_id
-        parents[scope_id] = parent
-        return scope_id
-
     for scope in scopes:
-        environment(scope.scope_id)
+        if scope.scope_id in environments:
+            continue
+        path: list[int] = []
+        active: set[int] = set()
+        current = scope.scope_id
+        while current not in environments:
+            if current in active:
+                raise _MalformedTaintEvidence("shell taint stream scope cannot be structured")
+            active.add(current)
+            path.append(current)
+            current_scope = by_id.get(current)
+            if current_scope is None or current_scope.parent_scope_id is None:
+                parent_environment = None
+                break
+            current = current_scope.parent_scope_id
+        else:
+            parent_environment = environments[current]
+
+        for scope_id in reversed(path):
+            current_scope = by_id.get(scope_id)
+            if (
+                current_scope is not None
+                and current_scope.kind == "brace_group"
+                and parent_environment is not None
+            ):
+                environment = parent_environment
+            else:
+                environment = scope_id
+                parents[scope_id] = parent_environment
+            environments[scope_id] = environment
+            parent_environment = environment
     return environments, parents
 
 
@@ -2016,9 +2037,13 @@ def analyze_marker_taint(  # noqa: PLR0911
     limits: TaintLimits = TaintLimits(),  # noqa: B008
 ) -> tuple[bool, str | None]:
     """Return a fail-closed verdict for authored marker flow in one run body."""
-    evidence = _contextualize_evidence(evidence)
     if any(scope.kind not in _STREAM_SCOPE_KINDS for scope in evidence.scopes):
         return True, "shell taint stream scope cannot be structured"
+    if any(
+        (pipe.consumer_command_id is None) == (pipe.consumer_scope_id is None)
+        for pipe in evidence.pipes
+    ):
+        return True, "shell taint pipe cannot be structured"
     if any(
         resource.direction not in _PROCESS_RESOURCE_DIRECTIONS
         for resource in evidence.process_resources
@@ -2042,6 +2067,7 @@ def analyze_marker_taint(  # noqa: PLR0911
         return True, "shell taint table entry limit exceeded"
 
     try:
+        evidence = _contextualize_evidence(evidence)
         definitions, inputs = _build_flow_definitions(evidence)
         solved = _solve_flow_definitions(definitions, limits=limits)
         eval_commands = tuple(
@@ -2071,6 +2097,6 @@ def analyze_marker_taint(  # noqa: PLR0911
             for expression in _sink_expressions(command, stdin, process_resources):
                 if _marker_capable(solved.evaluate(expression)):
                     return True, TAINT_REFUSAL_REASON
-    except _TaintLimitExceeded as error:
+    except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
         return True, str(error)
     return False, None

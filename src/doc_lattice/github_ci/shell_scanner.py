@@ -1740,9 +1740,9 @@ class _ShellScanner:
             budget=self.budget,
             invocations=self.invocations,
             classify_commands=self.classify_commands,
-            taint_builder=self.taint_builder,
-            collect_taint=False,
         )
+        child.taint_builder = self.taint_builder
+        child.owns_taint_builder = False
         child.scope_stack = self.scope_stack
         content = ContentBuilder.empty()
         index = 0
