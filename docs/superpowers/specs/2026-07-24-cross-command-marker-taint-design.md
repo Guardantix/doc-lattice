@@ -220,12 +220,19 @@ several commands is representable. The scanner emits a `_StreamScopeEvidence` pe
   fallthrough is not mutually exclusive:** an arm terminated by `;&` executes the following arm, and
   `;;&` may continue matching later arms (the terminators the scanner already distinguishes in
   `_advance_case_body`, `shell_scanner.py:975-980`); fallthrough-connected arms compose as a
-  `Sequence`, or fail closed if the chain cannot be structured. A loop body
-  (`for`/`select`/`while`/`until`) forms a `Repeat`, evaluated as the reflexive-transitive closure of
-  its body's transfer relation in the finite domain. `Repeat` alone does not bind a loop variable, so
-  a `for`/`select` loop first adds **loop-binding evidence**: its variable is joined with the loop's
-  authored iteration words (section 5.1) before the closure applies, so
-  `for X in doc- lattice; do printf %s "$X"; done | bash` composes to a marker across iterations.
+  `Sequence`, or fail closed if the chain cannot be structured. A loop forms a `Repeat`, evaluated as the
+  reflexive-transitive closure of its per-iteration trace's transfer relation in the finite domain.
+  Two loop-shape details matter:
+  - **`for`/`select`** bind a variable each iteration, which `Repeat` alone misses, so the loop first
+    adds **loop-binding evidence**: the variable is joined with the loop's authored iteration words
+    (section 5.1) before the closure applies, so `for X in doc- lattice; do printf %s "$X"; done |
+    bash` composes to a marker across iterations. Their per-iteration trace is the body.
+  - **`while`/`until`** run the **test-command list before every iteration**
+    (<https://www.gnu.org/software/bash/manual/html_node/Looping-Constructs.html>), so content
+    composes across a body and the next test list. The per-iteration trace is therefore
+    `Concat(test-list output, body output)`, closed under `Repeat`, with the test list also
+    contributing an initial (pre-first-body) and final (post-last-body) run. A body-only closure
+    would miss `#\n` then `doc-lattice` assembled across the body -> next-test boundary.
   Compound control flow the scanner cannot structure this way fails closed rather than blindly
   concatenating.
 
@@ -327,9 +334,11 @@ typed `DynamicResource` key (no modeled edge), never an `OutsideGap`.
 ### 5.3 Pipe edges
 
 A `|` records producer-id -> consumer-id; the producer's stdout port (its stream-scope aggregation,
-section 4.6, when the producer side is itself compound) transports unchanged into the consumer's
-stdin port. A producer whose stdout carries no authored marker (for example `curl`, whose stdout
-reduces to `OUTSIDE`) gives the consumer an `OUTSIDE` stdin, so `curl | bash` certifies.
+section 4.6, when the producer side is itself compound) is a **candidate** binding of the consumer's
+descriptor 0. A producer whose stdout carries no authored marker (for example `curl`, whose stdout
+reduces to `OUTSIDE`) gives the consumer an `OUTSIDE` stdin, so `curl | bash` certifies. The pipe is a
+*candidate* rather than a final edge because a later redirection on the consumer can rebind descriptor
+0; the resolution is section 5.6.
 
 ### 5.4 Process substitution as typed ephemeral resources
 
@@ -363,6 +372,38 @@ concatenated to each other. This closes the `printf` split (ordered argv composi
 `cat > task.sh <<EOF` handoff (stdin passthrough) without trusting any head. `curl | bash` stays
 certified because neither authored alternative bears a marker and `OUTSIDE` carries the rest. A
 producer the phase-1 resolver classifies as doc-lattice keeps its existing finding-path treatment.
+
+### 5.6 Ordered descriptor binding (last binding wins)
+
+Pipe, heredoc, herestring, static read, and static write are **not** independent content edges.
+Bash establishes pipeline connections first, then processes each command's redirections
+left-to-right, and the **final binding of each descriptor** determines byte flow
+(<https://www.gnu.org/software/bash/manual/html_node/Pipelines.html>,
+<https://www.gnu.org/software/bash/manual/html_node/Redirections.html>). Evidence therefore records
+a per-command **ordered redirection-event list** `(ordinal, operator, effective descriptor, target)`,
+and the taint pass resolves byte flow by replay:
+
+1. install the pipeline endpoints (a `|` binds the producer's stdout to the consumer's descriptor 0);
+2. replay the command's redirection events in order, each rebinding its effective descriptor to its
+   target (a file resource, a heredoc/herestring body, or `/dev/null`);
+3. create content edges **only from the resulting final bindings** -- the final reader of descriptor
+   0 is the command's stdin content; the final writer of each output descriptor routes that
+   descriptor's content to the bound resource.
+
+Consequences the independent-edge model got wrong:
+
+- `printf ... | bash <<<'true'` **certifies**: the pipe binds `bash` descriptor 0 to `printf`, then
+  the herestring rebinds descriptor 0 to `true`; the marker-bearing pipe is not the final stdin.
+- `printf ... > task.sh > /dev/null; bash task.sh` **certifies**: descriptor 1's final binding is
+  `/dev/null`, so `task.sh` is created/truncated (a filesystem side effect: the resource key exists
+  with empty content) but receives no stdout. Reversing to `> /dev/null > task.sh` **refuses**.
+
+Earlier `>` targets retain their truncation side effect (the resource becomes an empty-content write)
+but do not receive the producer's output. **Descriptor scope:** only descriptor 1 (stdout) carries
+the section 5.5 may-output content into its bound resource; a write bound to another output
+descriptor (`2>`, and merges like `&>`/`2>&1` under the FD-alias limitation) routes `OUTSIDE` content,
+disclosed, since the may-output rule models stdout composition, not stderr. Only descriptor 0 input
+bindings feed a consumer's stdin.
 
 ## 6. Sinks, source selection, and the refusal rule
 
@@ -420,7 +461,7 @@ bit, since a shell resolves through `execve` regardless.
 modeled content flow, and that content reaches an execution sink. Operationally: evaluate the sink
 port's content value, resolving refs through the tables; if any authored-only alternative passes
 through accept, the pass returns a refusal with reason
-`"cross-command marker flow reaches an execution sink"`. Resolved doc-lattice invocations are
+`"authored marker flow reaches an execution sink"`. Resolved doc-lattice invocations are
 unaffected; marker-free flow, and flow whose only marker-capable alternative depends on an `OUTSIDE`
 contribution, certify (the latter disclosed).
 
@@ -461,10 +502,11 @@ flush, so evidence parsed after a command is gone can attach to its owner.
   previous flush** (tracked by count at flush time), never onto a single "last flushed command." A
   heredoc routes to the owner's stdin port only when its descriptor is 0 (default); `3<<EOF` targets
   descriptor 3 and is not a stdin sink.
-- **Redirection descriptor retention.** `_redirection_at` parses the numeric descriptor prefix but
-  discards it (`shell_scanner.py:1040-1056`); phase 2 must retain the effective descriptor on both
-  read and heredoc evidence so the stdin routing above is correct. Descriptor duplication forms
-  (`<&`, `>&`) are not resolved and stay under the disclosed FD-alias limitation (section 10).
+- **Ordered redirection events.** `_redirection_at` parses the numeric descriptor prefix but discards
+  it (`shell_scanner.py:1040-1056`); phase 2 records, per command, the ordered event list
+  `(ordinal, operator, effective descriptor, target)` over reads, writes, heredocs, and herestrings,
+  so the section 5.6 last-binding-wins replay is possible. Descriptor duplication forms (`<&`, `>&`,
+  `&>`, `2>&1`) are not resolved and stay under the disclosed FD-alias limitation (section 10).
 - **Pipe edges use a pending producer, not an eager consumer ID.** Because IDs are assigned at flush,
   the consumer does not exist when `|` is scanned (`shell_scanner.py:739-768`, `:1010`). At the `|`
   the just-flushed producer is recorded as a **pending producer edge**; the next command to flush
@@ -494,7 +536,7 @@ body smuggling via file handoff exits 2 end to end).
 **End-to-end refusal rows must prove phase 2 fired, not phase 1.** Phase 1 already refuses a complete
 marker in one assignment word (`tests/test_github_ci_shell_scanner.py:752-756`, `2422-2428`), so
 refusal rows use genuinely split authored content and assert the exact phase-2 reason
-(`"cross-command marker flow reaches an execution sink"`) so a phase-1 refusal cannot satisfy the
+(`"authored marker flow reaches an execution sink"`) so a phase-1 refusal cannot satisfy the
 test by accident:
 
 ```bash
@@ -516,7 +558,7 @@ in-word parameter default `unset X; eval "${X:-doc-}lattice reconcile"`; the ass
 the brace fan-out `eval doc-{lattice,noop}` and the adjacency fan-out
 `printf %s {doc-,lattice} | bash` (proving fan-out composes neighbors, which a `Choice` model would
 miss); the loop-binding case `for X in doc- lattice; do printf %s "$X"; done | bash`; the `case`
-fallthrough `case $Y in a) printf doc- ;& *) printf lattice ;; esac | bash` (`;&` composes across
+fallthrough `case a in a) printf doc- ;& *) printf lattice ;; esac | bash` (`;&` composes across
 arms); the static file read `printf ... > task.sh; bash < task.sh`; the launcher-head bypasses
 `X=doc-; X+=lattice; builtin eval "$X"` and `X=doc-; X+=lattice; uv run bash -c "$X"`; and the
 ambiguous selector `X=doc-; X+='lattice reconcile'; bash "$OPT" "$X"`. The
@@ -529,6 +571,18 @@ doc-
 EOF
 )lattice reconcile"   # substitution output "doc-\n" strips to "doc-", spliced to "lattice" -> refuse
 ```
+
+The `while` test-list case pins that the closure includes the pre-body test output (section 4.6),
+composing `doc-` from the body with `lattice` from the next iteration's test:
+
+```bash
+i=0; P='#\n'
+while { printf %b "$P"; test "$i" -lt 1; }; do printf doc-; P=lattice; i=1; done | bash
+```
+
+The descriptor-order case pins section 5.6 last-binding-wins: `printf ... > /dev/null > task.sh;
+bash task.sh` refuses (descriptor 1's final binding is `task.sh`), while the reversed
+`printf ... > task.sh > /dev/null; bash task.sh` and `printf ... | bash <<<'true'` certify.
 
 Mandatory CERTIFY (must not regress): `curl ... | bash`; `echo 'make build' > run.sh; bash run.sh`;
 `eval doc- lattice` (space barrier); `bash -c 'echo ok' <<EOF...EOF` (source selection -- stdin not a
