@@ -3096,6 +3096,169 @@ def test_parameter_operator_records_conditional_assignment_evidence():
     assert word.conditional_assignments[0].content == LiteralTransfer("doc-")
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        ': > "${X:=doc-}"; eval "$X"lattice',
+        ': <<< "${X:=doc-}"; eval "$X"lattice',
+        ': <<EOF\n${X:=doc-}\nEOF\neval "$X"lattice',
+        '{ :; } > "${X:=doc-}"; eval "$X"lattice',
+        '{ :; } <<EOF\n${X:=doc-}\nEOF\neval "$X"lattice',
+    ],
+    ids=(
+        "redirection-word",
+        "here-string",
+        "heredoc",
+        "brace-redirection",
+        "brace-heredoc",
+    ),
+)
+def test_redirection_parameter_assignment_reaches_owner_environment(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '( :; ) > "${X:=doc-}"; eval "$X"lattice',
+        '( :; ) <<EOF\n${X:=doc-}\nEOF\neval "$X"lattice',
+    ],
+    ids=("subshell-redirection", "subshell-heredoc"),
+)
+def test_redirection_parameter_assignment_stays_in_isolated_scope(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'command cat <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+        '/bin/cat /dev/null > "${X:=doc-}"; eval "$X"lattice',
+        'env cat <<EOF >/dev/null\n${X:=doc-}\nEOF\neval "$X"lattice',
+        'env printf x <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+    ],
+    ids=(
+        "command-here-string",
+        "path-redirection-word",
+        "env-heredoc",
+        "env-externalized-builtin",
+    ),
+)
+def test_external_command_redirection_assignment_does_not_persist(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf x <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+        '<<< "${X:=doc-}"; eval "$X"lattice',
+        'printf x <<EOF >/dev/null\n${X:=doc-}\nEOF\neval "$X"lattice',
+    ],
+    ids=("builtin-here-string", "null-command", "builtin-heredoc"),
+)
+def test_builtin_redirection_assignment_persists(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { :; }; f <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+        'function f { :; }; f <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+        'f () { :; }; f <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+        'cat() { :; }; cat <<< "${X:=doc-}" >/dev/null; eval "$X"lattice',
+    ],
+    ids=("compact", "function-keyword", "spaced", "external-shadow"),
+)
+def test_unknown_command_redirection_assignment_stays_fail_safe_for_shell_function(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "S='${X:-doc-}'; eval \"$S\"lattice",
+        "S='${X:=doc-}'; eval \"$S\"lattice",
+        "X=present; S='${X:+doc-}'; eval \"$S\"lattice",
+        "S='${X/pattern/doc-}'; eval \"$S\"lattice",
+        "Y=doc-; S='${X:-$Y}'; eval \"$S\"lattice",
+        "S='${X:-${Y:-doc-}}'; eval \"$S\"lattice",
+    ],
+    ids=(
+        "default",
+        "assign-default",
+        "alternate",
+        "replacement",
+        "variable-default",
+        "nested-default",
+    ),
+)
+def test_eval_second_pass_preserves_complex_parameter_operands(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "S='${X:-safe}'; eval \"$S\"lattice",
+        "S='${X/pattern/safe}'; eval \"$S\"lattice",
+    ],
+    ids=("default", "replacement"),
+)
+def test_eval_second_pass_complex_parameter_without_marker_stays_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "S='${X:-$(printf doc-)}'; eval \"$S\"lattice",
+        "S='${X:-`printf doc-`}'; eval \"$S\"lattice",
+        "S='${X:-${Y:-$(printf doc-)}}'; eval \"$S\"lattice",
+        """S='${X:-$(printf %s "`printf doc-`")}'; eval "$S"lattice""",
+        """S='${X:-`printf %s "$(printf doc-)"`}'; eval "$S"lattice""",
+    ],
+    ids=("modern", "legacy", "nested-default", "legacy-in-modern", "modern-in-legacy"),
+)
+def test_eval_parameter_operand_command_substitution_fails_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint eval command substitution cannot be bounded"
+
+
+def test_deep_eval_parameter_command_substitution_fails_with_stable_bound():
+    nested = "$(" * 1100 + "printf doc-" + ")" * 1100
+    result = scan_doc_lattice_invocations(f"S='${{X:-{nested}}}'; eval \"$S\"lattice")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint eval command substitution cannot be bounded"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        r"""S='${X:-\$(printf doc-)}'; eval "$S"lattice""",
+    ],
+    ids=("escaped",),
+)
+def test_inactive_eval_parameter_operand_command_substitution_stays_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 def test_brace_alternatives_become_separate_eval_argv_ports():
     result = scan_doc_lattice_invocations("eval {doc-,lattice}")
 
@@ -3287,6 +3450,41 @@ def test_eval_second_pass_keeps_inactive_braces_literal(script: str):
 
 
 @pytest.mark.parametrize(
+    "script",
+    [
+        "X={1..1000}; true",
+        "X={doc-,$Y}lattice; true",
+        "X={1..1000} true",
+        "X=({1..1000}); true",
+    ],
+    ids=("range", "dynamic", "prefix", "array"),
+)
+def test_assignment_rhs_defers_brace_expansion_until_reparsed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        ('X={1..1000}; eval "$X"', "shell taint brace expansion limit exceeded"),
+        (
+            'X={doc-,$Y}lattice; eval "$X"',
+            "shell taint dynamic brace expansion cannot be bounded",
+        ),
+    ],
+    ids=("range-cap", "dynamic"),
+)
+def test_eval_second_pass_applies_deferred_assignment_braces(script: str, reason: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == reason
+
+
+@pytest.mark.parametrize(
     ("script", "reason"),
     [
         ("eval doc-{1..1000}-lattice", "shell taint brace expansion limit exceeded"),
@@ -3355,6 +3553,10 @@ def test_split_printf_file_handoff_reaches_shell_script_sink(script_operand: str
     assert_taint_refusal(
         f"printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash {script_operand}"
     )
+
+
+def test_padded_brace_range_preserves_shell_script_resource_key():
+    assert_taint_refusal("printf '%s%s\\n' 'doc-' 'lattice reconcile' > 01\nbash {01..01}")
 
 
 def test_heredoc_passthrough_reaches_written_script_sink():

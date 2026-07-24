@@ -138,7 +138,71 @@ _COMMAND_OPERATORS = (
 )
 _WORD_BREAKS = frozenset(" \t\n;&|()<>")
 _PARAMETER_OPERATORS = (":-", ":=", ":+", "-", "=", "+")
-
+_BASH_REDIRECTION_ASSIGNMENT_BUILTINS = frozenset(
+    {
+        ".",
+        ":",
+        "[",
+        "alias",
+        "bg",
+        "bind",
+        "break",
+        "builtin",
+        "caller",
+        "cd",
+        "command",
+        "compgen",
+        "complete",
+        "compopt",
+        "continue",
+        "declare",
+        "dirs",
+        "disown",
+        "echo",
+        "enable",
+        "eval",
+        "exec",
+        "exit",
+        "export",
+        "false",
+        "fc",
+        "fg",
+        "getopts",
+        "hash",
+        "help",
+        "history",
+        "jobs",
+        "kill",
+        "let",
+        "local",
+        "logout",
+        "mapfile",
+        "popd",
+        "printf",
+        "pushd",
+        "pwd",
+        "read",
+        "readarray",
+        "readonly",
+        "return",
+        "set",
+        "shift",
+        "shopt",
+        "source",
+        "suspend",
+        "test",
+        "times",
+        "trap",
+        "true",
+        "type",
+        "typeset",
+        "ulimit",
+        "umask",
+        "unalias",
+        "unset",
+        "wait",
+    }
+)
 _UV_SHARED_OPTIONS_WITH_ARGUMENTS = frozenset(
     {
         "--allow-insecure-host",
@@ -621,6 +685,7 @@ class _Heredoc:
     ordinal: int
     owner_id: int | None = None
     owner_scope_id: int | None = None
+    assignments_persist: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,6 +725,7 @@ class _CommandScanState:
     heredocs: list[_Heredoc]
     cases: list["_CaseScanState"]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
+    redirection_assignments: list[_AssignmentEvidence] = field(default_factory=list)
     owned_heredoc_count: int = 0
     last_command_id: int | None = None
     prefix_mode: str = "normal"
@@ -675,6 +741,7 @@ class _CommandScanState:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
         self.words.clear()
         self.redirections.clear()
+        self.redirection_assignments.clear()
         self.prefix_mode = "normal"
         self.prefix_pending = 0
         self.at_command_position = True
@@ -1385,7 +1452,7 @@ class _ShellScanner:
         state.pipeline = None
         state.pending_pipe_producer = None
 
-    def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912
+    def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912, PLR0915
         if not state.words and not state.redirections:
             return None
         resolution = _LauncherResolutionState(self.budget)
@@ -1419,6 +1486,7 @@ class _ShellScanner:
             if state.words and not resolution_attempted:
                 _doc_lattice_command_index(state.words, 0, resolution)
                 executable = _executable_evidence_from_resolution(state.words, resolution)
+            redirection_assignments_persist = _redirection_assignments_persist(executable)
             assignment_indices = _assignment_indices(state.words, executable)
             assignments: list[_AssignmentEvidence] = []
             for index in assignment_indices:
@@ -1433,6 +1501,8 @@ class _ShellScanner:
                     )
             for word in state.words:
                 assignments.extend(word.conditional_assignments)
+            if redirection_assignments_persist:
+                assignments.extend(state.redirection_assignments)
             argv_indices: dict[int, int] = {}
             argv_parts: list[_ArgPort] = []
             for source_index, word in enumerate(state.words):
@@ -1476,6 +1546,7 @@ class _ShellScanner:
                     self.taint_builder.attach_scope_parent(scope_id, command_id)
             for heredoc in state.heredocs[state.owned_heredoc_count :]:
                 heredoc.owner_id = command_id
+                heredoc.assignments_persist = redirection_assignments_persist
             state.owned_heredoc_count = len(state.heredocs)
         state.reset_command()
         return state.last_command_id
@@ -1594,6 +1665,13 @@ class _ShellScanner:
                 state.heredocs[-1].owner_scope_id = state.pending_compound_scope_id
             return index
         target, index = self._parse_word(index, limit, depth)
+        if state.pending_compound_scope_id is not None and self.taint_builder is not None:
+            self.taint_builder.attach_scope_assignments(
+                state.pending_compound_scope_id,
+                target.conditional_assignments,
+            )
+        else:
+            state.redirection_assignments.extend(target.conditional_assignments)
         redirection_target: RedirectionTarget
         if redirection.operator == "<<<":
             redirection_target = ContentTarget(concat(target.content, LiteralTransfer("\n")))
@@ -1723,22 +1801,24 @@ class _ShellScanner:
             raw_body = self.source[body_start:body_end]
             body = _remove_active_line_continuations(raw_body) if heredoc.expand else raw_body
             if self.taint_builder is not None:
-                content = (
+                content, assignments = (
                     self._heredoc_content_expression(body, depth + 1)
                     if heredoc.expand
-                    else LiteralTransfer(raw_body)
+                    else (LiteralTransfer(raw_body), ())
                 )
                 if heredoc.owner_id is not None:
                     self.taint_builder.attach_redirection_content(
                         heredoc.owner_id,
                         heredoc.ordinal,
                         content,
+                        assignments if heredoc.assignments_persist else (),
                     )
                 elif heredoc.owner_scope_id is not None:
                     self.taint_builder.attach_scope_redirection_content(
                         heredoc.owner_scope_id,
                         heredoc.ordinal,
                         content,
+                        assignments,
                     )
             if heredoc.expand and self.taint_builder is None:
                 child = self._child_scanner(
@@ -1750,7 +1830,11 @@ class _ShellScanner:
             index = after_delimiter
         return min(index, limit)
 
-    def _heredoc_content_expression(self, body: str, depth: int) -> ContentExpr:
+    def _heredoc_content_expression(
+        self,
+        body: str,
+        depth: int,
+    ) -> tuple[ContentExpr, tuple[_AssignmentEvidence, ...]]:
         """Model active heredoc expansions while retaining all literal bytes."""
         child = _ShellScanner(
             body,
@@ -1775,11 +1859,14 @@ class _ShellScanner:
             expansion = child._consume_active_expansion(index, limit, depth)
             if expansion is not None:
                 content.append_expression(expansion.content)
+                for assignment in expansion.conditional_assignments:
+                    content.add_conditional_assignment(assignment)
                 index = expansion.end
                 continue
             content.append_literal(body[index])
             index += 1
-        return content.build().expression
+        built = content.build()
+        return built.expression, built.conditional_assignments
 
     def _consume_unquoted_heredoc_line(
         self,
@@ -2525,6 +2612,30 @@ def _executable_evidence_from_resolution(
     )
 
 
+def _redirection_assignments_persist(executable: _ExecutableEvidence | None) -> bool:
+    """Return whether redirection expansion runs in a surviving shell environment."""
+    if executable is None:
+        return True
+    pending = [executable]
+    while pending:
+        candidate = pending.pop()
+        if candidate.ambiguous:
+            return True
+        if (
+            not candidate.external_lookup
+            and candidate.literal == candidate.name
+            and candidate.name in _BASH_REDIRECTION_ASSIGNMENT_BUILTINS
+        ):
+            return True
+        proven_external = candidate.external_lookup or (
+            candidate.literal is not None and "/" in candidate.literal
+        )
+        if not proven_external:
+            return True
+        pending.extend(candidate.alternates)
+    return False
+
+
 def _assignment_indices(
     words: list[_ShellWord], executable: _ExecutableEvidence | None
 ) -> set[int]:
@@ -2816,7 +2927,16 @@ def _skip_shell_prefixes(
                 return _ResolvedIndex(None, ambiguous or wrapper.ambiguous, external_lookup)
             index = wrapper.index
             ambiguous = ambiguous or wrapper.ambiguous
-            external_lookup = external_lookup or wrapper_literal == "exec"
+            external_lookup = (
+                external_lookup
+                or wrapper_literal == "exec"
+                or (
+                    wrapper_literal == "command"
+                    and index < len(words)
+                    and not _word_may_change_argv(words[index])
+                    and words[index].literal not in _BASH_REDIRECTION_ASSIGNMENT_BUILTINS
+                )
+            )
             if (
                 wrapper_literal in {"command", "exec"}
                 and index < len(words)

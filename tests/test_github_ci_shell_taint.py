@@ -175,6 +175,41 @@ def test_content_builder_preserves_signed_numeric_and_letter_ranges(
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
+        ("{01..03}", ["01", "02", "03"]),
+        ("{1..03}", ["01", "02", "03"]),
+        ("{03..1}", ["03", "02", "01"]),
+        ("{-03..-01}", ["-03", "-02", "-01"]),
+        ("{-3..-01}", ["-03", "-02", "-01"]),
+        ("{01..-01}", ["001", "000", "-01"]),
+    ],
+    ids=(
+        "padded",
+        "mixed-endpoint",
+        "descending",
+        "negative",
+        "mixed-negative-endpoint",
+        "cross-zero",
+    ),
+)
+def test_content_builder_preserves_bash_numeric_range_padding(
+    source: str,
+    expected: list[str],
+) -> None:
+    builder = ContentBuilder.empty()
+    for character in source:
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert [port.literal for port in built.argv_ports] == expected
+    assert [port.content for port in built.argv_ports] == [
+        LiteralTransfer(value) for value in expected
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
         ("{1..3..0}", ["1", "2", "3"]),
         ("{1..3..-1}", ["1", "2", "3"]),
         ("{3..1..1}", ["3", "2", "1"]),
@@ -238,6 +273,25 @@ def test_content_builder_assignment_rhs_preserves_original_unexpanded_tokens() -
     built = builder.build()
 
     assert built.assignment_content == LiteralTransfer("{doc-,lattice}")
+    assert [(port.literal, port.content) for port in built.argv_ports] == [
+        ("X={doc-,lattice}", LiteralTransfer("X={doc-,lattice}"))
+    ]
+    assert built.brace_expansion_error is None
+
+
+def test_content_builder_assignment_rhs_does_not_apply_brace_expansion_cap() -> None:
+    builder = ContentBuilder.empty()
+    for character in "X=":
+        builder.append_literal(character, brace_active=True)
+    builder.mark_assignment("X", append=False)
+    for character in "{1..1000}":
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert built.assignment_content == LiteralTransfer("{1..1000}")
+    assert [port.literal for port in built.argv_ports] == ["X={1..1000}"]
+    assert built.brace_expansion_error is None
 
 
 @pytest.mark.parametrize(

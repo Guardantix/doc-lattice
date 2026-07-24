@@ -397,6 +397,17 @@ def _brace_range_step(first: int, last: int, step_text: str | None) -> int:
     return magnitude if first <= last else -magnitude
 
 
+def _brace_range_number(value: int, start: str, stop: str) -> str:
+    """Render one numeric range member with Bash's endpoint-derived zero padding."""
+    padded = any(
+        endpoint[:1] != "+"
+        and len(endpoint.removeprefix("-")) > 1
+        and endpoint.removeprefix("-").startswith("0")
+        for endpoint in (start, stop)
+    )
+    return f"{value:0{max(len(start), len(stop))}d}" if padded else str(value)
+
+
 def _brace_alternatives(
     tokens: list[_ContentToken],
     limits: TaintLimits,
@@ -436,7 +447,7 @@ def _brace_alternatives(
         if expansion_count > limits.max_brace_expansions:
             raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
         values = range(first, last + (1 if step > 0 else -1), step)
-        return [_literal_tokens(str(value)) for value in values]
+        return [_literal_tokens(_brace_range_number(value, start, stop)) for value in values]
     if (
         len(start) == len(stop) == 1
         and start.isascii()
@@ -535,13 +546,16 @@ class ContentBuilder:
             else None
         )
         brace_expansion_error: str | None = None
-        try:
-            expanded_ports = _expand_braces(self.tokens, limits)
-        except _TaintLimitExceeded as error:
-            if not defer_brace_errors:
-                raise
-            brace_expansion_error = str(error)
+        if self.assignment_value_start is not None:
             expanded_ports = [self.tokens]
+        else:
+            try:
+                expanded_ports = _expand_braces(self.tokens, limits)
+            except _TaintLimitExceeded as error:
+                if not defer_brace_errors:
+                    raise
+                brace_expansion_error = str(error)
+                expanded_ports = [self.tokens]
         ports = tuple(
             _WordContentPort(
                 "".join(token.literal for token in expanded),
@@ -597,6 +611,7 @@ class _EvidenceBuilder:
         command_id: int,
         ordinal: int,
         content: ContentExpr,
+        assignments: tuple[_AssignmentEvidence, ...] = (),
     ) -> None:
         """Replace one command redirection's placeholder with authored content."""
         for index, command in enumerate(self.commands):
@@ -606,7 +621,11 @@ class _EvidenceBuilder:
                 replace(event, target=ContentTarget(content)) if event.ordinal == ordinal else event
                 for event in command.redirections
             )
-            self.commands[index] = replace(command, redirections=redirections)
+            self.commands[index] = replace(
+                command,
+                assignments=(*command.assignments, *assignments),
+                redirections=redirections,
+            )
             return
         raise ValueError("heredoc owner command is missing")
 
@@ -615,6 +634,7 @@ class _EvidenceBuilder:
         scope_id: int,
         ordinal: int,
         content: ContentExpr,
+        assignments: tuple[_AssignmentEvidence, ...] = (),
     ) -> None:
         """Replace one compound-scope heredoc placeholder with authored content."""
         for index, scope in enumerate(self.scopes):
@@ -624,9 +644,30 @@ class _EvidenceBuilder:
                 replace(event, target=ContentTarget(content)) if event.ordinal == ordinal else event
                 for event in scope.redirections
             )
-            self.scopes[index] = replace(scope, redirections=redirections)
+            self.scopes[index] = replace(
+                scope,
+                redirections=redirections,
+                loop_bindings=(*scope.loop_bindings, *assignments),
+            )
             return
         raise ValueError("heredoc owner scope is missing")
+
+    def attach_scope_assignments(
+        self,
+        scope_id: int,
+        assignments: tuple[_AssignmentEvidence, ...],
+    ) -> None:
+        """Attach redirection-word side effects to their compound-scope environment."""
+        if not assignments:
+            return
+        for index, scope in enumerate(self.scopes):
+            if scope.scope_id == scope_id:
+                self.scopes[index] = replace(
+                    scope,
+                    loop_bindings=(*scope.loop_bindings, *assignments),
+                )
+                return
+        raise ValueError("compound assignment owner scope is missing")
 
     def command_output_scope(self, command_id: int) -> int:
         """Return the stdout scope owned by one command."""
@@ -2042,6 +2083,7 @@ _EVAL_UNICODE_MAX = 0x10FFFF
 _EVAL_SURROGATE_MIN = 0xD800
 _EVAL_SURROGATE_MAX = 0xDFFF
 _EVAL_SPECIAL_PARAMETERS = frozenset("@*#?-$!0123456789")
+_EVAL_COMMAND_SUBSTITUTION_REASON = "shell taint eval command substitution cannot be bounded"
 _EVAL_ANSI_C_SIMPLE_ESCAPES = {
     "a": "\a",
     "b": "\b",
@@ -2161,8 +2203,13 @@ def _eval_reparse_branches(
 def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
     text: str,
     quote: str | None,
+    limits: TaintLimits,
+    *,
+    depth: int = 0,
 ) -> tuple[tuple[_ContentToken, ...], str | None]:
     """Tokenize eval text while retaining active brace and quote provenance."""
+    if depth > _MAX_EVAL_REPARSE_DEPTH:
+        raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
     tokens: list[_ContentToken] = []
     index = 0
 
@@ -2207,20 +2254,32 @@ def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
                 append_literal(escaped, brace_active=False)
             index += 2
             continue
+        if (
+            text.startswith("$(", index)
+            and not text.startswith("$((", index)
+            and _eval_command_substitution_closing(text, index) is not None
+        ):
+            raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
+        if character == "`" and _eval_backtick_closing(text, index) is not None:
+            raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
         if character == "$":
             if text.startswith("${", index):
-                closing = text.find("}", index + 2)
-                contents = text[index + 2 : closing] if closing != -1 else ""
-                if (
-                    closing == -1
-                    or not contents
-                    or contents in _EVAL_SPECIAL_PARAMETERS
-                    or contents.isdigit()
-                    or _eval_identifier_end(contents, 0) != len(contents)
-                ):
+                closing = _eval_parameter_closing(text, index)
+                if closing is None:
                     append_expression(OutsideGap())
-                    index = closing + 1 if closing != -1 else len(text)
+                    index = len(text)
                     continue
+                contents = text[index + 2 : closing]
+                append_expression(
+                    _eval_parameter_content(
+                        contents,
+                        quote,
+                        limits,
+                        depth=depth + 1,
+                    )
+                )
+                index = closing + 1
+                continue
             name, end = _eval_parameter_name(text, index)
             if name is not None:
                 append_expression(_SecondPassVariableRef(name))
@@ -2241,9 +2300,152 @@ def _eval_reparse_literal(
     limits: TaintLimits = TaintLimits(),  # noqa: B008
 ) -> tuple[ContentExpr, str | None]:
     """Reparse quote, escape, parameter, and bounded brace syntax."""
-    tokens, resulting_quote = _eval_reparse_tokens(text, quote)
+    tokens, resulting_quote = _eval_reparse_tokens(text, quote, limits)
     reparsed = tuple(_token_content(expanded) for expanded in _expand_braces(list(tokens), limits))
     return choice(*reparsed), resulting_quote
+
+
+def _eval_command_substitution_closing(
+    text: str,
+    start: int,
+    *,
+    depth: int = 0,
+) -> int | None:
+    """Return the balanced closing parenthesis for one active eval-time ``$(...)``."""
+    if depth > _MAX_EVAL_REPARSE_DEPTH:
+        raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
+    index = start + 2
+    parentheses = 1
+    quote: str | None = None
+    while index < len(text):
+        character = text[index]
+        if character == "\\":
+            index += 2
+            continue
+        if quote == "'":
+            quote = None if character == "'" else quote
+            index += 1
+            continue
+        if character == "'" and quote is None:
+            quote = "'"
+            index += 1
+            continue
+        if character == '"':
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if text.startswith("$(", index) and not text.startswith("$((", index):
+            nested_closing = _eval_command_substitution_closing(
+                text,
+                index,
+                depth=depth + 1,
+            )
+            if nested_closing is None:
+                return None
+            index = nested_closing + 1
+            continue
+        if quote is None and character == "(":
+            parentheses += 1
+        elif quote is None and character == ")":
+            parentheses -= 1
+            if parentheses == 0:
+                return index
+        index += 1
+    return None
+
+
+def _eval_backtick_closing(text: str, start: int) -> int | None:
+    """Return the unescaped closing backtick for one active legacy substitution."""
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "`":
+            return index
+        index += 1
+    return None
+
+
+def _eval_parameter_closing(text: str, start: int) -> int | None:
+    """Return the balanced closing brace for an eval-time parameter expansion."""
+    index = start + 2
+    nested = 1
+    quote: str | None = None
+    while index < len(text):
+        character = text[index]
+        if character == "\\":
+            index += 2
+            continue
+        if quote is not None:
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if text.startswith("$(", index) and not text.startswith("$((", index):
+            substitution_closing = _eval_command_substitution_closing(text, index)
+            if substitution_closing is None:
+                return None
+            index = substitution_closing + 1
+            continue
+        if character == "`":
+            substitution_closing = _eval_backtick_closing(text, index)
+            if substitution_closing is None:
+                return None
+            index = substitution_closing + 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        if text.startswith("${", index):
+            nested += 1
+            index += 2
+            continue
+        if character == "}":
+            nested -= 1
+            if nested == 0:
+                return index
+        index += 1
+    return None
+
+
+def _eval_parameter_content(
+    contents: str,
+    quote: str | None,
+    limits: TaintLimits,
+    *,
+    depth: int,
+) -> ContentExpr:
+    """Lower one balanced eval-time parameter expansion without dropping authored operands."""
+    if contents in _EVAL_SPECIAL_PARAMETERS or contents.isdigit():
+        return OutsideGap()
+    name_end = _eval_identifier_end(contents, 0)
+    name = contents[:name_end]
+    variable: ContentExpr = _SecondPassVariableRef(name) if name else OutsideGap()
+    if name and name_end == len(contents):
+        return variable
+
+    operator: str | None = None
+    operand_start = name_end
+    for candidate in (":-", ":=", ":+", "-", "=", "+"):
+        if contents.startswith(candidate, name_end):
+            operator = candidate
+            operand_start += len(candidate)
+            break
+    operand_text = contents[operand_start:]
+    operand_tokens, _operand_quote = _eval_reparse_tokens(
+        operand_text,
+        quote,
+        limits,
+        depth=depth,
+    )
+    operand = _token_content(list(operand_tokens))
+    if operator in {"-", ":-", "=", ":="}:
+        return choice(variable, operand)
+    if operator in {"+", ":+"}:
+        return choice(LiteralTransfer(""), operand)
+    return concat(OutsideGap(), operand)
 
 
 def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
@@ -2502,7 +2704,11 @@ def _eval_syntax_append(  # noqa: PLR0911
     if depth > _MAX_EVAL_REPARSE_DEPTH:
         raise _TaintLimitExceeded("shell taint eval syntax depth limit exceeded")
     if isinstance(expression, LiteralTransfer):
-        tokens, resulting_quote = _eval_reparse_tokens(expression.text, state.quote)
+        tokens, resulting_quote = _eval_reparse_tokens(
+            expression.text,
+            state.quote,
+            context.limits,
+        )
         value: _EvalSyntaxValue = frozenset({state})
         for token in tokens:
             value = _cap_eval_syntax(
