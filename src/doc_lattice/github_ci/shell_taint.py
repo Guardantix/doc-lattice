@@ -1182,6 +1182,11 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
                 parts.append(_SecondPassVariableRef(name))
                 index = end
                 continue
+            if index + 1 < len(text) and text[index + 1] in "@*#?-$!0123456789":
+                flush_literal()
+                parts.append(OutsideGap())
+                index += 2
+                continue
         literal.append(character)
         index += 1
     flush_literal()
@@ -1422,6 +1427,73 @@ def _solve_eval_syntax_variables(
     return variables
 
 
+def _builtin_eval_candidates(command: _CommandEvidence) -> tuple[_ExecutableEvidence, ...]:
+    """Return the exact builtin eval candidates whose arguments enter a second parse."""
+    return tuple(
+        executable
+        for executable in _iter_executable_evidence(command.executable)
+        if (
+            executable.name == "eval"
+            and executable.literal == "eval"
+            and not executable.external_lookup
+        )
+    )
+
+
+def _eval_content_dependencies(expression: ContentExpr) -> set[str]:
+    """Collect variable names that can enter eval syntax from one authored expression."""
+    names: set[str] = set()
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, VariableRef):
+            names.add(current.name)
+        elif isinstance(current, LiteralTransfer):
+            names.update(_eval_literal_variable_names(current.text))
+        elif isinstance(current, Choice | Concat):
+            pending.extend(current.parts)
+    return names
+
+
+def _eval_literal_variable_names(text: str) -> set[str]:
+    """Find simple parameter references without rejecting malformed syntax during reachability."""
+    names: set[str] = set()
+    index = 0
+    while index < len(text):
+        if text[index] != "$":
+            index += 1
+            continue
+        name, end = _eval_parameter_name(text, index)
+        if name is not None:
+            names.add(name)
+            index = end
+            continue
+        index += 1
+    return names
+
+
+def _reachable_eval_variable_writes(
+    commands: tuple[_CommandEvidence, ...], writes: tuple[_FlowWrite, ...]
+) -> tuple[_FlowWrite, ...]:
+    """Retain only variable definitions reachable from exact builtin eval argument content."""
+    names: set[str] = set()
+    for command in commands:
+        for executable in _builtin_eval_candidates(command):
+            names.update(_eval_content_dependencies(_eval_arguments_raw(command, executable)))
+    changed = True
+    while changed:
+        changed = False
+        for write in writes:
+            if not isinstance(write.key, str) or write.key not in names:
+                continue
+            dependencies = _eval_content_dependencies(write.expression)
+            if dependencies <= names:
+                continue
+            names.update(dependencies)
+            changed = True
+    return tuple(write for write in writes if isinstance(write.key, str) and write.key in names)
+
+
 def _eval_sink_marker_capable(
     command: _CommandEvidence,
     variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
@@ -1429,9 +1501,7 @@ def _eval_sink_marker_capable(
     limits: TaintLimits,
 ) -> bool:
     """Return whether any builtin eval candidate reparses an authored marker flow."""
-    for executable in _iter_executable_evidence(command.executable):
-        if executable.name != "eval" or executable.literal != "eval" or executable.external_lookup:
-            continue
+    for executable in _builtin_eval_candidates(command):
         raw = _eval_arguments_raw(command, executable)
         if any(
             summary.full.entries[_DFA_START][1]
@@ -1587,16 +1657,23 @@ def analyze_marker_taint(  # noqa: PLR0911
     try:
         definitions, inputs = _build_flow_definitions(evidence)
         solved = _solve_flow_definitions(definitions, limits=limits)
-        eval_syntax_variables = _solve_eval_syntax_variables(
-            definitions.variable_writes,
-            solved.variables,
-            limits,
+        eval_commands = tuple(
+            command for command in evidence.commands if _builtin_eval_candidates(command)
+        )
+        eval_syntax_variables = (
+            _solve_eval_syntax_variables(
+                _reachable_eval_variable_writes(eval_commands, definitions.variable_writes),
+                solved.variables,
+                limits,
+            )
+            if eval_commands
+            else {}
         )
         process_resources = {
             resource.resource_id: resource for resource in evidence.process_resources
         }
         for command in evidence.commands:
-            if _eval_sink_marker_capable(
+            if command in eval_commands and _eval_sink_marker_capable(
                 command,
                 eval_syntax_variables,
                 solved.variables,

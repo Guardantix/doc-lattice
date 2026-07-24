@@ -3001,6 +3001,26 @@ def test_eval_reparse_keeps_external_only_value_non_evidentiary():
     assert result.invocations == NONE
 
 
+@pytest.mark.parametrize("parameter", ["$@", "$*", "$1"])
+def test_eval_reparse_treats_special_parameters_as_external_gap(parameter: str):
+    assert_taint_refusal(f"eval 'doc-{parameter}lattice --help'")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X="\\$\'unterminated"; echo ok',
+        "X=\"\\$'unterminated\"; eval 'echo ok'",
+    ],
+    ids=("no-eval", "eval-unrelated-variable"),
+)
+def test_unreachable_malformed_eval_syntax_does_not_block_certification(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 @pytest.mark.parametrize(
     ("script", "expected"),
     [
