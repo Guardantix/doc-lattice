@@ -1606,6 +1606,8 @@ def _scope_environment_ids(
 
 def _scoped_variable_name(environment: int, name: str) -> str:
     """Return an internal variable-table key that shell source cannot spell."""
+    if name.startswith("\0"):
+        return name
     return f"\0{environment}\0{name}"
 
 
@@ -1691,6 +1693,10 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
             loop_bindings=tuple(
                 replace(
                     binding,
+                    name=_scoped_variable_name(
+                        environments.get(scope.scope_id, scope.scope_id),
+                        binding.name,
+                    ),
                     content=_scope_expression(
                         binding.content,
                         environments.get(scope.scope_id, scope.scope_id),

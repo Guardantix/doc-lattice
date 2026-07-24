@@ -86,11 +86,12 @@ def _command(  # noqa: PLR0913
     external_lookup: bool = False,
     assignments: tuple[_AssignmentEvidence, ...] = (),
     redirections: tuple[_RedirectionEvent, ...] = (),
+    container_scope_id: int = 100,
 ) -> _CommandEvidence:
     return _CommandEvidence(
         command_id=command_id,
         output_scope_id=command_id,
-        container_scope_id=100,
+        container_scope_id=container_scope_id,
         argv=argv,
         assignments=assignments,
         redirections=redirections,
@@ -566,7 +567,114 @@ def test_scope_content_targets_and_loop_bindings_use_scope_environment() -> None
         ),
     )
     assert contextualized.scopes[0].loop_bindings == (
-        _AssignmentEvidence("ITEM", VariableRef(_scoped_variable_name(100, "PAYLOAD"))),
+        _AssignmentEvidence(
+            _scoped_variable_name(100, "ITEM"),
+            VariableRef(_scoped_variable_name(100, "PAYLOAD")),
+        ),
+    )
+    assert _contextualize_evidence(contextualized).scopes[0].loop_bindings[0].name == (
+        _scoped_variable_name(100, "ITEM")
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["subshell_group", "brace_group"],
+    ids=("isolated", "shared"),
+)
+def test_loop_binding_reaches_eval_in_same_non_root_scope(kind: str) -> None:
+    sink = _command(
+        10,
+        _arg("eval"),
+        _arg(
+            "$ITEM lattice reconcile",
+            Concat((VariableRef("ITEM"), LiteralTransfer("lattice reconcile"))),
+            dynamic=True,
+        ),
+        name="eval",
+        container_scope_id=100,
+    )
+    root = _StreamScopeEvidence(1, "command", None, None, ScopeOutput(100))
+    nested = _StreamScopeEvidence(
+        100,
+        kind,
+        1,
+        None,
+        CommandOutput(10),
+        loop_bindings=(_AssignmentEvidence("ITEM", LiteralTransfer("doc-")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_subshell_loop_binding_does_not_leak_to_parent_eval() -> None:
+    sink = _command(
+        10,
+        _arg("eval"),
+        _arg(
+            "$ITEM lattice reconcile",
+            Concat((VariableRef("ITEM"), LiteralTransfer("lattice reconcile"))),
+            dynamic=True,
+        ),
+        name="eval",
+        container_scope_id=1,
+    )
+    root = _StreamScopeEvidence(
+        1,
+        "command",
+        None,
+        None,
+        SequenceOutput((ScopeOutput(100), CommandOutput(10))),
+    )
+    nested = _StreamScopeEvidence(
+        100,
+        "subshell_group",
+        1,
+        None,
+        SequenceOutput(()),
+        loop_bindings=(_AssignmentEvidence("ITEM", LiteralTransfer("doc-")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
+        False,
+        None,
+    )
+
+
+def test_brace_loop_binding_shares_parent_eval_environment() -> None:
+    sink = _command(
+        10,
+        _arg("eval"),
+        _arg(
+            "$ITEM lattice reconcile",
+            Concat((VariableRef("ITEM"), LiteralTransfer("lattice reconcile"))),
+            dynamic=True,
+        ),
+        name="eval",
+        container_scope_id=1,
+    )
+    root = _StreamScopeEvidence(
+        1,
+        "command",
+        None,
+        None,
+        SequenceOutput((ScopeOutput(100), CommandOutput(10))),
+    )
+    nested = _StreamScopeEvidence(
+        100,
+        "brace_group",
+        1,
+        None,
+        SequenceOutput(()),
+        loop_bindings=(_AssignmentEvidence("ITEM", LiteralTransfer("doc-")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
+        True,
+        "authored marker flow reaches an execution sink",
     )
 
 
