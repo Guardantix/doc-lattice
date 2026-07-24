@@ -390,7 +390,14 @@ def _brace_integer(value: str) -> int:
     return int(value)
 
 
-def _brace_alternatives(  # noqa: PLR0911, PLR0912
+def _brace_range_step(first: int, last: int, step_text: str | None) -> int:
+    """Normalize a brace range step magnitude and endpoint-derived direction like Bash."""
+    magnitude = abs(_brace_integer(step_text)) if step_text is not None else 1
+    magnitude = magnitude or 1
+    return magnitude if first <= last else -magnitude
+
+
+def _brace_alternatives(
     tokens: list[_ContentToken],
     limits: TaintLimits,
 ) -> list[list[_ContentToken]] | None:
@@ -424,13 +431,7 @@ def _brace_alternatives(  # noqa: PLR0911, PLR0912
     if _signed_decimal(start) is not None and _signed_decimal(stop) is not None:
         first = _brace_integer(start)
         last = _brace_integer(stop)
-        step = _brace_integer(step_text) if step_text is not None else None
-        if step is None:
-            step = 1 if first <= last else -1
-        if step == 0:
-            return []
-        if (last - first) * step < 0:
-            return []
+        step = _brace_range_step(first, last, step_text)
         expansion_count = abs(last - first) // abs(step) + 1
         if expansion_count > limits.max_brace_expansions:
             raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
@@ -445,13 +446,10 @@ def _brace_alternatives(  # noqa: PLR0911, PLR0912
     ):
         first = ord(start)
         last = ord(stop)
-        step = (
-            int(step_text) if step_text is not None and step_text.lstrip("+-").isdigit() else None
-        )
-        if step is None:
-            step = 1 if first <= last else -1
-        if step == 0 or (last - first) * step < 0:
-            return []
+        step = _brace_range_step(first, last, step_text)
+        expansion_count = abs(last - first) // abs(step) + 1
+        if expansion_count > limits.max_brace_expansions:
+            raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
         return [
             _literal_tokens(chr(value))
             for value in range(first, last + (1 if step > 0 else -1), step)
@@ -2060,7 +2058,18 @@ _EVAL_ANSI_C_SIMPLE_ESCAPES = {
     "?": "?",
 }
 
-_EvalSyntaxValue: TypeAlias = frozenset[tuple[_TransferSummary, str | None]]  # noqa: UP040
+
+@dataclass(frozen=True, slots=True)
+class _EvalSyntaxState:
+    """One bounded eval parse state retained across symbolic variable writes."""
+
+    summary: _TransferSummary
+    quote: str | None
+    brace_tokens: tuple[_ContentToken, ...] = ()
+    brace_depth: int = 0
+
+
+_EvalSyntaxValue: TypeAlias = frozenset[_EvalSyntaxState]  # noqa: UP040
 
 
 def _eval_reparse_content(
@@ -2118,12 +2127,11 @@ def _eval_reparse_branches(
     return [(expression, quote)]
 
 
-def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
+def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
     text: str,
     quote: str | None,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
-) -> tuple[ContentExpr, str | None]:
-    """Reparse quote, escape, and simple parameter syntax from one literal transfer."""
+) -> tuple[tuple[_ContentToken, ...], str | None]:
+    """Tokenize eval text while retaining active brace and quote provenance."""
     tokens: list[_ContentToken] = []
     index = 0
 
@@ -2193,8 +2201,18 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
                 continue
         append_literal(character, brace_active=quote is None)
         index += 1
-    reparsed = tuple(_token_content(expanded) for expanded in _expand_braces(tokens, limits))
-    return choice(*reparsed), quote
+    return tuple(tokens), quote
+
+
+def _eval_reparse_literal(
+    text: str,
+    quote: str | None,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
+) -> tuple[ContentExpr, str | None]:
+    """Reparse quote, escape, parameter, and bounded brace syntax."""
+    tokens, resulting_quote = _eval_reparse_tokens(text, quote)
+    reparsed = tuple(_token_content(expanded) for expanded in _expand_braces(list(tokens), limits))
+    return choice(*reparsed), resulting_quote
 
 
 def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
@@ -2294,12 +2312,184 @@ def _eval_ansi_c_character(value: int) -> str:
 
 def _eval_syntax_outside(quote: str | None) -> _EvalSyntaxValue:
     """Keep unknown external text non-evidentiary without inventing quote syntax."""
-    return frozenset((summary, quote) for summary in _OUTSIDE_VALUE)
+    return frozenset(_EvalSyntaxState(summary, quote) for summary in _OUTSIDE_VALUE)
 
 
 def _cap_eval_syntax(value: _EvalSyntaxValue, limits: TaintLimits) -> _EvalSyntaxValue:
     if len(value) > limits.max_alternatives:
         raise _TaintLimitExceeded("shell taint eval syntax alternative limit exceeded")
+    return value
+
+
+def _eval_syntax_token(
+    state: _EvalSyntaxState,
+    token: _ContentToken,
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> _EvalSyntaxValue:
+    """Append one eval token while retaining an unmatched active brace operand."""
+    if not state.brace_tokens and _active_character(token, "{"):
+        return frozenset(
+            {
+                _EvalSyntaxState(
+                    state.summary,
+                    state.quote,
+                    (token,),
+                    1,
+                )
+            }
+        )
+    if state.brace_tokens:
+        brace_tokens = (*state.brace_tokens, token)
+        if len(brace_tokens) > limits.max_expression_nodes:
+            raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+        brace_depth = state.brace_depth
+        if _active_character(token, "{"):
+            brace_depth += 1
+            if brace_depth > limits.max_brace_depth:
+                raise _TaintLimitExceeded("shell taint brace expansion depth limit exceeded")
+        elif _active_character(token, "}"):
+            brace_depth -= 1
+        if brace_depth:
+            return frozenset(
+                {
+                    _EvalSyntaxState(
+                        state.summary,
+                        state.quote,
+                        brace_tokens,
+                        brace_depth,
+                    )
+                }
+            )
+        expanded_words = _expand_braces(list(brace_tokens), limits)
+        expanded_content = concat(
+            *(
+                part
+                for index, expanded in enumerate(expanded_words)
+                for part in (
+                    *((LiteralTransfer(" "),) if index else ()),
+                    _token_content(expanded),
+                )
+            )
+        )
+        value = frozenset(
+            _EvalSyntaxState(state.summary.compose(after), state.quote)
+            for after in _evaluate_with_tables(
+                expanded_content,
+                raw_variables,
+                {},
+                {},
+                limits,
+            )
+        )
+        return _cap_eval_syntax(value, limits)
+    value = frozenset(
+        _EvalSyntaxState(state.summary.compose(after), state.quote)
+        for after in _evaluate_with_tables(
+            token.expression,
+            raw_variables,
+            {},
+            {},
+            limits,
+        )
+    )
+    return _cap_eval_syntax(value, limits)
+
+
+def _eval_syntax_append(  # noqa: PLR0911, PLR0913
+    expression: ContentExpr,
+    state: _EvalSyntaxState,
+    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+    *,
+    depth: int = 0,
+) -> _EvalSyntaxValue:
+    """Append authored eval syntax to one bounded streaming parse state."""
+    if depth > _MAX_EVAL_REPARSE_DEPTH:
+        raise _TaintLimitExceeded("shell taint eval syntax depth limit exceeded")
+    if isinstance(expression, LiteralTransfer):
+        tokens, resulting_quote = _eval_reparse_tokens(expression.text, state.quote)
+        value: _EvalSyntaxValue = frozenset({state})
+        for token in tokens:
+            value = _cap_eval_syntax(
+                frozenset(
+                    after
+                    for current in value
+                    for after in _eval_syntax_token(
+                        current,
+                        token,
+                        raw_variables,
+                        limits,
+                    )
+                ),
+                limits,
+            )
+        return frozenset(replace(current, quote=resulting_quote) for current in value)
+    if isinstance(expression, VariableRef):
+        if state.brace_tokens:
+            return _eval_syntax_token(
+                state,
+                _ContentToken(OutsideGap(), "", False),
+                raw_variables,
+                limits,
+            )
+        suffixes = variables.get(
+            (expression.name, state.quote),
+            _eval_syntax_outside(state.quote),
+        )
+        return _cap_eval_syntax(
+            frozenset(
+                _EvalSyntaxState(
+                    state.summary.compose(suffix.summary),
+                    suffix.quote,
+                    suffix.brace_tokens,
+                    suffix.brace_depth,
+                )
+                for suffix in suffixes
+            ),
+            limits,
+        )
+    if isinstance(expression, OutsideGap | ResourceRef | StreamRef):
+        return _eval_syntax_token(
+            state,
+            _ContentToken(expression, "", False),
+            raw_variables,
+            limits,
+        )
+    if isinstance(expression, Choice):
+        value = frozenset(
+            alternative
+            for part in expression.parts
+            for alternative in _eval_syntax_append(
+                part,
+                state,
+                variables,
+                raw_variables,
+                limits,
+                depth=depth + 1,
+            )
+        )
+        return _cap_eval_syntax(value, limits)
+    if not isinstance(expression, Concat):
+        return _eval_syntax_outside(state.quote)
+    value = frozenset({state})
+    for part in _coalesced_eval_parts(expression.parts):
+        value = _cap_eval_syntax(
+            frozenset(
+                after
+                for current in value
+                for after in _eval_syntax_append(
+                    part,
+                    current,
+                    variables,
+                    raw_variables,
+                    limits,
+                    depth=depth + 1,
+                )
+            ),
+            limits,
+        )
     return value
 
 
@@ -2312,53 +2502,35 @@ def _eval_syntax_expression(  # noqa: PLR0913
     *,
     depth: int = 0,
 ) -> _EvalSyntaxValue:
-    """Evaluate eval-reparsed syntax with quote-sensitive variable definitions."""
-    if depth > _MAX_EVAL_REPARSE_DEPTH:
-        raise _TaintLimitExceeded("shell taint eval syntax depth limit exceeded")
-    if isinstance(expression, LiteralTransfer):
-        reparsed, resulting_quote = _eval_reparse_literal(expression.text, quote, limits)
-        return frozenset(
-            (summary, resulting_quote)
-            for summary in _evaluate_with_tables(reparsed, raw_variables, {}, {}, limits)
-        )
-    if isinstance(expression, VariableRef):
-        return variables.get((expression.name, quote), _eval_syntax_outside(quote))
-    if isinstance(expression, OutsideGap | ResourceRef | StreamRef):
-        return _eval_syntax_outside(quote)
-    if isinstance(expression, Choice):
-        value = frozenset(
-            alternative
-            for part in expression.parts
-            for alternative in _eval_syntax_expression(
-                part,
-                quote,
-                variables,
-                raw_variables,
-                limits,
-                depth=depth + 1,
-            )
-        )
-        return _cap_eval_syntax(value, limits)
-    if not isinstance(expression, Concat):
-        return _eval_syntax_outside(quote)
-    value: _EvalSyntaxValue = frozenset({(_EPSILON, quote)})
-    for part in _coalesced_eval_parts(expression.parts):
-        value = _cap_eval_syntax(
-            frozenset(
-                (summary.compose(after), resulting_quote)
-                for summary, current_quote in value
-                for after, resulting_quote in _eval_syntax_expression(
-                    part,
-                    current_quote,
-                    variables,
-                    raw_variables,
-                    limits,
-                    depth=depth + 1,
-                )
-            ),
+    """Evaluate eval syntax from one empty bounded streaming parse state."""
+    return _eval_syntax_append(
+        expression,
+        _EvalSyntaxState(_EPSILON, quote),
+        variables,
+        raw_variables,
+        limits,
+        depth=depth,
+    )
+
+
+def _finalize_eval_syntax(
+    state: _EvalSyntaxState,
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> _ContentValue:
+    """Treat a still-unmatched brace buffer as literal text at the eval sink."""
+    if not state.brace_tokens:
+        return frozenset({state.summary})
+    return frozenset(
+        state.summary.compose(after)
+        for after in _evaluate_with_tables(
+            _token_content(list(state.brace_tokens)),
+            raw_variables,
+            {},
+            {},
             limits,
         )
-    return value
+    )
 
 
 def _coalesced_eval_parts(parts: tuple[ContentExpr, ...]) -> tuple[ContentExpr, ...]:
@@ -2376,6 +2548,45 @@ def _coalesced_eval_parts(parts: tuple[ContentExpr, ...]) -> tuple[ContentExpr, 
     if literal:
         coalesced.append(LiteralTransfer("".join(literal)))
     return tuple(coalesced)
+
+
+def _ordered_eval_syntax_variables(
+    writes: tuple[_FlowWrite, ...],
+    raw_variables: dict[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> dict[tuple[str | int, str | None], _EvalSyntaxValue]:
+    """Apply writes once in source order for eval's second parsing pass."""
+    variables = {
+        (write.key, quote): frozenset() for write in writes for quote in _EVAL_QUOTE_STATES
+    }
+    for write in writes:
+        for quote in _EVAL_QUOTE_STATES:
+            if write.append:
+                base = variables[(write.key, quote)] or _eval_syntax_outside(quote)
+                value = _cap_eval_syntax(
+                    frozenset(
+                        after
+                        for current in base
+                        for after in _eval_syntax_append(
+                            write.expression,
+                            current,
+                            variables,
+                            raw_variables,
+                            limits,
+                        )
+                    ),
+                    limits,
+                )
+            else:
+                value = _eval_syntax_expression(
+                    write.expression,
+                    quote,
+                    variables,
+                    raw_variables,
+                    limits,
+                )
+            variables[(write.key, quote)] = value
+    return variables
 
 
 def _solve_eval_syntax_variables(
@@ -2398,11 +2609,11 @@ def _solve_eval_syntax_variables(
                     base = prior or _eval_syntax_outside(quote)
                     value = _cap_eval_syntax(
                         frozenset(
-                            (summary.compose(after), resulting_quote)
-                            for summary, current_quote in base
-                            for after, resulting_quote in _eval_syntax_expression(
+                            after
+                            for current in base
+                            for after in _eval_syntax_append(
                                 write.expression,
-                                current_quote,
+                                current,
                                 variables,
                                 raw_variables,
                                 limits,
@@ -2502,13 +2713,14 @@ def _eval_sink_marker_capable(
             return True
         if any(
             summary.full.entries[_DFA_START][1]
-            for summary, _quote in _eval_syntax_expression(
+            for state in _eval_syntax_expression(
                 raw,
                 None,
                 variables,
                 raw_variables,
                 limits,
             )
+            for summary in _finalize_eval_syntax(state, raw_variables, limits)
         ):
             return True
     return False
@@ -2672,13 +2884,37 @@ def analyze_marker_taint(  # noqa: PLR0911
         eval_commands = tuple(
             command for command in evidence.commands if _builtin_eval_candidates(command)
         )
+        eval_writes = (
+            _reachable_eval_variable_writes(
+                eval_commands,
+                definitions.variable_writes,
+                limits,
+            )
+            if eval_commands
+            else ()
+        )
+        ordered_eval_syntax_variables = (
+            _ordered_eval_syntax_variables(
+                eval_writes,
+                solved.variables,
+                limits,
+            )
+            if eval_commands
+            else {}
+        )
+        if any(
+            _eval_sink_marker_capable(
+                command,
+                ordered_eval_syntax_variables,
+                solved.variables,
+                limits,
+            )
+            for command in eval_commands
+        ):
+            return True, TAINT_REFUSAL_REASON
         eval_syntax_variables = (
             _solve_eval_syntax_variables(
-                _reachable_eval_variable_writes(
-                    eval_commands,
-                    definitions.variable_writes,
-                    limits,
-                ),
+                eval_writes,
                 solved.variables,
                 limits,
             )

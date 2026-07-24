@@ -3126,6 +3126,34 @@ def test_eval_second_pass_keeps_separate_brace_argv_clean():
 @pytest.mark.parametrize(
     "script",
     [
+        'X=doc-{; X+=lattice,noop}; eval "$X"',
+        'X=doc-; X+={lattice,; X+=noop}; eval "$X"',
+    ],
+    ids=("opening-in-assignment", "closing-in-later-append"),
+)
+def test_eval_second_pass_preserves_active_braces_across_writes(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '''X="doc-'{"; X+="lattice,noop}'"; eval "$X"''',
+        r'''X='doc-\{'; X+='lattice,noop\}'; eval "$X"''',
+        '''X='{doc-,'; X+='lattice}'; eval "$X"''',
+    ],
+    ids=("quoted", "escaped", "separate-argv"),
+)
+def test_eval_second_pass_cross_write_brace_controls_stay_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         '''eval "'doc-{lattice,noop}'"''',
         r'''eval "doc-\{lattice,noop\}"''',
     ],
@@ -3167,6 +3195,35 @@ def test_oversized_numeric_brace_range_fails_closed(range_body: str):
 
     assert result.invocations == NONE
     assert result.incomplete_reason == "shell taint brace expansion limit exceeded"
+
+
+@pytest.mark.parametrize(
+    "range_body",
+    [
+        f"a..z..{'9' * 5000}",
+        f"a..z..+{'9' * 5000}",
+        f"a..z..-{'9' * 5000}",
+    ],
+    ids=("step", "positive-step", "negative-step"),
+)
+def test_oversized_letter_brace_range_step_fails_closed(range_body: str):
+    result = scan_doc_lattice_invocations(f"eval {{{range_body}}}")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint brace expansion limit exceeded"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "eval doc-{l..n..0}attice",
+        "eval doc-{l..n..-1}attice",
+        "eval doc-{l..j..1}attice",
+    ],
+    ids=("zero-step", "opposite-step", "descending-opposite-step"),
+)
+def test_bash_normalized_brace_range_step_still_surfaces_marker(script: str):
+    assert_taint_refusal(script)
 
 
 @pytest.mark.parametrize(

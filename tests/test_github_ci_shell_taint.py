@@ -171,6 +171,35 @@ def test_content_builder_preserves_signed_numeric_and_letter_ranges(
     assert [port.literal for port in built.argv_ports] == expected
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("{1..3..0}", ["1", "2", "3"]),
+        ("{1..3..-1}", ["1", "2", "3"]),
+        ("{3..1..1}", ["3", "2", "1"]),
+        ("{a..c..0}", ["a", "b", "c"]),
+        ("{a..c..-1}", ["a", "b", "c"]),
+        ("{c..a..1}", ["c", "b", "a"]),
+    ],
+    ids=(
+        "numeric-zero",
+        "numeric-opposite",
+        "numeric-descending-opposite",
+        "letter-zero",
+        "letter-opposite",
+        "letter-descending-opposite",
+    ),
+)
+def test_content_builder_normalizes_range_step_like_bash(source: str, expected: list[str]) -> None:
+    builder = ContentBuilder.empty()
+    for character in source:
+        builder.append_literal(character, brace_active=True)
+
+    built = builder.build()
+
+    assert [port.literal for port in built.argv_ports] == expected
+
+
 @pytest.mark.parametrize("source", ["{1..2..invalid}", "{1..²}"])
 def test_content_builder_leaves_malformed_brace_ranges_literal(source: str) -> None:
     builder = ContentBuilder.empty()
@@ -414,6 +443,42 @@ def test_eval_variable_syntax_expands_braces_after_assignment_flow() -> None:
         True,
         "authored marker flow reaches an execution sink",
     )
+
+
+def test_eval_variable_syntax_preserves_braces_across_append_writes() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("doc-{")),
+            _AssignmentEvidence("X", LiteralTransfer("lattice,noop}"), append=True),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_variable_syntax_append_cycle_obeys_taint_cap() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("X", LiteralTransfer("{")),
+            _AssignmentEvidence("X", LiteralTransfer("x"), append=True),
+        ),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)),
+        limits=TaintLimits(max_expression_nodes=4),
+    ) == (True, "shell taint expression node limit exceeded")
 
 
 def test_eval_brace_expansion_obeys_taint_cap() -> None:
