@@ -967,6 +967,11 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
         return ()
     name = executable.name
     literal = executable.literal
+    direct_sinks: tuple[ContentExpr, ...] = ()
+    if literal is not None and "/" in literal:
+        key = normalize_static_resource(literal, dynamic=False)
+        if key is not None:
+            direct_sinks = (ResourceRef(key),)
     if name == "eval" and literal == "eval" and not executable.external_lookup:
         return (_eval_arguments(command),)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
@@ -980,18 +985,18 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
     if _normalized_shell_head(executable.name) in _SHELL_HEADS:
         selection = _select_shell_source(command.argv, executable.argv_index)
         if selection.kind is _ShellSourceKind.NONE:
-            return ()
+            return direct_sinks
         if selection.kind is _ShellSourceKind.STDIN:
-            return (stdin,)
+            return (stdin, *direct_sinks)
         if selection.kind is _ShellSourceKind.COMMAND:
             if selection.argv_index is None:
-                return ()
-            return (command.argv[selection.argv_index].content,)
+                return direct_sinks
+            return (command.argv[selection.argv_index].content, *direct_sinks)
         if selection.kind is _ShellSourceKind.SCRIPT:
             if selection.argv_index is None:
-                return ()
+                return direct_sinks
             port = command.argv[selection.argv_index]
-            return (_shell_script_source_expression(port, process_resources),)
+            return (_shell_script_source_expression(port, process_resources), *direct_sinks)
         candidates: list[ContentExpr] = []
         for index in selection.candidate_indices:
             port = command.argv[index]
@@ -1000,12 +1005,8 @@ def _sink_expressions(  # noqa: PLR0911, PLR0912
             )
         if selection.include_stdin:
             candidates.append(stdin)
-        return (choice(*candidates),)
-    if literal is not None and "/" in literal:
-        key = normalize_static_resource(literal, dynamic=False)
-        if key is not None:
-            return (ResourceRef(key),)
-    return ()
+        return (choice(*candidates), *direct_sinks)
+    return direct_sinks
 
 
 def analyze_marker_taint(  # noqa: PLR0911

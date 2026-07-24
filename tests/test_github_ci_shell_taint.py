@@ -417,6 +417,28 @@ def test_relative_direct_executable_with_slash_reads_static_resource() -> None:
     )
 
 
+def test_direct_path_named_like_shell_remains_a_resource_sink() -> None:
+    writer = _command(
+        1,
+        _arg("printf"),
+        _arg("doc-lattice"),
+        name="printf",
+        redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("dir/bash")),),
+    )
+    reader = _command(
+        2,
+        _arg("dir/bash"),
+        _arg("-c"),
+        _arg("true"),
+        name="bash",
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, reader))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
 def test_deep_producer_content_hits_node_limit_without_recursion_error() -> None:
     deep_concat = _deep_concat(1_200)
     deep_choice: ContentExpr = LiteralTransfer("y")
