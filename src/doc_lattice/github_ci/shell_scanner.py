@@ -1,7 +1,7 @@
 """Bounded non-executing scanner for direct doc-lattice shell invocations."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
@@ -736,6 +736,7 @@ class _CommandScanState:
     pipeline: _PipelineFrame | None = None
     pending_compound_scope_id: int | None = None
     compound_redirection_ordinal: int = 0
+    conditionally_executed: bool = False
 
     def reset_command(self) -> None:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
@@ -1118,9 +1119,12 @@ class _ShellScanner:
                 depth=depth + 1,
                 kind="subshell_group" if operator == "(" else "brace_group",
             )
+        if operator == "&":
+            self._mark_isolated_command(state, command_id)
         self._finalize_pipeline(state)
         self._advance_case_body(state, operator)
         state.pending_compound_scope_id = None
+        state.conditionally_executed = operator in {"&&", "||"}
         return index
 
     def _scan_compound_scope(  # noqa: PLR0913
@@ -1134,6 +1138,9 @@ class _ShellScanner:
         kind: str = "subshell_group",
     ) -> int:
         """Scan a real compound command and expose its stdout to the parent command list."""
+        command_start = len(self.taint_builder.commands) if self.taint_builder is not None else 0
+        function_body = self._pending_function_body(state, kind)
+        coprocess_body = self._pending_coprocess_body(state)
         end, scope_id = self._scan_stream_scope(
             start,
             limit,
@@ -1141,6 +1148,19 @@ class _ShellScanner:
             depth=depth,
             kind=kind,
         )
+        if self.taint_builder is not None and (state.conditionally_executed or function_body):
+            for command_index in range(command_start, len(self.taint_builder.commands)):
+                self.taint_builder.commands[command_index] = replace(
+                    self.taint_builder.commands[command_index],
+                    conditionally_executed=True,
+                )
+        if self.taint_builder is not None and coprocess_body:
+            for command_index in range(command_start, len(self.taint_builder.commands)):
+                self.taint_builder.commands[command_index] = replace(
+                    self.taint_builder.commands[command_index],
+                    isolated_execution=True,
+                    isolated_context_id=scope_id,
+                )
         if self.scope_stack:
             self.scope_stack[-1].outputs.append(ScopeOutput(scope_id))
         state.pending_compound_scope_id = scope_id
@@ -1151,6 +1171,85 @@ class _ShellScanner:
             )
             state.pending_pipe_producer = None
         return end
+
+    def _pending_function_body(self, state: _CommandScanState, kind: str) -> bool:
+        """Return whether a brace scope follows a parsed ``name()`` signature."""
+        if kind != "brace_group" or self.taint_builder is None or state.last_command_id is None:
+            return False
+        command = next(
+            (
+                command
+                for command in self.taint_builder.commands
+                if command.command_id == state.last_command_id
+            ),
+            None,
+        )
+        if command is not None and bool(command.argv[1:]) and command.argv[0].literal == "function":
+            return True
+        pending = next(
+            (
+                scope
+                for scope in self.taint_builder.scopes
+                if scope.scope_id == state.pending_compound_scope_id
+            ),
+            None,
+        )
+        return bool(
+            pending is not None
+            and pending.kind == "subshell_group"
+            and isinstance(pending.output, SequenceOutput)
+            and not pending.output.parts
+            and command is not None
+            and len(command.argv) == 1
+        )
+
+    def _pending_coprocess_body(self, state: _CommandScanState) -> bool:
+        """Return whether the pending compound command belongs to ``coproc``."""
+        if self.taint_builder is None or state.last_command_id is None:
+            return False
+        return any(
+            command.command_id == state.last_command_id
+            and bool(command.argv)
+            and command.argv[0].literal == "coproc"
+            for command in self.taint_builder.commands
+        )
+
+    def _mark_isolated_command(
+        self,
+        state: _CommandScanState,
+        command_id: int | None,
+    ) -> None:
+        """Mark a simple or compound asynchronous command as environment-isolated."""
+        if self.taint_builder is None:
+            return
+        command_ids = {command_id} if command_id is not None else set()
+        scope_id = state.pending_compound_scope_id
+        if scope_id is not None:
+            isolated_scopes = {scope_id}
+            changed = True
+            while changed:
+                changed = False
+                for scope in self.taint_builder.scopes:
+                    if (
+                        scope.parent_scope_id in isolated_scopes
+                        and scope.scope_id not in isolated_scopes
+                    ):
+                        isolated_scopes.add(scope.scope_id)
+                        changed = True
+            command_ids.update(
+                command.command_id
+                for command in self.taint_builder.commands
+                if command.container_scope_id in isolated_scopes
+            )
+        for command_index, command in enumerate(self.taint_builder.commands):
+            if command.command_id in command_ids:
+                self.taint_builder.commands[command_index] = replace(
+                    command,
+                    isolated_execution=True,
+                    isolated_context_id=(
+                        scope_id if scope_id is not None else command.output_scope_id
+                    ),
+                )
 
     def _record_word(self, state: _CommandScanState, word: _ShellWord) -> None:
         state.pending_compound_scope_id = None
@@ -1385,6 +1484,7 @@ class _ShellScanner:
         self._flush_command(state)
         self._finalize_pipeline(state)
         state.pending_compound_scope_id = None
+        state.conditionally_executed = False
         index += 1
         if state.heredocs:
             index = self._consume_heredocs(
@@ -1463,6 +1563,7 @@ class _ShellScanner:
             resolved_executable = _doc_lattice_command_index(state.words, 0, resolution)
             resolution_attempted = True
             executable = _executable_evidence_from_resolution(state.words, resolution)
+        assignment_indices = _assignment_indices(state.words, executable)
         if self.classify_commands:
             invocation = _invocation_in_simple_command(
                 state.words,
@@ -1479,15 +1580,14 @@ class _ShellScanner:
                 if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
                     raise _ShellScanIncomplete("invocation limit exceeded")
                 self.invocations.append(invocation)
-        for word in state.words:
-            if word.brace_expansion_error is not None:
+        for index, word in enumerate(state.words):
+            if index not in assignment_indices and word.brace_expansion_error is not None:
                 raise _ShellScanIncomplete(word.brace_expansion_error)
         if self.taint_builder is not None:
             if state.words and not resolution_attempted:
                 _doc_lattice_command_index(state.words, 0, resolution)
                 executable = _executable_evidence_from_resolution(state.words, resolution)
             redirection_assignments_persist = _redirection_assignments_persist(executable)
-            assignment_indices = _assignment_indices(state.words, executable)
             assignments: list[_AssignmentEvidence] = []
             for index in assignment_indices:
                 word = state.words[index]
@@ -1499,6 +1599,7 @@ class _ShellScanner:
                             append=word.assignment_append,
                         )
                     )
+            definite_assignments = tuple(assignments)
             for word in state.words:
                 assignments.extend(word.conditional_assignments)
             if redirection_assignments_persist:
@@ -1524,13 +1625,19 @@ class _ShellScanner:
             container_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else 0
             self.taint_builder.commands.append(
                 _CommandEvidence(
-                    command_id,
-                    output_scope_id,
-                    container_scope_id,
-                    argv,
-                    tuple(assignments),
-                    tuple(state.redirections),
-                    _remap_executable(executable, argv_indices),
+                    command_id=command_id,
+                    output_scope_id=output_scope_id,
+                    container_scope_id=container_scope_id,
+                    argv=argv,
+                    assignments=tuple(assignments),
+                    redirections=tuple(state.redirections),
+                    executable=_remap_executable(executable, argv_indices),
+                    definite_assignments=definite_assignments,
+                    conditionally_executed=state.conditionally_executed or bool(state.cases),
+                    isolated_execution=bool(argv and argv[0].literal == "coproc"),
+                    isolated_context_id=(
+                        output_scope_id if argv and argv[0].literal == "coproc" else None
+                    ),
                 )
             )
             state.last_command_id = command_id

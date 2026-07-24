@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import ChainMap
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, TypeAlias
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING, TypeAlias
 from doc_lattice.error_types import ProjectError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
@@ -35,6 +36,20 @@ class _SecondPassVariableRef:
     """A parameter expanded by eval's second shell parse, not by its input-producing shell."""
 
     name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SecondPassConditionalAssignment:
+    """One eval-time ``${name=word}`` or ``${name:=word}`` expansion."""
+
+    name: str
+    operand: ContentExpr
+    assign_if_null: bool
+
+    @property
+    def parts(self) -> tuple[ContentExpr, ContentExpr]:
+        """Expose the expansion's mutually exclusive existing/default values."""
+        return (_SecondPassVariableRef(self.name), self.operand)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +89,7 @@ ContentExpr: TypeAlias = (  # noqa: UP040
     LiteralTransfer
     | VariableRef
     | _SecondPassVariableRef
+    | _SecondPassConditionalAssignment
     | StreamRef
     | ResourceRef
     | Choice
@@ -269,6 +285,10 @@ class _CommandEvidence:
     assignments: tuple[_AssignmentEvidence, ...]
     redirections: tuple[_RedirectionEvent, ...]
     executable: _ExecutableEvidence
+    definite_assignments: tuple[_AssignmentEvidence, ...] = ()
+    conditionally_executed: bool = False
+    isolated_execution: bool = False
+    isolated_context_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,16 +566,13 @@ class ContentBuilder:
             else None
         )
         brace_expansion_error: str | None = None
-        if self.assignment_value_start is not None:
+        try:
+            expanded_ports = _expand_braces(self.tokens, limits)
+        except _TaintLimitExceeded as error:
+            if not defer_brace_errors:
+                raise
+            brace_expansion_error = str(error)
             expanded_ports = [self.tokens]
-        else:
-            try:
-                expanded_ports = _expand_braces(self.tokens, limits)
-            except _TaintLimitExceeded as error:
-                if not defer_brace_errors:
-                    raise
-                brace_expansion_error = str(error)
-                expanded_ports = [self.tokens]
         ports = tuple(
             _WordContentPort(
                 "".join(token.literal for token in expanded),
@@ -1024,7 +1041,7 @@ def _expression_nodes(expression: ContentExpr) -> int:
     while pending:
         current = pending.pop()
         nodes += 1
-        if isinstance(current, Choice | Concat):
+        if isinstance(current, Choice | Concat | _SecondPassConditionalAssignment):
             pending.extend(current.parts)
     return nodes
 
@@ -1036,9 +1053,64 @@ def _expression_edges(expression: ContentExpr) -> int:
         current = pending.pop()
         if isinstance(current, VariableRef | _SecondPassVariableRef | ResourceRef | StreamRef):
             edges += 1
-        elif isinstance(current, Choice | Concat):
+        elif isinstance(current, Choice | Concat | _SecondPassConditionalAssignment):
             pending.extend(current.parts)
     return edges
+
+
+def _expression_identity(expression: ContentExpr) -> tuple[str | int | bool, ...]:
+    """Return a flat structural identity without recursive dataclass hashing."""
+    identity: list[str | int | bool] = []
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, LiteralTransfer):
+            identity.extend(("literal", current.text))
+        elif isinstance(current, VariableRef):
+            identity.extend(("variable", current.name))
+        elif isinstance(current, _SecondPassVariableRef):
+            identity.extend(("second-variable", current.name))
+        elif isinstance(current, StreamRef):
+            identity.extend(("stream", current.scope_id))
+        elif isinstance(current, ResourceRef):
+            identity.extend(("resource", current.key))
+        elif isinstance(current, OutsideGap):
+            identity.append("outside")
+        elif isinstance(current, _SecondPassConditionalAssignment):
+            identity.extend(("conditional-assignment", current.name, current.assign_if_null))
+            pending.append(current.operand)
+        else:
+            identity.extend(
+                (
+                    "choice" if isinstance(current, Choice) else "concat",
+                    len(current.parts),
+                )
+            )
+            pending.extend(reversed(current.parts))
+    return tuple(identity)
+
+
+def _flow_write_identity(
+    write: _FlowWrite,
+) -> tuple[str | int, bool, bool, tuple[str | int | bool, ...]]:
+    """Return a recursion-safe structural identity for one flow write."""
+    return (
+        write.key,
+        write.append,
+        write.strip_trailing_newlines,
+        _expression_identity(write.expression),
+    )
+
+
+def _assignment_identity(
+    assignment: _AssignmentEvidence,
+) -> tuple[str, bool, tuple[str | int | bool, ...]]:
+    """Return a recursion-safe structural identity for assignment evidence."""
+    return (
+        assignment.name,
+        assignment.append,
+        _expression_identity(assignment.content),
+    )
 
 
 def _cap_value(value: _ContentValue, limits: TaintLimits) -> _ContentValue:
@@ -1076,7 +1148,7 @@ def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
             parts = values[-len(current.parts) :] if current.parts else []
             if current.parts:
                 del values[-len(current.parts) :]
-            if isinstance(current, Choice):
+            if isinstance(current, Choice | _SecondPassConditionalAssignment):
                 values.append(_join_values(*parts))
             else:
                 value = frozenset({_EPSILON})
@@ -1091,9 +1163,9 @@ def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
 
 def _evaluate_with_tables(
     expression: ContentExpr,
-    variables: dict[str | int, _ContentValue],
-    resources: dict[str | int, _ContentValue],
-    streams: dict[str | int, _ContentValue],
+    variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
     limits: TaintLimits,
 ) -> _ContentValue:
     pending: list[tuple[ContentExpr, bool]] = [(expression, False)]
@@ -1114,7 +1186,7 @@ def _evaluate_with_tables(
             parts = values[-len(current.parts) :] if current.parts else []
             if current.parts:
                 del values[-len(current.parts) :]
-            if isinstance(current, Choice):
+            if isinstance(current, Choice | _SecondPassConditionalAssignment):
                 values.append(_cap_value(_join_values(*parts), limits))
             else:
                 value = frozenset({_EPSILON})
@@ -1788,7 +1860,7 @@ def stream_ref_ids(expression: ContentExpr) -> tuple[int, ...]:
         current = pending.pop()
         if isinstance(current, StreamRef):
             stream_ids.append(current.scope_id)
-        elif isinstance(current, Choice | Concat):
+        elif isinstance(current, Choice | Concat | _SecondPassConditionalAssignment):
             pending.extend(reversed(current.parts))
     return tuple(stream_ids)
 
@@ -1851,6 +1923,19 @@ def _unscoped_variable_name(name: str) -> str:
     return unscoped if separator else name
 
 
+def _scoped_variable_environment(name: str | int) -> int | None:
+    """Return the environment encoded in one internal scoped variable key."""
+    if not isinstance(name, str) or not name.startswith("\0"):
+        return None
+    environment, separator, _unscoped = name[1:].partition("\0")
+    if not separator:
+        return None
+    try:
+        return int(environment)
+    except ValueError:
+        return None
+
+
 def _scope_expression(expression: ContentExpr, environment: int) -> ContentExpr:
     """Bind first-pass shell variable references to one lexical environment."""
     if isinstance(expression, VariableRef):
@@ -1860,6 +1945,12 @@ def _scope_expression(expression: ContentExpr, environment: int) -> ContentExpr:
         LiteralTransfer | _SecondPassVariableRef | OutsideGap | ResourceRef | StreamRef,
     ):
         return expression
+    if isinstance(expression, _SecondPassConditionalAssignment):
+        return _SecondPassConditionalAssignment(
+            expression.name,
+            _scope_expression(expression.operand, environment),
+            expression.assign_if_null,
+        )
     if isinstance(expression, Choice):
         return choice(*(_scope_expression(part, environment) for part in expression.parts))
     return concat(*(_scope_expression(part, environment) for part in expression.parts))
@@ -1870,6 +1961,7 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
     if not evidence.scopes:
         return evidence
     environments, _parents = _scope_environment_ids(evidence.scopes)
+    command_environments, _execution_parents, _lastpipe = _execution_environment_ids(evidence)
     commands = tuple(
         replace(
             command,
@@ -1878,7 +1970,7 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
                     port,
                     content=_scope_expression(
                         port.content,
-                        environments.get(command.container_scope_id, command.container_scope_id),
+                        command_environments[command.command_id],
                     ),
                 )
                 for port in command.argv
@@ -1888,10 +1980,20 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
                     assignment,
                     content=_scope_expression(
                         assignment.content,
-                        environments.get(command.container_scope_id, command.container_scope_id),
+                        command_environments[command.command_id],
                     ),
                 )
                 for assignment in command.assignments
+            ),
+            definite_assignments=tuple(
+                replace(
+                    assignment,
+                    content=_scope_expression(
+                        assignment.content,
+                        command_environments[command.command_id],
+                    ),
+                )
+                for assignment in command.definite_assignments
             ),
             redirections=tuple(
                 replace(
@@ -1899,10 +2001,7 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
                     target=ContentTarget(
                         _scope_expression(
                             event.target.content,
-                            environments.get(
-                                command.container_scope_id,
-                                command.container_scope_id,
-                            ),
+                            command_environments[command.command_id],
                         )
                     ),
                 )
@@ -1956,7 +2055,8 @@ def _build_flow_definitions(
     limits: TaintLimits = TaintLimits(),  # noqa: B008
 ) -> tuple[_FlowDefinitions, dict[int, ContentExpr]]:
     """Lower typed shell evidence into fixed-point definitions and command stdin."""
-    environments, environment_parents = _scope_environment_ids(evidence.scopes)
+    environments, _lexical_parents = _scope_environment_ids(evidence.scopes)
+    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
     command_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
     pipe_inputs = _pipe_inputs(evidence)
@@ -1969,10 +2069,15 @@ def _build_flow_definitions(
     stream_writes: list[_FlowWrite] = []
     scoped_variables = bool(evidence.scopes)
     has_eval = any(_builtin_eval_candidates(command) for command in evidence.commands)
-    command_environments = {
-        command.command_id: environments.get(command.container_scope_id, command.container_scope_id)
-        for command in evidence.commands
-    }
+    variable_keys: set[str | int] = set()
+
+    def append_variable_write(write: _FlowWrite) -> None:
+        if len(variable_writes) >= limits.max_edges:
+            raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        if write.key not in variable_keys and len(variable_keys) >= limits.max_table_entries:
+            raise _TaintLimitExceeded("shell taint table entry limit exceeded")
+        variable_writes.append(write)
+        variable_keys.add(write.key)
 
     def visible_environments(environment: int) -> set[int]:
         visible: set[int] = set()
@@ -1987,34 +2092,37 @@ def _build_flow_definitions(
         for target_environment in set(command_environments.values()):
             if origin_environment not in visible_environments(target_environment):
                 continue
-            variable_writes.extend(
-                _FlowWrite(
-                    (
-                        _scoped_variable_name(target_environment, assignment.name)
-                        if scoped_variables
-                        else assignment.name
-                    ),
-                    assignment.content,
-                    append=assignment.append,
+            for assignment in command.assignments:
+                append_variable_write(
+                    _FlowWrite(
+                        (
+                            _scoped_variable_name(target_environment, assignment.name)
+                            if scoped_variables
+                            else assignment.name
+                        ),
+                        assignment.content,
+                        append=assignment.append,
+                    )
                 )
-                for assignment in command.assignments
-            )
         if scoped_variables and has_eval and environment_parents.get(origin_environment) is None:
-            variable_writes.extend(
-                _FlowWrite(assignment.name, assignment.content, append=assignment.append)
-                for assignment in command.assignments
-            )
+            for assignment in command.assignments:
+                append_variable_write(
+                    _FlowWrite(
+                        assignment.name,
+                        assignment.content,
+                        append=assignment.append,
+                    )
+                )
         output = _producer_stdout(command, inputs[command.command_id])
         stream_writes.append(_FlowWrite(command.output_scope_id, output))
         resource_writes.extend(_static_write_definitions(command.redirections, output))
 
     lowering = _OutputLowering(command_scopes)
-    target_environments = set(environments.values())
+    target_environments = set(environments.values()) | set(command_environments.values())
     visible_by_target = {
         target_environment: visible_environments(target_environment)
         for target_environment in target_environments
     }
-    variable_keys = {write.key for write in variable_writes}
     for scope in evidence.scopes:
         origin_environment = environments.get(scope.scope_id, scope.scope_id)
         for target_environment, visible in visible_by_target.items():
@@ -2025,12 +2133,7 @@ def _build_flow_definitions(
                     target_environment,
                     _unscoped_variable_name(binding.name),
                 )
-                if len(variable_writes) >= limits.max_edges:
-                    raise _TaintLimitExceeded("shell taint edge limit exceeded")
-                if key not in variable_keys and len(variable_keys) >= limits.max_table_entries:
-                    raise _TaintLimitExceeded("shell taint table entry limit exceeded")
-                variable_writes.append(_FlowWrite(key, binding.content, append=binding.append))
-                variable_keys.add(key)
+                append_variable_write(_FlowWrite(key, binding.content, append=binding.append))
         stream_writes.append(
             _FlowWrite(
                 scope.scope_id,
@@ -2066,17 +2169,8 @@ def _eval_arguments_raw(command: _CommandEvidence, executable: _ExecutableEviden
     return concat(*parts)
 
 
-def _eval_arguments_from(
-    command: _CommandEvidence,
-    executable: _ExecutableEvidence,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
-) -> ContentExpr:
-    """Return second-pass eval input after joining argv with authored spaces."""
-    return _eval_reparse_content(_eval_arguments_raw(command, executable), limits)
-
-
 _MAX_EVAL_REPARSE_BRANCHES = 256
-_MAX_EVAL_REPARSE_DEPTH = 512
+_MAX_EVAL_REPARSE_DEPTH = 128
 _EVAL_QUOTE_STATES = (None, "'", '"')
 _EVAL_ANSI_OCTAL_BASE = 8
 _EVAL_UNICODE_MAX = 0x10FFFF
@@ -2110,6 +2204,12 @@ class _EvalSyntaxState:
     brace_tokens: tuple[_ContentToken, ...] = ()
     brace_depth: int = 0
     applied_appends: int = 0
+    local_variables: tuple[tuple[str, _ContentValue], ...] = ()
+    environment_variables: tuple[tuple[str, _ContentValue], ...] = ()
+    definitely_set_variables: frozenset[str] = frozenset()
+    parameter_text: str = ""
+    conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
+    conditional_decisions: tuple[tuple[_SecondPassConditionalAssignment, bool], ...] = ()
 
 
 _EvalSyntaxValue: TypeAlias = frozenset[_EvalSyntaxState]  # noqa: UP040
@@ -2128,13 +2228,55 @@ class _EvalSyntaxContext:
     raw_variables: dict[str | int, _ContentValue]
     limits: TaintLimits
     programs: _EvalSyntaxPrograms
+    environment_index: dict[int, tuple[tuple[str, _ContentValue], ...]] = field(
+        default_factory=dict
+    )
     transitions: dict[_EvalSyntaxTransitionKey, _EvalSyntaxValue] = field(default_factory=dict)
     active_transitions: set[_EvalSyntaxTransitionKey] = field(default_factory=set)
+    variable_overlays: dict[
+        tuple[int, int],
+        tuple[
+            tuple[tuple[str, _ContentValue], ...],
+            tuple[tuple[str, _ContentValue], ...],
+            Mapping[str | int, _ContentValue],
+        ],
+    ] = field(default_factory=dict)
     transition_updates: int = 0
+
+    def __post_init__(self) -> None:
+        """Index scoped values once instead of rescanning the solved table per write."""
+        if not self.environment_index:
+            self.environment_index = _eval_environment_index(self.raw_variables)
 
     def invalidate_transitions(self) -> None:
         """Discard memoized transitions after the solved variable table changes."""
         self.transitions.clear()
+
+    def variables_for(self, state: _EvalSyntaxState) -> Mapping[str | int, _ContentValue]:
+        """Return one cached layered variable view for token evaluation."""
+        key = (id(state.local_variables), id(state.environment_variables))
+        cached = self.variable_overlays.get(key)
+        if (
+            cached is not None
+            and cached[0] is state.local_variables
+            and cached[1] is state.environment_variables
+        ):
+            return cached[2]
+        if len(self.variable_overlays) >= self.limits.max_table_entries:
+            raise _TaintLimitExceeded("shell taint eval syntax variable table limit exceeded")
+        local_variables: dict[str | int, _ContentValue] = dict(state.local_variables)
+        environment_variables: dict[str | int, _ContentValue] = dict(state.environment_variables)
+        layered: ChainMap[str | int, _ContentValue] = ChainMap(
+            local_variables,
+            environment_variables,
+            self.raw_variables,
+        )
+        self.variable_overlays[key] = (
+            state.local_variables,
+            state.environment_variables,
+            layered,
+        )
+        return layered
 
 
 def _eval_syntax_programs(writes: tuple[_FlowWrite, ...]) -> _EvalSyntaxPrograms:
@@ -2200,13 +2342,32 @@ def _eval_reparse_branches(
     return [(expression, quote)]
 
 
-def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
+def _eval_reparse_tokens(
     text: str,
     quote: str | None,
     limits: TaintLimits,
     *,
     depth: int = 0,
 ) -> tuple[tuple[_ContentToken, ...], str | None]:
+    """Tokenize one complete eval fragment without retaining malformed suffixes."""
+    tokens, resulting_quote, _pending_parameter = _eval_reparse_tokens_streaming(
+        text,
+        quote,
+        limits,
+        depth=depth,
+        defer_incomplete_parameter=False,
+    )
+    return tokens, resulting_quote
+
+
+def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
+    text: str,
+    quote: str | None,
+    limits: TaintLimits,
+    *,
+    depth: int = 0,
+    defer_incomplete_parameter: bool,
+) -> tuple[tuple[_ContentToken, ...], str | None, str]:
     """Tokenize eval text while retaining active brace and quote provenance."""
     if depth > _MAX_EVAL_REPARSE_DEPTH:
         raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
@@ -2244,6 +2405,8 @@ def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
             continue
         if character == "\\":
             if index + 1 >= len(text):
+                if defer_incomplete_parameter:
+                    return tuple(tokens), quote, text[index:]
                 append_literal(character, brace_active=False)
                 index += 1
                 continue
@@ -2254,18 +2417,25 @@ def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
                 append_literal(escaped, brace_active=False)
             index += 2
             continue
-        if (
-            text.startswith("$(", index)
-            and not text.startswith("$((", index)
-            and _eval_command_substitution_closing(text, index) is not None
-        ):
+        if text.startswith("$(", index) and not text.startswith("$((", index):
+            if (
+                _eval_command_substitution_closing(text, index) is None
+                and defer_incomplete_parameter
+            ):
+                return tuple(tokens), quote, text[index:]
             raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
-        if character == "`" and _eval_backtick_closing(text, index) is not None:
+        if character == "`":
+            if _eval_backtick_closing(text, index) is None and defer_incomplete_parameter:
+                return tuple(tokens), quote, text[index:]
             raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
         if character == "$":
+            if index + 1 == len(text) and defer_incomplete_parameter:
+                return tuple(tokens), quote, text[index:]
             if text.startswith("${", index):
                 closing = _eval_parameter_closing(text, index)
                 if closing is None:
+                    if defer_incomplete_parameter:
+                        return tuple(tokens), quote, text[index:]
                     append_expression(OutsideGap())
                     index = len(text)
                     continue
@@ -2291,7 +2461,7 @@ def _eval_reparse_tokens(  # noqa: PLR0912, PLR0915
                 continue
         append_literal(character, brace_active=quote is None)
         index += 1
-    return tuple(tokens), quote
+    return tuple(tokens), quote, ""
 
 
 def _eval_reparse_literal(
@@ -2441,7 +2611,9 @@ def _eval_parameter_content(
         depth=depth,
     )
     operand = _token_content(list(operand_tokens))
-    if operator in {"-", ":-", "=", ":="}:
+    if operator in {"=", ":="} and name:
+        return _SecondPassConditionalAssignment(name, operand, operator == ":=")
+    if operator in {"-", ":-"}:
         return choice(variable, operand)
     if operator in {"+", ":+"}:
         return choice(LiteralTransfer(""), operand)
@@ -2543,9 +2715,19 @@ def _eval_ansi_c_character(value: int) -> str:
     return chr(value)
 
 
-def _eval_syntax_outside(quote: str | None) -> _EvalSyntaxValue:
+def _eval_syntax_outside(
+    quote: str | None,
+    environment_variables: tuple[tuple[str, _ContentValue], ...] = (),
+) -> _EvalSyntaxValue:
     """Keep unknown external text non-evidentiary without inventing quote syntax."""
-    return frozenset(_EvalSyntaxState(summary, quote) for summary in _OUTSIDE_VALUE)
+    return frozenset(
+        _EvalSyntaxState(
+            summary,
+            quote,
+            environment_variables=environment_variables,
+        )
+        for summary in _OUTSIDE_VALUE
+    )
 
 
 def _cap_eval_syntax(value: _EvalSyntaxValue, limits: TaintLimits) -> _EvalSyntaxValue:
@@ -2554,13 +2736,254 @@ def _cap_eval_syntax(value: _EvalSyntaxValue, limits: TaintLimits) -> _EvalSynta
     return value
 
 
-def _eval_syntax_token(
+def _eval_environment_variables(
+    environment: int | None,
+    environment_index: dict[int, tuple[tuple[str, _ContentValue], ...]],
+) -> tuple[tuple[str, _ContentValue], ...]:
+    """Expose one scoped shell environment under second-pass parameter names."""
+    if environment is None:
+        return ()
+    return environment_index.get(environment, ())
+
+
+def _eval_environment_index(
+    raw_variables: dict[str | int, _ContentValue],
+) -> dict[int, tuple[tuple[str, _ContentValue], ...]]:
+    """Group solved scoped variables once for all eval syntax writes."""
+    grouped: dict[int, list[tuple[str, _ContentValue]]] = {}
+    for name, value in raw_variables.items():
+        environment = _scoped_variable_environment(name)
+        if environment is None or not isinstance(name, str):
+            continue
+        grouped.setdefault(environment, []).append((_unscoped_variable_name(name), value))
+    return {environment: tuple(sorted(variables)) for environment, variables in grouped.items()}
+
+
+def _eval_syntax_set_local(
+    state: _EvalSyntaxState,
+    name: str,
+    value: _ContentValue,
+) -> _EvalSyntaxState:
+    """Return one state with a deterministic branch-local variable binding."""
+    variables = dict(state.local_variables)
+    variables[name] = value
+    return replace(
+        state,
+        local_variables=tuple(sorted(variables.items())),
+        definitely_set_variables=state.definitely_set_variables | {name},
+    )
+
+
+def _eval_syntax_record_assignment(
+    state: _EvalSyntaxState,
+    assignment: _SecondPassConditionalAssignment,
+    content: ContentExpr,
+    limits: TaintLimits,
+) -> _EvalSyntaxState:
+    """Retain one taken eval assignment branch under the shared edge cap."""
+    evidence = _AssignmentEvidence(assignment.name, content)
+    assignments = (*state.conditional_assignments, evidence)
+    if len(assignments) > limits.max_edges:
+        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+    return replace(state, conditional_assignments=assignments)
+
+
+def _eval_syntax_record_decision(
+    state: _EvalSyntaxState,
+    assignment: _SecondPassConditionalAssignment,
+    taken: bool,
+    limits: TaintLimits,
+) -> _EvalSyntaxState:
+    """Retain one parameter-operator branch for correlated enclosing operands."""
+    decisions = (*state.conditional_decisions, (assignment, taken))
+    if len(decisions) > limits.max_edges:
+        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+    return replace(state, conditional_decisions=decisions)
+
+
+def _eval_syntax_resolve_conditionals(
+    expression: ContentExpr,
+    state: _EvalSyntaxState,
+) -> ContentExpr:
+    """Resolve nested default assignments according to this eval state's branch path."""
+    if isinstance(expression, _SecondPassConditionalAssignment):
+        decision = next(
+            (
+                taken
+                for candidate, taken in reversed(state.conditional_decisions)
+                if candidate == expression
+            ),
+            None,
+        )
+        if decision is False:
+            return _SecondPassVariableRef(expression.name)
+        operand = _eval_syntax_resolve_conditionals(expression.operand, state)
+        if decision is True:
+            return operand
+        return choice(_SecondPassVariableRef(expression.name), operand)
+    if isinstance(
+        expression,
+        LiteralTransfer
+        | VariableRef
+        | _SecondPassVariableRef
+        | OutsideGap
+        | ResourceRef
+        | StreamRef,
+    ):
+        return expression
+    if isinstance(expression, Choice):
+        return choice(
+            *(_eval_syntax_resolve_conditionals(part, state) for part in expression.parts)
+        )
+    return concat(*(_eval_syntax_resolve_conditionals(part, state) for part in expression.parts))
+
+
+def _eval_syntax_assignment_branches(
+    assignment: _SecondPassConditionalAssignment,
+    state: _EvalSyntaxState,
+    context: _EvalSyntaxContext,
+) -> tuple[bool, bool]:
+    """Return whether retained-value and assignment branches remain reachable."""
+    if assignment.name not in state.definitely_set_variables:
+        return True, True
+    existing = context.variables_for(state).get(assignment.name)
+    if existing is None:
+        return True, True
+    if not assignment.assign_if_null:
+        return True, False
+    return (any(summary != _EPSILON for summary in existing), _EPSILON in existing)
+
+
+def _eval_syntax_merge_locals(
+    left: tuple[tuple[str, _ContentValue], ...],
+    right: tuple[tuple[str, _ContentValue], ...],
+) -> tuple[tuple[str, _ContentValue], ...]:
+    """Merge sequential eval-local writes, with later syntax taking precedence."""
+    variables = dict(left)
+    variables.update(right)
+    return tuple(sorted(variables.items()))
+
+
+def _eval_syntax_merge_assignments(
+    left: tuple[_AssignmentEvidence, ...],
+    right: tuple[_AssignmentEvidence, ...],
+    limits: TaintLimits,
+) -> tuple[_AssignmentEvidence, ...]:
+    """Join sequential taken assignment branches without exceeding discovery bounds."""
+    assignments = (*left, *right)
+    if len(assignments) > limits.max_edges:
+        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+    return assignments
+
+
+def _eval_syntax_merge_decisions(
+    left: tuple[tuple[_SecondPassConditionalAssignment, bool], ...],
+    right: tuple[tuple[_SecondPassConditionalAssignment, bool], ...],
+    limits: TaintLimits,
+) -> tuple[tuple[_SecondPassConditionalAssignment, bool], ...]:
+    """Join sequential parameter branch decisions under the shared edge cap."""
+    decisions = (*left, *right)
+    if len(decisions) > limits.max_edges:
+        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+    return decisions
+
+
+def _eval_syntax_token(  # noqa: PLR0911, PLR0912
     state: _EvalSyntaxState,
     token: _ContentToken,
-    raw_variables: dict[str | int, _ContentValue],
-    limits: TaintLimits,
+    context: _EvalSyntaxContext,
 ) -> _EvalSyntaxValue:
     """Append one eval token while retaining an unmatched active brace operand."""
+    limits = context.limits
+    if isinstance(token.expression, _SecondPassConditionalAssignment):
+        retain_existing, take_assignment = _eval_syntax_assignment_branches(
+            token.expression,
+            state,
+            context,
+        )
+        retained: _EvalSyntaxValue = frozenset()
+        if retain_existing:
+            retained = frozenset(
+                _eval_syntax_record_decision(
+                    after,
+                    token.expression,
+                    False,
+                    limits,
+                )
+                for after in _eval_syntax_token(
+                    state,
+                    _ContentToken(_SecondPassVariableRef(token.expression.name), "", False),
+                    context,
+                )
+            )
+        assigned_with_bindings: _EvalSyntaxValue = frozenset()
+        if take_assignment:
+            assigned = _eval_syntax_token(
+                state,
+                _ContentToken(token.expression.operand, "", False),
+                context,
+            )
+            assigned_with_bindings = frozenset(
+                _eval_syntax_record_decision(
+                    _eval_syntax_record_assignment(
+                        bound,
+                        token.expression,
+                        _eval_syntax_resolve_conditionals(
+                            token.expression.operand,
+                            bound,
+                        ),
+                        limits,
+                    ),
+                    token.expression,
+                    True,
+                    limits,
+                )
+                for after in assigned
+                for summary in _evaluate_with_tables(
+                    token.expression.operand,
+                    context.variables_for(after),
+                    {},
+                    {},
+                    limits,
+                )
+                for bound in (
+                    _eval_syntax_set_local(
+                        after,
+                        token.expression.name,
+                        frozenset({summary}),
+                    ),
+                )
+            )
+        return _cap_eval_syntax(retained | assigned_with_bindings, limits)
+    if isinstance(token.expression, Choice):
+        return _cap_eval_syntax(
+            frozenset(
+                after
+                for part in token.expression.parts
+                for after in _eval_syntax_token(
+                    state,
+                    _ContentToken(part, "", False),
+                    context,
+                )
+            ),
+            limits,
+        )
+    if isinstance(token.expression, Concat):
+        value: _EvalSyntaxValue = frozenset({state})
+        for part in token.expression.parts:
+            value = _cap_eval_syntax(
+                frozenset(
+                    after
+                    for current in value
+                    for after in _eval_syntax_token(
+                        current,
+                        _ContentToken(part, "", False),
+                        context,
+                    )
+                ),
+                limits,
+            )
+        return value
     if not state.brace_tokens and _active_character(token, "{"):
         return frozenset(
             {
@@ -2602,7 +3025,11 @@ def _eval_syntax_token(
             )
             for expanded in expanded_words
             for after in _evaluate_with_tables(
-                _token_content(expanded), raw_variables, {}, {}, limits
+                _token_content(expanded),
+                context.variables_for(state),
+                {},
+                {},
+                limits,
             )
         )
         return _cap_eval_syntax(value, limits)
@@ -2610,7 +3037,7 @@ def _eval_syntax_token(
         replace(state, summary=state.summary.compose(after))
         for after in _evaluate_with_tables(
             token.expression,
-            raw_variables,
+            context.variables_for(state),
             {},
             {},
             limits,
@@ -2619,7 +3046,7 @@ def _eval_syntax_token(
     return _cap_eval_syntax(value, limits)
 
 
-def _eval_syntax_variable_transition(
+def _eval_syntax_variable_transition(  # noqa: PLR0912
     name: str | int,
     state: _EvalSyntaxState,
     context: _EvalSyntaxContext,
@@ -2635,11 +3062,12 @@ def _eval_syntax_variable_transition(
         raise _TaintLimitExceeded("shell taint eval syntax fixed-point update limit exceeded")
     program = context.programs.get(name)
     if program is None:
+        if state.parameter_text:
+            raise _TaintLimitExceeded("shell taint eval parameter expansion cannot be bounded")
         return _eval_syntax_token(
             state,
             _ContentToken(OutsideGap(), "", False),
-            context.raw_variables,
-            context.limits,
+            context,
         )
     context.active_transitions.add(key)
     try:
@@ -2654,8 +3082,7 @@ def _eval_syntax_variable_transition(
                         base = _eval_syntax_token(
                             state,
                             _ContentToken(OutsideGap(), "", False),
-                            context.raw_variables,
-                            context.limits,
+                            context,
                         )
                     produced = frozenset(
                         after
@@ -2702,14 +3129,15 @@ def _eval_syntax_append(  # noqa: PLR0911
 ) -> _EvalSyntaxValue:
     """Append authored eval syntax to one bounded streaming parse state."""
     if depth > _MAX_EVAL_REPARSE_DEPTH:
-        raise _TaintLimitExceeded("shell taint eval syntax depth limit exceeded")
+        raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
     if isinstance(expression, LiteralTransfer):
-        tokens, resulting_quote = _eval_reparse_tokens(
-            expression.text,
+        tokens, resulting_quote, pending_parameter = _eval_reparse_tokens_streaming(
+            f"{state.parameter_text}{expression.text}",
             state.quote,
             context.limits,
+            defer_incomplete_parameter=True,
         )
-        value: _EvalSyntaxValue = frozenset({state})
+        value: _EvalSyntaxValue = frozenset({replace(state, parameter_text="")})
         for token in tokens:
             value = _cap_eval_syntax(
                 frozenset(
@@ -2718,45 +3146,75 @@ def _eval_syntax_append(  # noqa: PLR0911
                     for after in _eval_syntax_token(
                         current,
                         token,
-                        context.raw_variables,
-                        context.limits,
+                        context,
                     )
                 ),
                 context.limits,
             )
-        return frozenset(replace(current, quote=resulting_quote) for current in value)
-    if isinstance(expression, VariableRef):
-        if state.brace_tokens:
-            return _eval_syntax_variable_transition(
-                expression.name,
-                state,
-                context,
-                depth=depth + 1,
+        return frozenset(
+            replace(
+                current,
+                quote=resulting_quote,
+                parameter_text=pending_parameter,
             )
-        suffixes = context.variables.get(
-            (expression.name, state.quote),
-            _eval_syntax_outside(state.quote),
+            for current in value
         )
-        return _cap_eval_syntax(
-            frozenset(
-                replace(
-                    state,
-                    summary=state.summary.compose(suffix.summary),
-                    quote=suffix.quote,
-                    brace_tokens=suffix.brace_tokens,
-                    brace_depth=suffix.brace_depth,
-                    applied_appends=state.applied_appends | suffix.applied_appends,
+    if isinstance(expression, VariableRef):
+        transition_key = (expression.name, state)
+        if transition_key in context.active_transitions:
+            if state.brace_tokens or state.parameter_text:
+                raise _TaintLimitExceeded(
+                    "shell taint eval syntax fixed-point update limit exceeded"
                 )
-                for suffix in suffixes
-            ),
-            context.limits,
+            suffixes = context.variables.get(
+                (expression.name, state.quote),
+                _eval_syntax_outside(state.quote),
+            )
+            return _cap_eval_syntax(
+                frozenset(
+                    replace(
+                        state,
+                        summary=state.summary.compose(suffix.summary),
+                        quote=suffix.quote,
+                        brace_tokens=suffix.brace_tokens,
+                        brace_depth=suffix.brace_depth,
+                        applied_appends=state.applied_appends | suffix.applied_appends,
+                        parameter_text=suffix.parameter_text,
+                        local_variables=_eval_syntax_merge_locals(
+                            state.local_variables,
+                            suffix.local_variables,
+                        ),
+                        definitely_set_variables=(
+                            state.definitely_set_variables | suffix.definitely_set_variables
+                        ),
+                        conditional_assignments=_eval_syntax_merge_assignments(
+                            state.conditional_assignments,
+                            suffix.conditional_assignments,
+                            context.limits,
+                        ),
+                        conditional_decisions=_eval_syntax_merge_decisions(
+                            state.conditional_decisions,
+                            suffix.conditional_decisions,
+                            context.limits,
+                        ),
+                    )
+                    for suffix in suffixes
+                ),
+                context.limits,
+            )
+        return _eval_syntax_variable_transition(
+            expression.name,
+            state,
+            context,
+            depth=depth + 1,
         )
     if isinstance(expression, OutsideGap | ResourceRef | StreamRef):
+        if state.parameter_text:
+            raise _TaintLimitExceeded("shell taint eval parameter expansion cannot be bounded")
         return _eval_syntax_token(
             state,
             _ContentToken(expression, "", False),
-            context.raw_variables,
-            context.limits,
+            context,
         )
     if isinstance(expression, Choice):
         value = frozenset(
@@ -2813,17 +3271,29 @@ def _eval_syntax_append_write(
     )
 
 
-def _eval_syntax_expression(
+def _eval_syntax_expression(  # noqa: PLR0913
     expression: ContentExpr,
     quote: str | None,
     context: _EvalSyntaxContext,
     *,
     depth: int = 0,
+    environment: int | None = None,
+    environment_variables: tuple[tuple[str, _ContentValue], ...] | None = None,
+    definitely_set_variables: frozenset[str] = frozenset(),
 ) -> _EvalSyntaxValue:
     """Evaluate eval syntax from one empty bounded streaming parse state."""
     return _eval_syntax_append(
         expression,
-        _EvalSyntaxState(_EPSILON, quote),
+        _EvalSyntaxState(
+            _EPSILON,
+            quote,
+            environment_variables=(
+                _eval_environment_variables(environment, context.environment_index)
+                if environment_variables is None
+                else environment_variables
+            ),
+            definitely_set_variables=definitely_set_variables,
+        ),
         context,
         depth=depth,
     )
@@ -2831,8 +3301,7 @@ def _eval_syntax_expression(
 
 def _finalize_eval_syntax(
     state: _EvalSyntaxState,
-    raw_variables: dict[str | int, _ContentValue],
-    limits: TaintLimits,
+    context: _EvalSyntaxContext,
 ) -> _ContentValue:
     """Treat a still-unmatched brace buffer as literal text at the eval sink."""
     if not state.brace_tokens:
@@ -2841,10 +3310,10 @@ def _finalize_eval_syntax(
         state.summary.compose(after)
         for after in _evaluate_with_tables(
             _token_content(list(state.brace_tokens)),
-            raw_variables,
+            context.variables_for(state),
             {},
             {},
-            limits,
+            context.limits,
         )
     )
 
@@ -2882,9 +3351,17 @@ def _ordered_eval_syntax_variables(
         _eval_syntax_programs(writes),
     )
     for write_index, write in enumerate(writes):
+        environment = _scoped_variable_environment(write.key)
+        environment_variables = _eval_environment_variables(
+            environment,
+            context.environment_index,
+        )
         for quote in _EVAL_QUOTE_STATES:
             if write.append:
-                base = variables[(write.key, quote)] or _eval_syntax_outside(quote)
+                base = variables[(write.key, quote)] or _eval_syntax_outside(
+                    quote,
+                    environment_variables,
+                )
                 value = _cap_eval_syntax(
                     frozenset(
                         after
@@ -2903,6 +3380,7 @@ def _ordered_eval_syntax_variables(
                     write.expression,
                     quote,
                     context,
+                    environment=environment,
                 )
             variables[(write.key, quote)] = value
             context.invalidate_transitions()
@@ -2929,10 +3407,18 @@ def _solve_eval_syntax_variables(
     while changed:
         changed = False
         for write_index, write in enumerate(writes):
+            environment = _scoped_variable_environment(write.key)
+            environment_variables = _eval_environment_variables(
+                environment,
+                context.environment_index,
+            )
             for quote in _EVAL_QUOTE_STATES:
                 prior = variables[(write.key, quote)]
                 if write.append:
-                    base = prior or _eval_syntax_outside(quote)
+                    base = prior or _eval_syntax_outside(
+                        quote,
+                        environment_variables,
+                    )
                     value = _cap_eval_syntax(
                         frozenset(
                             after
@@ -2951,6 +3437,7 @@ def _solve_eval_syntax_variables(
                         write.expression,
                         quote,
                         context,
+                        environment=environment,
                     )
                 widened = _cap_eval_syntax(prior | value, limits)
                 if widened == prior:
@@ -2990,57 +3477,871 @@ def _eval_content_dependencies(
         current = pending.pop()
         if isinstance(current, VariableRef):
             names.add(current.name)
-        elif isinstance(current, Choice | Concat):
+        elif isinstance(current, Choice | Concat | _SecondPassConditionalAssignment):
             pending.extend(current.parts)
     return names
+
+
+def _lower_eval_assignment_operand(
+    expression: ContentExpr,
+    environment: int,
+    *,
+    scoped: bool,
+) -> ContentExpr:
+    """Bind eval-time parameter reads while lowering one persisted assignment value."""
+    if isinstance(expression, _SecondPassVariableRef):
+        return VariableRef(
+            _scoped_variable_name(environment, expression.name) if scoped else expression.name
+        )
+    if isinstance(expression, _SecondPassConditionalAssignment):
+        variable = VariableRef(
+            _scoped_variable_name(environment, expression.name) if scoped else expression.name
+        )
+        return choice(
+            variable,
+            _lower_eval_assignment_operand(
+                expression.operand,
+                environment,
+                scoped=scoped,
+            ),
+        )
+    if isinstance(
+        expression,
+        LiteralTransfer | VariableRef | OutsideGap | ResourceRef | StreamRef,
+    ):
+        return expression
+    if isinstance(expression, Choice):
+        return choice(
+            *(
+                _lower_eval_assignment_operand(part, environment, scoped=scoped)
+                for part in expression.parts
+            )
+        )
+    return concat(
+        *(
+            _lower_eval_assignment_operand(part, environment, scoped=scoped)
+            for part in expression.parts
+        )
+    )
+
+
+def _environment_inherits(
+    origin: int,
+    target: int,
+    environment_parents: dict[int, int | None],
+) -> bool:
+    """Return whether writes in ``origin`` are visible from ``target``."""
+    current: int | None = target
+    visited: set[int] = set()
+    while current is not None and current not in visited:
+        if current == origin:
+            return True
+        visited.add(current)
+        current = environment_parents.get(current)
+    return False
+
+
+def _wrapped_shopt_index(command: _CommandEvidence) -> int | None:
+    """Resolve exact nested ``command``/``builtin`` wrappers around ``shopt``."""
+    index = 0
+    wrapped = False
+    while index < len(command.argv):
+        argument = command.argv[index]
+        if argument.dynamic:
+            return None
+        if argument.literal == "shopt":
+            return index if wrapped else None
+        if argument.literal == "builtin":
+            wrapped = True
+            index += 1
+            if index < len(command.argv) and command.argv[index].literal == "--":
+                index += 1
+            continue
+        if argument.literal != "command":
+            return None
+        wrapped = True
+        index += 1
+        while index < len(command.argv):
+            option = command.argv[index]
+            if option.dynamic:
+                return None
+            if option.literal == "--":
+                index += 1
+                break
+            if option.literal.startswith("-") and option.literal != "-":
+                flags = option.literal[1:]
+                if "v" in flags or "V" in flags or set(flags) - {"p"}:
+                    return None
+                index += 1
+                continue
+            break
+    return None
+
+
+def _shopt_executable_index(command: _CommandEvidence) -> int | None:
+    """Return the argv index for a statically resolved ``shopt`` invocation."""
+    direct_index = next(
+        (
+            candidate.argv_index
+            for candidate in _iter_executable_evidence(command.executable)
+            if candidate.name == "shopt"
+            and candidate.literal == "shopt"
+            and not candidate.external_lookup
+            and candidate.argv_index is not None
+        ),
+        None,
+    )
+    return direct_index if direct_index is not None else _wrapped_shopt_index(command)
+
+
+def _shopt_lastpipe_action(command: _CommandEvidence) -> bool | None:  # noqa: PLR0912
+    """Return one authored transition that may change Bash ``lastpipe``."""
+    executable_index = _shopt_executable_index(command)
+    if executable_index is None:
+        return None
+    mode: bool | None = None
+    saw_set = False
+    saw_unset = False
+    names: list[_ArgPort] = []
+    dynamic_option = False
+    for argument in command.argv[executable_index + 1 :]:
+        if argument.dynamic:
+            if mode is None:
+                dynamic_option = True
+            else:
+                names.append(argument)
+        elif argument.literal.startswith("-") and argument.literal != "-":
+            if "s" in argument.literal[1:]:
+                mode = True
+                saw_set = True
+            if "u" in argument.literal[1:]:
+                mode = False
+                saw_unset = True
+        else:
+            names.append(argument)
+    if saw_set and saw_unset:
+        return None
+    mentions_lastpipe = any(argument.literal == "lastpipe" for argument in names)
+    dynamic_name = any(argument.dynamic for argument in names)
+    if dynamic_option and (not names or mentions_lastpipe or dynamic_name):
+        return True
+    if mode is True and (mentions_lastpipe or dynamic_name):
+        return True
+    if mode is False and mentions_lastpipe:
+        return None if dynamic_name else False
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellExecutionContext:
+    """One persistent shell environment introduced by asynchronous or pipeline execution."""
+
+    kind: str
+    context_id: int
+    scope_id: int | None
+    conditional_on_lastpipe: bool = False
+
+
+def _control_command_ranges(
+    evidence: _ShellTaintEvidence,
+) -> tuple[tuple[int, int], ...]:
+    """Return source-index ranges belonging to control compounds."""
+    stack: list[tuple[str, int]] = []
+    ranges: list[tuple[int, int]] = []
+    openers = {
+        "if": "fi",
+        "for": "done",
+        "select": "done",
+        "while": "done",
+        "until": "done",
+    }
+    for index, command in enumerate(evidence.commands):
+        head = command.argv[0].literal if command.argv else None
+        if head in openers:
+            stack.append((openers[head], index))
+        elif stack and head == stack[-1][0]:
+            _closing, start = stack.pop()
+            ranges.append((start, index))
+        elif head == "esac":
+            start = index
+            while start > 0 and evidence.commands[start - 1].conditionally_executed:
+                start -= 1
+            ranges.append((start, index))
+    return tuple(ranges)
+
+
+def _command_scope_paths(
+    evidence: _ShellTaintEvidence,
+) -> dict[int, tuple[int, ...]]:
+    """Return each command's structured scope ancestry from outermost to innermost."""
+    scopes = {scope.scope_id: scope for scope in evidence.scopes}
+    paths: dict[int, tuple[int, ...]] = {}
+    for command in evidence.commands:
+        reverse_path: list[int] = []
+        current: int | None = command.container_scope_id
+        visited: set[int] = set()
+        while current is not None and current not in visited:
+            visited.add(current)
+            reverse_path.append(current)
+            scope = scopes.get(current)
+            current = scope.parent_scope_id if scope is not None else None
+        paths[command.command_id] = tuple(reversed(reverse_path))
+    return paths
+
+
+def _command_execution_contexts(  # noqa: PLR0912
+    evidence: _ShellTaintEvidence,
+) -> dict[int, tuple[_ShellExecutionContext, ...]]:
+    """Index stable isolated shell contexts containing each command."""
+    scopes = {scope.scope_id: scope for scope in evidence.scopes}
+    paths = _command_scope_paths(evidence)
+    commands_by_scope: dict[int, set[int]] = {}
+    for command_id, path in paths.items():
+        for scope_id in path:
+            commands_by_scope.setdefault(scope_id, set()).add(command_id)
+
+    contexts: dict[int, dict[tuple[str, int], _ShellExecutionContext]] = {
+        command.command_id: {} for command in evidence.commands
+    }
+    output_commands = {command.output_scope_id: command.command_id for command in evidence.commands}
+    output_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
+
+    def add(command_id: int, context: _ShellExecutionContext) -> None:
+        key = (context.kind, context.context_id)
+        prior = contexts[command_id].get(key)
+        if (
+            prior is None
+            or (prior.conditional_on_lastpipe and not context.conditional_on_lastpipe)
+            or (prior.scope_id is None and context.scope_id is not None)
+        ):
+            contexts[command_id][key] = context
+
+    for pipe in evidence.pipes:
+        producer_command = output_commands.get(pipe.producer_scope_id)
+        if producer_command is not None:
+            add(
+                producer_command,
+                _ShellExecutionContext("pipeline", pipe.producer_scope_id, None),
+            )
+        else:
+            for command_id in commands_by_scope.get(pipe.producer_scope_id, ()):
+                add(
+                    command_id,
+                    _ShellExecutionContext(
+                        "pipeline",
+                        pipe.producer_scope_id,
+                        pipe.producer_scope_id,
+                    ),
+                )
+        if pipe.consumer_command_id is not None:
+            add(
+                pipe.consumer_command_id,
+                _ShellExecutionContext(
+                    "pipeline",
+                    output_scopes[pipe.consumer_command_id],
+                    None,
+                    conditional_on_lastpipe=True,
+                ),
+            )
+        elif pipe.consumer_scope_id is not None:
+            for command_id in commands_by_scope.get(pipe.consumer_scope_id, ()):
+                add(
+                    command_id,
+                    _ShellExecutionContext(
+                        "pipeline",
+                        pipe.consumer_scope_id,
+                        pipe.consumer_scope_id,
+                        conditional_on_lastpipe=True,
+                    ),
+                )
+
+    for command in evidence.commands:
+        if not command.isolated_execution:
+            continue
+        context_id = (
+            command.isolated_context_id
+            if command.isolated_context_id is not None
+            else command.output_scope_id
+        )
+        add(
+            command.command_id,
+            _ShellExecutionContext(
+                "asynchronous",
+                context_id,
+                context_id if context_id in scopes else None,
+            ),
+        )
+
+    for start, end in _control_command_ranges(evidence):
+        command_ids = tuple(evidence.commands[index].command_id for index in range(start, end + 1))
+        common_path = list(paths[command_ids[0]])
+        for command_id in command_ids[1:]:
+            path = paths[command_id]
+            common_length = 0
+            while (
+                common_length < len(common_path)
+                and common_length < len(path)
+                and common_path[common_length] == path[common_length]
+            ):
+                common_length += 1
+            del common_path[common_length:]
+        anchor_scope_id = common_path[-1] if common_path else None
+        direct_contexts = {
+            key: context
+            for command_id in command_ids
+            for key, context in contexts[command_id].items()
+            if context.scope_id is None
+        }
+        for command_id in command_ids:
+            for context in direct_contexts.values():
+                add(command_id, replace(context, scope_id=anchor_scope_id))
+
+    ordered: dict[int, tuple[_ShellExecutionContext, ...]] = {}
+    for command in evidence.commands:
+        path = paths[command.command_id]
+        depths = {scope_id: depth for depth, scope_id in enumerate(path)}
+        ordered[command.command_id] = tuple(
+            sorted(
+                contexts[command.command_id].values(),
+                key=lambda context: (
+                    depths.get(context.scope_id, len(path)),
+                    context.kind,
+                    context.context_id,
+                ),
+            )
+        )
+    return ordered
+
+
+def _execution_environment_ids(  # noqa: PLR0912, PLR0915
+    evidence: _ShellTaintEvidence,
+) -> tuple[dict[int, int], dict[int, int | None], dict[int, bool]]:
+    """Return persistent command environments and their source-ordered lastpipe state."""
+    lexical_environments, lexical_parents = _scope_environment_ids(evidence.scopes)
+    environment_parents = dict(lexical_parents)
+    contexts = _command_execution_contexts(evidence)
+    paths = _command_scope_paths(evidence)
+    used_environments = set(lexical_environments.values())
+    next_environment = -1
+    context_environments: dict[tuple[int, str, int], int] = {}
+    consumer_isolation: dict[tuple[int, str, int], bool] = {}
+    enabled_by_environment: dict[int, bool] = {}
+    conditional_commands = _control_conditional_commands(evidence)
+
+    def allocate(parent: int, context: _ShellExecutionContext) -> int:
+        nonlocal next_environment
+        key = (parent, context.kind, context.context_id)
+        cached = context_environments.get(key)
+        if cached is not None:
+            return cached
+        while next_environment in used_environments:
+            next_environment -= 1
+        environment = next_environment
+        next_environment -= 1
+        used_environments.add(environment)
+        context_environments[key] = environment
+        environment_parents[environment] = parent
+        return environment
+
+    def enabled(environment: int) -> bool:
+        if environment in enabled_by_environment:
+            return enabled_by_environment[environment]
+        parent = environment_parents.get(environment)
+        inherited = enabled(parent) if parent is not None else False
+        enabled_by_environment[environment] = inherited
+        return inherited
+
+    command_environments: dict[int, int] = {}
+    lastpipe_states: dict[int, bool] = {}
+    for command in evidence.commands:
+        path = paths[command.command_id]
+        by_depth: dict[int, list[_ShellExecutionContext]] = {}
+        depths = {scope_id: depth for depth, scope_id in enumerate(path)}
+        for context in contexts[command.command_id]:
+            by_depth.setdefault(depths.get(context.scope_id, len(path)), []).append(context)
+
+        environment: int | None = None
+        prior_lexical: int | None = None
+        for depth, scope_id in enumerate(path):
+            lexical = lexical_environments.get(scope_id, scope_id)
+            if environment is None:
+                environment = lexical
+            elif lexical != prior_lexical:
+                environment_parents[lexical] = environment
+                environment = lexical
+            prior_lexical = lexical
+            for context in by_depth.get(depth, ()):
+                if context.conditional_on_lastpipe:
+                    key = (environment, context.kind, context.context_id)
+                    isolated = consumer_isolation.setdefault(key, not enabled(environment))
+                    if not isolated:
+                        continue
+                environment = allocate(environment, context)
+        if environment is None:
+            environment = command.container_scope_id
+            environment_parents.setdefault(environment, None)
+        for context in by_depth.get(len(path), ()):
+            if context.conditional_on_lastpipe:
+                key = (environment, context.kind, context.context_id)
+                isolated = consumer_isolation.setdefault(key, not enabled(environment))
+                if not isolated:
+                    continue
+            environment = allocate(environment, context)
+
+        command_environments[command.command_id] = environment
+        lastpipe_states[command.command_id] = enabled(environment)
+        action = _shopt_lastpipe_action(command)
+        if action is None:
+            continue
+        conditional = command.conditionally_executed or command.command_id in conditional_commands
+        if action:
+            enabled_by_environment[environment] = True
+        elif not conditional:
+            enabled_by_environment[environment] = False
+    return command_environments, environment_parents, lastpipe_states
+
+
+def _lastpipe_states(evidence: _ShellTaintEvidence) -> dict[int, bool]:
+    """Return whether authored option state may enable ``lastpipe`` per command."""
+    _command_environments, _environment_parents, states = _execution_environment_ids(evidence)
+    return states
+
+
+def _control_conditional_commands(evidence: _ShellTaintEvidence) -> frozenset[int]:
+    """Return commands whose surrounding shell control body may not execute."""
+    conditional: set[int] = set()
+    control_stack: list[str] = []
+    openers = {
+        "if": "fi",
+        "for": "done",
+        "select": "done",
+        "while": "done",
+        "until": "done",
+        "case": "esac",
+    }
+    closers = frozenset(openers.values())
+    for command in evidence.commands:
+        head = command.argv[0].literal if command.argv else None
+        if control_stack:
+            conditional.add(command.command_id)
+        if head in openers:
+            control_stack.append(openers[head])
+        elif head in closers and control_stack and head == control_stack[-1]:
+            control_stack.pop()
+    return frozenset(conditional)
+
+
+def _append_eval_conditional_writes(  # noqa: PLR0913
+    lowered: list[_FlowWrite],
+    assignment: _AssignmentEvidence,
+    origin_environment: int,
+    target_environments: set[int],
+    environment_parents: dict[int, int | None],
+    *,
+    scoped_variables: bool,
+    limits: TaintLimits,
+) -> None:
+    """Append bounded scope-visible definitions for one eval-time assignment."""
+    scoped_content = _lower_eval_assignment_operand(
+        assignment.content,
+        origin_environment,
+        scoped=scoped_variables,
+    )
+    for target_environment in target_environments:
+        if not _environment_inherits(
+            origin_environment,
+            target_environment,
+            environment_parents,
+        ):
+            continue
+        key = (
+            _scoped_variable_name(target_environment, assignment.name)
+            if scoped_variables
+            else assignment.name
+        )
+        lowered.append(_FlowWrite(key, scoped_content))
+    if scoped_variables and environment_parents.get(origin_environment) is None:
+        lowered.append(
+            _FlowWrite(
+                assignment.name,
+                _lower_eval_assignment_operand(
+                    assignment.content,
+                    origin_environment,
+                    scoped=False,
+                ),
+            )
+        )
+    if len(lowered) > limits.max_edges:
+        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+
+
+def _eval_conditional_variable_writes(
+    evidence: _ShellTaintEvidence,
+    assignments_by_command: dict[int, tuple[_AssignmentEvidence, ...]],
+    limits: TaintLimits,
+) -> tuple[_FlowWrite, ...]:
+    """Lower taken eval-time assignment branches into scope-visible flow writes."""
+    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    scoped_variables = bool(evidence.scopes)
+    target_environments = set(command_environments.values())
+
+    lowered: list[_FlowWrite] = []
+    lowered_keys: set[tuple[int, str, tuple[str | int | bool, ...]]] = set()
+    for command in evidence.commands:
+        origin_environment = command_environments[command.command_id]
+        for assignment in assignments_by_command.get(command.command_id, ()):
+            identity = (
+                origin_environment,
+                assignment.name,
+                _expression_identity(assignment.content),
+            )
+            if identity in lowered_keys:
+                continue
+            lowered_keys.add(identity)
+            _append_eval_conditional_writes(
+                lowered,
+                assignment,
+                origin_environment,
+                target_environments,
+                environment_parents,
+                scoped_variables=scoped_variables,
+                limits=limits,
+            )
+    return tuple(lowered)
+
+
+@dataclass(slots=True)
+class _EvalDiscoveryBudget:
+    """Shared work accounting across iterative eval side-effect discovery."""
+
+    limits: TaintLimits
+    work: int = 0
+    updates: int = 0
+
+    def charge_work(self, amount: int = 1) -> None:
+        self.work += amount
+        if self.work > self.limits.max_expression_nodes:
+            raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+
+    def charge_update(self, amount: int = 1) -> None:
+        self.updates += amount
+        if self.updates > self.limits.max_fixed_point_updates:
+            raise _TaintLimitExceeded("shell taint fixed-point update limit exceeded")
+
+
+@dataclass(frozen=True, slots=True)
+class _EvalCommandEnvironment:
+    """Possible values and definitely-set names visible to one command-time eval."""
+
+    variables: tuple[tuple[str, _ContentValue], ...]
+    definitely_set: frozenset[str]
+
+
+def _eval_command_environments(  # noqa: PLR0913
+    evidence: _ShellTaintEvidence,
+    raw_variables: dict[str | int, _ContentValue],
+    assignments_by_command: dict[int, tuple[_AssignmentEvidence, ...]],
+    command_environments: dict[int, int],
+    environment_parents: dict[int, int | None],
+    limits: TaintLimits,
+) -> dict[int, _EvalCommandEnvironment]:
+    """Replay definite authored writes in source order without importing future values."""
+    values: dict[int, dict[str, _ContentValue]] = {}
+    definitely_set: dict[int, set[str]] = {}
+    evaluation_layers: dict[int, dict[str | int, _ContentValue]] = {}
+    conditional_commands = _control_conditional_commands(evidence)
+
+    def ensure(
+        environment: int,
+    ) -> tuple[
+        dict[str, _ContentValue],
+        set[str],
+        dict[str | int, _ContentValue],
+    ]:
+        if environment in values:
+            return (
+                values[environment],
+                definitely_set[environment],
+                evaluation_layers[environment],
+            )
+        parent = environment_parents.get(environment)
+        if parent is None:
+            inherited_values: dict[str, _ContentValue] = {}
+            inherited_set: set[str] = set()
+        else:
+            parent_values, parent_set, _parent_layer = ensure(parent)
+            inherited_values = dict(parent_values)
+            inherited_set = set(parent_set)
+        values[environment] = inherited_values
+        definitely_set[environment] = inherited_set
+        layer: dict[str | int, _ContentValue] = {
+            key: value
+            for name, value in inherited_values.items()
+            for key in (name, _scoped_variable_name(environment, name))
+        }
+        evaluation_layers[environment] = layer
+        return inherited_values, inherited_set, layer
+
+    def evaluate_assignment(
+        assignment: _AssignmentEvidence,
+        layer: dict[str | int, _ContentValue],
+    ) -> _ContentValue:
+        return _evaluate_with_tables(
+            assignment.content,
+            ChainMap(layer, raw_variables),
+            {},
+            {},
+            limits,
+        )
+
+    def apply_assignment(  # noqa: PLR0913
+        assignment: _AssignmentEvidence,
+        environment: int,
+        current: dict[str, _ContentValue],
+        current_set: set[str],
+        layer: dict[str | int, _ContentValue],
+        *,
+        definite: bool,
+    ) -> None:
+        value = evaluate_assignment(assignment, layer)
+        prior = current.get(assignment.name)
+        if assignment.append:
+            value = _compose_values(prior or _OUTSIDE_VALUE, value)
+        elif not definite:
+            value = _join_values(prior or _OUTSIDE_VALUE, value)
+        current[assignment.name] = _cap_value(value, limits)
+        layer[assignment.name] = current[assignment.name]
+        layer[_scoped_variable_name(environment, assignment.name)] = current[assignment.name]
+        if definite:
+            current_set.add(assignment.name)
+
+    snapshots: dict[int, _EvalCommandEnvironment] = {}
+    for command in evidence.commands:
+        environment = command_environments[command.command_id]
+        persistent_values, persistent_set, persistent_layer = ensure(environment)
+        conditional = command.conditionally_executed or command.command_id in conditional_commands
+        if not conditional:
+            current = persistent_values
+            current_set = persistent_set
+            layer = persistent_layer
+        else:
+            current = dict(persistent_values)
+            current_set = set(persistent_set)
+            layer = dict(persistent_layer)
+        for assignment in command.definite_assignments:
+            apply_assignment(
+                assignment,
+                environment,
+                current,
+                current_set,
+                layer,
+                definite=True,
+            )
+        snapshots[command.command_id] = _EvalCommandEnvironment(
+            tuple(sorted(current.items())),
+            frozenset(current_set),
+        )
+        if conditional:
+            for assignment in command.definite_assignments:
+                apply_assignment(
+                    assignment,
+                    environment,
+                    persistent_values,
+                    persistent_set,
+                    persistent_layer,
+                    definite=False,
+                )
+        for assignment in assignments_by_command.get(command.command_id, ()):
+            apply_assignment(
+                assignment,
+                environment,
+                (persistent_values if conditional else current),
+                (persistent_set if conditional else current_set),
+                (persistent_layer if conditional else layer),
+                definite=False,
+            )
+    return snapshots
+
+
+def _eval_taken_assignments(
+    commands: tuple[_CommandEvidence, ...],
+    context: _EvalSyntaxContext,
+    budget: _EvalDiscoveryBudget,
+    command_environments: dict[int, _EvalCommandEnvironment],
+) -> dict[int, tuple[_AssignmentEvidence, ...]]:
+    """Collect branch-correlated assignments reached by the streaming eval parser."""
+    assignments_by_command: dict[int, tuple[_AssignmentEvidence, ...]] = {}
+    for command in commands:
+        assignments: list[_AssignmentEvidence] = []
+        seen: set[tuple[str, bool, tuple[str | int | bool, ...]]] = set()
+        for executable in _builtin_eval_candidates(command):
+            raw = _eval_arguments_raw(command, executable)
+            budget.charge_work(_expression_nodes(raw))
+            environment = command_environments[command.command_id]
+            states = _eval_syntax_expression(
+                raw,
+                None,
+                context,
+                environment_variables=environment.variables,
+                definitely_set_variables=environment.definitely_set,
+            )
+            budget.charge_work(len(states))
+            for state in states:
+                for assignment in state.conditional_assignments:
+                    identity = _assignment_identity(assignment)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    assignments.append(assignment)
+                    budget.charge_work()
+        assignments_by_command[command.command_id] = tuple(assignments)
+    return assignments_by_command
 
 
 def _reachable_eval_variable_writes(
     commands: tuple[_CommandEvidence, ...],
     writes: tuple[_FlowWrite, ...],
     limits: TaintLimits,
+    *,
+    budget: _EvalDiscoveryBudget | None = None,
+    dependency_cache: dict[tuple[str | int | bool, ...], frozenset[str]] | None = None,
 ) -> tuple[_FlowWrite, ...]:
     """Retain only variable definitions reachable from exact builtin eval argument content."""
+    cache = dependency_cache if dependency_cache is not None else {}
+
+    def dependencies(expression: ContentExpr) -> frozenset[str]:
+        identity = _expression_identity(expression)
+        cached = cache.get(identity)
+        if cached is not None:
+            return cached
+        if budget is not None:
+            budget.charge_work(_expression_nodes(expression))
+        found = frozenset(_eval_content_dependencies(expression, limits))
+        if budget is not None:
+            budget.charge_work(len(found))
+        cache[identity] = found
+        return found
+
     names: set[str] = set()
     for command in commands:
         for executable in _builtin_eval_candidates(command):
-            names.update(
-                _eval_content_dependencies(
-                    _eval_arguments_raw(command, executable),
-                    limits,
-                )
-            )
-    changed = True
-    while changed:
-        changed = False
-        for write in writes:
-            if not isinstance(write.key, str) or write.key not in names:
-                continue
-            dependencies = _eval_content_dependencies(write.expression, limits)
-            if dependencies <= names:
-                continue
-            names.update(dependencies)
-            changed = True
+            names.update(dependencies(_eval_arguments_raw(command, executable)))
+    writes_by_key: dict[str, list[_FlowWrite]] = {}
+    for write in writes:
+        if isinstance(write.key, str):
+            writes_by_key.setdefault(write.key, []).append(write)
+    pending = list(names)
+    visited: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        if budget is not None:
+            budget.charge_work()
+        for write in writes_by_key.get(name, ()):
+            found = dependencies(write.expression)
+            pending.extend(found - names)
+            names.update(found)
     return tuple(write for write in writes if isinstance(write.key, str) and write.key in names)
+
+
+def _solve_eval_conditional_flow(
+    evidence: _ShellTaintEvidence,
+    definitions: _FlowDefinitions,
+    commands: tuple[_CommandEvidence, ...],
+    limits: TaintLimits,
+) -> tuple[
+    _FlowDefinitions,
+    _SolvedFlow,
+    tuple[_FlowWrite, ...],
+    dict[tuple[str | int, str | None], _EvalSyntaxValue],
+    dict[int, _EvalCommandEnvironment],
+]:
+    """Iteratively persist taken eval assignments and re-solve scoped variable flow."""
+    solved = _solve_flow_definitions(definitions, limits=limits)
+    budget = _EvalDiscoveryBudget(limits)
+    dependency_cache: dict[tuple[str | int | bool, ...], frozenset[str]] = {}
+    known_writes = {_flow_write_identity(write) for write in definitions.variable_writes}
+    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    assignments_by_command: dict[int, tuple[_AssignmentEvidence, ...]] = {}
+    while True:
+        eval_writes = _reachable_eval_variable_writes(
+            commands,
+            definitions.variable_writes,
+            limits,
+            budget=budget,
+            dependency_cache=dependency_cache,
+        )
+        syntax_variables = _solve_eval_syntax_variables(
+            eval_writes,
+            solved.variables,
+            limits,
+        )
+        command_snapshots = _eval_command_environments(
+            evidence,
+            solved.variables,
+            assignments_by_command,
+            command_environments,
+            environment_parents,
+            limits,
+        )
+        discovered_assignments = _eval_taken_assignments(
+            commands,
+            _EvalSyntaxContext(
+                syntax_variables,
+                solved.variables,
+                limits,
+                _eval_syntax_programs(eval_writes),
+            ),
+            budget,
+            command_snapshots,
+        )
+        candidates = _eval_conditional_variable_writes(
+            evidence,
+            discovered_assignments,
+            limits,
+        )
+        new_writes = tuple(
+            write for write in candidates if _flow_write_identity(write) not in known_writes
+        )
+        if not new_writes:
+            final_snapshots = _eval_command_environments(
+                evidence,
+                solved.variables,
+                discovered_assignments,
+                command_environments,
+                environment_parents,
+                limits,
+            )
+            return definitions, solved, eval_writes, syntax_variables, final_snapshots
+        budget.charge_update(len(new_writes))
+        known_writes.update(_flow_write_identity(write) for write in new_writes)
+        assignments_by_command = discovered_assignments
+        definitions = replace(
+            definitions,
+            variable_writes=(*definitions.variable_writes, *new_writes),
+        )
+        solved = _solve_flow_definitions(definitions, limits=limits)
 
 
 def _eval_sink_marker_capable(
     command: _CommandEvidence,
-    variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
-    writes: tuple[_FlowWrite, ...],
-    raw_variables: dict[str | int, _ContentValue],
-    limits: TaintLimits,
+    context: _EvalSyntaxContext,
+    environment: _EvalCommandEnvironment,
 ) -> bool:
     """Return whether any builtin eval candidate reparses an authored marker flow."""
-    context = _EvalSyntaxContext(
-        variables,
-        raw_variables,
-        limits,
-        _eval_syntax_programs(writes),
-    )
     for executable in _builtin_eval_candidates(command):
         raw = _eval_arguments_raw(command, executable)
-        if _marker_capable(_evaluate_with_tables(raw, raw_variables, {}, {}, limits)):
+        if _marker_capable(
+            _evaluate_with_tables(
+                raw,
+                context.raw_variables,
+                {},
+                {},
+                context.limits,
+            )
+        ):
             return True
         if any(
             summary.full.entries[_DFA_START][1]
@@ -3048,8 +4349,13 @@ def _eval_sink_marker_capable(
                 raw,
                 None,
                 context,
+                environment_variables=environment.variables,
+                definitely_set_variables=environment.definitely_set,
             )
-            for summary in _finalize_eval_syntax(state, raw_variables, limits)
+            for summary in _finalize_eval_syntax(
+                state,
+                context,
+            )
         ):
             return True
     return False
@@ -3078,7 +4384,6 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
     executable: _ExecutableEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
-    limits: TaintLimits,
 ) -> tuple[ContentExpr, ...]:
     """Return conservative sink expressions for one resolved executable candidate."""
     if executable.argv_index is None or executable.name is None:
@@ -3091,7 +4396,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
         if key is not None:
             direct_sinks = (ResourceRef(key),)
     if name == "eval" and literal == "eval" and not executable.external_lookup:
-        return (_eval_arguments_from(command, executable, limits),)
+        return (_eval_arguments_raw(command, executable),)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
         operand_index = executable.argv_index + 1
         if operand_index >= len(command.argv):
@@ -3153,7 +4458,6 @@ def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
-    limits: TaintLimits,
 ) -> tuple[ContentExpr, ...]:
     """Return every conservative execution sink expression for all candidates."""
     expressions: list[ContentExpr] = []
@@ -3164,13 +4468,12 @@ def _sink_expressions(
                 executable,
                 stdin,
                 process_resources,
-                limits,
             )
         )
     return tuple(expressions)
 
 
-def analyze_marker_taint(  # noqa: PLR0911
+def analyze_marker_taint(  # noqa: PLR0911, PLR0912
     evidence: _ShellTaintEvidence,
     *,
     limits: TaintLimits = TaintLimits(),  # noqa: B008
@@ -3209,19 +4512,34 @@ def analyze_marker_taint(  # noqa: PLR0911
         _validate_nested_evidence(evidence, limits)
         evidence = _contextualize_evidence(evidence)
         definitions, inputs = _build_flow_definitions(evidence, limits=limits)
-        solved = _solve_flow_definitions(definitions, limits=limits)
+        (
+            command_environment_ids,
+            environment_parents,
+            _lastpipe,
+        ) = _execution_environment_ids(evidence)
         eval_commands = tuple(
             command for command in evidence.commands if _builtin_eval_candidates(command)
         )
-        eval_writes = (
-            _reachable_eval_variable_writes(
-                eval_commands,
-                definitions.variable_writes,
+        if eval_commands:
+            (
+                definitions,
+                solved,
+                eval_writes,
+                eval_syntax_variables,
+                command_environments,
+            ) = _solve_eval_conditional_flow(evidence, definitions, eval_commands, limits)
+        else:
+            solved = _solve_flow_definitions(definitions, limits=limits)
+            eval_writes = ()
+            eval_syntax_variables = {}
+            command_environments = _eval_command_environments(
+                evidence,
+                solved.variables,
+                {},
+                command_environment_ids,
+                environment_parents,
                 limits,
             )
-            if eval_commands
-            else ()
-        )
         ordered_eval_syntax_variables = (
             _ordered_eval_syntax_variables(
                 eval_writes,
@@ -3231,25 +4549,26 @@ def analyze_marker_taint(  # noqa: PLR0911
             if eval_commands
             else {}
         )
+        ordered_eval_context = _EvalSyntaxContext(
+            ordered_eval_syntax_variables,
+            solved.variables,
+            limits,
+            _eval_syntax_programs(eval_writes),
+        )
         if any(
             _eval_sink_marker_capable(
                 command,
-                ordered_eval_syntax_variables,
-                eval_writes,
-                solved.variables,
-                limits,
+                ordered_eval_context,
+                command_environments[command.command_id],
             )
             for command in eval_commands
         ):
             return True, TAINT_REFUSAL_REASON
-        eval_syntax_variables = (
-            _solve_eval_syntax_variables(
-                eval_writes,
-                solved.variables,
-                limits,
-            )
-            if eval_commands
-            else {}
+        eval_context = _EvalSyntaxContext(
+            eval_syntax_variables,
+            solved.variables,
+            limits,
+            _eval_syntax_programs(eval_writes),
         )
         process_resources = {
             resource.resource_id: resource for resource in evidence.process_resources
@@ -3257,14 +4576,12 @@ def analyze_marker_taint(  # noqa: PLR0911
         for command in evidence.commands:
             if command in eval_commands and _eval_sink_marker_capable(
                 command,
-                eval_syntax_variables,
-                eval_writes,
-                solved.variables,
-                limits,
+                eval_context,
+                command_environments[command.command_id],
             ):
                 return True, TAINT_REFUSAL_REASON
             stdin = inputs[command.command_id]
-            for expression in _sink_expressions(command, stdin, process_resources, limits):
+            for expression in _sink_expressions(command, stdin, process_resources):
                 if _marker_capable(solved.evaluate(expression)):
                     return True, TAINT_REFUSAL_REASON
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:

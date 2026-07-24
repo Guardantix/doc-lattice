@@ -1,5 +1,7 @@
 """Tests for pure authored-marker shell taint analysis."""
 
+from dataclasses import replace
+
 import pytest
 
 from doc_lattice.error_types import ProjectError
@@ -33,8 +35,11 @@ from doc_lattice.github_ci.shell_taint import (
     _AssignmentEvidence,
     _build_flow_definitions,
     _CommandEvidence,
+    _ContentValue,
     _contextualize_evidence,
     _eval_reparse_literal,
+    _eval_syntax_expression,
+    _EvalSyntaxContext,
     _evaluate_closed,
     _ExecutableEvidence,
     _FlowDefinitions,
@@ -274,12 +279,13 @@ def test_content_builder_assignment_rhs_preserves_original_unexpanded_tokens() -
 
     assert built.assignment_content == LiteralTransfer("{doc-,lattice}")
     assert [(port.literal, port.content) for port in built.argv_ports] == [
-        ("X={doc-,lattice}", LiteralTransfer("X={doc-,lattice}"))
+        ("X=doc-", LiteralTransfer("X=doc-")),
+        ("X=lattice", LiteralTransfer("X=lattice")),
     ]
     assert built.brace_expansion_error is None
 
 
-def test_content_builder_assignment_rhs_does_not_apply_brace_expansion_cap() -> None:
+def test_content_builder_assignment_rhs_retains_deferred_brace_expansion_error() -> None:
     builder = ContentBuilder.empty()
     for character in "X=":
         builder.append_literal(character, brace_active=True)
@@ -287,11 +293,11 @@ def test_content_builder_assignment_rhs_does_not_apply_brace_expansion_cap() -> 
     for character in "{1..1000}":
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(defer_brace_errors=True)
 
     assert built.assignment_content == LiteralTransfer("{1..1000}")
     assert [port.literal for port in built.argv_ports] == ["X={1..1000}"]
-    assert built.brace_expansion_error is None
+    assert built.brace_expansion_error == "shell taint brace expansion limit exceeded"
 
 
 @pytest.mark.parametrize(
@@ -354,6 +360,54 @@ def test_output_process_substitution_binds_writer_scope_to_consumer_stdin() -> N
 
     assert inputs[2] == StreamRef(writer.output_scope_id)
     assert _marker_capable(_solve_flow_definitions(definitions).evaluate(StreamRef(2))) is True
+
+
+@pytest.mark.parametrize(
+    ("limits", "reason"),
+    [
+        (TaintLimits(max_edges=3), "shell taint edge limit exceeded"),
+        (TaintLimits(max_table_entries=3), "shell taint table entry limit exceeded"),
+    ],
+    ids=("edges", "table-entries"),
+)
+def test_assignment_environment_materialization_checks_limits_incrementally(
+    limits: TaintLimits,
+    reason: str,
+) -> None:
+    assignment = _command(
+        1,
+        _arg("true"),
+        name="true",
+        assignments=(_AssignmentEvidence("X", LiteralTransfer("value")),),
+    )
+    isolated = tuple(
+        replace(
+            _command(command_id, _arg("true"), name="true"),
+            isolated_execution=True,
+            isolated_context_id=200 + command_id,
+        )
+        for command_id in range(2, 5)
+    )
+    commands = (assignment, *isolated)
+    evidence = _contextualize_evidence(
+        _ShellTaintEvidence(
+            commands=commands,
+            scopes=(
+                _StreamScopeEvidence(
+                    100,
+                    "command",
+                    None,
+                    None,
+                    SequenceOutput(
+                        tuple(CommandOutput(command.command_id) for command in commands)
+                    ),
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(_TaintLimitExceeded, match=reason):
+        _build_flow_definitions(evidence, limits=limits)
 
 
 def test_eval_joins_dynamic_variable_assignment_and_append() -> None:
@@ -596,6 +650,86 @@ def test_eval_variable_syntax_mutual_cycle_obeys_fixed_point_cap() -> None:
             {},
             TaintLimits(max_fixed_point_updates=1),
         )
+
+
+def test_eval_conditional_assignment_obeys_augmented_edge_cap() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("${X:=doc-}", LiteralTransfer("${X:=doc-}")),
+        name="eval",
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)),
+        limits=TaintLimits(max_edges=1),
+    ) == (True, "shell taint edge limit exceeded")
+
+
+def test_eval_base_definition_cap_precedes_side_effect_discovery() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$(printf doc-)", LiteralTransfer("$(printf doc-)")),
+        name="eval",
+        assignments=(_AssignmentEvidence("X", _deep_concat(2)),),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)),
+        limits=TaintLimits(max_expression_nodes=2),
+    ) == (True, "shell taint expression node limit exceeded")
+
+
+def test_eval_side_effect_discovery_shares_expression_work_cap() -> None:
+    commands = tuple(
+        _command(
+            command_id,
+            _arg("eval"),
+            _arg("${X:=doc-}", LiteralTransfer("${X:=doc-}")),
+            name="eval",
+        )
+        for command_id in (1, 2)
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=commands),
+        limits=TaintLimits(max_expression_nodes=3),
+    ) == (True, "shell taint expression node limit exceeded")
+
+
+def test_deep_eval_syntax_fails_with_stable_depth_reason() -> None:
+    assignment = _AssignmentEvidence("X", _deep_concat(1000))
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$X", VariableRef("X"), dynamic=True),
+        name="eval",
+        assignments=(assignment,),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "shell taint eval reparse depth limit exceeded",
+    )
+
+
+def test_eval_syntax_reuses_scoped_overlay_for_long_token_stream() -> None:
+    raw_variables: dict[str | int, _ContentValue] = {
+        _scoped_variable_name(1, f"V{index}"): _evaluate_closed(LiteralTransfer(f"value-{index}"))
+        for index in range(512)
+    }
+    context = _EvalSyntaxContext({}, raw_variables, TaintLimits(), {})
+
+    states = _eval_syntax_expression(
+        LiteralTransfer("x" * 4096),
+        None,
+        context,
+        environment=1,
+    )
+
+    assert len(states) == 1
+    assert len(context.variable_overlays) == 1
 
 
 @pytest.mark.parametrize(

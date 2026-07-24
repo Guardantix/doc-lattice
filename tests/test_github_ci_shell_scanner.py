@@ -3207,6 +3207,343 @@ def test_eval_second_pass_preserves_complex_parameter_operands(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        'S=\'${X:=doc-}\'; eval "$S"; eval "$X"lattice',
+        "S=': ${X:=doc-}; ${X}lattice'; eval \"$S\"",
+        'A=\'${X:=doc-}\'; S=$A; eval "$S"; eval "$X"lattice',
+        'S=\'${X:=${Y:=doc-}}\'; eval "$S"; eval "$Y"lattice',
+        '( S=\'${X:=doc-}\'; eval "$S"; eval "$X"lattice )',
+        '{ S=\'${X:=doc-}\'; eval "$S"; }; eval "$X"lattice',
+        "if true; then eval ': ${X:=doc-}'; fi; eval \"$X\"lattice",
+        "f() { eval ': ${X:=doc-}'; }; f; eval \"$X\"lattice",
+        "case x in x) eval ': ${X:=doc-}';; esac; eval \"$X\"lattice",
+        ("select x in one; do eval ': ${X:=doc-}'; break; done <<< 1; eval \"$X\"lattice"),
+        'shopt -s lastpipe; S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice',
+        ('builtin shopt -s lastpipe; S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'),
+        (
+            "builtin -- shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "command builtin shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf x | eval "$S"; eval "$X"lattice'
+        ),
+        ('command shopt -s lastpipe; S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'),
+        (
+            "shopt -s lastpipe; shopt -su lastpipe; S=': ${X:=doc-}'; "
+            'printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "shopt -s lastpipe; { shopt -u lastpipe; } | cat; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "shopt -s lastpipe; printf x | { shopt -u lastpipe; cat; } | cat; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        "{ eval ': ${X:=doc-}'; eval \"$X\"lattice; } | cat",
+        "printf x | { eval ': ${X:=doc-}'; eval \"$X\"lattice; }",
+        "{ eval ': ${X:=doc-}'; eval \"$X\"lattice; } & wait",
+        "coproc { eval ': ${X:=doc-}'; eval \"$X\"lattice; }; wait",
+        (
+            "printf x | { shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf y | eval "$S"; eval "$X"lattice; }'
+        ),
+        (
+            "{ shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf y | eval "$S"; eval "$X"lattice; } | cat'
+        ),
+        (
+            "{ shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf y | eval "$S"; eval "$X"lattice; } & wait'
+        ),
+        (
+            "coproc { shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf y | eval "$S"; eval "$X"lattice; }; wait'
+        ),
+        "if true; then eval ': ${X:=doc-}'; ( eval \"$X\"lattice ); fi | cat",
+        ("printf x | if true; then eval ': ${X:=doc-}'; ( eval \"$X\"lattice ); fi"),
+        "for x in one; do eval ': ${X:=doc-}'; ( eval \"$X\"lattice ); done | cat",
+        ("while true; do eval ': ${X:=doc-}'; ( eval \"$X\"lattice ); break; done | cat"),
+        "case x in x) eval ': ${X:=doc-}'; ( eval \"$X\"lattice );; esac | cat",
+        "if true; then eval ': ${X:=doc-}'; ( eval \"$X\"lattice ); fi & wait",
+        (
+            "if true; then shopt -s lastpipe; "
+            "( S=': ${X:=doc-}'; printf y | eval \"$S\"; "
+            'eval "$X"lattice ); fi | cat'
+        ),
+        (
+            "shopt -s lastpipe; { S=': ${X:=doc-}'; "
+            'printf y | eval "$S"; eval "$X"lattice; } | cat'
+        ),
+        ('V=lastpipe; shopt -s "$V"; S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'),
+        ('shopt -s lastpipe; S=\': ${X:=doc-}\'; printf x | { eval "$S"; }; eval "$X"lattice'),
+        (
+            "shopt -s lastpipe; S=': ${X:=doc-}'; "
+            'printf x | while read item; do eval "$S"; done; eval "$X"lattice'
+        ),
+    ],
+    ids=(
+        "later-eval",
+        "same-eval",
+        "alias",
+        "nested-default",
+        "scoped-later-eval",
+        "brace-shared-later-eval",
+        "conditional-possible-later-eval",
+        "called-function-later-eval",
+        "matched-case-later-eval",
+        "nonempty-select-later-eval",
+        "lastpipe-consumer-later-eval",
+        "builtin-lastpipe-consumer-later-eval",
+        "builtin-separator-lastpipe-consumer-later-eval",
+        "nested-builtin-lastpipe-consumer-later-eval",
+        "command-lastpipe-consumer-later-eval",
+        "invalid-mixed-shopt-preserves-lastpipe",
+        "compound-producer-unset-keeps-lastpipe",
+        "compound-middle-unset-keeps-lastpipe",
+        "compound-producer-local-eval-state",
+        "compound-consumer-local-eval-state",
+        "background-compound-local-eval-state",
+        "coprocess-compound-local-eval-state",
+        "isolated-consumer-local-lastpipe-enable",
+        "isolated-producer-local-lastpipe-enable",
+        "background-local-lastpipe-enable",
+        "coprocess-local-lastpipe-enable",
+        "if-producer-nested-subshell-state",
+        "if-consumer-nested-subshell-state",
+        "for-producer-nested-subshell-state",
+        "while-producer-nested-subshell-state",
+        "case-producer-nested-subshell-state",
+        "background-if-nested-subshell-state",
+        "if-producer-nested-subshell-lastpipe",
+        "isolated-producer-inherits-lastpipe",
+        "dynamic-lastpipe-consumer-later-eval",
+        "lastpipe-compound-consumer-later-eval",
+        "lastpipe-loop-consumer-later-eval",
+    ),
+)
+def test_eval_second_pass_assignment_updates_reachable_variable_state(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "S=': ${X:='; S+='doc-}'; eval \"$S\"; eval \"$X\"lattice",
+        "A='doc-}'; S=': ${X:='; S+=$A; eval \"$S\"; eval \"$X\"lattice",
+        "S=': ${X:=${Y:='; S+='doc-}}'; eval \"$S\"; eval \"$Y\"lattice",
+    ],
+    ids=("append", "append-alias", "nested-append"),
+)
+def test_eval_second_pass_assignment_spans_reachable_variable_writes(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "eval '${X:=doc-}lattice'; X=safe",
+        "false && X=safe; eval '${X:=doc-}lattice'",
+        "if false; then X=safe; fi; eval '${X:=doc-}lattice'",
+        "while false; do X=safe; done; eval '${X:=doc-}lattice'",
+        "false && { X=safe; }; eval '${X:=doc-}lattice'",
+        "f() { X=safe; }; eval '${X:=doc-}lattice'",
+        "function f { X=safe; }; eval '${X:=doc-}lattice'",
+        "function f() { X=safe; }; eval '${X:=doc-}lattice'",
+        "case x in y) X=safe;; esac; eval '${X:=doc-}lattice'",
+        "select x in; do X=safe; break; done; eval '${X:=doc-}lattice'",
+        "coproc X=safe; eval '${X:=doc-}lattice'",
+        "X=safe & eval '${X:=doc-}lattice'",
+        "{ X=safe; } & eval '${X:=doc-}lattice'",
+        'S=\': ${X=doc-}\'; eval "$S"; eval "$X"lattice; X=safe',
+    ],
+    ids=(
+        "future",
+        "short-circuit-prior",
+        "conditional-prior",
+        "loop-prior",
+        "short-circuit-brace-prior",
+        "uncalled-function-prior",
+        "uncalled-function-keyword-prior",
+        "uncalled-function-keyword-parentheses-prior",
+        "unmatched-case-prior",
+        "empty-select-prior",
+        "coprocess-prior",
+        "background-prior",
+        "background-compound-prior",
+        "future-after-later-eval",
+    ),
+)
+def test_eval_second_pass_assignment_ignores_non_dominating_global_writes(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "split",
+    range(1, len("${X:=doc-}")),
+    ids=lambda split: f"split-{split}",
+)
+def test_eval_second_pass_assignment_spans_every_parameter_token_split(split: int):
+    parameter = "${X:=doc-}"
+    script = f"S=': {parameter[:split]}'; S+='{parameter[split:]}'; eval \"$S\"; eval \"$X\"lattice"
+
+    assert_taint_refusal(script)
+
+
+def test_eval_second_pass_assignment_spans_parameter_introducer_alias():
+    assert_taint_refusal("A='{X:=doc-}'; S=': $'; S+=$A; eval \"$S\"; eval \"$X\"lattice")
+
+
+@pytest.mark.parametrize(
+    "split",
+    range(1, len("$(printf doc-)lattice")),
+    ids=lambda split: f"split-{split}",
+)
+def test_eval_second_pass_command_substitution_spans_every_token_split(split: int):
+    source = "$(printf doc-)lattice"
+    script = f"S='{source[:split]}'; S+='{source[split:]}'; eval \"$S\""
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint eval command substitution cannot be bounded"
+
+
+@pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        (
+            "S='doc-\\'; S+='lattice'; eval \"$S\"",
+            TAINT_REFUSAL_REASON,
+        ),
+        (
+            "S='`printf doc-'; S+='`lattice'; eval \"$S\"",
+            "shell taint eval command substitution cannot be bounded",
+        ),
+    ],
+    ids=("backslash", "backtick"),
+)
+def test_eval_second_pass_retains_other_split_lexical_introducers(
+    script: str,
+    reason: str,
+):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == reason
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'S=\'${X:-doc-}\'; eval "$S"; eval "$X"lattice',
+        '( S=\'${X:=doc-}\'; eval "$S" ); eval "$X"lattice',
+        'X=safe; S=\': ${X:=doc-}\'; eval "$S"; eval "$X"lattice',
+        "X=''; S=': ${X=doc-}'; eval \"$S\"; eval \"$X\"lattice",
+        'Y=safe; S=\': ${X:=${Y:=doc-}}\'; eval "$S"; eval "$X"lattice',
+        "X=safe; eval '${X:=doc-}lattice'",
+        "X=''; eval '${X=doc-}lattice'",
+        "Y=safe; eval '${X:=${Y:=doc-}}lattice'",
+        '( X=safe; S=\'${X:=doc-}\'; eval "$S"; eval "$X"lattice )',
+        "( X=''; S='${X=doc-}'; eval \"$S\"; eval \"$X\"lattice )",
+        'S=\': ${X:=doc-}\'; eval "$S" | cat; eval "$X"lattice',
+        'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice',
+        'S=\': ${X:=doc-}\'; { eval "$S"; } | cat; eval "$X"lattice',
+        'S=\': ${X:=doc-}\'; printf x | { eval "$S"; }; eval "$X"lattice',
+        ('S=\': ${X:=doc-}\'; for item in x; do eval "$S"; done | cat; eval "$X"lattice'),
+        ('S=\': ${X:=doc-}\'; printf x | while read item; do eval "$S"; done; eval "$X"lattice'),
+        ('S=\': ${X:=doc-}\'; if true; then eval "$S"; fi | cat; eval "$X"lattice'),
+        ('S=\': ${X:=doc-}\'; printf x | if true; then eval "$S"; fi; eval "$X"lattice'),
+        ('S=\': ${X:=doc-}\'; case x in x) eval "$S";; esac | cat; eval "$X"lattice'),
+        ('S=\': ${X:=doc-}\'; printf x | case x in x) eval "$S";; esac; eval "$X"lattice'),
+        'S=\': ${X:=doc-}\'; eval "$S" & wait; eval "$X"lattice',
+        'S=\': ${X:=doc-}\'; { eval "$S"; } & wait; eval "$X"lattice',
+        'S=\': ${X:=doc-}\'; coproc eval "$S"; wait; eval "$X"lattice',
+        'S=\': ${X:=doc-}\'; coproc { eval "$S"; }; wait; eval "$X"lattice',
+        'shopt -u lastpipe; S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice',
+        (
+            "shopt -s lastpipe; shopt -u lastpipe; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "builtin shopt -s lastpipe; builtin shopt -u lastpipe; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "shopt -s lastpipe; printf x | shopt -u lastpipe; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "shopt -s lastpipe; printf x | { shopt -u lastpipe; }; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "{ shopt -s lastpipe; } | cat; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "printf x | { shopt -s lastpipe; }; "
+            'S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice'
+        ),
+        (
+            "shopt -s lastpipe; { shopt -u lastpipe; S=': ${X:=doc-}'; "
+            'printf y | eval "$S"; eval "$X"lattice; } | cat'
+        ),
+        'shopt -su lastpipe; S=\': ${X:=doc-}\'; printf x | eval "$S"; eval "$X"lattice',
+        'shopt -s lastpipe; S=\': ${X:=doc-}\'; eval "$S" | cat; eval "$X"lattice',
+        'shopt -s lastpipe; S=\': ${X:=doc-}\'; { eval "$S"; } | cat; eval "$X"lattice',
+    ],
+    ids=(
+        "non-assigning-default",
+        "isolated-subshell",
+        "preset-nonempty-colon",
+        "preset-empty-no-colon",
+        "nested-preset-nonempty",
+        "direct-preset-nonempty-colon",
+        "direct-preset-empty-no-colon",
+        "direct-nested-preset-nonempty",
+        "scoped-preset-nonempty-colon",
+        "scoped-preset-empty-no-colon",
+        "pipeline-producer",
+        "pipeline-consumer",
+        "compound-pipeline-producer",
+        "compound-pipeline-consumer",
+        "loop-pipeline-producer",
+        "loop-pipeline-consumer",
+        "if-pipeline-producer",
+        "if-pipeline-consumer",
+        "case-pipeline-producer",
+        "case-pipeline-consumer",
+        "background-eval",
+        "background-compound-eval",
+        "coprocess-eval",
+        "coprocess-compound-eval",
+        "lastpipe-disabled-consumer",
+        "lastpipe-enabled-then-disabled-consumer",
+        "builtin-lastpipe-enabled-then-disabled-consumer",
+        "direct-consumer-unset-clears-lastpipe",
+        "compound-consumer-unset-clears-lastpipe",
+        "compound-producer-set-keeps-default",
+        "compound-consumer-set-keeps-default",
+        "isolated-producer-local-lastpipe-disable",
+        "invalid-mixed-shopt-keeps-default",
+        "lastpipe-producer",
+        "lastpipe-compound-producer",
+    ),
+)
+def test_eval_second_pass_nonpersistent_assignment_controls_stay_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_eval_second_pass_colon_assignment_updates_preset_empty_variable():
+    assert_taint_refusal("X=''; S=': ${X:=doc-}'; eval \"$S\"; eval \"$X\"lattice")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "S='${X:-safe}'; eval \"$S\"lattice",
         "S='${X/pattern/safe}'; eval \"$S\"lattice",
     ],
@@ -3464,6 +3801,28 @@ def test_assignment_rhs_defers_brace_expansion_until_reparsed(script: str):
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+def test_assignment_shaped_argv_word_expands_braces_before_pipeline_sink():
+    assert_taint_refusal("printf %s X=doc-{lattice,noop} | bash")
+
+
+@pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        ("printf %s X={1..1000}", "shell taint brace expansion limit exceeded"),
+        (
+            "printf %s X={doc-,$Y}lattice",
+            "shell taint dynamic brace expansion cannot be bounded",
+        ),
+    ],
+    ids=("range-cap", "dynamic"),
+)
+def test_assignment_shaped_argv_word_applies_brace_bounds(script: str, reason: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == reason
 
 
 @pytest.mark.parametrize(
