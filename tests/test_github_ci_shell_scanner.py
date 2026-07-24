@@ -2994,6 +2994,60 @@ def test_eval_taints_marker_split_across_cross_command_append_assignment():
     assert_taint_refusal("X=doc-\nX+='lattice reconcile'\neval \"$X\"")
 
 
+@pytest.mark.parametrize(
+    "script_operand",
+    ["task.sh", "./task.sh"],
+    ids=("plain", "dot-normalized"),
+)
+def test_split_printf_file_handoff_reaches_shell_script_sink(script_operand: str):
+    assert_taint_refusal(
+        f"printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash {script_operand}"
+    )
+
+
+def test_heredoc_passthrough_reaches_written_script_sink():
+    assert_taint_refusal("cat > task.sh <<'EOF'\ndoc-lattice reconcile\nEOF\nbash task.sh")
+
+
+def test_split_herestring_reaches_shell_stdin_sink():
+    assert_taint_refusal("X=doc-\nX+='lattice reconcile'\nbash <<< \"$X\"")
+
+
+def test_static_descriptor_zero_read_reaches_shell_stdin_sink():
+    assert_taint_refusal("printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash < task.sh")
+
+
+def test_nonzero_static_read_is_not_shell_stdin():
+    result = scan_doc_lattice_invocations(
+        "printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash 3< task.sh"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_final_stdout_binding_routes_bytes_to_task():
+    assert_taint_refusal(
+        "printf '%s%s\\n' 'doc-' 'lattice reconcile' > /dev/null > task.sh\nbash task.sh"
+    )
+
+
+def test_overwritten_stdout_binding_leaves_only_empty_task():
+    result = scan_doc_lattice_invocations(
+        "printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh > /dev/null\nbash task.sh"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_nonzero_heredoc_is_not_shell_stdin():
+    result = scan_doc_lattice_invocations("bash 3<<'EOF'\ndoc-lattice reconcile\nEOF")
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 def test_eval_taint_is_order_insensitive_within_run_body():
     assert_taint_refusal("eval \"$X\"\nX=doc-\nX+='lattice reconcile'")
 

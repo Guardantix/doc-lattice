@@ -10,8 +10,15 @@ from doc_lattice.github_ci.shell_taint import (
     Concat,
     ContentBuilder,
     ContentExpr,
+    ContentTarget,
+    DescriptorTarget,
+    DynamicResourceTarget,
     LiteralTransfer,
+    NullTarget,
     OutsideGap,
+    ProcessResourceTarget,
+    RedirectionTarget,
+    StaticResourceTarget,
     VariableRef,
     _ArgPort,
     _AssignmentEvidence,
@@ -22,6 +29,8 @@ from doc_lattice.github_ci.shell_taint import (
     _select_shell_source,
     _ShellSourceKind,
     analyze_marker_taint,
+    concat,
+    normalize_static_resource,
 )
 
 _Invocation = tuple[str, bool]
@@ -579,10 +588,20 @@ class _LauncherPayloadRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class _ParsedRedirection:
+    operand_start: int
+    operator: str
+    descriptor: int | None
+
+
+@dataclass(slots=True)
 class _Heredoc:
     delimiter: str
     strip_tabs: bool
     expand: bool
+    descriptor: int | None
+    ordinal: int
+    owner_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -591,6 +610,7 @@ class _CommandScanState:
     heredocs: list[_Heredoc]
     cases: list["_CaseScanState"]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
+    owned_heredoc_count: int = 0
     last_command_id: int | None = None
     prefix_mode: str = "normal"
     prefix_pending: int = 0
@@ -763,13 +783,12 @@ class _ShellScanner:
                 continue
             redirection = self._redirection_at(index, limit)
             if redirection is not None:
-                index, heredoc = self._consume_redirection(
+                index = self._consume_redirection(
                     redirection,
                     limit,
+                    state,
                     depth,
                 )
-                if heredoc is not None:
-                    state.heredocs.append(heredoc)
                 continue
             operator_end = self._consume_command_operator(index, limit, state, depth)
             if operator_end is not None:
@@ -1141,6 +1160,7 @@ class _ShellScanner:
                 depth,
             )
             state.heredocs.clear()
+            state.owned_heredoc_count = 0
         return index
 
     def _flush_command(self, state: _CommandScanState) -> int | None:
@@ -1211,11 +1231,14 @@ class _ShellScanner:
                     0,
                     argv,
                     tuple(assignments),
-                    (),
+                    tuple(state.redirections),
                     _remap_executable(executable, argv_indices),
                 )
             )
             state.last_command_id = command_id
+            for heredoc in state.heredocs[state.owned_heredoc_count :]:
+                heredoc.owner_id = command_id
+            state.owned_heredoc_count = len(state.heredocs)
         state.reset_command()
         return state.last_command_id
 
@@ -1254,43 +1277,85 @@ class _ShellScanner:
         self,
         index: int,
         limit: int,
-    ) -> tuple[int, str] | None:
+    ) -> _ParsedRedirection | None:
         operator_index = index
+        descriptor: int | None = None
         if self.source[index].isdigit():
             while operator_index < limit and self.source[operator_index].isdigit():
                 operator_index += 1
+            descriptor = int(self.source[index:operator_index])
         elif self.source[index] == "{":
             closing = self.source.find("}", index + 1, limit)
             if closing != -1 and _is_name(self.source[index + 1 : closing]):
                 operator_index = closing + 1
         for operator in _REDIRECTION_OPERATORS:
             if self.source.startswith(operator, operator_index):
-                return operator_index + len(operator), operator
+                if descriptor is None and self.source[index] != "{":
+                    descriptor = 0 if operator in {"<", "<<", "<<-", "<<<", "<&", "<>"} else 1
+                return _ParsedRedirection(operator_index + len(operator), operator, descriptor)
         return None
+
+    @staticmethod
+    def _redirection_target(word: _ShellWord, operator: str) -> RedirectionTarget:
+        if word.process_resource_id is not None:
+            return ProcessResourceTarget(word.process_resource_id)
+        if operator in {"<&", ">&"} and not word.dynamic and word.literal.isdigit():
+            return DescriptorTarget(int(word.literal))
+        resource = normalize_static_resource(word.literal, dynamic=word.dynamic)
+        if resource == "/dev/null":
+            return NullTarget()
+        if resource is not None:
+            return StaticResourceTarget(resource)
+        return DynamicResourceTarget()
 
     def _consume_redirection(
         self,
-        redirection: tuple[int, str],
+        redirection: _ParsedRedirection,
         limit: int,
+        state: _CommandScanState,
         depth: int,
-    ) -> tuple[int, _Heredoc | None]:
-        index, operator = redirection
+    ) -> int:
+        index = redirection.operand_start
         while index < limit and self.source[index] in " \t":
             index += 1
-        if operator in {"<<", "<<-"}:
+        ordinal = len(state.redirections)
+        if redirection.operator in {"<<", "<<-"}:
             delimiter, quoted, index = self._parse_heredoc_delimiter(index, limit, depth)
             if delimiter is None:
-                return index, None
-            return (
-                index,
+                return index
+            state.heredocs.append(
                 _Heredoc(
                     delimiter=delimiter,
-                    strip_tabs=operator == "<<-",
+                    strip_tabs=redirection.operator == "<<-",
                     expand=not quoted,
-                ),
+                    descriptor=redirection.descriptor,
+                    ordinal=ordinal,
+                )
             )
-        _target, index = self._parse_word(index, limit, depth)
-        return index, None
+            state.redirections.append(
+                _RedirectionEvent(
+                    ordinal,
+                    redirection.operator,
+                    redirection.descriptor,
+                    ContentTarget(LiteralTransfer("")),
+                )
+            )
+            return index
+        target, index = self._parse_word(index, limit, depth)
+        redirection_target: RedirectionTarget
+        if redirection.operator == "<<<":
+            redirection_target = ContentTarget(concat(target.content, LiteralTransfer("\n")))
+        else:
+            redirection_target = self._redirection_target(target, redirection.operator)
+        state.redirections.append(
+            _RedirectionEvent(
+                ordinal,
+                redirection.operator,
+                redirection.descriptor,
+                redirection_target,
+            )
+        )
+        return index
 
     def _parse_heredoc_delimiter(
         self,
@@ -1394,8 +1459,15 @@ class _ShellScanner:
                     body_end = logical_line_start
                     after_delimiter = min(index, limit)
                     break
+            raw_body = self.source[body_start:body_end]
+            body = _remove_active_line_continuations(raw_body) if heredoc.expand else raw_body
+            if self.taint_builder is not None and heredoc.owner_id is not None:
+                self.taint_builder.attach_redirection_content(
+                    heredoc.owner_id,
+                    heredoc.ordinal,
+                    LiteralTransfer(body),
+                )
             if heredoc.expand:
-                body = _remove_active_line_continuations(self.source[body_start:body_end])
                 child = self._child_scanner(
                     body,
                     invocations=self.invocations,

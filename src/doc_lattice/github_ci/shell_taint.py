@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, TypeAlias
@@ -378,6 +378,24 @@ class _EvidenceBuilder:
         resource_id = self.next_process_resource_id
         self.next_process_resource_id += 1
         return resource_id
+
+    def attach_redirection_content(
+        self,
+        command_id: int,
+        ordinal: int,
+        content: ContentExpr,
+    ) -> None:
+        """Replace one command redirection's placeholder with authored content."""
+        for index, command in enumerate(self.commands):
+            if command.command_id != command_id:
+                continue
+            redirections = tuple(
+                replace(event, target=ContentTarget(content)) if event.ordinal == ordinal else event
+                for event in command.redirections
+            )
+            self.commands[index] = replace(command, redirections=redirections)
+            return
+        raise ValueError("heredoc owner command is missing")
 
     def freeze(self) -> _ShellTaintEvidence:
         return _ShellTaintEvidence(
