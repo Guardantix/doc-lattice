@@ -434,6 +434,7 @@ _SHELL_EAGER_STOPS = frozenset({"--help", "--version", "--dump-strings", "--dump
 _INPUT_REDIRECTION_OPERATORS = frozenset({"<", "<<", "<<-", "<<<", "<&", "<>"})
 _OUTPUT_REDIRECTION_OPERATORS = frozenset({">", ">|", ">>", ">&", "<>", "&>", "&>>"})
 _APPEND_REDIRECTION_OPERATORS = frozenset({">>", "&>>"})
+_COMBINED_OUTPUT_REDIRECTION_OPERATORS = frozenset({"&>", "&>>"})
 _STREAM_SCOPE_KINDS = frozenset(
     {"command", "command_substitution", "process_substitution", "subshell_group", "pipeline"}
 )
@@ -969,7 +970,11 @@ def _static_write_definitions(
                 event.target,
                 event.operator in _APPEND_REDIRECTION_OPERATORS,
             )
-        bindings[event.descriptor] = binding
+        if event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS:
+            bindings[1] = binding
+            bindings[2] = bindings[1]
+        else:
+            bindings[event.descriptor] = binding
     for descriptor, (target, append) in bindings.items():
         if not isinstance(target, StaticResourceTarget):
             continue

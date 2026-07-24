@@ -3025,6 +3025,32 @@ def test_duplicated_static_output_descriptor_receives_stdout():
     assert_taint_refusal("printf '%s%s' 'doc-' 'lattice reconcile' 3> task.sh 1>&3; bash task.sh")
 
 
+@pytest.mark.parametrize(
+    "operator",
+    ["&>", "&>>"],
+    ids=("truncate", "append"),
+)
+def test_combined_redirect_copy_routes_stdout_to_task(operator: str):
+    assert_taint_refusal(
+        f"printf '%s%s' 'doc-' 'lattice reconcile' {operator} task.sh 1>&2; bash task.sh"
+    )
+
+
+@pytest.mark.parametrize(
+    "operator",
+    ["&>", "&>>"],
+    ids=("truncate", "append"),
+)
+def test_rebound_stderr_breaks_combined_redirect_copy(operator: str):
+    result = scan_doc_lattice_invocations(
+        f"printf '%s%s' 'doc-' 'lattice reconcile' {operator} task.sh "
+        "2>/dev/null 1>&2; bash task.sh"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 def test_nonzero_static_read_is_not_shell_stdin():
     result = scan_doc_lattice_invocations(
         "printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nbash 3< task.sh"
