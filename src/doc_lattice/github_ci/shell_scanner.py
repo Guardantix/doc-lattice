@@ -5,7 +5,22 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
-from doc_lattice.github_ci.shell_taint import _ExecutableEvidence
+from doc_lattice.github_ci.shell_taint import (
+    TAINT_REFUSAL_REASON,
+    Concat,
+    ContentBuilder,
+    ContentExpr,
+    LiteralTransfer,
+    OutsideGap,
+    VariableRef,
+    _ArgPort,
+    _AssignmentEvidence,
+    _CommandEvidence,
+    _EvidenceBuilder,
+    _ExecutableEvidence,
+    _RedirectionEvent,
+    analyze_marker_taint,
+)
 
 _Invocation = tuple[str, bool]
 _MAX_SHELL_SOURCE_CHARS = 1_048_576
@@ -367,6 +382,7 @@ _ANSI_C_SIMPLE_ESCAPES = {
 @dataclass(frozen=True, slots=True)
 class _ShellWord:
     literal: str
+    content: ContentExpr = field(default_factory=lambda: LiteralTransfer(""))
     has_doc_lattice_marker: bool = False
     dynamic: bool = False
     locale_translated: bool = False
@@ -374,6 +390,11 @@ class _ShellWord:
     quoted_zero_field_expansion: bool = False
     active_argv_expansion: bool = False
     shell_assignment: bool = False
+    assignment_name: str | None = None
+    assignment_content: ContentExpr | None = None
+    assignment_append: bool = False
+    conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
+    process_resource_id: int | None = None
     keyword_eligible: bool = True
 
 
@@ -381,6 +402,7 @@ class _ShellWord:
 class _ShellWordBuilder:
     characters: list[str]
     active_syntax: list[str]
+    content: ContentBuilder = field(default_factory=ContentBuilder.empty)
     dynamic: bool = False
     locale_translated: bool = False
     unquoted_dynamic: bool = False
@@ -400,6 +422,7 @@ class _ShellWordBuilder:
         quoted_zero_field_expansion: bool = False,
     ) -> None:
         """Append text protected from literal argv expansion."""
+        self.content.append_literal("".join(segment) if isinstance(segment, list) else segment)
         self.characters.extend(segment)
         self.active_syntax.append(" ")
         self.dynamic = self.dynamic or dynamic
@@ -414,6 +437,7 @@ class _ShellWordBuilder:
 
     def append_active(self, character: str) -> None:
         """Append one unquoted, unescaped literal character."""
+        self.content.append_literal(character)
         self.characters.append(character)
         self.active_syntax.append(character)
         if not self.assignment_name_is_literal or self.shell_assignment:
@@ -421,6 +445,11 @@ class _ShellWordBuilder:
         if character == "=":
             assignment_name = self.assignment_name.removesuffix("+")
             self.shell_assignment = bool(_SHELL_ASSIGNMENT_NAME_RE.fullmatch(assignment_name))
+            if self.shell_assignment:
+                self.content.mark_assignment(
+                    assignment_name,
+                    append=self.assignment_name.endswith("+"),
+                )
             self.assignment_name_is_literal = False
             return
         self.assignment_name += character
@@ -428,17 +457,42 @@ class _ShellWordBuilder:
     def build(self) -> _ShellWord:
         """Build the immutable decoded word and its expansion provenance."""
         literal = "".join(self.characters)
+        built_content = self.content.build()
         return _ShellWord(
             literal=literal,
-            has_doc_lattice_marker=_DISPATCHER_MARKER_RE.search(literal) is not None,
+            content=built_content.expression,
+            has_doc_lattice_marker=_content_has_doc_lattice_marker(built_content.expression),
             dynamic=self.dynamic,
             locale_translated=self.locale_translated,
             unquoted_dynamic=self.unquoted_dynamic,
             quoted_zero_field_expansion=self.quoted_zero_field_expansion,
             active_argv_expansion=_has_active_argv_expansion("".join(self.active_syntax)),
             shell_assignment=self.shell_assignment,
+            assignment_name=built_content.assignment_name,
+            assignment_content=built_content.assignment_content,
+            assignment_append=built_content.assignment_append,
+            conditional_assignments=built_content.conditional_assignments,
+            process_resource_id=built_content.process_resource_id,
             keyword_eligible=self.keyword_eligible,
         )
+
+
+def _content_has_doc_lattice_marker(content: ContentExpr) -> bool:
+    """Return whether one contiguous authored literal segment contains the marker."""
+    pending = [content]
+    literal_parts: list[str] = []
+    while pending:
+        part = pending.pop()
+        if isinstance(part, Concat):
+            pending.extend(reversed(part.parts))
+            continue
+        if isinstance(part, LiteralTransfer):
+            literal_parts.append(part.text)
+            continue
+        if _DISPATCHER_MARKER_RE.search("".join(literal_parts)) is not None:
+            return True
+        literal_parts.clear()
+    return _DISPATCHER_MARKER_RE.search("".join(literal_parts)) is not None
 
 
 def _reject_active_extglob_opener(
@@ -463,6 +517,8 @@ class _ShellExpansion:
 
     end: int
     quoted_zero_field_expansion: bool = False
+    content: ContentExpr = field(default_factory=OutsideGap)
+    conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,6 +578,8 @@ class _CommandScanState:
     words: list[_ShellWord]
     heredocs: list[_Heredoc]
     cases: list["_CaseScanState"]
+    redirections: list[_RedirectionEvent] = field(default_factory=list)
+    last_command_id: int | None = None
     prefix_mode: str = "normal"
     prefix_pending: int = 0
     at_command_position: bool = True
@@ -530,6 +588,7 @@ class _CommandScanState:
     def reset_command(self) -> None:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
         self.words.clear()
+        self.redirections.clear()
         self.prefix_mode = "normal"
         self.prefix_pending = 0
         self.at_command_position = True
@@ -606,21 +665,33 @@ class _LauncherResolutionState:
 
 
 class _ShellScanner:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         source: str,
         *,
         budget: _ScanBudget | None = None,
         invocations: list[_Invocation] | None = None,
         classify_commands: bool = True,
+        taint_builder: _EvidenceBuilder | None = None,
+        collect_taint: bool = True,
     ) -> None:
         self.source = source
         self.budget = budget if budget is not None else _ScanBudget()
         self.invocations = invocations if invocations is not None else []
         self.classify_commands = classify_commands
+        self.taint_builder = (
+            taint_builder
+            if taint_builder is not None
+            else (_EvidenceBuilder.empty() if collect_taint else None)
+        )
+        self.owns_taint_builder = collect_taint and taint_builder is None
 
     def scan(self) -> tuple[_Invocation, ...]:
         self._scan_commands(0, len(self.source), terminator=None, depth=0)
+        if self.owns_taint_builder and self.taint_builder is not None:
+            refused, reason = analyze_marker_taint(self.taint_builder.freeze())
+            if refused:
+                raise _ShellScanIncomplete(reason or TAINT_REFUSAL_REASON)
         return tuple(self.invocations)
 
     def _scan_commands(
@@ -1042,20 +1113,68 @@ class _ShellScanner:
             state.heredocs.clear()
         return index
 
-    def _flush_command(self, state: _CommandScanState) -> None:
-        if not state.words:
-            return
+    def _flush_command(self, state: _CommandScanState) -> int | None:
+        if not state.words and not state.redirections:
+            return None
+        resolution = _LauncherResolutionState(self.budget)
         if self.classify_commands:
             invocation = _invocation_in_simple_command(
                 state.words,
                 self.budget,
                 command_has_marker=state.command_has_marker,
+                resolution=resolution,
             )
             if invocation is not None:
                 if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
                     raise _ShellScanIncomplete("invocation limit exceeded")
                 self.invocations.append(invocation)
+        if self.taint_builder is not None:
+            if state.words and not resolution.executable_positions:
+                _doc_lattice_command_index(state.words, 0, resolution)
+            executable = _executable_evidence_from_resolution(state.words, resolution)
+            assignment_indices = _assignment_indices(state.words, executable)
+            assignments: list[_AssignmentEvidence] = []
+            for index in assignment_indices:
+                word = state.words[index]
+                if word.assignment_name is not None and word.assignment_content is not None:
+                    assignments.append(
+                        _AssignmentEvidence(
+                            word.assignment_name,
+                            word.assignment_content,
+                            append=word.assignment_append,
+                        )
+                    )
+                assignments.extend(word.conditional_assignments)
+            argv_indices = {
+                source_index: argv_index
+                for argv_index, source_index in enumerate(
+                    index for index in range(len(state.words)) if index not in assignment_indices
+                )
+            }
+            argv = tuple(
+                _ArgPort(
+                    state.words[source_index].literal,
+                    state.words[source_index].content,
+                    dynamic=state.words[source_index].dynamic,
+                    process_resource_id=state.words[source_index].process_resource_id,
+                )
+                for source_index in argv_indices
+            )
+            command_id, output_scope_id = self.taint_builder.allocate_command()
+            self.taint_builder.commands.append(
+                _CommandEvidence(
+                    command_id,
+                    output_scope_id,
+                    0,
+                    argv,
+                    tuple(assignments),
+                    (),
+                    _remap_executable(executable, argv_indices),
+                )
+            )
+            state.last_command_id = command_id
         state.reset_command()
+        return state.last_command_id
 
     def _consume_process_substitution(
         self,
@@ -1182,6 +1301,7 @@ class _ShellScanner:
             self.source,
             budget=self.budget,
             classify_commands=False,
+            collect_taint=False,
         )
         return lexer._consume_active_expansion(index, limit, depth)
 
@@ -1227,6 +1347,7 @@ class _ShellScanner:
                     budget=self.budget,
                     invocations=self.invocations,
                     classify_commands=self.classify_commands,
+                    collect_taint=False,
                 )
                 child._scan_heredoc_expansions(0, len(body), depth + 1)
             index = after_delimiter
@@ -1280,7 +1401,7 @@ class _ShellScanner:
                 continue
             index += 1
 
-    def _parse_word(
+    def _parse_word(  # noqa: PLR0912, PLR0915
         self,
         start: int,
         limit: int,
@@ -1305,13 +1426,15 @@ class _ShellScanner:
                     index + 2,
                     limit,
                     depth,
+                    builder.content,
                 )
                 builder.append_protected(
-                    segment,
+                    "",
                     dynamic=True,
                     locale_translated=True,
                     quoted_zero_field_expansion=fragment_zero_field,
                 )
+                builder.characters.extend(segment)
                 continue
             character = self.source[index]
             if character == "'":
@@ -1327,12 +1450,14 @@ class _ShellScanner:
                     index + 1,
                     limit,
                     depth,
+                    builder.content,
                 )
                 builder.append_protected(
-                    segment,
+                    "",
                     dynamic=fragment_dynamic,
                     quoted_zero_field_expansion=fragment_zero_field,
                 )
+                builder.characters.extend(segment)
                 continue
             if character == "\\":
                 if index + 1 < limit and self.source[index + 1] == "\n":
@@ -1347,6 +1472,9 @@ class _ShellScanner:
                 continue
             expansion_end = self._consume_active_expansion(index, limit, depth)
             if expansion_end is not None:
+                builder.content.append_expression(expansion_end.content)
+                for assignment in expansion_end.conditional_assignments:
+                    builder.content.add_conditional_assignment(assignment)
                 builder.append_protected("", dynamic=True, unquoted_dynamic=True)
                 index = expansion_end.end
                 continue
@@ -1375,6 +1503,7 @@ class _ShellScanner:
         start: int,
         limit: int,
         depth: int,
+        content: ContentBuilder,
     ) -> tuple[list[str], int, bool, bool]:
         characters: list[str] = []
         dynamic = False
@@ -1392,9 +1521,11 @@ class _ShellScanner:
                     continue
                 if escaped in {"$", '"', "\\", "`"}:
                     characters.append(escaped)
+                    content.append_literal(escaped)
                     index += 2
                     continue
                 characters.append("\\")
+                content.append_literal("\\")
                 index += 1
                 continue
             expansion_end = self._consume_active_expansion(
@@ -1404,6 +1535,9 @@ class _ShellScanner:
                 double_quoted=True,
             )
             if expansion_end is not None:
+                content.append_expression(expansion_end.content)
+                for assignment in expansion_end.conditional_assignments:
+                    content.add_conditional_assignment(assignment)
                 dynamic = True
                 quoted_zero_field_expansion = (
                     quoted_zero_field_expansion or expansion_end.quoted_zero_field_expansion
@@ -1411,6 +1545,7 @@ class _ShellScanner:
                 index = expansion_end.end
                 continue
             characters.append(character)
+            content.append_literal(character)
             index += 1
         return characters, index, dynamic, quoted_zero_field_expansion
 
@@ -1426,6 +1561,7 @@ class _ShellScanner:
             raise _ShellScanIncomplete("recursion limit exceeded")
         end: int | None = None
         quoted_zero_field_expansion = False
+        content: ContentExpr = OutsideGap()
         if self.source.startswith("$((", index):
             end = self._consume_arithmetic(index + 3, limit, depth + 1)
             if end is None:
@@ -1457,13 +1593,18 @@ class _ShellScanner:
             end = self._consume_legacy_substitution(index, limit, depth + 1)
         elif self.source[index] == "$":
             end = _consume_parameter_name(self.source, index, limit)
+            content = (
+                VariableRef(self.source[index + 1 : end])
+                if _is_unbraced_named_parameter(self.source, index, limit)
+                else OutsideGap()
+            )
             quoted_zero_field_expansion = double_quoted and (
                 _is_unbraced_named_parameter(self.source, index, limit)
                 or (index + 1 < limit and self.source[index + 1] == "@")
             )
         if end is None:
             return None
-        return _ShellExpansion(end, quoted_zero_field_expansion)
+        return _ShellExpansion(end, quoted_zero_field_expansion, content)
 
     def _consume_parameter(
         self,
@@ -1625,6 +1766,7 @@ class _ShellScanner:
                     budget=self.budget,
                     invocations=self.invocations,
                     classify_commands=self.classify_commands,
+                    collect_taint=False,
                 )
                 child._scan_commands(
                     0,
@@ -1733,8 +1875,9 @@ def _invocation_in_simple_command(
     budget: _ScanBudget,
     *,
     command_has_marker: bool,
+    resolution: _LauncherResolutionState | None = None,
 ) -> _Invocation | None:
-    resolution = _LauncherResolutionState(budget)
+    resolution = resolution if resolution is not None else _LauncherResolutionState(budget)
     executable = _doc_lattice_command_index(words, 0, resolution)
     if executable.index is None:
         _reject_marker_bearing_non_invocation(command_has_marker)
@@ -1794,16 +1937,15 @@ def _effective_executable_evidence(
 ) -> _ExecutableEvidence | None:
     """Resolve launcher-chain executable evidence for one simple command."""
     resolution = _LauncherResolutionState(budget)
-    result = _doc_lattice_command_index(words, 0, resolution)
+    _doc_lattice_command_index(words, 0, resolution)
+    return _executable_evidence_from_resolution(words, resolution)
+
+
+def _executable_evidence_from_resolution(
+    words: list[_ShellWord], resolution: _LauncherResolutionState
+) -> _ExecutableEvidence | None:
+    """Export the already-resolved launcher candidates as taint evidence."""
     candidates = resolution.executable_positions
-    if not candidates and result.index is not None:
-        candidates = [
-            _ExecutableCandidate(
-                result.index,
-                external_lookup=result.external_lookup,
-                ambiguous=result.ambiguous,
-            )
-        ]
     if not candidates:
         return None
     exported: dict[_ExecutableEvidence, None] = {}
@@ -1825,6 +1967,41 @@ def _effective_executable_evidence(
         external_lookup=primary.external_lookup,
         ambiguous=primary.ambiguous,
         alternates=converted[:-1],
+    )
+
+
+def _assignment_indices(
+    words: list[_ShellWord], executable: _ExecutableEvidence | None
+) -> set[int]:
+    """Return static assignment-prefix positions before the primary executable."""
+    limit = (
+        executable.argv_index
+        if executable is not None and executable.argv_index is not None
+        else len(words)
+    )
+    return {
+        index
+        for index, word in enumerate(words[:limit])
+        if word.shell_assignment and word.assignment_name is not None
+    }
+
+
+def _remap_executable(
+    executable: _ExecutableEvidence | None, argv_indices: dict[int, int]
+) -> _ExecutableEvidence:
+    """Translate source word positions to compact taint argv positions."""
+    if executable is None:
+        return _ExecutableEvidence(None, None, None)
+    remapped_alternates = tuple(
+        _remap_executable(alternate, argv_indices) for alternate in executable.alternates
+    )
+    return _ExecutableEvidence(
+        argv_indices.get(executable.argv_index) if executable.argv_index is not None else None,
+        executable.name,
+        executable.literal,
+        external_lookup=executable.external_lookup,
+        ambiguous=executable.ambiguous,
+        alternates=remapped_alternates,
     )
 
 

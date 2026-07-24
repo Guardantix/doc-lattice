@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, TypeAlias
@@ -273,6 +273,105 @@ class _ShellTaintEvidence:
     scopes: tuple[_StreamScopeEvidence, ...] = ()
     pipes: tuple[_PipeEvidence, ...] = ()
     process_resources: tuple[_ProcessResourceEvidence, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _BuiltContent:
+    """Completed authored content plus word-local taint annotations."""
+
+    expression: ContentExpr
+    assignment_name: str | None = None
+    assignment_content: ContentExpr | None = None
+    assignment_append: bool = False
+    conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
+    process_resource_id: int | None = None
+
+
+@dataclass(slots=True)
+class ContentBuilder:
+    """Incrementally construct one word's authored content evidence."""
+
+    parts: list[ContentExpr] = field(default_factory=list)
+    assignment_value_start: int | None = None
+    assignment_name: str | None = None
+    assignment_append: bool = False
+    conditional_assignments: list[_AssignmentEvidence] = field(default_factory=list)
+    process_resource_id: int | None = None
+
+    @classmethod
+    def empty(cls) -> ContentBuilder:
+        return cls()
+
+    def append_literal(self, text: str) -> None:
+        if text:
+            self.parts.append(LiteralTransfer(text))
+
+    def append_expression(self, expression: ContentExpr) -> None:
+        self.parts.append(expression)
+
+    def mark_assignment(self, name: str, *, append: bool) -> None:
+        self.assignment_name = name
+        self.assignment_append = append
+        self.assignment_value_start = len(self.parts)
+
+    def add_conditional_assignment(self, assignment: _AssignmentEvidence) -> None:
+        self.conditional_assignments.append(assignment)
+
+    def build(self) -> _BuiltContent:
+        expression = concat(*self.parts)
+        assignment_content = (
+            concat(*self.parts[self.assignment_value_start :])
+            if self.assignment_value_start is not None
+            else None
+        )
+        return _BuiltContent(
+            expression,
+            assignment_name=self.assignment_name,
+            assignment_content=assignment_content,
+            assignment_append=self.assignment_append,
+            conditional_assignments=tuple(self.conditional_assignments),
+            process_resource_id=self.process_resource_id,
+        )
+
+
+@dataclass(slots=True)
+class _EvidenceBuilder:
+    """Mutable collector for one scanner-owned taint pass."""
+
+    commands: list[_CommandEvidence] = field(default_factory=list)
+    scopes: list[_StreamScopeEvidence] = field(default_factory=list)
+    pipes: list[_PipeEvidence] = field(default_factory=list)
+    process_resources: list[_ProcessResourceEvidence] = field(default_factory=list)
+    next_command_id: int = 1
+    next_scope_id: int = 1
+    next_process_resource_id: int = 1
+
+    @classmethod
+    def empty(cls) -> _EvidenceBuilder:
+        return cls()
+
+    def allocate_command(self) -> tuple[int, int]:
+        command_id = self.next_command_id
+        self.next_command_id += 1
+        return command_id, self.allocate_scope()
+
+    def allocate_scope(self) -> int:
+        scope_id = self.next_scope_id
+        self.next_scope_id += 1
+        return scope_id
+
+    def allocate_process_resource(self) -> int:
+        resource_id = self.next_process_resource_id
+        self.next_process_resource_id += 1
+        return resource_id
+
+    def freeze(self) -> _ShellTaintEvidence:
+        return _ShellTaintEvidence(
+            commands=tuple(self.commands),
+            scopes=tuple(self.scopes),
+            pipes=tuple(self.pipes),
+            process_resources=tuple(self.process_resources),
+        )
 
 
 def normalize_static_resource(literal: str, *, dynamic: bool) -> str | None:

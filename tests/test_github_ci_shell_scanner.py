@@ -24,6 +24,7 @@ from doc_lattice.github_ci.shell_scanner import (
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
 )
+from doc_lattice.github_ci.shell_taint import TAINT_REFUSAL_REASON
 
 NONE = ()
 LINEAR = (("linear", False),)
@@ -244,6 +245,18 @@ def assert_marker_refusal(script: str) -> None:
     assert result.invocations == NONE
     assert result.incomplete_reason is not None
     with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+def assert_taint_refusal(script: str) -> None:
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+    with pytest.raises(
+        ConfigError,
+        match=r"shell scan incomplete: authored marker flow reaches an execution sink",
+    ):
         direct_doc_lattice_invocations(script)
 
 
@@ -2950,3 +2963,53 @@ def test_resolved_or_marker_free_command_stays_certified(_description, script, e
 
     assert result.incomplete_reason is None
     assert result.invocations == expected
+
+
+def test_eval_taints_marker_split_across_cross_command_append_assignment():
+    assert_taint_refusal("X=doc-\nX+='lattice reconcile'\neval \"$X\"")
+
+
+def test_eval_taint_is_order_insensitive_within_run_body():
+    assert_taint_refusal("eval \"$X\"\nX=doc-\nX+='lattice reconcile'")
+
+
+def test_eval_with_only_partial_marker_variable_stays_certified():
+    result = scan_doc_lattice_invocations('A=doc-\nB=lattice\neval "$A"')
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    ("script", "tainted"),
+    [
+        ('eval "doc-${EXTERNAL}lattice"', True),
+        ('eval "doc${EXTERNAL}lattice"', False),
+    ],
+    ids=("authored-separator", "no-authored-separator"),
+)
+def test_eval_parameter_gap_taint_depends_on_authored_marker_separator(script: str, tainted: bool):
+    if tainted:
+        assert_taint_refusal(script)
+        return
+    result = scan_doc_lattice_invocations(script)
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_complete_marker_assignment_retains_phase_one_refusal_reason():
+    result = scan_doc_lattice_invocations("X='doc-lattice reconcile'\neval \"$X\"")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == (
+        "marker-bearing command is not a certified doc-lattice invocation"
+    )
+
+
+def test_literal_command_after_unrelated_fragments_remains_classified():
+    result = scan_doc_lattice_invocations(
+        "X=unrelated\nX+=' fragments'\ndoc-lattice reconcile --dry-run"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == RECONCILE_DRY
