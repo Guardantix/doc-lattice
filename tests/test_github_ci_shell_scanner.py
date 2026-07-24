@@ -3455,3 +3455,67 @@ def test_stdout_redirection_detaches_pipeline_from_later_consumer(script: str):
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- lattice | { true; bash; }",
+        '{ true; bash; } <<<"doc-lattice reconcile"',
+        "printf '%s%s\\n' doc- lattice > >( true; bash )",
+    ],
+    ids=("pipeline", "here-string", "output-process-substitution"),
+)
+def test_shared_compound_stdin_reaches_later_possible_consumers(script: str):
+    assert_taint_refusal(script)
+
+
+def test_later_compound_consumer_redirection_overrides_shared_stdin():
+    result = scan_doc_lattice_invocations(
+        "printf '%s%s\\n' doc- lattice | { true; bash <<<'true'; }"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'P=doc-; X=lattice; { bash; } <<<"$P$X reconcile"',
+        "P=doc-; X=lattice; { bash; } <<EOF\n$P$X reconcile\nEOF",
+        'P=doc-; X=lattice; ( bash ) <<<"$P$X reconcile"',
+    ],
+    ids=("brace-here-string", "brace-heredoc", "subshell-here-string"),
+)
+def test_compound_redirection_content_uses_scope_environment(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- lattice 2>&1 1>&2 | bash",
+        "printf '%s%s\\n' doc- lattice 3>&1 1>&3 | bash",
+        "printf '%s%s\\n' doc- lattice 2>&1 1>&2 | { bash; }",
+    ],
+    ids=("stderr-alias", "descriptor-three-alias", "compound-consumer"),
+)
+def test_stdout_alias_back_to_implicit_pipe_reaches_consumer(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- lattice >/dev/null | bash",
+        "printf '%s%s\\n' doc- lattice 1>&3 | bash",
+        "printf '%s%s\\n' doc- lattice 2>&1 1>/dev/null | bash",
+    ],
+    ids=("null", "descriptor-away", "alias-then-null"),
+)
+def test_final_stdout_binding_away_from_implicit_pipe_stays_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE

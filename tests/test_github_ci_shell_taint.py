@@ -32,6 +32,7 @@ from doc_lattice.github_ci.shell_taint import (
     _AssignmentEvidence,
     _build_flow_definitions,
     _CommandEvidence,
+    _contextualize_evidence,
     _evaluate_closed,
     _ExecutableEvidence,
     _FlowDefinitions,
@@ -41,6 +42,7 @@ from doc_lattice.github_ci.shell_taint import (
     _PipeEvidence,
     _ProcessResourceEvidence,
     _RedirectionEvent,
+    _scoped_variable_name,
     _ShellTaintEvidence,
     _solve_flow_definitions,
     _StreamScopeEvidence,
@@ -540,6 +542,152 @@ def test_cyclic_scope_parents_fail_closed() -> None:
         True,
         "shell taint stream scope cannot be structured",
     )
+
+
+def test_scope_content_targets_and_loop_bindings_use_scope_environment() -> None:
+    scope = _StreamScopeEvidence(
+        100,
+        "subshell_group",
+        None,
+        None,
+        SequenceOutput(()),
+        redirections=(_RedirectionEvent(0, "<<<", 0, ContentTarget(VariableRef("PAYLOAD"))),),
+        loop_bindings=(_AssignmentEvidence("ITEM", VariableRef("PAYLOAD")),),
+    )
+
+    contextualized = _contextualize_evidence(_ShellTaintEvidence(scopes=(scope,)))
+
+    assert contextualized.scopes[0].redirections == (
+        _RedirectionEvent(
+            0,
+            "<<<",
+            0,
+            ContentTarget(VariableRef(_scoped_variable_name(100, "PAYLOAD"))),
+        ),
+    )
+    assert contextualized.scopes[0].loop_bindings == (
+        _AssignmentEvidence("ITEM", VariableRef(_scoped_variable_name(100, "PAYLOAD"))),
+    )
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        _ShellTaintEvidence(
+            scopes=(
+                _StreamScopeEvidence(
+                    1,
+                    "subshell_group",
+                    999,
+                    None,
+                    SequenceOutput(()),
+                ),
+            )
+        ),
+        _ShellTaintEvidence(
+            scopes=(
+                _StreamScopeEvidence(
+                    1,
+                    "subshell_group",
+                    None,
+                    None,
+                    ScopeOutput(999),
+                ),
+            )
+        ),
+        _ShellTaintEvidence(
+            commands=(_command(1, _arg("bash"), name="bash"),),
+            pipes=(_PipeEvidence(999, consumer_command_id=1),),
+        ),
+        _ShellTaintEvidence(
+            commands=(
+                _command(1, _arg("true"), name="true"),
+                _command(1, _arg("bash"), name="bash"),
+            ),
+        ),
+        _ShellTaintEvidence(
+            scopes=(
+                _StreamScopeEvidence(1, "subshell_group", None, None, SequenceOutput(())),
+                _StreamScopeEvidence(1, "subshell_group", None, None, SequenceOutput(())),
+            )
+        ),
+        _ShellTaintEvidence(
+            process_resources=(
+                _ProcessResourceEvidence(1, 10, "input"),
+                _ProcessResourceEvidence(1, 11, "input"),
+            )
+        ),
+        _ShellTaintEvidence(
+            commands=(_command(1, _arg("printf"), name="printf"),),
+            pipes=(_PipeEvidence(1, consumer_command_id=999),),
+        ),
+        _ShellTaintEvidence(
+            commands=(_command(1, _arg("printf"), name="printf"),),
+            pipes=(_PipeEvidence(1, consumer_scope_id=999),),
+        ),
+        _ShellTaintEvidence(
+            process_resources=(_ProcessResourceEvidence(1, 999, "input"),),
+        ),
+        _ShellTaintEvidence(
+            scopes=(
+                _StreamScopeEvidence(1, "subshell_group", None, None, ScopeOutput(2)),
+                _StreamScopeEvidence(2, "subshell_group", None, None, ScopeOutput(1)),
+            )
+        ),
+        _ShellTaintEvidence(
+            scopes=(
+                _StreamScopeEvidence(
+                    1,
+                    "pipeline",
+                    None,
+                    None,
+                    SequenceOutput(()),
+                    entry=ScopeOutput(2),
+                ),
+                _StreamScopeEvidence(
+                    2,
+                    "pipeline",
+                    None,
+                    None,
+                    SequenceOutput(()),
+                    entry=ScopeOutput(1),
+                ),
+            )
+        ),
+    ],
+    ids=(
+        "dangling-parent-scope",
+        "dangling-scope-output",
+        "dangling-pipe-producer",
+        "duplicate-command-id",
+        "duplicate-scope-id",
+        "duplicate-process-resource-id",
+        "dangling-command-consumer",
+        "dangling-scope-consumer",
+        "dangling-process-resource-scope",
+        "scope-output-cycle",
+        "scope-entry-cycle",
+    ),
+)
+def test_malformed_nested_evidence_references_fail_closed(
+    evidence: _ShellTaintEvidence,
+) -> None:
+    assert analyze_marker_taint(evidence) == (
+        True,
+        "shell taint evidence cannot be structured",
+    )
+
+
+def test_evidence_count_limit_precedes_nested_reference_validation() -> None:
+    duplicate_scopes = (
+        _StreamScopeEvidence(1, "subshell_group", None, None, SequenceOutput(())),
+        _StreamScopeEvidence(1, "subshell_group", None, None, SequenceOutput(())),
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(scopes=duplicate_scopes),
+        limits=TaintLimits(max_table_entries=1),
+    ) == (True, "shell taint table entry limit exceeded")
 
 
 def test_uppercase_eval_is_not_a_builtin_execution_sink() -> None:

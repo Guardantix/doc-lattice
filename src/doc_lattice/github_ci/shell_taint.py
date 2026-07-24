@@ -191,6 +191,11 @@ class NullTarget:
     """The shell null device target."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ImplicitPipeTarget:
+    """Internal descriptor binding for pipeline-provided standard output."""
+
+
 RedirectionTarget: TypeAlias = (  # noqa: UP040
     StaticResourceTarget
     | DynamicResourceTarget
@@ -965,57 +970,284 @@ def _solve_flow_definitions(
     return _SolvedFlow(variables, resources, streams, limits)
 
 
-def _output_entry_commands(  # noqa: PLR0911
+@dataclass(slots=True)
+class _OutputValidationState:
+    """Memoized bounded state for validating structured output expressions."""
+
+    remaining_nodes: int
+    memo: dict[int, frozenset[int]] = field(default_factory=dict)
+
+
+def _output_children(output: OutputExpr) -> tuple[OutputExpr, ...]:
+    """Return one output expression's nested structural children."""
+    if isinstance(output, SequenceOutput | ChoiceOutput):
+        return output.parts
+    if isinstance(output, RepeatOutput):
+        return (output.part,)
+    if isinstance(output, CommandOutput | ScopeOutput):
+        return ()
+    raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+
+
+def _validated_output_scope_refs(
+    output: OutputExpr,
+    command_ids: set[int],
+    stream_ids: set[int],
+    scope_ids: set[int],
+    state: _OutputValidationState,
+) -> frozenset[int]:
+    """Validate one output tree iteratively and return referenced structured scopes."""
+    pending = [(output, False)]
+    active: set[int] = set()
+    while pending:
+        current, expanded = pending.pop()
+        current_id = id(current)
+        if current_id in state.memo:
+            continue
+        if expanded:
+            active.remove(current_id)
+            if isinstance(current, CommandOutput):
+                if current.command_id not in command_ids:
+                    raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+                refs: set[int] = set()
+            elif isinstance(current, ScopeOutput):
+                if current.scope_id not in stream_ids:
+                    raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+                refs = {current.scope_id} if current.scope_id in scope_ids else set()
+            else:
+                refs = set()
+                for child in _output_children(current):
+                    refs.update(state.memo[id(child)])
+            state.memo[current_id] = frozenset(refs)
+            continue
+        if current_id in active:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        if state.remaining_nodes < 1:
+            raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+        state.remaining_nodes -= 1
+        active.add(current_id)
+        pending.append((current, True))
+        pending.extend((child, False) for child in reversed(_output_children(current)))
+    return state.memo[id(output)]
+
+
+def _validate_acyclic_graph(
+    graph: dict[int, frozenset[int]],
+    *,
+    reason: str,
+) -> None:
+    """Reject directed cycles without recursive graph traversal."""
+    active: set[int] = set()
+    visited: set[int] = set()
+    for root in graph:
+        if root in visited:
+            continue
+        pending = [(root, False)]
+        while pending:
+            node, expanded = pending.pop()
+            if expanded:
+                active.remove(node)
+                visited.add(node)
+                continue
+            if node in visited:
+                continue
+            if node in active:
+                raise _MalformedTaintEvidence(reason)
+            active.add(node)
+            pending.append((node, True))
+            pending.extend((child, False) for child in reversed(tuple(graph[node])))
+
+
+def _validate_nested_evidence(
+    evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
+) -> None:
+    """Validate nested evidence identifiers, references, and output graphs."""
+    command_id_values = tuple(command.command_id for command in evidence.commands)
+    scope_id_values = tuple(scope.scope_id for scope in evidence.scopes)
+    resource_id_values = tuple(resource.resource_id for resource in evidence.process_resources)
+    stream_id_values = (
+        *(command.output_scope_id for command in evidence.commands),
+        *scope_id_values,
+    )
+    if any(
+        len(values) != len(set(values))
+        for values in (
+            command_id_values,
+            scope_id_values,
+            resource_id_values,
+            stream_id_values,
+        )
+    ):
+        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+
+    command_ids = set(command_id_values)
+    scope_ids = set(scope_id_values)
+    resource_ids = set(resource_id_values)
+    stream_ids = set(stream_id_values)
+    parent_graph: dict[int, frozenset[int]] = {}
+    output_graph: dict[int, frozenset[int]] = {}
+    output_state = _OutputValidationState(limits.max_expression_nodes)
+    for scope in evidence.scopes:
+        if scope.parent_scope_id is not None and scope.parent_scope_id not in scope_ids:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        if scope.parent_command_id is not None and scope.parent_command_id not in command_ids:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        parent_graph[scope.scope_id] = (
+            frozenset({scope.parent_scope_id}) if scope.parent_scope_id is not None else frozenset()
+        )
+        refs = set(
+            _validated_output_scope_refs(
+                scope.output,
+                command_ids,
+                stream_ids,
+                scope_ids,
+                output_state,
+            )
+        )
+        if scope.entry is not None:
+            refs.update(
+                _validated_output_scope_refs(
+                    scope.entry,
+                    command_ids,
+                    stream_ids,
+                    scope_ids,
+                    output_state,
+                )
+            )
+        output_graph[scope.scope_id] = frozenset(refs)
+
+    _validate_acyclic_graph(
+        parent_graph,
+        reason="shell taint stream scope cannot be structured",
+    )
+    _validate_acyclic_graph(
+        output_graph,
+        reason="shell taint evidence cannot be structured",
+    )
+
+    for pipe in evidence.pipes:
+        if pipe.producer_scope_id not in stream_ids:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        if pipe.consumer_command_id is not None and pipe.consumer_command_id not in command_ids:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        if pipe.consumer_scope_id is not None and pipe.consumer_scope_id not in scope_ids:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+    if any(resource.scope_id not in scope_ids for resource in evidence.process_resources):
+        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+
+    redirection_groups = (
+        *(command.redirections for command in evidence.commands),
+        *(scope.redirections for scope in evidence.scopes),
+    )
+    if any(
+        isinstance(event.target, ProcessResourceTarget)
+        and event.target.resource_id not in resource_ids
+        for events in redirection_groups
+        for event in events
+    ):
+        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+    if any(
+        port.process_resource_id is not None and port.process_resource_id not in resource_ids
+        for command in evidence.commands
+        for port in command.argv
+    ):
+        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+
+
+def _output_input_parts(
     output: OutputExpr,
     scopes: dict[int, _StreamScopeEvidence],
     command_scopes: dict[int, int],
-    visited: set[int],
-) -> tuple[int, ...]:
-    """Return recursive stream-entry commands without following scope cycles twice."""
-    if isinstance(output, CommandOutput):
-        return (output.command_id,)
-    if isinstance(output, ScopeOutput):
-        command_id = command_scopes.get(output.scope_id)
-        if command_id is not None:
-            return (command_id,)
-        return _scope_entry_commands(output.scope_id, scopes, command_scopes, visited)
-    if isinstance(output, SequenceOutput):
-        for part in output.parts:
-            commands = _output_entry_commands(part, scopes, command_scopes, visited)
-            if commands:
-                return commands
-        return ()
-    if isinstance(output, ChoiceOutput):
-        return tuple(
-            command
-            for part in output.parts
-            for command in _output_entry_commands(part, scopes, command_scopes, visited.copy())
-        )
-    return _output_entry_commands(output.part, scopes, command_scopes, visited)
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return direct commands and nested scopes that may consume inherited stdin."""
+    pending = [output]
+    seen_nodes: set[int] = set()
+    commands: list[int] = []
+    command_set: set[int] = set()
+    dependencies: list[int] = []
+    dependency_set: set[int] = set()
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+        if current_id in seen_nodes:
+            continue
+        seen_nodes.add(current_id)
+        if isinstance(current, CommandOutput):
+            if current.command_id not in command_set:
+                command_set.add(current.command_id)
+                commands.append(current.command_id)
+        elif isinstance(current, ScopeOutput):
+            command_id = command_scopes.get(current.scope_id)
+            if command_id is not None and command_id not in command_set:
+                command_set.add(command_id)
+                commands.append(command_id)
+            elif current.scope_id in scopes and current.scope_id not in dependency_set:
+                dependency_set.add(current.scope_id)
+                dependencies.append(current.scope_id)
+        elif isinstance(current, SequenceOutput | ChoiceOutput):
+            pending.extend(reversed(current.parts))
+        elif isinstance(current, RepeatOutput):
+            pending.append(current.part)
+        else:
+            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+    return tuple(commands), tuple(dependencies)
 
 
-def _scope_entry_commands(
-    scope_id: int,
+def _scope_input_commands(
     scopes: dict[int, _StreamScopeEvidence],
     command_scopes: dict[int, int],
-    visited: set[int] | None = None,
-) -> tuple[int, ...]:
-    """Return commands that consume one scope's inherited standard input."""
-    if scope_id in (visited or set()):
-        return ()
-    scope = scopes.get(scope_id)
-    if scope is None:
-        return ()
-    active = set() if visited is None else visited
-    active.add(scope_id)
-    return _output_entry_commands(scope.entry or scope.output, scopes, command_scopes, active)
+) -> dict[int, tuple[int, ...]]:
+    """Return memoized possible stdin consumers for every structured scope."""
+    parts = {
+        scope_id: _output_input_parts(
+            (scope.entry if scope.kind == "pipeline" and scope.entry is not None else scope.output),
+            scopes,
+            command_scopes,
+        )
+        for scope_id, scope in scopes.items()
+    }
+    memo: dict[int, tuple[int, ...]] = {}
+    state: dict[int, int] = {}
+    for root in scopes:
+        if root in memo:
+            continue
+        pending = [(root, False)]
+        while pending:
+            scope_id, expanded = pending.pop()
+            if scope_id in memo:
+                continue
+            if expanded:
+                direct, dependencies = parts[scope_id]
+                commands = list(direct)
+                seen = set(commands)
+                for dependency in dependencies:
+                    for command_id in memo[dependency]:
+                        if command_id not in seen:
+                            seen.add(command_id)
+                            commands.append(command_id)
+                memo[scope_id] = tuple(commands)
+                state[scope_id] = 2
+                continue
+            if state.get(scope_id) == 1:
+                raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            state[scope_id] = 1
+            pending.append((scope_id, True))
+            for dependency in reversed(parts[scope_id][1]):
+                if dependency not in memo:
+                    pending.append((dependency, False))
+    return memo
 
 
 def _output_bindings(
     events: tuple[_RedirectionEvent, ...],
-) -> dict[int, tuple[RedirectionTarget, bool]]:
+    *,
+    implicit_pipe: bool = False,
+) -> dict[int, tuple[RedirectionTarget | _ImplicitPipeTarget, bool]]:
     """Replay output descriptor mutations left-to-right."""
-    bindings: dict[int, tuple[RedirectionTarget, bool]] = {}
+    bindings: dict[int, tuple[RedirectionTarget | _ImplicitPipeTarget, bool]] = (
+        {1: (_ImplicitPipeTarget(), False)} if implicit_pipe else {}
+    )
     for event in sorted(events, key=lambda candidate: candidate.ordinal):
         if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
             continue
@@ -1069,9 +1301,112 @@ def _pipe_source(
     )
     scope = scopes.get(scope_id)
     events = command.redirections if command is not None else scope.redirections if scope else ()
-    if _output_bindings(events).get(1) is not None:
-        return LiteralTransfer("")
-    return StreamRef(scope_id)
+    stdout = _output_bindings(events, implicit_pipe=True)[1][0]
+    return StreamRef(scope_id) if isinstance(stdout, _ImplicitPipeTarget) else LiteralTransfer("")
+
+
+def _output_process_scope_inputs(
+    evidence: _ShellTaintEvidence,
+    scopes: dict[int, _StreamScopeEvidence],
+    resources: dict[int, _ProcessResourceEvidence],
+) -> dict[int, ContentExpr]:
+    """Return direct scope inputs created by output process substitutions."""
+    inputs: dict[int, ContentExpr] = {}
+    for writer in evidence.commands:
+        binding = _output_bindings(writer.redirections).get(1)
+        if binding is None or not isinstance(binding[0], ProcessResourceTarget):
+            continue
+        resource = resources.get(binding[0].resource_id)
+        if resource is None or resource.direction != "output":
+            continue
+        if resource.scope_id in scopes:
+            inputs[resource.scope_id] = StreamRef(writer.output_scope_id)
+    return inputs
+
+
+def _resolved_scope_inputs(
+    scopes: dict[int, _StreamScopeEvidence],
+    direct_inputs: dict[int, ContentExpr],
+    resources: dict[int, _ProcessResourceEvidence],
+    active_scopes: set[int],
+) -> dict[int, ContentExpr]:
+    """Resolve inherited scope stdin iteratively, replaying each scope's redirects."""
+    memo: dict[int, ContentExpr] = {}
+    for scope_id in active_scopes:
+        if scope_id in memo:
+            continue
+        path: list[int] = []
+        active: set[int] = set()
+        current = scope_id
+        while current not in memo:
+            if current in active:
+                raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            active.add(current)
+            scope = scopes.get(current)
+            if scope is None:
+                inherited: ContentExpr = OutsideGap()
+                break
+            path.append(current)
+            if current in direct_inputs:
+                inherited = direct_inputs[current]
+                break
+            if scope.parent_scope_id is None:
+                inherited = OutsideGap()
+                break
+            current = scope.parent_scope_id
+        else:
+            inherited = memo[current]
+        for current in reversed(path):
+            scope = scopes[current]
+            inherited = _replay_input_bindings(
+                scope.redirections,
+                direct_inputs.get(current, inherited),
+                resources,
+            )
+            memo[current] = inherited
+    return memo
+
+
+def _scope_depths(scopes: dict[int, _StreamScopeEvidence]) -> dict[int, int]:
+    """Return each validated structured scope's parent depth."""
+    depths: dict[int, int] = {}
+    for scope_id in scopes:
+        if scope_id in depths:
+            continue
+        path: list[int] = []
+        current = scope_id
+        while current not in depths:
+            path.append(current)
+            parent = scopes[current].parent_scope_id
+            if parent is None:
+                depth = -1
+                break
+            current = parent
+        else:
+            depth = depths[current]
+        for current in reversed(path):
+            depth += 1
+            depths[current] = depth
+    return depths
+
+
+def _apply_scope_inputs(
+    command_inputs: dict[int, ContentExpr],
+    active_scopes: set[int],
+    scope_inputs: dict[int, ContentExpr],
+    scope_commands: dict[int, tuple[int, ...]],
+    depths: dict[int, int],
+) -> None:
+    """Apply the closest possible scope stdin to commands without a direct pipe."""
+    candidates: dict[int, tuple[int, ContentExpr]] = {}
+    for scope_id in active_scopes:
+        expression = scope_inputs[scope_id]
+        for command_id in scope_commands[scope_id]:
+            prior = candidates.get(command_id)
+            if prior is None or depths[scope_id] > prior[0]:
+                candidates[command_id] = (depths[scope_id], expression)
+    for command_id, (_depth, expression) in candidates.items():
+        command_inputs.setdefault(command_id, expression)
 
 
 def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
@@ -1088,47 +1423,20 @@ def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
         if pipe.consumer_scope_id is not None:
             scope_inputs[pipe.consumer_scope_id] = expression
     resources = {resource.resource_id: resource for resource in evidence.process_resources}
-    for writer in evidence.commands:
-        binding = _output_bindings(writer.redirections).get(1)
-        if binding is None or not isinstance(binding[0], ProcessResourceTarget):
-            continue
-        resource = resources.get(binding[0].resource_id)
-        if resource is None or resource.direction != "output":
-            continue
-        scope = scopes.get(resource.scope_id)
-        if scope is None:
-            continue
-        scope_inputs[scope.scope_id] = StreamRef(writer.output_scope_id)
-
-    memo: dict[int, ContentExpr] = {}
-
-    def scope_input(scope_id: int, active: set[int]) -> ContentExpr:
-        if scope_id in memo:
-            return memo[scope_id]
-        if scope_id in active:
-            return OutsideGap()
-        scope = scopes.get(scope_id)
-        if scope is None:
-            return OutsideGap()
-        inherited = scope_inputs.get(scope_id)
-        if inherited is None:
-            inherited = (
-                scope_input(scope.parent_scope_id, {*active, scope_id})
-                if scope.parent_scope_id is not None
-                else OutsideGap()
-            )
-        value = _replay_input_bindings(scope.redirections, inherited, resources)
-        memo[scope_id] = value
-        return value
+    scope_inputs.update(_output_process_scope_inputs(evidence, scopes, resources))
 
     active_scopes = {
         scope_id
         for scope_id, scope in scopes.items()
         if scope_id in scope_inputs or scope.redirections
     }
-    for scope_id in active_scopes:
-        for command_id in _scope_entry_commands(scope_id, scopes, command_scopes):
-            command_inputs.setdefault(command_id, scope_input(scope_id, set()))
+    _apply_scope_inputs(
+        command_inputs,
+        active_scopes,
+        _resolved_scope_inputs(scopes, scope_inputs, resources, active_scopes),
+        _scope_input_commands(scopes, command_scopes),
+        _scope_depths(scopes),
+    )
     return command_inputs
 
 
@@ -1171,7 +1479,6 @@ def _static_write_definitions(
 ) -> tuple[_FlowWrite, ...]:
     """Replay output descriptors and return static resource writes they receive."""
     writes: list[_FlowWrite] = []
-    bindings: dict[int, tuple[RedirectionTarget, bool]] = {}
     for event in sorted(events, key=lambda candidate: candidate.ordinal):
         if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
             continue
@@ -1364,7 +1671,37 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
         )
         for command in evidence.commands
     )
-    return replace(evidence, commands=commands)
+    scopes = tuple(
+        replace(
+            scope,
+            redirections=tuple(
+                replace(
+                    event,
+                    target=ContentTarget(
+                        _scope_expression(
+                            event.target.content,
+                            environments.get(scope.scope_id, scope.scope_id),
+                        )
+                    ),
+                )
+                if isinstance(event.target, ContentTarget)
+                else event
+                for event in scope.redirections
+            ),
+            loop_bindings=tuple(
+                replace(
+                    binding,
+                    content=_scope_expression(
+                        binding.content,
+                        environments.get(scope.scope_id, scope.scope_id),
+                    ),
+                )
+                for binding in scope.loop_bindings
+            ),
+        )
+        for scope in evidence.scopes
+    )
+    return replace(evidence, commands=commands, scopes=scopes)
 
 
 def _build_flow_definitions(
@@ -2067,6 +2404,7 @@ def analyze_marker_taint(  # noqa: PLR0911
         return True, "shell taint table entry limit exceeded"
 
     try:
+        _validate_nested_evidence(evidence, limits)
         evidence = _contextualize_evidence(evidence)
         definitions, inputs = _build_flow_definitions(evidence)
         solved = _solve_flow_definitions(definitions, limits=limits)
