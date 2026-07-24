@@ -1106,7 +1106,7 @@ def _eval_reparse_branches(
         return [(parsed, resulting_quote)]
     if isinstance(expression, Concat):
         branches: list[tuple[ContentExpr, str | None]] = [(LiteralTransfer(""), quote)]
-        for part in expression.parts:
+        for part in _coalesced_eval_parts(expression.parts):
             expanded: list[tuple[ContentExpr, str | None]] = []
             for prefix, current_quote in branches:
                 for suffix, resulting_quote in _eval_reparse_branches(
@@ -1182,6 +1182,13 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
                 parts.append(_SecondPassVariableRef(name))
                 index = end
                 continue
+            if text.startswith("${", index):
+                closing = text.find("}", index + 2)
+                if closing != -1 and text[index + 2 : closing] in {"@", "*", "1"}:
+                    flush_literal()
+                    parts.append(OutsideGap())
+                    index = closing + 1
+                    continue
             if index + 1 < len(text) and text[index + 1] in "@*#?-$!0123456789":
                 flush_literal()
                 parts.append(OutsideGap())
@@ -1443,32 +1450,13 @@ def _builtin_eval_candidates(command: _CommandEvidence) -> tuple[_ExecutableEvid
 def _eval_content_dependencies(expression: ContentExpr) -> set[str]:
     """Collect variable names that can enter eval syntax from one authored expression."""
     names: set[str] = set()
-    pending = [expression]
+    pending = [_eval_reparse_content(expression)]
     while pending:
         current = pending.pop()
-        if isinstance(current, VariableRef):
+        if isinstance(current, VariableRef | _SecondPassVariableRef):
             names.add(current.name)
-        elif isinstance(current, LiteralTransfer):
-            names.update(_eval_literal_variable_names(current.text))
         elif isinstance(current, Choice | Concat):
             pending.extend(current.parts)
-    return names
-
-
-def _eval_literal_variable_names(text: str) -> set[str]:
-    """Find simple parameter references without rejecting malformed syntax during reachability."""
-    names: set[str] = set()
-    index = 0
-    while index < len(text):
-        if text[index] != "$":
-            index += 1
-            continue
-        name, end = _eval_parameter_name(text, index)
-        if name is not None:
-            names.add(name)
-            index = end
-            continue
-        index += 1
     return names
 
 
