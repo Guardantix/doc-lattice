@@ -8,6 +8,7 @@ from typer.main import get_command
 
 from doc_lattice.cli.application import create_app
 from doc_lattice.error_types import ConfigError, ProjectError
+from doc_lattice.github_ci import shell_scanner
 from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS,
     _DOC_LATTICE_ROOT_OPTIONS,
@@ -2337,6 +2338,28 @@ def test_nested_dynamic_uv_resolution_charges_shared_scan_budget():
         scanner.scan()
 
 
+def test_child_scanner_supports_legacy_constructor_subclass(monkeypatch: pytest.MonkeyPatch):
+    class LegacyChildScanner(_ShellScanner):
+        def __init__(
+            self,
+            source: str,
+            *,
+            budget: _ScanBudget | None = None,
+            invocations: list[tuple[str, bool]] | None = None,
+            classify_commands: bool = True,
+        ) -> None:
+            super().__init__(
+                source,
+                budget=budget,
+                invocations=invocations,
+                classify_commands=classify_commands,
+            )
+
+    monkeypatch.setattr(shell_scanner, "_ShellScanner", LegacyChildScanner)
+
+    assert direct_doc_lattice_invocations("echo `doc-lattice linear`") == LINEAR
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -3001,7 +3024,26 @@ def test_eval_reparse_keeps_external_only_value_non_evidentiary():
     assert result.invocations == NONE
 
 
-@pytest.mark.parametrize("parameter", ["$@", "$*", "$1", "${@}", "${*}", "${1}"])
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        "$@",
+        "$*",
+        "$1",
+        "${@}",
+        "${*}",
+        "${1}",
+        "${2}",
+        "${9}",
+        "${10}",
+        "${!}",
+        "${#}",
+        "${?}",
+        "${-}",
+        "${$}",
+        "${0}",
+    ],
+)
 def test_eval_reparse_treats_special_parameters_as_external_gap(parameter: str):
     assert_taint_refusal(f"eval 'doc-{parameter}lattice --help'")
 
@@ -3023,6 +3065,23 @@ def test_unreachable_malformed_eval_syntax_does_not_block_certification(script: 
 
 def test_eval_reachability_ignores_variable_reference_escaped_inside_ansi_c_literal():
     result = scan_doc_lattice_invocations("X=\"\\$'unterminated\"; eval $'\\\\$X'")
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=\"$'unterminated\"; eval '$X'",
+        "X=\"\\$'unterminated\"; eval '$X'",
+    ],
+    ids=("ordinary-dollar", "escaped-dollar"),
+)
+def test_second_pass_variable_expansion_does_not_reparse_its_value_as_shell_syntax(
+    script: str,
+):
+    result = scan_doc_lattice_invocations(script)
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
@@ -3074,6 +3133,25 @@ def test_eval_parameter_gap_taint_depends_on_authored_marker_separator(script: s
 def test_unmodeled_wrapper_retains_decoded_literal_marker_refusal():
     result = scan_doc_lattice_invocations('dispatch "doc-${EXTERNAL}lattice reconcile"')
 
+    assert result.incomplete_reason == (
+        "marker-bearing command is not a certified doc-lattice invocation"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "bash -c 'doc-lattice reconcile'",
+        'eval "doc-lattice reconcile"',
+    ],
+    ids=("shell-command", "eval"),
+)
+def test_modeled_sink_with_complete_authored_marker_retains_phase_one_refusal(
+    script: str,
+):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
     assert result.incomplete_reason == (
         "marker-bearing command is not a certified doc-lattice invocation"
     )

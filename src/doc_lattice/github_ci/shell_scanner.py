@@ -7,6 +7,7 @@ from enum import Enum, auto
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
     TAINT_REFUSAL_REASON,
+    Concat,
     ContentBuilder,
     ContentExpr,
     LiteralTransfer,
@@ -479,6 +480,33 @@ class _ShellWordBuilder:
         )
 
 
+def _content_has_authored_doc_lattice_marker(content: ContentExpr) -> bool:
+    """Return whether one contiguous authored literal segment contains the marker."""
+    pending = [content]
+    literal_parts: list[str] = []
+    while pending:
+        part = pending.pop()
+        if isinstance(part, Concat):
+            pending.extend(reversed(part.parts))
+            continue
+        if isinstance(part, LiteralTransfer):
+            literal_parts.append(part.text)
+            continue
+        if _DISPATCHER_MARKER_RE.search("".join(literal_parts)) is not None:
+            return True
+        literal_parts.clear()
+    return _DISPATCHER_MARKER_RE.search("".join(literal_parts)) is not None
+
+
+def _has_synthesized_doc_lattice_marker(word: _ShellWord) -> bool:
+    """Return whether decoded marker text depends on a dynamic content boundary."""
+    return (
+        word.has_doc_lattice_marker
+        and word.dynamic
+        and not _content_has_authored_doc_lattice_marker(word.content)
+    )
+
+
 def _reject_active_extglob_opener(
     builder: _ShellWordBuilder,
     boundary: str,
@@ -677,6 +705,24 @@ class _ShellScanner:
             if refused:
                 raise _ShellScanIncomplete(reason or TAINT_REFUSAL_REASON)
         return tuple(self.invocations)
+
+    def _child_scanner(
+        self,
+        source: str,
+        *,
+        invocations: list[_Invocation] | None = None,
+        classify_commands: bool = True,
+    ) -> "_ShellScanner":
+        """Construct a non-taint child without extending private subclass constructors."""
+        child = _ShellScanner(
+            source,
+            budget=self.budget,
+            invocations=invocations,
+            classify_commands=classify_commands,
+        )
+        child.taint_builder = None
+        child.owns_taint_builder = False
+        return child
 
     def _scan_commands(
         self,
@@ -1310,12 +1356,7 @@ class _ShellScanner:
         depth: int,
     ) -> _ShellExpansion | None:
         """Consume expansion-shaped delimiter syntax without classifying its commands."""
-        lexer = _ShellScanner(
-            self.source,
-            budget=self.budget,
-            classify_commands=False,
-            collect_taint=False,
-        )
+        lexer = self._child_scanner(self.source, classify_commands=False)
         return lexer._consume_active_expansion(index, limit, depth)
 
     def _consume_heredocs(
@@ -1355,12 +1396,10 @@ class _ShellScanner:
                     break
             if heredoc.expand:
                 body = _remove_active_line_continuations(self.source[body_start:body_end])
-                child = _ShellScanner(
+                child = self._child_scanner(
                     body,
-                    budget=self.budget,
                     invocations=self.invocations,
                     classify_commands=self.classify_commands,
-                    collect_taint=False,
                 )
                 child._scan_heredoc_expansions(0, len(body), depth + 1)
             index = after_delimiter
@@ -1774,12 +1813,10 @@ class _ShellScanner:
             self.budget.step()
             character = self.source[index]
             if character == "`":
-                child = _ShellScanner(
+                child = self._child_scanner(
                     "".join(body),
-                    budget=self.budget,
                     invocations=self.invocations,
                     classify_commands=self.classify_commands,
-                    collect_taint=False,
                 )
                 child._scan_commands(
                     0,
@@ -2049,7 +2086,10 @@ def _is_modeled_taint_sink(words: list[_ShellWord], executable: _ExecutableEvide
             and candidate.literal == candidate.name == "eval"
             and candidate.argv_index is not None
         ):
-            return any(word.has_doc_lattice_marker for word in words[candidate.argv_index + 1 :])
+            return any(
+                _has_synthesized_doc_lattice_marker(word)
+                for word in words[candidate.argv_index + 1 :]
+            )
         if (
             not candidate.external_lookup
             and candidate.argv_index is not None
@@ -2061,10 +2101,11 @@ def _is_modeled_taint_sink(words: list[_ShellWord], executable: _ExecutableEvide
             if normalized_name in _MODELED_SHELL_SINKS:
                 selection = _select_shell_source(argv, candidate.argv_index)
                 if selection.kind is _ShellSourceKind.COMMAND and selection.argv_index is not None:
-                    return words[selection.argv_index].has_doc_lattice_marker
+                    return _has_synthesized_doc_lattice_marker(words[selection.argv_index])
                 if selection.kind is _ShellSourceKind.AMBIGUOUS:
                     return any(
-                        words[index].has_doc_lattice_marker for index in selection.candidate_indices
+                        _has_synthesized_doc_lattice_marker(words[index])
+                        for index in selection.candidate_indices
                     )
         pending.extend(candidate.alternates)
     return False

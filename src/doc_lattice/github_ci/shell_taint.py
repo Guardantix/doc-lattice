@@ -1067,6 +1067,7 @@ _EVAL_ANSI_OCTAL_BASE = 8
 _EVAL_UNICODE_MAX = 0x10FFFF
 _EVAL_SURROGATE_MIN = 0xD800
 _EVAL_SURROGATE_MAX = 0xDFFF
+_EVAL_SPECIAL_PARAMETERS = frozenset("@*#?-$!0123456789")
 _EVAL_ANSI_C_SIMPLE_ESCAPES = {
     "a": "\a",
     "b": "\b",
@@ -1176,20 +1177,27 @@ def _eval_reparse_literal(  # noqa: PLR0912, PLR0915
             index += 2
             continue
         if character == "$":
+            if text.startswith("${", index):
+                closing = text.find("}", index + 2)
+                contents = text[index + 2 : closing] if closing != -1 else ""
+                if (
+                    closing == -1
+                    or not contents
+                    or contents in _EVAL_SPECIAL_PARAMETERS
+                    or contents.isdigit()
+                    or _eval_identifier_end(contents, 0) != len(contents)
+                ):
+                    flush_literal()
+                    parts.append(OutsideGap())
+                    index = closing + 1 if closing != -1 else len(text)
+                    continue
             name, end = _eval_parameter_name(text, index)
             if name is not None:
                 flush_literal()
                 parts.append(_SecondPassVariableRef(name))
                 index = end
                 continue
-            if text.startswith("${", index):
-                closing = text.find("}", index + 2)
-                if closing != -1 and text[index + 2 : closing] in {"@", "*", "1"}:
-                    flush_literal()
-                    parts.append(OutsideGap())
-                    index = closing + 1
-                    continue
-            if index + 1 < len(text) and text[index + 1] in "@*#?-$!0123456789":
+            if index + 1 < len(text) and text[index + 1] in _EVAL_SPECIAL_PARAMETERS:
                 flush_literal()
                 parts.append(OutsideGap())
                 index += 2
@@ -1453,7 +1461,7 @@ def _eval_content_dependencies(expression: ContentExpr) -> set[str]:
     pending = [_eval_reparse_content(expression)]
     while pending:
         current = pending.pop()
-        if isinstance(current, VariableRef | _SecondPassVariableRef):
+        if isinstance(current, VariableRef):
             names.add(current.name)
         elif isinstance(current, Choice | Concat):
             pending.extend(current.parts)
