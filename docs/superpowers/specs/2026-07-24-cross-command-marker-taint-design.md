@@ -189,24 +189,39 @@ adjacency. Resource-identity gaps (dynamic paths) are a distinct type in the res
 Bash removes all trailing newlines from command-substitution output before splicing
 (<https://www.gnu.org/software/bash/manual/bash.html#Command-Substitution>). So a substitution that
 emits `doc-` followed by a newline, spliced against a following authored `lattice`, can execute
-`doc-lattice` even though raw-stdout composition would not match. A `StreamRef` therefore evaluates
-as `StripTrailingNewlines(stream_stdout)`. A plain transfer relation loses suffix information, so the
-evaluated domain carries a **finite suffix-aware component**: a transducer summary recording the
-exit-state set reachable at trailing-newline-run boundaries, so strip-then-concat is representable.
-If that summary cannot be computed within caps, the pass fails closed.
+`doc-lattice` even though raw-stdout composition would not match. Stripping applies **only to
+command-substitution scopes**: a `StreamRef` to a `command_substitution` scope evaluates as
+`StripTrailingNewlines(stream_stdout)`, while a pipe, process substitution, group redirection, or
+file read transports bytes verbatim with no stripping (section 4.6 carries the scope kind that
+selects this). A plain transfer relation loses suffix information, so the evaluated domain carries a
+**finite suffix-aware component**: a transducer summary recording the exit-state set reachable at
+trailing-newline-run boundaries, so strip-then-concat is representable. If that summary cannot be
+computed within caps, the pass fails closed.
 
 ### 4.6 Stream scopes and `StreamRef`
 
 A `StreamRef` names a **stream scope**, not a single command, so a substitution or group containing
-several commands is representable. A stream scope is any construct whose aggregated stdout can be
-captured or transported: a command substitution (`$(...)`, `` `...` ``), a process substitution
-(`<(...)`, `>(...)`), a subshell or brace group (`( ... )`, `{ ...; }`), and a compound pipeline. Its
-aggregated stdout is the ordered `Concat` of the stdout ports of the commands it contains that write
-to the scope's stdout, then `StripTrailingNewlines` when the scope is a command substitution. This
-closes the two compound classes a bare command ID could not represent:
+several commands is representable. The scanner emits a `_StreamScopeEvidence` per scope:
+
+- **scope kind** -- `command_substitution` (`$(...)`, `` `...` ``), `process_substitution`
+  (`<(...)`, `>(...)`), `subshell_group` (`( ... )`, `{ ...; }`), or `pipeline`. The kind selects
+  trailing-newline stripping (section 4.5: only `command_substitution`).
+- **parent** -- the enclosing scope or command, so nested scopes resolve.
+- **output structure** -- how the contained commands' stdout ports combine, which is **not** a blind
+  concatenation. Sequential commands (`;`, newline, `&&`, `||`) form a `Sequence` (sequential
+  composition). Mutually exclusive branches (`if`/`elif`/`else`, `case` arms) form a `Choice` (join,
+  consistent with section 4.3 -- branches must not concatenate). A loop body (`for`/`while`/`until`)
+  forms a `Repeat`, evaluated as the reflexive-transitive closure of its body's transfer relation in
+  the finite domain (so `for ...; do printf doc-; done; printf lattice` still composes to a marker).
+  Compound control flow the scanner cannot structure this way fails closed rather than blindly
+  concatenating.
+
+Aggregated stdout is that output structure applied to the stdout ports of the contained commands
+that write to the scope's stdout. This closes the two compound classes a bare command ID could not
+represent:
 
 ```bash
-eval "$(printf doc-; printf 'lattice reconcile')"   # two commands, one substitution scope -> refuse
+eval "$(printf doc-; printf 'lattice reconcile')"   # Sequence in one substitution scope -> refuse
 ```
 
 ```bash
@@ -216,30 +231,44 @@ bash task.sh                                             # -> refuse
 
 Command IDs remain the evidence attachment key (section 8); the scope ID is the aggregation key. A
 scope whose contained producers are all unresolved contributes each producer's may-output stdout
-(section 5.5) in order.
+(section 5.5) through the output structure.
 
-### 4.7 Parameter expansion introduces in-word `Choice`
+### 4.7 In-word synthesis: parameter and brace expansion
 
-Alternatives are not only cross-command. A default or alternate parameter expansion authors a branch
-inside one word:
+Alternatives are not only cross-command. Several word-level expansions author a branch inside one
+word, and each currently certifies while executing `doc-lattice` under real bash:
 
 ```bash
-unset X
-eval "${X:-doc-}lattice reconcile"   # the authored default "doc-" plus "lattice" must refuse
+unset X; eval "${X:-doc-}lattice reconcile"   # default expansion
+unset X; eval "${X:=doc-}lattice"             # assign-default: returns AND assigns "doc-"
+eval doc-{lattice,noop}                        # brace expansion -> "doc-lattice doc-noop"
 ```
 
 The scanner currently consumes parameter internals without surfacing their authored operands
-(`_consume_parameter`, `shell_scanner.py:1433-1485`). The content builder must instead return the
-default/alternate word as authored content wrapped in `Choice`. Supported forms are the default and
-alternate operators (`-`, `:-`, `+`, `:+`): `${X:-word}` and `${X-word}` evaluate to
-`Choice(VariableRef(X), <word>)`; `${X:+word}` and `${X+word}` evaluate to
-`Choice(OutsideGap, <word>)` (the word is authored, the taken-or-not branch is the choice). The
-remaining forms -- pattern replacement (`${X/a/b}`), substring (`${X:off:len}`), indirection
-(`${!X}`), and transformation (`${X@Q}`) -- are not modeled precisely: their authored literal
-operands (replacement text, patterns) are surfaced as authored fragments joined with an `OutsideGap`
-so authored marker text cannot hide inside them, while the variable-derived portion stays disclosed;
-if such a form cannot be bounded within caps, the pass fails closed. See
-<https://www.gnu.org/software/bash/manual/html_node/Shell-Parameter-Expansion.html>.
+(`_consume_parameter`, `shell_scanner.py:1433-1485`), and brace expansion is only flagged, not
+expanded. The content builder must surface these:
+
+- **Default / alternate** (`-`, `:-`, `+`, `:+`): `${X:-word}` and `${X-word}` evaluate to
+  `Choice(VariableRef(X), <word>)`; `${X:+word}` and `${X+word}` evaluate to
+  `Choice(<empty>, <word>)` -- the alternate branch is the authored `word`, the other branch is
+  **epsilon** (the empty string), not `OutsideGap`.
+- **Assign-default** (`=`, `:=`): `${X:=word}` and `${X=word}` evaluate their value exactly like the
+  default form, `Choice(VariableRef(X), <word>)`, **and** carry conditional-assignment evidence: the
+  authored `word` is joined as a may-flow alternative into `X`'s variable-table entry (section 5.1),
+  because the expansion also assigns it. Modeling only `Choice` would miss a later `eval "$X"`.
+- **Brace expansion** (`doc-{lattice,noop}`): evaluated as a `Choice` over the authored alternatives
+  (`doc-lattice`, `doc-noop`), so the marker-bearing alternative refuses. Sequence and nested brace
+  forms expand into the `Choice` set within the caps; a brace expansion that cannot be bounded
+  (numeric ranges beyond a cap, deep nesting) fails closed.
+- **Remaining parameter forms** -- pattern replacement (`${X/a/b}`), substring (`${X:off:len}`),
+  indirection (`${!X}`), transformation (`${X@Q}`) -- are not modeled precisely: their authored
+  literal operands (replacement text, patterns) are surfaced as authored fragments joined with an
+  `OutsideGap` so authored marker text cannot hide inside them, while the variable-derived portion
+  stays disclosed; if such a form cannot be bounded within caps, the pass fails closed.
+
+See
+<https://www.gnu.org/software/bash/manual/html_node/Shell-Parameter-Expansion.html>
+and <https://www.gnu.org/software/bash/manual/html_node/Brace-Expansion.html>.
 
 ## 5. Flow tables and edges
 
@@ -258,10 +287,19 @@ resolves through this table during evaluation.
 Static resource key -> content value. `> path` joins written content as an alternative; `>> path`
 appends via `Concat`. The written content is the producing command's **stdout port** (section 5.5).
 
+**Static reads are input edges.** A static `< path` redirection reads the resource: it produces a
+`ResourceRef(key)` transported into the reading command's **stdin port**. Combined with the shell
+source-selector (section 6), this connects the file-to-stdin sink:
+
+```bash
+printf '%s%s\n' doc- 'lattice reconcile' > task.sh
+bash < task.sh          # no script operand -> bash reads commands from stdin -> refuse
+```
+
 Resource-key identity: `task.sh` and `./task.sh` normalize to the same key when no modeled directory
 change intervenes (minimum static-path equivalence). `..`, `cd`, symlinks, and filesystem aliases
-are **not** modeled and stay disclosed. A dynamic redirection target is a distinct typed
-`DynamicResource` key (no modeled write edge), never an `OutsideGap`.
+are **not** modeled and stay disclosed. A dynamic redirection target (read or write) is a distinct
+typed `DynamicResource` key (no modeled edge), never an `OutsideGap`.
 
 ### 5.3 Pipe edges
 
@@ -270,15 +308,19 @@ section 4.6, when the producer side is itself compound) transports unchanged int
 stdin port. A producer whose stdout carries no authored marker (for example `curl`, whose stdout
 reduces to `OUTSIDE`) gives the consumer an `OUTSIDE` stdin, so `curl | bash` certifies.
 
-### 5.4 Process substitution edges
+### 5.4 Process substitution as typed ephemeral resources
 
-Input and output process substitutions (`cmd <(producer)`, `cmd >(consumer)`,
-`bash < <(producer)`) are modeled as **pipe-like producer/consumer stream edges**, since bash
-defines them as producer/consumer streams
-(<https://www.gnu.org/software/bash/manual/bash.html#Process-Substitution>) and the scanner already
-parses the constructs (`_consume_process_substitution`). The producer is a stream scope (section
-4.6); an input process substitution feeding a shell stdin transports that scope's aggregated stdout
-into the stdin port.
+`<(...)` and `>(...)` expand to **filenames**, not automatic pipe edges. Blindly treating every
+`cmd <(producer)` as a producer -> consumer stream would over-connect: in `grep x <(producer)` the
+filename is an ordinary argument to a non-sink and the content never reaches execution. So an input
+process substitution is a typed **ephemeral input resource** whose content is the producer stream
+scope (section 4.6), and an output process substitution is an ephemeral **output resource** whose
+content is what the writer emits. The ephemeral resource connects to a flow edge **only where syntax
+or a known sink reads or writes that filename**: an input substitution on shell stdin
+(`bash < <(...)`), a shell script-file operand that is a substitution (`bash <(...)`, `source <(...)`),
+or a command whose stdout is redirected into an output substitution (`cmd > >(...)`). The scanner
+already parses these constructs (`_consume_process_substitution`).
+See <https://www.gnu.org/software/bash/manual/bash.html#Process-Substitution>.
 
 ### 5.5 Producer stdout (generic may-output; no producer-identity trust)
 
@@ -316,8 +358,9 @@ decides, from the shell command's own arguments, which port is the code sink
 a remaining non-option argument selects a script-file operand; `-s` or no remaining argument selects
 stdin. So `bash -c 'echo ok' <<EOF...EOF` does not treat the heredoc as executed shell. The
 recognized shell heads are the phase-1 dispatch shells (`sh`, `bash`, `dash`, `zsh`, `ksh`, and their
-`.exe` and restricted variants); a head the classifier does not recognize as a shell is not a shell
-sink.
+`.exe` and restricted variants), matched on the **basename-normalized** head so a path-qualified
+shell (`/bin/bash -c "$X"`, `/usr/bin/env`-resolved paths) is still recognized; a head the
+classifier does not recognize as a shell is not a shell sink.
 
 **Ambiguous selection fails closed.** When the selector itself is not statically resolvable -- an
 option word that is dynamic or external, as in `bash "$OPT" "$X"` where `$OPT` could be `-c` -- the
@@ -333,11 +376,19 @@ operand** (`bash task.sh`), **direct path head** (`./task.sh`, `/abs/task.sh`), 
 **anywhere** in the body, not only earlier, consistent with the scanner's deliberate
 reachability-insensitivity.
 
-**Wrapper resolution applies to every sink kind.** The supported `env` / `command` / `exec` / `time`
-wrappers (the phase-1 launcher grammar) are peeled before classifying the effective head for all
-sinks -- `eval`, shell `-c`, shell stdin, and static-path execution alike -- not only static-file
-execution. `env bash -c "$PAYLOAD"` and `command bash task.sh` are classified after removing the
-wrapper.
+**Wrapper resolution applies to every sink kind, preserving lookup provenance.** The supported
+`env` / `command` / `exec` / `time` wrappers (the phase-1 launcher grammar) are peeled before
+classifying the effective head for all sinks -- `eval`, shell `-c`, shell stdin, and static-path
+execution alike -- not only static-file execution. `env bash -c "$PAYLOAD"` and `command bash
+task.sh` are classified after removing the wrapper. But peeling must preserve the existing
+`external_lookup` distinction (`_ResolvedIndex.external_lookup`, `shell_scanner.py:468`;
+`_skip_shell_prefixes`, `shell_scanner.py:1889`): `env`, `exec`, and external `time` cross to a PATH
+`execve` that can never reach a shell builtin, while `command` and the `time` keyword keep shell
+lookup. The builtin sinks `eval`, `source`, and `.` are therefore sinks only on a non-external
+lookup: `command eval "$X"` is an `eval` sink, but `env eval "$X"` and `exec eval "$X"` are not
+(there is no `eval` executable on `PATH`; the wrapper would fail or run an unrelated binary). The
+`-c` / stdin / script-file shell sinks are unaffected by this bit, since a shell resolves through
+`execve` regardless.
 
 **Refusal rule (verbatim).** Refuse when authored fragments can compose `doc[-_.]+lattice` along a
 modeled content flow, and that content reaches an execution sink. Operationally: evaluate the sink
@@ -361,8 +412,8 @@ giving up:
 
 - a cap on alternatives per content value (join width);
 - a cap on total `ContentExpr` nodes;
-- a cap on table entries (variables, resource keys, pipe / substitution / process-substitution
-  edges);
+- a cap on table entries (variables, resource keys, stream scopes, pipe / substitution /
+  process-substitution edges, `Choice` and brace-expansion alternatives);
 - a cap on **deterministic fixed-point work**, charged as edge relaxations / successful lattice
   updates, **not** a raw worklist-loop count (which could vary with scheduling order despite
   identical evidence, making exhaustion order-dependent and tests unstable).
@@ -382,11 +433,23 @@ flush, so evidence parsed after a command is gone can attach to its owner.
   clear `state.heredocs` (`shell_scanner.py:519-525`), so `;`-separated commands can flush between a
   `<<EOF` and its newline. The owner ID is stamped onto **the heredocs a command registered since the
   previous flush** (tracked by count at flush time), never onto a single "last flushed command."
-- **Pipe / process-substitution edges** are recorded at the `|` operator (`shell_scanner.py:739-768`)
-  and at process-substitution parsing, linking producer and consumer IDs.
+- **Pipe edges use a pending producer, not an eager consumer ID.** Because IDs are assigned at flush,
+  the consumer does not exist when `|` is scanned (`shell_scanner.py:739-768`, `:1010`). At the `|`
+  the just-flushed producer is recorded as a **pending producer edge**; the next command to flush
+  finalizes it as producer -> consumer. This also carries the pipeline's stdin/stdout routing for the
+  `pipeline` stream scope (section 4.6).
+- **Process-substitution edges** are recorded at process-substitution parsing as the typed ephemeral
+  resources of section 5.4, linked to a sink only where syntax reads or writes the filename.
+- **Stream-scope evidence.** Each command substitution, subshell/brace group, and pipeline emits a
+  `_StreamScopeEvidence` (section 4.6) with its kind, parent, and the output structure derived from
+  the control flow the scanner already tracks (sequence operators, `case` arms via the existing
+  `_CaseScanState`, `if`/loop keywords); scopes whose structure cannot be derived fail closed.
+- **Static read edges.** A static `< path` redirection records a `ResourceRef` input on the reading
+  command's stdin port (section 5.2), parsed where `_consume_redirection` currently discards the
+  operand (`shell_scanner.py:1058-1080`).
 
-No rewrite of the scan loop; the change is localized to the flush and newline/operator boundaries the
-issue identifies.
+No rewrite of the scan loop; the changes are localized to the flush, newline, operator, redirection,
+and scope-parsing boundaries the issue identifies.
 
 ## 9. Tests
 
@@ -416,9 +479,12 @@ and `./task.sh` normalize to one resource key); the `cat > task.sh <<EOF` heredo
 `bash <<< "$X"`; the input process substitution `bash < <(printf '%s%s\n' doc- 'lattice reconcile')`;
 the multi-command substitution scope `eval "$(printf doc-; printf 'lattice reconcile')"`; the
 compound-group handoff `{ printf doc-; printf 'lattice reconcile'; } > task.sh; bash task.sh`; the
-in-word parameter default `unset X; eval "${X:-doc-}lattice reconcile"`; and the ambiguous selector
-`X=doc-; X+='lattice reconcile'; bash "$OPT" "$X"`. The trailing-newline-strip case uses an
-executable heredoc-backed substitution rather than relying on any one command's newline behavior:
+in-word parameter default `unset X; eval "${X:-doc-}lattice reconcile"`; the assign-default form
+`unset X; eval "${X:=doc-}lattice"` (also pinning that the assigned `X` refuses a later `eval "$X"`);
+the brace expansion `eval doc-{lattice,noop}`; the static file read `printf ... > task.sh; bash <
+task.sh`; and the ambiguous selector `X=doc-; X+='lattice reconcile'; bash "$OPT" "$X"`. The
+trailing-newline-strip case uses an executable heredoc-backed substitution rather than relying on any
+one command's newline behavior:
 
 ```bash
 eval "$(cat <<'EOF'
@@ -429,8 +495,12 @@ EOF
 
 Mandatory CERTIFY (must not regress): `curl ... | bash`; `echo 'make build' > run.sh; bash run.sh`;
 `eval doc- lattice` (space barrier); `bash -c 'echo ok' <<EOF...EOF` (source selection -- stdin not a
-sink); `bash -c 'echo hi' > doc-lattice.log` (phase-1 redirection-operand pin); and
-`doc${EXTERNAL}lattice` reaching a sink (disclosed external separator, certifies).
+sink); `bash -c 'echo hi' > doc-lattice.log` (phase-1 redirection-operand pin);
+`doc${EXTERNAL}lattice` reaching a sink (disclosed external separator, certifies);
+`grep x <(printf '%s%s' doc- lattice)` (process substitution read by a non-sink is not over-connected
+to execution); and `env eval "$X"` with a marker-capable `X` (external lookup cannot reach the `eval`
+builtin, so it is not an `eval` sink), paired with `command eval "$X"` as the REFUSE counterpart that
+can.
 
 Full handoff verification set at ship: pytest at the repo coverage gate, Ruff check and format,
 `ty`, typing boundaries, version sync, plus the read-only `successor-evaluation` corpus battery
