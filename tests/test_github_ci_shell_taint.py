@@ -630,6 +630,82 @@ def test_eval_variable_syntax_distinct_appends_each_apply_once_through_aliases()
     assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
+@pytest.mark.parametrize(
+    "definitions",
+    [
+        ("lattice,x}", "safe,x}"),
+        ("safe,x}", "lattice,x}"),
+    ],
+    ids=("marker-first", "marker-last"),
+)
+def test_eval_variable_syntax_joins_competing_definitions(
+    definitions: tuple[str, str],
+) -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg(
+            "$AB",
+            Concat((VariableRef("A"), VariableRef("B"))),
+            dynamic=True,
+        ),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("A", LiteralTransfer("doc-{")),
+            *(_AssignmentEvidence("B", LiteralTransfer(definition)) for definition in definitions),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_variable_syntax_applies_append_to_every_competing_definition() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg(
+            "$AB",
+            Concat((VariableRef("A"), VariableRef("B"))),
+            dynamic=True,
+        ),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("A", LiteralTransfer("doc-{")),
+            _AssignmentEvidence("B", LiteralTransfer("lat")),
+            _AssignmentEvidence("B", LiteralTransfer("safe")),
+            _AssignmentEvidence("B", LiteralTransfer("tice,x}"), append=True),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_variable_syntax_competing_definitions_never_concatenate() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg(
+            "$AB",
+            Concat((VariableRef("A"), VariableRef("B"))),
+            dynamic=True,
+        ),
+        name="eval",
+        assignments=(
+            _AssignmentEvidence("A", LiteralTransfer("doc-{")),
+            _AssignmentEvidence("B", LiteralTransfer("lattice,")),
+            _AssignmentEvidence("B", LiteralTransfer("x}")),
+        ),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
 def test_eval_brace_expansion_obeys_taint_cap() -> None:
     command = _command(
         1,

@@ -2441,19 +2441,21 @@ def _eval_syntax_variable_transition(
         )
     context.active_transitions.add(key)
     try:
-        value: _EvalSyntaxValue | None = None
-        for write_index, write in program:
-            if write.append:
-                base = value
-                if base is None:
-                    base = _eval_syntax_token(
-                        state,
-                        _ContentToken(OutsideGap(), "", False),
-                        context.raw_variables,
-                        context.limits,
-                    )
-                value = _cap_eval_syntax(
-                    frozenset(
+        value: _EvalSyntaxValue = frozenset()
+        changed = True
+        while changed:
+            changed = False
+            for write_index, write in program:
+                if write.append:
+                    base = value
+                    if not base:
+                        base = _eval_syntax_token(
+                            state,
+                            _ContentToken(OutsideGap(), "", False),
+                            context.raw_variables,
+                            context.limits,
+                        )
+                    produced = frozenset(
                         after
                         for current in base
                         for after in _eval_syntax_append_write(
@@ -2463,21 +2465,24 @@ def _eval_syntax_variable_transition(
                             context,
                             depth=depth + 1,
                         )
-                    ),
-                    context.limits,
-                )
-            else:
-                value = _eval_syntax_append(
-                    write.expression,
-                    state,
-                    context,
-                    depth=depth + 1,
-                )
-        if value is None:
-            value = _eval_syntax_outside(state.quote)
-        context.transition_updates += 1
-        if context.transition_updates > context.limits.max_fixed_point_updates:
-            raise _TaintLimitExceeded("shell taint eval syntax fixed-point update limit exceeded")
+                    )
+                else:
+                    produced = _eval_syntax_append(
+                        write.expression,
+                        state,
+                        context,
+                        depth=depth + 1,
+                    )
+                widened = _cap_eval_syntax(value | produced, context.limits)
+                if widened == value:
+                    continue
+                value = widened
+                context.transition_updates += 1
+                if context.transition_updates > context.limits.max_fixed_point_updates:
+                    raise _TaintLimitExceeded(
+                        "shell taint eval syntax fixed-point update limit exceeded"
+                    )
+                changed = True
         if len(context.transitions) >= context.limits.max_table_entries:
             raise _TaintLimitExceeded("shell taint eval syntax transition table limit exceeded")
         context.transitions[key] = value

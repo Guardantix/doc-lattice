@@ -3246,6 +3246,34 @@ def test_eval_second_pass_cyclic_variable_transition_fails_closed():
 @pytest.mark.parametrize(
     "script",
     [
+        ("A=doc-{; if true; then B='lattice,x}'; else B='safe,x}'; fi; eval \"$A$B\""),
+        ("A=doc-{; if true; then B='safe,x}'; else B='lattice,x}'; fi; eval \"$A$B\""),
+        ("A=doc-{; if true; then B=lat; else B=safe; fi; B+='tice,x}'; eval \"$A$B\""),
+    ],
+    ids=("marker-first", "marker-last", "append-every-branch"),
+)
+def test_eval_second_pass_joins_competing_brace_variable_definitions(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        ("A=doc-{; if true; then B='safe,x}'; else B='noop,y}'; fi; eval \"$A$B\""),
+        ("A=doc-{; if true; then B='lattice,'; else B='x}'; fi; eval \"$A$B\""),
+    ],
+    ids=("clean-alternatives", "separate-definitions"),
+)
+def test_eval_second_pass_competing_definitions_do_not_concatenate(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         '''eval "'doc-{lattice,noop}'"''',
         r'''eval "doc-\{lattice,noop\}"''',
     ],
