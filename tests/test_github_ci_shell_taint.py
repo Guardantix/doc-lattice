@@ -121,6 +121,43 @@ def test_eval_inserts_literal_spaces_between_argument_ports() -> None:
 
 
 @pytest.mark.parametrize(
+    "expression",
+    [
+        LiteralTransfer("${X}lattice reconcile"),
+        LiteralTransfer('"${X}lattice reconcile"'),
+        Concat((LiteralTransfer("${X}"), LiteralTransfer("lattice reconcile"))),
+        Choice((LiteralTransfer("safe"), LiteralTransfer("${X}lattice reconcile"))),
+    ],
+    ids=("unquoted", "double-quoted", "concat", "choice"),
+)
+def test_eval_reparses_literal_variable_reference_on_second_pass(expression: ContentExpr) -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("${X}lattice reconcile", expression),
+        name="eval",
+        assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+        True,
+        "authored marker flow reaches an execution sink",
+    )
+
+
+def test_eval_reparse_keeps_second_pass_single_quoted_variable_reference_literal() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("'${X}lattice'", LiteralTransfer("'${X}lattice'")),
+        name="eval",
+        assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-")),),
+    )
+
+    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+
+
+@pytest.mark.parametrize(
     ("words", "expected_index", "expected_name"),
     [
         (("exec", "command", "bash", "-c", "$X"), 1, "command"),

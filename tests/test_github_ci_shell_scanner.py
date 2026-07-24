@@ -2973,6 +2973,17 @@ def test_eval_taint_is_order_insensitive_within_run_body():
     assert_taint_refusal("eval \"$X\"\nX=doc-\nX+='lattice reconcile'")
 
 
+def test_eval_reparses_single_quoted_variable_reference_argument():
+    assert_taint_refusal("X=doc-\neval '${X}lattice reconcile --all'")
+
+
+def test_eval_reparse_keeps_second_pass_single_quoted_variable_reference_literal():
+    result = scan_doc_lattice_invocations("X=doc-\neval \"'\\${X}lattice reconcile --all'\"")
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 def test_eval_with_only_partial_marker_variable_stays_certified():
     result = scan_doc_lattice_invocations('A=doc-\nB=lattice\neval "$A"')
 
@@ -2995,6 +3006,14 @@ def test_eval_parameter_gap_taint_depends_on_authored_marker_separator(script: s
     result = scan_doc_lattice_invocations(script)
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+def test_unmodeled_wrapper_retains_decoded_literal_marker_refusal():
+    result = scan_doc_lattice_invocations('dispatch "doc-${EXTERNAL}lattice reconcile"')
+
+    assert result.incomplete_reason == (
+        "marker-bearing command is not a certified doc-lattice invocation"
+    )
 
 
 def test_complete_marker_assignment_retains_phase_one_refusal_reason():

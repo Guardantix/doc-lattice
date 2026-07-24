@@ -7,7 +7,6 @@ from enum import Enum, auto
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
     TAINT_REFUSAL_REASON,
-    Concat,
     ContentBuilder,
     ContentExpr,
     LiteralTransfer,
@@ -19,6 +18,8 @@ from doc_lattice.github_ci.shell_taint import (
     _EvidenceBuilder,
     _ExecutableEvidence,
     _RedirectionEvent,
+    _select_shell_source,
+    _ShellSourceKind,
     analyze_marker_taint,
 )
 
@@ -298,6 +299,7 @@ _LINEAR_FLAGS = frozenset({"--exit-code", "--warn-exit"})
 _RECONCILE_OPTIONS_WITH_ARGUMENTS = frozenset({"--config", "--format", "--ref"})
 _RECONCILE_FLAGS = frozenset({"--all", "--dry-run", "--recover"})
 _RECONCILE_NON_MUTATING_OPTIONS = frozenset({"--dry-run"})
+_MODELED_SHELL_SINKS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "rksh"})
 
 # Retained-word certification marker. It follows Python distribution separator spelling and is
 # deliberately ASCII case-insensitive, so doc-lattice/doc_lattice/doc.lattice variants match
@@ -461,7 +463,7 @@ class _ShellWordBuilder:
         return _ShellWord(
             literal=literal,
             content=built_content.expression,
-            has_doc_lattice_marker=_content_has_doc_lattice_marker(built_content.expression),
+            has_doc_lattice_marker=_DISPATCHER_MARKER_RE.search(literal) is not None,
             dynamic=self.dynamic,
             locale_translated=self.locale_translated,
             unquoted_dynamic=self.unquoted_dynamic,
@@ -475,24 +477,6 @@ class _ShellWordBuilder:
             process_resource_id=built_content.process_resource_id,
             keyword_eligible=self.keyword_eligible,
         )
-
-
-def _content_has_doc_lattice_marker(content: ContentExpr) -> bool:
-    """Return whether one contiguous authored literal segment contains the marker."""
-    pending = [content]
-    literal_parts: list[str] = []
-    while pending:
-        part = pending.pop()
-        if isinstance(part, Concat):
-            pending.extend(reversed(part.parts))
-            continue
-        if isinstance(part, LiteralTransfer):
-            literal_parts.append(part.text)
-            continue
-        if _DISPATCHER_MARKER_RE.search("".join(literal_parts)) is not None:
-            return True
-        literal_parts.clear()
-    return _DISPATCHER_MARKER_RE.search("".join(literal_parts)) is not None
 
 
 def _reject_active_extglob_opener(
@@ -1117,21 +1101,33 @@ class _ShellScanner:
         if not state.words and not state.redirections:
             return None
         resolution = _LauncherResolutionState(self.budget)
+        resolution_attempted = False
+        resolved_executable: _ResolvedIndex | None = None
+        executable: _ExecutableEvidence | None = None
+        if state.words:
+            resolved_executable = _doc_lattice_command_index(state.words, 0, resolution)
+            resolution_attempted = True
+            executable = _executable_evidence_from_resolution(state.words, resolution)
         if self.classify_commands:
             invocation = _invocation_in_simple_command(
                 state.words,
                 self.budget,
                 command_has_marker=state.command_has_marker,
                 resolution=resolution,
+                executable=resolved_executable,
+                defer_marker_refusal=(
+                    self.taint_builder is not None
+                    and _is_modeled_taint_sink(state.words, executable)
+                ),
             )
             if invocation is not None:
                 if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
                     raise _ShellScanIncomplete("invocation limit exceeded")
                 self.invocations.append(invocation)
         if self.taint_builder is not None:
-            if state.words and not resolution.executable_positions:
+            if state.words and not resolution_attempted:
                 _doc_lattice_command_index(state.words, 0, resolution)
-            executable = _executable_evidence_from_resolution(state.words, resolution)
+                executable = _executable_evidence_from_resolution(state.words, resolution)
             assignment_indices = _assignment_indices(state.words, executable)
             assignments: list[_AssignmentEvidence] = []
             for index in assignment_indices:
@@ -1144,6 +1140,7 @@ class _ShellScanner:
                             append=word.assignment_append,
                         )
                     )
+            for word in state.words:
                 assignments.extend(word.conditional_assignments)
             argv_indices = {
                 source_index: argv_index
@@ -1886,17 +1883,22 @@ def direct_doc_lattice_invocations(
     return result.invocations
 
 
-def _invocation_in_simple_command(
+def _invocation_in_simple_command(  # noqa: PLR0913
     words: list[_ShellWord],
     budget: _ScanBudget,
     *,
     command_has_marker: bool,
     resolution: _LauncherResolutionState | None = None,
+    executable: _ResolvedIndex | None = None,
+    defer_marker_refusal: bool = False,
 ) -> _Invocation | None:
     resolution = resolution if resolution is not None else _LauncherResolutionState(budget)
-    executable = _doc_lattice_command_index(words, 0, resolution)
+    executable = (
+        executable if executable is not None else _doc_lattice_command_index(words, 0, resolution)
+    )
     if executable.index is None:
-        _reject_marker_bearing_non_invocation(command_has_marker)
+        if not defer_marker_refusal:
+            _reject_marker_bearing_non_invocation(command_has_marker)
         return None
     subcommand_resolution = _doc_lattice_subcommand_index(words, executable.index + 1)
     if executable.ambiguous or subcommand_resolution.ambiguous:
@@ -2019,6 +2021,53 @@ def _remap_executable(
         ambiguous=executable.ambiguous,
         alternates=remapped_alternates,
     )
+
+
+def _is_modeled_taint_sink(words: list[_ShellWord], executable: _ExecutableEvidence | None) -> bool:
+    """Return whether a marker occupies a port the taint pass directly analyzes."""
+    if executable is None:
+        return False
+    argv = tuple(
+        _ArgPort(
+            word.literal,
+            word.content,
+            dynamic=word.dynamic,
+            process_resource_id=word.process_resource_id,
+        )
+        for word in words
+    )
+    pending = [executable]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop()
+        candidate_id = id(candidate)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        if (
+            not candidate.external_lookup
+            and candidate.literal == candidate.name == "eval"
+            and candidate.argv_index is not None
+        ):
+            return any(word.has_doc_lattice_marker for word in words[candidate.argv_index + 1 :])
+        if (
+            not candidate.external_lookup
+            and candidate.argv_index is not None
+            and candidate.literal == candidate.name
+        ):
+            normalized_name = (
+                candidate.name.casefold().removesuffix(".exe") if candidate.name else None
+            )
+            if normalized_name in _MODELED_SHELL_SINKS:
+                selection = _select_shell_source(argv, candidate.argv_index)
+                if selection.kind is _ShellSourceKind.COMMAND and selection.argv_index is not None:
+                    return words[selection.argv_index].has_doc_lattice_marker
+                if selection.kind is _ShellSourceKind.AMBIGUOUS:
+                    return any(
+                        words[index].has_doc_lattice_marker for index in selection.candidate_indices
+                    )
+        pending.extend(candidate.alternates)
+    return False
 
 
 def _reject_marker_bearing_non_invocation(command_has_marker: bool) -> None:

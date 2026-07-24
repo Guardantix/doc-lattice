@@ -1028,7 +1028,7 @@ def _build_flow_definitions(
 
 
 def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvidence) -> ContentExpr:
-    """Return eval arguments joined by the literal shell argument separator."""
+    """Return second-pass eval input after joining argv with authored spaces."""
     head_index = executable.argv_index
     if head_index is None:
         return LiteralTransfer("")
@@ -1038,7 +1038,130 @@ def _eval_arguments_from(command: _CommandEvidence, executable: _ExecutableEvide
         if index:
             parts.append(LiteralTransfer(" "))
         parts.append(argument.content)
-    return concat(*parts)
+    return _eval_reparse_content(concat(*parts))
+
+
+_MAX_EVAL_REPARSE_BRANCHES = 256
+_MAX_EVAL_REPARSE_DEPTH = 512
+
+
+def _eval_reparse_content(expression: ContentExpr) -> ContentExpr:
+    """Interpret the minimal shell syntax that ``eval`` reparses from literal content."""
+    branches = _eval_reparse_branches(expression, quote=None, depth=0)
+    return choice(*(branch for branch, _quote in branches))
+
+
+def _eval_reparse_branches(
+    expression: ContentExpr,
+    *,
+    quote: str | None,
+    depth: int,
+) -> list[tuple[ContentExpr, str | None]]:
+    """Reparse content while retaining quote state across symbolic expression boundaries."""
+    if depth > _MAX_EVAL_REPARSE_DEPTH:
+        raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
+    if isinstance(expression, LiteralTransfer):
+        parsed, resulting_quote = _eval_reparse_literal(expression.text, quote)
+        return [(parsed, resulting_quote)]
+    if isinstance(expression, Concat):
+        branches: list[tuple[ContentExpr, str | None]] = [(LiteralTransfer(""), quote)]
+        for part in expression.parts:
+            expanded: list[tuple[ContentExpr, str | None]] = []
+            for prefix, current_quote in branches:
+                for suffix, resulting_quote in _eval_reparse_branches(
+                    part,
+                    quote=current_quote,
+                    depth=depth + 1,
+                ):
+                    expanded.append((concat(prefix, suffix), resulting_quote))
+                    if len(expanded) > _MAX_EVAL_REPARSE_BRANCHES:
+                        raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
+            branches = expanded
+        return branches
+    if isinstance(expression, Choice):
+        branches = []
+        for part in expression.parts:
+            branches.extend(_eval_reparse_branches(part, quote=quote, depth=depth + 1))
+            if len(branches) > _MAX_EVAL_REPARSE_BRANCHES:
+                raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
+        return branches
+    return [(expression, quote)]
+
+
+def _eval_reparse_literal(text: str, quote: str | None) -> tuple[ContentExpr, str | None]:
+    """Reparse quote, escape, and simple parameter syntax from one literal transfer."""
+    parts: list[ContentExpr] = []
+    literal: list[str] = []
+    index = 0
+
+    def flush_literal() -> None:
+        if literal:
+            parts.append(LiteralTransfer("".join(literal)))
+            literal.clear()
+
+    while index < len(text):
+        character = text[index]
+        if quote == "'":
+            if character == "'":
+                quote = None
+            else:
+                literal.append(character)
+            index += 1
+            continue
+        if quote == '"' and character == '"':
+            quote = None
+            index += 1
+            continue
+        if quote is None and character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        if character == "\\":
+            if index + 1 >= len(text):
+                literal.append(character)
+                index += 1
+                continue
+            escaped = text[index + 1]
+            if quote == '"' and escaped not in {"$", '"', "\\", "`", "\n"}:
+                literal.extend((character, escaped))
+            elif escaped != "\n":
+                literal.append(escaped)
+            index += 2
+            continue
+        if character == "$":
+            name, end = _eval_parameter_name(text, index)
+            if name is not None:
+                flush_literal()
+                parts.append(VariableRef(name))
+                index = end
+                continue
+        literal.append(character)
+        index += 1
+    flush_literal()
+    return concat(*parts), quote
+
+
+def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
+    """Return one simple eval parameter name without interpreting complex shell forms."""
+    index = start + 1
+    if index < len(text) and text[index] == "{":
+        name_start = index + 1
+        name_end = _eval_identifier_end(text, name_start)
+        if name_end > name_start and name_end < len(text) and text[name_end] == "}":
+            return text[name_start:name_end], name_end + 1
+        return None, start + 1
+    name_end = _eval_identifier_end(text, index)
+    return (text[index:name_end], name_end) if name_end > index else (None, start + 1)
+
+
+def _eval_identifier_end(text: str, start: int) -> int:
+    """Return the exclusive endpoint of an ASCII shell identifier."""
+    if start >= len(text) or not (text[start].isalpha() or text[start] == "_"):
+        return start
+    index = start + 1
+    while index < len(text) and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    return index
 
 
 def _script_port_expression(port: _ArgPort) -> ContentExpr:
