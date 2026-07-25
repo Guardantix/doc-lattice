@@ -8,6 +8,7 @@ from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
     _QUOTED_FUNCTION_POSITIONAL_STAR,
     TAINT_REFUSAL_REASON,
+    ChoiceOutput,
     CommandOutput,
     Concat,
     ContentBuilder,
@@ -21,6 +22,7 @@ from doc_lattice.github_ci.shell_taint import (
     OutsideGap,
     ProcessResourceTarget,
     RedirectionTarget,
+    RepeatOutput,
     ScopeOutput,
     SequenceOutput,
     StaticResourceTarget,
@@ -62,6 +64,10 @@ _SURROGATE_MAX = 0xDFFF
 _PRINTF_SEPARATE_V_MIN_ARGUMENTS = 3
 _PRINTF_ATTACHED_V_PREFIX_LENGTH = 2
 _PRINTF_FIELD_LIMIT = 4096
+_LOOP_HEADER_NAME_WORDS = 2
+_CASE_HEADER_PATTERN_WORDS = 4
+_MAX_CASE_ARMS = 256
+_MAX_CASE_DYNAMIC_BRANCHES = 8
 
 _COMMAND_PREFIXES = frozenset(
     {
@@ -718,6 +724,35 @@ class _ScopeFrame:
     outputs: list[OutputExpr]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
     loop_bindings: list[_AssignmentEvidence] = field(default_factory=list)
+    controls: list["_ControlFrame"] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _ControlFrame:
+    """Structured output accumulated for one shell control compound."""
+
+    kind: str
+    scope_id: int
+    parent_scope_id: int
+    parent_outputs: list[OutputExpr]
+    current_outputs: list[OutputExpr] = field(default_factory=list)
+    test_outputs: list[OutputExpr] = field(default_factory=list)
+    body_outputs: list[OutputExpr] = field(default_factory=list)
+    branches: list[OutputExpr] = field(default_factory=list)
+    case_arms: list[OutputExpr] = field(default_factory=list)
+    case_terminators: list[str] = field(default_factory=list)
+    case_word: _ShellWord | None = None
+    case_match_statuses: list[bool | None] = field(default_factory=list)
+    case_dynamic_branches: int = 0
+    loop_variable: str | None = None
+    loop_values: list[ContentExpr] = field(default_factory=list)
+    phase: str = "header"
+    if_tests: list[OutputExpr] = field(default_factory=list)
+    if_test_statuses: list[bool | None] = field(default_factory=list)
+    current_test_status: bool | None = None
+    prior_branch_status: bool | None = False
+    body_status: bool | None = None
+    prune_unreachable_effects: bool = False
 
 
 @dataclass(slots=True)
@@ -726,6 +761,7 @@ class _PipelineFrame:
 
     scope_id: int
     stages: list[int]
+    control_depth: int = 0
 
 
 @dataclass(slots=True)
@@ -748,6 +784,8 @@ class _CommandScanState:
     compound_redirection_ordinal: int = 0
     conditionally_executed: bool = False
     conditional_operator: str | None = None
+    and_or_status: bool | None = None
+    and_or_started: bool = False
 
     def reset_command(self) -> None:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
@@ -866,6 +904,8 @@ class _ShellScanner:
         self._parameter_content_assignments: dict[
             tuple[int, int], tuple[_AssignmentEvidence, ...]
         ] = {}
+        self.active_function_names: set[str] = set()
+        self.function_body_depth = 0
 
     def scan(self) -> tuple[_Invocation, ...]:
         self._scan_stream_scope(
@@ -920,7 +960,7 @@ class _ShellScanner:
         frame = _ScopeFrame(
             scope_id,
             kind,
-            self.scope_stack[-1].scope_id if self.scope_stack else None,
+            self._container_scope_id() if self.scope_stack else None,
             None,
             [],
         )
@@ -941,6 +981,423 @@ class _ShellScanner:
             )
         )
         return end, scope_id
+
+    def _output_target(self) -> list[OutputExpr]:
+        """Return the innermost structured list that receives completed output."""
+        frame = self.scope_stack[-1]
+        if frame.controls:
+            return frame.controls[-1].current_outputs
+        return frame.outputs
+
+    def _container_scope_id(self) -> int:
+        """Return the lexical scope containing the command currently being scanned."""
+        frame = self.scope_stack[-1]
+        return frame.controls[-1].scope_id if frame.controls else frame.scope_id
+
+    @staticmethod
+    def _sequence_output(parts: list[OutputExpr]) -> OutputExpr:
+        """Collapse one ordered output list without losing authored epsilon."""
+        if not parts:
+            return SequenceOutput(())
+        if len(parts) == 1:
+            return parts[0]
+        return SequenceOutput(tuple(parts))
+
+    @staticmethod
+    def _and_status(left: bool | None, right: bool | None) -> bool | None:
+        if left is False or right is False:
+            return False
+        if left is True and right is True:
+            return True
+        return None
+
+    @staticmethod
+    def _or_status(left: bool | None, right: bool | None) -> bool | None:
+        if left is True or right is True:
+            return True
+        if left is False and right is False:
+            return False
+        return None
+
+    @staticmethod
+    def _invert_status(status: bool | None) -> bool | None:
+        return None if status is None else not status
+
+    def _control_execution_status(self) -> bool | None:
+        """Return reachability imposed by every active enclosing control body."""
+        status: bool | None = True
+        if not self.scope_stack:
+            return status
+        for frame in self.scope_stack[-1].controls:
+            if frame.phase in {"body", "else"}:
+                status = self._and_status(status, frame.body_status)
+        return status
+
+    def _command_literal_status(
+        self,
+        words: list[_ShellWord],
+        executable: _ExecutableEvidence | None,
+    ) -> bool | None:
+        """Return exact true/false status, honoring negation and function shadowing."""
+        if (
+            executable is None
+            or executable.argv_index is None
+            or executable.external_lookup
+            or executable.name != executable.literal
+            or executable.name not in {"true", "false"}
+            or executable.name in self.active_function_names
+        ):
+            return None
+        source_indices = [
+            index
+            for index, word in enumerate(words)
+            if not word.dynamic and word.literal == executable.literal
+        ]
+        if not source_indices:
+            return None
+        executable_index = source_indices[-1]
+        negated = (
+            sum(word.literal == "!" and not word.dynamic for word in words[:executable_index]) % 2
+            == 1
+        )
+        status = executable.name == "true"
+        return not status if negated else status
+
+    def _command_execution_status(self, state: _CommandScanState) -> bool | None:
+        """Return whether the current AND/OR-list command executes."""
+        status = self._control_execution_status()
+        if not state.and_or_started:
+            return status
+        if state.conditional_operator == "&&":
+            return self._and_status(status, state.and_or_status)
+        if state.conditional_operator == "||":
+            return self._and_status(status, self._invert_status(state.and_or_status))
+        return status
+
+    def _record_command_status(
+        self,
+        state: _CommandScanState,
+        literal_status: bool | None,
+    ) -> None:
+        """Advance the left-associative AND/OR status and current condition status."""
+        if not state.and_or_started or state.conditional_operator is None:
+            state.and_or_status = literal_status
+            state.and_or_started = True
+        elif state.conditional_operator == "&&":
+            state.and_or_status = self._and_status(state.and_or_status, literal_status)
+        else:
+            state.and_or_status = self._or_status(state.and_or_status, literal_status)
+        frame = (
+            self.scope_stack[-1].controls[-1]
+            if self.scope_stack and self.scope_stack[-1].controls
+            else None
+        )
+        if frame is not None and frame.phase == "test":
+            frame.current_test_status = state.and_or_status
+
+    @staticmethod
+    def _reset_and_or_status(state: _CommandScanState) -> None:
+        state.and_or_status = None
+        state.and_or_started = False
+
+    def _open_control(self, kind: str) -> _ControlFrame:
+        """Open a structured compound beneath the current output target."""
+        builder = self.taint_builder
+        if builder is None:
+            raise _ShellScanIncomplete("missing shell taint evidence builder")
+        scope = self.scope_stack[-1]
+        frame = _ControlFrame(
+            kind=kind,
+            scope_id=builder.allocate_scope(),
+            parent_scope_id=self._container_scope_id(),
+            parent_outputs=self._output_target(),
+        )
+        if kind in {"if", "while", "until"}:
+            frame.phase = "test"
+            frame.current_outputs = frame.test_outputs
+        elif kind == "case":
+            frame.phase = "word"
+        scope.controls.append(frame)
+        return frame
+
+    def _matching_control(self, kinds: set[str]) -> _ControlFrame | None:
+        if not self.scope_stack[-1].controls:
+            return None
+        frame = self.scope_stack[-1].controls[-1]
+        return frame if frame.kind in kinds else None
+
+    def _freeze_control(
+        self,
+        state: _CommandScanState,
+        frame: _ControlFrame,
+        output: OutputExpr,
+        *,
+        loop_bindings: tuple[_AssignmentEvidence, ...] = (),
+    ) -> None:
+        """Freeze one completed control scope and expose it as a compound output."""
+        builder = self.taint_builder
+        if builder is None:
+            raise _ShellScanIncomplete("missing shell taint evidence builder")
+        controls = self.scope_stack[-1].controls
+        if not controls or controls[-1] is not frame:
+            raise _ShellScanIncomplete("ambiguous nested shell control flow")
+        controls.pop()
+        builder.scopes.append(
+            _StreamScopeEvidence(
+                frame.scope_id,
+                frame.kind,
+                frame.parent_scope_id,
+                None,
+                output,
+                loop_bindings=loop_bindings,
+            )
+        )
+        frame.parent_outputs.append(ScopeOutput(frame.scope_id))
+        state.pending_compound_scope_id = frame.scope_id
+        state.compound_redirection_ordinal = 0
+        if state.pending_pipe_producer is not None:
+            builder.pipes.append(
+                _PipeEvidence(
+                    state.pending_pipe_producer,
+                    consumer_scope_id=frame.scope_id,
+                    includes_stderr=state.pending_pipe_stderr,
+                )
+            )
+            state.pending_pipe_producer = None
+            state.pending_pipe_stderr = False
+
+    def _finish_if(self, state: _CommandScanState, frame: _ControlFrame) -> None:
+        """Close one if/elif/else chain as nested test-plus-choice output."""
+        if frame.phase == "body":
+            frame.branches.append(self._sequence_output(frame.current_outputs))
+            tail: OutputExpr = SequenceOutput(())
+        elif frame.phase == "else":
+            tail = self._sequence_output(frame.current_outputs)
+        else:
+            raise _ShellScanIncomplete("unfinished if control flow")
+        if not (len(frame.if_tests) == len(frame.if_test_statuses) == len(frame.branches)):
+            raise _ShellScanIncomplete("ambiguous if control flow")
+        entries = zip(
+            frame.if_tests,
+            frame.branches,
+            frame.if_test_statuses,
+            strict=True,
+        )
+        for test, branch, status in reversed(tuple(entries)):
+            selected = (
+                branch
+                if status is True
+                else tail
+                if status is False
+                else ChoiceOutput((branch, tail))
+            )
+            tail = SequenceOutput((test, selected))
+        self._freeze_control(state, frame, tail)
+
+    def _finish_loop(self, state: _CommandScanState, frame: _ControlFrame) -> None:
+        """Close one bounded loop using zero-or-more structured body repetition."""
+        if frame.phase != "body":
+            raise _ShellScanIncomplete("unfinished loop control flow")
+        body = self._sequence_output(frame.current_outputs)
+        if frame.kind in {"for", "select"}:
+            output: OutputExpr = RepeatOutput(body) if frame.loop_values else SequenceOutput(())
+            loop_bindings = (
+                (
+                    _AssignmentEvidence(
+                        frame.loop_variable,
+                        choice(*frame.loop_values),
+                    ),
+                )
+                if frame.loop_variable is not None and frame.loop_values
+                else ()
+            )
+        else:
+            test = self._sequence_output(frame.test_outputs)
+            output = (
+                test
+                if frame.body_status is False
+                else SequenceOutput((test, RepeatOutput(SequenceOutput((body, test)))))
+            )
+            loop_bindings = ()
+        self._freeze_control(state, frame, output, loop_bindings=loop_bindings)
+
+    def _case_chains(self, frame: _ControlFrame) -> tuple[OutputExpr, ...]:
+        """Return bounded case output with distinct fallthrough and retest semantics."""
+        empty = SequenceOutput(())
+        executed_cache: dict[int, OutputExpr] = {}
+        retested_cache: dict[int, OutputExpr] = {}
+
+        def executed(index: int) -> OutputExpr:
+            if index in executed_cache:
+                return executed_cache[index]
+            arm = frame.case_arms[index]
+            terminator = (
+                frame.case_terminators[index] if index < len(frame.case_terminators) else ";;"
+            )
+            if index + 1 >= len(frame.case_arms) or terminator == ";;":
+                output = arm
+            else:
+                suffix = executed(index + 1) if terminator == ";&" else retested(index + 1)
+                output = self._sequence_output([arm, suffix])
+            executed_cache[index] = output
+            return output
+
+        def retested(index: int) -> OutputExpr:
+            if index >= len(frame.case_arms):
+                return empty
+            if index in retested_cache:
+                return retested_cache[index]
+            status = (
+                frame.case_match_statuses[index] if index < len(frame.case_match_statuses) else None
+            )
+            if status is True:
+                output = executed(index)
+            else:
+                skipped = retested(index + 1)
+                output = skipped if status is False else ChoiceOutput((executed(index), skipped))
+            retested_cache[index] = output
+            return output
+
+        return (retested(0),) if frame.case_arms else (empty,)
+
+    @staticmethod
+    def _case_match_status(
+        subject: _ShellWord | None,
+        patterns: list[_ShellWord],
+    ) -> bool | None:
+        """Return exact literal case-pattern status when no glob syntax is involved."""
+        if subject is None or subject.dynamic or not patterns:
+            return None
+        unknown = False
+        for pattern in patterns:
+            if pattern.dynamic or any(character in pattern.literal for character in "*?["):
+                unknown = True
+            elif subject.literal == pattern.literal:
+                return True
+        return None if unknown else False
+
+    def _finish_case(self, state: _CommandScanState, frame: _ControlFrame) -> None:
+        """Close one case compound, preserving arm exclusivity and fallthrough."""
+        if frame.phase == "body":
+            if len(frame.case_arms) >= _MAX_CASE_ARMS:
+                raise _ShellScanIncomplete("case arm limit exceeded")
+            frame.case_arms.append(self._sequence_output(frame.current_outputs))
+        elif frame.phase not in {"pattern", "word"}:
+            raise _ShellScanIncomplete("unfinished case control flow")
+        self._freeze_control(state, frame, ChoiceOutput(self._case_chains(frame)))
+
+    def _capture_loop_header(
+        self,
+        frame: _ControlFrame,
+        words: list[_ShellWord],
+    ) -> None:
+        """Capture one statically bounded for/select iteration word list."""
+        if frame.phase != "header" or not words or words[0].literal != frame.kind:
+            return
+        if (
+            len(words) < _LOOP_HEADER_NAME_WORDS
+            or words[1].dynamic
+            or not _is_name(words[1].literal)
+        ):
+            raise _ShellScanIncomplete("dynamic loop header cannot be scanned safely")
+        frame.loop_variable = words[1].literal
+        if len(words) == _LOOP_HEADER_NAME_WORDS:
+            raise _ShellScanIncomplete("implicit positional loop values cannot be scanned safely")
+        if words[2].dynamic or words[2].literal != "in":
+            raise _ShellScanIncomplete("dynamic loop header cannot be scanned safely")
+        values = words[3:]
+        if any(word.dynamic or word.active_argv_expansion for word in values):
+            raise _ShellScanIncomplete("dynamic loop values cannot be scanned safely")
+        frame.loop_values.extend(word.content for word in values)
+
+    def _handle_control_word(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        state: _CommandScanState,
+        word: _ShellWord,
+        *,
+        command_position: bool,
+    ) -> None:
+        """Apply one eligible reserved word to the active structured control stack."""
+        if (
+            self.taint_builder is None
+            or not command_position
+            or word.dynamic
+            or not word.keyword_eligible
+        ):
+            return
+        literal = word.literal
+        if literal in {"if", "for", "select", "while", "until", "case"}:
+            self._open_control(literal)
+            return
+        if literal == "then":
+            frame = self._matching_control({"if"})
+            if frame is None or frame.phase != "test":
+                return
+            frame.if_tests.append(self._sequence_output(frame.current_outputs))
+            frame.if_test_statuses.append(frame.current_test_status)
+            frame.body_status = self._and_status(
+                self._invert_status(frame.prior_branch_status),
+                frame.current_test_status,
+            )
+            frame.phase = "body"
+            frame.current_outputs = []
+            return
+        if literal == "elif":
+            frame = self._matching_control({"if"})
+            if frame is None or frame.phase != "body":
+                return
+            frame.branches.append(self._sequence_output(frame.current_outputs))
+            frame.prior_branch_status = self._or_status(
+                frame.prior_branch_status,
+                frame.current_test_status,
+            )
+            frame.phase = "test"
+            frame.test_outputs = []
+            frame.current_outputs = frame.test_outputs
+            frame.current_test_status = None
+            return
+        if literal == "else":
+            frame = self._matching_control({"if"})
+            if frame is None or frame.phase != "body":
+                return
+            frame.branches.append(self._sequence_output(frame.current_outputs))
+            frame.prior_branch_status = self._or_status(
+                frame.prior_branch_status,
+                frame.current_test_status,
+            )
+            frame.phase = "else"
+            frame.current_outputs = []
+            frame.body_status = self._invert_status(frame.prior_branch_status)
+            return
+        if literal == "fi":
+            frame = self._matching_control({"if"})
+            if frame is not None:
+                self._finish_if(state, frame)
+            return
+        if literal == "do":
+            frame = self._matching_control({"for", "select", "while", "until"})
+            if frame is None:
+                return
+            expected_phase = "header" if frame.kind in {"for", "select"} else "test"
+            if frame.phase != expected_phase:
+                raise _ShellScanIncomplete("ambiguous loop control flow")
+            zero_iterations = (frame.kind == "while" and frame.current_test_status is False) or (
+                frame.kind == "until" and frame.current_test_status is True
+            )
+            frame.body_status = False if zero_iterations else None
+            frame.phase = "body"
+            frame.body_outputs = []
+            frame.current_outputs = frame.body_outputs
+            return
+        if literal == "done":
+            frame = self._matching_control({"for", "select", "while", "until"})
+            if frame is not None:
+                self._finish_loop(state, frame)
+            return
+        if literal == "esac":
+            frame = self._matching_control({"case"})
+            if frame is not None:
+                self._finish_case(state, frame)
 
     def _scan_commands(
         self,
@@ -963,6 +1420,8 @@ class _ShellScanner:
             if terminator is not None and character == terminator:
                 self._flush_command(state)
                 self._finalize_pipeline(state)
+                if self.scope_stack and self.scope_stack[-1].controls:
+                    raise _ShellScanIncomplete("unfinished shell control flow")
                 return index + 1
             boundary_end = self._consume_command_boundary(
                 index,
@@ -1001,6 +1460,8 @@ class _ShellScanner:
             index = next_index
         self._flush_command(state)
         self._finalize_pipeline(state)
+        if self.scope_stack and self.scope_stack[-1].controls:
+            raise _ShellScanIncomplete("unfinished shell control flow")
         return index
 
     def _consume_arithmetic_command(
@@ -1119,6 +1580,7 @@ class _ShellScanner:
             return self._consume_array_assignment(index, limit, state, depth + 1)
         command_id = self._flush_command(state)
         if operator in {"|", "|&"}:
+            self._reset_and_or_status(state)
             self._begin_or_extend_pipeline(
                 state,
                 command_id,
@@ -1127,14 +1589,20 @@ class _ShellScanner:
             return index
         if operator in {"(", "{"}:
             closing = ")" if operator == "(" else "}"
-            return self._scan_compound_scope(
+            inherited_status = self._command_execution_status(state)
+            end = self._scan_compound_scope(
                 index,
                 limit,
                 state,
                 terminator=closing,
                 depth=depth + 1,
                 kind="subshell_group" if operator == "(" else "brace_group",
+                inherited_status=inherited_status,
             )
+            self._reset_and_or_status(state)
+            return end
+        if operator not in {"&&", "||"}:
+            self._reset_and_or_status(state)
         if operator == "&":
             self._mark_isolated_command(state, command_id)
         self._finalize_pipeline(state)
@@ -1144,7 +1612,7 @@ class _ShellScanner:
         state.conditional_operator = operator if operator in {"&&", "||"} else None
         return index
 
-    def _scan_compound_scope(  # noqa: PLR0913
+    def _scan_compound_scope(  # noqa: PLR0912, PLR0913
         self,
         start: int,
         limit: int,
@@ -1153,6 +1621,7 @@ class _ShellScanner:
         terminator: str,
         depth: int,
         kind: str = "subshell_group",
+        inherited_status: bool | None = True,
     ) -> int:
         """Scan a real compound command and expose its stdout to the parent command list."""
         command_start = len(self.taint_builder.commands) if self.taint_builder is not None else 0
@@ -1160,13 +1629,19 @@ class _ShellScanner:
         function_name = self._pending_function_name(state, kind)
         function_body = function_name is not None
         coprocess_body = self._pending_coprocess_body(state)
-        end, scope_id = self._scan_stream_scope(
-            start,
-            limit,
-            terminator=terminator,
-            depth=depth,
-            kind=kind,
-        )
+        if function_body:
+            self.function_body_depth += 1
+        try:
+            end, scope_id = self._scan_stream_scope(
+                start,
+                limit,
+                terminator=terminator,
+                depth=depth,
+                kind=kind,
+            )
+        finally:
+            if function_body:
+                self.function_body_depth -= 1
         if self.taint_builder is not None:
             for scope_index, scope in enumerate(self.taint_builder.scopes):
                 if scope.scope_id != scope_id:
@@ -1181,6 +1656,15 @@ class _ShellScanner:
                     binding_command_id=binding_command_id,
                 )
                 break
+            for command_index in range(command_start, len(self.taint_builder.commands)):
+                command = self.taint_builder.commands[command_index]
+                self.taint_builder.commands[command_index] = replace(
+                    command,
+                    execution_status=self._and_status(
+                        inherited_status,
+                        command.execution_status,
+                    ),
+                )
         if self.taint_builder is not None and (state.conditionally_executed or function_body):
             for command_index in range(command_start, len(self.taint_builder.commands)):
                 command = self.taint_builder.commands[command_index]
@@ -1209,6 +1693,8 @@ class _ShellScanner:
                     defines_function_name=function_name,
                 )
                 break
+            if function_name is not None:
+                self.active_function_names.add(function_name)
         if self.taint_builder is not None and coprocess_body:
             for command_index in range(command_start, len(self.taint_builder.commands)):
                 self.taint_builder.commands[command_index] = replace(
@@ -1217,7 +1703,7 @@ class _ShellScanner:
                     isolated_context_id=scope_id,
                 )
         if self.scope_stack:
-            self.scope_stack[-1].outputs.append(ScopeOutput(scope_id))
+            self._output_target().append(ScopeOutput(scope_id))
         state.pending_compound_scope_id = scope_id
         state.compound_redirection_ordinal = 0
         if state.pending_pipe_producer is not None and self.taint_builder is not None:
@@ -1324,6 +1810,7 @@ class _ShellScanner:
         state.compound_redirection_ordinal = 0
         state.command_has_marker = state.command_has_marker or word.has_doc_lattice_marker
         command_position = state.at_command_position
+        self._handle_control_word(state, word, command_position=command_position)
         if (
             not word.dynamic
             and word.keyword_eligible
@@ -1343,6 +1830,14 @@ class _ShellScanner:
                     state.cases.pop()
                 else:
                     case.at_pattern_start = False
+            elif (
+                not word.dynamic
+                and word.keyword_eligible
+                and command_position
+                and case.phase == "body"
+                and word.literal == "esac"
+            ):
+                state.cases.pop()
         self._advance_prefix_scan(state, word)
         state.words.append(word)
 
@@ -1507,8 +2002,26 @@ class _ShellScanner:
         if case.pattern_parentheses:
             case.pattern_parentheses -= 1
         else:
+            frame = self._matching_control({"case"})
+            if frame is None or frame.phase not in {"word", "pattern"}:
+                raise _ShellScanIncomplete("ambiguous case control flow")
+            if state.words and state.words[0].literal == "case":
+                if len(state.words) < _CASE_HEADER_PATTERN_WORDS or state.words[2].literal != "in":
+                    raise _ShellScanIncomplete("dynamic case header cannot be scanned safely")
+                frame.case_word = state.words[1]
+                patterns = state.words[3:]
+            else:
+                patterns = state.words
+            match_status = self._case_match_status(frame.case_word, patterns)
+            if match_status is None:
+                if frame.case_dynamic_branches >= _MAX_CASE_DYNAMIC_BRANCHES:
+                    raise _ShellScanIncomplete("case dynamic branch limit exceeded")
+                frame.case_dynamic_branches += 1
+            frame.case_match_statuses.append(match_status)
             state.reset_command()
             case.phase = "body"
+            frame.phase = "body"
+            frame.current_outputs = []
         return True
 
     def _consume_case_pattern_operator(
@@ -1529,6 +2042,15 @@ class _ShellScanner:
     def _advance_case_body(self, state: _CommandScanState, operator: str) -> None:
         if state.cases and state.cases[-1].phase == "body" and operator in {";;", ";&", ";;&"}:
             case = state.cases[-1]
+            frame = self._matching_control({"case"})
+            if frame is None or frame.phase != "body":
+                raise _ShellScanIncomplete("ambiguous case control flow")
+            if len(frame.case_arms) >= _MAX_CASE_ARMS:
+                raise _ShellScanIncomplete("case arm limit exceeded")
+            frame.case_arms.append(self._sequence_output(frame.current_outputs))
+            frame.case_terminators.append(operator)
+            frame.current_outputs = []
+            frame.phase = "pattern"
             case.phase = "pattern"
             case.pattern_parentheses = 0
             case.at_pattern_start = True
@@ -1551,6 +2073,7 @@ class _ShellScanner:
             return None
         self._flush_command(state)
         self._finalize_pipeline(state)
+        self._reset_and_or_status(state)
         state.pending_compound_scope_id = None
         state.conditionally_executed = False
         state.conditional_operator = None
@@ -1582,18 +2105,24 @@ class _ShellScanner:
                 return
             producer_scope = self.taint_builder.command_output_scope(producer_command_id)
         if state.pipeline is None:
-            state.pipeline = _PipelineFrame(self.taint_builder.allocate_scope(), [producer_scope])
+            state.pipeline = _PipelineFrame(
+                self.taint_builder.allocate_scope(),
+                [producer_scope],
+                len(self.scope_stack[-1].controls) if self.scope_stack else 0,
+            )
         elif not state.pipeline.stages or state.pipeline.stages[-1] != producer_scope:
             state.pipeline.stages.append(producer_scope)
         state.pending_pipe_producer = producer_scope
         state.pending_pipe_stderr = includes_stderr
         state.pending_compound_scope_id = None
-        if self.scope_stack and self.scope_stack[-1].outputs:
-            self.scope_stack[-1].outputs.pop()
+        if self.scope_stack and self._output_target():
+            self._output_target().pop()
 
     def _finalize_pipeline(self, state: _CommandScanState) -> None:
         """Emit the completed pipeline scope after its final stage is flushed."""
         if state.pipeline is None or self.taint_builder is None:
+            return
+        if self.scope_stack and len(self.scope_stack[-1].controls) > state.pipeline.control_depth:
             return
         final_scope = state.pending_compound_scope_id
         if final_scope is None and state.last_command_id is not None:
@@ -1601,12 +2130,12 @@ class _ShellScanner:
         if final_scope is not None:
             if not state.pipeline.stages or state.pipeline.stages[-1] != final_scope:
                 state.pipeline.stages.append(final_scope)
-            if self.scope_stack and self.scope_stack[-1].outputs:
-                self.scope_stack[-1].outputs.pop()
+            if self.scope_stack and self._output_target():
+                self._output_target().pop()
         output: OutputExpr = (
             ScopeOutput(state.pipeline.stages[-1]) if state.pipeline.stages else SequenceOutput(())
         )
-        parent_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else None
+        parent_scope_id = self._container_scope_id() if self.scope_stack else None
         self.taint_builder.scopes.append(
             _StreamScopeEvidence(
                 state.pipeline.scope_id,
@@ -1620,13 +2149,49 @@ class _ShellScanner:
             )
         )
         if self.scope_stack:
-            self.scope_stack[-1].outputs.append(ScopeOutput(state.pipeline.scope_id))
+            self._output_target().append(ScopeOutput(state.pipeline.scope_id))
         state.pipeline = None
         state.pending_pipe_producer = None
         state.pending_pipe_stderr = False
 
     def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912, PLR0915
         if not state.words and not state.redirections:
+            return None
+        active_control = (
+            self.scope_stack[-1].controls[-1]
+            if self.scope_stack and self.scope_stack[-1].controls
+            else None
+        )
+        if (
+            active_control is not None
+            and active_control.kind in {"for", "select"}
+            and active_control.phase == "header"
+            and state.words
+            and state.words[0].literal == active_control.kind
+        ):
+            self._capture_loop_header(active_control, state.words)
+            state.reset_command()
+            return None
+        if (
+            active_control is not None
+            and active_control.kind == "case"
+            and active_control.phase in {"word", "pattern"}
+            and state.words
+            and state.words[0].literal == "case"
+        ):
+            state.reset_command()
+            return None
+        if (
+            state.words
+            and not state.redirections
+            and all(
+                not word.dynamic
+                and word.keyword_eligible
+                and word.literal in {"then", "else", "fi", "do", "done", "esac"}
+                for word in state.words
+            )
+        ):
+            state.reset_command()
             return None
         resolution = _LauncherResolutionState(self.budget)
         resolution_attempted = False
@@ -1637,6 +2202,29 @@ class _ShellScanner:
             resolution_attempted = True
             executable = _executable_evidence_from_resolution(state.words, resolution)
         assignment_indices = _assignment_indices(state.words, executable)
+        literal_status = self._command_literal_status(state.words, executable)
+        if (
+            literal_status is None
+            and (executable is None or executable.argv_index is None)
+            and not state.redirections
+        ):
+            literal_status = True
+        execution_status = self._command_execution_status(state)
+        self._record_command_status(state, literal_status)
+        if (
+            self.scope_stack
+            and self.scope_stack[-1].controls
+            and self.scope_stack[-1].controls[-1].phase == "test"
+            and any(not word.dynamic and word.literal == "!" for word in state.words)
+        ):
+            self.scope_stack[-1].controls[-1].prune_unreachable_effects = True
+        prune_unreachable_effects = execution_status is False and (
+            state.conditional_operator in {"&&", "||"}
+            or any(
+                frame.phase in {"body", "else"} and frame.prune_unreachable_effects
+                for frame in (self.scope_stack[-1].controls if self.scope_stack else ())
+            )
+        )
         if self.classify_commands:
             command_has_marker = state.command_has_marker and not (
                 _eval_markers_are_only_active_comments(state.words, executable)
@@ -1699,6 +2287,17 @@ class _ShellScanner:
             argv = tuple(argv_parts)
             remapped_executable = _remap_executable(executable, argv_indices)
             assignment_only = not argv or remapped_executable.argv_index is None
+            recorded_execution_status = (
+                None
+                if assignment_only
+                and self.function_body_depth == 0
+                and not prune_unreachable_effects
+                and any(
+                    frame.kind == "if" and frame.phase in {"body", "else"}
+                    for frame in (self.scope_stack[-1].controls if self.scope_stack else ())
+                )
+                else execution_status
+            )
             assignments = list(definite_assignments if assignment_only else ())
             for word in state.words:
                 assignments.extend(word.conditional_assignments)
@@ -1726,7 +2325,7 @@ class _ShellScanner:
                     else unknown_writer_content
                 )
             command_id, output_scope_id = self.taint_builder.allocate_command()
-            container_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else 0
+            container_scope_id = self._container_scope_id() if self.scope_stack else 0
             self.taint_builder.commands.append(
                 _CommandEvidence(
                     command_id=command_id,
@@ -1744,6 +2343,8 @@ class _ShellScanner:
                     builtin_dynamic_options=builtin_dynamic_options,
                     unknown_builtin_content=unknown_builtin_content,
                     unsupported_builtin_write=unsupported_nameref or unsupported_writer,
+                    execution_status=recorded_execution_status,
+                    prune_unreachable_effects=prune_unreachable_effects,
                     conditionally_executed=state.conditionally_executed or bool(state.cases),
                     conditional_operator=state.conditional_operator,
                     isolated_execution=bool(argv and argv[0].literal == "coproc"),
@@ -1754,8 +2355,8 @@ class _ShellScanner:
             )
             state.last_command_id = command_id
             if self.scope_stack:
-                self.scope_stack[-1].outputs.append(CommandOutput(command_id))
-            if state.pending_pipe_producer is not None:
+                self._output_target().append(CommandOutput(command_id))
+            if state.pending_pipe_producer is not None and not self.scope_stack[-1].controls:
                 self.taint_builder.pipes.append(
                     _PipeEvidence(
                         state.pending_pipe_producer,

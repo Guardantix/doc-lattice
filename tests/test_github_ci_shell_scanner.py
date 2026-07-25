@@ -28,7 +28,13 @@ from doc_lattice.github_ci.shell_scanner import (
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
 )
-from doc_lattice.github_ci.shell_taint import TAINT_REFUSAL_REASON, LiteralTransfer
+from doc_lattice.github_ci.shell_taint import (
+    TAINT_REFUSAL_REASON,
+    ChoiceOutput,
+    LiteralTransfer,
+    RepeatOutput,
+    SequenceOutput,
+)
 
 NONE = ()
 LINEAR = (("linear", False),)
@@ -6309,5 +6315,321 @@ def test_stdout_alias_back_to_implicit_pipe_reaches_consumer(script: str):
 def test_final_stdout_binding_away_from_implicit_pipe_stays_clean(script: str):
     result = scan_doc_lattice_invocations(script)
 
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_if_branch_outputs_remain_mutually_exclusive_at_pipeline_sink():
+    result = scan_doc_lattice_invocations(
+        'if test -n "$EXTERNAL"; then printf doc-; else printf lattice; fi | bash'
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_known_false_if_condition_excludes_unreachable_branch_output():
+    result = scan_doc_lattice_invocations("if false; then printf doc-; printf lattice; fi | bash")
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_known_untaken_compound_consumer_does_not_forward_pipeline_input():
+    result = scan_doc_lattice_invocations(
+        "{ printf doc-; printf lattice; } | { if false; then cat; fi; } | bash"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_for_iteration_bindings_and_repeated_body_reach_pipeline_sink():
+    assert_taint_refusal('for X in doc- lattice; do printf %s "$X"; done | bash')
+
+
+def test_select_iteration_bindings_and_repeated_body_reach_pipeline_sink():
+    assert_taint_refusal('select X in doc- lattice; do printf %s "$X"; done | bash')
+
+
+def test_while_test_body_test_repetition_reaches_pipeline_sink():
+    assert_taint_refusal(
+        "P=$'#\\n'; "
+        'while printf %s "$P" && test "$P" = $\'#\\n\'; '
+        "do printf doc-; P=lattice; done | bash"
+    )
+
+
+def test_while_brace_test_list_and_percent_b_repetition_reaches_pipeline_sink():
+    assert_taint_refusal(
+        "i=0; P=$'#\\n'; "
+        'while { printf %b "$P"; test "$i" -lt 1; }; '
+        "do printf doc-; P=lattice; i=1; done | bash"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "while false; do printf doc-; printf lattice; done | bash",
+        "until true; do printf doc-; printf lattice; done | bash",
+    ],
+    ids=("while-false", "until-true"),
+)
+def test_known_zero_iteration_loop_excludes_unreachable_body_output(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [r"\154", r"\554", r"\x6c", r"\u006c"],
+    ids=("octal", "byte-masked-octal", "hex", "unicode"),
+)
+def test_percent_b_decoded_escapes_reach_pipeline_sink(escape: str):
+    assert_taint_refusal(f"printf %b 'doc-{escape}attice' | bash")
+
+
+@pytest.mark.parametrize(
+    ("conversion", "width_argument"),
+    [
+        ("%5b", ""),
+        ("%-5b", ""),
+        ("%.20b", ""),
+        ("%10.20b", ""),
+        ("%*b", "0 "),
+    ],
+    ids=("width", "left-width", "precision", "width-precision", "star-width"),
+)
+def test_modified_percent_b_decoded_escapes_reach_pipeline_sink(
+    conversion: str,
+    width_argument: str,
+):
+    assert_taint_refusal(f"printf '{conversion}' {width_argument}'doc-\\154attice' | bash")
+
+
+def test_until_body_repetition_reaches_pipeline_sink():
+    assert_taint_refusal('P=doc-; until false; do printf %s "$P"; P=lattice; done | bash')
+
+
+def test_case_double_semicolon_arms_remain_mutually_exclusive_at_pipeline_sink():
+    result = scan_doc_lattice_invocations(
+        "case x in x) printf doc-;; y) printf lattice;; esac | bash"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_case_fallthrough_sequences_adjacent_arm_outputs_at_pipeline_sink():
+    assert_taint_refusal("case x in x) printf doc-;& y) printf lattice;; esac | bash")
+
+
+def test_case_retest_fallthrough_can_skip_a_nonmatching_later_arm():
+    result = scan_doc_lattice_invocations(
+        "case x in x) printf doc-;;& y) printf lattice;; esac | bash"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_case_retest_fallthrough_can_take_a_matching_later_arm():
+    assert_taint_refusal("case x in x) printf doc-;;& x) printf lattice;; esac | bash")
+
+
+def test_if_evidence_routes_a_choice_scope_into_its_pipeline():
+    scanner = _ShellScanner(
+        'if test -n "$EXTERNAL"; then printf a; else printf b; fi | cat',
+        classify_commands=False,
+    )
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    scope = next(scope for scope in builder.scopes if scope.kind == "if")
+    assert isinstance(scope.output, SequenceOutput)
+    assert isinstance(scope.output.parts[-1], ChoiceOutput)
+    assert any(pipe.producer_scope_id == scope.scope_id for pipe in builder.pipes)
+
+
+@pytest.mark.parametrize(
+    ("kind", "script", "repeat_index"),
+    [
+        ("for", 'for X in a b; do printf %s "$X"; done | cat', None),
+        ("while", "while true; do printf a; done | cat", 1),
+        ("until", "until false; do printf a; done | cat", 1),
+    ],
+)
+def test_loop_evidence_routes_repetition_scopes_into_their_pipelines(
+    kind: str,
+    script: str,
+    repeat_index: int | None,
+):
+    scanner = _ShellScanner(
+        script,
+        classify_commands=False,
+    )
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    scope = next(scope for scope in builder.scopes if scope.kind == kind)
+    if repeat_index is None:
+        repeat = scope.output
+    else:
+        assert isinstance(scope.output, SequenceOutput)
+        repeat = scope.output.parts[repeat_index]
+    assert isinstance(repeat, RepeatOutput)
+    assert any(pipe.producer_scope_id == scope.scope_id for pipe in builder.pipes)
+
+
+def test_case_evidence_routes_a_choice_scope_into_its_pipeline():
+    scanner = _ShellScanner(
+        "case x in x) printf a;; y) printf b;; esac | cat",
+        classify_commands=False,
+    )
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    scope = next(scope for scope in builder.scopes if scope.kind == "case")
+    assert isinstance(scope.output, ChoiceOutput)
+    assert any(pipe.producer_scope_id == scope.scope_id for pipe in builder.pipes)
+
+
+def test_large_case_statement_fails_closed_before_python_recursion():
+    arms = " ".join(f"p{index}) :;;" for index in range(1200))
+    result = scan_doc_lattice_invocations(f"case unmatched in {arms} esac")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "case arm limit exceeded"
+
+
+def test_near_limit_dynamic_case_retest_chain_remains_bounded():
+    arms = " ".join(f"p{index}) :;;&" for index in range(256))
+    result = scan_doc_lattice_invocations(f'case "$EXTERNAL" in {arms} esac')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "case dynamic branch limit exceeded"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "if true; then printf doc-",
+        'for X in doc- lattice; do printf %s "$X"',
+        "case x in x) printf doc-;;",
+    ],
+    ids=("if", "for", "case"),
+)
+def test_unterminated_structured_control_frames_fail_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=safe; ! true && X=doc-; eval "$X"lattice',
+        'X=safe; if ! true; then X=doc-; fi; eval "$X"lattice',
+    ],
+    ids=("and-list", "if-condition"),
+)
+def test_negated_true_status_skips_unreachable_marker_writes(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '! false && X=doc-; eval "$X"lattice',
+        'if ! false; then X=doc-; fi; eval "$X"lattice',
+    ],
+    ids=("and-list", "if-condition"),
+)
+def test_negated_false_status_reaches_marker_writes(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'false && true || X=doc-; eval "$X"lattice',
+        'true || false && X=doc-; eval "$X"lattice',
+    ],
+    ids=("false-and-true-or", "true-or-false-and"),
+)
+def test_and_or_lists_use_left_associative_status(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'true() { false; }; X=safe; if true; then :; else X=doc-; fi; eval "$X"lattice',
+        'false() { true; }; if false; then X=doc-; fi; eval "$X"lattice',
+    ],
+    ids=("true-shadowed", "false-shadowed"),
+)
+def test_active_functions_shadow_literal_status_builtins(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "if true; then eval 'X=doc-'; fi; eval \"$X\"lattice",
+        "X=safe; if true; then eval 'unset X'; fi; eval '${X:=doc-}lattice'",
+    ],
+    ids=("write", "unset"),
+)
+def test_definitely_taken_branches_propagate_exact_eval_mutations(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=safe; if false; then eval 'X=doc-'; fi; eval \"$X\"lattice",
+        "X=safe; if false; then eval 'unset X'; fi; eval '${X:=doc-}lattice'",
+    ],
+    ids=("write", "unset"),
+)
+def test_untaken_branches_do_not_propagate_exact_eval_mutations(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_multiple_elif_keeps_an_earlier_taken_branch_state():
+    assert_taint_refusal(
+        'if true; then X=doc-; elif true; then X=safe; elif true; then X=safe; fi; eval "$X"lattice'
+    )
+
+
+@pytest.mark.parametrize(
+    ("condition", "tainted"),
+    [("false", False), ("true", True)],
+    ids=("untaken", "taken"),
+)
+def test_static_eval_branch_mutations_follow_exact_condition(
+    condition: str,
+    tainted: bool,
+):
+    script = f"X=safe; eval 'if {condition}; then X=doc-; fi'; eval \"$X\"lattice"
+    if tainted:
+        assert_taint_refusal(script)
+        return
+
+    result = scan_doc_lattice_invocations(script)
     assert result.incomplete_reason is None
     assert result.invocations == NONE

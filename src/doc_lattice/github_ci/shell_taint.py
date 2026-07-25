@@ -19,6 +19,10 @@ _MAX_BRACE_INTEGER_DIGITS = 256
 _MAX_FUNCTION_EFFECT_DEPTH = 64
 _MAX_LOCAL_SUBSTITUTION_DEPTH = 128
 _QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
+_UNICODE_MAX = 0x10FFFF
+_SURROGATE_MIN = 0xD800
+_SURROGATE_MAX = 0xDFFF
+_OCTAL_BYTE_MASK = 0xFF
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +199,18 @@ class _StaticEvalCommand:
     words: tuple[str, ...]
     keyword_eligible: tuple[bool, ...]
     source_words: tuple[str, ...]
+    execution_status: bool | None = True
+
+
+@dataclass(slots=True)
+class _StaticEvalControl:
+    """Reachability state for one exact eval if/elif/else chain."""
+
+    parent_status: bool | None
+    prior_branch_status: bool | None = False
+    current_test_status: bool | None = None
+    body_status: bool | None = None
+    phase: str = "test"
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +379,8 @@ class _CommandEvidence:
     resolved_eval_program: str | None = None
     resolved_eval_programs: tuple[str, ...] = ()
     runtime_eval_program_authoritative: bool = False
+    execution_status: bool | None = True
+    prune_unreachable_effects: bool = False
     conditionally_executed: bool = False
     conditional_operator: str | None = None
     isolated_execution: bool = False
@@ -851,12 +869,21 @@ _COMBINED_OUTPUT_REDIRECTION_OPERATORS = frozenset({"&>", "&>>"})
 _STREAM_SCOPE_KINDS = frozenset(
     {
         "brace_group",
+        "case",
         "command",
         "command_substitution",
+        "for",
+        "if",
         "process_substitution",
+        "select",
         "subshell_group",
         "pipeline",
+        "until",
+        "while",
     }
+)
+_SHARED_ENVIRONMENT_SCOPE_KINDS = frozenset(
+    {"brace_group", "case", "for", "if", "select", "until", "while"}
 )
 _PROCESS_RESOURCE_DIRECTIONS = frozenset({"input", "output"})
 
@@ -2690,10 +2717,8 @@ def _refresh_runtime_eval_programs(
     return tuple(refreshed)
 
 
-def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
-    command: _CommandEvidence,
-) -> ContentExpr | None:
-    """Return one bounded exact builtin ``printf`` output."""
+def _literal_printf_arguments(command: _CommandEvidence) -> tuple[_ArgPort, ...] | None:
+    """Return arguments for one statically resolved builtin ``printf``."""
     pending = [command.executable]
     executable_index: int | None = None
     while pending:
@@ -2712,17 +2737,127 @@ def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
     arguments = command.argv[executable_index + 1 :]
     if arguments and not arguments[0].dynamic and arguments[0].literal == "--":
         arguments = arguments[1:]
+    return arguments
+
+
+def _decode_printf_b_literal(text: str) -> tuple[str, bool] | None:
+    """Decode one bounded Bash ``printf %b`` literal and whether ``\\c`` stopped output."""
+    simple_escapes = {
+        "\\": "\\",
+        "a": "\a",
+        "b": "\b",
+        "e": "\x1b",
+        "E": "\x1b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+    }
+    rendered: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "\\":
+            rendered.append(text[index])
+            index += 1
+            continue
+        if index + 1 >= len(text):
+            return None
+        escape = text[index + 1]
+        if escape in simple_escapes:
+            rendered.append(simple_escapes[escape])
+            index += 2
+            continue
+        if escape == "c":
+            return "".join(rendered), True
+        if escape in "01234567":
+            digit_limit = 4 if escape == "0" else 3
+            stop = index + 1
+            while stop < len(text) and stop < index + 1 + digit_limit and text[stop] in "01234567":
+                stop += 1
+            rendered.append(chr(int(text[index + 1 : stop], 8) & _OCTAL_BYTE_MASK))
+            index = stop
+            continue
+        if escape in {"x", "u", "U"}:
+            digit_limit = {"x": 2, "u": 4, "U": 8}[escape]
+            start = index + 2
+            stop = start
+            while (
+                stop < len(text)
+                and stop < start + digit_limit
+                and text[stop] in "0123456789abcdefABCDEF"
+            ):
+                stop += 1
+            if stop == start:
+                return None
+            codepoint = int(text[start:stop], 16)
+            if codepoint > _UNICODE_MAX or _SURROGATE_MIN <= codepoint <= _SURROGATE_MAX:
+                return None
+            rendered.append(chr(codepoint))
+            index = stop
+            continue
+        rendered.extend(("\\", escape))
+        index += 2
+    return "".join(rendered), False
+
+
+def _printf_conversion_at(
+    format_text: str,
+    index: int,
+) -> tuple[str, int, int] | None:
+    """Parse one bounded Bash printf conversion and its star-supplied arguments."""
+    if index >= len(format_text) or format_text[index] != "%":
+        return None
+    cursor = index + 1
+    if cursor < len(format_text) and format_text[cursor] == "%":
+        return "%", cursor + 1, 0
+    while cursor < len(format_text) and format_text[cursor] in "#0- +":
+        cursor += 1
+    star_arguments = 0
+    if cursor < len(format_text) and format_text[cursor] == "*":
+        star_arguments += 1
+        cursor += 1
+    else:
+        while (
+            cursor < len(format_text)
+            and format_text[cursor].isascii()
+            and format_text[cursor].isdigit()
+        ):
+            cursor += 1
+    if cursor < len(format_text) and format_text[cursor] == ".":
+        cursor += 1
+        if cursor < len(format_text) and format_text[cursor] == "*":
+            star_arguments += 1
+            cursor += 1
+        else:
+            while (
+                cursor < len(format_text)
+                and format_text[cursor].isascii()
+                and format_text[cursor].isdigit()
+            ):
+                cursor += 1
+    if cursor >= len(format_text):
+        return None
+    return format_text[cursor], cursor + 1, star_arguments
+
+
+def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
+    command: _CommandEvidence,
+) -> ContentExpr | None:
+    """Return one bounded exact builtin ``printf`` output."""
+    arguments = _literal_printf_arguments(command)
     if (
-        not arguments
+        arguments is None
+        or not arguments
         or arguments[0].dynamic
         or arguments[0].literal == "-v"
         or arguments[0].literal.startswith("-v")
-        or any(argument.dynamic for argument in arguments[1:])
     ):
         return None
     format_text = arguments[0].literal
     values = arguments[1:]
-    rendered: list[str] = []
+    rendered: list[ContentExpr] = []
+    rendered_literal_chars = 0
     value_index = 0
     first_pass = True
     saw_conversion = False
@@ -2734,20 +2869,37 @@ def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
         while index < len(format_text):
             character = format_text[index]
             if character == "%":
-                if index + 1 >= len(format_text):
+                parsed = _printf_conversion_at(format_text, index)
+                if parsed is None:
                     return None
-                conversion = format_text[index + 1]
+                conversion, next_index, star_arguments = parsed
                 if conversion == "%":
-                    rendered.append("%")
-                elif conversion == "s":
+                    rendered.append(LiteralTransfer("%"))
+                    rendered_literal_chars += 1
+                elif conversion in {"b", "s"}:
                     saw_conversion = True
-                    rendered.append(
-                        values[value_index].literal if value_index < len(values) else ""
+                    value_index += star_arguments
+                    content = (
+                        values[value_index].content
+                        if value_index < len(values)
+                        else LiteralTransfer("")
                     )
                     value_index += 1
+                    if conversion == "b":
+                        literal = _exact_content_literal(content, {})
+                        decoded = _decode_printf_b_literal(literal) if literal is not None else None
+                        if decoded is not None:
+                            text, stopped = decoded
+                            rendered.append(LiteralTransfer(text))
+                            rendered_literal_chars += len(text)
+                            if stopped:
+                                return concat(*rendered)
+                            index = next_index
+                            continue
+                    rendered.append(content)
                 else:
                     return None
-                index += 2
+                index = next_index
                 continue
             if character == "\\":
                 saw_escape = True
@@ -2755,28 +2907,84 @@ def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
                     return None
                 escaped = format_text[index + 1]
                 if escaped == "n":
-                    rendered.append("\n")
+                    rendered.append(LiteralTransfer("\n"))
                 elif escaped == "\\":
-                    rendered.append("\\")
+                    rendered.append(LiteralTransfer("\\"))
                 else:
                     return None
+                rendered_literal_chars += 1
                 index += 2
                 continue
-            rendered.append(character)
+            rendered.append(LiteralTransfer(character))
+            rendered_literal_chars += 1
             index += 1
         if value_index == pass_start:
             break
-        if sum(map(len, rendered)) > _MAX_TRACKED_LITERAL_CHARS:
+        if rendered_literal_chars > _MAX_TRACKED_LITERAL_CHARS:
             return None
     if values and not saw_conversion:
         return None
     if not saw_conversion and not saw_escape:
         return None
-    return LiteralTransfer("".join(rendered))
+    return concat(*rendered)
+
+
+def _printf_b_unrepresentable(command: _CommandEvidence) -> bool:
+    """Return whether dynamic ``%b`` escape decoding remains after exact rendering."""
+    arguments = _literal_printf_arguments(command)
+    if (
+        arguments is None
+        or not arguments
+        or arguments[0].dynamic
+        or arguments[0].literal == "-v"
+        or arguments[0].literal.startswith("-v")
+    ):
+        return False
+    format_text = arguments[0].literal
+    values = arguments[1:]
+    value_index = 0
+    first_pass = True
+    while first_pass or value_index < len(values):
+        first_pass = False
+        pass_start = value_index
+        index = 0
+        while index < len(format_text):
+            if format_text[index] != "%":
+                index += 1
+                continue
+            parsed = _printf_conversion_at(format_text, index)
+            if parsed is None:
+                return False
+            conversion, next_index, star_arguments = parsed
+            if conversion == "%":
+                index = next_index
+                continue
+            value_index += star_arguments
+            content = (
+                values[value_index].content if value_index < len(values) else LiteralTransfer("")
+            )
+            value_index += 1
+            if conversion == "b":
+                literal = _exact_content_literal(content, {})
+                if literal is None or _decode_printf_b_literal(literal) is None:
+                    return True
+            index = next_index
+        if value_index == pass_start:
+            break
+    return False
 
 
 def _producer_stdout(command: _CommandEvidence, stdin: ContentExpr) -> ContentExpr:
     """Return a conservative stdout expression for one command."""
+    executable = command.executable
+    if (
+        executable.name in {"false", "true"}
+        and executable.name == executable.literal
+        and not executable.external_lookup
+        and not executable.alternates
+        and not command.called_function_context_ids
+    ):
+        return LiteralTransfer("")
     head_index = command.executable.argv_index
     payload_start = head_index + 1 if head_index is not None else min(1, len(command.argv))
     argv_content = concat(*(port.content for port in command.argv[payload_start:]))
@@ -2908,7 +3116,7 @@ def _scope_environment_ids(
             current_scope = by_id.get(scope_id)
             if (
                 current_scope is not None
-                and current_scope.kind == "brace_group"
+                and current_scope.kind in _SHARED_ENVIRONMENT_SCOPE_KINDS
                 and parent_environment is not None
             ):
                 environment = parent_environment
@@ -3558,7 +3766,127 @@ def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...
                 tuple(source_words),
             )
         )
-    return tuple(commands)
+    return _annotate_static_eval_control(tuple(commands))
+
+
+def _static_status_and(left: bool | None, right: bool | None) -> bool | None:
+    if left is False or right is False:
+        return False
+    if left is True and right is True:
+        return True
+    return None
+
+
+def _static_status_or(left: bool | None, right: bool | None) -> bool | None:
+    if left is True or right is True:
+        return True
+    if left is False and right is False:
+        return False
+    return None
+
+
+def _static_status_not(status: bool | None) -> bool | None:
+    return None if status is None else not status
+
+
+def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
+    """Return exact status for an eligible true/false eval condition."""
+    candidates = [
+        index
+        for index, word in enumerate(command.words)
+        if command.keyword_eligible[index] and word in {"false", "true"}
+    ]
+    if not candidates:
+        return None
+    index = candidates[-1]
+    status = command.words[index] == "true"
+    if (
+        sum(
+            word == "!" and command.keyword_eligible[word_index]
+            for word_index, word in enumerate(command.words[:index])
+        )
+        % 2
+        == 1
+    ):
+        status = not status
+    return status
+
+
+def _annotate_static_eval_control(
+    commands: tuple[_StaticEvalCommand, ...],
+) -> tuple[_StaticEvalCommand, ...]:
+    """Annotate exact eval commands with nested if-branch reachability."""
+    controls: list[_StaticEvalControl] = []
+    annotated: list[_StaticEvalCommand] = []
+
+    def enclosing_status() -> bool | None:
+        status: bool | None = True
+        for frame in controls:
+            if frame.phase in {"body", "else"}:
+                status = _static_status_and(status, frame.body_status)
+        return status
+
+    for command in commands:
+        head = command.words[0] if command.words else None
+        if head == "if" and command.keyword_eligible[0]:
+            parent = enclosing_status()
+            controls.append(
+                _StaticEvalControl(
+                    parent_status=parent,
+                    current_test_status=_static_eval_literal_status(command),
+                )
+            )
+            annotated.append(replace(command, execution_status=parent))
+            continue
+        if controls and head == "then" and command.keyword_eligible[0]:
+            frame = controls[-1]
+            frame.body_status = _static_status_and(
+                frame.parent_status,
+                _static_status_and(
+                    _static_status_not(frame.prior_branch_status),
+                    frame.current_test_status,
+                ),
+            )
+            frame.phase = "body"
+            annotated.append(replace(command, execution_status=frame.body_status))
+            continue
+        if controls and head == "elif" and command.keyword_eligible[0]:
+            frame = controls[-1]
+            frame.prior_branch_status = _static_status_or(
+                frame.prior_branch_status,
+                frame.current_test_status,
+            )
+            frame.current_test_status = _static_eval_literal_status(command)
+            frame.phase = "test"
+            annotated.append(
+                replace(
+                    command,
+                    execution_status=_static_status_and(
+                        frame.parent_status,
+                        _static_status_not(frame.prior_branch_status),
+                    ),
+                )
+            )
+            continue
+        if controls and head == "else" and command.keyword_eligible[0]:
+            frame = controls[-1]
+            frame.prior_branch_status = _static_status_or(
+                frame.prior_branch_status,
+                frame.current_test_status,
+            )
+            frame.body_status = _static_status_and(
+                frame.parent_status,
+                _static_status_not(frame.prior_branch_status),
+            )
+            frame.phase = "else"
+            annotated.append(replace(command, execution_status=frame.body_status))
+            continue
+        if controls and head == "fi" and command.keyword_eligible[0]:
+            frame = controls.pop()
+            annotated.append(replace(command, execution_status=frame.parent_status))
+            continue
+        annotated.append(replace(command, execution_status=enclosing_status()))
+    return tuple(annotated)
 
 
 def _static_assignment_word(word: str) -> _AssignmentEvidence | None:
@@ -3634,8 +3962,12 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
         return replace(mutation, assignment=replace(assignment, name=target))
 
     for parsed in _static_eval_commands(command):
+        if parsed.execution_status is False:
+            continue
         words = parsed.words
-        index = 0
+        index = 1 if words and parsed.keyword_eligible[0] and words[0] in {"else", "then"} else 0
+        if index == 0 and words and parsed.keyword_eligible[0] and words[0] in {"elif", "fi", "if"}:
+            continue
         prefix_assignments: list[_StaticEvalAssignment] = []
         while index < len(words):
             assignment = _static_assignment_word(words[index])
@@ -3848,8 +4180,6 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
 
     environments, _parents = _scope_environment_ids(evidence.scopes)
     command_environments, execution_parents, _lastpipe = _execution_environment_ids(evidence)
-    conditional_commands = _control_conditional_commands(evidence)
-
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     exact_values_before: dict[int, dict[str, str]] = {}
 
@@ -3966,11 +4296,16 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         )
         resolved_commands.append(resolved)
 
-        conditional = (
-            command.function_effect_conditional
+        status = (
+            None
             if context is not None
-            else command.conditionally_executed
-        ) or command.command_id in conditional_commands
+            and command.function_effect_conditional
+            and command.execution_status is True
+            else command.execution_status
+        )
+        if status is False:
+            continue
+        conditional = status is None
         assignment_only = not command.argv or command.executable.argv_index is None
         assignments = (
             (*command.definite_assignments, *command.builtin_assignments)
@@ -3991,81 +4326,16 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
 
     evidence = replace(evidence, commands=tuple(resolved_commands))
 
-    def constant_command_status(command: _CommandEvidence) -> bool | None:
-        for executable in _iter_executable_evidence(command.executable):
-            if (
-                executable.name == executable.literal
-                and not executable.external_lookup
-                and executable.name in {"false", "true"}
-            ):
-                return executable.name == "true"
-        return None
-
-    def invert_status(status: bool | None) -> bool | None:
-        return None if status is None else not status
-
-    def and_status(left: bool | None, right: bool | None) -> bool | None:
-        if left is False or right is False:
-            return False
-        if left is True and right is True:
-            return True
-        return None
-
-    control_frames: dict[int | None, list[tuple[str, bool | None]]] = {}
-    control_status: dict[int, bool | None] = {}
-    control_openers = {
-        "case": ("esac", None),
-        "for": ("done", None),
-        "if": ("fi", None),
-        "select": ("done", None),
-        "until": ("done", None),
-        "while": ("done", None),
+    conditional_execution = {
+        command.command_id: (
+            None
+            if command.execution_status is True
+            and command.function_context_id is not None
+            and command.function_effect_conditional
+            else command.execution_status
+        )
+        for command in evidence.commands
     }
-    for command in evidence.commands:
-        context = command.function_context_id
-        frames = control_frames.setdefault(context, [])
-        head = command.argv[0].literal if command.argv else None
-        if frames and frames[-1][0] == "fi":
-            closer, branch = frames[-1]
-            if head == "else":
-                frames[-1] = (closer, invert_status(branch))
-            elif head == "elif":
-                frames[-1] = (
-                    closer,
-                    and_status(invert_status(branch), constant_command_status(command)),
-                )
-        status: bool | None = True
-        for _closer, frame_status in frames:
-            status = and_status(status, frame_status)
-        control_status[command.command_id] = status
-        if head in control_openers:
-            closer, status = control_openers[head]
-            if head in {"if", "while"}:
-                status = constant_command_status(command)
-            elif head == "until":
-                status = invert_status(constant_command_status(command))
-            frames.append((closer, status))
-        elif frames and head == frames[-1][0]:
-            frames.pop()
-
-    previous_by_context: dict[int | None, _CommandEvidence] = {}
-    conditional_execution: dict[int, bool | None] = {}
-    for command in evidence.commands:
-        status = control_status[command.command_id]
-        previous = previous_by_context.get(command.function_context_id)
-        previous_status = constant_command_status(previous) if previous is not None else None
-        if command.conditional_operator == "&&":
-            status = and_status(status, previous_status)
-        elif command.conditional_operator == "||":
-            status = and_status(status, invert_status(previous_status))
-        elif status is True and (
-            command.function_effect_conditional
-            if command.function_context_id is not None
-            else command.conditionally_executed
-        ):
-            status = None
-        conditional_execution[command.command_id] = status
-        previous_by_context[command.function_context_id] = command
 
     active_locals: dict[int, set[str]] = {}
     definitely_set_locals: dict[int, set[str]] = {}
@@ -5145,7 +5415,10 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         charge_edges(len(global_values) + len(global_set) + len(global_unset))
         if command.function_context_id is not None:
             continue
-        conditional = command.conditionally_executed or command.command_id in conditional_commands
+        status = conditional_execution[command.command_id]
+        if status is False:
+            continue
+        conditional = status is None
 
         for assignment in (
             *command.assignments,
@@ -5747,6 +6020,9 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
         return visible
 
     for command in evidence.commands:
+        if command.prune_unreachable_effects:
+            stream_writes.append(_FlowWrite(command.output_scope_id, LiteralTransfer("")))
+            continue
         origin_environment = command_environments[command.command_id]
         for target_environment in set(command_environments.values()):
             if origin_environment not in visible_environments(target_environment):
@@ -7944,7 +8220,6 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
     function_entry_overrides: dict[int, set[str]] = {}
     function_unknown: set[int] = set()
     unknown_environments: set[int] = set()
-    conditional_commands = _control_conditional_commands(evidence)
     function_contexts = {
         command.function_context_id
         for command in evidence.commands
@@ -8166,7 +8441,11 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
     for command in evidence.commands:
         environment = command_environments[command.command_id]
         persistent_values, persistent_set, persistent_layer = ensure(environment)
-        conditional = command.conditionally_executed or command.command_id in conditional_commands
+        status = command.execution_status
+        conditional = status is not True or (
+            command.function_context_id is not None
+            and (command.function_effect_conditional or command.conditionally_executed)
+        )
         assignment_only = not command.argv or command.executable.argv_index is None
         temporary_prefix = bool(command.definite_assignments and not assignment_only)
         if not conditional and not temporary_prefix:
@@ -8291,6 +8570,8 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
             frozenset(current_set),
             tuple(sorted(fixed_point_overrides.items())),
         )
+        if status is False:
+            continue
         if assignment_only:
             for assignment in command.definite_assignments:
                 name = _unscoped_variable_name(assignment.name)
@@ -8318,6 +8599,8 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
                         definite=False,
                     )
         unset_names, unknown_unset_target = _unset_action(command)
+        _eval_assignments, eval_unsets = _static_eval_mutations(command)
+        unset_names = (*unset_names, *eval_unsets)
         if unknown_unset_target:
             persistent_set.clear()
             if function_context is not None:
@@ -9018,6 +9301,8 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                     )
                 ):
                     return True, TAINT_REFUSAL_REASON
+        if any(_printf_b_unrepresentable(command) for command in evidence.commands):
+            raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
         return True, str(error)
     return False, None
