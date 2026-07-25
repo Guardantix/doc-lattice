@@ -28,14 +28,22 @@ def _action_references(workflow: Any) -> list[str]:
     return references
 
 
+def _image_of(container: Any) -> str | None:
+    if isinstance(container, str):
+        return container
+    if isinstance(container, dict):
+        return container["image"]
+    return None
+
+
 def _container_images(workflow: Any) -> list[str]:
+    """Collect job containers and service containers, both of which the runner pulls."""
     images: list[str] = []
     for job in workflow["jobs"].values():
-        container = job.get("container")
-        if isinstance(container, str):
-            images.append(container)
-        elif isinstance(container, dict):
-            images.append(container["image"])
+        for container in (job.get("container"), *job.get("services", {}).values()):
+            image = _image_of(container)
+            if image is not None:
+                images.append(image)
     return images
 
 
