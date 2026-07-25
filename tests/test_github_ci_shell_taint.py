@@ -45,6 +45,7 @@ from doc_lattice.github_ci.shell_taint import (
     _ExecutableEvidence,
     _FlowDefinitions,
     _FlowWrite,
+    _is_function_positional_parameter,
     _marker_capable,
     _OutputLowering,
     _PipeEvidence,
@@ -2199,6 +2200,56 @@ def test_static_eval_unset_collects_names_and_excludes_option_words() -> None:
 
     assert assignments == ()
     assert unsets == ("X", "Y")
+
+
+def test_static_eval_function_only_unset_keeps_the_variable_defined() -> None:
+    assert _static_eval_mutations(_eval_command("unset -f X")) == ((), ())
+
+
+def test_static_eval_combined_unset_still_removes_the_variable() -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command("unset -vf X"))
+
+    assert assignments == ()
+    assert unsets == ("X",)
+
+
+def test_static_eval_unset_after_end_of_options_collects_the_operand() -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command("unset -- X"))
+
+    assert assignments == ()
+    assert unsets == ("X",)
+
+
+def test_static_eval_nameref_unset_fails_closed() -> None:
+    with pytest.raises(_TaintLimitExceeded, match="nameref unset"):
+        _static_eval_mutations(_eval_command("unset -n R"))
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        "{ X=doc-; }",
+        "for i in 1; do X=doc-; done",
+        "time X=doc-",
+        "! X=doc-",
+        "command -p export X=doc-",
+    ],
+    ids=("brace-group", "loop-body", "time-prefix", "negation", "command-wrapper-options"),
+)
+def test_static_eval_recovers_an_assignment_behind_a_reserved_word_prefix(program: str) -> None:
+    assignments, _ = _static_eval_mutations(_eval_command(program))
+
+    assert [item.assignment.name for item in assignments] == ["X"]
+    assert assignments[0].assignment.content == LiteralTransfer("doc-")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["\u00b2", "\u0661", "1\u00b2"],
+    ids=("superscript-two", "arabic-indic-one", "mixed-ascii-and-superscript"),
+)
+def test_non_ascii_digits_are_not_function_positional_parameters(name: str) -> None:
+    assert _is_function_positional_parameter(name) is False
 
 
 @pytest.mark.parametrize(

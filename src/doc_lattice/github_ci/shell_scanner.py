@@ -67,6 +67,7 @@ _PRINTF_ATTACHED_V_PREFIX_LENGTH = 2
 _PRINTF_FIELD_LIMIT = 4096
 _LOOP_HEADER_NAME_WORDS = 2
 _CASE_HEADER_PATTERN_WORDS = 4
+_CASE_HEADER_SUBJECT_WORDS = 3
 _MAX_CASE_ARMS = 256
 _MAX_CASE_DYNAMIC_BRANCHES = 8
 
@@ -1122,7 +1123,7 @@ class _ShellScanner:
         return frame
 
     def _matching_control(self, kinds: set[str]) -> _ControlFrame | None:
-        if not self.scope_stack[-1].controls:
+        if not self.scope_stack or not self.scope_stack[-1].controls:
             return None
         frame = self.scope_stack[-1].controls[-1]
         return frame if frame.kind in kinds else None
@@ -2190,6 +2191,10 @@ class _ShellScanner:
             and state.words
             and state.words[0].literal == active_control.kind
         ):
+            if self.classify_commands:
+                # A loop header is never itself a certified invocation, so a retained
+                # marker in it must still fail closed.
+                _reject_marker_bearing_non_invocation(state.command_has_marker)
             self._capture_loop_header(active_control, state.words)
             state.reset_command()
             return None
@@ -2200,6 +2205,16 @@ class _ShellScanner:
             and state.words
             and state.words[0].literal == "case"
         ):
+            if self.classify_commands:
+                _reject_marker_bearing_non_invocation(state.command_has_marker)
+            # Retain the subject so a literal case can still resolve its arms exactly;
+            # the header is otherwise discarded before the pattern close sees it.
+            if (
+                active_control.case_word is None
+                and len(state.words) >= _CASE_HEADER_SUBJECT_WORDS
+                and state.words[2].literal == "in"
+            ):
+                active_control.case_word = state.words[1]
             state.reset_command()
             return None
         if (
@@ -2447,17 +2462,22 @@ class _ShellScanner:
         limit: int,
     ) -> _ParsedRedirection | None:
         operator_index = index
-        descriptor: int | None = None
+        digits = False
         if self.source[index].isdigit():
+            digits = True
             while operator_index < limit and self.source[operator_index].isdigit():
                 operator_index += 1
-            descriptor = _parse_static_descriptor(self.source[index:operator_index])
         elif self.source[index] == "{":
             closing = self.source.find("}", index + 1, limit)
             if closing != -1 and _is_name(self.source[index + 1 : closing]):
                 operator_index = closing + 1
         for operator in _REDIRECTION_OPERATORS:
             if self.source.startswith(operator, operator_index):
+                # Only parse the descriptor once an operator confirms this is a redirection;
+                # otherwise an ordinary word starting with digits would fail the scan.
+                descriptor = (
+                    _parse_static_descriptor(self.source[index:operator_index]) if digits else None
+                )
                 if descriptor is None and self.source[index] != "{":
                     descriptor = 0 if operator in {"<", "<<", "<<-", "<<<", "<&", "<>"} else 1
                 return _ParsedRedirection(operator_index + len(operator), operator, descriptor)
@@ -5303,7 +5323,12 @@ def _read_ansi_c_escape(
         result = _read_ansi_c_prefixed_escape(source, start, limit, 16, 8)
     elif character == "c" and start + 1 < limit:
         controlled = source[start + 1]
-        value = 127 if controlled == "?" else ord(controlled.upper()) & 0x1F
+        uppercased = controlled.upper()
+        value = (
+            127
+            if controlled == "?"
+            else ord(uppercased if len(uppercased) == 1 else controlled) & 0x1F
+        )
         result = (_valid_ansi_c_character(value, source[start : start + 2]), start + 2)
     else:
         result = (f"\\{character}", start + 1)

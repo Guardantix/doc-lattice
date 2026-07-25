@@ -187,6 +187,73 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         ("printf %s doc- > task.sh; printf %s lattice >> task.sh; bash task.sh"),
         {},
     ),
+    (
+        "function-local-shadows-unrelated-global",
+        'f(){ X=doc-; }; g(){ local X; f; }; f; eval "$X"lattice check',
+        {},
+    ),
+    (
+        "eval-parameter-single-quoted-backslash",
+        r'''eval "\${Y:+'\\'} doc-\${Z}lattice check"''',
+        {},
+    ),
+    (
+        "eval-brace-group-assignment",
+        """eval '{ X=doc-; }'; eval "$X"'lattice check'""",
+        {},
+    ),
+    (
+        "eval-loop-body-assignment",
+        """eval 'for i in 1; do X=doc-; done'; eval "$X"'lattice check'""",
+        {},
+    ),
+    (
+        "eval-time-prefixed-assignment",
+        """eval 'time X=doc-'; eval "$X"'lattice check'""",
+        {},
+    ),
+    (
+        "eval-negated-assignment",
+        """eval '! X=doc-'; eval "$X"'lattice check'""",
+        {},
+    ),
+    (
+        "eval-unset-function-keeps-variable",
+        """eval 'X=doc-'; eval 'unset -f X'; eval "$X"'lattice check'""",
+        {},
+    ),
+    (
+        "shadowed-printf-function",
+        ("printf() { command printf '%s%s\\n' doc- 'lattice check'; }\nprintf '%s' ignored | bash"),
+        {},
+    ),
+    (
+        "eval-end-of-options",
+        """eval -- 'X=doc-'; eval "$X"'lattice check'""",
+        {},
+    ),
+    (
+        "eval-command-wrapper-options",
+        """eval 'command -p export X=doc-'; eval "$X"'lattice check'""",
+        {},
+    ),
+]
+
+# Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
+# fail-closed scan limit rather than the taint sink itself.
+PHASE_TWO_FAIL_CLOSED_REFUSALS = [
+    (
+        "dynamic-builtin-write-may-retarget-ifs",
+        'export "$SPEC"\nread -r A B <<< \'doc-Xlattice\'\neval "$A$B check"',
+        {"SPEC": "IFS=X"},
+        "shell builtin writer cannot be represented",
+    ),
+    (
+        "loop-header-retains-marker",
+        "for c in doc-lattice; do $c check; done",
+        {},
+        "marker-bearing command is not a certified doc-lattice invocation",
+    ),
 ]
 
 
@@ -7070,17 +7137,21 @@ eval "$X"
     assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
-@pytest.mark.parametrize(
-    ("_description", "script", "extra_environment"),
-    PHASE_TWO_RUNTIME_REFUSALS,
-    ids=[row[0] for row in PHASE_TWO_RUNTIME_REFUSALS],
-)
-def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
-    _description,
-    script,
-    extra_environment,
+def _marker_executes_under_bash(
+    script: str,
+    extra_environment: dict[str, str],
     tmp_path: Path,
-):
+) -> tuple[bool, str]:
+    """Run a fixture under real bash and report whether the doc-lattice stub executed.
+
+    Args:
+        script: The fixture script to execute.
+        extra_environment: Environment entries the fixture reads.
+        tmp_path: The sandbox directory holding the stub executables.
+
+    Returns:
+        Whether the stub ran, and the captured standard error for failure messages.
+    """
     bash = shutil.which("bash", path=os.defpath)
     assert bash is not None
     bin_dir = tmp_path / "bin"
@@ -7105,7 +7176,6 @@ def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
         "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
     }
 
-    scan = scan_doc_lattice_invocations(script)
     completed = subprocess.run(  # noqa: S603 - fixtures execute static plan-authored scripts
         [bash, "-c", script],
         cwd=tmp_path,
@@ -7115,10 +7185,88 @@ def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
         timeout=5,
         check=False,
     )
+    return probe.exists(), completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("_description", "script", "extra_environment"),
+    PHASE_TWO_RUNTIME_REFUSALS,
+    ids=[row[0] for row in PHASE_TWO_RUNTIME_REFUSALS],
+)
+def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
+    _description,
+    script,
+    extra_environment,
+    tmp_path: Path,
+):
+    scan = scan_doc_lattice_invocations(script)
+    executed, stderr = _marker_executes_under_bash(script, extra_environment, tmp_path)
 
     assert scan.invocations == NONE
     assert scan.incomplete_reason == TAINT_REFUSAL_REASON
-    assert probe.exists(), completed.stderr
+    assert executed, stderr
+
+
+@pytest.mark.parametrize(
+    ("_description", "script", "extra_environment", "reason"),
+    PHASE_TWO_FAIL_CLOSED_REFUSALS,
+    ids=[row[0] for row in PHASE_TWO_FAIL_CLOSED_REFUSALS],
+)
+def test_fail_closed_refusal_fixture_executes_marker_under_real_bash(
+    _description,
+    script,
+    extra_environment,
+    reason,
+    tmp_path: Path,
+):
+    scan = scan_doc_lattice_invocations(script)
+    executed, stderr = _marker_executes_under_bash(script, extra_environment, tmp_path)
+
+    assert scan.invocations == NONE
+    assert scan.incomplete_reason == reason
+    assert executed, stderr
+
+
+def test_select_header_retaining_marker_fails_closed():
+    assert_marker_refusal("select c in doc-lattice; do :; done </dev/null")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "echo $'\\cß'",
+        """eval "echo \\$'\\\\cß'\"""",
+        "X=$'\\cß'; eval \"echo $X\"",
+    ],
+    ids=("direct", "eval-reparse", "assignment-then-eval"),
+)
+def test_multi_character_uppercase_control_escape_scans_without_crashing(script):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["1" * 65, "²"],
+    ids=("long-digit-run", "non-ascii-digit"),
+)
+def test_word_that_never_precedes_a_redirection_operator_is_not_a_descriptor(word):
+    result = scan_doc_lattice_invocations(f"echo {word}")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_multi_line_literal_case_resolves_arms_without_the_dynamic_branch_cap():
+    arms = "\n".join(f"  p{index}) :;;" for index in range(8))
+    script = f'case "p8" in\n{arms}\n  p8) doc-lattice check;;\nesac'
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == CHECK
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(

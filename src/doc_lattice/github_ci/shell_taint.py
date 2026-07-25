@@ -2424,6 +2424,8 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             unknown_values.add("IFS")
         if routed.unknown_builtin_content is not None:
             exact_values.clear()
+            # The dynamic write may target IFS, so later reads must not assume the default.
+            unknown_values.add("IFS")
     return replace(evidence, commands=tuple(commands))
 
 
@@ -3018,9 +3020,10 @@ def _producer_stdout(
     head_index = command.executable.argv_index
     payload_start = head_index + 1 if head_index is not None else min(1, len(command.argv))
     argv_content = concat(*(port.content for port in command.argv[payload_start:]))
-    literal_printf = _literal_printf_stdout(command, limits)
-    if literal_printf is not None:
-        return literal_printf
+    if not executable.alternates and not command.called_function_context_ids:
+        literal_printf = _literal_printf_stdout(command, limits)
+        if literal_printf is not None:
+            return literal_printf
     return choice(
         OutsideGap(),
         argv_content,
@@ -3191,7 +3194,7 @@ def _scoped_variable_environment(name: str | int) -> int | None:
 def _is_function_positional_parameter(name: str) -> bool:
     """Return whether a variable is populated from shell-function call arguments."""
     return name in {"@", "*", _QUOTED_FUNCTION_POSITIONAL_STAR} or (
-        name.isdigit() and bool(name.strip("0"))
+        name.isdecimal() and name.isascii() and bool(name.strip("0"))
     )
 
 
@@ -3472,6 +3475,15 @@ def _scope_function_variables(  # noqa: PLR0911
     )
 
 
+def _eval_argument_ports(command: _CommandEvidence, head_index: int) -> tuple[_ArgPort, ...]:
+    """Return eval's program arguments with bash's end-of-options marker removed."""
+    arguments = command.argv[head_index + 1 :]
+    if arguments and not arguments[0].dynamic and arguments[0].literal == "--":
+        # eval accepts no options; bash strips `--` before reparsing the program.
+        return arguments[1:]
+    return arguments
+
+
 def _static_eval_programs(command: _CommandEvidence) -> tuple[str, ...]:
     """Return eval's bounded exact joined programs."""
     if command.resolved_eval_programs:
@@ -3481,7 +3493,7 @@ def _static_eval_programs(command: _CommandEvidence) -> tuple[str, ...]:
     for executable in _builtin_eval_candidates(command):
         if executable.argv_index is None:
             continue
-        arguments = command.argv[executable.argv_index + 1 :]
+        arguments = _eval_argument_ports(command, executable.argv_index)
         if all(not argument.dynamic for argument in arguments):
             return (" ".join(argument.literal for argument in arguments),)
     return ()
@@ -3709,7 +3721,9 @@ def _decode_ansi_c_eval_word(body: str) -> str:
             index = end
             continue
         if escaped == "c" and index + 2 < len(body):
-            decoded.append(chr(ord(body[index + 2].upper()) ^ 0x40))
+            controlled = body[index + 2]
+            uppercased = controlled.upper()
+            decoded.append(chr(ord(uppercased if len(uppercased) == 1 else controlled) ^ 0x40))
             index += 3
             continue
         decoded.extend(("\\", escaped))
@@ -3831,6 +3845,11 @@ def _static_status_or(left: bool | None, right: bool | None) -> bool | None:
 
 def _static_status_not(status: bool | None) -> bool | None:
     return None if status is None else not status
+
+
+_STATIC_EVAL_MUTATION_PREFIXES = frozenset(
+    {"coproc", "do", "elif", "else", "if", "then", "time", "until", "while", "{"}
+)
 
 
 def _static_eval_wrapped_executable(
@@ -4092,9 +4111,15 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
         if parsed.execution_status is False:
             continue
         words = parsed.words
-        index = 1 if words and parsed.keyword_eligible[0] and words[0] in {"else", "then"} else 0
-        if index == 0 and words and parsed.keyword_eligible[0] and words[0] in {"elif", "fi", "if"}:
-            continue
+        index = 0
+        while index < len(words) and parsed.keyword_eligible[index]:
+            word = words[index]
+            if word != "!" and word not in _STATIC_EVAL_MUTATION_PREFIXES:
+                break
+            index += 1
+            if word == "time":
+                while index < len(words) and words[index] == "-p":
+                    index += 1
         prefix_assignments: list[_StaticEvalAssignment] = []
         while index < len(words):
             assignment = _static_assignment_word(words[index])
@@ -4111,9 +4136,21 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
             assignments.extend(route_assignment(item) for item in prefix_assignments)
             continue
         while index < len(words) and words[index] in {"builtin", "command"}:
+            wrapper = words[index]
             index += 1
-            if index < len(words) and words[index] == "--":
-                index += 1
+            if wrapper == "builtin":
+                if index < len(words) and words[index] == "--":
+                    index += 1
+                continue
+            while index < len(words):
+                option = words[index]
+                if option == "--":
+                    index += 1
+                    break
+                if option.startswith("-") and option != "-":
+                    index += 1
+                    continue
+                break
         if index >= len(words):
             continue
         executable = words[index]
@@ -4170,11 +4207,23 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                 ):
                     aliases.pop(word, None)
         elif executable == "unset":
-            unsets.extend(
-                word
-                for word in words[index + 1 :]
-                if not word.startswith("-") and _static_variable_name(word)
-            )
+            operands = words[index + 1 :]
+            flags = ""
+            operand_start = 0
+            for option in operands:
+                if option == "--":
+                    operand_start += 1
+                    break
+                if not option.startswith("-") or option == "-":
+                    break
+                flags += option[1:]
+                operand_start += 1
+            if "f" in flags and "v" not in flags:
+                # `unset -f` removes only a function; the variable survives.
+                continue
+            if "n" in flags:
+                raise _TaintLimitExceeded("shell eval nameref unset cannot be represented")
+            unsets.extend(word for word in operands[operand_start:] if _static_variable_name(word))
     return tuple(assignments), tuple(dict.fromkeys(unsets))
 
 
@@ -4370,7 +4419,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if executable.argv_index is None:
                 continue
             arguments: list[str] = []
-            for argument in command.argv[executable.argv_index + 1 :]:
+            for argument in _eval_argument_ports(command, executable.argv_index):
                 value = exact_literal(argument.content, values)
                 if value is None:
                     break
@@ -5719,7 +5768,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             caller = site.function_context_id
             if caller is not None and name in command_locals[site.command_id]:
                 destinations.add(_scoped_variable_name(caller, name))
-            elif not destinations:
+            else:
                 destinations.add(name)
         charge_edges(len(destinations))
         return tuple(sorted(destinations or {name}))
@@ -6312,7 +6361,7 @@ def _eval_arguments_raw(command: _CommandEvidence, executable: _ExecutableEviden
     head_index = executable.argv_index
     if head_index is None:
         return LiteralTransfer("")
-    arguments = command.argv[head_index + 1 :]
+    arguments = _eval_argument_ports(command, head_index)
     parts: list[ContentExpr] = []
     for index, argument in enumerate(arguments):
         if index:
@@ -6699,6 +6748,23 @@ def _eval_backtick_closing(text: str, start: int) -> int | None:
     return None
 
 
+def _eval_quoted_advance(text: str, index: int, quote: str) -> tuple[int, str | None]:
+    """Advance one character inside an eval quote, honouring backslash only outside `'`.
+
+    Args:
+        text: The eval program text being scanned.
+        index: The offset of the character to consume.
+        quote: The active quote character.
+
+    Returns:
+        The next offset and the quote still in effect after the character.
+    """
+    character = text[index]
+    if character == "\\" and quote != "'":
+        return index + 2, quote
+    return index + 1, (None if character == quote else quote)
+
+
 def _eval_parameter_closing(text: str, start: int) -> int | None:
     """Return the balanced closing brace for an eval-time parameter expansion."""
     index = start + 2
@@ -6706,13 +6772,11 @@ def _eval_parameter_closing(text: str, start: int) -> int | None:
     quote: str | None = None
     while index < len(text):
         character = text[index]
+        if quote is not None:
+            index, quote = _eval_quoted_advance(text, index, quote)
+            continue
         if character == "\\":
             index += 2
-            continue
-        if quote is not None:
-            if character == quote:
-                quote = None
-            index += 1
             continue
         if text.startswith("$(", index) and not text.startswith("$((", index):
             substitution_closing = _eval_command_substitution_closing(text, index)
@@ -6848,7 +6912,12 @@ def _eval_ansi_c_escape(text: str, start: int) -> tuple[str, int]:  # noqa: PLR0
         return _eval_ansi_c_digits(text, start + 1, 16, 8, prefix="U")
     if character == "c" and start + 1 < len(text):
         controlled = text[start + 1]
-        value = 127 if controlled == "?" else ord(controlled.upper()) & 0x1F
+        uppercased = controlled.upper()
+        value = (
+            127
+            if controlled == "?"
+            else ord(uppercased if len(uppercased) == 1 else controlled) & 0x1F
+        )
         return _eval_ansi_c_character(value), start + 2
     return f"\\{character}", start + 1
 
