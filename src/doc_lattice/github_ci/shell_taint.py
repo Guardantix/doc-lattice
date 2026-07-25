@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections import ChainMap
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -10,11 +11,14 @@ from typing import TYPE_CHECKING, TypeAlias
 from doc_lattice.error_types import ProjectError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
 _MAX_BRACE_INTEGER_DIGITS = 256
+_MAX_FUNCTION_EFFECT_DEPTH = 64
+_MAX_LOCAL_SUBSTITUTION_DEPTH = 128
+_QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +135,11 @@ class _FlowWrite:
     expression: ContentExpr
     append: bool = False
     strip_trailing_newlines: bool = False
+    first_record: bool = False
+    read_ifs: str | None = None
+    read_target_index: int | None = None
+    read_target_count: int | None = None
+    read_raw: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +166,53 @@ class _AssignmentEvidence:
     name: str
     content: ContentExpr
     append: bool = False
+    conditional: bool = False
+    assign_if_null: bool = False
+    from_stdin: bool = False
+    nameref_target: str | None = None
+    read_target_index: int | None = None
+    read_target_count: int | None = None
+    read_raw: bool = False
+    read_first_record: bool = False
+    read_ifs: str | None = None
+    nameref_unset: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticEvalAssignment:
+    """One exact eval assignment with builtin scope semantics."""
+
+    assignment: _AssignmentEvidence
+    local: bool = False
+    force_global: bool = False
+    eval_content: ContentExpr | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticEvalCommand:
+    """One exact eval simple command with reserved-word eligibility per word."""
+
+    words: tuple[str, ...]
+    keyword_eligible: tuple[bool, ...]
+    source_words: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticEvalWordMetadata:
+    """Lexical properties shlex does not retain for one eval word."""
+
+    keyword_eligible: bool
+    redirection_prefix: bool
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactFunctionEffect:
+    """One ordered caller-state mutation performed by a function."""
+
+    assignment: _AssignmentEvidence | None = None
+    unset_name: str | None = None
+    optional: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +342,29 @@ class _CommandEvidence:
     redirections: tuple[_RedirectionEvent, ...]
     executable: _ExecutableEvidence
     definite_assignments: tuple[_AssignmentEvidence, ...] = ()
+    builtin_assignments: tuple[_AssignmentEvidence, ...] = ()
+    builtin_unsets: tuple[str, ...] = ()
+    builtin_local: bool = False
+    builtin_force_global: bool = False
+    builtin_dynamic_options: bool = False
+    unknown_builtin_content: ContentExpr | None = None
+    unsupported_builtin_write: bool = False
+    function_context_id: int | None = None
+    function_name: str | None = None
+    defines_function_context_id: int | None = None
+    defines_function_name: str | None = None
+    called_function_context_ids: tuple[int, ...] = ()
+    function_entry_definitely_set: tuple[str, ...] = ()
+    function_entry_assignments: tuple[_AssignmentEvidence, ...] = ()
+    function_entry_unsets: tuple[str, ...] = ()
+    function_effect_assignments: tuple[_AssignmentEvidence, ...] = ()
+    function_effect_unsets: tuple[str, ...] = ()
+    function_effect_conditional: bool = False
+    resolved_eval_program: str | None = None
+    resolved_eval_programs: tuple[str, ...] = ()
+    runtime_eval_program_authoritative: bool = False
     conditionally_executed: bool = False
+    conditional_operator: str | None = None
     isolated_execution: bool = False
     isolated_context_id: int | None = None
 
@@ -303,6 +381,7 @@ class _StreamScopeEvidence:
     redirections: tuple[_RedirectionEvent, ...] = ()
     loop_bindings: tuple[_AssignmentEvidence, ...] = ()
     entry: OutputExpr | None = None
+    binding_command_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +391,7 @@ class _PipeEvidence:
     producer_scope_id: int
     consumer_command_id: int | None = None
     consumer_scope_id: int | None = None
+    includes_stderr: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,7 +423,7 @@ class _BuiltContent:
     assignment_append: bool = False
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
     process_resource_id: int | None = None
-    argv_ports: tuple[_WordContentPort, ...] = ()
+    argv_ports: tuple[_WordContentPort, ...] | None = None
     brace_expansion_error: str | None = None
 
 
@@ -354,6 +434,7 @@ class _ContentToken:
     expression: ContentExpr
     literal: str
     brace_active: bool
+    field_present: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,6 +626,17 @@ class ContentBuilder:
     def append_expression(self, expression: ContentExpr) -> None:
         self.tokens.append(_ContentToken(expression, "", False))
 
+    def mark_field_presence(self) -> None:
+        """Retain an empty expansion result when quoting authored a real argv field."""
+        self.tokens.append(
+            _ContentToken(
+                LiteralTransfer(""),
+                "",
+                False,
+                field_present=True,
+            )
+        )
+
     def mark_assignment(self, name: str, *, append: bool) -> None:
         self.assignment_name = name
         self.assignment_append = append
@@ -579,6 +671,7 @@ class ContentBuilder:
                 _token_content(expanded),
             )
             for expanded in expanded_ports
+            if expanded
         )
         return _BuiltContent(
             expression,
@@ -587,7 +680,7 @@ class ContentBuilder:
             assignment_append=self.assignment_append,
             conditional_assignments=tuple(self.conditional_assignments),
             process_resource_id=self.process_resource_id,
-            argv_ports=ports or (_WordContentPort("", LiteralTransfer("")),),
+            argv_ports=ports,
             brace_expansion_error=brace_expansion_error,
         )
 
@@ -897,6 +990,8 @@ _DOC_SEPARATOR_STATE = 3
 _LATTICE_START_STATE = 4
 _DFA_FINAL_STATE = 10
 _DFA_EXPECTED_CHARACTERS = ("", "o", "c", "", "", "a", "t", "t", "i", "c", "e")
+_MAX_TRACKED_LITERAL_CHARS = 4_096
+_MAX_TRACKED_LITERAL_ALTERNATIVES = 16
 
 
 def _ascii_lower(character: str) -> str:
@@ -979,31 +1074,78 @@ class _TransferSummary:
     full: _DfaTransfer
     stripped: _DfaTransfer
     newline_only: bool
+    first_record: _DfaTransfer
+    record_open: bool
+    literal_texts: frozenset[str]
+    projection_opaque: bool
+    projection_incomplete: bool
 
     @classmethod
     def literal(cls, text: str) -> _TransferSummary:
         """Return a summary for authored literal text."""
+        first_record, separator, _remainder = text.partition("\n")
         return cls(
             full=_DfaTransfer.literal(text),
             stripped=_DfaTransfer.literal(text.rstrip("\n")),
             newline_only=all(character == "\n" for character in text),
+            first_record=_DfaTransfer.literal(first_record),
+            record_open=not separator,
+            literal_texts=(
+                frozenset({text}) if len(text) <= _MAX_TRACKED_LITERAL_CHARS else frozenset()
+            ),
+            projection_opaque=False,
+            projection_incomplete=len(text) > _MAX_TRACKED_LITERAL_CHARS,
         )
 
     @classmethod
     def barrier(cls) -> _TransferSummary:
         """Return a summary for opaque external content."""
         transfer = _DfaTransfer.barrier()
-        return cls(full=transfer, stripped=transfer, newline_only=False)
+        return cls(
+            full=transfer,
+            stripped=transfer,
+            newline_only=False,
+            first_record=transfer,
+            record_open=False,
+            literal_texts=frozenset({""}),
+            projection_opaque=True,
+            projection_incomplete=False,
+        )
 
     def compose(self, following: _TransferSummary) -> _TransferSummary:
         """Return this summary followed by another summary."""
         stripped = (
             self.stripped if following.newline_only else self.full.compose(following.stripped)
         )
+        literal_texts: set[str] = set()
+        projection_incomplete = self.projection_incomplete or following.projection_incomplete
+        if not projection_incomplete:
+            for before in self.literal_texts:
+                for after in following.literal_texts:
+                    if len(before) + len(after) > _MAX_TRACKED_LITERAL_CHARS:
+                        projection_incomplete = True
+                        break
+                    literal_texts.add(before + after)
+                    if len(literal_texts) > _MAX_TRACKED_LITERAL_ALTERNATIVES:
+                        projection_incomplete = True
+                        break
+                if projection_incomplete:
+                    break
+        if projection_incomplete:
+            literal_texts.clear()
         return _TransferSummary(
             full=self.full.compose(following.full),
             stripped=stripped,
             newline_only=self.newline_only and following.newline_only,
+            first_record=(
+                self.first_record.compose(following.first_record)
+                if self.record_open
+                else self.first_record
+            ),
+            record_open=self.record_open and following.record_open,
+            literal_texts=frozenset(literal_texts),
+            projection_opaque=(self.projection_opaque or following.projection_opaque),
+            projection_incomplete=projection_incomplete,
         )
 
 
@@ -1012,12 +1154,47 @@ _EPSILON = _TransferSummary.literal("")
 _OUTSIDE_VALUE = frozenset({_EPSILON, _TransferSummary.barrier()})
 
 
+def _merge_content_summaries(
+    summaries: Iterable[_TransferSummary],
+) -> _ContentValue:
+    """Merge equal DFA behavior while retaining bounded literal alternatives."""
+    merged: dict[
+        tuple[_DfaTransfer, _DfaTransfer, bool, _DfaTransfer, bool],
+        _TransferSummary,
+    ] = {}
+    for summary in summaries:
+        key = (
+            summary.full,
+            summary.stripped,
+            summary.newline_only,
+            summary.first_record,
+            summary.record_open,
+        )
+        prior = merged.get(key)
+        if prior is None:
+            merged[key] = summary
+        elif prior != summary:
+            literal_texts = prior.literal_texts | summary.literal_texts
+            projection_incomplete = (
+                prior.projection_incomplete
+                or summary.projection_incomplete
+                or len(literal_texts) > _MAX_TRACKED_LITERAL_ALTERNATIVES
+            )
+            merged[key] = replace(
+                prior,
+                literal_texts=(frozenset() if projection_incomplete else literal_texts),
+                projection_opaque=(prior.projection_opaque or summary.projection_opaque),
+                projection_incomplete=projection_incomplete,
+            )
+    return frozenset(merged.values())
+
+
 def _join_values(*values: _ContentValue) -> _ContentValue:
-    return frozenset(summary for value in values for summary in value)
+    return _merge_content_summaries(summary for value in values for summary in value)
 
 
 def _compose_values(left: _ContentValue, right: _ContentValue) -> _ContentValue:
-    return frozenset(before.compose(after) for before in left for after in right)
+    return _merge_content_summaries(before.compose(after) for before in left for after in right)
 
 
 def _strip_trailing_newlines(value: _ContentValue) -> _ContentValue:
@@ -1026,9 +1203,88 @@ def _strip_trailing_newlines(value: _ContentValue) -> _ContentValue:
             full=alternative.stripped,
             stripped=alternative.stripped,
             newline_only=alternative.newline_only,
+            first_record=alternative.first_record,
+            record_open=alternative.record_open,
+            literal_texts=frozenset(
+                literal_text.rstrip("\n") for literal_text in alternative.literal_texts
+            ),
+            projection_opaque=alternative.projection_opaque,
+            projection_incomplete=alternative.projection_incomplete,
         )
         for alternative in value
     )
+
+
+def _first_record(value: _ContentValue) -> _ContentValue:
+    """Project each stream alternative through its first record delimiter."""
+    return frozenset(
+        _TransferSummary(
+            full=alternative.first_record,
+            stripped=alternative.first_record,
+            newline_only=False,
+            first_record=alternative.first_record,
+            record_open=True,
+            literal_texts=frozenset(
+                literal_text.partition("\n")[0] for literal_text in alternative.literal_texts
+            ),
+            projection_opaque=alternative.projection_opaque,
+            projection_incomplete=alternative.projection_incomplete,
+        )
+        for alternative in value
+    )
+
+
+def _project_read_value(
+    value: _ContentValue,
+    ifs: str,
+    target_index: int,
+    target_count: int,
+    *,
+    raw: bool,
+) -> _ContentValue:
+    """Apply one bounded scalar ``read`` projection after stream solving."""
+    projected: set[_TransferSummary] = set()
+    for alternative in value:
+        if alternative.projection_incomplete:
+            if target_count == 1 and alternative.first_record.entries[_DFA_START][1]:
+                projected.add(_TransferSummary.literal("doc-lattice"))
+                continue
+            raise _TaintLimitExceeded("shell read projection cannot be represented")
+        if alternative.projection_opaque:
+            projected.add(_TransferSummary.barrier())
+            for literal_text in alternative.literal_texts:
+                if sum(character in ifs for character in literal_text) > (
+                    _MAX_TRACKED_LITERAL_ALTERNATIVES - 1
+                ):
+                    raise _TaintLimitExceeded("shell read projection cannot be represented")
+                relocatable_fields = _read_literal_fields(
+                    literal_text,
+                    ifs,
+                    _MAX_TRACKED_LITERAL_ALTERNATIVES,
+                    raw=raw,
+                )
+                sole_field = _read_literal_fields(literal_text, ifs, 1, raw=raw)
+                if relocatable_fields is None or sole_field is None:
+                    raise _TaintLimitExceeded("shell read projection cannot be represented")
+                projected.update(
+                    _TransferSummary.literal(field)
+                    for field in (
+                        *relocatable_fields,
+                        sole_field[0],
+                    )
+                )
+        for literal_text in alternative.literal_texts:
+            fields = _read_literal_fields(
+                literal_text,
+                ifs,
+                target_count,
+                raw=raw,
+            )
+            if fields is None or target_index >= len(fields):
+                projected.add(_TransferSummary.barrier())
+                continue
+            projected.add(_TransferSummary.literal(fields[target_index]))
+    return _merge_content_summaries(projected)
 
 
 def _marker_capable(value: _ContentValue) -> bool:
@@ -1092,23 +1348,41 @@ def _expression_identity(expression: ContentExpr) -> tuple[str | int | bool, ...
 
 def _flow_write_identity(
     write: _FlowWrite,
-) -> tuple[str | int, bool, bool, tuple[str | int | bool, ...]]:
+) -> tuple[
+    str | int,
+    bool,
+    bool,
+    bool,
+    str | None,
+    int | None,
+    int | None,
+    bool,
+    tuple[str | int | bool, ...],
+]:
     """Return a recursion-safe structural identity for one flow write."""
     return (
         write.key,
         write.append,
         write.strip_trailing_newlines,
+        write.first_record,
+        write.read_ifs,
+        write.read_target_index,
+        write.read_target_count,
+        write.read_raw,
         _expression_identity(write.expression),
     )
 
 
 def _assignment_identity(
     assignment: _AssignmentEvidence,
-) -> tuple[str, bool, tuple[str | int | bool, ...]]:
+) -> tuple[str, bool, bool, bool, bool, tuple[str | int | bool, ...]]:
     """Return a recursion-safe structural identity for assignment evidence."""
     return (
         assignment.name,
         assignment.append,
+        assignment.conditional,
+        assignment.assign_if_null,
+        assignment.nameref_unset,
         _expression_identity(assignment.content),
     )
 
@@ -1258,6 +1532,23 @@ def _solve_flow_definitions(
             value = _evaluate_with_tables(write.expression, variables, resources, streams, limits)
             if write.strip_trailing_newlines:
                 value = _cap_value(_strip_trailing_newlines(value), limits)
+            if write.first_record:
+                value = _cap_value(_first_record(value), limits)
+            if (
+                write.read_ifs is not None
+                and write.read_target_index is not None
+                and write.read_target_count is not None
+            ):
+                value = _cap_value(
+                    _project_read_value(
+                        value,
+                        write.read_ifs,
+                        write.read_target_index,
+                        write.read_target_count,
+                        raw=write.read_raw,
+                    ),
+                    limits,
+                )
             prior = table.get(write.key, frozenset())
             if write.append:
                 base = prior or _OUTSIDE_VALUE
@@ -1594,19 +1885,31 @@ def _replay_input_bindings(
 
 
 def _pipe_source(
-    scope_id: int,
+    pipe: _PipeEvidence,
     commands: dict[int, _CommandEvidence],
     scopes: dict[int, _StreamScopeEvidence],
 ) -> ContentExpr:
-    """Return what a pipe receives after the producer replays descriptor-one redirects."""
+    """Return what a pipe receives after explicit and implicit descriptor redirects."""
+    scope_id = pipe.producer_scope_id
     command = next(
         (candidate for candidate in commands.values() if candidate.output_scope_id == scope_id),
         None,
     )
     scope = scopes.get(scope_id)
     events = command.redirections if command is not None else scope.redirections if scope else ()
-    stdout = _output_bindings(events, implicit_pipe=True)[1][0]
-    return StreamRef(scope_id) if isinstance(stdout, _ImplicitPipeTarget) else LiteralTransfer("")
+    bindings = _output_bindings(events, implicit_pipe=True)
+    if pipe.includes_stderr:
+        # Bash applies ``|&``'s implicit ``2>&1`` after authored redirections.
+        bindings[2] = bindings[1]
+    descriptors = (1, 2) if pipe.includes_stderr else (1,)
+    return (
+        StreamRef(scope_id)
+        if any(
+            isinstance(bindings.get(descriptor, (None, False))[0], _ImplicitPipeTarget)
+            for descriptor in descriptors
+        )
+        else LiteralTransfer("")
+    )
 
 
 def _output_process_scope_inputs(
@@ -1721,7 +2024,7 @@ def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
     command_inputs: dict[int, ContentExpr] = {}
     scope_inputs: dict[int, ContentExpr] = {}
     for pipe in evidence.pipes:
-        expression = _pipe_source(pipe.producer_scope_id, commands, scopes)
+        expression = _pipe_source(pipe, commands, scopes)
         if pipe.consumer_command_id is not None:
             command_inputs[pipe.consumer_command_id] = expression
         if pipe.consumer_scope_id is not None:
@@ -1770,12 +2073,721 @@ def _input_expression(
     )
 
 
+def _strip_one_trailing_newline(expression: ContentExpr) -> ContentExpr:
+    """Remove the record delimiter consumed by one bounded ``read``."""
+    if isinstance(expression, LiteralTransfer):
+        return LiteralTransfer(
+            expression.text[:-1] if expression.text.endswith("\n") else expression.text
+        )
+    if isinstance(expression, Concat) and expression.parts:
+        return concat(
+            *expression.parts[:-1],
+            _strip_one_trailing_newline(expression.parts[-1]),
+        )
+    return expression
+
+
+def _exact_content_literal(
+    expression: ContentExpr,
+    values: Mapping[str, str],
+) -> str | None:
+    """Resolve one bounded content expression against exact scalar values."""
+    memo: dict[int, str | None] = {}
+    pending = [(expression, False)]
+    while pending:
+        current, expanded = pending.pop()
+        current_id = id(current)
+        if current_id in memo:
+            continue
+        if not expanded:
+            pending.append((current, True))
+            if isinstance(current, Choice | Concat):
+                pending.extend((part, False) for part in reversed(current.parts))
+            continue
+        if isinstance(current, LiteralTransfer):
+            value: str | None = current.text
+        elif isinstance(current, VariableRef):
+            value = values.get(_unscoped_variable_name(current.name))
+        elif isinstance(current, Concat):
+            parts = tuple(memo.get(id(part)) for part in current.parts)
+            value = (
+                None
+                if any(part is None for part in parts)
+                else "".join(part for part in parts if part is not None)
+            )
+        elif isinstance(current, Choice):
+            alternatives = {memo.get(id(part)) for part in current.parts}
+            value = alternatives.pop() if len(alternatives) == 1 else None
+        else:
+            value = None
+        memo[current_id] = value
+    return memo[id(expression)]
+
+
+def _read_literal_fields(  # noqa: PLR0912
+    value: str,
+    ifs: str,
+    target_count: int,
+    *,
+    raw: bool,
+) -> tuple[str, ...] | None:
+    """Split one exact read record across scalar targets with bounded IFS semantics."""
+    if target_count < 1:
+        return None
+    record: list[tuple[str, bool]] = []
+    cursor = 0
+    while cursor < len(value):
+        character = value[cursor]
+        if not raw and character == "\\" and cursor + 1 < len(value):
+            escaped = value[cursor + 1]
+            cursor += 2
+            if escaped == "\n":
+                continue
+            record.append((escaped, True))
+            continue
+        if character == "\n":
+            break
+        record.append((character, False))
+        cursor += 1
+    if not ifs:
+        return (
+            "".join(character for character, _escaped in record),
+            *("" for _ in range(target_count - 1)),
+        )
+    ifs_characters = frozenset(ifs)
+    ifs_whitespace = frozenset(character for character in ifs if character in " \t\n")
+    cursor = 0
+
+    def is_delimiter(index: int) -> bool:
+        character, escaped = record[index]
+        return not escaped and character in ifs_characters
+
+    def is_ifs_whitespace(index: int) -> bool:
+        character, escaped = record[index]
+        return not escaped and character in ifs_whitespace
+
+    def skip_ifs_whitespace(start: int) -> int:
+        while start < len(record) and is_ifs_whitespace(start):
+            start += 1
+        return start
+
+    assigned: list[str] = []
+    for _index in range(target_count - 1):
+        cursor = skip_ifs_whitespace(cursor)
+        start = cursor
+        while cursor < len(record) and not is_delimiter(cursor):
+            cursor += 1
+        assigned.append("".join(character for character, _escaped in record[start:cursor]))
+        if cursor >= len(record):
+            continue
+        if is_ifs_whitespace(cursor):
+            cursor = skip_ifs_whitespace(cursor)
+            if (
+                cursor < len(record)
+                and is_delimiter(cursor)
+                and record[cursor][0] not in ifs_whitespace
+            ):
+                cursor += 1
+                cursor = skip_ifs_whitespace(cursor)
+        else:
+            cursor += 1
+            cursor = skip_ifs_whitespace(cursor)
+    cursor = skip_ifs_whitespace(cursor)
+    remainder = record[cursor:]
+    while remainder and (not remainder[-1][1] and remainder[-1][0] in ifs_whitespace):
+        remainder.pop()
+    assigned.append("".join(character for character, _escaped in remainder))
+    return tuple(assigned)
+
+
+def _resolve_builtin_writer_evidence(  # noqa: PLR0915
+    evidence: _ShellTaintEvidence,
+) -> _ShellTaintEvidence:
+    """Attach finalized stdin and exact bounded read-field projections."""
+    pipe_inputs = _pipe_inputs(evidence)
+    process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
+    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
+    unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    commands: list[_CommandEvidence] = []
+
+    def exact_values_for(context: int | None, environment: int) -> dict[str, str]:
+        key = (context, environment)
+        cached = exact_values_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = dict(exact_values_for(context, parent)) if parent is not None else {}
+        exact_values_by_environment[key] = inherited
+        return inherited
+
+    def unknown_values_for(context: int | None, environment: int) -> set[str]:
+        key = (context, environment)
+        cached = unknown_values_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = set(unknown_values_for(context, parent)) if parent is not None else set()
+        unknown_values_by_environment[key] = inherited
+        return inherited
+
+    def apply_exact(
+        assignment: _AssignmentEvidence,
+        values: dict[str, str],
+        unknown_values: set[str],
+        *,
+        conditional: bool,
+    ) -> None:
+        name = _unscoped_variable_name(assignment.name)
+        if conditional:
+            values.pop(name, None)
+            unknown_values.add(name)
+            return
+        value = _exact_content_literal(assignment.content, values)
+        if value is None:
+            values.pop(name, None)
+            unknown_values.add(name)
+        elif assignment.append:
+            prior = values.get(name)
+            if prior is None:
+                values.pop(name, None)
+                unknown_values.add(name)
+            else:
+                values[name] = prior + value
+                unknown_values.discard(name)
+        else:
+            values[name] = value
+            unknown_values.discard(name)
+
+    for command in evidence.commands:
+        context = command.function_context_id
+        environment = command_environments[command.command_id]
+        exact_values = exact_values_for(context, environment)
+        unknown_values = unknown_values_for(context, environment)
+        command_values = dict(exact_values)
+        command_unknown_values = set(unknown_values)
+        for assignment in command.definite_assignments:
+            apply_exact(
+                assignment,
+                command_values,
+                command_unknown_values,
+                conditional=False,
+            )
+        stdin = _strip_one_trailing_newline(
+            _input_expression(command, pipe_inputs, process_resources)
+        )
+        exact_stdin = _exact_content_literal(stdin, command_values)
+        read_target_count = next(
+            (
+                assignment.read_target_count
+                for assignment in command.builtin_assignments
+                if assignment.from_stdin
+            ),
+            None,
+        )
+        read_raw = next(
+            (
+                assignment.read_raw
+                for assignment in command.builtin_assignments
+                if assignment.from_stdin
+            ),
+            False,
+        )
+        read_ifs_unknown = read_target_count is not None and "IFS" in command_unknown_values
+        read_fields = (
+            _read_literal_fields(
+                exact_stdin,
+                command_values.get("IFS", " \t\n"),
+                read_target_count,
+                raw=read_raw,
+            )
+            if exact_stdin is not None and read_target_count is not None and not read_ifs_unknown
+            else None
+        )
+
+        def route(
+            assignment: _AssignmentEvidence,
+            *,
+            input_content: ContentExpr = stdin,
+            projected_fields: tuple[str, ...] | None = read_fields,
+            ifs_value: str = command_values.get("IFS", " \t\n"),
+        ) -> _AssignmentEvidence:
+            content = (
+                LiteralTransfer(projected_fields[assignment.read_target_index])
+                if assignment.from_stdin
+                and projected_fields is not None
+                and assignment.read_target_index is not None
+                else input_content
+                if assignment.from_stdin
+                else assignment.content
+            )
+            deferred_projection = assignment.from_stdin and projected_fields is None
+            return replace(
+                assignment,
+                content=content,
+                from_stdin=False,
+                read_target_index=(assignment.read_target_index if deferred_projection else None),
+                read_target_count=(assignment.read_target_count if deferred_projection else None),
+                read_raw=assignment.read_raw if deferred_projection else False,
+                read_first_record=False,
+                read_ifs=ifs_value if deferred_projection else None,
+            )
+
+        routed = replace(
+            command,
+            assignments=tuple(route(assignment) for assignment in command.assignments),
+            definite_assignments=tuple(
+                route(assignment) for assignment in command.definite_assignments
+            ),
+            builtin_assignments=tuple(
+                route(assignment) for assignment in command.builtin_assignments
+            ),
+            unsupported_builtin_write=(command.unsupported_builtin_write or read_ifs_unknown),
+        )
+        commands.append(routed)
+        conditional = command.conditionally_executed
+        assignment_only = not command.argv or command.executable.argv_index is None
+        if assignment_only:
+            for assignment in routed.definite_assignments:
+                apply_exact(
+                    assignment,
+                    exact_values,
+                    unknown_values,
+                    conditional=conditional,
+                )
+        for assignment in routed.builtin_assignments:
+            apply_exact(
+                assignment,
+                exact_values,
+                unknown_values,
+                conditional=conditional,
+            )
+        unset_names, unknown_unset = _unset_action(command)
+        for name in unset_names:
+            exact_values.pop(name, None)
+            if conditional:
+                unknown_values.add(name)
+            else:
+                unknown_values.discard(name)
+        if unknown_unset:
+            exact_values.clear()
+            unknown_values.add("IFS")
+        if routed.unknown_builtin_content is not None:
+            exact_values.clear()
+    return replace(evidence, commands=tuple(commands))
+
+
+def _route_runtime_nameref_writes(  # noqa: PLR0915
+    evidence: _ShellTaintEvidence,
+) -> _ShellTaintEvidence:
+    """Route contextualized writes through Bash namerefs in execution order."""
+    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    aliases_by_environment: dict[int, dict[str, str | None]] = {}
+    commands: list[_CommandEvidence] = []
+    saw_nameref = False
+
+    def aliases_for(environment: int) -> dict[str, str | None]:
+        cached = aliases_by_environment.get(environment)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = dict(aliases_for(parent)) if parent is not None else {}
+        aliases_by_environment[environment] = inherited
+        return inherited
+
+    def resolve_alias(
+        name: str,
+        aliases: Mapping[str, str | None],
+    ) -> tuple[str | None, bool]:
+        seen: set[str] = set()
+        current: str | None = name
+        while current is not None and current in aliases:
+            if current in seen:
+                return current, False
+            seen.add(current)
+            current = aliases[current]
+        return current, True
+
+    def scoped_binding_target(name: str, target: str, environment: int) -> str:
+        target_environment = _scoped_variable_environment(name)
+        return _scoped_variable_name(
+            target_environment if target_environment is not None else environment,
+            target,
+        )
+
+    for command in evidence.commands:
+        environment = command_environments[command.command_id]
+        aliases = aliases_for(environment)
+        unsupported = command.unsupported_builtin_write
+
+        def route_assignment(  # noqa: PLR0911, PLR0912
+            assignment: _AssignmentEvidence,
+            *,
+            activate_declaration: bool = True,
+            environment_id: int = environment,
+            alias_map: dict[str, str | None] = aliases,
+        ) -> _AssignmentEvidence:
+            nonlocal saw_nameref, unsupported
+            if assignment.nameref_unset:
+                saw_nameref = True
+                alias_names = {
+                    assignment.name,
+                    scoped_binding_target(
+                        assignment.name,
+                        _unscoped_variable_name(assignment.name),
+                        environment_id,
+                    ),
+                }
+                for alias_name in alias_names:
+                    alias_map.pop(alias_name, None)
+                return assignment
+            declaration_target = assignment.nameref_target
+            if declaration_target is not None:
+                saw_nameref = True
+                if not activate_declaration:
+                    return assignment
+                alias_names = {
+                    assignment.name,
+                    scoped_binding_target(
+                        assignment.name,
+                        _unscoped_variable_name(assignment.name),
+                        environment_id,
+                    ),
+                }
+                if not declaration_target:
+                    for alias_name in alias_names:
+                        alias_map[alias_name] = None
+                    return assignment
+                target = (
+                    assignment.content.name
+                    if isinstance(assignment.content, VariableRef)
+                    else declaration_target
+                )
+                resolved, valid = resolve_alias(target, alias_map)
+                if not valid or resolved is None or resolved in alias_names:
+                    unsupported = True
+                    for alias_name in alias_names:
+                        alias_map.pop(alias_name, None)
+                    return assignment
+                for alias_name in alias_names:
+                    alias_map[alias_name] = resolved
+                return assignment
+
+            target, valid = resolve_alias(assignment.name, alias_map)
+            if not valid:
+                unsupported = True
+                return assignment
+            if assignment.name not in alias_map:
+                return assignment
+            if target is None:
+                binding = _exact_content_literal(assignment.content, {})
+                if binding is None or not _static_variable_name(binding):
+                    unsupported = True
+                    return assignment
+                target = scoped_binding_target(assignment.name, binding, environment_id)
+                alias_map[assignment.name] = target
+                scoped_alias = scoped_binding_target(
+                    assignment.name,
+                    _unscoped_variable_name(assignment.name),
+                    environment_id,
+                )
+                if scoped_alias in alias_map:
+                    alias_map[scoped_alias] = target
+                return replace(
+                    assignment,
+                    content=VariableRef(target),
+                    nameref_target=binding,
+                )
+            return replace(
+                assignment,
+                name=_scoped_variable_name(
+                    environment_id,
+                    _unscoped_variable_name(target),
+                ),
+            )
+
+        routed_definite = tuple(
+            route_assignment(assignment) for assignment in command.definite_assignments
+        )
+        routed_by_identity = {
+            (
+                _assignment_identity(original),
+                original.nameref_target,
+            ): routed
+            for original, routed in zip(
+                command.definite_assignments,
+                routed_definite,
+                strict=True,
+            )
+        }
+        routed_assignments_list: list[_AssignmentEvidence] = []
+        for assignment in command.assignments:
+            routed = routed_by_identity.get(
+                (_assignment_identity(assignment), assignment.nameref_target)
+            )
+            routed_assignments_list.append(
+                routed if routed is not None else route_assignment(assignment)
+            )
+        routed_assignments = tuple(routed_assignments_list)
+        activate_builtin_declarations = not (
+            command.function_context_id is not None and command.builtin_force_global
+        )
+        routed_builtin = tuple(
+            routed
+            for assignment in command.builtin_assignments
+            for routed in (
+                route_assignment(
+                    assignment,
+                    activate_declaration=activate_builtin_declarations,
+                ),
+            )
+            if not routed.nameref_unset
+        )
+        eval_assignments, _eval_unsets = _static_eval_mutations(command)
+        for mutation in eval_assignments:
+            if mutation.assignment.nameref_target is not None or mutation.assignment.nameref_unset:
+                route_assignment(mutation.assignment)
+        routed_effects_list: list[_AssignmentEvidence] = []
+        for assignment in command.function_effect_assignments:
+            if assignment.nameref_unset:
+                saw_nameref = True
+                name = assignment.name
+                aliases.pop(name, None)
+                aliases.pop(
+                    scoped_binding_target(
+                        name,
+                        _unscoped_variable_name(name),
+                        environment,
+                    ),
+                    None,
+                )
+                continue
+            routed_effects_list.append(route_assignment(assignment))
+        routed_effects = tuple(routed_effects_list)
+        nameref_unsets, unknown_nameref_unset = _unset_nameref_action(command)
+        if unknown_nameref_unset:
+            unsupported = True
+        if nameref_unsets:
+            saw_nameref = True
+        for name in nameref_unsets:
+            aliases.pop(name, None)
+            aliases.pop(
+                scoped_binding_target(name, name, environment),
+                None,
+            )
+        commands.append(
+            replace(
+                command,
+                assignments=routed_assignments,
+                definite_assignments=routed_definite,
+                builtin_assignments=routed_builtin,
+                function_effect_assignments=routed_effects,
+                unsupported_builtin_write=unsupported,
+            )
+        )
+    if saw_nameref:
+        commands = list(
+            _refresh_runtime_eval_programs(
+                tuple(commands),
+                command_environments,
+                environment_parents,
+            )
+        )
+    return replace(evidence, commands=tuple(commands))
+
+
+def _refresh_runtime_eval_programs(
+    commands: tuple[_CommandEvidence, ...],
+    command_environments: Mapping[int, int],
+    environment_parents: Mapping[int, int | None],
+) -> tuple[_CommandEvidence, ...]:
+    """Replay routed exact writes before refreshing eval programs."""
+    values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
+    refreshed: list[_CommandEvidence] = []
+
+    def values_for(context: int | None, environment: int) -> dict[str, str]:
+        key = (context, environment)
+        cached = values_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = dict(values_for(context, parent)) if parent is not None else {}
+        values_by_environment[key] = inherited
+        return inherited
+
+    def apply_exact(
+        assignment: _AssignmentEvidence,
+        values: dict[str, str],
+        *,
+        conditional: bool,
+    ) -> None:
+        name = _unscoped_variable_name(assignment.name)
+        if conditional:
+            values.pop(name, None)
+            return
+        value = _exact_content_literal(assignment.content, values)
+        if value is None:
+            values.pop(name, None)
+        elif assignment.append:
+            prior = values.get(name)
+            if prior is None:
+                values.pop(name, None)
+            else:
+                values[name] = prior + value
+        else:
+            values[name] = value
+
+    for command in commands:
+        values = values_for(
+            command.function_context_id,
+            command_environments[command.command_id],
+        )
+        eval_values = dict(values)
+        for assignment in command.definite_assignments:
+            apply_exact(assignment, eval_values, conditional=False)
+        programs = {
+            program
+            for executable in _builtin_eval_candidates(command)
+            for program in (
+                _exact_content_literal(
+                    _eval_arguments_raw(command, executable),
+                    eval_values,
+                ),
+            )
+            if program is not None
+        }
+        resolved_program = next(iter(programs)) if len(programs) == 1 else None
+        refreshed_command = replace(
+            command,
+            resolved_eval_program=resolved_program,
+            resolved_eval_programs=(),
+            runtime_eval_program_authoritative=resolved_program is not None,
+        )
+        refreshed.append(refreshed_command)
+
+        conditional = (
+            command.function_effect_conditional
+            if command.function_context_id is not None
+            else command.conditionally_executed
+        )
+        assignment_only = not command.argv or command.executable.argv_index is None
+        if assignment_only:
+            for assignment in command.definite_assignments:
+                apply_exact(assignment, values, conditional=conditional)
+        for assignment in (
+            *command.builtin_assignments,
+            *command.function_effect_assignments,
+        ):
+            apply_exact(assignment, values, conditional=conditional)
+        eval_assignments, eval_unsets = _static_eval_mutations(refreshed_command)
+        for mutation in eval_assignments:
+            apply_exact(mutation.assignment, values, conditional=conditional)
+        unset_names, unknown_unset = _unset_action(command)
+        if unknown_unset or command.unknown_builtin_content is not None:
+            values.clear()
+        for name in (*unset_names, *eval_unsets):
+            values.pop(name, None)
+    return tuple(refreshed)
+
+
+def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
+    command: _CommandEvidence,
+) -> ContentExpr | None:
+    """Return one bounded exact builtin ``printf`` output."""
+    pending = [command.executable]
+    executable_index: int | None = None
+    while pending:
+        executable = pending.pop()
+        if (
+            executable.name == "printf"
+            and executable.literal == "printf"
+            and not executable.external_lookup
+            and executable.argv_index is not None
+        ):
+            executable_index = executable.argv_index
+            break
+        pending.extend(executable.alternates)
+    if executable_index is None:
+        return None
+    arguments = command.argv[executable_index + 1 :]
+    if arguments and not arguments[0].dynamic and arguments[0].literal == "--":
+        arguments = arguments[1:]
+    if (
+        not arguments
+        or arguments[0].dynamic
+        or arguments[0].literal == "-v"
+        or arguments[0].literal.startswith("-v")
+        or any(argument.dynamic for argument in arguments[1:])
+    ):
+        return None
+    format_text = arguments[0].literal
+    values = arguments[1:]
+    rendered: list[str] = []
+    value_index = 0
+    first_pass = True
+    saw_conversion = False
+    saw_escape = False
+    while first_pass or value_index < len(values):
+        first_pass = False
+        pass_start = value_index
+        index = 0
+        while index < len(format_text):
+            character = format_text[index]
+            if character == "%":
+                if index + 1 >= len(format_text):
+                    return None
+                conversion = format_text[index + 1]
+                if conversion == "%":
+                    rendered.append("%")
+                elif conversion == "s":
+                    saw_conversion = True
+                    rendered.append(
+                        values[value_index].literal if value_index < len(values) else ""
+                    )
+                    value_index += 1
+                else:
+                    return None
+                index += 2
+                continue
+            if character == "\\":
+                saw_escape = True
+                if index + 1 >= len(format_text):
+                    return None
+                escaped = format_text[index + 1]
+                if escaped == "n":
+                    rendered.append("\n")
+                elif escaped == "\\":
+                    rendered.append("\\")
+                else:
+                    return None
+                index += 2
+                continue
+            rendered.append(character)
+            index += 1
+        if value_index == pass_start:
+            break
+        if sum(map(len, rendered)) > _MAX_TRACKED_LITERAL_CHARS:
+            return None
+    if values and not saw_conversion:
+        return None
+    if not saw_conversion and not saw_escape:
+        return None
+    return LiteralTransfer("".join(rendered))
+
+
 def _producer_stdout(command: _CommandEvidence, stdin: ContentExpr) -> ContentExpr:
     """Return a conservative stdout expression for one command."""
     head_index = command.executable.argv_index
     payload_start = head_index + 1 if head_index is not None else min(1, len(command.argv))
     argv_content = concat(*(port.content for port in command.argv[payload_start:]))
-    return choice(OutsideGap(), argv_content, stdin)
+    literal_printf = _literal_printf_stdout(command)
+    if literal_printf is not None:
+        return literal_printf
+    return choice(
+        OutsideGap(),
+        argv_content,
+        stdin,
+    )
 
 
 def _static_write_definitions(
@@ -1936,6 +2948,156 @@ def _scoped_variable_environment(name: str | int) -> int | None:
         return None
 
 
+def _is_function_positional_parameter(name: str) -> bool:
+    """Return whether a variable is populated from shell-function call arguments."""
+    return name in {"@", "*", _QUOTED_FUNCTION_POSITIONAL_STAR} or (
+        name.isdigit() and bool(name.strip("0"))
+    )
+
+
+def _function_positional_index(name: str, argument_count: int) -> int | None:
+    """Return a bounded zero-based call-argument index, or None when absent."""
+    digits = name.lstrip("0")
+    maximum = str(argument_count)
+    if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
+        return None
+    index = int(digits) - 1
+    return index if index < argument_count else None
+
+
+def _expression_function_positionals(expression: ContentExpr) -> set[str]:
+    """Collect function-positional reads from one content expression."""
+    names: set[str] = set()
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, VariableRef):
+            name = _unscoped_variable_name(current.name)
+            if _is_function_positional_parameter(name):
+                names.add(name)
+        elif isinstance(current, Choice | Concat | _SecondPassConditionalAssignment):
+            pending.extend(current.parts)
+    return names
+
+
+def _substitute_local_contents(
+    expression: ContentExpr,
+    local_contents: Mapping[str, ContentExpr],
+    *,
+    resolving: frozenset[str] = frozenset(),
+) -> ContentExpr:
+    """Substitute ordered callee-local definitions while retaining caller references."""
+    pending: list[tuple[ContentExpr, frozenset[str], int, bool]] = [
+        (expression, resolving, 0, False)
+    ]
+    results: list[ContentExpr] = []
+    while pending:
+        current, active_names, depth, assemble = pending.pop()
+        if assemble:
+            if isinstance(current, _SecondPassConditionalAssignment):
+                operand = results.pop()
+                results.append(
+                    _SecondPassConditionalAssignment(
+                        current.name,
+                        operand,
+                        current.assign_if_null,
+                    )
+                )
+                continue
+            if not isinstance(current, Choice | Concat):
+                raise _MalformedTaintEvidence("local content substitution cannot be structured")
+            parts = current.parts
+            count = len(parts)
+            resolved_parts = tuple(results[-count:]) if count else ()
+            if count:
+                del results[-count:]
+            results.append(
+                choice(*resolved_parts) if isinstance(current, Choice) else concat(*resolved_parts)
+            )
+            continue
+        if isinstance(current, VariableRef):
+            name = _unscoped_variable_name(current.name)
+            replacement = local_contents.get(name)
+            if replacement is None or name in active_names:
+                results.append(current)
+                continue
+            if depth >= _MAX_LOCAL_SUBSTITUTION_DEPTH:
+                raise _TaintLimitExceeded("local substitution depth limit")
+            pending.append(
+                (
+                    replacement,
+                    active_names | {name},
+                    depth + 1,
+                    False,
+                )
+            )
+            continue
+        if isinstance(
+            current,
+            LiteralTransfer | _SecondPassVariableRef | OutsideGap | ResourceRef | StreamRef,
+        ):
+            results.append(current)
+            continue
+        pending.append((current, active_names, depth, True))
+        if isinstance(current, _SecondPassConditionalAssignment):
+            pending.append((current.operand, active_names, depth, False))
+            continue
+        pending.extend((part, active_names, depth, False) for part in reversed(current.parts))
+    if len(results) != 1:
+        raise _MalformedTaintEvidence("local content substitution cannot be structured")
+    return results[0]
+
+
+def _substitute_function_positionals(  # noqa: PLR0911
+    expression: ContentExpr,
+    arguments: tuple[ContentExpr, ...] | None,
+    shift_offset: int,
+) -> ContentExpr:
+    """Apply ordered function positional mutations to one effect expression."""
+    if isinstance(expression, VariableRef):
+        name = _unscoped_variable_name(expression.name)
+        if not _is_function_positional_parameter(name):
+            return expression
+        if name in {"@", "*", _QUOTED_FUNCTION_POSITIONAL_STAR}:
+            if arguments is None and shift_offset == 0:
+                return expression
+            raise _TaintLimitExceeded("unsupported function positional mutation")
+        index = _function_positional_index(name, len(arguments)) if arguments is not None else None
+        if arguments is not None:
+            return arguments[index] if index is not None else LiteralTransfer("")
+        if len(name) > _MAX_BRACE_INTEGER_DIGITS:
+            raise _TaintLimitExceeded("function positional mutation limit exceeded")
+        return VariableRef(str(int(name) + shift_offset))
+    if isinstance(
+        expression,
+        LiteralTransfer | _SecondPassVariableRef | OutsideGap | ResourceRef | StreamRef,
+    ):
+        return expression
+    if isinstance(expression, _SecondPassConditionalAssignment):
+        return _SecondPassConditionalAssignment(
+            expression.name,
+            _substitute_function_positionals(
+                expression.operand,
+                arguments,
+                shift_offset,
+            ),
+            expression.assign_if_null,
+        )
+    if isinstance(expression, Choice):
+        return choice(
+            *(
+                _substitute_function_positionals(part, arguments, shift_offset)
+                for part in expression.parts
+            )
+        )
+    return concat(
+        *(
+            _substitute_function_positionals(part, arguments, shift_offset)
+            for part in expression.parts
+        )
+    )
+
+
 def _scope_expression(expression: ContentExpr, environment: int) -> ContentExpr:
     """Bind first-pass shell variable references to one lexical environment."""
     if isinstance(expression, VariableRef):
@@ -1956,62 +3118,2517 @@ def _scope_expression(expression: ContentExpr, environment: int) -> ContentExpr:
     return concat(*(_scope_expression(part, environment) for part in expression.parts))
 
 
-def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidence:
+def _rescope_expression(
+    expression: ContentExpr,
+    source_environment: int,
+    target_environment: int,
+) -> ContentExpr:
+    """Move lexical reads to an execution environment while preserving function locals."""
+    if isinstance(expression, VariableRef):
+        environment = _scoped_variable_environment(expression.name)
+        if environment != source_environment:
+            return expression
+        return VariableRef(
+            _scoped_variable_name(
+                target_environment,
+                _unscoped_variable_name(expression.name),
+            )
+        )
+    if isinstance(
+        expression,
+        LiteralTransfer | _SecondPassVariableRef | OutsideGap | ResourceRef | StreamRef,
+    ):
+        return expression
+    if isinstance(expression, _SecondPassConditionalAssignment):
+        return _SecondPassConditionalAssignment(
+            expression.name,
+            _rescope_expression(
+                expression.operand,
+                source_environment,
+                target_environment,
+            ),
+            expression.assign_if_null,
+        )
+    if isinstance(expression, Choice):
+        return choice(
+            *(
+                _rescope_expression(part, source_environment, target_environment)
+                for part in expression.parts
+            )
+        )
+    return concat(
+        *(
+            _rescope_expression(part, source_environment, target_environment)
+            for part in expression.parts
+        )
+    )
+
+
+def _scope_function_variables(  # noqa: PLR0911
+    expression: ContentExpr,
+    function_context: int | None,
+    local_names: frozenset[str],
+    caller_locals: Mapping[str, tuple[int, ...]],
+    call_prefixes: Mapping[str, tuple[ContentExpr, ...]],
+) -> ContentExpr:
+    """Bind reads to active locals, dynamic callers, and call-prefix overlays."""
+    if function_context is None:
+        return expression
+    if isinstance(expression, VariableRef):
+        if _is_function_positional_parameter(expression.name):
+            return choice(*call_prefixes.get(expression.name, (LiteralTransfer(""),)))
+        if expression.name in local_names:
+            return VariableRef(_scoped_variable_name(function_context, expression.name))
+        alternatives: list[ContentExpr] = [
+            expression,
+            *(
+                VariableRef(_scoped_variable_name(context, expression.name))
+                for context in caller_locals.get(expression.name, ())
+            ),
+            *call_prefixes.get(expression.name, ()),
+        ]
+        return choice(*alternatives)
+    if isinstance(
+        expression,
+        LiteralTransfer | _SecondPassVariableRef | OutsideGap | ResourceRef | StreamRef,
+    ):
+        return expression
+    if isinstance(expression, _SecondPassConditionalAssignment):
+        return _SecondPassConditionalAssignment(
+            expression.name,
+            _scope_function_variables(
+                expression.operand,
+                function_context,
+                local_names,
+                caller_locals,
+                call_prefixes,
+            ),
+            expression.assign_if_null,
+        )
+    if isinstance(expression, Choice):
+        return choice(
+            *(
+                _scope_function_variables(
+                    part,
+                    function_context,
+                    local_names,
+                    caller_locals,
+                    call_prefixes,
+                )
+                for part in expression.parts
+            )
+        )
+    return concat(
+        *(
+            _scope_function_variables(
+                part,
+                function_context,
+                local_names,
+                caller_locals,
+                call_prefixes,
+            )
+            for part in expression.parts
+        )
+    )
+
+
+def _static_eval_programs(command: _CommandEvidence) -> tuple[str, ...]:
+    """Return eval's bounded exact joined programs."""
+    if command.resolved_eval_programs:
+        return command.resolved_eval_programs
+    if command.resolved_eval_program is not None:
+        return (command.resolved_eval_program,)
+    for executable in _builtin_eval_candidates(command):
+        if executable.argv_index is None:
+            continue
+        arguments = command.argv[executable.argv_index + 1 :]
+        if all(not argument.dynamic for argument in arguments):
+            return (" ".join(argument.literal for argument in arguments),)
+    return ()
+
+
+def _static_eval_word_metadata(  # noqa: PLR0912
+    program: str,
+) -> tuple[_StaticEvalWordMetadata, ...] | None:
+    """Return lexical properties for each eval word."""
+    metadata: list[_StaticEvalWordMetadata] = []
+    in_word = False
+    eligible = True
+    word_start = 0
+    quote: str | None = None
+    index = 0
+    while index < len(program):
+        character = program[index]
+        if quote is not None:
+            if character == quote:
+                quote = None
+            elif character == "\\" and quote == '"' and index + 1 < len(program):
+                index += 1
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            if not in_word:
+                word_start = index
+            in_word = True
+            eligible = False
+            quote = character
+            index += 1
+            continue
+        if character == "\\":
+            if not in_word:
+                word_start = index
+            in_word = True
+            eligible = False
+            index += 2 if index + 1 < len(program) else 1
+            continue
+        if character.isspace() or character in ";&|<>()":
+            if in_word:
+                raw_word = program[word_start:index]
+                metadata.append(
+                    _StaticEvalWordMetadata(
+                        keyword_eligible=eligible,
+                        redirection_prefix=(
+                            character in "<>"
+                            and eligible
+                            and (
+                                raw_word.isdigit()
+                                or (
+                                    raw_word.startswith("{")
+                                    and raw_word.endswith("}")
+                                    and _static_variable_name(raw_word[1:-1])
+                                )
+                            )
+                        ),
+                        source=raw_word,
+                    )
+                )
+                in_word = False
+                eligible = True
+            index += 1
+            continue
+        if not in_word:
+            word_start = index
+        in_word = True
+        index += 1
+    if quote is not None:
+        return None
+    if in_word:
+        metadata.append(
+            _StaticEvalWordMetadata(
+                keyword_eligible=eligible,
+                redirection_prefix=False,
+                source=program[word_start:],
+            )
+        )
+    return tuple(metadata)
+
+
+def _static_eval_shlex_program(program: str) -> str:
+    """Remove unquoted Bash dollar-quote introducers before shlex tokenization."""
+    normalized: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(program):
+        character = program[index]
+        if quote is not None:
+            normalized.append(character)
+            if character == quote:
+                quote = None
+            elif character == "\\" and quote == '"' and index + 1 < len(program):
+                index += 1
+                normalized.append(program[index])
+            index += 1
+            continue
+        if character == "\\" and index + 1 < len(program):
+            normalized.extend((character, program[index + 1]))
+            index += 2
+            continue
+        if character == "$" and index + 1 < len(program) and program[index + 1] == "'":
+            closing = index + 2
+            while closing < len(program):
+                if program[closing] == "\\":
+                    closing += 2
+                    continue
+                if program[closing] == "'":
+                    break
+                closing += 1
+            if closing >= len(program):
+                normalized.append(character)
+                index += 1
+                continue
+            normalized.append(shlex.quote(_decode_ansi_c_eval_word(program[index + 2 : closing])))
+            index = closing + 1
+            continue
+        if character == "$" and index + 1 < len(program) and program[index + 1] == '"':
+            index += 1
+            continue
+        normalized.append(character)
+        if character in {"'", '"'}:
+            quote = character
+        index += 1
+    return "".join(normalized)
+
+
+def _strip_active_shell_comments(program: str) -> str:
+    """Remove exact Bash comments while preserving quoted and escaped ``#`` bytes."""
+    stripped: list[str] = []
+    quote: str | None = None
+    at_word_start = True
+    index = 0
+    while index < len(program):
+        character = program[index]
+        if quote is not None:
+            stripped.append(character)
+            if character == quote:
+                quote = None
+            elif character == "\\" and quote == '"' and index + 1 < len(program):
+                index += 1
+                stripped.append(program[index])
+            index += 1
+            continue
+        if character == "\\":
+            stripped.append(character)
+            if index + 1 < len(program):
+                index += 1
+                stripped.append(program[index])
+            at_word_start = False
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            stripped.append(character)
+            at_word_start = False
+            index += 1
+            continue
+        if character == "#" and at_word_start:
+            while index < len(program) and program[index] != "\n":
+                index += 1
+            continue
+        stripped.append(character)
+        at_word_start = character.isspace() or character in ";&|<>()"
+        index += 1
+    return "".join(stripped)
+
+
+def _decode_ansi_c_eval_word(body: str) -> str:
+    """Decode Bash ANSI-C quoting needed by static eval command words."""
+    simple = {
+        "a": "\a",
+        "b": "\b",
+        "e": "\x1b",
+        "E": "\x1b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+    }
+    decoded: list[str] = []
+    index = 0
+    while index < len(body):
+        character = body[index]
+        if character != "\\" or index + 1 >= len(body):
+            decoded.append(character)
+            index += 1
+            continue
+        escaped = body[index + 1]
+        if escaped == "\n":
+            index += 2
+            continue
+        if escaped in simple:
+            decoded.append(simple[escaped])
+            index += 2
+            continue
+        if escaped in {"x", "u", "U"}:
+            width = {"x": 2, "u": 4, "U": 8}[escaped]
+            end = index + 2
+            while (
+                end < len(body)
+                and end < index + 2 + width
+                and body[end].lower() in "0123456789abcdef"
+            ):
+                end += 1
+            if end > index + 2:
+                codepoint = int(body[index + 2 : end], 16)
+                decoded.append(
+                    chr(codepoint)
+                    if codepoint <= _EVAL_UNICODE_MAX
+                    and not _EVAL_SURROGATE_MIN <= codepoint <= _EVAL_SURROGATE_MAX
+                    else "\ufffd"
+                )
+                index = end
+                continue
+        if escaped in "01234567":
+            end = index + 2
+            while end < len(body) and end < index + 4 and body[end] in "01234567":
+                end += 1
+            decoded.append(chr(int(body[index + 1 : end], 8) & 0xFF))
+            index = end
+            continue
+        if escaped == "c" and index + 2 < len(body):
+            decoded.append(chr(ord(body[index + 2].upper()) ^ 0x40))
+            index += 3
+            continue
+        decoded.extend(("\\", escaped))
+        index += 2
+    return "".join(decoded)
+
+
+def _static_eval_commands(command: _CommandEvidence) -> tuple[_StaticEvalCommand, ...]:
+    """Tokenize bounded static eval input into simple command words."""
+    commands: list[_StaticEvalCommand] = []
+    for program in _static_eval_programs(command):
+        commands.extend(_static_eval_program_commands(program))
+    return tuple(commands)
+
+
+def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...]:
+    """Tokenize one exact eval program and retain reserved-word eligibility."""
+    program = _strip_active_shell_comments(program)
+    lexer = shlex.shlex(
+        _static_eval_shlex_program(program),
+        posix=True,
+        punctuation_chars=";&|<>()\n",
+    )
+    lexer.commenters = ""
+    lexer.whitespace_split = True
+    metadata = _static_eval_word_metadata(program)
+    if metadata is None:
+        return ()
+    metadata_index = 0
+    commands: list[_StaticEvalCommand] = []
+    words: list[str] = []
+    word_eligibility: list[bool] = []
+    source_words: list[str] = []
+    redirection_prefixes: list[bool] = []
+    skip_redirection_target = False
+    try:
+        tokens = tuple(lexer)
+    except ValueError:
+        return ()
+    for token in tokens:
+        if token and all(character in ";&|()\n" for character in token):
+            if words:
+                commands.append(
+                    _StaticEvalCommand(
+                        tuple(words),
+                        tuple(word_eligibility),
+                        tuple(source_words),
+                    )
+                )
+                words.clear()
+                word_eligibility.clear()
+                source_words.clear()
+                redirection_prefixes.clear()
+            skip_redirection_target = False
+            continue
+        if (
+            token
+            and any(character in "<>" for character in token)
+            and all(character in "<>&|" for character in token)
+        ):
+            if redirection_prefixes and redirection_prefixes[-1]:
+                words.pop()
+                word_eligibility.pop()
+                source_words.pop()
+                redirection_prefixes.pop()
+            skip_redirection_target = True
+            continue
+        if metadata_index >= len(metadata):
+            return ()
+        token_metadata = metadata[metadata_index]
+        metadata_index += 1
+        if skip_redirection_target:
+            skip_redirection_target = False
+            continue
+        words.append(token)
+        word_eligibility.append(token_metadata.keyword_eligible)
+        source_words.append(token_metadata.source)
+        redirection_prefixes.append(token_metadata.redirection_prefix)
+    if metadata_index != len(metadata):
+        return ()
+    if words:
+        commands.append(
+            _StaticEvalCommand(
+                tuple(words),
+                tuple(word_eligibility),
+                tuple(source_words),
+            )
+        )
+    return tuple(commands)
+
+
+def _static_assignment_word(word: str) -> _AssignmentEvidence | None:
+    """Return one scalar assignment represented by an already-tokenized shell word."""
+    name, separator, value = word.partition("=")
+    append = name.endswith("+")
+    if append:
+        name = name[:-1]
+    if not separator or not _static_variable_name(name):
+        return None
+    return _AssignmentEvidence(name, LiteralTransfer(value), append=append)
+
+
+def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
+    """Lower one static eval assignment RHS with its second-pass quote semantics."""
+    quote: str | None = None
+    index = 0
+    while index < len(source_word):
+        character = source_word[index]
+        if quote is not None:
+            if character == quote:
+                quote = None
+            elif character == "\\" and quote == '"' and index + 1 < len(source_word):
+                index += 1
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        if character == "\\":
+            index += 2
+            continue
+        if character == "=":
+            name = source_word[:index]
+            if name.endswith("+"):
+                name = name[:-1]
+            if not _static_variable_name(name):
+                return None
+            rhs = _eval_reparse_content(LiteralTransfer(source_word[index + 1 :]))
+            return _lower_eval_assignment_operand(rhs, 0, scoped=False)
+        index += 1
+    return None
+
+
+def _static_eval_mutations(  # noqa: PLR0912, PLR0915
+    command: _CommandEvidence,
+) -> tuple[tuple[_StaticEvalAssignment, ...], tuple[str, ...]]:
+    """Return exact scalar assignments and unsets from bounded static eval input."""
+    assignments: list[_StaticEvalAssignment] = []
+    unsets: list[str] = []
+    aliases: dict[str, str] = {}
+
+    def route_assignment(
+        mutation: _StaticEvalAssignment,
+    ) -> _StaticEvalAssignment:
+        assignment = mutation.assignment
+        if assignment.nameref_target is not None:
+            if assignment.nameref_target:
+                aliases[assignment.name] = assignment.nameref_target
+            else:
+                aliases.pop(assignment.name, None)
+            return mutation
+        target = assignment.name
+        visited: set[str] = set()
+        while target in aliases:
+            if target in visited:
+                raise _TaintLimitExceeded("shell eval nameref cycle cannot be represented")
+            visited.add(target)
+            target = aliases[target]
+        if target == assignment.name:
+            return mutation
+        return replace(mutation, assignment=replace(assignment, name=target))
+
+    for parsed in _static_eval_commands(command):
+        words = parsed.words
+        index = 0
+        prefix_assignments: list[_StaticEvalAssignment] = []
+        while index < len(words):
+            assignment = _static_assignment_word(words[index])
+            if assignment is None:
+                break
+            prefix_assignments.append(
+                _StaticEvalAssignment(
+                    assignment,
+                    eval_content=_static_eval_assignment_content(parsed.source_words[index]),
+                )
+            )
+            index += 1
+        if index >= len(words):
+            assignments.extend(route_assignment(item) for item in prefix_assignments)
+            continue
+        while index < len(words) and words[index] in {"builtin", "command"}:
+            index += 1
+            if index < len(words) and words[index] == "--":
+                index += 1
+        if index >= len(words):
+            continue
+        executable = words[index]
+        if executable in {"declare", "export", "local", "readonly", "typeset"}:
+            if executable == "local" and command.function_context_id is None:
+                continue
+            options = tuple(
+                word
+                for word in words[index + 1 :]
+                if word.startswith(("-", "+")) and word not in {"-", "+"}
+            )
+            force_global = executable in {"declare", "typeset"} and any(
+                option.startswith("-") and "g" in option[1:] for option in options
+            )
+            local = executable in {"declare", "local", "typeset"} and not force_global
+            nameref_action: bool | None = None
+            for option in options:
+                if "n" in option[1:] and executable in {"declare", "local", "typeset"}:
+                    nameref_action = option.startswith("-")
+            for word_index in range(index + 1, len(words)):
+                word = words[word_index]
+                assignment = _static_assignment_word(word)
+                if assignment is not None:
+                    if nameref_action is False:
+                        aliases.pop(assignment.name, None)
+                    if nameref_action:
+                        target = (
+                            assignment.content.text
+                            if isinstance(assignment.content, LiteralTransfer)
+                            else ""
+                        )
+                        if not _static_variable_name(target):
+                            raise _TaintLimitExceeded(
+                                "shell eval nameref target cannot be represented"
+                            )
+                        assignment = replace(
+                            assignment,
+                            content=VariableRef(target),
+                            nameref_target=target,
+                        )
+                    mutation = _StaticEvalAssignment(
+                        assignment,
+                        local=local,
+                        force_global=force_global,
+                        eval_content=_static_eval_assignment_content(
+                            parsed.source_words[word_index]
+                        ),
+                    )
+                    assignments.append(route_assignment(mutation))
+                elif (
+                    nameref_action is False
+                    and _static_variable_name(word)
+                    and not word.startswith(("-", "+"))
+                ):
+                    aliases.pop(word, None)
+        elif executable == "unset":
+            unsets.extend(
+                word
+                for word in words[index + 1 :]
+                if not word.startswith("-") and _static_variable_name(word)
+            )
+    return tuple(assignments), tuple(dict.fromkeys(unsets))
+
+
+def _eval_assignment_transfers(
+    command: _CommandEvidence,
+) -> tuple[_StaticEvalAssignment, ...]:
+    """Retain one dynamic eval assignment as a caller-state transfer."""
+    transfers: list[_StaticEvalAssignment] = []
+    for executable in _builtin_eval_candidates(command):
+        if executable.argv_index is None:
+            continue
+        arguments = command.argv[executable.argv_index + 1 :]
+        if len(arguments) != 1 or not isinstance(arguments[0].content, Concat):
+            continue
+        parts = arguments[0].content.parts
+        if not parts or not isinstance(parts[0], LiteralTransfer):
+            continue
+        name, separator, literal_value = parts[0].text.partition("=")
+        append = name.endswith("+")
+        if append:
+            name = name[:-1]
+        if not separator or not _static_variable_name(name):
+            continue
+        transfers.append(
+            _StaticEvalAssignment(
+                _AssignmentEvidence(
+                    name,
+                    concat(LiteralTransfer(literal_value), *parts[1:]),
+                    append=append,
+                )
+            )
+        )
+    return tuple(transfers)
+
+
+def _static_eval_command_names(command: _CommandEvidence) -> tuple[str, ...]:
+    """Return exact simple-command heads executed by bounded static eval input."""
+    names: list[str] = []
+    for parsed in _static_eval_commands(command):
+        words = parsed.words
+        index = 0
+        while index < len(words) and _static_assignment_word(words[index]) is not None:
+            index += 1
+        while index < len(words):
+            if words[index] == "!" and parsed.keyword_eligible[index]:
+                index += 1
+                continue
+            if not parsed.keyword_eligible[index] or words[index] not in {
+                "coproc",
+                "do",
+                "elif",
+                "else",
+                "if",
+                "then",
+                "time",
+                "until",
+                "while",
+            }:
+                break
+            prefix = words[index]
+            index += 1
+            if prefix == "time":
+                while index < len(words) and words[index].startswith("-"):
+                    index += 1
+        if index < len(words) and words[index] not in {"done", "esac", "fi"}:
+            names.append(words[index])
+    return tuple(dict.fromkeys(names))
+
+
+def _unset_function_names(command: _CommandEvidence) -> tuple[str, ...]:
+    """Return exact function names removed by a literal ``unset -f`` command."""
+    executable_index = _builtin_executable_index(command, "unset")
+    if executable_index is None:
+        return ()
+    function_only = False
+    options_enabled = True
+    names: list[str] = []
+    for argument in command.argv[executable_index + 1 :]:
+        if options_enabled and argument.literal == "--" and not argument.dynamic:
+            options_enabled = False
+            continue
+        if (
+            options_enabled
+            and not argument.dynamic
+            and argument.literal.startswith("-")
+            and argument.literal != "-"
+        ):
+            flags = argument.literal[1:]
+            function_only = "f" in flags and "v" not in flags
+            continue
+        if function_only and not argument.dynamic:
+            names.append(argument.literal)
+    return tuple(names)
+
+
+def _contextualize_evidence(  # noqa: PLR0912, PLR0915
+    evidence: _ShellTaintEvidence,
+    *,
+    limits: TaintLimits = TaintLimits(),  # noqa: B008
+) -> _ShellTaintEvidence:
     """Bind command-local first-pass variable reads before solving global flow tables."""
     if not evidence.scopes:
         return evidence
+    evidence = replace(
+        evidence,
+        commands=tuple(
+            replace(
+                command,
+                builtin_assignments=(),
+                builtin_unsets=(),
+                builtin_local=False,
+                builtin_force_global=False,
+                builtin_dynamic_options=False,
+                unknown_builtin_content=None,
+                unsupported_builtin_write=False,
+            )
+            if command.function_context_id is None
+            and _builtin_executable_index(command, "local") is not None
+            else command
+            for command in evidence.commands
+        ),
+    )
+    contextualization_edges = 0
+
+    def charge_edges(amount: int = 1) -> None:
+        nonlocal contextualization_edges
+        contextualization_edges += amount
+        if contextualization_edges > limits.max_edges:
+            raise _TaintLimitExceeded("shell taint edge limit exceeded")
+
     environments, _parents = _scope_environment_ids(evidence.scopes)
-    command_environments, _execution_parents, _lastpipe = _execution_environment_ids(evidence)
+    command_environments, execution_parents, _lastpipe = _execution_environment_ids(evidence)
+    conditional_commands = _control_conditional_commands(evidence)
+
+    exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
+    exact_values_before: dict[int, dict[str, str]] = {}
+
+    def exact_state_for(context: int | None, environment: int) -> dict[str, str]:
+        key = (context, environment)
+        cached = exact_values_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = execution_parents.get(environment)
+        inherited = dict(exact_state_for(context, parent)) if parent is not None else {}
+        charge_edges(len(inherited))
+        exact_values_by_environment[key] = inherited
+        return inherited
+
+    def exact_literal(expression: ContentExpr, values: Mapping[str, str]) -> str | None:
+        memo: dict[int, str | None] = {}
+        scheduled: set[int] = set()
+        pending = [(expression, False)]
+        while pending:
+            current, expanded = pending.pop()
+            current_id = id(current)
+            if current_id in memo:
+                continue
+            if not expanded:
+                if current_id in scheduled:
+                    continue
+                scheduled.add(current_id)
+                charge_edges()
+                pending.append((current, True))
+                if isinstance(current, Choice | Concat):
+                    pending.extend((part, False) for part in reversed(current.parts))
+                continue
+            if isinstance(current, LiteralTransfer):
+                value: str | None = current.text
+            elif isinstance(current, VariableRef):
+                value = values.get(_unscoped_variable_name(current.name))
+            elif isinstance(current, Concat):
+                parts = tuple(memo.get(id(part)) for part in current.parts)
+                value = (
+                    None
+                    if any(part is None for part in parts)
+                    else "".join(part for part in parts if part is not None)
+                )
+            elif isinstance(current, Choice):
+                alternatives = {memo.get(id(part)) for part in current.parts}
+                value = alternatives.pop() if len(alternatives) == 1 else None
+            else:
+                value = None
+            memo[current_id] = value
+        return memo[id(expression)]
+
+    def apply_exact_assignment(
+        assignment: _AssignmentEvidence,
+        values: dict[str, str],
+        *,
+        conditional: bool,
+    ) -> None:
+        name = _unscoped_variable_name(assignment.name)
+        if conditional:
+            values.pop(name, None)
+            return
+        value = exact_literal(assignment.content, values)
+        if (
+            assignment.conditional
+            and name in values
+            and (not assignment.assign_if_null or values[name])
+        ):
+            return
+        if value is None:
+            values.pop(name, None)
+        elif assignment.append:
+            prior = values.get(name)
+            if prior is None:
+                values.pop(name, None)
+            else:
+                values[name] = prior + value
+        else:
+            values[name] = value
+
+    def exact_eval_program(
+        command: _CommandEvidence,
+        values: Mapping[str, str],
+    ) -> str | None:
+        for executable in _builtin_eval_candidates(command):
+            if executable.argv_index is None:
+                continue
+            arguments: list[str] = []
+            for argument in command.argv[executable.argv_index + 1 :]:
+                value = exact_literal(argument.content, values)
+                if value is None:
+                    break
+                arguments.append(value)
+            else:
+                return " ".join(arguments)
+        return None
+
+    resolved_commands: list[_CommandEvidence] = []
+    for command in evidence.commands:
+        context = command.function_context_id
+        environment = command_environments[command.command_id]
+        exact_values = exact_state_for(context, environment)
+        exact_values_before[command.command_id] = dict(exact_values)
+        charge_edges(len(exact_values))
+        eval_values = dict(exact_values)
+        charge_edges(len(eval_values))
+        for assignment in command.definite_assignments:
+            apply_exact_assignment(assignment, eval_values, conditional=False)
+
+        resolved_program = exact_eval_program(command, eval_values)
+        resolved = (
+            replace(command, resolved_eval_program=resolved_program)
+            if resolved_program is not None
+            else command
+        )
+        resolved_commands.append(resolved)
+
+        conditional = (
+            command.function_effect_conditional
+            if context is not None
+            else command.conditionally_executed
+        ) or command.command_id in conditional_commands
+        assignment_only = not command.argv or command.executable.argv_index is None
+        assignments = (
+            (*command.definite_assignments, *command.builtin_assignments)
+            if assignment_only
+            else command.builtin_assignments
+        )
+        eval_assignments, eval_unsets = _static_eval_mutations(resolved)
+        for assignment in (
+            *assignments,
+            *(mutation.assignment for mutation in eval_assignments),
+        ):
+            apply_exact_assignment(assignment, exact_values, conditional=conditional)
+        unset_names, unknown_unset = _unset_action(command)
+        if unknown_unset or command.unknown_builtin_content is not None:
+            exact_values.clear()
+        for name in (*unset_names, *eval_unsets):
+            exact_values.pop(name, None)
+
+    evidence = replace(evidence, commands=tuple(resolved_commands))
+
+    def constant_command_status(command: _CommandEvidence) -> bool | None:
+        for executable in _iter_executable_evidence(command.executable):
+            if (
+                executable.name == executable.literal
+                and not executable.external_lookup
+                and executable.name in {"false", "true"}
+            ):
+                return executable.name == "true"
+        return None
+
+    def invert_status(status: bool | None) -> bool | None:
+        return None if status is None else not status
+
+    def and_status(left: bool | None, right: bool | None) -> bool | None:
+        if left is False or right is False:
+            return False
+        if left is True and right is True:
+            return True
+        return None
+
+    control_frames: dict[int | None, list[tuple[str, bool | None]]] = {}
+    control_status: dict[int, bool | None] = {}
+    control_openers = {
+        "case": ("esac", None),
+        "for": ("done", None),
+        "if": ("fi", None),
+        "select": ("done", None),
+        "until": ("done", None),
+        "while": ("done", None),
+    }
+    for command in evidence.commands:
+        context = command.function_context_id
+        frames = control_frames.setdefault(context, [])
+        head = command.argv[0].literal if command.argv else None
+        if frames and frames[-1][0] == "fi":
+            closer, branch = frames[-1]
+            if head == "else":
+                frames[-1] = (closer, invert_status(branch))
+            elif head == "elif":
+                frames[-1] = (
+                    closer,
+                    and_status(invert_status(branch), constant_command_status(command)),
+                )
+        status: bool | None = True
+        for _closer, frame_status in frames:
+            status = and_status(status, frame_status)
+        control_status[command.command_id] = status
+        if head in control_openers:
+            closer, status = control_openers[head]
+            if head in {"if", "while"}:
+                status = constant_command_status(command)
+            elif head == "until":
+                status = invert_status(constant_command_status(command))
+            frames.append((closer, status))
+        elif frames and head == frames[-1][0]:
+            frames.pop()
+
+    previous_by_context: dict[int | None, _CommandEvidence] = {}
+    conditional_execution: dict[int, bool | None] = {}
+    for command in evidence.commands:
+        status = control_status[command.command_id]
+        previous = previous_by_context.get(command.function_context_id)
+        previous_status = constant_command_status(previous) if previous is not None else None
+        if command.conditional_operator == "&&":
+            status = and_status(status, previous_status)
+        elif command.conditional_operator == "||":
+            status = and_status(status, invert_status(previous_status))
+        elif status is True and (
+            command.function_effect_conditional
+            if command.function_context_id is not None
+            else command.conditionally_executed
+        ):
+            status = None
+        conditional_execution[command.command_id] = status
+        previous_by_context[command.function_context_id] = command
+
+    active_locals: dict[int, set[str]] = {}
+    definitely_set_locals: dict[int, set[str]] = {}
+    command_locals: dict[int, frozenset[str]] = {}
+    command_set_locals: dict[int, frozenset[str]] = {}
+    for command in evidence.commands:
+        context = command.function_context_id
+        names = active_locals.setdefault(context, set()) if context is not None else set()
+        set_names = (
+            definitely_set_locals.setdefault(context, set()) if context is not None else set()
+        )
+        command_locals[command.command_id] = frozenset(names)
+        command_set_locals[command.command_id] = frozenset(set_names)
+        if context is not None and command.builtin_local:
+            names.update(assignment.name for assignment in command.builtin_assignments)
+            names.update(command.builtin_unsets)
+            set_names.update(assignment.name for assignment in command.builtin_assignments)
+            set_names.difference_update(command.builtin_unsets)
+        if context is not None:
+            set_names.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in command.definite_assignments
+                if _unscoped_variable_name(assignment.name) in names
+            )
+            set_names.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in command.builtin_assignments
+                if _unscoped_variable_name(assignment.name) in names
+            )
+            unset_names, unknown_unset = _unset_action(command)
+            set_names.difference_update(name for name in unset_names if name in names)
+            if unknown_unset:
+                set_names.clear()
+
+    active_definitions_by_environment: dict[int, dict[str, int]] = {}
+    active_definitions_before: dict[int, dict[str, int]] = {}
+
+    def active_definitions_for(environment: int) -> dict[str, int]:
+        cached = active_definitions_by_environment.get(environment)
+        if cached is not None:
+            return cached
+        parent = execution_parents.get(environment)
+        inherited = dict(active_definitions_for(parent)) if parent is not None else {}
+        active_definitions_by_environment[environment] = inherited
+        return inherited
+
+    for command in evidence.commands:
+        environment = command_environments[command.command_id]
+        active_definitions = active_definitions_for(environment)
+        active_definitions_before[command.command_id] = dict(active_definitions)
+        charge_edges(len(active_definitions))
+        if conditional_execution[command.command_id] is True:
+            if (
+                command.defines_function_name is not None
+                and command.defines_function_context_id is not None
+            ):
+                active_definitions[command.defines_function_name] = (
+                    command.defines_function_context_id
+                )
+            for name in _unset_function_names(command):
+                active_definitions.pop(name, None)
+
+    definitions_by_name: dict[str, list[tuple[int, int]]] = {}
+    for command in evidence.commands:
+        if (
+            command.defines_function_name is not None
+            and command.defines_function_context_id is not None
+        ):
+            definitions_by_name.setdefault(command.defines_function_name, []).append(
+                (command.command_id, command.defines_function_context_id)
+            )
+    function_contexts = {
+        context
+        for command in evidence.commands
+        for context in (command.defines_function_context_id,)
+        if context is not None
+    }
+    direct_callers: dict[int, set[int]] = {context: set() for context in function_contexts}
+    call_commands: list[tuple[_CommandEvidence, int]] = []
+
+    def called_names(command: _CommandEvidence) -> tuple[str, ...]:
+        if command.defines_function_context_id is not None:
+            return ()
+        names: list[str] = []
+        if command.executable.name is not None:
+            names.append(command.executable.name)
+        names.extend(
+            name for name in _static_eval_command_names(command) if name in definitions_by_name
+        )
+        return tuple(dict.fromkeys(names))
+
+    def callees_for(command: _CommandEvidence) -> tuple[int, ...]:
+        callees: list[int] = []
+        for name in called_names(command):
+            definitions = definitions_by_name.get(name, ())
+            if command.function_context_id is None:
+                active = active_definitions_before[command.command_id].get(name)
+                if active is not None:
+                    callees.append(active)
+            else:
+                callees.extend(context for _definition_id, context in definitions)
+            charge_edges(len(definitions))
+        return tuple(dict.fromkeys(callees))
+
+    for command in evidence.commands:
+        for callee in callees_for(command):
+            charge_edges()
+            call_commands.append((command, callee))
+            if command.function_context_id is not None:
+                direct_callers.setdefault(callee, set()).add(command.function_context_id)
+
+    preliminary_call_sites: dict[int, list[_CommandEvidence]] = {}
+    reachable_contexts: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for command, callee in call_commands:
+            caller = command.function_context_id
+            if (
+                conditional_execution[command.command_id] is False
+                or (caller is not None and caller not in reachable_contexts)
+                or callee in reachable_contexts
+            ):
+                continue
+            reachable_contexts.add(callee)
+            charge_edges()
+            changed = True
+    for command, callee in call_commands:
+        caller = command.function_context_id
+        if (
+            callee in reachable_contexts
+            and conditional_execution[command.command_id] is not False
+            and (caller is None or caller in reachable_contexts)
+        ):
+            preliminary_call_sites.setdefault(callee, []).append(command)
+
+    positional_references_by_context: dict[int, frozenset[str]] = {}
+    for context in function_contexts:
+        positional_names: set[str] = set()
+        for command in evidence.commands:
+            if command.function_context_id != context:
+                continue
+            expressions: list[ContentExpr] = [
+                *(argument.content for argument in command.argv),
+                *(assignment.content for assignment in command.assignments),
+                *(assignment.content for assignment in command.definite_assignments),
+                *(assignment.content for assignment in command.builtin_assignments),
+            ]
+            if command.unknown_builtin_content is not None:
+                expressions.append(command.unknown_builtin_content)
+            eval_assignments, _eval_unsets = _static_eval_mutations(command)
+            expressions.extend(
+                mutation.eval_content
+                for mutation in eval_assignments
+                if mutation.eval_content is not None
+            )
+            for expression in expressions:
+                positional_names.update(_expression_function_positionals(expression))
+        positional_references_by_context[context] = frozenset(positional_names)
+
+    function_names_by_context = {
+        command.defines_function_context_id: command.defines_function_name
+        for command in evidence.commands
+        if command.defines_function_context_id is not None
+        and command.defines_function_name is not None
+    }
+
+    def positional_set_operands(
+        command: _CommandEvidence,
+    ) -> tuple[tuple[_ArgPort, ...] | None, bool]:
+        executable_index = _builtin_executable_index(command, "set")
+        if executable_index is None:
+            return None, False
+        arguments = command.argv[executable_index + 1 :]
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument.dynamic:
+                return None, True
+            literal = argument.literal
+            if literal in {"--", "-"}:
+                operands = arguments[index + 1 :]
+                return (operands if operands or literal == "--" else None), False
+            if literal.startswith(("-", "+")) and literal not in {"-", "+"}:
+                if "o" in literal[1:] and index + 1 < len(arguments):
+                    index += 1
+                    if arguments[index].dynamic:
+                        return None, True
+                index += 1
+                continue
+            return arguments[index:], False
+        return None, False
+
+    def positional_mutation_kind(command: _CommandEvidence) -> str | None:
+        if _builtin_executable_index(command, "shift") is not None:
+            return "shift"
+        operands, unknown = positional_set_operands(command)
+        if operands is not None or unknown:
+            return "set"
+        return None
+
+    positional_mutating_contexts = {
+        context
+        for command in evidence.commands
+        for context in (command.function_context_id,)
+        if context is not None and positional_mutation_kind(command) is not None
+    }
+
+    def positional_call_arguments(
+        command: _CommandEvidence,
+        callee: int,
+    ) -> tuple[_ArgPort, ...] | None:
+        executable_index = command.executable.argv_index
+        if executable_index is None or command.executable.name != function_names_by_context.get(
+            callee
+        ):
+            return None
+        return command.argv[executable_index + 1 :]
+
+    def positional_call_contents(
+        command: _CommandEvidence,
+        callee: int,
+    ) -> dict[str, ContentExpr]:
+        names = positional_references_by_context.get(callee, ())
+        if not names:
+            return {}
+        arguments = positional_call_arguments(command, callee)
+        if arguments is None:
+            raise _TaintLimitExceeded("unsupported function positional argument")
+        if any(argument.dynamic for argument in arguments):
+            raise _TaintLimitExceeded("dynamic function positional argument")
+        joined = concat(
+            *(
+                part
+                for index, argument in enumerate(arguments)
+                for part in (
+                    *((LiteralTransfer(" "),) if index else ()),
+                    argument.content,
+                )
+            )
+        )
+        bindings: dict[str, ContentExpr] = {}
+        for name in names:
+            if name in {"@", "*", _QUOTED_FUNCTION_POSITIONAL_STAR}:
+                bindings[name] = joined
+                continue
+            argument_index = _function_positional_index(name, len(arguments))
+            bindings[name] = (
+                arguments[argument_index].content
+                if argument_index is not None
+                else LiteralTransfer("")
+            )
+        charge_edges(len(bindings))
+        return bindings
+
+    def exact_positional_arguments(values: Mapping[str, str]) -> list[str]:
+        arguments: list[str] = []
+        index = 1
+        while str(index) in values:
+            arguments.append(values[str(index)])
+            index += 1
+        charge_edges(len(arguments))
+        return arguments
+
+    def refresh_exact_positionals(
+        values: dict[str, str],
+        context: int,
+        *,
+        default_ifs: bool,
+    ) -> None:
+        arguments = exact_positional_arguments(values)
+        joined = " ".join(arguments)
+        values["@"] = joined
+        values["*"] = joined
+        if _QUOTED_FUNCTION_POSITIONAL_STAR not in positional_references_by_context.get(
+            context,
+            (),
+        ):
+            return
+        if "IFS" not in values:
+            if not default_ifs:
+                raise _TaintLimitExceeded("dynamic function positional IFS")
+            values["IFS"] = " "
+        values[_QUOTED_FUNCTION_POSITIONAL_STAR] = values["IFS"][:1].join(arguments)
+
+    def replace_exact_positionals(
+        values: dict[str, str],
+        arguments: list[str],
+        context: int,
+    ) -> None:
+        for name in tuple(values):
+            if _is_function_positional_parameter(name):
+                del values[name]
+        values.update((str(index), value) for index, value in enumerate(arguments, start=1))
+        refresh_exact_positionals(values, context, default_ifs=True)
+
+    def bind_exact_positionals(
+        command: _CommandEvidence,
+        callee: int,
+        values: dict[str, str],
+    ) -> None:
+        if not positional_references_by_context.get(callee):
+            return
+        arguments = positional_call_arguments(command, callee)
+        if arguments is None:
+            raise _TaintLimitExceeded("unsupported function positional argument")
+        if any(argument.dynamic for argument in arguments):
+            raise _TaintLimitExceeded("dynamic function positional argument")
+        exact_arguments: list[str] = []
+        for argument in arguments:
+            value = exact_literal(argument.content, values)
+            if value is None:
+                raise _TaintLimitExceeded("dynamic function positional argument")
+            exact_arguments.append(value)
+        replace_exact_positionals(values, exact_arguments, callee)
+
+    def apply_exact_positional_mutation(
+        command: _CommandEvidence,
+        values: dict[str, str],
+        context: int,
+    ) -> None:
+        kind = positional_mutation_kind(command)
+        if kind is None:
+            return
+        executable_index = _builtin_executable_index(command, kind)
+        if executable_index is None:
+            return
+        arguments = exact_positional_arguments(values)
+        operands = command.argv[executable_index + 1 :]
+        if kind == "shift":
+            if len(operands) > 1 or any(operand.dynamic for operand in operands):
+                raise _TaintLimitExceeded("dynamic function positional mutation")
+            amount_text = operands[0].literal if operands else "1"
+            if not amount_text.isdigit():
+                raise _TaintLimitExceeded("dynamic function positional mutation")
+            digits = amount_text.lstrip("0") or "0"
+            maximum = str(len(arguments))
+            if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
+                return
+            amount = int(digits)
+            replace_exact_positionals(values, arguments[amount:], context)
+            return
+        set_operands, unknown = positional_set_operands(command)
+        if unknown or set_operands is None:
+            raise _TaintLimitExceeded("dynamic function positional mutation")
+        exact_arguments = []
+        for operand in set_operands:
+            if operand.dynamic:
+                raise _TaintLimitExceeded("dynamic function positional mutation")
+            value = exact_literal(operand.content, values)
+            if value is None:
+                raise _TaintLimitExceeded("dynamic function positional mutation")
+            exact_arguments.append(value)
+        replace_exact_positionals(values, exact_arguments, context)
+
+    def exact_call_values(
+        command: _CommandEvidence,
+        caller_values: Mapping[str, str],
+        callee: int,
+    ) -> dict[str, str]:
+        context = command.function_context_id
+        values = dict(caller_values) if context is not None else {}
+        lexical = exact_values_before[command.command_id]
+        for name in command_locals[command.command_id]:
+            if name not in lexical:
+                values.pop(name, None)
+        values.update(lexical)
+        for assignment in command.definite_assignments:
+            apply_exact_assignment(assignment, values, conditional=False)
+        bind_exact_positionals(command, callee, values)
+        charge_edges(len(values))
+        return values
+
+    def exact_variant_identity(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted(values.items()))
+
+    exact_entry_variants: dict[int, tuple[dict[str, str], ...]] = dict.fromkeys(
+        function_contexts,
+        (),
+    )
+    exact_entry_updates = 0
+    changed = True
+    while changed:
+        changed = False
+        for context in reachable_contexts:
+            variants = {
+                exact_variant_identity(values): dict(values)
+                for values in exact_entry_variants[context]
+            }
+            for command in preliminary_call_sites.get(context, ()):
+                caller = command.function_context_id
+                caller_variants = ({},) if caller is None else exact_entry_variants.get(caller, ())
+                for caller_values in caller_variants:
+                    values = exact_call_values(command, caller_values, context)
+                    variants.setdefault(exact_variant_identity(values), values)
+            if len(variants) > limits.max_alternatives:
+                raise _TaintLimitExceeded("shell taint alternative limit exceeded")
+            candidate = tuple(variants.values())
+            if tuple(map(exact_variant_identity, candidate)) == tuple(
+                map(exact_variant_identity, exact_entry_variants[context])
+            ):
+                continue
+            exact_entry_variants[context] = candidate
+            exact_entry_updates += 1
+            if exact_entry_updates > limits.max_fixed_point_updates:
+                raise _TaintLimitExceeded(
+                    "shell taint contextualization fixed-point update limit exceeded"
+                )
+            changed = True
+
+    exact_function_base_environments = {
+        command.defines_function_context_id: command_environments[command.command_id]
+        for command in evidence.commands
+        if command.defines_function_context_id is not None
+    }
+
+    exact_effects: dict[int, tuple[_ExactFunctionEffect, ...]] = dict.fromkeys(
+        function_contexts,
+        (),
+    )
+    exact_effect_unknown: set[int] = set()
+
+    exact_effect_updates = 0
+    changed = True
+    while changed:
+        changed = False
+        for context in function_contexts:
+            effects: list[_ExactFunctionEffect] = []
+            local_values: dict[str, str] = {}
+            local_contents: dict[str, ContentExpr] = {}
+            effect_positional_arguments: tuple[ContentExpr, ...] | None = None
+            effect_shift_offset = 0
+            unknown = False
+
+            def effect_content(
+                expression: ContentExpr,
+                positional_arguments: tuple[ContentExpr, ...] | None,
+                shift_offset: int,
+            ) -> ContentExpr:
+                return _substitute_function_positionals(
+                    expression,
+                    positional_arguments,
+                    shift_offset,
+                )
+
+            def apply_effect_positional_mutation(
+                command: _CommandEvidence,
+                *,
+                effect_context: int = context,
+            ) -> None:
+                nonlocal effect_positional_arguments, effect_shift_offset
+                kind = positional_mutation_kind(command)
+                if kind is None:
+                    return
+                executable_index = _builtin_executable_index(command, kind)
+                if executable_index is None:
+                    return
+                operands = command.argv[executable_index + 1 :]
+                if kind == "shift":
+                    if len(operands) > 1 or any(operand.dynamic for operand in operands):
+                        raise _TaintLimitExceeded("dynamic function positional mutation")
+                    amount_text = operands[0].literal if operands else "1"
+                    if not amount_text.isdigit() or len(amount_text) > _MAX_BRACE_INTEGER_DIGITS:
+                        raise _TaintLimitExceeded("dynamic function positional mutation")
+                    amount = int(amount_text)
+                    if effect_positional_arguments is None:
+                        argument_counts: set[int] = set()
+                        for call in preliminary_call_sites.get(effect_context, ()):
+                            arguments = positional_call_arguments(call, effect_context)
+                            if arguments is None or any(argument.dynamic for argument in arguments):
+                                raise _TaintLimitExceeded("dynamic function positional mutation")
+                            argument_counts.add(len(arguments))
+                        if argument_counts and all(
+                            count >= effect_shift_offset + amount for count in argument_counts
+                        ):
+                            effect_shift_offset += amount
+                        elif any(
+                            count >= effect_shift_offset + amount for count in argument_counts
+                        ):
+                            raise _TaintLimitExceeded("dynamic function positional mutation")
+                    elif amount <= len(effect_positional_arguments):
+                        effect_positional_arguments = effect_positional_arguments[amount:]
+                    return
+                set_operands, dynamic = positional_set_operands(command)
+                if dynamic or set_operands is None:
+                    raise _TaintLimitExceeded("dynamic function positional mutation")
+                effect_positional_arguments = tuple(operand.content for operand in set_operands)
+                effect_shift_offset = 0
+
+            def apply_local_assignment(
+                assignment: _AssignmentEvidence,
+                exact_values: dict[str, str],
+                contents: dict[str, ContentExpr],
+                *,
+                conditional: bool,
+            ) -> None:
+                name = _unscoped_variable_name(assignment.name)
+                content = _substitute_local_contents(
+                    assignment.content,
+                    contents,
+                )
+                resolved = replace(assignment, content=content)
+                if conditional:
+                    contents.pop(name, None)
+                elif assignment.append:
+                    prior = contents.get(name)
+                    contents[name] = concat(prior, content) if prior is not None else content
+                else:
+                    contents[name] = content
+                apply_exact_assignment(
+                    resolved,
+                    exact_values,
+                    conditional=conditional,
+                )
+
+            for command in evidence.commands:
+                if (
+                    command.function_context_id != context
+                    or command_environments[command.command_id]
+                    != exact_function_base_environments.get(context)
+                    or conditional_execution[command.command_id] is False
+                ):
+                    continue
+                status = conditional_execution[command.command_id]
+                assignment_only = not command.argv or command.executable.argv_index is None
+                assignments = (
+                    *(
+                        (assignment, False)
+                        for assignment in command.definite_assignments
+                        if assignment_only
+                    ),
+                    *(
+                        (
+                            assignment,
+                            command.builtin_local and not command.builtin_force_global,
+                        )
+                        for assignment in command.builtin_assignments
+                    ),
+                )
+                eval_assignments, eval_unsets = _static_eval_mutations(command)
+                eval_assignments = (*eval_assignments, *_eval_assignment_transfers(command))
+                for assignment, local in assignments:
+                    resolved_effect_assignment = replace(
+                        assignment,
+                        content=effect_content(
+                            assignment.content,
+                            effect_positional_arguments,
+                            effect_shift_offset,
+                        ),
+                    )
+                    name = _unscoped_variable_name(resolved_effect_assignment.name)
+                    if local or name in command_locals[command.command_id]:
+                        apply_local_assignment(
+                            resolved_effect_assignment,
+                            local_values,
+                            local_contents,
+                            conditional=status is None,
+                        )
+                    else:
+                        resolved_assignment = replace(
+                            resolved_effect_assignment,
+                            content=_substitute_local_contents(
+                                resolved_effect_assignment.content,
+                                local_contents,
+                            ),
+                        )
+                        value = exact_literal(resolved_assignment.content, local_values)
+                        effects.append(
+                            _ExactFunctionEffect(
+                                assignment=(
+                                    replace(
+                                        resolved_assignment,
+                                        content=LiteralTransfer(value),
+                                    )
+                                    if value is not None
+                                    else resolved_assignment
+                                ),
+                                optional=status is None,
+                            )
+                        )
+                for mutation in eval_assignments:
+                    name = _unscoped_variable_name(mutation.assignment.name)
+                    local = not mutation.force_global and (
+                        mutation.local or name in command_locals[command.command_id]
+                    )
+                    assignment = (
+                        replace(
+                            mutation.assignment,
+                            content=effect_content(
+                                mutation.eval_content,
+                                effect_positional_arguments,
+                                effect_shift_offset,
+                            ),
+                        )
+                        if mutation.eval_content is not None
+                        else replace(
+                            mutation.assignment,
+                            content=effect_content(
+                                mutation.assignment.content,
+                                effect_positional_arguments,
+                                effect_shift_offset,
+                            ),
+                        )
+                    )
+                    if local:
+                        apply_local_assignment(
+                            assignment,
+                            local_values,
+                            local_contents,
+                            conditional=status is None,
+                        )
+                    else:
+                        assignment = replace(
+                            assignment,
+                            content=_substitute_local_contents(
+                                assignment.content,
+                                local_contents,
+                            ),
+                        )
+                        value = exact_literal(assignment.content, local_values)
+                        effects.append(
+                            _ExactFunctionEffect(
+                                assignment=(
+                                    replace(
+                                        assignment,
+                                        content=LiteralTransfer(value),
+                                    )
+                                    if value is not None
+                                    else assignment
+                                ),
+                                optional=status is None,
+                            )
+                        )
+                unset_names, unknown_unset = _unset_action(command)
+                for name in (*unset_names, *eval_unsets):
+                    if name in command_locals[command.command_id]:
+                        local_values.pop(name, None)
+                        local_contents.pop(name, None)
+                    else:
+                        effects.append(
+                            _ExactFunctionEffect(
+                                unset_name=name,
+                                optional=status is None,
+                            )
+                        )
+                for name in command.builtin_unsets:
+                    local_values.pop(name, None)
+                    local_contents.pop(name, None)
+                unknown = unknown or unknown_unset or command.unknown_builtin_content is not None
+                for callee in callees_for(command):
+                    if callee == context:
+                        unknown = True
+                    else:
+                        callee_values = dict(local_values)
+                        for assignment in command.definite_assignments:
+                            resolved_assignment = replace(
+                                assignment,
+                                content=_substitute_local_contents(
+                                    effect_content(
+                                        assignment.content,
+                                        effect_positional_arguments,
+                                        effect_shift_offset,
+                                    ),
+                                    local_contents,
+                                ),
+                            )
+                            apply_exact_assignment(
+                                resolved_assignment,
+                                callee_values,
+                                conditional=False,
+                            )
+                        bind_exact_positionals(command, callee, callee_values)
+                        for effect in exact_effects.get(callee, ()):
+                            assignment = effect.assignment
+                            if assignment is not None:
+                                assignment = replace(
+                                    assignment,
+                                    content=_substitute_local_contents(
+                                        assignment.content,
+                                        local_contents,
+                                    ),
+                                )
+                                value = exact_literal(assignment.content, callee_values)
+                                if value is not None:
+                                    assignment = replace(
+                                        assignment,
+                                        content=LiteralTransfer(value),
+                                    )
+                                apply_exact_assignment(
+                                    assignment,
+                                    callee_values,
+                                    conditional=effect.optional,
+                                )
+                            elif effect.unset_name is not None:
+                                callee_values.pop(effect.unset_name, None)
+                            effects.append(
+                                replace(effect, assignment=assignment)
+                                if assignment is not effect.assignment
+                                else effect
+                            )
+                        unknown = unknown or callee in exact_effect_unknown
+                apply_effect_positional_mutation(command)
+                if len(effects) > limits.max_edges:
+                    raise _TaintLimitExceeded("shell taint edge limit exceeded")
+            frozen_effects = tuple(effects)
+            if frozen_effects != exact_effects[context]:
+                exact_effects[context] = frozen_effects
+                exact_effect_updates += 1
+                changed = True
+            if unknown and context not in exact_effect_unknown:
+                exact_effect_unknown.add(context)
+                exact_effect_updates += 1
+                changed = True
+            if exact_effect_updates > limits.max_fixed_point_updates:
+                raise _TaintLimitExceeded(
+                    "shell taint contextualization fixed-point update limit exceeded"
+                )
+
+    call_time_values = {
+        context: [dict(values) for values in variants]
+        for context, variants in exact_entry_variants.items()
+    }
+    exact_positionals_before: dict[int, dict[str, set[str]]] = {}
+    call_time_resolved_commands: list[_CommandEvidence] = []
+    for command in evidence.commands:
+        context = command.function_context_id
+        if context is None:
+            call_time_resolved_commands.append(command)
+            continue
+        states = call_time_values.setdefault(context, [])
+        programs: set[str] = set()
+        next_states: dict[tuple[tuple[str, str], ...], dict[str, str]] = {}
+        for values in states:
+            eval_values = dict(values)
+            for assignment in command.definite_assignments:
+                apply_exact_assignment(assignment, eval_values, conditional=False)
+            refresh_exact_positionals(
+                eval_values,
+                context,
+                default_ifs=False,
+            )
+            positional_values = exact_positionals_before.setdefault(
+                command.command_id,
+                {},
+            )
+            for name, value in eval_values.items():
+                if _is_function_positional_parameter(name):
+                    positional_values.setdefault(name, set()).add(value)
+                    charge_edges()
+            charge_edges(len(eval_values))
+            program = exact_eval_program(command, eval_values)
+            if program is not None:
+                programs.add(program)
+            resolved_variant = (
+                replace(
+                    command,
+                    resolved_eval_program=program,
+                    resolved_eval_programs=(),
+                )
+                if program is not None
+                else command
+            )
+
+            updated = dict(values)
+            if (
+                command_environments[command.command_id]
+                == exact_function_base_environments.get(context)
+                and conditional_execution[command.command_id] is not False
+            ):
+                status = conditional_execution[command.command_id]
+                assignment_only = not command.argv or command.executable.argv_index is None
+                assignments = (
+                    (*command.definite_assignments, *command.builtin_assignments)
+                    if assignment_only
+                    else command.builtin_assignments
+                )
+                eval_assignments, eval_unsets = _static_eval_mutations(resolved_variant)
+                for assignment in (
+                    *assignments,
+                    *(mutation.assignment for mutation in eval_assignments),
+                ):
+                    apply_exact_assignment(assignment, updated, conditional=status is None)
+                for name in command.builtin_unsets:
+                    updated.pop(name, None)
+                    if (
+                        name == "IFS"
+                        and command.builtin_local
+                        and _QUOTED_FUNCTION_POSITIONAL_STAR
+                        in positional_references_by_context.get(context, ())
+                    ):
+                        updated["IFS"] = " "
+                unset_names, unknown_unset = _unset_action(command)
+                if unknown_unset or command.unknown_builtin_content is not None:
+                    updated.clear()
+                for name in (*unset_names, *eval_unsets):
+                    updated.pop(name, None)
+                    if (
+                        name == "IFS"
+                        and _QUOTED_FUNCTION_POSITIONAL_STAR
+                        in positional_references_by_context.get(context, ())
+                    ):
+                        updated["IFS"] = " "
+                for callee in callees_for(command):
+                    if callee in exact_effect_unknown:
+                        updated.clear()
+                    callee_values = exact_call_values(command, updated, callee)
+                    for effect in exact_effects.get(callee, ()):
+                        assignment = effect.assignment
+                        if assignment is not None:
+                            value = exact_literal(assignment.content, callee_values)
+                            if value is not None:
+                                assignment = replace(
+                                    assignment,
+                                    content=LiteralTransfer(value),
+                                )
+                            apply_exact_assignment(
+                                assignment,
+                                updated,
+                                conditional=effect.optional,
+                            )
+                            apply_exact_assignment(
+                                assignment,
+                                callee_values,
+                                conditional=effect.optional,
+                            )
+                        elif effect.unset_name is not None:
+                            updated.pop(effect.unset_name, None)
+                            callee_values.pop(effect.unset_name, None)
+                apply_exact_positional_mutation(command, updated, context)
+            next_states.setdefault(exact_variant_identity(updated), updated)
+        if len(next_states) > limits.max_alternatives:
+            raise _TaintLimitExceeded("shell taint alternative limit exceeded")
+        call_time_values[context] = list(next_states.values())
+        if not programs:
+            programs.update(_static_eval_programs(command))
+        resolved = (
+            replace(
+                command,
+                resolved_eval_program=None,
+                resolved_eval_programs=tuple(sorted(programs)),
+            )
+            if programs
+            else command
+        )
+        call_time_resolved_commands.append(resolved)
+
+    evidence = replace(evidence, commands=tuple(call_time_resolved_commands))
+    exact_positional_prefixes = {
+        command_id: {
+            name: tuple(LiteralTransfer(value) for value in sorted(values))
+            for name, values in by_name.items()
+        }
+        for command_id, by_name in exact_positionals_before.items()
+    }
+    direct_callers = {context: set() for context in function_contexts}
+    call_commands = []
+    for command in evidence.commands:
+        for callee in callees_for(command):
+            charge_edges()
+            call_commands.append((command, callee))
+            if command.function_context_id is not None:
+                direct_callers.setdefault(callee, set()).add(command.function_context_id)
+
+    dynamic_callers = {context: set(callers) for context, callers in direct_callers.items()}
+    changed = True
+    while changed:
+        changed = False
+        for callers in dynamic_callers.values():
+            inherited = {
+                ancestor
+                for caller in tuple(callers)
+                for ancestor in dynamic_callers.get(caller, ())
+            }
+            if not inherited.issubset(callers):
+                charge_edges(len(inherited - callers))
+                callers.update(inherited)
+                changed = True
+    caller_locals_by_context: dict[int, dict[str, tuple[int, ...]]] = {}
+    for context, callers in dynamic_callers.items():
+        names = {name for caller in callers for name in active_locals.get(caller, ())}
+        caller_locals_by_context[context] = {
+            name: tuple(
+                sorted(caller for caller in callers if name in active_locals.get(caller, ()))
+            )
+            for name in names
+        }
+        charge_edges(
+            sum(
+                len(callers_for_name)
+                for callers_for_name in caller_locals_by_context[context].values()
+            )
+        )
+    call_sites_by_context: dict[int, list[_CommandEvidence]] = {}
+    for command, callee in call_commands:
+        call_sites_by_context.setdefault(callee, []).append(command)
+
+    function_base_environments = {
+        command.defines_function_context_id: command_environments[command.command_id]
+        for command in evidence.commands
+        if command.defines_function_context_id is not None
+    }
+
+    def persistent_function_effect(command: _CommandEvidence) -> bool:
+        context = command.function_context_id
+        return (
+            context is not None
+            and conditional_execution[command.command_id] is not False
+            and command_environments[command.command_id] == function_base_environments.get(context)
+        )
+
+    compound_bindings_by_command: dict[int, list[_AssignmentEvidence]] = {}
+    for scope in evidence.scopes:
+        if scope.binding_command_id is not None:
+            compound_bindings_by_command.setdefault(scope.binding_command_id, []).extend(
+                scope.loop_bindings
+            )
+
+    effect_names: dict[int, set[str]] = {context: set() for context in function_contexts}
+    effect_unknown: set[int] = set()
+    for command in evidence.commands:
+        context = command.function_context_id
+        if context is None or not persistent_function_effect(command):
+            continue
+        local_names = command_locals[command.command_id]
+        assignment_only = not command.argv or command.executable.argv_index is None
+        assignments = (
+            (*command.definite_assignments, *command.builtin_assignments)
+            if assignment_only
+            else command.builtin_assignments
+        )
+        eval_assignments, eval_unsets = _static_eval_mutations(command)
+        assignments = (
+            *assignments,
+            *command.assignments,
+            *compound_bindings_by_command.get(command.command_id, ()),
+            *(
+                mutation.assignment
+                for mutation in eval_assignments
+                if not mutation.local or mutation.force_global
+            ),
+        )
+        effect_names[context].update(
+            _unscoped_variable_name(assignment.name)
+            for assignment in assignments
+            if _unscoped_variable_name(assignment.name) not in local_names
+            and not command.builtin_local
+        )
+        unset_names, unknown_unset = _unset_action(command)
+        effect_names[context].update(
+            name for name in (*unset_names, *eval_unsets) if name not in local_names
+        )
+        if unknown_unset or command.unknown_builtin_content is not None:
+            effect_unknown.add(context)
+
+    changed = True
+    while changed:
+        changed = False
+        for call, callee in call_commands:
+            caller = call.function_context_id
+            if caller is None or not persistent_function_effect(call):
+                continue
+            inherited_names = effect_names.get(callee, ())
+            missing = set(inherited_names) - effect_names.setdefault(caller, set())
+            if missing:
+                charge_edges(len(missing))
+                effect_names[caller].update(missing)
+                changed = True
+            if callee in effect_unknown and caller not in effect_unknown:
+                effect_unknown.add(caller)
+                changed = True
+
+    global_values_by_environment: dict[
+        int,
+        dict[str, tuple[_CommandEvidence, ContentExpr]],
+    ] = {}
+    global_set_by_environment: dict[int, set[str]] = {}
+    global_unset_by_environment: dict[int, set[str]] = {}
+    global_values_before: dict[
+        int,
+        dict[str, tuple[_CommandEvidence, ContentExpr]],
+    ] = {}
+    global_set_before: dict[int, frozenset[str]] = {}
+    global_unset_before: dict[int, frozenset[str]] = {}
+
+    def global_state_for(
+        environment: int,
+    ) -> tuple[
+        dict[str, tuple[_CommandEvidence, ContentExpr]],
+        set[str],
+        set[str],
+    ]:
+        cached = global_values_by_environment.get(environment)
+        if cached is not None:
+            return (
+                cached,
+                global_set_by_environment[environment],
+                global_unset_by_environment[environment],
+            )
+        parent = execution_parents.get(environment)
+        if parent is None:
+            values: dict[str, tuple[_CommandEvidence, ContentExpr]] = {}
+            definitely_set: set[str] = set()
+            definitely_unset: set[str] = set()
+        else:
+            parent_values, parent_set, parent_unset = global_state_for(parent)
+            values = dict(parent_values)
+            definitely_set = set(parent_set)
+            definitely_unset = set(parent_unset)
+        global_values_by_environment[environment] = values
+        global_set_by_environment[environment] = definitely_set
+        global_unset_by_environment[environment] = definitely_unset
+        return values, definitely_set, definitely_unset
+
+    def invalidate_global(
+        name: str,
+        values: dict[str, tuple[_CommandEvidence, ContentExpr]],
+        definitely_set: set[str],
+        definitely_unset: set[str],
+    ) -> None:
+        values.pop(name, None)
+        definitely_set.discard(name)
+        definitely_unset.discard(name)
+
+    def apply_global_assignment(  # noqa: PLR0913
+        assignment: _AssignmentEvidence,
+        command: _CommandEvidence,
+        values: dict[str, tuple[_CommandEvidence, ContentExpr]],
+        definitely_set: set[str],
+        definitely_unset: set[str],
+        *,
+        conditional: bool,
+    ) -> None:
+        name = _unscoped_variable_name(assignment.name)
+        if conditional:
+            invalidate_global(name, values, definitely_set, definitely_unset)
+            return
+        if assignment.append:
+            prior = values.get(name)
+            if (
+                prior is not None
+                and isinstance(prior[1], LiteralTransfer)
+                and isinstance(assignment.content, LiteralTransfer)
+            ):
+                content: ContentExpr = LiteralTransfer(prior[1].text + assignment.content.text)
+            elif name in definitely_unset:
+                content = assignment.content
+            else:
+                invalidate_global(name, values, definitely_set, definitely_unset)
+                return
+            values[name] = (command, content)
+            definitely_set.add(name)
+            definitely_unset.discard(name)
+            return
+        if assignment.conditional:
+            if name in definitely_set:
+                prior = values.get(name)
+                if (
+                    not assignment.assign_if_null
+                    or prior is None
+                    or not isinstance(prior[1], LiteralTransfer)
+                    or prior[1].text
+                ):
+                    return
+            elif name not in definitely_unset:
+                invalidate_global(name, values, definitely_set, definitely_unset)
+                return
+        values[name] = (command, assignment.content)
+        definitely_set.add(name)
+        definitely_unset.discard(name)
+
+    for command in evidence.commands:
+        environment = command_environments[command.command_id]
+        global_values, global_set, global_unset = global_state_for(environment)
+        global_values_before[command.command_id] = dict(global_values)
+        global_set_before[command.command_id] = frozenset(global_set)
+        global_unset_before[command.command_id] = frozenset(global_unset)
+        charge_edges(len(global_values) + len(global_set) + len(global_unset))
+        if command.function_context_id is not None:
+            continue
+        conditional = command.conditionally_executed or command.command_id in conditional_commands
+
+        for assignment in (
+            *command.assignments,
+            *compound_bindings_by_command.get(command.command_id, ()),
+        ):
+            if assignment.conditional:
+                apply_global_assignment(
+                    assignment,
+                    command,
+                    global_values,
+                    global_set,
+                    global_unset,
+                    conditional=conditional,
+                )
+        assignment_only = not command.argv or command.executable.argv_index is None
+        assignments = (
+            (*command.definite_assignments, *command.builtin_assignments)
+            if assignment_only
+            else command.builtin_assignments
+        )
+        eval_assignments, eval_unsets = _static_eval_mutations(command)
+        for assignment in (
+            *assignments,
+            *(mutation.assignment for mutation in eval_assignments),
+        ):
+            apply_global_assignment(
+                assignment,
+                command,
+                global_values,
+                global_set,
+                global_unset,
+                conditional=conditional,
+            )
+        unset_names, unknown_unset = _unset_action(command)
+        if unknown_unset or command.unknown_builtin_content is not None:
+            global_values.clear()
+            global_set.clear()
+            global_unset.clear()
+        for name in (*unset_names, *eval_unsets):
+            if conditional:
+                invalidate_global(name, global_values, global_set, global_unset)
+                continue
+            global_values.pop(name, None)
+            global_set.discard(name)
+            global_unset.add(name)
+        for callee in callees_for(command):
+            if callee in effect_unknown:
+                global_values.clear()
+                global_set.clear()
+                global_unset.clear()
+                continue
+            for name in effect_names.get(callee, ()):
+                invalidate_global(name, global_values, global_set, global_unset)
+
+    entry_set_by_context: dict[int, frozenset[str]] = {}
+    entry_unset_by_context: dict[int, frozenset[str]] = {}
+    for context, sites in call_sites_by_context.items():
+        entry_sets = [
+            {
+                *(
+                    _unscoped_variable_name(assignment.name)
+                    for assignment in command.definite_assignments
+                ),
+                *command_set_locals[command.command_id],
+                *(
+                    name
+                    for name in global_set_before[command.command_id]
+                    if command.function_context_id is None
+                    and name not in command_locals[command.command_id]
+                ),
+            }
+            for command in sites
+        ]
+        entry_unsets = [
+            {
+                name
+                for name in global_unset_before[command.command_id]
+                if command.function_context_id is None
+                and name not in command_locals[command.command_id]
+                and all(
+                    _unscoped_variable_name(assignment.name) != name
+                    for assignment in command.definite_assignments
+                )
+            }
+            for command in sites
+        ]
+        charge_edges(sum(map(len, entry_sets)) + sum(map(len, entry_unsets)))
+        entry_set_by_context[context] = (
+            frozenset.intersection(*(frozenset(names) for names in entry_sets))
+            if entry_sets
+            else frozenset()
+        )
+        entry_unset_by_context[context] = (
+            frozenset.intersection(*(frozenset(names) for names in entry_unsets))
+            if entry_unsets
+            else frozenset()
+        )
+
+    def scope_command_content(
+        command: _CommandEvidence,
+        expression: ContentExpr,
+        *,
+        prefixes: Mapping[str, tuple[ContentExpr, ...]] | None = None,
+    ) -> ContentExpr:
+        context = command.function_context_id
+        active_prefixes = dict(
+            prefixes if prefixes is not None else frozen_call_prefixes.get(context, {})
+        )
+        active_prefixes.update(exact_positional_prefixes.get(command.command_id, {}))
+        return _scope_expression(
+            _scope_function_variables(
+                expression,
+                context,
+                command_locals[command.command_id],
+                caller_locals_by_context.get(context, {}),
+                active_prefixes,
+            ),
+            command_environments[command.command_id],
+        )
+
+    call_prefixes: dict[int, dict[str, list[ContentExpr]]] = {}
+    reachable_call_pairs = {
+        (command.command_id, context)
+        for context, commands in preliminary_call_sites.items()
+        for command in commands
+    }
+    for command, callee in call_commands:
+        for assignment in command.definite_assignments:
+            call_prefixes.setdefault(callee, {}).setdefault(
+                _unscoped_variable_name(assignment.name),
+                [],
+            ).append(scope_command_content(command, assignment.content, prefixes={}))
+        if (command.command_id, callee) not in reachable_call_pairs:
+            continue
+        if callee in positional_mutating_contexts:
+            continue
+        for name, content in positional_call_contents(command, callee).items():
+            call_prefixes.setdefault(callee, {}).setdefault(name, []).append(
+                scope_command_content(command, content, prefixes={})
+            )
+    frozen_call_prefixes = {
+        context: {name: tuple(values) for name, values in by_name.items()}
+        for context, by_name in call_prefixes.items()
+    }
+    entry_assignments_by_context: dict[int, tuple[_AssignmentEvidence, ...]] = {}
+    for context, names in entry_set_by_context.items():
+        assignments: list[_AssignmentEvidence] = []
+        for name in names:
+            values: list[ContentExpr] = []
+            for site in call_sites_by_context.get(context, ()):
+                prefix = next(
+                    (
+                        assignment
+                        for assignment in reversed(site.definite_assignments)
+                        if _unscoped_variable_name(assignment.name) == name
+                    ),
+                    None,
+                )
+                if prefix is not None:
+                    values.append(scope_command_content(site, prefix.content, prefixes={}))
+                    continue
+                caller = site.function_context_id
+                if caller is not None and name in command_set_locals[site.command_id]:
+                    values.append(VariableRef(_scoped_variable_name(caller, name)))
+                    continue
+                global_value = global_values_before[site.command_id].get(name)
+                if global_value is not None and name in global_set_before[site.command_id]:
+                    writer, content = global_value
+                    values.append(scope_command_content(writer, content, prefixes={}))
+            if values:
+                charge_edges(len(values))
+                assignments.append(_AssignmentEvidence(name, choice(*values)))
+        entry_assignments_by_context[context] = tuple(assignments)
+
+    def scoped_destinations(
+        command: _CommandEvidence,
+        assignment: _AssignmentEvidence,
+        *,
+        force_global: bool = False,
+        local_builtin: bool = False,
+    ) -> tuple[str, ...]:
+        name = _unscoped_variable_name(assignment.name)
+        context = command.function_context_id
+        if force_global or context is None:
+            return (name,)
+        if local_builtin or name in command_locals[command.command_id]:
+            return (_scoped_variable_name(context, name),)
+        if not persistent_function_effect(command):
+            return (name,)
+        destinations: set[str] = {
+            _scoped_variable_name(caller, name)
+            for caller in caller_locals_by_context.get(context, {}).get(name, ())
+        }
+        for site in call_sites_by_context.get(context, ()):
+            caller = site.function_context_id
+            if caller is not None and name in command_locals[site.command_id]:
+                destinations.add(_scoped_variable_name(caller, name))
+            elif not destinations:
+                destinations.add(name)
+        charge_edges(len(destinations))
+        return tuple(sorted(destinations or {name}))
+
+    def contextualized_assignments(
+        command: _CommandEvidence,
+        assignments: tuple[_AssignmentEvidence, ...],
+        *,
+        force_global: bool = False,
+        local_builtin: bool = False,
+    ) -> tuple[_AssignmentEvidence, ...]:
+        contextualized = tuple(
+            replace(
+                assignment,
+                name=destination,
+                content=scope_command_content(command, assignment.content),
+            )
+            for assignment in assignments
+            for destination in scoped_destinations(
+                command,
+                assignment,
+                force_global=force_global,
+                local_builtin=local_builtin,
+            )
+        )
+        charge_edges(len(contextualized))
+        return contextualized
+
     commands = tuple(
         replace(
             command,
             argv=tuple(
                 replace(
                     port,
-                    content=_scope_expression(
-                        port.content,
-                        command_environments[command.command_id],
-                    ),
+                    content=scope_command_content(command, port.content),
                 )
                 for port in command.argv
             ),
-            assignments=tuple(
-                replace(
-                    assignment,
-                    content=_scope_expression(
-                        assignment.content,
-                        command_environments[command.command_id],
-                    ),
-                )
-                for assignment in command.assignments
+            assignments=contextualized_assignments(command, command.assignments),
+            definite_assignments=contextualized_assignments(
+                command,
+                command.definite_assignments,
             ),
-            definite_assignments=tuple(
-                replace(
-                    assignment,
-                    content=_scope_expression(
-                        assignment.content,
-                        command_environments[command.command_id],
-                    ),
+            builtin_assignments=contextualized_assignments(
+                command,
+                command.builtin_assignments,
+                force_global=command.builtin_force_global,
+                local_builtin=command.builtin_local and not command.builtin_force_global,
+            ),
+            unknown_builtin_content=(
+                scope_command_content(
+                    command,
+                    command.unknown_builtin_content,
                 )
-                for assignment in command.definite_assignments
+                if command.unknown_builtin_content is not None
+                else None
             ),
             redirections=tuple(
                 replace(
                     event,
-                    target=ContentTarget(
-                        _scope_expression(
-                            event.target.content,
-                            command_environments[command.command_id],
-                        )
-                    ),
+                    target=ContentTarget(scope_command_content(command, event.target.content)),
                 )
                 if isinstance(event.target, ContentTarget)
                 else event
                 for event in command.redirections
             ),
+            called_function_context_ids=callees_for(command),
+            function_entry_definitely_set=tuple(
+                sorted(entry_set_by_context.get(command.function_context_id, ()))
+            ),
+            function_entry_assignments=entry_assignments_by_context.get(
+                command.function_context_id,
+                (),
+            ),
+            function_entry_unsets=tuple(
+                sorted(entry_unset_by_context.get(command.function_context_id, ()))
+            ),
         )
         for command in evidence.commands
     )
+    contextualized_by_id = {command.command_id: command for command in commands}
+
+    compound_effects: dict[int, list[_AssignmentEvidence]] = {}
+    original_commands = {command.command_id: command for command in evidence.commands}
+    for scope in evidence.scopes:
+        anchor = (
+            original_commands.get(scope.binding_command_id)
+            if scope.binding_command_id is not None
+            else None
+        )
+        if (
+            anchor is None
+            or anchor.function_context_id is None
+            or not persistent_function_effect(anchor)
+        ):
+            continue
+        compound_effects.setdefault(anchor.function_context_id, []).extend(
+            contextualized_assignments(anchor, scope.loop_bindings)
+        )
+
+    effect_assignments: dict[int, list[_AssignmentEvidence]] = {
+        context: [] for context in function_contexts
+    }
+    effect_segments: dict[int, list[_AssignmentEvidence | int]] = {
+        context: [] for context in function_contexts
+    }
+    effect_unsets: dict[int, list[str]] = {context: [] for context in function_contexts}
+    called_contexts_by_command: dict[int, list[int]] = {}
+    for call, callee in call_commands:
+        called_contexts_by_command.setdefault(call.command_id, []).append(callee)
+    for context in function_contexts:
+        assignments = effect_assignments[context]
+        segments = effect_segments[context]
+        unsets = effect_unsets[context]
+        for original in evidence.commands:
+            if original.function_context_id != context or not persistent_function_effect(original):
+                continue
+            assignment_start = len(assignments)
+            command = contextualized_by_id[original.command_id]
+            assignment_only = not command.argv or command.executable.argv_index is None
+            if assignment_only:
+                assignments.extend(
+                    assignment
+                    for assignment in command.definite_assignments
+                    if _scoped_variable_environment(assignment.name) != context
+                )
+            assignments.extend(
+                assignment
+                for assignment in command.builtin_assignments
+                if _scoped_variable_environment(assignment.name) != context
+            )
+            eval_assignments, eval_unsets = _static_eval_mutations(original)
+            for mutation in eval_assignments:
+                assignments.extend(
+                    assignment
+                    for assignment in contextualized_assignments(
+                        original,
+                        (mutation.assignment,),
+                        force_global=mutation.force_global,
+                        local_builtin=mutation.local and not mutation.force_global,
+                    )
+                    if _scoped_variable_environment(assignment.name) != context
+                )
+            names, unknown = _unset_action(original)
+            if unknown:
+                names = (
+                    *names,
+                    *caller_locals_by_context.get(context, ()),
+                )
+            nameref_names, _unknown_nameref = _unset_nameref_action(original)
+            assignments.extend(
+                _AssignmentEvidence(
+                    name,
+                    LiteralTransfer(""),
+                    nameref_unset=True,
+                )
+                for name in nameref_names
+                if name not in command_locals[original.command_id]
+            )
+            names = (*names, *eval_unsets)
+            unsets.extend(name for name in names if name not in command_locals[original.command_id])
+            segments.extend(assignments[assignment_start:])
+            segments.extend(called_contexts_by_command.get(original.command_id, ()))
+        compound_start = len(assignments)
+        assignments.extend(
+            assignment
+            for assignment in compound_effects.get(context, ())
+            if _scoped_variable_environment(assignment.name) != context
+        )
+        segments.extend(assignments[compound_start:])
+
+    changed = True
+    while changed:
+        changed = False
+        for call, callee in call_commands:
+            caller = call.function_context_id
+            if caller is None or not persistent_function_effect(call):
+                continue
+            unsets = effect_unsets.setdefault(caller, [])
+            for name in effect_unsets.get(callee, ()):
+                if name in unsets:
+                    continue
+                unsets.append(name)
+                charge_edges()
+                changed = True
+
+    ordered_effects_cache: dict[int, tuple[_AssignmentEvidence, ...]] = {}
+
+    def ordered_effects(context: int) -> tuple[_AssignmentEvidence, ...]:
+        cached = ordered_effects_cache.get(context)
+        if cached is not None:
+            return cached
+        context_stack = [context]
+        active_stack = [frozenset({context})]
+        index_stack = [0]
+        assignment_stack: list[list[_AssignmentEvidence]] = [[]]
+        while context_stack:
+            current = context_stack[-1]
+            segments = effect_segments.get(current, ())
+            index = index_stack[-1]
+            if index >= len(segments):
+                result = tuple(assignment_stack.pop())
+                ordered_effects_cache[current] = result
+                context_stack.pop()
+                active_stack.pop()
+                index_stack.pop()
+                if not context_stack:
+                    return result
+                charge_edges(len(result))
+                assignment_stack[-1].extend(result)
+                continue
+            segment = segments[index]
+            index_stack[-1] += 1
+            if isinstance(segment, _AssignmentEvidence):
+                assignment_stack[-1].append(segment)
+                continue
+            nested = ordered_effects_cache.get(segment)
+            if nested is None and segment in active_stack[-1]:
+                nested = tuple(effect_assignments.get(segment, ()))
+            if nested is not None:
+                charge_edges(len(nested))
+                assignment_stack[-1].extend(nested)
+                continue
+            if len(context_stack) - 1 >= _MAX_FUNCTION_EFFECT_DEPTH:
+                raise _TaintLimitExceeded("shell taint function effect depth limit exceeded")
+            context_stack.append(segment)
+            active_stack.append(active_stack[-1] | {segment})
+            index_stack.append(0)
+            assignment_stack.append([])
+        raise _MalformedTaintEvidence("shell function effects cannot be structured")
+
+    effects_by_context = {
+        context: (
+            ordered_effects(context),
+            tuple(dict.fromkeys(effect_unsets.get(context, ()))),
+        )
+        for context in effect_assignments
+    }
+
+    def effects_for_call(
+        command: _CommandEvidence,
+    ) -> tuple[tuple[_AssignmentEvidence, ...], tuple[str, ...]]:
+        assignments: list[_AssignmentEvidence] = []
+        unsets: list[str] = []
+        caller = command.function_context_id
+        caller_locals = command_locals[command.command_id]
+        for callee in command.called_function_context_ids:
+            callee_assignments, callee_unsets = effects_by_context.get(callee, ((), ()))
+            for assignment in callee_assignments:
+                name = _unscoped_variable_name(assignment.name)
+                target = _scoped_variable_environment(assignment.name)
+                if assignment.nameref_unset:
+                    assignments.append(
+                        replace(
+                            assignment,
+                            name=(
+                                _scoped_variable_name(caller, name)
+                                if caller is not None and name in caller_locals
+                                else name
+                            ),
+                        )
+                    )
+                    continue
+                if target == caller or (target is None and name not in caller_locals):
+                    assignments.append(assignment)
+            unsets.extend(
+                _scoped_variable_name(caller, name)
+                if caller is not None and name in caller_locals
+                else name
+                for name in callee_unsets
+            )
+        return tuple(assignments), tuple(dict.fromkeys(unsets))
+
+    commands_with_effects: list[_CommandEvidence] = []
+    for command in commands:
+        call_assignments, call_unsets = effects_for_call(command)
+        charge_edges(len(call_assignments) + len(call_unsets))
+        commands_with_effects.append(
+            replace(
+                command,
+                function_effect_assignments=call_assignments,
+                function_effect_unsets=call_unsets,
+            )
+        )
+    commands = tuple(commands_with_effects)
     scopes = tuple(
         replace(
             scope,
@@ -2032,16 +5649,44 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
             loop_bindings=tuple(
                 replace(
                     binding,
-                    name=_scoped_variable_name(
-                        environments.get(scope.scope_id, scope.scope_id),
-                        binding.name,
-                    ),
+                    name=destination,
                     content=_scope_expression(
-                        binding.content,
+                        _scope_function_variables(
+                            binding.content,
+                            anchor.function_context_id if anchor is not None else None,
+                            (
+                                command_locals[anchor.command_id]
+                                if anchor is not None
+                                else frozenset()
+                            ),
+                            caller_locals_by_context.get(
+                                anchor.function_context_id if anchor is not None else None,
+                                {},
+                            ),
+                            frozen_call_prefixes.get(
+                                anchor.function_context_id if anchor is not None else None,
+                                {},
+                            ),
+                        ),
                         environments.get(scope.scope_id, scope.scope_id),
                     ),
                 )
                 for binding in scope.loop_bindings
+                for anchor in (
+                    original_commands.get(scope.binding_command_id)
+                    if scope.binding_command_id is not None
+                    else None,
+                )
+                for destination in (
+                    scoped_destinations(anchor, binding)
+                    if anchor is not None
+                    else (
+                        _scoped_variable_name(
+                            environments.get(scope.scope_id, scope.scope_id),
+                            binding.name,
+                        ),
+                    )
+                )
             ),
         )
         for scope in evidence.scopes
@@ -2049,7 +5694,7 @@ def _contextualize_evidence(evidence: _ShellTaintEvidence) -> _ShellTaintEvidenc
     return replace(evidence, commands=commands, scopes=scopes)
 
 
-def _build_flow_definitions(
+def _build_flow_definitions(  # noqa: PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
     limits: TaintLimits = TaintLimits(),  # noqa: B008
@@ -2057,6 +5702,7 @@ def _build_flow_definitions(
     """Lower typed shell evidence into fixed-point definitions and command stdin."""
     environments, _lexical_parents = _scope_environment_ids(evidence.scopes)
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    command_paths = _command_scope_paths(evidence)
     command_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
     pipe_inputs = _pipe_inputs(evidence)
@@ -2069,6 +5715,19 @@ def _build_flow_definitions(
     stream_writes: list[_FlowWrite] = []
     scoped_variables = bool(evidence.scopes)
     has_eval = any(_builtin_eval_candidates(command) for command in evidence.commands)
+    eval_dependency_names = (
+        {
+            name
+            for command in evidence.commands
+            for executable in _builtin_eval_candidates(command)
+            for name in _eval_content_dependencies(
+                _eval_arguments_raw(command, executable),
+                limits,
+            )
+        }
+        if any(command.unknown_builtin_content is not None for command in evidence.commands)
+        else set()
+    )
     variable_keys: set[str | int] = set()
 
     def append_variable_write(write: _FlowWrite) -> None:
@@ -2102,6 +5761,11 @@ def _build_flow_definitions(
                         ),
                         assignment.content,
                         append=assignment.append,
+                        first_record=assignment.read_first_record,
+                        read_ifs=assignment.read_ifs,
+                        read_target_index=assignment.read_target_index,
+                        read_target_count=assignment.read_target_count,
+                        read_raw=assignment.read_raw,
                     )
                 )
         if scoped_variables and has_eval and environment_parents.get(origin_environment) is None:
@@ -2111,6 +5775,75 @@ def _build_flow_definitions(
                         assignment.name,
                         assignment.content,
                         append=assignment.append,
+                        first_record=assignment.read_first_record,
+                        read_ifs=assignment.read_ifs,
+                        read_target_index=assignment.read_target_index,
+                        read_target_count=assignment.read_target_count,
+                        read_raw=assignment.read_raw,
+                    )
+                )
+        if command.builtin_local and command.function_context_id is not None:
+            for assignment in command.builtin_assignments:
+                append_variable_write(
+                    _FlowWrite(
+                        _scoped_variable_name(
+                            command.function_context_id,
+                            assignment.name,
+                        ),
+                        assignment.content,
+                        append=assignment.append,
+                        first_record=assignment.read_first_record,
+                        read_ifs=assignment.read_ifs,
+                        read_target_index=assignment.read_target_index,
+                        read_target_count=assignment.read_target_count,
+                        read_raw=assignment.read_raw,
+                    )
+                )
+        if (
+            not command.builtin_local
+            or command.function_context_id is None
+            or command.builtin_dynamic_options
+        ):
+            for target_environment in set(command_environments.values()):
+                if origin_environment not in visible_environments(target_environment):
+                    continue
+                for assignment in command.builtin_assignments:
+                    append_variable_write(
+                        _FlowWrite(
+                            (
+                                _scoped_variable_name(
+                                    target_environment,
+                                    (
+                                        _unscoped_variable_name(assignment.name)
+                                        if command.builtin_dynamic_options
+                                        else assignment.name
+                                    ),
+                                )
+                                if scoped_variables
+                                else assignment.name
+                            ),
+                            assignment.content,
+                            append=assignment.append,
+                            first_record=assignment.read_first_record,
+                            read_ifs=assignment.read_ifs,
+                            read_target_index=assignment.read_target_index,
+                            read_target_count=assignment.read_target_count,
+                            read_raw=assignment.read_raw,
+                        )
+                    )
+        if command.unknown_builtin_content is not None:
+            for name in eval_dependency_names:
+                if (
+                    command.builtin_local
+                    and command.function_context_id is not None
+                    and not command.builtin_dynamic_options
+                    and _scoped_variable_environment(name) != command.function_context_id
+                ):
+                    continue
+                append_variable_write(
+                    _FlowWrite(
+                        name,
+                        choice(OutsideGap(), command.unknown_builtin_content),
                     )
                 )
         output = _producer_stdout(command, inputs[command.command_id])
@@ -2119,21 +5852,61 @@ def _build_flow_definitions(
 
     lowering = _OutputLowering(command_scopes)
     target_environments = set(environments.values()) | set(command_environments.values())
+    function_contexts = {
+        command.function_context_id
+        for command in evidence.commands
+        if command.function_context_id is not None
+    }
     visible_by_target = {
         target_environment: visible_environments(target_environment)
         for target_environment in target_environments
     }
     for scope in evidence.scopes:
-        origin_environment = environments.get(scope.scope_id, scope.scope_id)
+        lexical_environment = environments.get(scope.scope_id, scope.scope_id)
+        origin_environment = next(
+            (
+                command_environments[command.command_id]
+                for command in evidence.commands
+                if scope.scope_id in command_paths[command.command_id]
+            ),
+            environments.get(scope.scope_id, scope.scope_id),
+        )
+        for binding in scope.loop_bindings:
+            binding_environment = _scoped_variable_environment(binding.name)
+            if binding_environment not in function_contexts:
+                continue
+            append_variable_write(
+                _FlowWrite(
+                    binding.name,
+                    _rescope_expression(
+                        binding.content,
+                        lexical_environment,
+                        origin_environment,
+                    ),
+                    append=binding.append,
+                )
+            )
         for target_environment, visible in visible_by_target.items():
             if origin_environment not in visible:
                 continue
             for binding in scope.loop_bindings:
+                if _scoped_variable_environment(binding.name) in function_contexts:
+                    continue
                 key = _scoped_variable_name(
                     target_environment,
                     _unscoped_variable_name(binding.name),
                 )
-                append_variable_write(_FlowWrite(key, binding.content, append=binding.append))
+                append_variable_write(
+                    _FlowWrite(
+                        key,
+                        _rescope_expression(
+                            binding.content,
+                            lexical_environment,
+                            origin_environment,
+                        ),
+                        append=binding.append,
+                    )
+                )
         stream_writes.append(
             _FlowWrite(
                 scope.scope_id,
@@ -2206,6 +5979,7 @@ class _EvalSyntaxState:
     applied_appends: int = 0
     local_variables: tuple[tuple[str, _ContentValue], ...] = ()
     environment_variables: tuple[tuple[str, _ContentValue], ...] = ()
+    fixed_point_overrides: tuple[tuple[str, _ContentValue], ...] = ()
     definitely_set_variables: frozenset[str] = frozenset()
     parameter_text: str = ""
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
@@ -2234,8 +6008,9 @@ class _EvalSyntaxContext:
     transitions: dict[_EvalSyntaxTransitionKey, _EvalSyntaxValue] = field(default_factory=dict)
     active_transitions: set[_EvalSyntaxTransitionKey] = field(default_factory=set)
     variable_overlays: dict[
-        tuple[int, int],
+        tuple[int, int, int],
         tuple[
+            tuple[tuple[str, _ContentValue], ...],
             tuple[tuple[str, _ContentValue], ...],
             tuple[tuple[str, _ContentValue], ...],
             Mapping[str | int, _ContentValue],
@@ -2254,26 +6029,34 @@ class _EvalSyntaxContext:
 
     def variables_for(self, state: _EvalSyntaxState) -> Mapping[str | int, _ContentValue]:
         """Return one cached layered variable view for token evaluation."""
-        key = (id(state.local_variables), id(state.environment_variables))
+        key = (
+            id(state.local_variables),
+            id(state.environment_variables),
+            id(state.fixed_point_overrides),
+        )
         cached = self.variable_overlays.get(key)
         if (
             cached is not None
             and cached[0] is state.local_variables
             and cached[1] is state.environment_variables
+            and cached[2] is state.fixed_point_overrides
         ):
-            return cached[2]
+            return cached[3]
         if len(self.variable_overlays) >= self.limits.max_table_entries:
             raise _TaintLimitExceeded("shell taint eval syntax variable table limit exceeded")
         local_variables: dict[str | int, _ContentValue] = dict(state.local_variables)
         environment_variables: dict[str | int, _ContentValue] = dict(state.environment_variables)
+        fixed_point_overrides: dict[str | int, _ContentValue] = dict(state.fixed_point_overrides)
         layered: ChainMap[str | int, _ContentValue] = ChainMap(
             local_variables,
+            fixed_point_overrides,
             environment_variables,
             self.raw_variables,
         )
         self.variable_overlays[key] = (
             state.local_variables,
             state.environment_variables,
+            state.fixed_point_overrides,
             layered,
         )
         return layered
@@ -2580,7 +6363,7 @@ def _eval_parameter_closing(text: str, start: int) -> int | None:
     return None
 
 
-def _eval_parameter_content(
+def _eval_parameter_content(  # noqa: PLR0911
     contents: str,
     quote: str | None,
     limits: TaintLimits,
@@ -2588,7 +6371,9 @@ def _eval_parameter_content(
     depth: int,
 ) -> ContentExpr:
     """Lower one balanced eval-time parameter expansion without dropping authored operands."""
-    if contents in _EVAL_SPECIAL_PARAMETERS or contents.isdigit():
+    if _is_function_positional_parameter(contents):
+        return _SecondPassVariableRef(contents)
+    if contents in _EVAL_SPECIAL_PARAMETERS:
         return OutsideGap()
     name_end = _eval_identifier_end(contents, 0)
     name = contents[:name_end]
@@ -2625,10 +6410,17 @@ def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
     index = start + 1
     if index < len(text) and text[index] == "{":
         name_start = index + 1
+        closing = text.find("}", name_start)
+        if closing != -1:
+            name = text[name_start:closing]
+            if _is_function_positional_parameter(name):
+                return name, closing + 1
         name_end = _eval_identifier_end(text, name_start)
         if name_end > name_start and name_end < len(text) and text[name_end] == "}":
             return text[name_start:name_end], name_end + 1
         return None, start + 1
+    if index < len(text) and _is_function_positional_parameter(text[index]):
+        return text[index], index + 1
     name_end = _eval_identifier_end(text, index)
     return (text[index:name_end], name_end) if name_end > index else (None, start + 1)
 
@@ -3054,6 +6846,21 @@ def _eval_syntax_variable_transition(  # noqa: PLR0912
     depth: int,
 ) -> _EvalSyntaxValue:
     """Replay one variable's authored writes against an actual incoming eval state."""
+    fixed_point_overrides = dict(state.fixed_point_overrides)
+    snapshot = fixed_point_overrides.get(name)
+    raw = context.raw_variables.get(name)
+    if (
+        snapshot is not None
+        and snapshot != raw
+        and not _marker_capable(snapshot)
+        and not state.parameter_text
+    ):
+        return _cap_eval_syntax(
+            frozenset(
+                replace(state, summary=state.summary.compose(summary)) for summary in snapshot
+            ),
+            context.limits,
+        )
     key = (name, state)
     cached = context.transitions.get(key)
     if cached is not None:
@@ -3279,6 +7086,7 @@ def _eval_syntax_expression(  # noqa: PLR0913
     depth: int = 0,
     environment: int | None = None,
     environment_variables: tuple[tuple[str, _ContentValue], ...] | None = None,
+    fixed_point_overrides: tuple[tuple[str, _ContentValue], ...] = (),
     definitely_set_variables: frozenset[str] = frozenset(),
 ) -> _EvalSyntaxValue:
     """Evaluate eval syntax from one empty bounded streaming parse state."""
@@ -3292,6 +7100,7 @@ def _eval_syntax_expression(  # noqa: PLR0913
                 if environment_variables is None
                 else environment_variables
             ),
+            fixed_point_overrides=fixed_point_overrides,
             definitely_set_variables=definitely_set_variables,
         ),
         context,
@@ -3541,15 +7350,15 @@ def _environment_inherits(
     return False
 
 
-def _wrapped_shopt_index(command: _CommandEvidence) -> int | None:
-    """Resolve exact nested ``command``/``builtin`` wrappers around ``shopt``."""
+def _wrapped_builtin_index(command: _CommandEvidence, name: str) -> int | None:
+    """Resolve exact nested ``command``/``builtin`` wrappers around one builtin."""
     index = 0
     wrapped = False
     while index < len(command.argv):
         argument = command.argv[index]
         if argument.dynamic:
             return None
-        if argument.literal == "shopt":
+        if argument.literal == name:
             return index if wrapped else None
         if argument.literal == "builtin":
             wrapped = True
@@ -3578,20 +7387,99 @@ def _wrapped_shopt_index(command: _CommandEvidence) -> int | None:
     return None
 
 
-def _shopt_executable_index(command: _CommandEvidence) -> int | None:
-    """Return the argv index for a statically resolved ``shopt`` invocation."""
+def _builtin_executable_index(command: _CommandEvidence, name: str) -> int | None:
+    """Return the argv index for one statically resolved builtin invocation."""
     direct_index = next(
         (
             candidate.argv_index
             for candidate in _iter_executable_evidence(command.executable)
-            if candidate.name == "shopt"
-            and candidate.literal == "shopt"
+            if candidate.name == name
+            and candidate.literal == name
             and not candidate.external_lookup
             and candidate.argv_index is not None
         ),
         None,
     )
-    return direct_index if direct_index is not None else _wrapped_shopt_index(command)
+    return direct_index if direct_index is not None else _wrapped_builtin_index(command, name)
+
+
+def _shopt_executable_index(command: _CommandEvidence) -> int | None:
+    """Return the argv index for a statically resolved ``shopt`` invocation."""
+    return _builtin_executable_index(command, "shopt")
+
+
+def _static_variable_name(value: str) -> bool:
+    """Return whether ``value`` is an exact portable shell variable name."""
+    return (
+        bool(value)
+        and (value[0].isascii() and (value[0].isalpha() or value[0] == "_"))
+        and all(
+            character.isascii() and (character.isalnum() or character == "_")
+            for character in value[1:]
+        )
+    )
+
+
+def _unset_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:
+    """Return exact variable unsets plus whether an unknown target may be unset."""
+    executable_index = _builtin_executable_index(command, "unset")
+    if executable_index is None:
+        return (), False
+    names: list[str] = []
+    unknown = False
+    options_enabled = True
+    function_only = False
+    for argument in command.argv[executable_index + 1 :]:
+        if options_enabled and argument.dynamic:
+            unknown = True
+            continue
+        if options_enabled and argument.literal == "--":
+            options_enabled = False
+            continue
+        if options_enabled and argument.literal.startswith("-") and argument.literal != "-":
+            flags = argument.literal[1:]
+            if set(flags) - {"f", "n", "v"}:
+                unknown = True
+            function_only = "f" in flags and "v" not in flags
+            continue
+        if function_only:
+            continue
+        if argument.dynamic or not _static_variable_name(argument.literal):
+            unknown = True
+        else:
+            names.append(argument.literal)
+    return tuple(names), unknown
+
+
+def _unset_nameref_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:
+    """Return exact ``unset -n`` aliases plus whether their removal is ambiguous."""
+    executable_index = _builtin_executable_index(command, "unset")
+    if executable_index is None:
+        return (), False
+    names: list[str] = []
+    unknown = False
+    options_enabled = True
+    nameref_only = False
+    for argument in command.argv[executable_index + 1 :]:
+        if options_enabled and argument.dynamic:
+            unknown = True
+            continue
+        if options_enabled and argument.literal == "--":
+            options_enabled = False
+            continue
+        if options_enabled and argument.literal.startswith("-") and argument.literal != "-":
+            flags = argument.literal[1:]
+            if set(flags) - {"f", "n", "v"} or ("f" in flags and "n" in flags):
+                unknown = True
+            nameref_only = nameref_only or "n" in flags
+            continue
+        if argument.dynamic or not _static_variable_name(argument.literal):
+            unknown = True
+        else:
+            names.append(argument.literal)
+    if not nameref_only:
+        return (), False
+    return tuple(names), unknown
 
 
 def _shopt_lastpipe_action(command: _CommandEvidence) -> bool | None:  # noqa: PLR0912
@@ -4035,9 +7923,10 @@ class _EvalCommandEnvironment:
 
     variables: tuple[tuple[str, _ContentValue], ...]
     definitely_set: frozenset[str]
+    fixed_point_overrides: tuple[tuple[str, _ContentValue], ...] = ()
 
 
-def _eval_command_environments(  # noqa: PLR0913
+def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
     evidence: _ShellTaintEvidence,
     raw_variables: dict[str | int, _ContentValue],
     assignments_by_command: dict[int, tuple[_AssignmentEvidence, ...]],
@@ -4049,7 +7938,67 @@ def _eval_command_environments(  # noqa: PLR0913
     values: dict[int, dict[str, _ContentValue]] = {}
     definitely_set: dict[int, set[str]] = {}
     evaluation_layers: dict[int, dict[str | int, _ContentValue]] = {}
+    function_values: dict[int, dict[str, _ContentValue]] = {}
+    function_set: dict[int, set[str]] = {}
+    function_shadows: dict[int, set[str]] = {}
+    function_entry_overrides: dict[int, set[str]] = {}
+    function_unknown: set[int] = set()
+    unknown_environments: set[int] = set()
     conditional_commands = _control_conditional_commands(evidence)
+    function_contexts = {
+        command.function_context_id
+        for command in evidence.commands
+        if command.function_context_id is not None
+    }
+    scope_environments, _scope_parents = _scope_environment_ids(evidence.scopes)
+    compound_assignments: dict[int, list[_AssignmentEvidence]] = {}
+    source_order_override_keys: set[str] = set()
+    for scope in evidence.scopes:
+        if scope.binding_command_id is None:
+            continue
+        origin_environment = command_environments.get(scope.binding_command_id)
+        if origin_environment is None:
+            continue
+        lexical_environment = scope_environments.get(scope.scope_id, scope.scope_id)
+        for assignment in scope.loop_bindings:
+            target_environment = _scoped_variable_environment(assignment.name)
+            name = (
+                assignment.name
+                if target_environment in function_contexts
+                else _scoped_variable_name(
+                    origin_environment,
+                    _unscoped_variable_name(assignment.name),
+                )
+            )
+            compound_assignments.setdefault(scope.binding_command_id, []).append(
+                replace(
+                    assignment,
+                    name=name,
+                    content=_rescope_expression(
+                        assignment.content,
+                        lexical_environment,
+                        origin_environment,
+                    ),
+                )
+            )
+            source_order_override_keys.add(name)
+
+    eval_shadow_names: dict[int, frozenset[str]] = {}
+    for command in evidence.commands:
+        names: set[str] = set()
+        for executable in _builtin_eval_candidates(command):
+            reparsed = _eval_reparse_content(_eval_arguments_raw(command, executable), limits)
+            pending = [reparsed]
+            while pending:
+                current_expression = pending.pop()
+                if isinstance(current_expression, VariableRef):
+                    names.add(current_expression.name)
+                elif isinstance(current_expression, _SecondPassConditionalAssignment):
+                    names.add(current_expression.name)
+                    pending.append(current_expression.operand)
+                elif isinstance(current_expression, Choice | Concat):
+                    pending.extend(current_expression.parts)
+        eval_shadow_names[command.command_id] = frozenset(names)
 
     def ensure(
         environment: int,
@@ -4102,25 +8051,125 @@ def _eval_command_environments(  # noqa: PLR0913
         layer: dict[str | int, _ContentValue],
         *,
         definite: bool,
+        evaluation_layer: dict[str | int, _ContentValue] | None = None,
     ) -> None:
-        value = evaluate_assignment(assignment, layer)
-        prior = current.get(assignment.name)
+        name = _unscoped_variable_name(assignment.name)
+        value = evaluate_assignment(
+            assignment,
+            evaluation_layer if evaluation_layer is not None else layer,
+        )
+        prior = current.get(name)
         if assignment.append:
             value = _compose_values(prior or _OUTSIDE_VALUE, value)
         elif not definite:
             value = _join_values(prior or _OUTSIDE_VALUE, value)
-        current[assignment.name] = _cap_value(value, limits)
-        layer[assignment.name] = current[assignment.name]
-        layer[_scoped_variable_name(environment, assignment.name)] = current[assignment.name]
+        current[name] = _cap_value(value, limits)
+        layer[name] = current[name]
+        layer[_scoped_variable_name(environment, name)] = current[name]
         if definite:
-            current_set.add(assignment.name)
+            current_set.add(name)
+
+    def apply_parameter_assignment(  # noqa: PLR0913
+        assignment: _AssignmentEvidence,
+        environment: int,
+        current: dict[str, _ContentValue],
+        current_set: set[str],
+        layer: dict[str | int, _ContentValue],
+        *,
+        definite: bool,
+        evaluation_layer: dict[str | int, _ContentValue] | None = None,
+    ) -> None:
+        """Apply one expansion side effect only when its parameter branch is reachable."""
+        name = _unscoped_variable_name(assignment.name)
+        prior = current.get(name)
+        if (
+            assignment.conditional
+            and name in current_set
+            and (not assignment.assign_if_null or (prior is not None and _EPSILON not in prior))
+        ):
+            return
+        uncertain = (
+            assignment.conditional
+            and prior is not None
+            and (
+                name not in current_set
+                or (assignment.assign_if_null and any(summary != _EPSILON for summary in prior))
+            )
+        )
+        apply_assignment(
+            assignment,
+            environment,
+            current,
+            current_set,
+            layer,
+            definite=definite and not uncertain,
+            evaluation_layer=evaluation_layer,
+        )
+        if definite:
+            current_set.add(name)
+
+    def apply_routed_side_effect(  # noqa: PLR0913
+        assignment: _AssignmentEvidence,
+        *,
+        function_context: int | None,
+        environment: int,
+        current: dict[str, _ContentValue],
+        current_set: set[str],
+        layer: dict[str | int, _ContentValue],
+        persistent_values: dict[str, _ContentValue],
+        persistent_set: set[str],
+        persistent_layer: dict[str | int, _ContentValue],
+        definite: bool,
+    ) -> None:
+        target_environment = _scoped_variable_environment(assignment.name)
+        name = _unscoped_variable_name(assignment.name)
+        if target_environment in function_contexts:
+            target_values = function_values.setdefault(target_environment, {})
+            target_set = function_set.setdefault(target_environment, set())
+            function_shadows.setdefault(target_environment, set()).add(name)
+            apply_parameter_assignment(
+                assignment,
+                target_environment,
+                target_values,
+                target_set,
+                layer,
+                definite=definite,
+                evaluation_layer=layer,
+            )
+            if target_environment == function_context:
+                if name in target_values:
+                    current[name] = target_values[name]
+                    layer[name] = target_values[name]
+                    layer[_scoped_variable_name(environment, name)] = target_values[name]
+                    layer[assignment.name] = target_values[name]
+                if name in target_set:
+                    current_set.add(name)
+            return
+        apply_parameter_assignment(
+            assignment,
+            environment,
+            persistent_values,
+            persistent_set,
+            persistent_layer,
+            definite=definite,
+            evaluation_layer=layer,
+        )
+        if current is not persistent_values:
+            if name in persistent_values:
+                current[name] = persistent_values[name]
+                layer[name] = persistent_values[name]
+                layer[_scoped_variable_name(environment, name)] = persistent_values[name]
+            if name in persistent_set:
+                current_set.add(name)
 
     snapshots: dict[int, _EvalCommandEnvironment] = {}
     for command in evidence.commands:
         environment = command_environments[command.command_id]
         persistent_values, persistent_set, persistent_layer = ensure(environment)
         conditional = command.conditionally_executed or command.command_id in conditional_commands
-        if not conditional:
+        assignment_only = not command.argv or command.executable.argv_index is None
+        temporary_prefix = bool(command.definite_assignments and not assignment_only)
+        if not conditional and not temporary_prefix:
             current = persistent_values
             current_set = persistent_set
             layer = persistent_layer
@@ -4128,6 +8177,75 @@ def _eval_command_environments(  # noqa: PLR0913
             current = dict(persistent_values)
             current_set = set(persistent_set)
             layer = dict(persistent_layer)
+        function_context = command.function_context_id
+        entry_overrides: set[str] = set()
+        if function_context is not None:
+            local_values = function_values.setdefault(function_context, {})
+            local_set = function_set.setdefault(function_context, set())
+            local_shadows = function_shadows.setdefault(function_context, set())
+            entry_overrides = function_entry_overrides.setdefault(function_context, set())
+            for name in local_shadows:
+                current.pop(name, None)
+                current_set.discard(name)
+                layer.pop(name, None)
+                layer.pop(_scoped_variable_name(environment, name), None)
+            if function_context in function_unknown:
+                current_set.clear()
+            for name, value in local_values.items():
+                current[name] = value
+                layer[name] = value
+                layer[_scoped_variable_name(environment, name)] = value
+                layer[_scoped_variable_name(function_context, name)] = value
+            current_set.update(local_set)
+        for name in command.function_entry_unsets:
+            if name in entry_overrides:
+                continue
+            current.pop(name, None)
+            current_set.discard(name)
+            layer.pop(name, None)
+            layer.pop(_scoped_variable_name(environment, name), None)
+        for assignment in command.function_entry_assignments:
+            if _unscoped_variable_name(assignment.name) in entry_overrides:
+                continue
+            apply_assignment(
+                assignment,
+                environment,
+                current,
+                current_set,
+                layer,
+                definite=True,
+            )
+        current_set.update(
+            name for name in command.function_entry_definitely_set if name not in entry_overrides
+        )
+
+        for assignment in compound_assignments.get(command.command_id, ()):
+            apply_routed_side_effect(
+                assignment,
+                function_context=function_context,
+                environment=environment,
+                current=current,
+                current_set=current_set,
+                layer=layer,
+                persistent_values=persistent_values,
+                persistent_set=persistent_set,
+                persistent_layer=persistent_layer,
+                definite=not conditional,
+            )
+        for assignment in command.assignments:
+            if assignment.conditional:
+                apply_routed_side_effect(
+                    assignment,
+                    function_context=function_context,
+                    environment=environment,
+                    current=current,
+                    current_set=current_set,
+                    layer=layer,
+                    persistent_values=persistent_values,
+                    persistent_set=persistent_set,
+                    persistent_layer=persistent_layer,
+                    definite=not conditional,
+                )
         for assignment in command.definite_assignments:
             apply_assignment(
                 assignment,
@@ -4137,29 +8255,223 @@ def _eval_command_environments(  # noqa: PLR0913
                 layer,
                 definite=True,
             )
+        snapshot_values = dict(current)
+        fixed_point_overrides: dict[str, _ContentValue] = {}
+        function_entry_names = {
+            *command.function_entry_unsets,
+            *(
+                _unscoped_variable_name(assignment.name)
+                for assignment in command.function_entry_assignments
+            ),
+        }
+        for key in eval_shadow_names[command.command_id]:
+            name = _unscoped_variable_name(key)
+            if key not in source_order_override_keys and name not in function_entry_names:
+                continue
+            if (
+                name not in current
+                and (environment in unknown_environments or function_context in function_unknown)
+                and name not in function_entry_names
+            ):
+                continue
+            target_environment = _scoped_variable_environment(key)
+            if target_environment in function_contexts:
+                fixed_point_overrides[key] = (
+                    current.get(name, _OUTSIDE_VALUE)
+                    if name in function_entry_names
+                    else function_values.get(
+                        target_environment,
+                        {},
+                    ).get(name, _OUTSIDE_VALUE)
+                )
+            else:
+                fixed_point_overrides[key] = current.get(name, _OUTSIDE_VALUE)
         snapshots[command.command_id] = _EvalCommandEnvironment(
-            tuple(sorted(current.items())),
+            tuple(sorted(snapshot_values.items())),
             frozenset(current_set),
+            tuple(sorted(fixed_point_overrides.items())),
         )
-        if conditional:
+        if assignment_only:
             for assignment in command.definite_assignments:
+                name = _unscoped_variable_name(assignment.name)
+                local_target = function_context is not None and (
+                    _scoped_variable_environment(assignment.name) == function_context
+                    or name in function_shadows[function_context]
+                )
+                if local_target:
+                    function_shadows[function_context].add(name)
+                    apply_assignment(
+                        assignment,
+                        function_context,
+                        function_values[function_context],
+                        function_set[function_context],
+                        layer,
+                        definite=True,
+                    )
+                elif conditional:
+                    apply_assignment(
+                        assignment,
+                        environment,
+                        persistent_values,
+                        persistent_set,
+                        persistent_layer,
+                        definite=False,
+                    )
+        unset_names, unknown_unset_target = _unset_action(command)
+        if unknown_unset_target:
+            persistent_set.clear()
+            if function_context is not None:
+                function_unknown.add(function_context)
+                function_set[function_context].clear()
+        for name in unset_names:
+            if function_context is not None and name in function_shadows[function_context]:
+                function_values[function_context].pop(name, None)
+                function_set[function_context].discard(name)
+                continue
+            persistent_set.discard(name)
+            if conditional:
+                continue
+            persistent_values.pop(name, None)
+            persistent_layer.pop(name, None)
+            persistent_layer.pop(_scoped_variable_name(environment, name), None)
+        if command.unknown_builtin_content is not None:
+            persistent_set.clear()
+            if function_context is not None:
+                function_unknown.add(function_context)
+                function_set[function_context].clear()
+            else:
+                unknown_environments.add(environment)
+        if command.builtin_local and function_context is not None:
+            for name in command.builtin_unsets:
+                function_shadows[function_context].add(name)
+                function_values[function_context].pop(name, None)
+                function_set[function_context].discard(name)
+        for assignment in command.builtin_assignments:
+            name = _unscoped_variable_name(assignment.name)
+            local_target = (
+                function_context is not None
+                and not command.builtin_force_global
+                and (
+                    command.builtin_local
+                    or _scoped_variable_environment(assignment.name) == function_context
+                    or name in function_shadows[function_context]
+                )
+            )
+            if local_target:
+                function_shadows[function_context].add(name)
+                apply_assignment(
+                    assignment,
+                    function_context,
+                    function_values[function_context],
+                    function_set[function_context],
+                    layer,
+                    definite=True,
+                )
+            if not local_target or command.builtin_dynamic_options:
                 apply_assignment(
                     assignment,
                     environment,
                     persistent_values,
                     persistent_set,
                     persistent_layer,
-                    definite=False,
+                    definite=not conditional and not command.builtin_dynamic_options,
+                    evaluation_layer=layer,
                 )
         for assignment in assignments_by_command.get(command.command_id, ()):
             apply_assignment(
                 assignment,
                 environment,
-                (persistent_values if conditional else current),
-                (persistent_set if conditional else current_set),
-                (persistent_layer if conditional else layer),
+                persistent_values,
+                persistent_set,
+                persistent_layer,
                 definite=False,
+                evaluation_layer=layer,
             )
+            source_order_override_keys.add(
+                _scoped_variable_name(
+                    environment,
+                    _unscoped_variable_name(assignment.name),
+                )
+            )
+        for assignment in command.function_effect_assignments:
+            target_environment = _scoped_variable_environment(assignment.name)
+            name = _unscoped_variable_name(assignment.name)
+            if target_environment in function_contexts:
+                function_shadows.setdefault(target_environment, set()).add(name)
+                apply_parameter_assignment(
+                    assignment,
+                    target_environment,
+                    function_values.setdefault(target_environment, {}),
+                    function_set.setdefault(target_environment, set()),
+                    layer,
+                    definite=not conditional,
+                    evaluation_layer=layer,
+                )
+                source_order_override_keys.add(assignment.name)
+            else:
+                apply_parameter_assignment(
+                    assignment,
+                    environment,
+                    persistent_values,
+                    persistent_set,
+                    persistent_layer,
+                    definite=not conditional,
+                    evaluation_layer=layer,
+                )
+                source_order_override_keys.add(_scoped_variable_name(environment, name))
+        for target in command.function_effect_unsets:
+            target_environment = _scoped_variable_environment(target)
+            name = _unscoped_variable_name(target)
+            if target_environment in function_contexts:
+                function_shadows.setdefault(target_environment, set()).add(name)
+                function_values.setdefault(target_environment, {}).pop(name, None)
+                function_set.setdefault(target_environment, set()).discard(name)
+                source_order_override_keys.add(target)
+            else:
+                persistent_values.pop(name, None)
+                persistent_set.discard(name)
+                persistent_layer.pop(name, None)
+                persistent_layer.pop(_scoped_variable_name(environment, name), None)
+                source_order_override_keys.add(_scoped_variable_name(environment, name))
+        if function_context is not None:
+            entry_overrides.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in compound_assignments.get(command.command_id, ())
+            )
+            entry_overrides.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in command.assignments
+                if assignment.conditional
+            )
+            if assignment_only:
+                entry_overrides.update(
+                    _unscoped_variable_name(assignment.name)
+                    for assignment in command.definite_assignments
+                )
+            entry_overrides.update(command.builtin_unsets)
+            entry_overrides.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in command.builtin_assignments
+            )
+            entry_overrides.update(unset_names)
+            entry_overrides.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in assignments_by_command.get(command.command_id, ())
+            )
+            entry_overrides.update(
+                _unscoped_variable_name(assignment.name)
+                for assignment in command.function_effect_assignments
+            )
+            entry_overrides.update(
+                _unscoped_variable_name(target) for target in command.function_effect_unsets
+            )
+            if unknown_unset_target or command.unknown_builtin_content is not None:
+                entry_overrides.update(command.function_entry_unsets)
+                entry_overrides.update(command.function_entry_definitely_set)
+                entry_overrides.update(
+                    _unscoped_variable_name(assignment.name)
+                    for assignment in command.function_entry_assignments
+                )
     return snapshots
 
 
@@ -4173,7 +8485,7 @@ def _eval_taken_assignments(
     assignments_by_command: dict[int, tuple[_AssignmentEvidence, ...]] = {}
     for command in commands:
         assignments: list[_AssignmentEvidence] = []
-        seen: set[tuple[str, bool, tuple[str | int | bool, ...]]] = set()
+        seen: set[tuple[str, bool, bool, bool, bool, tuple[str | int | bool, ...]]] = set()
         for executable in _builtin_eval_candidates(command):
             raw = _eval_arguments_raw(command, executable)
             budget.charge_work(_expression_nodes(raw))
@@ -4183,6 +8495,7 @@ def _eval_taken_assignments(
                 None,
                 context,
                 environment_variables=environment.variables,
+                fixed_point_overrides=environment.fixed_point_overrides,
                 definitely_set_variables=environment.definitely_set,
             )
             budget.charge_work(len(states))
@@ -4332,29 +8645,112 @@ def _eval_sink_marker_capable(
 ) -> bool:
     """Return whether any builtin eval candidate reparses an authored marker flow."""
     for executable in _builtin_eval_candidates(command):
-        raw = _eval_arguments_raw(command, executable)
-        if _marker_capable(
-            _evaluate_with_tables(
-                raw,
-                context.raw_variables,
+        exact_programs = _static_eval_programs(command)
+        raw_programs = (
+            tuple(
+                LiteralTransfer(_strip_active_shell_comments(program)) for program in exact_programs
+            )
+            if exact_programs
+            else (_eval_arguments_raw(command, executable),)
+        )
+        for raw in raw_programs:
+            if _marker_capable(
+                _evaluate_with_tables(
+                    raw,
+                    ChainMap(dict(environment.fixed_point_overrides), context.raw_variables),
+                    {},
+                    {},
+                    context.limits,
+                )
+            ):
+                return True
+            if any(
+                summary.full.entries[_DFA_START][1]
+                for state in _eval_syntax_expression(
+                    raw,
+                    None,
+                    context,
+                    environment_variables=environment.variables,
+                    fixed_point_overrides=environment.fixed_point_overrides,
+                    definitely_set_variables=environment.definitely_set,
+                )
+                for summary in _finalize_eval_syntax(
+                    state,
+                    context,
+                )
+            ):
+                return True
+        if _static_eval_prefix_sink_marker_capable(
+            command,
+            context,
+            environment,
+        ):
+            return True
+    return False
+
+
+def _static_eval_prefix_sink_marker_capable(  # noqa: PLR0912
+    command: _CommandEvidence,
+    context: _EvalSyntaxContext,
+    environment: _EvalCommandEnvironment,
+) -> bool:
+    """Check exact eval sinks under temporary leading assignment environments."""
+    outer_variables: Mapping[str | int, _ContentValue] = ChainMap(
+        dict(environment.fixed_point_overrides),
+        context.raw_variables,
+    )
+    for parsed in _static_eval_commands(command):
+        index = 0
+        prefix_variables: dict[str | int, _ContentValue] = {}
+        while index < len(parsed.words):
+            assignment = _static_assignment_word(parsed.words[index])
+            if assignment is None:
+                break
+            content = _static_eval_assignment_content(parsed.source_words[index])
+            if content is None:
+                raise _TaintLimitExceeded("shell taint eval command prefix cannot be represented")
+            prefix_variables[assignment.name] = _evaluate_with_tables(
+                content,
+                ChainMap(prefix_variables, outer_variables),
                 {},
                 {},
                 context.limits,
             )
-        ):
-            return True
-        if any(
-            summary.full.entries[_DFA_START][1]
-            for state in _eval_syntax_expression(
-                raw,
-                None,
-                context,
-                environment_variables=environment.variables,
-                definitely_set_variables=environment.definitely_set,
-            )
-            for summary in _finalize_eval_syntax(
-                state,
-                context,
+            index += 1
+        if not prefix_variables or index >= len(parsed.words):
+            continue
+        while index < len(parsed.words) and parsed.words[index] in {"builtin", "command"}:
+            index += 1
+            if index < len(parsed.words) and parsed.words[index] == "--":
+                index += 1
+        if index >= len(parsed.words):
+            continue
+        sink_text: str | None = None
+        executable = parsed.words[index]
+        if executable == "eval":
+            sink_text = " ".join(parsed.words[index + 1 :])
+        elif executable in {"source", "."}:
+            if index + 1 < len(parsed.words):
+                sink_text = parsed.words[index + 1]
+        elif _normalized_shell_head(executable) in _SHELL_HEADS:
+            argv = tuple(_ArgPort(word, LiteralTransfer(word)) for word in parsed.words)
+            selection = _select_shell_source(argv, index)
+            if selection.kind is _ShellSourceKind.COMMAND and selection.argv_index is not None:
+                sink_text = parsed.words[selection.argv_index]
+        if sink_text is None:
+            continue
+        sink = _lower_eval_assignment_operand(
+            _eval_reparse_content(LiteralTransfer(sink_text), context.limits),
+            0,
+            scoped=False,
+        )
+        if _marker_capable(
+            _evaluate_with_tables(
+                sink,
+                ChainMap(prefix_variables, outer_variables),
+                {},
+                {},
+                context.limits,
             )
         ):
             return True
@@ -4458,10 +8854,19 @@ def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
+    *,
+    skip_builtin_eval: bool = False,
 ) -> tuple[ContentExpr, ...]:
     """Return every conservative execution sink expression for all candidates."""
     expressions: list[ContentExpr] = []
     for executable in _iter_executable_evidence(command.executable):
+        if (
+            skip_builtin_eval
+            and executable.name == "eval"
+            and executable.literal == "eval"
+            and not executable.external_lookup
+        ):
+            continue
         expressions.extend(
             _candidate_sink_expressions(
                 command,
@@ -4510,7 +8915,13 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
 
     try:
         _validate_nested_evidence(evidence, limits)
-        evidence = _contextualize_evidence(evidence)
+        evidence = _resolve_builtin_writer_evidence(evidence)
+        if any(command.unsupported_builtin_write for command in evidence.commands):
+            raise _TaintLimitExceeded("shell builtin writer cannot be represented")
+        evidence = _contextualize_evidence(evidence, limits=limits)
+        evidence = _route_runtime_nameref_writes(evidence)
+        if any(command.unsupported_builtin_write for command in evidence.commands):
+            raise _TaintLimitExceeded("shell builtin writer cannot be represented")
         definitions, inputs = _build_flow_definitions(evidence, limits=limits)
         (
             command_environment_ids,
@@ -4581,8 +8992,31 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
             ):
                 return True, TAINT_REFUSAL_REASON
             stdin = inputs[command.command_id]
-            for expression in _sink_expressions(command, stdin, process_resources):
-                if _marker_capable(solved.evaluate(expression)):
+            sink_variables: Mapping[str | int, _ContentValue] = ChainMap(
+                dict(command_environments[command.command_id].fixed_point_overrides),
+                solved.variables,
+            )
+            for expression in _sink_expressions(
+                command,
+                stdin,
+                process_resources,
+                skip_builtin_eval=(
+                    command.runtime_eval_program_authoritative
+                    or any(
+                        _strip_active_shell_comments(program) != program
+                        for program in _static_eval_programs(command)
+                    )
+                ),
+            ):
+                if _marker_capable(
+                    _evaluate_with_tables(
+                        expression,
+                        sink_variables,
+                        solved.resources,
+                        solved.streams,
+                        limits,
+                    )
+                ):
                     return True, TAINT_REFUSAL_REASON
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
         return True, str(error)

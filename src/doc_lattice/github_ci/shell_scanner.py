@@ -6,6 +6,7 @@ from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
+    _QUOTED_FUNCTION_POSITIONAL_STAR,
     TAINT_REFUSAL_REASON,
     CommandOutput,
     Concat,
@@ -36,6 +37,7 @@ from doc_lattice.github_ci.shell_taint import (
     _select_shell_source,
     _ShellSourceKind,
     _StreamScopeEvidence,
+    _strip_active_shell_comments,
     _TaintLimitExceeded,
     _WordContentPort,
     analyze_marker_taint,
@@ -57,6 +59,9 @@ _ANSI_C_OCTAL_BYTE_MASK = 0xFF
 _UNICODE_MAX = 0x10FFFF
 _SURROGATE_MIN = 0xD800
 _SURROGATE_MAX = 0xDFFF
+_PRINTF_SEPARATE_V_MIN_ARGUMENTS = 3
+_PRINTF_ATTACHED_V_PREFIX_LENGTH = 2
+_PRINTF_FIELD_LIMIT = 4096
 
 _COMMAND_PREFIXES = frozenset(
     {
@@ -126,6 +131,7 @@ _COMMAND_OPERATORS = (
     ";;&",
     "&&",
     "||",
+    "|&",
     ";;",
     ";&",
     ";",
@@ -203,6 +209,7 @@ _BASH_REDIRECTION_ASSIGNMENT_BUILTINS = frozenset(
         "wait",
     }
 )
+_BASH_ASSIGNMENT_BUILTINS = frozenset({"declare", "export", "local", "readonly", "typeset"})
 _UV_SHARED_OPTIONS_WITH_ARGUMENTS = frozenset(
     {
         "--allow-insecure-host",
@@ -486,7 +493,7 @@ class _ShellWord:
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
     process_resource_id: int | None = None
     keyword_eligible: bool = True
-    argv_ports: tuple[_WordContentPort, ...] = ()
+    argv_ports: tuple[_WordContentPort, ...] | None = None
     brace_expansion_error: str | None = None
 
 
@@ -515,6 +522,8 @@ class _ShellWordBuilder:
     ) -> None:
         """Append text protected from literal argv expansion."""
         self.content.append_literal("".join(segment) if isinstance(segment, list) else segment)
+        if not unquoted_dynamic:
+            self.content.mark_field_presence()
         self.characters.extend(segment)
         self.active_syntax.append(" ")
         self.dynamic = self.dynamic or dynamic
@@ -733,10 +742,12 @@ class _CommandScanState:
     at_command_position: bool = True
     command_has_marker: bool = False
     pending_pipe_producer: int | None = None
+    pending_pipe_stderr: bool = False
     pipeline: _PipelineFrame | None = None
     pending_compound_scope_id: int | None = None
     compound_redirection_ordinal: int = 0
     conditionally_executed: bool = False
+    conditional_operator: str | None = None
 
     def reset_command(self) -> None:
         """Clear the accumulated simple command and its incremental prefix-scan state."""
@@ -747,6 +758,7 @@ class _CommandScanState:
         self.prefix_pending = 0
         self.at_command_position = True
         self.command_has_marker = False
+        self.conditional_operator = None
 
 
 @dataclass(slots=True)
@@ -1106,8 +1118,12 @@ class _ShellScanner:
         ):
             return self._consume_array_assignment(index, limit, state, depth + 1)
         command_id = self._flush_command(state)
-        if operator == "|":
-            self._begin_or_extend_pipeline(state, command_id)
+        if operator in {"|", "|&"}:
+            self._begin_or_extend_pipeline(
+                state,
+                command_id,
+                includes_stderr=operator == "|&",
+            )
             return index
         if operator in {"(", "{"}:
             closing = ")" if operator == "(" else "}"
@@ -1125,6 +1141,7 @@ class _ShellScanner:
         self._advance_case_body(state, operator)
         state.pending_compound_scope_id = None
         state.conditionally_executed = operator in {"&&", "||"}
+        state.conditional_operator = operator if operator in {"&&", "||"} else None
         return index
 
     def _scan_compound_scope(  # noqa: PLR0913
@@ -1139,7 +1156,9 @@ class _ShellScanner:
     ) -> int:
         """Scan a real compound command and expose its stdout to the parent command list."""
         command_start = len(self.taint_builder.commands) if self.taint_builder is not None else 0
-        function_body = self._pending_function_body(state, kind)
+        definition_command_id = state.last_command_id
+        function_name = self._pending_function_name(state, kind)
+        function_body = function_name is not None
         coprocess_body = self._pending_coprocess_body(state)
         end, scope_id = self._scan_stream_scope(
             start,
@@ -1148,12 +1167,48 @@ class _ShellScanner:
             depth=depth,
             kind=kind,
         )
+        if self.taint_builder is not None:
+            for scope_index, scope in enumerate(self.taint_builder.scopes):
+                if scope.scope_id != scope_id:
+                    continue
+                binding_command_id = (
+                    self.taint_builder.commands[command_start].command_id
+                    if command_start < len(self.taint_builder.commands)
+                    else None
+                )
+                self.taint_builder.scopes[scope_index] = replace(
+                    scope,
+                    binding_command_id=binding_command_id,
+                )
+                break
         if self.taint_builder is not None and (state.conditionally_executed or function_body):
             for command_index in range(command_start, len(self.taint_builder.commands)):
+                command = self.taint_builder.commands[command_index]
                 self.taint_builder.commands[command_index] = replace(
-                    self.taint_builder.commands[command_index],
+                    command,
                     conditionally_executed=True,
+                    function_effect_conditional=(
+                        command.function_effect_conditional or command.conditionally_executed
+                    ),
+                    function_context_id=(
+                        command.function_context_id
+                        if command.function_context_id is not None
+                        else scope_id
+                        if function_body
+                        else None
+                    ),
+                    function_name=command.function_name or function_name,
                 )
+        if self.taint_builder is not None and function_body and definition_command_id is not None:
+            for command_index, command in enumerate(self.taint_builder.commands):
+                if command.command_id != definition_command_id:
+                    continue
+                self.taint_builder.commands[command_index] = replace(
+                    command,
+                    defines_function_context_id=scope_id,
+                    defines_function_name=function_name,
+                )
+                break
         if self.taint_builder is not None and coprocess_body:
             for command_index in range(command_start, len(self.taint_builder.commands)):
                 self.taint_builder.commands[command_index] = replace(
@@ -1167,15 +1222,20 @@ class _ShellScanner:
         state.compound_redirection_ordinal = 0
         if state.pending_pipe_producer is not None and self.taint_builder is not None:
             self.taint_builder.pipes.append(
-                _PipeEvidence(state.pending_pipe_producer, consumer_scope_id=scope_id)
+                _PipeEvidence(
+                    state.pending_pipe_producer,
+                    consumer_scope_id=scope_id,
+                    includes_stderr=state.pending_pipe_stderr,
+                )
             )
             state.pending_pipe_producer = None
+            state.pending_pipe_stderr = False
         return end
 
-    def _pending_function_body(self, state: _CommandScanState, kind: str) -> bool:
-        """Return whether a brace scope follows a parsed ``name()`` signature."""
+    def _pending_function_name(self, state: _CommandScanState, kind: str) -> str | None:
+        """Return the exact name whose parsed function body is this brace scope."""
         if kind != "brace_group" or self.taint_builder is None or state.last_command_id is None:
-            return False
+            return None
         command = next(
             (
                 command
@@ -1185,7 +1245,8 @@ class _ShellScanner:
             None,
         )
         if command is not None and bool(command.argv[1:]) and command.argv[0].literal == "function":
-            return True
+            name = command.argv[1]
+            return name.literal if not name.dynamic and name.literal else None
         pending = next(
             (
                 scope
@@ -1194,14 +1255,21 @@ class _ShellScanner:
             ),
             None,
         )
-        return bool(
+        executable_index = command.executable.argv_index if command is not None else None
+        if (
             pending is not None
             and pending.kind == "subshell_group"
             and isinstance(pending.output, SequenceOutput)
             and not pending.output.parts
             and command is not None
-            and len(command.argv) == 1
-        )
+            and executable_index is not None
+            and executable_index == len(command.argv) - 1
+            and not command.argv[executable_index].dynamic
+            and command.argv[executable_index].literal
+            and command.executable.literal == command.argv[executable_index].literal
+        ):
+            return command.argv[executable_index].literal
+        return None
 
     def _pending_coprocess_body(self, state: _CommandScanState) -> bool:
         """Return whether the pending compound command belongs to ``coproc``."""
@@ -1485,6 +1553,7 @@ class _ShellScanner:
         self._finalize_pipeline(state)
         state.pending_compound_scope_id = None
         state.conditionally_executed = False
+        state.conditional_operator = None
         index += 1
         if state.heredocs:
             index = self._consume_heredocs(
@@ -1501,6 +1570,8 @@ class _ShellScanner:
         self,
         state: _CommandScanState,
         producer_command_id: int | None,
+        *,
+        includes_stderr: bool,
     ) -> None:
         """Record the command just flushed as one stage of a shell pipeline."""
         if self.taint_builder is None:
@@ -1515,6 +1586,7 @@ class _ShellScanner:
         elif not state.pipeline.stages or state.pipeline.stages[-1] != producer_scope:
             state.pipeline.stages.append(producer_scope)
         state.pending_pipe_producer = producer_scope
+        state.pending_pipe_stderr = includes_stderr
         state.pending_compound_scope_id = None
         if self.scope_stack and self.scope_stack[-1].outputs:
             self.scope_stack[-1].outputs.pop()
@@ -1551,6 +1623,7 @@ class _ShellScanner:
             self.scope_stack[-1].outputs.append(ScopeOutput(state.pipeline.scope_id))
         state.pipeline = None
         state.pending_pipe_producer = None
+        state.pending_pipe_stderr = False
 
     def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912, PLR0915
         if not state.words and not state.redirections:
@@ -1565,10 +1638,13 @@ class _ShellScanner:
             executable = _executable_evidence_from_resolution(state.words, resolution)
         assignment_indices = _assignment_indices(state.words, executable)
         if self.classify_commands:
+            command_has_marker = state.command_has_marker and not (
+                _eval_markers_are_only_active_comments(state.words, executable)
+            )
             invocation = _invocation_in_simple_command(
                 state.words,
                 self.budget,
-                command_has_marker=state.command_has_marker,
+                command_has_marker=command_has_marker,
                 resolution=resolution,
                 executable=resolved_executable,
                 defer_marker_refusal=(
@@ -1588,29 +1664,29 @@ class _ShellScanner:
                 _doc_lattice_command_index(state.words, 0, resolution)
                 executable = _executable_evidence_from_resolution(state.words, resolution)
             redirection_assignments_persist = _redirection_assignments_persist(executable)
-            assignments: list[_AssignmentEvidence] = []
+            definite_assignments_list: list[_AssignmentEvidence] = []
             for index in assignment_indices:
                 word = state.words[index]
                 if word.assignment_name is not None and word.assignment_content is not None:
-                    assignments.append(
+                    definite_assignments_list.append(
                         _AssignmentEvidence(
                             word.assignment_name,
                             word.assignment_content,
                             append=word.assignment_append,
                         )
                     )
-            definite_assignments = tuple(assignments)
-            for word in state.words:
-                assignments.extend(word.conditional_assignments)
-            if redirection_assignments_persist:
-                assignments.extend(state.redirection_assignments)
+            definite_assignments = tuple(definite_assignments_list)
             argv_indices: dict[int, int] = {}
             argv_parts: list[_ArgPort] = []
             for source_index, word in enumerate(state.words):
                 if source_index in assignment_indices:
                     continue
                 argv_indices[source_index] = len(argv_parts)
-                ports = word.argv_ports or (_WordContentPort(word.literal, word.content),)
+                ports = (
+                    word.argv_ports
+                    if word.argv_ports is not None
+                    else (_WordContentPort(word.literal, word.content),)
+                )
                 argv_parts.extend(
                     _ArgPort(
                         port.literal,
@@ -1621,6 +1697,34 @@ class _ShellScanner:
                     for port in ports
                 )
             argv = tuple(argv_parts)
+            remapped_executable = _remap_executable(executable, argv_indices)
+            assignment_only = not argv or remapped_executable.argv_index is None
+            assignments = list(definite_assignments if assignment_only else ())
+            for word in state.words:
+                assignments.extend(word.conditional_assignments)
+            if redirection_assignments_persist:
+                assignments.extend(state.redirection_assignments)
+            (
+                builtin_assignments,
+                builtin_unsets,
+                builtin_local,
+                builtin_force_global,
+                builtin_dynamic_options,
+                unknown_builtin_content,
+                unsupported_nameref,
+            ) = _assignment_builtin_evidence(state.words, executable)
+            (
+                writer_assignments,
+                unknown_writer_content,
+                unsupported_writer,
+            ) = _deterministic_writer_evidence(state.words, executable)
+            builtin_assignments = (*builtin_assignments, *writer_assignments)
+            if unknown_writer_content is not None:
+                unknown_builtin_content = (
+                    choice(unknown_builtin_content, unknown_writer_content)
+                    if unknown_builtin_content is not None
+                    else unknown_writer_content
+                )
             command_id, output_scope_id = self.taint_builder.allocate_command()
             container_scope_id = self.scope_stack[-1].scope_id if self.scope_stack else 0
             self.taint_builder.commands.append(
@@ -1631,9 +1735,17 @@ class _ShellScanner:
                     argv=argv,
                     assignments=tuple(assignments),
                     redirections=tuple(state.redirections),
-                    executable=_remap_executable(executable, argv_indices),
+                    executable=remapped_executable,
                     definite_assignments=definite_assignments,
+                    builtin_assignments=builtin_assignments,
+                    builtin_unsets=builtin_unsets,
+                    builtin_local=builtin_local,
+                    builtin_force_global=builtin_force_global,
+                    builtin_dynamic_options=builtin_dynamic_options,
+                    unknown_builtin_content=unknown_builtin_content,
+                    unsupported_builtin_write=unsupported_nameref or unsupported_writer,
                     conditionally_executed=state.conditionally_executed or bool(state.cases),
+                    conditional_operator=state.conditional_operator,
                     isolated_execution=bool(argv and argv[0].literal == "coproc"),
                     isolated_context_id=(
                         output_scope_id if argv and argv[0].literal == "coproc" else None
@@ -1645,9 +1757,14 @@ class _ShellScanner:
                 self.scope_stack[-1].outputs.append(CommandOutput(command_id))
             if state.pending_pipe_producer is not None:
                 self.taint_builder.pipes.append(
-                    _PipeEvidence(state.pending_pipe_producer, command_id)
+                    _PipeEvidence(
+                        state.pending_pipe_producer,
+                        command_id,
+                        includes_stderr=state.pending_pipe_stderr,
+                    )
                 )
                 state.pending_pipe_producer = None
+                state.pending_pipe_stderr = False
             for word in state.words:
                 for scope_id in stream_ref_ids(word.content):
                     self.taint_builder.attach_scope_parent(scope_id, command_id)
@@ -2190,6 +2307,8 @@ class _ShellScanner:
     ) -> _ShellExpansion | None:
         if depth > _MAX_SHELL_RECURSION_DEPTH:
             raise _ShellScanIncomplete("recursion limit exceeded")
+        if double_quoted and self.source.startswith(("$'", '$"'), index, limit):
+            return None
         end: int | None = None
         quoted_zero_field_expansion = False
         content: ContentExpr = OutsideGap()
@@ -2229,9 +2348,14 @@ class _ShellScanner:
             content = StreamRef(scope_id) if self.taint_builder is not None else OutsideGap()
         elif self.source[index] == "$":
             end = _consume_parameter_name(self.source, index, limit)
+            name = self.source[index + 1 : end]
+            reference_name = (
+                _QUOTED_FUNCTION_POSITIONAL_STAR if double_quoted and name == "*" else name
+            )
             content = (
-                VariableRef(self.source[index + 1 : end])
+                VariableRef(reference_name)
                 if _is_unbraced_named_parameter(self.source, index, limit)
+                or _is_function_positional_parameter(name)
                 else OutsideGap()
             )
             quoted_zero_field_expansion = double_quoted and (
@@ -2293,11 +2417,15 @@ class _ShellScanner:
                 index += 1
                 if braces == 0:
                     closing = index - 1
-                    name_end = _parameter_name_end(self.source, start, closing)
+                    name_end = _parameter_reference_end(self.source, start, closing)
                     name = self.source[start:name_end]
                     operator, operand_start = _parameter_operator_at(self.source, name_end, closing)
-                    variable = VariableRef(name) if _is_name(name) else OutsideGap()
-                    if operator is None and name_end == closing and _is_name(name):
+                    reference = _is_name(name) or _is_function_positional_parameter(name)
+                    reference_name = (
+                        _QUOTED_FUNCTION_POSITIONAL_STAR if double_quoted and name == "*" else name
+                    )
+                    variable = VariableRef(reference_name) if reference else OutsideGap()
+                    if operator is None and name_end == closing and reference:
                         return _ShellExpansion(index, quoted_zero_field_expansion, variable)
                     operand_start = operand_start if operator is not None else name_end
                     operand = self._parse_parameter_word_content(
@@ -2317,7 +2445,12 @@ class _ShellScanner:
                         content = choice(variable, operand)
                         conditional_assignments = (
                             *conditional_assignments,
-                            _AssignmentEvidence(name, operand),
+                            _AssignmentEvidence(
+                                name,
+                                operand,
+                                conditional=True,
+                                assign_if_null=operator == ":=",
+                            ),
                         )
                     else:
                         content = concat(OutsideGap(), operand)
@@ -2759,6 +2892,368 @@ def _assignment_indices(
     }
 
 
+def _assignment_builtin_evidence(  # noqa: PLR0912, PLR0915
+    words: list[_ShellWord],
+    executable: _ExecutableEvidence | None,
+) -> tuple[
+    tuple[_AssignmentEvidence, ...],
+    tuple[str, ...],
+    bool,
+    bool,
+    bool,
+    ContentExpr | None,
+    bool,
+]:
+    """Extract exact ``NAME[+]=value`` operands from Bash assignment builtins."""
+    if executable is None:
+        return (), (), False, False, False, None, False
+    pending = [executable]
+    executable_index: int | None = None
+    builtin_name: str | None = None
+    while pending:
+        candidate = pending.pop()
+        if (
+            not candidate.external_lookup
+            and candidate.argv_index is not None
+            and candidate.name in _BASH_ASSIGNMENT_BUILTINS
+            and candidate.literal == candidate.name
+        ):
+            executable_index = candidate.argv_index
+            builtin_name = candidate.name
+            break
+        pending.extend(candidate.alternates)
+    if executable_index is None or builtin_name is None:
+        return (), (), False, False, False, None, False
+
+    options_enabled = True
+    query_only = False
+    force_global = False
+    nameref = False
+    remove_nameref = False
+    dynamic_options = False
+    unsupported_nameref = False
+    assignments: list[_AssignmentEvidence] = []
+    unsets: list[str] = []
+    unknown: list[ContentExpr] = []
+    for word in words[executable_index + 1 :]:
+        if options_enabled and not word.dynamic and word.literal == "--":
+            options_enabled = False
+            continue
+        if (
+            options_enabled
+            and not word.dynamic
+            and word.literal.startswith(("-", "+"))
+            and word.literal not in {"-", "+"}
+        ):
+            flags = word.literal[1:]
+            setting_attributes = word.literal.startswith("-")
+            query_flags = (
+                {"F", "f", "p"} if builtin_name in {"declare", "local", "typeset"} else {"f"}
+            )
+            query_only = query_only or (setting_attributes and bool(set(flags) & query_flags))
+            force_global = force_global or (setting_attributes and "g" in flags)
+            if "n" in flags and builtin_name in {"declare", "local", "typeset"}:
+                nameref = setting_attributes
+                remove_nameref = not setting_attributes
+            continue
+        if options_enabled and word.dynamic:
+            dynamic_options = True
+            unknown.append(word.content)
+            unsupported_nameref = unsupported_nameref or nameref
+            continue
+        if query_only:
+            continue
+        if word.assignment_name is not None and word.assignment_content is not None:
+            content = word.assignment_content
+            if remove_nameref:
+                assignments.append(
+                    _AssignmentEvidence(
+                        word.assignment_name,
+                        LiteralTransfer(""),
+                        nameref_unset=True,
+                    )
+                )
+            if nameref:
+                if (
+                    not isinstance(content, LiteralTransfer)
+                    or _SHELL_ASSIGNMENT_NAME_RE.fullmatch(content.text) is None
+                ):
+                    unknown.append(content)
+                    unsupported_nameref = True
+                    continue
+                nameref_target = content.text
+                content = VariableRef(nameref_target)
+            else:
+                nameref_target = None
+            assignments.append(
+                _AssignmentEvidence(
+                    word.assignment_name,
+                    content,
+                    append=word.assignment_append,
+                    nameref_target=nameref_target,
+                )
+            )
+        elif word.dynamic:
+            unknown.append(word.content)
+            unsupported_nameref = unsupported_nameref or nameref
+        elif builtin_name in {
+            "declare",
+            "local",
+            "typeset",
+        } and _SHELL_ASSIGNMENT_NAME_RE.fullmatch(word.literal):
+            if remove_nameref:
+                assignments.append(
+                    _AssignmentEvidence(
+                        word.literal,
+                        LiteralTransfer(""),
+                        nameref_unset=True,
+                    )
+                )
+            elif nameref:
+                assignments.append(
+                    _AssignmentEvidence(
+                        word.literal,
+                        LiteralTransfer(""),
+                        nameref_target="",
+                    )
+                )
+            else:
+                unsets.append(word.literal)
+
+    builtin_local = builtin_name in {"declare", "local", "typeset"} and not force_global
+    return (
+        tuple(assignments),
+        tuple(unsets),
+        builtin_local,
+        force_global,
+        dynamic_options,
+        choice(*unknown) if unknown else None,
+        unsupported_nameref,
+    )
+
+
+def _printf_v_format_content(  # noqa: PLR0911, PLR0912, PLR0915
+    format_text: str,
+    values: list[_ShellWord],
+) -> ContentExpr | None:
+    """Render bounded ``printf -v`` formats whose output ordering is representable."""
+    if "\\" in format_text:
+        return None
+    parts: list[ContentExpr] = []
+    value_index = 0
+    first_pass = True
+    while first_pass or value_index < len(values):
+        first_pass = False
+        pass_start = value_index
+        literal_start = 0
+        index = 0
+        while index < len(format_text):
+            if format_text[index] != "%":
+                index += 1
+                continue
+            if index > literal_start:
+                parts.append(LiteralTransfer(format_text[literal_start:index]))
+            index += 1
+            if index >= len(format_text):
+                return None
+            if format_text[index] == "%":
+                parts.append(LiteralTransfer("%"))
+                index += 1
+                literal_start = index
+                continue
+            conversion_index = index
+            while conversion_index < len(format_text) and format_text[conversion_index] not in "s":
+                character = format_text[conversion_index]
+                if character.isalpha() or character in {"%", "*", "$"}:
+                    return None
+                conversion_index += 1
+            if conversion_index >= len(format_text):
+                return None
+            value_word = values[value_index] if value_index < len(values) else None
+            value: ContentExpr = (
+                value_word.content if value_word is not None else LiteralTransfer("")
+            )
+            specifier = format_text[index : conversion_index + 1]
+            match = re.fullmatch(r"([-+ #0]*)(\d*)(?:\.(\d*))?s", specifier)
+            if match is None:
+                return None
+            flags, width_text, precision_text = match.groups()
+            if len(width_text) > len(str(_PRINTF_FIELD_LIMIT)) or (
+                precision_text is not None and len(precision_text) > len(str(_PRINTF_FIELD_LIMIT))
+            ):
+                return None
+            if width_text and int(width_text) > _PRINTF_FIELD_LIMIT:
+                return None
+            if precision_text is not None and int(precision_text or "0") > _PRINTF_FIELD_LIMIT:
+                return None
+            if width_text or precision_text is not None:
+                if value_word is not None and not isinstance(
+                    value_word.content,
+                    LiteralTransfer,
+                ):
+                    return None
+                rendered = value_word.literal if value_word is not None else ""
+                if precision_text is not None:
+                    rendered = rendered[: int(precision_text or "0")]
+                if width_text:
+                    width = int(width_text)
+                    rendered = rendered.ljust(width) if "-" in flags else rendered.rjust(width)
+                value = LiteralTransfer(rendered)
+            parts.append(value)
+            value_index += 1
+            index = conversion_index + 1
+            literal_start = index
+        if literal_start < len(format_text):
+            parts.append(LiteralTransfer(format_text[literal_start:]))
+        if value_index == pass_start:
+            break
+    return concat(*parts)
+
+
+def _deterministic_writer_evidence(  # noqa: PLR0911, PLR0912, PLR0915
+    words: list[_ShellWord],
+    executable: _ExecutableEvidence | None,
+) -> tuple[tuple[_AssignmentEvidence, ...], ContentExpr | None, bool]:
+    """Return bounded assignments from deterministic ``printf -v`` and ``read`` forms."""
+    if executable is None:
+        return (), None, False
+    pending = [executable]
+    executable_index: int | None = None
+    builtin_name: str | None = None
+    while pending:
+        candidate = pending.pop()
+        if (
+            not candidate.external_lookup
+            and candidate.argv_index is not None
+            and candidate.name in {"printf", "read"}
+            and candidate.literal == candidate.name
+        ):
+            executable_index = candidate.argv_index
+            builtin_name = candidate.name
+            break
+        pending.extend(candidate.alternates)
+    if executable_index is None or builtin_name is None:
+        return (), None, False
+
+    arguments = words[executable_index + 1 :]
+    if builtin_name == "printf":
+        if not arguments or arguments[0].dynamic:
+            return (
+                (),
+                choice(*(word.content for word in arguments)) if arguments else OutsideGap(),
+                bool(arguments),
+            )
+        first = arguments[0].literal
+        if first == "-v":
+            if len(arguments) < _PRINTF_SEPARATE_V_MIN_ARGUMENTS:
+                return (), OutsideGap(), True
+            target = arguments[1]
+            format_index = 2
+        elif first.startswith("-v") and len(first) > _PRINTF_ATTACHED_V_PREFIX_LENGTH:
+            target = replace(
+                arguments[0],
+                literal=first[_PRINTF_ATTACHED_V_PREFIX_LENGTH:],
+            )
+            format_index = 1
+        else:
+            return (), None, False
+        if (
+            format_index < len(arguments)
+            and not arguments[format_index].dynamic
+            and arguments[format_index].literal == "--"
+        ):
+            format_index += 1
+        if (
+            target.dynamic
+            or _SHELL_ASSIGNMENT_NAME_RE.fullmatch(target.literal) is None
+            or format_index >= len(arguments)
+        ):
+            return (), choice(*(word.content for word in arguments)), True
+        format_word = arguments[format_index]
+        values = arguments[format_index + 1 :]
+        content = (
+            None if format_word.dynamic else _printf_v_format_content(format_word.literal, values)
+        )
+        if content is None:
+            return (
+                (),
+                choice(format_word.content, *(word.content for word in values)),
+                True,
+            )
+        return (
+            (
+                _AssignmentEvidence(
+                    target.literal,
+                    content,
+                ),
+            ),
+            None,
+            False,
+        )
+
+    options_with_values = frozenset({"a", "d", "i", "n", "N", "p", "t", "u"})
+    array_target = False
+    read_raw = False
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument.dynamic:
+            return (), choice(*(word.content for word in arguments)), True
+        if argument.literal == "--":
+            index += 1
+            break
+        if not argument.literal.startswith("-") or argument.literal == "-":
+            break
+        flags = argument.literal[1:]
+        array_target = array_target or "a" in flags
+        read_raw = read_raw or "r" in flags
+        if set(flags) & {"d", "n", "N", "u"}:
+            return (
+                (),
+                choice(*(word.content for word in arguments)),
+                True,
+            )
+        if len(flags) == 1 and flags in options_with_values:
+            index += 1
+        index += 1
+    if array_target:
+        return (
+            (),
+            choice(*(word.content for word in arguments)) if arguments else OutsideGap(),
+            True,
+        )
+    targets = arguments[index:] or [
+        _ShellWord(
+            literal="REPLY",
+            content=LiteralTransfer("REPLY"),
+        )
+    ]
+    if any(
+        target.dynamic or _SHELL_ASSIGNMENT_NAME_RE.fullmatch(target.literal) is None
+        for target in targets
+    ):
+        return (
+            (),
+            choice(*(word.content for word in arguments)) if arguments else OutsideGap(),
+            True,
+        )
+    return (
+        tuple(
+            _AssignmentEvidence(
+                target.literal,
+                OutsideGap(),
+                from_stdin=True,
+                read_target_index=target_index,
+                read_target_count=len(targets),
+                read_raw=read_raw,
+            )
+            for target_index, target in enumerate(targets)
+        ),
+        None,
+        False,
+    )
+
+
 def _remap_executable(
     executable: _ExecutableEvidence | None, argv_indices: dict[int, int]
 ) -> _ExecutableEvidence:
@@ -2826,6 +3321,43 @@ def _is_modeled_taint_sink(words: list[_ShellWord], executable: _ExecutableEvide
                         for index in selection.candidate_indices
                     )
         pending.extend(candidate.alternates)
+    return False
+
+
+def _eval_markers_are_only_active_comments(
+    words: list[_ShellWord],
+    executable: _ExecutableEvidence | None,
+) -> bool:
+    """Return whether every exact eval marker is removed by Bash comment parsing."""
+    if executable is None:
+        return False
+    pending = [executable]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop()
+        candidate_id = id(candidate)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        pending.extend(candidate.alternates)
+        if (
+            candidate.external_lookup
+            or candidate.literal != "eval"
+            or candidate.name != "eval"
+            or candidate.argv_index is None
+        ):
+            continue
+        if any(word.has_doc_lattice_marker for word in words[: candidate.argv_index + 1]):
+            continue
+        arguments = words[candidate.argv_index + 1 :]
+        if not arguments or any(argument.dynamic for argument in arguments):
+            continue
+        program = " ".join(argument.literal for argument in arguments)
+        if (
+            _DISPATCHER_MARKER_RE.search(program) is not None
+            and _DISPATCHER_MARKER_RE.search(_strip_active_shell_comments(program)) is None
+        ):
+            return True
     return False
 
 
@@ -4204,6 +4736,11 @@ def _is_unbraced_named_parameter(source: str, start: int, limit: int) -> bool:
     return name_start < limit and (source[name_start].isalpha() or source[name_start] == "_")
 
 
+def _is_function_positional_parameter(name: str) -> bool:
+    """Return whether a parameter name is set from shell-function call arguments."""
+    return name in {"@", "*"} or (name.isdigit() and bool(name.strip("0")))
+
+
 def _parameter_name_end(source: str, start: int, limit: int) -> int:
     """Return the exclusive end of a shell variable name beginning at ``start``."""
     index = start
@@ -4211,6 +4748,19 @@ def _parameter_name_end(source: str, start: int, limit: int) -> int:
         return index
     index += 1
     while index < limit and (source[index].isalnum() or source[index] == "_"):
+        index += 1
+    return index
+
+
+def _parameter_reference_end(source: str, start: int, limit: int) -> int:
+    """Return the end of a named or function-positional parameter reference."""
+    name_end = _parameter_name_end(source, start, limit)
+    if name_end != start or start >= limit:
+        return name_end
+    if source[start] in {"@", "*"}:
+        return start + 1
+    index = start
+    while index < limit and source[index].isdigit():
         index += 1
     return index
 

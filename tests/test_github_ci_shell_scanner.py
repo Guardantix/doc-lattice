@@ -1,6 +1,7 @@
 """Tests for the bounded, non-executing doc-lattice shell invocation scanner."""
 
 import subprocess
+import sys
 
 import pytest
 from typer.core import TyperGroup
@@ -265,6 +266,55 @@ def assert_taint_refusal(script: str) -> None:
 
 def test_split_pipeline_stdout_reaches_shell_stdin():
     assert_taint_refusal("printf '%s%s\\n' doc- 'lattice reconcile' | bash")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- 'lattice reconcile' |& bash",
+        "printf '%s%s\\n' doc- 'lattice reconcile' 2>/dev/null |& bash",
+        "printf '%s%s\\n' doc- 'lattice reconcile' |& { bash; }",
+    ],
+    ids=("command", "stderr-rebound-before-implicit-copy", "compound-consumer"),
+)
+def test_combined_pipeline_output_reaches_shell_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- lattice >/dev/null |& bash",
+        "printf '%s%s\\n' doc- lattice |& bash <<<'true'",
+        "printf '%s%s\\n' doc- lattice |& cat",
+    ],
+    ids=("stdout-rebound", "stdin-override", "non-sink-consumer"),
+)
+def test_combined_pipeline_preserves_redirection_and_sink_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_combined_pipeline_lastpipe_consumer_updates_parent_environment():
+    assert_taint_refusal(
+        'shopt -s lastpipe; S=\': ${X:=doc-}\'; printf x |& eval "$S"; eval "$X"lattice'
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["", "shopt -u lastpipe; "],
+    ids=("default", "explicitly-disabled"),
+)
+def test_combined_pipeline_consumer_keeps_isolated_environment_without_lastpipe(prefix: str):
+    result = scan_doc_lattice_invocations(
+        f'{prefix}S=\': ${{X:=doc-}}\'; printf x |& eval "$S"; eval "$X"lattice'
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
 
 
 def test_marker_free_unresolved_pipeline_stays_certified():
@@ -3184,6 +3234,1576 @@ def test_unknown_command_redirection_assignment_stays_fail_safe_for_shell_functi
 @pytest.mark.parametrize(
     "script",
     [
+        '{ :; } <<< "${X:=doc-}" | cat; eval "$X"lattice',
+        'printf x | { :; } <<< "${X:=doc-}"; eval "$X"lattice',
+        '{ :; } <<< "${X:=doc-}" & wait; eval "$X"lattice',
+        'coproc { :; } <<< "${X:=doc-}"; wait; eval "$X"lattice',
+        '{ :; } <<EOF | cat\n${X:=doc-}\nEOF\neval "$X"lattice',
+    ],
+    ids=("producer", "consumer", "background", "coprocess", "producer-heredoc"),
+)
+def test_isolated_compound_redirection_assignments_do_not_leak(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        '{ :; } <<< "${X:=doc-}"; eval "$X"lattice',
+        ('shopt -s lastpipe; printf x | { :; } <<< "${X:=doc-}"; eval "$X"lattice'),
+    ],
+    ids=("foreground", "lastpipe-consumer"),
+)
+def test_persistent_compound_redirection_assignments_reach_later_eval(script: str):
+    assert_taint_refusal(script)
+
+
+def test_compound_redirection_assignment_rhs_uses_execution_environment():
+    assert_taint_refusal('{ X=doc-; { :; } >"${Y:=$X}"; eval "$Y"lattice; } | cat')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=safe; f() { local X=doc-; { :; } >"${Y:=$X}"; eval "$Y"lattice; }; f',
+        'f() { local X=doc-; { :; } >"${Y:=$X}"; eval "$Y"lattice; }; f',
+        ('X=safe; f() { local X=doc-; { { :; } >"${Y:=$X}"; eval "$Y"lattice; } | cat; }; f'),
+        'f() { local Y; { :; } >"${Y:=doc-}"; eval "$Y"lattice; }; f',
+        ('f() { local Y=safe; unset Y; { :; } >"${Y:=doc-}"; eval "$Y"lattice; }; f'),
+        'f() { local Y; { :; } <<< "${Y:=doc-}"; eval "$Y"lattice; }; f',
+        ('f() { local Y; { :; } <<EOF\n${Y:=doc-}\nEOF\neval "$Y"lattice; }; f'),
+    ],
+    ids=(
+        "local-rhs-shadowed-global",
+        "local-rhs-unset-global",
+        "local-rhs-nested-pipeline",
+        "local-destination",
+        "local-destination-after-unset",
+        "local-destination-here-string",
+        "local-destination-heredoc",
+    ),
+)
+def test_compound_redirection_assignments_respect_function_scope(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'inner() { X=doc-; }; outer() { local X=safe; inner; eval "$X"lattice; }; outer',
+        ('inner() { export X=doc-; }; outer() { local X=safe; inner; eval "$X"lattice; }; outer'),
+        ("inner() { unset X; }; outer() { local X=safe; inner; eval '${X:=doc-}lattice'; }; outer"),
+    ],
+    ids=("ordinary-assignment", "export-assignment", "unset"),
+)
+def test_called_function_mutates_callers_dynamic_local_scope(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        (
+            "inner() { X=doc-; }; mid() { inner; }; "
+            'outer() { local X=safe; mid; eval "$X"lattice; }; outer'
+        ),
+        (
+            "inner() { export X=doc-; }; mid() { inner; }; "
+            'outer() { local X=safe; mid; eval "$X"lattice; }; outer'
+        ),
+        (
+            "inner() { unset X; }; mid() { inner; }; "
+            "outer() { local X=safe; mid; eval '${X:=doc-}lattice'; }; outer"
+        ),
+        ("inner() { eval 'X=doc-'; }; outer() { local X=safe; inner; eval \"$X\"lattice; }; outer"),
+        ('inner() { { :; } >"${X:=doc-}"; }; outer() { local X; inner; eval "$X"lattice; }; outer'),
+        (
+            'inner() { N=X; unset "$N"; }; '
+            "outer() { local X=safe; inner; eval '${X:=doc-}lattice'; }; outer"
+        ),
+        (
+            "inner() { eval 'X=doc-;'; }; "
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            "inner() { eval 'X=doc-; :'; }; "
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+    ],
+    ids=(
+        "transitive-ordinary-assignment",
+        "transitive-export-assignment",
+        "transitive-unset",
+        "eval-assignment",
+        "compound-assignment",
+        "dynamic-unset",
+        "eval-trailing-semicolon",
+        "eval-multiple-commands",
+    ),
+)
+def test_called_function_propagates_all_dynamic_scope_effects(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        ("inner() { eval 'X+=doc-'; }; outer() { local X=; inner; eval \"$X\"lattice; }; outer"),
+        (
+            "inner() { eval 'builtin unset X'; }; "
+            "outer() { local X=safe; inner; eval '${X:=doc-}lattice'; }; outer"
+        ),
+        (
+            "inner() { eval 'command unset X'; }; "
+            "outer() { local X=safe; inner; eval '${X:=doc-}lattice'; }; outer"
+        ),
+        (
+            "inner() { eval 'builtin export X=doc-'; }; "
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+    ],
+    ids=("append", "builtin-unset", "command-unset", "builtin-export"),
+)
+def test_called_function_propagates_wrapped_eval_mutations(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=; f() { eval "$X"lattice; }; eval "X+=doc-"; f',
+        ("X=safe; f() { eval '${X:=doc-}lattice'; }; eval 'builtin unset X'; f"),
+        ("X=safe; f() { eval '${X:=doc-}lattice'; }; eval 'command unset X'; f"),
+        ("X=safe; f() { eval \"$X\"lattice; }; eval 'builtin export X=doc-'; f"),
+    ],
+    ids=("append", "builtin-unset", "command-unset", "builtin-export"),
+)
+def test_function_eval_call_time_global_observes_wrapped_eval_mutations(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        ('inner() { X=doc- | cat; }; outer() { local X=safe; inner; eval "$X"lattice; }; outer'),
+        ('inner() { X=doc- & wait; }; outer() { local X=safe; inner; eval "$X"lattice; }; outer'),
+        (
+            "inner() { coproc { X=doc-; }; wait; }; "
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            "inner() { false && unset X; }; "
+            "outer() { local X=safe; inner; eval '${X:=doc-}lattice'; }; outer"
+        ),
+        (
+            "inner() { if false; then X=doc-; fi; }; "
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            "inner() { unset X | cat; }; "
+            "outer() { local X=safe; inner; eval '${X:=doc-}lattice'; }; outer"
+        ),
+    ],
+    ids=(
+        "pipeline-assignment",
+        "background-assignment",
+        "coprocess-assignment",
+        "conditional-unset",
+        "conditional-assignment",
+        "pipeline-unset",
+    ),
+)
+def test_called_function_effects_respect_control_and_execution_context(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        ('inner() { true && X=doc-; }; outer() { local X=safe; inner; eval "$X"lattice; }; outer'),
+        ('inner() { false || X=doc-; }; outer() { local X=safe; inner; eval "$X"lattice; }; outer'),
+        (
+            "inner() { if true; then X=doc-; fi; }; "
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+    ],
+    ids=("and", "or", "if"),
+)
+def test_called_function_effects_include_definitely_executed_branches(script: str):
+    assert_taint_refusal(script)
+
+
+def test_called_function_propagates_variable_backed_eval_mutation():
+    assert_taint_refusal(
+        'inner() { S=X=doc-; eval "$S"; }; '
+        'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+def test_function_eval_call_time_global_observes_variable_backed_eval_mutation():
+    assert_taint_refusal('S=X=doc-; f() { eval "$X"lattice; }; eval "$S"; f')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        (
+            'S=X=doc-; inner() { eval "$S"; }; '
+            'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            'inner() { eval "$S"; }; '
+            'outer() { local S=X=doc-; local X=safe; inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            'inner() { eval "$S"; }; '
+            'outer() { local X=safe; S=X=doc- inner; eval "$X"lattice; }; outer'
+        ),
+    ],
+    ids=("global", "caller-local", "call-prefix"),
+)
+def test_variable_backed_eval_inherits_function_call_time_values(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        (
+            'inner() { eval "$S"; }; '
+            'outer() { local X=safe; S=: inner; S=X=doc- inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            'inner() { eval "$S"; }; '
+            'outer() { local X=safe; S=X=doc- inner; S=: inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            'inner() { eval "$S"; }; dead() { S=: inner; }; '
+            'outer() { local X=safe; S=X=doc- inner; eval "$X"lattice; }; outer'
+        ),
+        (
+            'inner() { false && S=: inner; eval "$S"; }; '
+            'outer() { local X=safe; S=X=doc- inner; eval "$X"lattice; }; outer'
+        ),
+    ],
+    ids=("safe-then-marker", "marker-then-safe", "dead-call", "recursive-dead-call"),
+)
+def test_variable_backed_eval_unions_exact_call_site_programs(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "setter",
+    ["S=X=doc-", 'eval "S=X=doc-"'],
+    ids=("ordinary-assignment", "static-eval-assignment"),
+)
+def test_variable_backed_eval_replays_preceding_callee_effects(setter: str):
+    assert_taint_refusal(
+        f"setprog() {{ {setter}; }}; "
+        'inner() { setprog; eval "$S"; }; '
+        'outer() { local S=: X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize(
+    "setter",
+    [
+        "S+=doc-",
+        'eval "S+=doc-"',
+        "S=$P",
+        'eval "S=$P"',
+    ],
+    ids=("ordinary-append", "static-eval-append", "ordinary-rhs", "static-eval-rhs"),
+)
+def test_variable_backed_eval_replays_callee_effects_as_state_transfers(setter: str):
+    assert_taint_refusal(
+        f"setprog() {{ {setter}; }}; "
+        'inner() { setprog; eval "$S"; }; '
+        'outer() { local P=X=doc- S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize(
+    "setter",
+    [
+        "local P=doc-; S+=$P",
+        "local P=doc-; eval 'S+=$P'",
+        "P=doc- setvalue",
+        "P=doc- setvalue_eval",
+    ],
+    ids=("local", "local-static-eval", "call-prefix", "call-prefix-static-eval"),
+)
+def test_variable_backed_eval_callee_transfers_use_callee_execution_state(setter: str):
+    helpers = "setvalue() { S+=$P; }; setvalue_eval() { eval 'S+=$P'; }; "
+    assert_taint_refusal(
+        helpers + f"setprog() {{ {setter}; }}; "
+        'inner() { setprog; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize("setter", ["S+=$P", "eval 'S+=$P'"])
+def test_variable_backed_eval_callee_local_shadow_stays_clean(setter: str):
+    result = scan_doc_lattice_invocations(
+        f"setprog() {{ local P=safe; {setter}; }}; "
+        'inner() { setprog; eval "$S"; }; '
+        'outer() { local P=doc- S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    ["$1", "${1}", "$*", "$@"],
+    ids=("positional-one", "braced-positional-one", "positional-star", "positional-at"),
+)
+def test_called_function_positional_parameters_reach_eval(parameter: str):
+    assert_taint_refusal(f'f() {{ eval "{parameter}"lattice; }}; f doc-')
+
+
+@pytest.mark.parametrize(
+    "setter",
+    [
+        "S+=$1",
+        "S=X=$1",
+        "eval 'S+=$1'",
+        "eval 'S=X=$1'",
+    ],
+    ids=("append", "replace", "static-eval-append", "static-eval-replace"),
+)
+def test_variable_backed_eval_replays_function_positional_argument(setter: str):
+    assert_taint_refusal(
+        f"setprog() {{ {setter}; }}; "
+        'inner() { setprog doc-; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { eval "$1"lattice; }; f safe',
+        'f() { eval "$2"lattice; }; f doc- safe',
+    ],
+    ids=("safe-value", "correct-position"),
+)
+def test_called_function_positional_parameters_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_called_function_dynamic_positional_argument_fails_closed():
+    result = scan_doc_lattice_invocations('f() { eval "$1"lattice; }; f "$EXTERNAL"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "dynamic function positional argument"
+
+
+def test_called_function_large_absent_positional_parameter_stays_bounded():
+    parameter = "9" * 5000
+    result = scan_doc_lattice_invocations(f'f() {{ eval "${{{parameter}}}"lattice; }}; f doc-')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'shift; eval "$1"lattice',
+        'shift 2; eval "$1"lattice',
+        'set -- safe doc-; shift; eval "$1"lattice',
+        'set -- doc-; eval "$1"lattice',
+    ],
+    ids=("shift", "shift-two", "set-then-shift", "set"),
+)
+def test_called_function_positional_mutations_reach_eval(body: str):
+    arguments = "safe safe doc-" if body.startswith("shift 2") else "safe doc-"
+    assert_taint_refusal(f"f() {{ {body}; }}; f {arguments}")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { shift; eval "$1"lattice; }; f doc- safe',
+        'f() { set -- safe; eval "$1"lattice; }; f doc-',
+    ],
+    ids=("shift-to-safe", "set-to-safe"),
+)
+def test_called_function_positional_mutations_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "setter",
+    ["S+=$1", "eval 'S+=$1'"],
+    ids=("ordinary", "static-eval"),
+)
+def test_function_effect_positional_mutation_uses_updated_argument(setter: str):
+    assert_taint_refusal(
+        f"setprog() {{ shift; {setter}; }}; "
+        'inner() { setprog safe doc-; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+def test_function_effect_positional_mutation_preserves_clean_control():
+    result = scan_doc_lattice_invocations(
+        "setprog() { shift; S+=$1; }; "
+        'inner() { setprog doc- safe; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_function_effect_failed_shift_preserves_positional_arguments():
+    assert_taint_refusal(
+        "setprog() { shift 2; S+=$1; }; "
+        'inner() { setprog doc-; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+def test_function_effect_failed_shift_preserves_clean_control():
+    result = scan_doc_lattice_invocations(
+        "setprog() { shift 2; S+=$1; }; "
+        'inner() { setprog safe; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_function_effect_unbounded_shift_fails_closed():
+    amount = "9" * 5000
+    result = scan_doc_lattice_invocations(
+        f"setprog() {{ shift {amount}; S+=$1; }}; "
+        'inner() { setprog safe; eval "$S"; }; '
+        'outer() { local S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "set_command",
+    ["set safe doc-", "set - safe doc-", "set +x safe doc-"],
+    ids=("plain", "dash", "option-prefixed"),
+)
+def test_called_function_set_forms_replace_positional_arguments(set_command: str):
+    assert_taint_refusal(f'f() {{ {set_command}; shift; eval "$1"lattice; }}; f')
+
+
+@pytest.mark.parametrize(
+    "set_command",
+    ["set doc- safe", "set - doc- safe", "set +x doc- safe"],
+    ids=("plain", "dash", "option-prefixed"),
+)
+def test_called_function_set_forms_preserve_clean_controls(set_command: str):
+    result = scan_doc_lattice_invocations(f'f() {{ {set_command}; shift; eval "$1"lattice; }}; f')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_called_function_dynamic_set_form_fails_closed():
+    result = scan_doc_lattice_invocations(
+        'f() { set "$EXTERNAL" doc-; shift; eval "$1"lattice; }; f'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "dynamic function positional mutation"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { local IFS=-; eval "$*"; }; f doc lattice',
+        'IFS=-; f() { eval "$*"; }; f doc lattice',
+    ],
+    ids=("local-ifs", "global-ifs"),
+)
+def test_called_function_quoted_star_uses_active_ifs(script: str):
+    assert_taint_refusal(script)
+
+
+def test_called_function_quoted_star_dynamic_ifs_fails_closed():
+    result = scan_doc_lattice_invocations(
+        'f() { local IFS="$EXTERNAL"; eval "$*"; }; f doc lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "dynamic function positional IFS"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { local IFS=:; eval "$*"; }; f doc lattice',
+        "f() { local IFS=-; eval $*; }; f doc lattice",
+        'f() { local IFS=-; eval "$@"; }; f doc lattice',
+    ],
+    ids=("safe-ifs", "unquoted-star", "positional-at"),
+)
+def test_called_function_star_ifs_preserves_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_called_function_unset_local_ifs_shadow_uses_default_joining():
+    result = scan_doc_lattice_invocations('IFS=-; f() { local IFS; eval "$*"; }; f doc lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf -v X %s doc-; eval "$X"lattice',
+        'read X <<< doc-; eval "$X"lattice',
+        'P=doc-; declare -n R=P; eval "$R"lattice',
+    ],
+    ids=("printf-v", "read", "nameref"),
+)
+def test_deterministic_shell_writers_reach_later_eval(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf -v X %s safe; eval "$X"lattice',
+        'read X <<< safe; eval "$X"lattice',
+        'P=doc-; Q=safe; declare -n R=Q; eval "$R"lattice',
+    ],
+    ids=("printf-v", "read", "nameref"),
+)
+def test_deterministic_shell_writers_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf -v X %s%s doc- lattice; eval "$X"',
+        'printf -v X doc-%s lattice; eval "$X"',
+    ],
+    ids=("two-substitutions", "literal-prefix"),
+)
+def test_printf_v_static_formats_reach_later_eval(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf -v X %s%s safe value; eval "$X"',
+        'printf -v X safe-%s value; eval "$X"',
+    ],
+    ids=("two-substitutions", "literal-prefix"),
+)
+def test_printf_v_static_formats_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_printf_v_unsupported_format_fails_closed():
+    result = scan_doc_lattice_invocations('printf -v X %q doc-lattice; eval "$X"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf -v X -- %s%s doc- lattice; eval "$X"',
+        "printf -v X '%.4slattice' doc-X; eval \"$X\"",
+    ],
+    ids=("option-terminator", "precision"),
+)
+def test_printf_v_option_terminator_and_precision_reach_eval(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'printf -v X -- %s%s safe value; eval "$X"',
+        "printf -v X '%.4svalue' safeX; eval \"$X\"",
+    ],
+    ids=("option-terminator", "precision"),
+)
+def test_printf_v_option_terminator_and_precision_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("prefix", ["", "."], ids=("width", "precision"))
+def test_printf_v_huge_numeric_fields_fail_closed(prefix: str):
+    digits = "9" * 5_000
+    previous_limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4_300)
+    try:
+        result = scan_doc_lattice_invocations(
+            f'printf -v X %{prefix}{digits}s doc-; eval "$X"lattice'
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+def test_printf_v_bounded_width_preserves_clean_control():
+    result = scan_doc_lattice_invocations('printf -v X %4s safe; eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'P="safe doc-"; P+=lattice; read A X <<<"$P"; eval "$X"',
+        'P=doc-; P+=lattice; read <<<"$P"; eval "$REPLY"',
+        'shopt -s lastpipe; printf %s%s doc- lattice | read X; eval "$X"',
+        'P=doc-; P+=lattice; printf %s "$P" > payload; read X < payload; eval "$X"',
+        'read X < <(printf %s%s doc- lattice); eval "$X"',
+        'P=doc-; read X <<EOF\n${P}lattice\nEOF\neval "$X"',
+        'read A X B <<<"safe doc- tail"; eval "$X"lattice',
+        'IFS=: read A X B <<<"safe:doc-:tail"; eval "$X"lattice',
+    ],
+    ids=(
+        "later-target",
+        "reply",
+        "lastpipe",
+        "static-resource",
+        "process-substitution",
+        "heredoc",
+        "middle-target",
+        "custom-ifs-middle-target",
+    ),
+)
+def test_read_writes_from_finalized_stdin_reach_later_eval(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'read A X <<<"safe value"; eval "$X"',
+        'read <<<safe; eval "$REPLY"',
+        'P=safe; printf %s "$P" > payload; read X < payload; eval "$X"lattice',
+        'read X < <(printf %s safe); eval "$X"lattice',
+        'P=safe; read X <<EOF\n${P}\nEOF\neval "$X"lattice',
+        'read A X B <<<"safe value tail"; eval "$X"lattice',
+        'IFS=: read A X B <<<"safe:value:tail"; eval "$X"lattice',
+    ],
+    ids=(
+        "later-target",
+        "reply",
+        "static-resource",
+        "process-substitution",
+        "heredoc",
+        "middle-target",
+        "custom-ifs-middle-target",
+    ),
+)
+def test_read_writes_from_finalized_stdin_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_dynamic_target_fails_closed():
+    result = scan_doc_lattice_invocations('TARGET=X; read "$TARGET" <<<doc-; eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'P="safe:doc_"; P+=lattice; IFS=:_ read A X <<<"$P"; eval "$X"',
+        'P=doc-; P+=lattice; IFS=:- read X <<<"$P"; eval "$X"',
+        'read X <<EOF\ndoc-\nignored\nEOF\neval "$X"lattice',
+    ],
+    ids=("last-remainder", "only-target", "first-record"),
+)
+def test_read_exact_record_and_delimiters_reach_later_eval(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'P=doc_; P+=lattice:safe; IFS=:_ read A X <<<"$P"; eval "$X"',
+        'read X <<EOF\nsafe\ndoc-\nEOF\neval "$X"lattice',
+    ],
+    ids=("split-marker", "later-record"),
+)
+def test_read_exact_record_and_delimiters_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'read -N 4 X <<<doc-X; eval "$X"lattice',
+        'read -n 4 X <<<doc-X; eval "$X"lattice',
+        'read -d X V <<<doc-Xlattice; eval "$V"lattice',
+    ],
+    ids=("exact-count", "maximum-count", "delimiter"),
+)
+def test_read_unmodeled_record_options_fail_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'read -u 3 X 3<<<doc-; eval "$X"lattice',
+        'X=doc-; read -u 3 X 3<<<safe; eval "$X"lattice',
+    ],
+    ids=("marker-input", "clean-input"),
+)
+def test_read_unmodeled_descriptor_selection_fails_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+def test_read_default_backslash_continuation_reaches_eval():
+    assert_taint_refusal("read X <<'EOF'\ndoc-\\\nlattice\nEOF\neval \"$X\"")
+
+
+def test_read_default_backslash_continuation_preserves_clean_control():
+    result = scan_doc_lattice_invocations("read X <<'EOF'\nsafe\\\nvalue\nEOF\neval \"$X\"lattice")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_nonliteral_stream_projects_first_record():
+    assert_taint_refusal(
+        "shopt -s lastpipe; printf 'doc-\\nignored\\n' | read X; eval \"$X\"lattice"
+    )
+
+
+def test_read_nonliteral_stream_preserves_later_record_clean_control():
+    result = scan_doc_lattice_invocations(
+        "shopt -s lastpipe; printf 'safe\\ndoc-\\n' | read X; eval \"$X\"lattice"
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_mixed_ifs_projects_exact_middle_field():
+    assert_taint_refusal(
+        'P="safe :doc-"; P+="lattice :tail"; IFS=" :" read A X B <<<"$P"; eval "$X"'
+    )
+
+
+def test_read_mixed_ifs_preserves_clean_field_selection_control():
+    result = scan_doc_lattice_invocations(
+        'P=doc_; P+=lattice:safe; IFS=" :_" read A X B <<<"$P"; eval "$X"'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_nonliteral_stream_projects_all_scalar_targets():
+    assert_taint_refusal(
+        "shopt -s lastpipe; printf 'safe doc-\\nignored\\n' | read A X; eval \"$X\"lattice"
+    )
+
+
+def test_read_nonliteral_stream_preserves_exact_target_selection_control():
+    result = scan_doc_lattice_invocations(
+        "shopt -s lastpipe; printf '%s%s\\n' doc- 'lattice safe' | read A X; eval \"$X\"lattice"
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_nonliteral_stream_applies_cooked_line_continuation():
+    assert_taint_refusal(
+        'shopt -s lastpipe; { printf "%s\\n" "doc-\\\\"; '
+        'printf "%s\\n" lattice; } | read X; eval "$X"'
+    )
+
+
+def test_read_nonliteral_stream_cooked_continuation_preserves_clean_control():
+    result = scan_doc_lattice_invocations(
+        'shopt -s lastpipe; { printf "%s\\n" "doc-\\\\"; '
+        'printf "%s\\n" safe; } | read X; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_deferred_projection_over_literal_cap_fails_closed():
+    prefix = "x" * 4_097
+    result = scan_doc_lattice_invocations(
+        f'shopt -s lastpipe; P={prefix}; printf "%s %s%s\\n" "$P" doc- lattice | '
+        'read A X; eval "$X"'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+def test_read_deferred_projection_at_literal_cap_reaches_eval():
+    prefix = "x" * 4_000
+    assert_taint_refusal(
+        f'shopt -s lastpipe; P={prefix}; printf "%s %s%s\\n" "$P" doc- lattice | '
+        'read A X; eval "$X"'
+    )
+
+
+def test_read_nonliteral_stream_cooked_escape_reaches_eval():
+    assert_taint_refusal("shopt -s lastpipe; printf '%s\\n' 'doc\\-lattice' | read X; eval \"$X\"")
+
+
+def test_read_nonliteral_stream_raw_escape_preserves_clean_control():
+    result = scan_doc_lattice_invocations(
+        "shopt -s lastpipe; printf '%s\\n' 'doc\\-lattice' | read -r X; eval \"$X\""
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_read_nonliteral_stream_cooked_escape_preserves_ifs_control():
+    result = scan_doc_lattice_invocations(
+        "shopt -s lastpipe; printf '%s\\n' 'safe:doc-\\:lattice' | "
+        'IFS=: read A X; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'P=safe:doc-; P+=lattice; IFS="$EXTERNAL" read A X <<<"$P"; eval "$X"',
+        'P=doc-; P+=lattice:safe; IFS="$EXTERNAL" read A X <<<"$P"; eval "$X"',
+        (
+            'shopt -s lastpipe; IFS="$EXTERNAL"; '
+            "printf '%s\\n' 'safe:doc-lattice' | read A X; eval \"$X\""
+        ),
+    ],
+    ids=("marker-field", "clean-field", "deferred-pipeline"),
+)
+def test_read_dynamic_ifs_fails_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+def test_read_differing_call_site_literals_reach_eval():
+    assert_taint_refusal(
+        'f(){ shopt -s lastpipe; printf "%s %s%s\\n" "$1" doc- lattice | '
+        'read A X; eval "$X"; }; f x; f y'
+    )
+
+
+@pytest.mark.parametrize(
+    "calls",
+    ["f x", "f x; f x"],
+    ids=("single", "identical-repeated"),
+)
+def test_read_same_call_site_literals_reach_eval_control(calls: str):
+    assert_taint_refusal(
+        'f(){ shopt -s lastpipe; printf "%s %s%s\\n" "$1" doc- lattice | '
+        f'read A X; eval "$X"; }}; {calls}'
+    )
+
+
+@pytest.mark.parametrize(
+    "calls",
+    ["f x", "f x; f y"],
+    ids=("single", "differing"),
+)
+def test_read_differing_call_site_literals_preserve_clean_inverse(calls: str):
+    result = scan_doc_lattice_invocations(
+        'f(){ shopt -s lastpipe; printf "%s %s%s\\n" "$1" safe value | '
+        f'read A X; eval "$X"; }}; {calls}'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("read_option", ["", "-r "], ids=("cooked", "raw"))
+def test_read_opaque_prefix_preserves_authored_marker_suffix(read_option: str):
+    assert_taint_refusal(
+        'shopt -s lastpipe; { cat "$EXTERNAL"; printf " doc-%s\\n" lattice; } | '
+        f'read {read_option}A X; eval "$X"'
+    )
+
+
+@pytest.mark.parametrize("read_option", ["", "-r "], ids=("cooked", "raw"))
+def test_read_opaque_prefix_preserves_clean_suffix_control(read_option: str):
+    result = scan_doc_lattice_invocations(
+        'shopt -s lastpipe; { cat "$EXTERNAL"; printf " safe%s\\n" value; } | '
+        f'read {read_option}A X; eval "$X"'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("writer", ["R=doc-", "read R <<<doc-"], ids=("assignment", "read"))
+def test_nameref_writes_update_referent(writer: str):
+    assert_taint_refusal(f'X=safe; declare -n R=X; {writer}; eval "$X"lattice')
+
+
+def test_nameref_write_preserves_clean_control():
+    result = scan_doc_lattice_invocations('X=safe; declare -n R=X; R=safe; eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_static_eval_nameref_declaration_routes_later_write():
+    assert_taint_refusal("X=safe; eval 'declare -n R=X; R=doc-'; eval \"$X\"lattice")
+
+
+def test_static_eval_nameref_declaration_preserves_clean_inverse():
+    result = scan_doc_lattice_invocations(
+        "X=doc-; eval 'declare -n R=X; R=safe'; eval \"$X\"lattice"
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_nameref_chain_write_updates_final_referent():
+    assert_taint_refusal('X=safe; declare -n R=X; declare -n S=R; S=doc-; eval "$X"lattice')
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    ['TARGET=X; declare -n R="$TARGET"', "declare -n R=S; declare -n S=R"],
+    ids=("dynamic", "cycle"),
+)
+def test_unsupported_nameref_target_fails_closed(declaration: str):
+    result = scan_doc_lattice_invocations(f'X=safe; {declaration}; R=doc-; eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f(){ R=doc-;}; X=safe; declare -n R=X; f; eval "$X"lattice',
+        'f(){ R=doc-;}; outer(){ local X=safe; local -n R=X; f; eval "$X"lattice;}; outer',
+        'X=safe; f(){ declare -gn R=X;}; f; R=doc-; eval "$X"lattice',
+    ],
+    ids=("global-after-definition", "caller-local", "declare-global"),
+)
+def test_runtime_nameref_writes_update_referent(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f(){ R=safe;}; X=doc-; declare -n R=X; f; eval "$X"lattice',
+        'f(){ R=safe;}; outer(){ local X=doc-; local -n R=X; f; eval "$X"lattice;}; outer',
+        'X=doc-; f(){ declare -gn R=X;}; f; R=safe; eval "$X"lattice',
+    ],
+    ids=("global-after-definition", "caller-local", "declare-global"),
+)
+def test_runtime_nameref_writes_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_unbound_nameref_can_bind_then_write_referent():
+    assert_taint_refusal('X=safe; declare -n R; R=X; R=doc-; eval "$X"lattice')
+
+
+def test_unbound_nameref_binding_preserves_clean_control():
+    result = scan_doc_lattice_invocations('X=doc-; declare -n R; R=X; R=safe; eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_nameref_rebinding_in_subprocess_does_not_leak_to_parent():
+    assert_taint_refusal(
+        'X=safe; Y=safe; declare -n R=X; (declare -n R=Y); R=doc-; eval "$X"lattice'
+    )
+
+
+def test_nameref_rebinding_in_subprocess_preserves_parent_clean_control():
+    result = scan_doc_lattice_invocations(
+        'X=doc-; Y=safe; declare -n R=X; (declare -n R=Y); R=safe; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_nameref_write_in_subprocess_does_not_refresh_parent_eval_state():
+    assert_taint_refusal('X=doc-; declare -n R=X; (R=safe); eval "$X"lattice')
+
+
+def test_nameref_write_in_subprocess_preserves_parent_eval_clean_control():
+    result = scan_doc_lattice_invocations('X=safe; declare -n R=X; (R=doc-); eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_unset_n_nameref_stops_routing_later_writes():
+    assert_taint_refusal('X=doc-; declare -n R=X; unset -n R; R=safe; eval "$X"lattice')
+
+
+def test_unset_n_nameref_preserves_referent_clean_control():
+    result = scan_doc_lattice_invocations(
+        'X=safe; declare -n R=X; unset -n R; R=doc-; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_unset_n_nameref_function_effect_stops_routing_later_writes():
+    assert_taint_refusal('f(){ unset -n R; R=safe;}; X=doc-; declare -n R=X; f; eval "$X"lattice')
+
+
+def test_unset_n_nameref_function_effect_preserves_clean_control():
+    result = scan_doc_lattice_invocations(
+        'f(){ unset -n R; R=doc-;}; X=safe; declare -n R=X; f; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_nested_unset_n_function_effect_preserves_call_site_order():
+    assert_taint_refusal(
+        'g(){ unset -n R;}; f(){ R=doc-; g; R=safe;}; X=safe; declare -n R=X; f; eval "$X"lattice'
+    )
+
+
+def test_nested_unset_n_function_effect_preserves_clean_control():
+    result = scan_doc_lattice_invocations(
+        'g(){ unset -n R;}; f(){ R=safe; g; R=doc-;}; X=doc-; declare -n R=X; f; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_deep_function_effect_expansion_fails_with_stable_bound():
+    depth = 80
+    definitions = [f"f{index}(){{ f{index - 1};}}" for index in range(depth, 0, -1)]
+    definitions.append("f0(){ X=doc-;}")
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(60)
+    try:
+        result = scan_doc_lattice_invocations(
+            f'{"; ".join(definitions)}; X=safe; f{depth}; eval "$X"lattice'
+        )
+    finally:
+        sys.setrecursionlimit(previous_limit)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint function effect depth limit exceeded"
+
+
+def test_bounded_function_effect_expansion_preserves_marker_control():
+    depth = 64
+    definitions = ["f0(){ X=doc-;}"]
+    definitions.extend(f"f{index}(){{ f{index - 1};}}" for index in range(1, depth + 1))
+
+    assert_taint_refusal(f'{"; ".join(definitions)}; X=safe; f{depth}; eval "$X"lattice')
+
+
+@pytest.mark.parametrize(
+    "setter",
+    ["S+=$Q", "eval 'S+=$Q'"],
+    ids=("ordinary", "static-eval"),
+)
+def test_variable_backed_eval_callee_local_derivation_preserves_caller_state(
+    setter: str,
+):
+    assert_taint_refusal(
+        f"setprog() {{ local Q; Q=$P; {setter}; }}; "
+        'inner() { setprog; eval "$S"; }; '
+        'outer() { local P=doc- S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["local P=safe Q; Q=$P", "local Q; Q=$P; Q=safe"],
+    ids=("safe-local-source", "safe-overwrite"),
+)
+def test_variable_backed_eval_callee_local_derivation_preserves_clean_controls(
+    prefix: str,
+):
+    result = scan_doc_lattice_invocations(
+        f"setprog() {{ {prefix}; S+=$Q; }}; "
+        'inner() { setprog; eval "$S"; }; '
+        'outer() { local P=doc- S=X= X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("builtin", ["declare", "typeset"])
+def test_called_eval_declaration_stays_local_to_callee(builtin: str):
+    result = scan_doc_lattice_invocations(
+        f"inner() {{ eval '{builtin} X=doc-'; }}; "
+        'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_called_eval_declare_global_reaches_global_scope():
+    assert_taint_refusal("inner() { eval 'declare -g X=doc-'; }; inner; eval \"$X\"lattice")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { eval "$X"lattice; }; X=doc- f; f() { :; }',
+        'f-x() { eval "$X"lattice; }; X=doc- f-x',
+        'function f-x { eval "$X"lattice; }; X=doc- f-x',
+        'f() { eval "$X"lattice; }; X=doc- eval f',
+        'f.x() { eval "$X"lattice; }; X=doc- f.x',
+        'function f.x { eval "$X"lattice; }; X=doc- f.x',
+        '1f() { eval "$X"lattice; }; X=doc- 1f',
+        'f() { eval "$X"lattice; }; X=doc- eval " f "',
+        'f() { eval "$X"lattice; }; X=doc- eval "f;"',
+        "f() { eval \"$X\"lattice; }; X=doc- eval f ''",
+        "f() { eval \"$X\"lattice; }; X=doc- eval $'f\\n'",
+        '.f() { eval "$X"lattice; }; X=doc- .f',
+        ':f() { eval "$X"lattice; }; X=doc- :f',
+        'f+g() { eval "$X"lattice; }; X=doc- f+g',
+        'function f@g { eval "$X"lattice; }; X=doc- f@g',
+        'f() { eval "$X"lattice; }; X=doc- eval "f arg"',
+        'f() { eval "$X"lattice; }; X=doc- eval "true; f"',
+        'f() { eval "$X"lattice; }; X=doc- eval "f </dev/null"',
+        'f() { eval "$X"lattice; }; X=doc- eval "f && :"',
+        'f,g() { eval "$X"lattice; }; X=doc- f,g',
+        'function f%g { eval "$X"lattice; }; X=doc- f%g',
+        'f() { eval "$X"lattice; }; X=doc- eval "time f"',
+        'f() { eval "$X"lattice; }; X=doc- eval "if true; then f; fi"',
+        'f^g() { eval "$X"lattice; }; X=doc- f^g',
+        'f~g() { eval "$X"lattice; }; X=doc- f~g',
+        'function f#x { eval "$X"lattice; }; X=doc- f#x',
+        'f() { eval "$X"lattice; }; X=doc- eval "coproc f"',
+        'f() { eval "$X"lattice; }; X=doc- eval "! time f"',
+        'f() { eval "$X"lattice; }; X=doc- eval "! coproc f"',
+    ],
+    ids=(
+        "redefinition",
+        "hyphenated-compact",
+        "hyphenated-function",
+        "eval-call",
+        "dotted-compact",
+        "dotted-function",
+        "digit-leading",
+        "eval-whitespace",
+        "eval-semicolon",
+        "eval-empty-argument",
+        "eval-newline",
+        "dot-leading",
+        "colon-leading",
+        "plus",
+        "at-sign",
+        "eval-argument",
+        "eval-sequence",
+        "eval-redirection",
+        "eval-and-list",
+        "comma",
+        "percent",
+        "eval-time",
+        "eval-if",
+        "caret",
+        "tilde",
+        "hash",
+        "eval-coproc",
+        "eval-negated-time",
+        "eval-negated-coproc",
+    ),
+)
+def test_function_call_prefix_mapping_follows_bash_execution(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize("wrapper", ["builtin", "command"])
+def test_eval_builtin_wrappers_do_not_call_user_functions(wrapper: str):
+    result = scan_doc_lattice_invocations(f'f() {{ eval "$X"lattice; }}; X=doc- eval "{wrapper} f"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    ("name", "program"),
+    [
+        ("time", '"time"'),
+        ("time", r"\time"),
+        ("coproc", '"coproc"'),
+        ("coproc", r"\coproc"),
+    ],
+    ids=("quoted-time", "escaped-time", "quoted-coproc", "escaped-coproc"),
+)
+def test_eval_quoted_reserved_words_call_same_named_functions(name: str, program: str):
+    assert_taint_refusal(f"function {name} {{ eval \"$X\"lattice; }}; X=doc- eval '{program}'")
+
+
+def test_eval_coproc_option_terminator_does_not_call_following_function():
+    result = scan_doc_lattice_invocations('f() { eval "$X"lattice; }; X=doc- eval "coproc -- f"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("redirection", ["2>/dev/null", "{fd}>/dev/null"])
+def test_eval_fd_prefixed_redirection_preserves_following_function_call(redirection: str):
+    assert_taint_refusal(f'f() {{ eval "$X"lattice; }}; X=doc- eval "{redirection} f"')
+
+
+@pytest.mark.parametrize("redirection", ["2>/dev/null", "{fd}>/dev/null"])
+def test_eval_fd_prefixed_redirection_preserves_following_mutation(redirection: str):
+    assert_taint_refusal(
+        f'inner() {{ eval "{redirection} X=doc-"; }}; '
+        'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize(
+    "redirection",
+    [
+        "2>&1",
+        "2>&-",
+        "2>|/dev/null",
+        "{fd}>&1",
+        "{fd}>&-",
+        "{fd}>|/dev/null",
+    ],
+    ids=(
+        "numeric-duplicate",
+        "numeric-close",
+        "numeric-clobber",
+        "dynamic-duplicate",
+        "dynamic-close",
+        "dynamic-clobber",
+    ),
+)
+def test_eval_fd_operator_variants_preserve_following_function_call(redirection: str):
+    assert_taint_refusal(f'f() {{ eval "$X"lattice; }}; X=doc- eval "{redirection} f"')
+
+
+@pytest.mark.parametrize(
+    "redirection",
+    [
+        "2>&1",
+        "2>&-",
+        "2>|/dev/null",
+        "{fd}>&1",
+        "{fd}>&-",
+        "{fd}>|/dev/null",
+    ],
+    ids=(
+        "numeric-duplicate",
+        "numeric-close",
+        "numeric-clobber",
+        "dynamic-duplicate",
+        "dynamic-close",
+        "dynamic-clobber",
+    ),
+)
+def test_eval_fd_operator_variants_preserve_following_mutation(redirection: str):
+    assert_taint_refusal(
+        f'inner() {{ eval "{redirection} X=doc-"; }}; '
+        'outer() { local X=safe; inner; eval "$X"lattice; }; outer'
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "eval_command"),
+    [
+        ("time", "eval \"$'time'\""),
+        ("coproc", "eval \"$'coproc'\""),
+        ("time", """eval '$"time"'"""),
+        ("coproc", """eval '$"coproc"'"""),
+    ],
+    ids=("ansi-time", "ansi-coproc", "locale-time", "locale-coproc"),
+)
+def test_eval_dollar_quoted_reserved_words_call_same_named_functions(
+    name: str,
+    eval_command: str,
+):
+    assert_taint_refusal(f'function {name} {{ eval "$X"lattice; }}; X=doc- {eval_command}')
+
+
+@pytest.mark.parametrize("name", ["time", "coproc"])
+def test_eval_unquoted_reserved_words_do_not_call_same_named_functions(name: str):
+    result = scan_doc_lattice_invocations(
+        f'function {name} {{ eval "$X"lattice; }}; X=doc- eval {name}'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    ("name", "encoded"),
+    [
+        ("time", r"\x74ime"),
+        ("time", r"\164ime"),
+        ("time", r"\u0074ime"),
+        ("coproc", r"copr\x6fc"),
+        ("coproc", r"copr\157c"),
+        ("coproc", r"copr\u006fc"),
+    ],
+    ids=("hex-time", "octal-time", "unicode-time", "hex-coproc", "octal-coproc", "unicode-coproc"),
+)
+def test_eval_ansi_c_escaped_reserved_words_call_same_named_functions(
+    name: str,
+    encoded: str,
+):
+    assert_taint_refusal(
+        f"""function {name} {{ eval "$X"lattice; }}; X=doc- eval "$'{encoded}'\""""
+    )
+
+
+@pytest.mark.parametrize("name", ["time", "coproc"])
+def test_eval_ansi_c_line_continuation_calls_same_named_function(name: str):
+    encoded = f"{name[:2]}\\\n{name[2:]}"
+    assert_taint_refusal(
+        f"""function {name} {{ eval "$X"lattice; }}; X=doc- eval "$'{encoded}'\""""
+    )
+
+
+def test_eval_ansi_c_out_of_range_unicode_fails_closed():
+    result = scan_doc_lattice_invocations(
+        """function time { eval "$X"lattice; }; X=doc- eval "$'\\U00110000time'\""""
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "eval ANSI-C escape cannot be represented"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { eval "$X"lattice; }; false && unset -f f; X=doc- f',
+        'f() { eval "$X"lattice; }; if false; then unset -f f; fi; X=doc- f',
+        'f() { eval "$X"lattice; }; { unset -f f; } & wait; X=doc- f',
+        'f() { eval "$X"lattice; }; false && f() { :; }; X=doc- f',
+        'f() { eval "$X"lattice; }; (f() { :; }); X=doc- f',
+    ],
+    ids=(
+        "conditional-and-unset",
+        "conditional-if-unset",
+        "background-unset",
+        "conditional-redefinition",
+        "subshell-redefinition",
+    ),
+)
+def test_function_lifetime_respects_control_and_execution_context(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'true && f() { eval "$X"lattice; }; X=doc- f',
+        'false || f() { eval "$X"lattice; }; X=doc- f',
+        'if true; then f() { eval "$X"lattice; }; fi; X=doc- f',
+    ],
+    ids=("and-definition", "or-definition", "if-definition"),
+)
+def test_function_lifetime_includes_definitely_executed_definitions(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { eval "$X"lattice; }; true && unset -f f; X=doc- f',
+        'f() { eval "$X"lattice; }; false || unset -f f; X=doc- f',
+        'f() { eval "$X"lattice; }; if true; then unset -f f; fi; X=doc- f',
+    ],
+    ids=("and-unset", "or-unset", "if-unset"),
+)
+def test_function_lifetime_applies_definitely_executed_unsets(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=safe; f() { eval '${X:=doc-}lattice'; }; unset X; f",
+        "X=safe; f() { eval '${X:=doc-}lattice'; }; X=doc-; f",
+        'X=safe; f() { eval "$X"lattice; }; eval "X=doc-"; f',
+    ],
+    ids=("unset-before-call", "assignment-before-call", "eval-assignment-before-call"),
+)
+def test_function_eval_uses_call_time_global_state(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "if false; then X=safe; fi; f() { eval '${X:=doc-}lattice'; }; f",
+        "false && X=safe; f() { eval '${X:=doc-}lattice'; }; f",
+        "true || X=safe; f() { eval '${X:=doc-}lattice'; }; f",
+        "case no in yes) X=safe;; esac; f() { eval '${X:=doc-}lattice'; }; f",
+        "X=safe | cat; f() { eval '${X:=doc-}lattice'; }; f",
+        "{ X=safe; } & wait; f() { eval '${X:=doc-}lattice'; }; f",
+        "coproc { X=safe; }; wait; f() { eval '${X:=doc-}lattice'; }; f",
+    ],
+    ids=(
+        "untaken-if",
+        "untaken-and",
+        "untaken-or",
+        "untaken-case",
+        "pipeline-producer",
+        "background-group",
+        "coprocess",
+    ),
+)
+def test_function_eval_call_time_global_ignores_nonpersistent_writes(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        ("X=safe; clear() { unset X; }; clear; f() { eval '${X:=doc-}lattice'; }; f"),
+        ('X=safe; setdoc() { X=doc-; }; setdoc; f() { eval "$X"lattice; }; f'),
+        ("X=safe; setdoc() { eval 'X=doc-'; }; setdoc; f() { eval \"$X\"lattice; }; f"),
+    ],
+    ids=("unset", "ordinary-assignment", "eval-assignment"),
+)
+def test_function_eval_call_time_global_observes_called_function_effects(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=safe; f() { eval "$X"lattice; }; eval "X=doc-;"; f',
+        'f() { eval "$X"lattice; }; unset X; : "${X:=doc-}"; f',
+        'f() { eval "$X"lattice; }; unset X; { :; } >"${X:=doc-}"; f',
+    ],
+    ids=("eval-trailing-semicolon", "parameter-assignment", "compound-redirection"),
+)
+def test_function_eval_call_time_global_observes_common_mutations(script: str):
+    assert_taint_refusal(script)
+
+
+def test_function_eval_call_time_safe_global_prevents_default():
+    result = scan_doc_lattice_invocations("f() { eval '${X:=doc-}lattice'; }; X=safe; f")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_unset_function_definition_is_not_used_for_later_call_mapping():
+    result = scan_doc_lattice_invocations('f() { eval "$X"lattice; }; unset -f f; X=doc- f')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { eval '${X:=doc-}lattice'; }; X=safe f",
+        ("inner() { eval '${X:=doc-}lattice'; }; outer() { local X=safe; inner; }; outer"),
+    ],
+    ids=("call-prefix", "dynamic-caller-local"),
+)
+def test_function_entry_setness_prevents_untaken_eval_defaults(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'eval "$X"lattice; { :; } >"${X:=doc-}"',
+        'X=safe; { :; } >"${X:=doc-}"; eval "$X"lattice',
+    ],
+    ids=("future-binding", "untaken-default"),
+)
+def test_compound_conditional_assignments_are_replayed_in_source_order(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "S='${X:-doc-}'; eval \"$S\"lattice",
         "S='${X:=doc-}'; eval \"$S\"lattice",
         "X=present; S='${X:+doc-}'; eval \"$S\"lattice",
@@ -3376,6 +4996,284 @@ def test_eval_second_pass_assignment_spans_reachable_variable_writes(script: str
 )
 def test_eval_second_pass_assignment_ignores_non_dominating_global_writes(script: str):
     assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=safe /bin/true; eval '${X:=doc-}lattice'",
+        "X=safe true; eval '${X:=doc-}lattice'",
+        "X=safe command true; eval '${X:=doc-}lattice'",
+        "X=safe env true; eval '${X:=doc-}lattice'",
+        "X=safe printf %s x; eval '${X:=doc-}lattice'",
+        "X=safe :; eval '${X:=doc-}lattice'",
+        "X=safe eval ':'; eval '${X:=doc-}lattice'",
+    ],
+    ids=("external", "builtin", "command", "env", "printf", "colon", "eval"),
+)
+def test_eval_second_pass_assignment_ignores_prior_command_prefixes(script: str):
+    assert_taint_refusal(script)
+
+
+def test_static_eval_command_prefix_assignment_does_not_persist():
+    result = scan_doc_lattice_invocations("X=safe; eval 'X=doc- true'; eval \"$X\"lattice")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_static_eval_assignment_only_command_persists_control():
+    assert_taint_refusal("X=safe; eval 'X=doc-'; eval \"$X\"lattice")
+
+
+def test_static_eval_command_prefix_is_visible_to_same_command_control():
+    assert_taint_refusal('eval "X=doc- bash -c \'eval \\"\\$X\\"lattice\'"')
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["eval '# doc-lattice'", "eval 'echo # doc-lattice'"],
+    ids=("command-position", "after-command"),
+)
+def test_static_eval_active_comments_do_not_reach_execution_sink(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["""eval 'echo "#" doc-lattice'""", r"""eval 'echo \# doc-lattice'"""],
+    ids=("quoted", "escaped"),
+)
+def test_static_eval_inactive_comment_markers_remain_taint_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=safe; unset X; eval '${X:=doc-}lattice'",
+        "X=safe; builtin unset X; eval '${X:=doc-}lattice'",
+        "X=safe; command unset X; eval '${X:=doc-}lattice'",
+        "X=safe; unset -v X; eval '${X:=doc-}lattice'",
+        "X=safe; NAME=X; unset \"$NAME\"; eval '${X:=doc-}lattice'",
+    ],
+    ids=("direct", "builtin-wrapper", "command-wrapper", "variable-option", "dynamic-target"),
+)
+def test_eval_second_pass_assignment_observes_prior_variable_unsets(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=safe; eval '${X:=doc-}lattice'",
+        "X=safe eval '${X:=doc-}lattice'",
+        "X=safe command eval '${X:=doc-}lattice'",
+        "X=safe builtin eval '${X:=doc-}lattice'",
+        "X=safe; /usr/bin/unset X; eval '${X:=doc-}lattice'",
+        "X=safe; env unset X; eval '${X:=doc-}lattice'",
+        "X=safe; unset -f X; eval '${X:=doc-}lattice'",
+    ],
+    ids=(
+        "assignment-only",
+        "current-eval",
+        "current-command-eval",
+        "current-builtin-eval",
+        "external-unset",
+        "env-unset",
+        "function-unset",
+    ),
+)
+def test_eval_second_pass_assignment_preserves_exact_setness_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'declare X=doc-; eval "$X"lattice',
+        'declare -x X=doc-; eval "$X"lattice',
+        'export X=doc-; eval "$X"lattice',
+        'readonly X=doc-; eval "$X"lattice',
+        'typeset X=doc-; eval "$X"lattice',
+        'X=doc-; declare X+=lattice; eval "$X"',
+        'f() { local X=doc-; eval "$X"lattice; }; f',
+        'f() { typeset X=doc-; eval "$X"lattice; }; f',
+        "X=safe; f() { local X; eval '${X:=doc-}lattice'; }; f",
+        "X=safe; f() { local X=; eval '${X:=doc-}lattice'; }; f",
+        'N=X; declare "$N"=doc-; eval "$X"lattice',
+        'export -p X=doc-; eval "$X"lattice',
+        'readonly -p X=doc-; eval "$X"lattice',
+    ],
+    ids=(
+        "declare",
+        "declare-option",
+        "export",
+        "readonly",
+        "typeset",
+        "append",
+        "function-local",
+        "function-typeset",
+        "local-unset-shadow",
+        "local-empty-shadow",
+        "dynamic-name",
+        "export-print-option",
+        "readonly-print-option",
+    ),
+)
+def test_assignment_builtins_update_reachable_eval_variables(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    ["local X=doc-", "local -g X=doc-"],
+    ids=("local", "local-global-option"),
+)
+def test_top_level_local_assignment_builtin_does_not_write(declaration: str):
+    result = scan_doc_lattice_invocations(f'{declaration}; eval "$X"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_top_level_declare_global_assignment_remains_valid_control():
+    assert_taint_refusal('declare -g X=doc-; eval "$X"lattice')
+
+
+def test_assignment_builtin_plus_n_removes_nameref_attribute():
+    result = scan_doc_lattice_invocations(
+        'X=safe; declare -n R=X; declare +n R; R=doc-; eval "$X"lattice'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_assignment_builtin_minus_n_rebinds_nameref_control():
+    assert_taint_refusal('X=safe; declare -n R=X; declare -n R=Y; R=doc-; eval "$Y"lattice')
+
+
+def test_function_local_plus_n_removes_nameref_attribute():
+    result = scan_doc_lattice_invocations(
+        'f(){ X=safe; local -n R=X; local +n R; R=doc-; eval "$X"lattice;}; f'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { local X; X=doc-; eval "$X"lattice; }; f',
+        'f() { local X; export X=doc-; eval "$X"lattice; }; f',
+        'f() { local X; readonly X=doc-; eval "$X"lattice; }; f',
+        "X=safe; f() { local X=safe; unset X; eval '${X:=doc-}lattice'; }; f",
+        ("X=safe; f() { local X=safe; N=X; unset \"$N\"; eval '${X:=doc-}lattice'; }; f"),
+        'X=safe; f() { local X=doc-; local Y=$X; eval "$Y"lattice; }; f',
+        'X=safe; f() { local X=doc-; export Y=$X; eval "$Y"lattice; }; f',
+    ],
+    ids=(
+        "ordinary-assignment",
+        "export-assignment",
+        "readonly-assignment",
+        "exact-unset",
+        "dynamic-unset",
+        "local-rhs",
+        "export-rhs",
+    ),
+)
+def test_function_local_mutations_update_the_active_shadow(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { local X=doc-; }; f; eval "$X"lattice',
+        'f() { typeset X=doc-; }; f; eval "$X"lattice',
+        'f() { local X; X=doc-; }; f; eval "$X"lattice',
+        'f() { local X; export X=doc-; }; f; eval "$X"lattice',
+        '/usr/bin/declare X=doc-; eval "$X"lattice',
+        'env declare X=doc-; eval "$X"lattice',
+        'declare -f X; eval "$X"lattice',
+        'export X; eval "$X"lattice',
+    ],
+    ids=(
+        "local-does-not-leak",
+        "typeset-does-not-leak",
+        "ordinary-local-does-not-leak",
+        "exported-local-does-not-leak",
+        "external-declare",
+        "env-declare",
+        "function-query",
+        "export-without-value",
+    ),
+)
+def test_assignment_builtins_preserve_scope_and_nonmutation_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_declare_global_option_bypasses_function_local_shadow():
+    assert_taint_refusal('f() { local X=safe; declare -g X=doc-; }; f; eval "$X"lattice')
+
+
+@pytest.mark.parametrize("builtin", ["declare", "typeset"])
+def test_dynamic_global_option_conservatively_reaches_outer_eval(builtin: str):
+    assert_taint_refusal(f'OPT=-g; f() {{ {builtin} "$OPT" X=doc-; }}; f; eval "$X"lattice')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=safe; inner() { eval "$X"lattice; }; outer() { local X=doc-; inner; }; outer',
+        'inner() { eval "$X"lattice; }; outer() { local X=doc-; inner; }; outer',
+    ],
+    ids=("shadowed-global", "unset-global"),
+)
+def test_called_function_reads_callers_dynamic_local_scope(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { eval "$X"lattice; }; X=doc- f',
+        'X=safe; f() { eval "$X"lattice; }; X=doc- f',
+        'f() { local Y=$X; eval "$Y"lattice; }; X=doc- f',
+    ],
+    ids=("unset-global", "shadowed-global", "local-rhs"),
+)
+def test_function_call_prefix_assignments_reach_function_body(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f() { :; }; X=doc- f; eval "$X"lattice',
+        'f() { eval "$X"lattice; }; X=doc- /bin/true; f',
+    ],
+    ids=("nonpersistent-after-call", "unrelated-external-prefix"),
+)
+def test_function_call_prefix_assignments_preserve_nonleak_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(
@@ -3601,6 +5499,46 @@ def test_brace_alternatives_become_separate_eval_argv_ports():
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'D=doc-; bash {,-c} "$D"lattice',
+        'D=doc-; bash {,} -c "$D"lattice',
+        "printf '%s%s\\n' doc- lattice >task.sh; bash {,} task.sh",
+    ],
+    ids=("selector-leading-empty", "selector-empty-word", "resource-empty-word"),
+)
+def test_unquoted_empty_brace_fields_are_elided_before_shell_sink_selection(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'D=doc-; bash ""{,-c} "$D"lattice',
+        'D=doc-; bash ""{,} -c "$D"lattice',
+        "printf '%s%s\\n' doc- lattice >task.sh; bash \"\"{,} task.sh",
+    ],
+    ids=("selector-leading-empty", "selector-empty-word", "resource-empty-word"),
+)
+def test_quoted_empty_brace_fields_remain_real_shell_arguments(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_brace_empty_field_presence_is_scoped_to_quoted_alternative():
+    assert_taint_refusal('D=doc-; bash {,"-c"} "$D"lattice')
+
+
+def test_brace_quoted_empty_alternative_remains_a_real_argument_control():
+    result = scan_doc_lattice_invocations('D=doc-; bash {"",-c} "$D"lattice')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(

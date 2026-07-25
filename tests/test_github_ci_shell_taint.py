@@ -55,6 +55,7 @@ from doc_lattice.github_ci.shell_taint import (
     _solve_flow_definitions,
     _StreamScopeEvidence,
     _strip_trailing_newlines,
+    _substitute_local_contents,
     _TaintLimitExceeded,
     analyze_marker_taint,
     choice,
@@ -125,10 +126,19 @@ def test_content_builder_expands_active_braces_into_ordered_argv_ports() -> None
 
     built = builder.build()
 
+    assert built.argv_ports is not None
     assert [(port.literal, port.content) for port in built.argv_ports] == [
         ("doc-lattice", LiteralTransfer("doc-lattice")),
         ("doc-noop", LiteralTransfer("doc-noop")),
     ]
+
+
+def test_content_builder_elides_wholly_empty_unquoted_brace_alternatives() -> None:
+    builder = ContentBuilder.empty()
+    for character in "{,}":
+        builder.append_literal(character, brace_active=True)
+
+    assert builder.build().argv_ports == ()
 
 
 def test_content_builder_keeps_quoted_and_escaped_braces_literal() -> None:
@@ -137,6 +147,7 @@ def test_content_builder_keeps_quoted_and_escaped_braces_literal() -> None:
 
     built = builder.build()
 
+    assert built.argv_ports is not None
     assert [(port.literal, port.content) for port in built.argv_ports] == [
         ("{doc-,lattice}", LiteralTransfer("{doc-,lattice}")),
     ]
@@ -150,6 +161,7 @@ def test_content_builder_expands_bounded_ranges_without_turning_word_content_int
     built = builder.build()
 
     assert built.expression == LiteralTransfer("doc-{1..2}-lattice")
+    assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == [
         "doc-1-lattice",
         "doc-2-lattice",
@@ -174,6 +186,7 @@ def test_content_builder_preserves_signed_numeric_and_letter_ranges(
 
     built = builder.build()
 
+    assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == expected
 
 
@@ -206,6 +219,7 @@ def test_content_builder_preserves_bash_numeric_range_padding(
 
     built = builder.build()
 
+    assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == expected
     assert [port.content for port in built.argv_ports] == [
         LiteralTransfer(value) for value in expected
@@ -238,6 +252,7 @@ def test_content_builder_normalizes_range_step_like_bash(source: str, expected: 
 
     built = builder.build()
 
+    assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == expected
 
 
@@ -249,6 +264,7 @@ def test_content_builder_leaves_malformed_brace_ranges_literal(source: str) -> N
 
     built = builder.build()
 
+    assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == [source]
 
 
@@ -278,6 +294,7 @@ def test_content_builder_assignment_rhs_preserves_original_unexpanded_tokens() -
     built = builder.build()
 
     assert built.assignment_content == LiteralTransfer("{doc-,lattice}")
+    assert built.argv_ports is not None
     assert [(port.literal, port.content) for port in built.argv_ports] == [
         ("X=doc-", LiteralTransfer("X=doc-")),
         ("X=lattice", LiteralTransfer("X=lattice")),
@@ -296,6 +313,7 @@ def test_content_builder_assignment_rhs_retains_deferred_brace_expansion_error()
     built = builder.build(defer_brace_errors=True)
 
     assert built.assignment_content == LiteralTransfer("{1..1000}")
+    assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == ["X={1..1000}"]
     assert built.brace_expansion_error == "shell taint brace expansion limit exceeded"
 
@@ -408,6 +426,52 @@ def test_assignment_environment_materialization_checks_limits_incrementally(
 
     with pytest.raises(_TaintLimitExceeded, match=reason):
         _build_flow_definitions(evidence, limits=limits)
+
+
+def test_function_call_contextualization_checks_limits_incrementally() -> None:
+    definitions = tuple(
+        replace(
+            _command(command_id, _arg(f"f{command_id}"), name=f"f{command_id}"),
+            defines_function_context_id=100 + command_id,
+            defines_function_name=f"f{command_id}",
+        )
+        for command_id in range(1, 4)
+    )
+    bodies = tuple(
+        replace(
+            _command(
+                10 + command_id,
+                _arg("true"),
+                name="true",
+                assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-")),),
+            ),
+            argv=(),
+            executable=_ExecutableEvidence(None, None, None),
+            function_context_id=100 + command_id,
+            function_name=f"f{command_id}",
+        )
+        for command_id in range(1, 4)
+    )
+    calls = tuple(
+        _command(20 + command_id, _arg(f"f{command_id}"), name=f"f{command_id}")
+        for command_id in range(1, 4)
+    )
+    commands = (*definitions, *bodies, *calls)
+    evidence = _ShellTaintEvidence(
+        commands=commands,
+        scopes=(
+            _StreamScopeEvidence(
+                100,
+                "command",
+                None,
+                None,
+                SequenceOutput(tuple(CommandOutput(command.command_id) for command in commands)),
+            ),
+        ),
+    )
+
+    with pytest.raises(_TaintLimitExceeded, match="shell taint edge limit exceeded"):
+        _contextualize_evidence(evidence, limits=TaintLimits(max_edges=4))
 
 
 def test_eval_joins_dynamic_variable_assignment_and_append() -> None:
@@ -2026,3 +2090,24 @@ def test_every_flow_bound_fails_closed(
 ) -> None:
     with pytest.raises(_TaintLimitExceeded, match=message):
         _solve_flow_definitions(definitions, limits=limits)
+
+
+def test_deep_local_content_substitution_fails_with_stable_bound() -> None:
+    depth = 1_100
+    local_contents: dict[str, ContentExpr] = {
+        f"V{index}": VariableRef(f"V{index + 1}") for index in range(depth)
+    }
+    local_contents[f"V{depth}"] = LiteralTransfer("doc-")
+
+    with pytest.raises(_TaintLimitExceeded, match="local substitution depth limit"):
+        _substitute_local_contents(VariableRef("V0"), local_contents)
+
+
+def test_bounded_local_content_substitution_preserves_marker_control() -> None:
+    depth = 64
+    local_contents: dict[str, ContentExpr] = {
+        f"V{index}": VariableRef(f"V{index + 1}") for index in range(depth)
+    }
+    local_contents[f"V{depth}"] = LiteralTransfer("doc-")
+
+    assert _substitute_local_contents(VariableRef("V0"), local_contents) == LiteralTransfer("doc-")
