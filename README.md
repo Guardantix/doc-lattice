@@ -660,12 +660,29 @@ whether that concrete spelling would execute on one host. Consequently forms suc
 words are marker-checked like scalar assignment values. Comments and discarded redirection
 targets are not retained command words.
 
-Executable classification is syntactic basename resolution, not proof of runtime identity. Audit
-does not model function, alias, or `PATH` shadowing; variables used as executable names; arbitrary
-scripts, actions, reusable workflows, or renamed wrappers; or cross-command data flow such as file
-handoff, variable-plus-`eval`, pipelines, heredoc/herestring bodies, and markers assembled across
-words. Malformed, oversized, or otherwise unreliably inspectable workflows also exit 2 instead of
-being treated as safe.
+Executable classification is syntactic basename resolution, not proof of runtime identity. Within
+each individual `run:` body, audit also evaluates authored marker flow after the command-local
+resolver pass. Certification means no authored fragments compose the ASCII
+`doc[-_.]+lattice` marker along a modeled content flow and reach an execution sink in that body.
+Modeled flows include variable assignment and append, producer stdout, pipes, heredocs,
+herestrings, command and process substitutions, static file writes and reads, shell script/stdin/
+`-c` source selection, `eval`, `source`/`.`, bounded parameter alternatives and brace argv
+fan-out, structured stream scopes, loop binding/repetition, and descriptor-aware final bindings.
+Resolved doc-lattice invocations and the phase-1 retained-word refusals keep their existing
+outcomes.
+
+This contract is step-local and marker-anchored, not a general proof that dynamic shell execution
+is safe. Audit does not aggregate across steps, jobs, `uses:` actions, or reusable workflows. It
+also has no authored evidence for external environment values, external files, or unresolved
+producer output beyond the generic may-output rule; for encoding or transform synthesis such as
+`base64 -d`, `tr`, or `sed`; for dynamic path identity, `..`, `cd`, rename, or symlink aliases; or
+for file-descriptor duplication and movement. Unsupported parameter transforms surface their
+authored literal operands but do not model the variable-derived transform. Function, alias,
+`PATH`, and dynamic executable-name shadowing remain the command-identity limitations. These are
+absence-of-evidence boundaries, not trust claims: for example `curl ... | bash`,
+`eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` still certify.
+Malformed, oversized, cap-exhausting, or otherwise unreliably structured input exits 2.
+
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
 access because it forwards every available caller secret, so it always produces a

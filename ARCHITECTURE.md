@@ -379,3 +379,54 @@ O(1) aggregate check at command flush. The resolver remains syntactic and does n
 identity or model function/alias/`PATH` shadowing or cross-command data flow; comments and
 discarded redirection operands remain outside retained-word certification. Frozen evaluation
 checkpoints stay immutable, while live scanner and audit tests own the changed expectations.
+
+### AD-18: CI shell certification follows authored marker flow within one run body
+
+**Date:** 2026-07-24
+**Status:** Accepted
+**Context:** AD-17 rejects a complete retained-word marker under every unresolved command, but a
+shell body can author marker fragments in separate commands and later execute their composed
+content through a variable, stream, file, or expansion. Treating all unknown dynamic content as
+unsafe would replace the marker-anchored policy with a general dynamic-execution ban, while
+treating it as inert would assert evidence the scanner does not have.
+**Decision:** Certification remains scoped to one `run:` body and anchored to authored
+`doc[-_.]+lattice` content. The parser emits immutable command, redirection, process-resource, and
+stream-scope evidence with monotonic IDs. Typed ports keep argv, assignments, stdin, stdout, and
+static-resource content separate. A pure taint module builds `LiteralTransfer`, variable, stream,
+resource, `Choice`, `Concat`, and `OutsideGap` expressions, then evaluates them with a fixed marker
+DFA. Sequential adjacency uses relational composition; competing definitions, truncating writes,
+and mutually exclusive alternatives use set union, so unrelated fragments never concatenate.
+`OutsideGap` contributes epsilon and an opaque non-authored barrier, which permits only
+authored-only marker paths.
+
+Stream scopes aggregate command stdout with `Sequence`, `Choice`, and reflexive-transitive
+`Repeat`; command substitution alone strips trailing newlines with a finite suffix-aware transfer
+summary. Parameter default/alternate forms produce in-word choices, assign-default also emits a
+conditional variable definition, and bounded static brace expansion fans one lexical word into
+ordered argv ports. `for`/`select` iteration words join into loop-variable evidence;
+`while`/`until` repeat the test list around each body iteration; `case` `;&` and `;;&` preserve
+fallthrough sequence. Ordered descriptor replay installs pipeline endpoints first and then applies
+redirections left to right, so only final descriptor bindings route bytes while earlier truncations
+retain their empty-file side effect.
+
+Execution sinks are `eval`, shell `-c`, selected shell stdin, and static script execution through a
+shell operand, direct path, `source`, or `.`. Effective-head evidence comes from the complete
+existing assignment, keyword, `builtin`, `command`, `exec`, `env`, `time`, `coproc`, `uv run`,
+`uvx`, and `uv tool run` grammar. Its `external_lookup` provenance prevents an external `env eval`
+from being mistaken for the shell builtin. The shell source selector chooses `-c`, a script
+operand, or stdin; if a dynamic selector could choose a marker-capable authored port, it fails
+closed.
+
+Variable, resource, and stream references are solved by monotone least fixed point, independent of
+source order. Alternative width, expression nodes, table entries, graph edges, brace expansion,
+and successful fixed-point updates have deterministic caps; every exhaustion fails closed. The
+absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
+beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, unsupported
+parameter transforms beyond their authored operands, descriptor aliasing, and AD-17's function,
+alias, `PATH`, and dynamic-executable limitations.
+**Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
+that execute authored marker content now exit 2, including launcher-wrapped and ambiguous-selector
+sinks. Marker-free dynamic execution and a marker whose required character comes only from
+external content continue to certify with the boundary disclosed. `audit.py` still invokes the
+scanner independently for each step; future job-level aggregation can consume the evidence shape
+without changing the parser/analysis ownership boundary.

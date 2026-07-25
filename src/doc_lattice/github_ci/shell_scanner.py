@@ -1,4 +1,4 @@
-"""Bounded non-executing scanner for direct doc-lattice shell invocations."""
+"""Bounded scanner for direct doc-lattice invocations and authored marker flow."""
 
 import re
 from dataclasses import dataclass, field, replace
@@ -3327,9 +3327,15 @@ def direct_doc_lattice_invocations(
     assignment-prefix or argv word matching the ASCII doc-lattice marker fails closed rather than
     being certified as a non-invocation.
 
-    The scanner intentionally does not resolve aliases, functions, PATH shadowing, variables used
-    as executable names, external wrapper scripts, actions, reusable workflows, or cross-command
-    data flow. Comments and discarded redirection operands are not retained command words.
+    After the command-local resolver pass, a pure bounded taint pass evaluates authored content
+    flow within this one shell body. It refuses when authored fragments can compose the ASCII
+    doc-lattice marker along a modeled variable, stream, or static-resource edge and that content
+    reaches an execution sink. External content is represented as absence of authored evidence,
+    never as a claim that the content is inert.
+
+    The scanner intentionally does not aggregate across run steps or model aliases, functions,
+    PATH shadowing, external files or environment content, dynamic resource identity, arbitrary
+    encoding/transform programs, descriptor aliasing, actions, or reusable workflows.
 
     Args:
         script: Literal Bash source to scan.
