@@ -1,7 +1,10 @@
 """Tests for the bounded, non-executing doc-lattice shell invocation scanner."""
 
+import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from typer.core import TyperGroup
@@ -43,6 +46,148 @@ RECONCILE_DRY = (("reconcile", True),)
 CHECK = (("check", False),)
 LINEAR_LINT = (("linear", False), ("lint", False))
 INCOMPLETE = object()
+
+PHASE_TWO_RUNTIME_REFUSALS = [
+    (
+        "file-handoff",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; bash task.sh",
+        {},
+    ),
+    (
+        "dot-file-handoff",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; bash ./task.sh",
+        {},
+    ),
+    (
+        "heredoc-handoff",
+        "cat > task.sh <<'EOF'\ndoc-lattice reconcile\nEOF\nbash task.sh",
+        {},
+    ),
+    (
+        "variable-eval",
+        "X=doc-; X+='lattice reconcile'; eval \"$X\"",
+        {},
+    ),
+    (
+        "pipeline",
+        "printf '%s%s\\n' doc- 'lattice reconcile' | bash",
+        {},
+    ),
+    (
+        "herestring",
+        "X=doc-; X+='lattice reconcile'; bash <<< \"$X\"",
+        {},
+    ),
+    (
+        "input-process-substitution",
+        "bash < <(printf '%s%s\\n' doc- 'lattice reconcile')",
+        {},
+    ),
+    (
+        "multi-command-substitution",
+        "eval \"$(printf doc-; printf 'lattice reconcile')\"",
+        {},
+    ),
+    (
+        "compound-group",
+        "{ printf doc-; printf 'lattice reconcile'; } > task.sh; bash task.sh",
+        {},
+    ),
+    (
+        "parameter-default",
+        'unset X; eval "${X:-doc-}lattice reconcile"',
+        {},
+    ),
+    (
+        "parameter-assign-default",
+        'unset X; eval "${X:=doc-}lattice"',
+        {},
+    ),
+    (
+        "parameter-assigned-later",
+        'unset X; : "${X:=doc-}"; X+=lattice; eval "$X"',
+        {},
+    ),
+    (
+        "brace-eval",
+        "eval doc-{lattice,noop}",
+        {},
+    ),
+    (
+        "brace-pipeline",
+        "printf %s {doc-,lattice} | bash",
+        {},
+    ),
+    (
+        "for-binding",
+        'for X in doc- lattice; do printf %s "$X"; done | bash',
+        {},
+    ),
+    (
+        "case-fallthrough",
+        "case a in a) printf doc- ;& *) printf lattice ;; esac | bash",
+        {},
+    ),
+    (
+        "static-stdin-read",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; bash < task.sh",
+        {},
+    ),
+    (
+        "builtin-eval",
+        'X=doc-; X+=lattice; builtin eval "$X"',
+        {},
+    ),
+    (
+        "uv-run-shell",
+        'X=doc-; X+=lattice; uv run bash -c "$X"',
+        {},
+    ),
+    (
+        "ambiguous-selector",
+        'X=doc-; X+=\'lattice reconcile\'; bash "$OPT" "$X"',
+        {"OPT": "-c"},
+    ),
+    (
+        "substitution-newline-strip",
+        "eval \"$(cat <<'EOF'\ndoc-\nEOF\n)lattice reconcile\"",
+        {},
+    ),
+    (
+        "while-test-list",
+        (
+            "i=0; P='#\\n'; "
+            'while { printf %b "$P"; test "$i" -lt 1; }; '
+            "do printf doc-; P=lattice; i=1; done | bash"
+        ),
+        {},
+    ),
+    (
+        "final-descriptor-binding",
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > /dev/null > task.sh; bash task.sh"),
+        {},
+    ),
+    (
+        "direct-path",
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; chmod +x task.sh; ./task.sh"),
+        {},
+    ),
+    (
+        "source",
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; source ./task.sh"),
+        {},
+    ),
+    (
+        "dot-source",
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; . ./task.sh"),
+        {},
+    ),
+    (
+        "resource-append",
+        ("printf %s doc- > task.sh; printf %s lattice >> task.sh; bash task.sh"),
+        {},
+    ),
+]
 
 
 def _static_word(literal: str, *, assignment: bool = False) -> _ShellWord:
@@ -6633,3 +6778,147 @@ def test_static_eval_branch_mutations_follow_exact_condition(
     result = scan_doc_lattice_invocations(script)
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        """\
+X=doc-
+X+=lattice
+builtin eval "$X"
+""",
+        """\
+X=doc-
+X+=lattice
+command eval "$X"
+""",
+        """\
+X=doc-
+X+=lattice
+uv run bash -c "$X"
+""",
+        """\
+X=doc-
+X+='lattice reconcile'
+bash "$OPT" "$X"
+""",
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; chmod +x task.sh; ./task.sh"),
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; source ./task.sh"),
+        ("printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; . ./task.sh"),
+        ("printf %s doc- > task.sh; printf %s lattice >> task.sh; bash task.sh"),
+    ],
+    ids=[
+        "builtin-eval",
+        "command-eval",
+        "uv-run-shell",
+        "ambiguous-selector",
+        "direct-path",
+        "source",
+        "dot-source",
+        "resource-append",
+    ],
+)
+def test_phase_two_launcher_and_selector_sinks_refuse(script):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "echo 'make build' > run.sh; bash run.sh",
+        "eval doc- lattice",
+        """\
+bash -c 'echo ok' <<'EOF'
+doc-lattice reconcile
+EOF
+""",
+        """\
+X=doc-
+X+=lattice
+env eval "$X"
+""",
+        "bash -c 'echo hi' > doc-lattice.log",
+        ("P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh"),
+        ("printf '%s%s\\n' doc- 'lattice reconcile' 2> task.sh; bash task.sh"),
+    ],
+    ids=[
+        "marker-free-generated-script",
+        "eval-space-barrier",
+        "shell-c-ignores-stdin",
+        "external-eval-lookup",
+        "redirection-name-is-not-content",
+        "dynamic-resource-identity",
+        "stderr-does-not-carry-stdout-payload",
+    ],
+)
+def test_phase_two_mandatory_certification_rows(script):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_phase_two_refusal_retains_resolved_findings_from_the_same_body():
+    result = scan_doc_lattice_invocations(
+        """\
+doc-lattice check
+X=doc-
+X+=lattice
+eval "$X"
+"""
+    )
+
+    assert result.invocations == CHECK
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    ("_description", "script", "extra_environment"),
+    PHASE_TWO_RUNTIME_REFUSALS,
+    ids=[row[0] for row in PHASE_TWO_RUNTIME_REFUSALS],
+)
+def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
+    _description,
+    script,
+    extra_environment,
+    tmp_path: Path,
+):
+    bash = shutil.which("bash", path=os.defpath)
+    assert bash is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    probe = tmp_path / "marker-ran"
+    doc_lattice = bin_dir / "doc-lattice"
+    doc_lattice.write_text(
+        '#!/bin/sh\n: > "$MARKER_PROBE"\n',
+        encoding="utf-8",
+    )
+    doc_lattice.chmod(0o755)
+    uv = bin_dir / "uv"
+    uv.write_text(
+        '#!/bin/sh\n[ "$1" = run ] || exit 64\nshift\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    environment = {
+        **extra_environment,
+        "LC_ALL": "C",
+        "MARKER_PROBE": str(probe),
+        "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+    }
+
+    scan = scan_doc_lattice_invocations(script)
+    completed = subprocess.run(  # noqa: S603 - fixtures execute static plan-authored scripts
+        [bash, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert scan.invocations == NONE
+    assert scan.incomplete_reason == TAINT_REFUSAL_REASON
+    assert probe.exists(), completed.stderr

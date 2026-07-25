@@ -2854,3 +2854,46 @@ def test_managed_audit_allows_display_name_changes(tmp_path: Path):
     )
 
     assert _audit_installed(tmp_path) == ()
+
+
+def test_global_audit_fails_closed_on_cross_command_file_handoff():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          printf '%s%s\\n' doc- 'lattice reconcile' > task.sh
+          bash task.sh
+"""
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            r"shell scan incomplete: authored marker flow reaches "
+            r"an execution sink"
+        ),
+    ):
+        audit_global_workflows((document,))
+
+
+def test_global_audit_does_not_aggregate_taint_across_run_steps():
+    document = _workflow(
+        """\
+on: pull_request
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: printf '%s%s\\n' doc- 'lattice reconcile' > task.sh
+      - shell: bash
+        run: bash task.sh
+"""
+    )
+
+    assert _finding_codes(audit_global_workflows((document,))) == set()
