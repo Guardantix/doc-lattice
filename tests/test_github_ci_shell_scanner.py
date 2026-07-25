@@ -6780,6 +6780,203 @@ def test_static_eval_branch_mutations_follow_exact_condition(
     assert result.invocations == NONE
 
 
+def test_static_eval_condition_status_ignores_true_false_argument_words():
+    assert_taint_refusal(
+        """\
+X=safe
+eval 'if echo false; then X=doc-; fi'
+eval "$X"lattice
+"""
+    )
+
+
+def test_static_eval_condition_status_honors_active_function_shadowing():
+    assert_taint_refusal(
+        """\
+false() { true; }
+X=safe
+eval 'if false; then X=doc-; fi'
+eval "$X"lattice
+"""
+    )
+
+
+def test_static_eval_function_body_uses_call_time_function_shadows():
+    assert_taint_refusal(
+        """\
+X=safe
+f() { eval 'if false; then X=doc-; fi'; }
+false() { true; }
+f
+eval "$X"lattice
+"""
+    )
+
+
+def test_static_eval_function_body_preserves_unshadowed_false_pruning():
+    result = scan_doc_lattice_invocations(
+        """\
+f() { local X=safe; eval 'if false; then X=doc-; fi'; eval "$X"lattice; }
+f
+"""
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    ("script", "tainted"),
+    [
+        (
+            "false() { true; }; X=safe; "
+            "eval 'if command -- false; then X=doc-; fi'; eval \"$X\"lattice",
+            False,
+        ),
+        (
+            "true() { false; }; X=safe; "
+            "eval 'if builtin -- true; then X=doc-; fi'; eval \"$X\"lattice",
+            True,
+        ),
+        (
+            "X=safe; eval 'if ! X=temporary false; then X=doc-; fi'; eval \"$X\"lattice",
+            True,
+        ),
+    ],
+    ids=("command-wrapper", "builtin-wrapper", "negated-assignment-prefix"),
+)
+def test_static_eval_condition_status_resolves_supported_prefixes(
+    script: str,
+    tainted: bool,
+):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == (TAINT_REFUSAL_REASON if tainted else None)
+
+
+def test_static_eval_assignment_prefix_prevents_late_negation_parsing():
+    assert_taint_refusal(
+        """\
+X=safe
+eval 'if X=temporary ! false; then :; else X=doc-; fi'
+eval "$X"lattice
+"""
+    )
+
+
+def test_static_eval_coproc_condition_does_not_use_child_executable_status():
+    assert_taint_refusal(
+        """\
+X=safe
+eval 'if coproc false; then X=doc-; fi; wait'
+eval "$X"lattice
+"""
+    )
+
+
+def test_static_eval_invalid_time_option_keeps_condition_status_unknown():
+    assert_taint_refusal(
+        """\
+X=safe
+eval 'if time -x true; then :; else X=doc-; fi'
+eval "$X"lattice
+"""
+    )
+
+
+def test_static_eval_valid_time_option_preserves_literal_status():
+    result = scan_doc_lattice_invocations(
+        """\
+X=safe
+eval 'if time -p false; then X=doc-; fi'
+eval "$X"lattice
+"""
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        "if false & then X=doc-; fi; wait",
+        "if false; true; then X=doc-; fi",
+        "if false | true; then X=doc-; fi",
+    ],
+    ids=("asynchronous", "command-list", "pipeline"),
+)
+def test_static_eval_compound_condition_status_stays_conservative(program: str):
+    assert_taint_refusal(f"X=safe; eval '{program}'; eval \"$X\"lattice")
+
+
+def test_static_eval_condition_status_skips_quoted_rhs_assignment_prefix():
+    result = scan_doc_lattice_invocations(
+        """\
+Y=safe
+eval "if X='quoted' false; then Y=doc-; fi"
+eval "$Y"lattice
+"""
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_static_eval_condition_status_keeps_fully_quoted_assignment_word_unknown():
+    assert_taint_refusal(
+        """\
+Y=safe
+eval "if 'X=quoted' false; then Y=doc-; fi"
+eval "$Y"lattice
+"""
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "wrapper"),
+    [("false", "command"), ("true", "builtin")],
+    ids=("command-false", "builtin-true"),
+)
+def test_static_eval_status_wrappers_bypass_shadow_function_effects(
+    name: str,
+    wrapper: str,
+):
+    result = scan_doc_lattice_invocations(
+        f"{name}() {{ X=doc-; }}; "
+        f"outer() {{ local X=safe; eval '{wrapper} {name}'; eval \"$X\"lattice; }}; outer"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    ("name", "target"),
+    [("command", "false"), ("builtin", "true")],
+    ids=("command", "builtin"),
+)
+def test_static_eval_wrapper_names_honor_active_function_shadows(
+    name: str,
+    target: str,
+):
+    assert_taint_refusal(
+        f"{name}() {{ X=doc-; }}; "
+        f"outer() {{ local X=safe; eval '{name} {target}'; eval \"$X\"lattice; }}; outer"
+    )
+
+
+def test_static_eval_function_shadow_evidence_has_fixed_membership_bound():
+    definitions = "; ".join(f"f{index}() {{ :; }}" for index in range(128))
+    scanner = _ShellScanner(f"{definitions}; :", classify_commands=False)
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    assert all(not command.active_function_names for command in builder.commands)
+
+
 @pytest.mark.parametrize(
     "script",
     [

@@ -19,6 +19,7 @@ _MAX_BRACE_INTEGER_DIGITS = 256
 _MAX_FUNCTION_EFFECT_DEPTH = 64
 _MAX_LOCAL_SUBSTITUTION_DEPTH = 128
 _QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
+_STATIC_EVAL_SHADOW_NAMES = frozenset({"builtin", "command", "false", "true"})
 _UNICODE_MAX = 0x10FFFF
 _SURROGATE_MIN = 0xD800
 _SURROGATE_MAX = 0xDFFF
@@ -200,6 +201,18 @@ class _StaticEvalCommand:
     keyword_eligible: tuple[bool, ...]
     source_words: tuple[str, ...]
     execution_status: bool | None = True
+    active_function_names: frozenset[str] = frozenset()
+    asynchronous: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticEvalExecutable:
+    """Resolved executable identity for one bounded static eval command."""
+
+    name: str
+    negated: bool
+    bypasses_functions: bool
+    literal_status_available: bool
 
 
 @dataclass(slots=True)
@@ -385,6 +398,7 @@ class _CommandEvidence:
     conditional_operator: str | None = None
     isolated_execution: bool = False
     isolated_context_id: int | None = None
+    active_function_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -3689,11 +3703,20 @@ def _static_eval_commands(command: _CommandEvidence) -> tuple[_StaticEvalCommand
     """Tokenize bounded static eval input into simple command words."""
     commands: list[_StaticEvalCommand] = []
     for program in _static_eval_programs(command):
-        commands.extend(_static_eval_program_commands(program))
+        commands.extend(
+            _static_eval_program_commands(
+                program,
+                active_function_names=command.active_function_names,
+            )
+        )
     return tuple(commands)
 
 
-def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...]:
+def _static_eval_program_commands(
+    program: str,
+    *,
+    active_function_names: frozenset[str] = frozenset(),
+) -> tuple[_StaticEvalCommand, ...]:
     """Tokenize one exact eval program and retain reserved-word eligibility."""
     program = _strip_active_shell_comments(program)
     lexer = shlex.shlex(
@@ -3717,14 +3740,16 @@ def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...
         tokens = tuple(lexer)
     except ValueError:
         return ()
-    for token in tokens:
-        if token and all(character in ";&|()\n" for character in token):
+    for lexeme in tokens:
+        if lexeme and all(character in ";&|()\n" for character in lexeme):
             if words:
                 commands.append(
                     _StaticEvalCommand(
                         tuple(words),
                         tuple(word_eligibility),
                         tuple(source_words),
+                        active_function_names=active_function_names,
+                        asynchronous=lexeme == "&",
                     )
                 )
                 words.clear()
@@ -3734,9 +3759,9 @@ def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...
             skip_redirection_target = False
             continue
         if (
-            token
-            and any(character in "<>" for character in token)
-            and all(character in "<>&|" for character in token)
+            lexeme
+            and any(character in "<>" for character in lexeme)
+            and all(character in "<>&|" for character in lexeme)
         ):
             if redirection_prefixes and redirection_prefixes[-1]:
                 words.pop()
@@ -3752,7 +3777,7 @@ def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...
         if skip_redirection_target:
             skip_redirection_target = False
             continue
-        words.append(token)
+        words.append(lexeme)
         word_eligibility.append(token_metadata.keyword_eligible)
         source_words.append(token_metadata.source)
         redirection_prefixes.append(token_metadata.redirection_prefix)
@@ -3764,6 +3789,7 @@ def _static_eval_program_commands(program: str) -> tuple[_StaticEvalCommand, ...
                 tuple(words),
                 tuple(word_eligibility),
                 tuple(source_words),
+                active_function_names=active_function_names,
             )
         )
     return _annotate_static_eval_control(tuple(commands))
@@ -3789,25 +3815,106 @@ def _static_status_not(status: bool | None) -> bool | None:
     return None if status is None else not status
 
 
-def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
-    """Return exact status for an eligible true/false eval condition."""
-    candidates = [
-        index
-        for index, word in enumerate(command.words)
-        if command.keyword_eligible[index] and word in {"false", "true"}
-    ]
-    if not candidates:
+def _static_eval_wrapped_executable(
+    command: _StaticEvalCommand,
+    index: int,
+    *,
+    negated: bool,
+    literal_status_available: bool,
+) -> _StaticEvalExecutable | None:
+    """Resolve command/builtin wrappers around one static eval executable."""
+    words = command.words
+    bypasses_functions = False
+    while index < len(words) and words[index] in {"builtin", "command"}:
+        wrapper = words[index]
+        if not bypasses_functions and wrapper in command.active_function_names:
+            break
+        bypasses_functions = True
+        index += 1
+        if wrapper == "builtin":
+            if index < len(words) and words[index] == "--":
+                index += 1
+            continue
+        while index < len(words):
+            option = words[index]
+            if option == "--":
+                index += 1
+                break
+            if option.startswith("-") and option != "-":
+                flags = option[1:]
+                if "v" in flags or "V" in flags or set(flags) - {"p"}:
+                    return None
+                index += 1
+                continue
+            break
+    if index >= len(words) or words[index] in {"done", "esac", "fi"}:
         return None
-    index = candidates[-1]
-    status = command.words[index] == "true"
-    if (
-        sum(
-            word == "!" and command.keyword_eligible[word_index]
-            for word_index, word in enumerate(command.words[:index])
-        )
-        % 2
-        == 1
+    return _StaticEvalExecutable(
+        words[index],
+        negated=negated,
+        bypasses_functions=bypasses_functions,
+        literal_status_available=literal_status_available,
+    )
+
+
+def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutable | None:
+    """Resolve one static eval command head and its literal negation."""
+    index = 0
+    negated = False
+    literal_status_available = True
+    control_prefixes = {
+        "coproc",
+        "do",
+        "elif",
+        "else",
+        "if",
+        "then",
+        "time",
+        "until",
+        "while",
+    }
+    while index < len(command.words):
+        word = command.words[index]
+        eligible = command.keyword_eligible[index]
+        if eligible and word == "!":
+            negated = not negated
+            index += 1
+            continue
+        if not eligible or word not in control_prefixes:
+            break
+        index += 1
+        if word == "coproc":
+            literal_status_available = False
+        if word == "time":
+            while index < len(command.words) and command.words[index] == "-p":
+                index += 1
+    while (
+        index < len(command.words)
+        and _static_assignment_word(command.words[index]) is not None
+        and _static_eval_assignment_content(command.source_words[index]) is not None
     ):
+        index += 1
+    return _static_eval_wrapped_executable(
+        command,
+        index,
+        negated=negated,
+        literal_status_available=literal_status_available,
+    )
+
+
+def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
+    """Return exact status for a resolved, unshadowed true/false eval command."""
+    executable = _static_eval_executable(command)
+    if (
+        executable is None
+        or executable.name not in {"false", "true"}
+        or not executable.literal_status_available
+        or command.asynchronous
+        or (not executable.bypasses_functions and executable.name in command.active_function_names)
+    ):
+        return None
+    status = executable.name == "true"
+    if executable.negated:
         status = not status
     return status
 
@@ -3885,6 +3992,8 @@ def _annotate_static_eval_control(
             frame = controls.pop()
             annotated.append(replace(command, execution_status=frame.parent_status))
             continue
+        if controls and controls[-1].phase == "test":
+            controls[-1].current_test_status = None
         annotated.append(replace(command, execution_status=enclosing_status()))
     return tuple(annotated)
 
@@ -4087,33 +4196,9 @@ def _static_eval_command_names(command: _CommandEvidence) -> tuple[str, ...]:
     """Return exact simple-command heads executed by bounded static eval input."""
     names: list[str] = []
     for parsed in _static_eval_commands(command):
-        words = parsed.words
-        index = 0
-        while index < len(words) and _static_assignment_word(words[index]) is not None:
-            index += 1
-        while index < len(words):
-            if words[index] == "!" and parsed.keyword_eligible[index]:
-                index += 1
-                continue
-            if not parsed.keyword_eligible[index] or words[index] not in {
-                "coproc",
-                "do",
-                "elif",
-                "else",
-                "if",
-                "then",
-                "time",
-                "until",
-                "while",
-            }:
-                break
-            prefix = words[index]
-            index += 1
-            if prefix == "time":
-                while index < len(words) and words[index].startswith("-"):
-                    index += 1
-        if index < len(words) and words[index] not in {"done", "esac", "fi"}:
-            names.append(words[index])
+        executable = _static_eval_executable(parsed)
+        if executable is not None and not executable.bypasses_functions:
+            names.append(executable.name)
     return tuple(dict.fromkeys(names))
 
 
@@ -9198,6 +9283,24 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
 
     try:
         _validate_nested_evidence(evidence, limits)
+        function_names = frozenset(
+            command.defines_function_name
+            for command in evidence.commands
+            if command.defines_function_name in _STATIC_EVAL_SHADOW_NAMES
+        )
+        if function_names:
+            evidence = replace(
+                evidence,
+                commands=tuple(
+                    replace(
+                        command,
+                        active_function_names=command.active_function_names | function_names,
+                    )
+                    if command.function_context_id is not None
+                    else command
+                    for command in evidence.commands
+                ),
+            )
         evidence = _resolve_builtin_writer_evidence(evidence)
         if any(command.unsupported_builtin_write for command in evidence.commands):
             raise _TaintLimitExceeded("shell builtin writer cannot be represented")

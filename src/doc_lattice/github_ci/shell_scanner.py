@@ -7,6 +7,7 @@ from enum import Enum, auto
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
     _QUOTED_FUNCTION_POSITIONAL_STAR,
+    _STATIC_EVAL_SHADOW_NAMES,
     TAINT_REFUSAL_REASON,
     ChoiceOutput,
     CommandOutput,
@@ -1742,6 +1743,8 @@ class _ShellScanner:
             None,
         )
         executable_index = command.executable.argv_index if command is not None else None
+        if executable_index is None and command is not None and len(command.argv) == 1:
+            executable_index = 0
         if (
             pending is not None
             and pending.kind == "subshell_group"
@@ -1752,7 +1755,10 @@ class _ShellScanner:
             and executable_index == len(command.argv) - 1
             and not command.argv[executable_index].dynamic
             and command.argv[executable_index].literal
-            and command.executable.literal == command.argv[executable_index].literal
+            and (
+                command.executable.literal is None
+                or command.executable.literal == command.argv[executable_index].literal
+            )
         ):
             return command.argv[executable_index].literal
         return None
@@ -2350,6 +2356,9 @@ class _ShellScanner:
                     isolated_execution=bool(argv and argv[0].literal == "coproc"),
                     isolated_context_id=(
                         output_scope_id if argv and argv[0].literal == "coproc" else None
+                    ),
+                    active_function_names=frozenset(
+                        self.active_function_names & _STATIC_EVAL_SHADOW_NAMES
                     ),
                 )
             )
