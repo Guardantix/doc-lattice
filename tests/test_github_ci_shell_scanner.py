@@ -5770,7 +5770,7 @@ def test_eval_second_pass_cross_write_brace_controls_stay_clean(script: str):
 
 
 def test_eval_second_pass_cartesian_brace_words_obey_alternative_cap():
-    result = scan_doc_lattice_invocations('X="{a..q}{a..q}"; eval "$X"')
+    result = scan_doc_lattice_invocations('X="{a..q}{a..q}{a..q}"; eval "$X"')
 
     assert result.invocations == NONE
     assert result.incomplete_reason == "shell taint brace expansion limit exceeded"
@@ -5899,10 +5899,10 @@ def test_assignment_shaped_argv_word_expands_braces_before_pipeline_sink():
 @pytest.mark.parametrize(
     ("script", "reason"),
     [
-        ("printf %s X={1..1000}", "shell taint brace expansion limit exceeded"),
+        ("printf %s X={1..5000}", "shell taint brace expansion limit exceeded"),
         (
-            "printf %s X={doc-,$Y}lattice",
-            "shell taint dynamic brace expansion cannot be bounded",
+            "printf %s X={doc-,$Y}lattice | bash",
+            "authored marker flow reaches an execution sink",
         ),
     ],
     ids=("range-cap", "dynamic"),
@@ -5917,10 +5917,10 @@ def test_assignment_shaped_argv_word_applies_brace_bounds(script: str, reason: s
 @pytest.mark.parametrize(
     ("script", "reason"),
     [
-        ('X={1..1000}; eval "$X"', "shell taint brace expansion limit exceeded"),
+        ('X={1..5000}; eval "$X"', "shell taint brace expansion limit exceeded"),
         (
             'X={doc-,$Y}lattice; eval "$X"',
-            "shell taint dynamic brace expansion cannot be bounded",
+            "authored marker flow reaches an execution sink",
         ),
     ],
     ids=("range-cap", "dynamic"),
@@ -5935,8 +5935,8 @@ def test_eval_second_pass_applies_deferred_assignment_braces(script: str, reason
 @pytest.mark.parametrize(
     ("script", "reason"),
     [
-        ("eval doc-{1..1000}-lattice", "shell taint brace expansion limit exceeded"),
-        ("eval {doc-,$X}lattice", "shell taint dynamic brace expansion cannot be bounded"),
+        ("eval doc-{1..5000}-lattice", "shell taint brace expansion limit exceeded"),
+        ("eval {doc-,$X}lattice", "authored marker flow reaches an execution sink"),
     ],
 )
 def test_brace_expansion_bounds_fail_closed(script: str, reason: str):
@@ -7119,3 +7119,194 @@ def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
     assert scan.invocations == NONE
     assert scan.incomplete_reason == TAINT_REFUSAL_REASON
     assert probe.exists(), completed.stderr
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=foobar; eval "doc-${X#foobar}lattice reconcile --apply"',
+        'X=barfoo; eval "doc-${X%barfoo}lattice reconcile --apply"',
+        'X=foobar; eval "doc-${X/foobar/}lattice reconcile --apply"',
+        'X=foobar; eval "doc-${X:6}lattice reconcile --apply"',
+        'X=foobar; eval "doc-${X:0:0}lattice reconcile --apply"',
+        'X=; eval "doc-${X^^}lattice reconcile --apply"',
+        'X=foobar; bash -c "doc-${X#foobar}lattice reconcile --apply"',
+    ],
+    ids=(
+        "strip-prefix",
+        "strip-suffix",
+        "substitute",
+        "offset",
+        "offset-length",
+        "case-fold",
+        "bash-c-sink",
+    ),
+)
+def test_unsupported_parameter_transform_keeps_empty_expansion_alternative(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "blank",
+    ["\v", "\f", "\r", "\xa0"],
+    ids=("vertical-tab", "form-feed", "carriage-return", "no-break-space"),
+)
+def test_non_blank_whitespace_does_not_start_an_eval_comment_word(blank: str):
+    assert_marker_refusal(f"eval 'echo a{blank}# ; doc-lattice reconcile --apply'")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'if true; then printf %s%s "$A" "$B" | bash; fi',
+        'if false; then :; elif true; then printf %s%s "$A" "$B" | bash; fi',
+        'if false; then :; else printf %s%s "$A" "$B" | bash; fi',
+        'for i in 1; do printf %s%s "$A" "$B" | bash; done',
+        'while false; do printf %s%s "$A" "$B" | bash; done',
+        'until true; do printf %s%s "$A" "$B" | bash; done',
+        'select o in x; do printf %s%s "$A" "$B" | bash; done',
+        'case x in x) printf %s%s "$A" "$B" | bash;; esac',
+    ],
+    ids=(
+        "if-body",
+        "elif-body",
+        "else-body",
+        "for-body",
+        "while-body",
+        "until-body",
+        "select-body",
+        "case-arm",
+    ),
+)
+def test_pipeline_inside_control_body_keeps_its_producer_edge(script: str):
+    assert_taint_refusal(f'A=doc-\nB="lattice reconcile"\n{script}\n')
+
+
+@pytest.mark.parametrize(
+    "tail",
+    ["|\nbash", "|\n# comment\nbash", "|\n\nbash", "|\n  bash"],
+    ids=("newline", "comment-line", "blank-line", "indented"),
+)
+def test_pipeline_continues_across_the_newline_after_a_pipe(tail: str):
+    assert_taint_refusal(f'A=doc-\nB="lattice reconcile"\nprintf %s%s "$A" "$B" {tail}\n')
+
+
+def test_pipeline_into_compound_consumer_still_binds_the_compound_scope():
+    script = 'S=\': ${X:=doc-}\'; printf x | while read item; do eval "$S"; done; eval "$X"lattice'
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "sink",
+    ["f | bash", "{ f; } | bash", 'eval "$(f)"', "f > s.sh\nbash s.sh"],
+    ids=("pipe", "compound-pipe", "command-substitution", "script-file"),
+)
+def test_function_call_stdout_reaches_execution_sinks(sink: str):
+    assert_taint_refusal(
+        f'A=doc-\nB="lattice reconcile"\nf() {{ printf %s%s "$A" "$B"; }}\n{sink}\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'bash /dev/stdin <<< "doc-lattice reconcile"',
+        'bash /dev/fd/0 <<< "doc-lattice reconcile"',
+        'bash /proc/self/fd/0 <<< "doc-lattice reconcile"',
+        'source /dev/stdin <<< "doc-lattice reconcile"',
+        "bash /dev/stdin <<EOF\ndoc-lattice reconcile\nEOF",
+    ],
+    ids=("bash", "dev-fd", "proc-self-fd", "source", "heredoc"),
+)
+def test_stdin_device_script_operand_reads_the_selected_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+def test_ordinary_script_operand_is_not_treated_as_stdin():
+    result = scan_doc_lattice_invocations('bash build.sh <<< "doc-lattice reconcile"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=a\n" + 'X+="$X"\n' * 24 + 'eval "$X"\n',
+        'X="' + "a" * 20_000 + '"\neval "$X"\n',
+    ],
+    ids=("repeated-doubling", "single-long-literal"),
+)
+def test_exact_eval_value_length_fails_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell taint exact value length limit exceeded"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'for f in *.md; do echo "$f"; done',
+        'for f in $FILES; do echo "$f"; done',
+        'for f in "$@"; do echo "$f"; done',
+        'for f in $(git diff --name-only); do echo "$f"; done',
+        'for i in {1..5}; do echo "$i"; done',
+        "for ((i=0;i<10;i++)); do echo $i; done",
+        'for f; do echo "$f"; done',
+        'select o in "${opts[@]}"; do echo "$o"; done',
+    ],
+    ids=(
+        "glob",
+        "unquoted-variable",
+        "positional-list",
+        "command-substitution",
+        "brace-range",
+        "arithmetic-header",
+        "implicit-positional",
+        "select-array",
+    ),
+)
+def test_marker_free_dynamic_loop_headers_stay_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'for f in doc-lattice; do eval "$f"; done',
+        'A=doc-lattice; for f in $A; do eval "$f"; done',
+        'for f in doc-lattice*; do eval "$f"; done',
+        'for f in doc-{lattice,x}; do eval "$f"; done',
+    ],
+    ids=("literal", "unquoted-variable", "glob-prefix", "brace-alternative"),
+)
+def test_marker_bearing_loop_values_still_refuse(script: str):
+    assert_marker_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["echo {1..300}", "echo {a..z}{0..9}", "echo {a,$X}", "A=safe; echo {a,$A}"],
+    ids=("range", "cross-product", "dynamic-member", "resolved-member"),
+)
+def test_marker_free_brace_expansions_stay_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["A=lattice; echo doc-{x,$A} | bash", "printf %s X={doc-,$Y}lattice | bash"],
+    ids=("dynamic-member", "assignment-shaped"),
+)
+def test_dynamic_brace_members_keep_their_marker_flow(script: str):
+    assert_taint_refusal(script)

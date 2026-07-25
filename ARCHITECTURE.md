@@ -401,16 +401,27 @@ authored-only marker paths.
 
 Stream scopes aggregate command stdout with `Sequence`, `Choice`, and reflexive-transitive
 `Repeat`; command substitution alone strips trailing newlines with a finite suffix-aware transfer
-summary. Parameter default/alternate forms produce in-word choices, assign-default also emits a
-conditional variable definition, and bounded static brace expansion fans one lexical word into
-ordered argv ports. `for`/`select` iteration words join into loop-variable evidence;
-`while`/`until` repeat the test list around each body iteration; `case` `;&` and `;;&` preserve
-fallthrough sequence. Ordered descriptor replay installs pipeline endpoints first and then applies
-redirections left to right, so only final descriptor bindings route bytes while earlier truncations
-retain their empty-file side effect.
+summary. A call to a function defined in the same body reproduces that function scope's aggregated
+stdout, so wrapping a producer in a function preserves the handoff. A pipeline keeps its
+producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
+command inside a control body, while a compound consumer still binds the compound scope. Parameter
+default/alternate forms produce in-word choices, assign-default also emits a conditional variable
+definition, and every other parameter operator keeps an empty-string alternative beside its
+authored operand, so a transform that can erase its value cannot hide a marker across the
+expansion. Bounded static brace expansion fans one lexical word into ordered argv ports; because
+brace expansion precedes parameter expansion, an authored comma list expands even when a member's
+content is dynamic. `for`/`select` iteration words join into loop-variable evidence, and a header
+this scan cannot enumerate, whether an arithmetic header, implicit positionals, word splitting, or
+pathname expansion, contributes an external gap rather than failing the scan; `while`/`until`
+repeat the test list around each body iteration; `case` `;&` and `;;&` preserve fallthrough
+sequence. Ordered descriptor replay installs pipeline endpoints first and then applies redirections
+left to right, so only final descriptor bindings route bytes while earlier truncations retain their
+empty-file side effect.
 
 Execution sinks are `eval`, shell `-c`, selected shell stdin, and static script execution through a
-shell operand, direct path, `source`, or `.`. Effective-head evidence comes from the complete
+shell operand, direct path, `source`, or `.`. A `/dev/stdin`, `/dev/fd/0`, or `/proc/self/fd/0`
+script operand resolves to that command's own stdin instead of to a static resource no writer
+reaches. Effective-head evidence comes from the complete
 existing assignment, keyword, `builtin`, `command`, `exec`, `env`, `time`, `coproc`, `uv run`,
 `uvx`, and `uv tool run` grammar. Its `external_lookup` provenance prevents an external `env eval`
 from being mistaken for the shell builtin. The shell source selector chooses `-c`, a script
@@ -441,7 +452,8 @@ interpretation.
 
 Variable, resource, and stream references are solved by monotone least fixed point, independent of
 source order. Alternative width, expression nodes, table entries, graph edges, brace expansion,
-and successful fixed-point updates have deterministic caps; every exhaustion fails closed. The
+resolved exact value length, and successful fixed-point updates have deterministic caps; every
+exhaustion fails closed, so an eval payload that grows itself cannot exhaust time or memory. The
 absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
 beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, unsupported
 parameter transforms beyond their authored operands, descriptor aliasing, eval payload constructs

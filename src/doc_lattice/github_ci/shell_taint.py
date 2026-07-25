@@ -116,8 +116,9 @@ class TaintLimits:
     max_table_entries: int = 10_000
     max_edges: int = 50_000
     max_fixed_point_updates: int = 100_000
-    max_brace_expansions: int = 256
+    max_brace_expansions: int = 4_096
     max_brace_depth: int = 16
+    max_exact_value_chars: int = 8_192
 
 
 class _TaintLimitExceeded(ProjectError):
@@ -562,9 +563,9 @@ def _brace_alternatives(
     )
     if not comma_indices and not recognized_range:
         return None
-    if any(not isinstance(token.expression, LiteralTransfer) for token in tokens):
-        raise _TaintLimitExceeded("shell taint dynamic brace expansion cannot be bounded")
     if comma_indices:
+        # Brace expansion precedes parameter expansion, so the authored commas fix the field
+        # count even when a member's own content is only known at run time.
         starts = [0, *(index + 1 for index in comma_indices)]
         stops = [*comma_indices, len(tokens)]
         return [tokens[start:stop] for start, stop in zip(starts, stops, strict=True)]
@@ -873,6 +874,10 @@ def normalize_static_resource(literal: str, *, dynamic: bool) -> str | None:
     return prefix + "/".join(parts)
 
 
+_STDIN_DEVICE_PATHS = frozenset({"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"})
+# Bash blanks are space and tab only, so Python's broader ``str.isspace`` must not decide word
+# starts; newline and the shell metacharacters end a word as well.
+_SHELL_WORD_SEPARATORS = frozenset(" \t\n;&|<>()")
 _SHELL_HEADS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "rksh"})
 _SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
 _SHELL_EAGER_STOPS = frozenset({"--help", "--version", "--dump-strings", "--dump-po-strings"})
@@ -2131,6 +2136,7 @@ def _strip_one_trailing_newline(expression: ContentExpr) -> ContentExpr:
 def _exact_content_literal(
     expression: ContentExpr,
     values: Mapping[str, str],
+    limits: TaintLimits,
 ) -> str | None:
     """Resolve one bounded content expression against exact scalar values."""
     memo: dict[int, str | None] = {}
@@ -2161,6 +2167,8 @@ def _exact_content_literal(
             value = alternatives.pop() if len(alternatives) == 1 else None
         else:
             value = None
+        if value is not None and len(value) > limits.max_exact_value_chars:
+            raise _TaintLimitExceeded("shell taint exact value length limit exceeded")
         memo[current_id] = value
     return memo[id(expression)]
 
@@ -2243,6 +2251,7 @@ def _read_literal_fields(  # noqa: PLR0912
 
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
 ) -> _ShellTaintEvidence:
     """Attach finalized stdin and exact bounded read-field projections."""
     pipe_inputs = _pipe_inputs(evidence)
@@ -2284,7 +2293,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             values.pop(name, None)
             unknown_values.add(name)
             return
-        value = _exact_content_literal(assignment.content, values)
+        value = _exact_content_literal(assignment.content, values, limits)
         if value is None:
             values.pop(name, None)
             unknown_values.add(name)
@@ -2317,7 +2326,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         stdin = _strip_one_trailing_newline(
             _input_expression(command, pipe_inputs, process_resources)
         )
-        exact_stdin = _exact_content_literal(stdin, command_values)
+        exact_stdin = _exact_content_literal(stdin, command_values, limits)
         read_target_count = next(
             (
                 assignment.read_target_count
@@ -2420,6 +2429,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
 
 def _route_runtime_nameref_writes(  # noqa: PLR0915
     evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
 ) -> _ShellTaintEvidence:
     """Route contextualized writes through Bash namerefs in execution order."""
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
@@ -2521,7 +2531,7 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
             if assignment.name not in alias_map:
                 return assignment
             if target is None:
-                binding = _exact_content_literal(assignment.content, {})
+                binding = _exact_content_literal(assignment.content, {}, limits)
                 if binding is None or not _static_variable_name(binding):
                     unsupported = True
                     return assignment
@@ -2632,6 +2642,7 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
                 tuple(commands),
                 command_environments,
                 environment_parents,
+                limits,
             )
         )
     return replace(evidence, commands=tuple(commands))
@@ -2641,6 +2652,7 @@ def _refresh_runtime_eval_programs(
     commands: tuple[_CommandEvidence, ...],
     command_environments: Mapping[int, int],
     environment_parents: Mapping[int, int | None],
+    limits: TaintLimits,
 ) -> tuple[_CommandEvidence, ...]:
     """Replay routed exact writes before refreshing eval programs."""
     values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
@@ -2666,7 +2678,7 @@ def _refresh_runtime_eval_programs(
         if conditional:
             values.pop(name, None)
             return
-        value = _exact_content_literal(assignment.content, values)
+        value = _exact_content_literal(assignment.content, values, limits)
         if value is None:
             values.pop(name, None)
         elif assignment.append:
@@ -2693,6 +2705,7 @@ def _refresh_runtime_eval_programs(
                 _exact_content_literal(
                     _eval_arguments_raw(command, executable),
                     eval_values,
+                    limits,
                 ),
             )
             if program is not None
@@ -2857,6 +2870,7 @@ def _printf_conversion_at(
 
 def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
     command: _CommandEvidence,
+    limits: TaintLimits,
 ) -> ContentExpr | None:
     """Return one bounded exact builtin ``printf`` output."""
     arguments = _literal_printf_arguments(command)
@@ -2900,7 +2914,7 @@ def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
                     )
                     value_index += 1
                     if conversion == "b":
-                        literal = _exact_content_literal(content, {})
+                        literal = _exact_content_literal(content, {}, limits)
                         decoded = _decode_printf_b_literal(literal) if literal is not None else None
                         if decoded is not None:
                             text, stopped = decoded
@@ -2943,7 +2957,7 @@ def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
     return concat(*rendered)
 
 
-def _printf_b_unrepresentable(command: _CommandEvidence) -> bool:
+def _printf_b_unrepresentable(command: _CommandEvidence, limits: TaintLimits) -> bool:
     """Return whether dynamic ``%b`` escape decoding remains after exact rendering."""
     arguments = _literal_printf_arguments(command)
     if (
@@ -2979,7 +2993,7 @@ def _printf_b_unrepresentable(command: _CommandEvidence) -> bool:
             )
             value_index += 1
             if conversion == "b":
-                literal = _exact_content_literal(content, {})
+                literal = _exact_content_literal(content, {}, limits)
                 if literal is None or _decode_printf_b_literal(literal) is None:
                     return True
             index = next_index
@@ -2988,7 +3002,9 @@ def _printf_b_unrepresentable(command: _CommandEvidence) -> bool:
     return False
 
 
-def _producer_stdout(command: _CommandEvidence, stdin: ContentExpr) -> ContentExpr:
+def _producer_stdout(
+    command: _CommandEvidence, stdin: ContentExpr, limits: TaintLimits
+) -> ContentExpr:
     """Return a conservative stdout expression for one command."""
     executable = command.executable
     if (
@@ -3002,13 +3018,15 @@ def _producer_stdout(command: _CommandEvidence, stdin: ContentExpr) -> ContentEx
     head_index = command.executable.argv_index
     payload_start = head_index + 1 if head_index is not None else min(1, len(command.argv))
     argv_content = concat(*(port.content for port in command.argv[payload_start:]))
-    literal_printf = _literal_printf_stdout(command)
+    literal_printf = _literal_printf_stdout(command, limits)
     if literal_printf is not None:
         return literal_printf
     return choice(
         OutsideGap(),
         argv_content,
         stdin,
+        # A call reproduces the stdout its function body aggregated into that scope.
+        *(StreamRef(context) for context in command.called_function_context_ids),
     )
 
 
@@ -3503,7 +3521,7 @@ def _static_eval_word_metadata(  # noqa: PLR0912
             eligible = False
             index += 2 if index + 1 < len(program) else 1
             continue
-        if character.isspace() or character in ";&|<>()":
+        if character in _SHELL_WORD_SEPARATORS:
             if in_word:
                 raw_word = program[word_start:index]
                 metadata.append(
@@ -3627,7 +3645,7 @@ def _strip_active_shell_comments(program: str) -> str:
                 index += 1
             continue
         stripped.append(character)
-        at_word_start = character.isspace() or character in ";&|<>()"
+        at_word_start = character in _SHELL_WORD_SEPARATORS
         index += 1
     return "".join(stripped)
 
@@ -6207,7 +6225,7 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                         choice(OutsideGap(), command.unknown_builtin_content),
                     )
                 )
-        output = _producer_stdout(command, inputs[command.command_id])
+        output = _producer_stdout(command, inputs[command.command_id], limits)
         stream_writes.append(_FlowWrite(command.output_scope_id, output))
         resource_writes.extend(_static_write_definitions(command.redirections, output))
 
@@ -6763,7 +6781,7 @@ def _eval_parameter_content(  # noqa: PLR0911
         return choice(variable, operand)
     if operator in {"+", ":+"}:
         return choice(LiteralTransfer(""), operand)
-    return concat(OutsideGap(), operand)
+    return choice(LiteralTransfer(""), concat(OutsideGap(), operand, OutsideGap()))
 
 
 def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
@@ -9125,22 +9143,27 @@ def _static_eval_prefix_sink_marker_capable(  # noqa: PLR0912
     return False
 
 
-def _script_port_expression(port: _ArgPort) -> ContentExpr:
+def _script_port_expression(port: _ArgPort, stdin: ContentExpr) -> ContentExpr:
     """Return a static script resource reference or an external gap."""
     if port.process_resource_id is not None:
         return OutsideGap()
     key = normalize_static_resource(port.literal, dynamic=port.dynamic)
-    return ResourceRef(key) if key is not None else OutsideGap()
+    if key is None:
+        return OutsideGap()
+    if key in _STDIN_DEVICE_PATHS:
+        return choice(stdin, ResourceRef(key))
+    return ResourceRef(key)
 
 
 def _shell_script_source_expression(
     port: _ArgPort,
     process_resources: dict[int, _ProcessResourceEvidence],
+    stdin: ContentExpr,
 ) -> ContentExpr:
     """Return the source expression when one shell port becomes a script operand."""
     if port.process_resource_id is not None:
         return _process_resource_input(port.process_resource_id, process_resources)
-    return _script_port_expression(port)
+    return _script_port_expression(port, stdin)
 
 
 def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
@@ -9168,7 +9191,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
         operand = command.argv[operand_index]
         if operand.process_resource_id is not None:
             return (_process_resource_input(operand.process_resource_id, process_resources),)
-        return (_script_port_expression(operand),)
+        return (_script_port_expression(operand, stdin),)
     if _normalized_shell_head(executable.name) in _SHELL_HEADS:
         selection = _select_shell_source(command.argv, executable.argv_index)
         if selection.kind is _ShellSourceKind.NONE:
@@ -9183,12 +9206,12 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
             if selection.argv_index is None:
                 return direct_sinks
             port = command.argv[selection.argv_index]
-            return (_shell_script_source_expression(port, process_resources), *direct_sinks)
+            return (_shell_script_source_expression(port, process_resources, stdin), *direct_sinks)
         candidates: list[ContentExpr] = []
         for index in selection.candidate_indices:
             port = command.argv[index]
             candidates.extend(
-                (port.content, _shell_script_source_expression(port, process_resources))
+                (port.content, _shell_script_source_expression(port, process_resources, stdin))
             )
         if selection.include_stdin:
             candidates.append(stdin)
@@ -9301,11 +9324,11 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                     for command in evidence.commands
                 ),
             )
-        evidence = _resolve_builtin_writer_evidence(evidence)
+        evidence = _resolve_builtin_writer_evidence(evidence, limits)
         if any(command.unsupported_builtin_write for command in evidence.commands):
             raise _TaintLimitExceeded("shell builtin writer cannot be represented")
         evidence = _contextualize_evidence(evidence, limits=limits)
-        evidence = _route_runtime_nameref_writes(evidence)
+        evidence = _route_runtime_nameref_writes(evidence, limits)
         if any(command.unsupported_builtin_write for command in evidence.commands):
             raise _TaintLimitExceeded("shell builtin writer cannot be represented")
         definitions, inputs = _build_flow_definitions(evidence, limits=limits)
@@ -9404,7 +9427,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                     )
                 ):
                     return True, TAINT_REFUSAL_REASON
-        if any(_printf_b_unrepresentable(command) for command in evidence.commands):
+        if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
         return True, str(error)

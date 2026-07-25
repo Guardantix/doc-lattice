@@ -1292,7 +1292,7 @@ class _ShellScanner:
         frame: _ControlFrame,
         words: list[_ShellWord],
     ) -> None:
-        """Capture one statically bounded for/select iteration word list."""
+        """Capture one for/select iteration word list, gapping values it cannot enumerate."""
         if frame.phase != "header" or not words or words[0].literal != frame.kind:
             return
         if (
@@ -1300,16 +1300,20 @@ class _ShellScanner:
             or words[1].dynamic
             or not _is_name(words[1].literal)
         ):
-            raise _ShellScanIncomplete("dynamic loop header cannot be scanned safely")
+            # An arithmetic header such as ``for ((i=0; i<n; i++))`` names no word list and
+            # only ever binds integers, so the body still repeats over external content.
+            frame.loop_values.append(OutsideGap())
+            return
         frame.loop_variable = words[1].literal
-        if len(words) == _LOOP_HEADER_NAME_WORDS:
-            raise _ShellScanIncomplete("implicit positional loop values cannot be scanned safely")
-        if words[2].dynamic or words[2].literal != "in":
-            raise _ShellScanIncomplete("dynamic loop header cannot be scanned safely")
+        if len(words) == _LOOP_HEADER_NAME_WORDS or words[2].dynamic or words[2].literal != "in":
+            # ``for name`` iterates the positional parameters, which are external content.
+            frame.loop_values.append(OutsideGap())
+            return
         values = words[3:]
-        if any(word.dynamic or word.active_argv_expansion for word in values):
-            raise _ShellScanIncomplete("dynamic loop values cannot be scanned safely")
         frame.loop_values.extend(word.content for word in values)
+        if any(word.dynamic or word.active_argv_expansion for word in values):
+            # Word splitting and pathname expansion yield fields this scan cannot enumerate.
+            frame.loop_values.append(OutsideGap())
 
     def _handle_control_word(  # noqa: PLR0911, PLR0912, PLR0915
         self,
@@ -2078,11 +2082,14 @@ class _ShellScanner:
         if character != "\n":
             return None
         self._flush_command(state)
-        self._finalize_pipeline(state)
-        self._reset_and_or_status(state)
-        state.pending_compound_scope_id = None
-        state.conditionally_executed = False
-        state.conditional_operator = None
+        if self._awaited_pipe_producer(state) is None:
+            # Bash continues a pipeline across the newline that follows ``|``, so the
+            # command list only ends when no consumer is still owed a producer.
+            self._finalize_pipeline(state)
+            self._reset_and_or_status(state)
+            state.pending_compound_scope_id = None
+            state.conditionally_executed = False
+            state.conditional_operator = None
         index += 1
         if state.heredocs:
             index = self._consume_heredocs(
@@ -2094,6 +2101,14 @@ class _ShellScanner:
             state.heredocs.clear()
             state.owned_heredoc_count = 0
         return index
+
+    def _awaited_pipe_producer(self, state: _CommandScanState) -> int | None:
+        """Return the producer still owing its edge to a consumer at this control depth."""
+        producer = state.pending_pipe_producer
+        if producer is None or state.pipeline is None:
+            return producer
+        depth = len(self.scope_stack[-1].controls) if self.scope_stack else 0
+        return producer if depth == state.pipeline.control_depth else None
 
     def _begin_or_extend_pipeline(
         self,
@@ -2365,10 +2380,11 @@ class _ShellScanner:
             state.last_command_id = command_id
             if self.scope_stack:
                 self._output_target().append(CommandOutput(command_id))
-            if state.pending_pipe_producer is not None and not self.scope_stack[-1].controls:
+            awaited_producer = self._awaited_pipe_producer(state)
+            if awaited_producer is not None:
                 self.taint_builder.pipes.append(
                     _PipeEvidence(
-                        state.pending_pipe_producer,
+                        awaited_producer,
                         command_id,
                         includes_stderr=state.pending_pipe_stderr,
                     )
@@ -3063,7 +3079,9 @@ class _ShellScanner:
                             ),
                         )
                     else:
-                        content = concat(OutsideGap(), operand)
+                        content = choice(
+                            LiteralTransfer(""), concat(OutsideGap(), operand, OutsideGap())
+                        )
                     return _ShellExpansion(
                         index,
                         quoted_zero_field_expansion,

@@ -274,7 +274,7 @@ def test_content_builder_leaves_malformed_brace_ranges_literal(source: str) -> N
     assert [port.literal for port in built.argv_ports] == [source]
 
 
-def test_content_builder_rejects_dynamic_recognized_brace_operand() -> None:
+def test_content_builder_expands_dynamic_recognized_brace_operand() -> None:
     builder = ContentBuilder.empty()
     for character in "{doc-,":
         builder.append_literal(character, brace_active=True)
@@ -282,11 +282,11 @@ def test_content_builder_rejects_dynamic_recognized_brace_operand() -> None:
     for character in "}lattice":
         builder.append_literal(character, brace_active=True)
 
-    with pytest.raises(
-        _TaintLimitExceeded,
-        match="shell taint dynamic brace expansion cannot be bounded",
-    ):
-        builder.build()
+    built = builder.build()
+
+    assert built.argv_ports is not None
+    assert [port.literal for port in built.argv_ports] == ["doc-lattice", "lattice"]
+    assert built.argv_ports[1].content == concat(VariableRef("X"), LiteralTransfer("lattice"))
 
 
 def test_content_builder_assignment_rhs_preserves_original_unexpanded_tokens() -> None:
@@ -313,14 +313,14 @@ def test_content_builder_assignment_rhs_retains_deferred_brace_expansion_error()
     for character in "X=":
         builder.append_literal(character, brace_active=True)
     builder.mark_assignment("X", append=False)
-    for character in "{1..1000}":
+    for character in "{1..5000}":
         builder.append_literal(character, brace_active=True)
 
     built = builder.build(defer_brace_errors=True)
 
-    assert built.assignment_content == LiteralTransfer("{1..1000}")
+    assert built.assignment_content == LiteralTransfer("{1..5000}")
     assert built.argv_ports is not None
-    assert [port.literal for port in built.argv_ports] == ["X={1..1000}"]
+    assert [port.literal for port in built.argv_ports] == ["X={1..5000}"]
     assert built.brace_expansion_error == "shell taint brace expansion limit exceeded"
 
 
