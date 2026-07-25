@@ -37,6 +37,7 @@ from doc_lattice.github_ci.shell_taint import (
     _CommandEvidence,
     _ContentValue,
     _contextualize_evidence,
+    _eval_assignment_transfers,
     _eval_reparse_literal,
     _eval_syntax_expression,
     _EvalSyntaxContext,
@@ -53,6 +54,11 @@ from doc_lattice.github_ci.shell_taint import (
     _ShellTaintEvidence,
     _solve_eval_syntax_variables,
     _solve_flow_definitions,
+    _static_eval_command_names,
+    _static_eval_commands,
+    _static_eval_mutations,
+    _static_eval_program_commands,
+    _static_eval_programs,
     _StreamScopeEvidence,
     _strip_trailing_newlines,
     _substitute_local_contents,
@@ -2111,3 +2117,217 @@ def test_bounded_local_content_substitution_preserves_marker_control() -> None:
     local_contents[f"V{depth}"] = LiteralTransfer("doc-")
 
     assert _substitute_local_contents(VariableRef("V0"), local_contents) == LiteralTransfer("doc-")
+
+
+def _eval_command(program: str, *, function_context_id: int | None = None) -> _CommandEvidence:
+    return replace(
+        _command(1, _arg("eval"), _arg(program), name="eval"),
+        resolved_eval_program=program,
+        function_context_id=function_context_id,
+    )
+
+
+def _mutation_names(command: _CommandEvidence) -> list[str]:
+    assignments, _ = _static_eval_mutations(command)
+    return [item.assignment.name for item in assignments]
+
+
+def test_static_eval_recovers_a_scalar_assignment_from_an_exact_payload() -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command("X=doc-"))
+
+    assert unsets == ()
+    assert len(assignments) == 1
+    assert assignments[0].assignment.name == "X"
+    assert assignments[0].assignment.content == LiteralTransfer("doc-")
+    assert (assignments[0].local, assignments[0].force_global) == (False, False)
+
+
+def test_static_eval_recovers_every_word_of_an_assignment_only_command() -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command("X=doc- Y=lattice"))
+
+    assert unsets == ()
+    assert [(item.assignment.name, item.assignment.content) for item in assignments] == [
+        ("X", LiteralTransfer("doc-")),
+        ("Y", LiteralTransfer("lattice")),
+    ]
+
+
+def test_static_eval_ignores_assignment_prefix_words_of_an_executed_command() -> None:
+    assert _static_eval_mutations(_eval_command("X=doc- printf hi")) == ((), ())
+
+
+@pytest.mark.parametrize(
+    ("program", "expected_local", "expected_force_global"),
+    [
+        ("declare X=v", True, False),
+        ("declare -g X=v", False, True),
+        ("export X=v", False, False),
+        ("readonly X=v", False, False),
+        ("typeset X=v", True, False),
+        ("typeset -g X=v", False, True),
+    ],
+    ids=("declare", "declare-global", "export", "readonly", "typeset", "typeset-global"),
+)
+def test_static_eval_declaration_builtin_carries_its_scope(
+    program: str, expected_local: bool, expected_force_global: bool
+) -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command(program))
+
+    assert unsets == ()
+    assert len(assignments) == 1
+    assert assignments[0].assignment.name == "X"
+    assert (assignments[0].local, assignments[0].force_global) == (
+        expected_local,
+        expected_force_global,
+    )
+
+
+def test_static_eval_local_declaration_inside_a_function_context_is_scoped_local() -> None:
+    assignments, _ = _static_eval_mutations(_eval_command("local X=v", function_context_id=7))
+
+    assert len(assignments) == 1
+    assert assignments[0].assignment.name == "X"
+    assert (assignments[0].local, assignments[0].force_global) == (True, False)
+
+
+def test_static_eval_skips_a_local_declaration_without_a_function_context() -> None:
+    assert _static_eval_mutations(_eval_command("local X=v")) == ((), ())
+
+
+def test_static_eval_unset_collects_names_and_excludes_option_words() -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command("unset -v X Y"))
+
+    assert assignments == ()
+    assert unsets == ("X", "Y")
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        "builtin export X=v",
+        "builtin -- export X=v",
+        "command export X=v",
+        "command -- export X=v",
+    ],
+    ids=("builtin", "builtin-dashdash", "command", "command-dashdash"),
+)
+def test_static_eval_skips_execution_wrappers_before_reading_the_executable(program: str) -> None:
+    assert _mutation_names(_eval_command(program)) == ["X"]
+
+
+def test_static_eval_nameref_routes_a_later_write_to_its_target() -> None:
+    assignments, unsets = _static_eval_mutations(_eval_command("declare -n R=X; R=doc-"))
+
+    assert unsets == ()
+    assert [item.assignment.name for item in assignments] == ["R", "X"]
+    assert assignments[0].assignment.nameref_target == "X"
+    assert assignments[1].assignment.content == LiteralTransfer("doc-")
+
+
+@pytest.mark.parametrize(
+    ("program", "message"),
+    [
+        ("declare -n R=R; R=doc-", "shell eval nameref cycle cannot be represented"),
+        ("declare -n R=1bad; R=doc-", "shell eval nameref target cannot be represented"),
+    ],
+    ids=("cycle", "non-name-target"),
+)
+def test_static_eval_nameref_hazard_fails_closed(program: str, message: str) -> None:
+    with pytest.raises(_TaintLimitExceeded, match=message) as raised:
+        _static_eval_mutations(_eval_command(program))
+
+    assert isinstance(raised.value, ProjectError)
+    assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
+
+
+def test_static_eval_prunes_mutations_of_an_unreachable_branch() -> None:
+    program = "if false; then X=doc-; fi"
+    parsed = _static_eval_program_commands(program)
+
+    assert [item.execution_status for item in parsed] == [True, False, True]
+    assert _static_eval_mutations(_eval_command(program)) == ((), ())
+
+
+def test_static_eval_payload_the_tokenizer_rejects_contributes_no_evidence() -> None:
+    program = "X='doc-"
+
+    assert _static_eval_program_commands(program) == ()
+    assert _static_eval_mutations(_eval_command(program)) == ((), ())
+
+
+def test_static_eval_commands_split_an_exact_payload_on_separators() -> None:
+    parsed = _static_eval_commands(_eval_command("printf a; declare -g X=1"))
+
+    assert [item.words for item in parsed] == [("printf", "a"), ("declare", "-g", "X=1")]
+
+
+def test_static_eval_command_names_dedupe_in_first_use_order() -> None:
+    names = _static_eval_command_names(_eval_command("printf a; printf b; declare -g X=1"))
+
+    assert names == ("printf", "declare")
+
+
+def test_static_eval_programs_prefer_the_resolved_program_list() -> None:
+    command = replace(
+        _command(1, _arg("eval"), _arg("Z=3"), name="eval"),
+        resolved_eval_program="A=1",
+        resolved_eval_programs=("B=2", "C=3"),
+    )
+
+    assert _static_eval_programs(command) == ("B=2", "C=3")
+
+
+def test_static_eval_programs_fall_back_to_joined_literal_arguments() -> None:
+    command = _command(1, _arg("eval"), _arg("X=doc-"), _arg("Y=2"), name="eval")
+
+    assert _static_eval_programs(command) == ("X=doc- Y=2",)
+
+
+def test_static_eval_programs_are_empty_for_a_dynamic_argument() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$P", LiteralTransfer("X=doc-"), dynamic=True),
+        name="eval",
+    )
+
+    assert _static_eval_programs(command) == ()
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected_append"),
+    [("X=doc-", False), ("X+=doc-", True)],
+    ids=("assign", "append"),
+)
+def test_eval_assignment_transfer_retains_one_dynamic_assignment(
+    prefix: str, expected_append: bool
+) -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg(
+            f"{prefix}$V",
+            Concat((LiteralTransfer(prefix), LiteralTransfer("v"))),
+            dynamic=True,
+        ),
+        name="eval",
+    )
+
+    transfers = _eval_assignment_transfers(command)
+
+    assert len(transfers) == 1
+    assert transfers[0].assignment.name == "X"
+    assert transfers[0].assignment.append is expected_append
+    assert transfers[0].assignment.content == concat(LiteralTransfer("doc-"), LiteralTransfer("v"))
+
+
+def test_eval_assignment_transfer_skips_a_multi_argument_command() -> None:
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("X=doc-$V", Concat((LiteralTransfer("X=doc-"), LiteralTransfer("v"))), dynamic=True),
+        _arg("tail"),
+        name="eval",
+    )
+
+    assert _eval_assignment_transfers(command) == ()

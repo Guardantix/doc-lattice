@@ -417,13 +417,36 @@ from being mistaken for the shell builtin. The shell source selector chooses `-c
 operand, or stdin; if a dynamic selector could choose a marker-capable authored port, it fails
 closed.
 
+Exact eval payload interpretation is a bounded sub-analysis, not a shell interpreter. When an
+`eval`, shell `-c`, or `source` payload resolves to exact literal text, that text is tokenized and
+its state effects are replayed so a later sink observes them. This is what refuses
+`X=safe; eval 'X=doc-'; eval "$X"lattice`, where no single payload carries the marker. It models
+scalar assignments and assignment prefixes, the `declare`, `export`, `local`, `readonly`, and
+`typeset` declaration builtins including `-g` and `-n` namerefs, `unset`, the `builtin` and
+`command` wrappers, `if`/`elif`/`else` reachability by literal command status, `case` arm bodies,
+subshell groups, and the function effects and call-graph names a payload contributes. Nameref
+cycles, nameref targets that are not static variable names, and command prefixes that cannot be
+represented fail closed. A payload the tokenizer cannot accept contributes no evidence.
+
+The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
+dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing
+`eval` has no natural terminating point, and this engine is defense in depth behind human review,
+not the boundary that contains untrusted code. Loop bodies (`for`, `while`, `until`), brace groups,
+array assignment and element reads, values bearing arithmetic expansion, and `eval` nested inside an
+`eval` payload are therefore not modeled. Verification under real bash on 2026-07-25 confirmed that
+brace groups, loop bodies, and nested `eval` do persist their assignments to the current shell, so
+those three are known false-safe gaps rather than evidence of safety. Closing them belongs in a
+bounded guard that fails closed on an unmodeled state-carrying construct, not in more
+interpretation.
+
 Variable, resource, and stream references are solved by monotone least fixed point, independent of
 source order. Alternative width, expression nodes, table entries, graph edges, brace expansion,
 and successful fixed-point updates have deterministic caps; every exhaustion fails closed. The
 absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
 beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, unsupported
-parameter transforms beyond their authored operands, descriptor aliasing, and AD-17's function,
-alias, `PATH`, and dynamic-executable limitations.
+parameter transforms beyond their authored operands, descriptor aliasing, eval payload constructs
+outside the bounded exact-literal set above, and AD-17's function, alias, `PATH`, and
+dynamic-executable limitations.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
 that execute authored marker content now exit 2, including launcher-wrapped and ambiguous-selector
 sinks. Marker-free dynamic execution and a marker whose required character comes only from

@@ -677,8 +677,12 @@ also has no authored evidence for external environment values, external files, o
 producer output beyond the generic may-output rule; for encoding or transform synthesis such as
 `base64 -d`, `tr`, or `sed`; for dynamic path identity, `..`, `cd`, rename, or symlink aliases; or
 for file-descriptor duplication and movement. Unsupported parameter transforms surface their
-authored literal operands but do not model the variable-derived transform. Function, alias,
-`PATH`, and dynamic executable-name shadowing remain the command-identity limitations. These are
+authored literal operands but do not model the variable-derived transform. An `eval`, shell `-c`,
+or `source` payload is interpreted for its state effects only when it is exact literal text, and
+only for assignments, declaration builtins, `unset`, `if`/`case` reachability, and subshell groups.
+Loop bodies, brace groups, arrays, arithmetic-bearing values, and nested `eval` inside a payload
+are not modeled. Function, alias, `PATH`, and dynamic executable-name shadowing remain the
+command-identity limitations. These are
 absence-of-evidence boundaries, not trust claims: for example `curl ... | bash`,
 `eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` still certify.
 Malformed, oversized, cap-exhausting, or otherwise unreliably structured input exits 2.
