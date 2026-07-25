@@ -7,6 +7,7 @@ from ruamel.yaml import YAML
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_TEXT = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 _WORKFLOW = YAML(typ="safe").load(_WORKFLOW_TEXT)
+_CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 _UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 _DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 _PYPI_PUBLISH = "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b"
@@ -56,7 +57,7 @@ def test_build_job_uses_exact_tag_without_oidc():
     assert build["permissions"] == {"contents": "read"}
     assert "id-token" not in build["permissions"]
     checkout = build["steps"][0]
-    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["uses"] == _CHECKOUT
     assert checkout["with"]["ref"] == "${{ needs.release.outputs.tag }}"
 
 
