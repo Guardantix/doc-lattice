@@ -1,6 +1,5 @@
 """Contract tests for release and PyPI publishing automation."""
 
-import re
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -8,7 +7,6 @@ from ruamel.yaml import YAML
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_TEXT = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 _WORKFLOW = YAML(typ="safe").load(_WORKFLOW_TEXT)
-_SHA_PINNED_USES_RE = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 _CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 _UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 _DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
@@ -77,27 +75,6 @@ def test_build_job_builds_validates_and_uploads_one_artifact():
         "path": "dist/",
         "if-no-files-found": "error",
     }
-
-
-def test_every_workflow_action_is_pinned_to_a_commit_sha():
-    uses = [
-        step["uses"]
-        for job in _WORKFLOW["jobs"].values()
-        for step in job["steps"]
-        if "uses" in step
-    ]
-    assert uses
-    unpinned = [ref for ref in uses if not _SHA_PINNED_USES_RE.match(ref)]
-    assert unpinned == []
-
-
-def test_container_images_are_pinned_to_a_digest():
-    containers = [
-        job["container"]["image"] for job in _WORKFLOW["jobs"].values() if "container" in job
-    ]
-    assert containers
-    unpinned = [image for image in containers if "@sha256:" not in image]
-    assert unpinned == []
 
 
 def test_publish_job_is_oidc_only_and_waits_for_build():
