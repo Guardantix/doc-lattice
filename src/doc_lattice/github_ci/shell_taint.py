@@ -9945,29 +9945,74 @@ def _shell_command_payload_marker_capable(
     return False
 
 
+def _resource_marker_fragment_capable(value: _ContentValue) -> bool:
+    """Return whether a resource's own content could plausibly compose the marker.
+
+    ``_marker_capable`` asks only "does this text alone complete the marker starting fresh" --
+    exactly right for a value that is itself a full, final sink. A sourced file's raw content
+    instead gets read into variables this analysis cannot extract (issue #133), so instead of
+    asking whether the file completes the marker on its own, this asks whether scanning it from a
+    fresh start leaves the DFA in a state other than idle -- carrying "doc"/separator/"lattice"
+    progress that a boundary this analysis can't see (an unmodeled assignment, then a later
+    literal continuation such as ``eval "$X"lattice``) could complete. Trailing newlines are
+    stripped the same way command substitution's are, since a shell variable's value from an
+    assigned line never includes its own line terminator.
+
+    Only entry state zero (a fresh scan) is checked, not every possible entry state: composing
+    from a nonzero entry state is only meaningful for text known to be adjacent to a specific
+    prior fragment, and an empty alternative's other entries trivially "exit" at their own
+    (nonzero) entry state with no text processed at all, which would make this fire on any
+    resource content whatsoever.
+
+    Args:
+        value: The resource's solved content value.
+
+    Returns:
+        Whether any alternative leaves fresh-start progress the marker DFA could still complete.
+    """
+    for alternative in value:
+        exit_state, accepted = alternative.stripped.entries[_DFA_START]
+        if accepted or exit_state != _DFA_START:
+            return True
+    return False
+
+
 def _source_payload_state_unrepresentable(
     command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
     resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
 ) -> bool:
-    """Return whether a ``source``/``.`` candidate reads a script-tracked resource this analysis
-    cannot replay.
+    """Return whether a ``source``/``.`` candidate reads a resource whose effects this analysis
+    cannot rule out composing the marker.
 
     AD-18 replays an ``eval`` payload's state effects because the exact text sits directly in the
     command's own arguments, so ``_static_eval_mutations`` can tokenize it. A ``source`` payload's
     state effects live in a FILE the argument only names, and this analysis has no exact-literal
     model of a resource's content the way it does variable assignments (issue #133), so it cannot
-    reconstruct what a sourced file assigns. A target this same script never writes is already
-    outside every other sink check's purview (it is opaque, pre-existing content this analysis
-    was never going to be able to reason about), so this stays narrow to resources the script
-    itself writes, where silently ignoring ``source``'s effects would reproduce the reported
-    false-safe.
+    reconstruct what a sourced file assigns to which variable. A target this same script never
+    writes is already outside every other sink check's purview (it is opaque, pre-existing content
+    this analysis was never going to be able to reason about), so this stays narrow to resources
+    the script itself writes.
+
+    Refusing on every script-written source target regardless of content is unsound the other
+    way: it over-refuses the ordinary "write a config/env file, then source it" idiom (for
+    example ``echo "REGION=us-east-1" > env.sh; source env.sh``) that carries the marker nowhere.
+    This only fails closed when the resource's own content could plausibly carry a marker
+    fragment (`_resource_marker_fragment_capable`), matching the same content-aware check that
+    already makes a source target directly containing the marker refuse.
 
     Args:
         command: The command whose executable candidates may be ``source``/``.``.
+        sink_variables: The per-command solved variable table, for resolving the resource.
         resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving the resource.
+        limits: The bound on content evaluation this analysis stays within.
 
     Returns:
-        Whether this command sources a script-tracked resource whose state effects go unmodeled.
+        Whether this command sources a script-tracked resource whose state effects go unmodeled
+        and whose content could plausibly carry the marker.
     """
     for executable in _iter_executable_evidence(command.executable):
         if executable.argv_index is None or executable.name is None:
@@ -9983,7 +10028,12 @@ def _source_payload_state_unrepresentable(
         if operand.process_resource_id is not None:
             continue
         key = normalize_static_resource(operand.literal, dynamic=operand.dynamic)
-        if key is not None and key in resources:
+        if key is None or key not in resources:
+            continue
+        content = _evaluate_with_tables(
+            ResourceRef(key), sink_variables, resources, streams, limits
+        )
+        if _resource_marker_fragment_capable(content):
             return True
     return False
 
@@ -10180,7 +10230,13 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                     )
                 ):
                     return True, TAINT_REFUSAL_REASON
-            if _source_payload_state_unrepresentable(command, solved.resources):
+            if _source_payload_state_unrepresentable(
+                command,
+                sink_variables,
+                solved.resources,
+                solved.streams,
+                limits,
+            ):
                 raise _TaintLimitExceeded("shell source payload state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")

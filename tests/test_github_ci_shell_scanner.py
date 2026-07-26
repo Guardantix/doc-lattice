@@ -289,6 +289,25 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
 ]
 
 
+def test_marker_free_env_file_write_then_source_still_certifies():
+    """Over-refusal guard for the #133 source fail-closed fix (review round 1 finding).
+
+    An unconditional "any script-written source target fails closed" rule refused this body even
+    though it carries the marker nowhere -- ``REGION=us-east-1`` has no ``d`` character at all, so
+    it cannot contribute any "doc"/separator/"lattice" progress under any reading.
+    `direct_doc_lattice_invocations` turns any non-``None`` `incomplete_reason` into a raised
+    `ConfigError`, so an unconditional rule would have broken this entirely ordinary "generate an
+    env file, then source it" CI step. The fix gates the refusal on the sourced content actually
+    being able to carry a marker fragment, not merely on the target being one this script wrote.
+    """
+    body = 'echo "REGION=us-east-1" > env.sh; source env.sh; aws configure set region "$REGION"'
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
 def _static_word(literal: str, *, assignment: bool = False) -> _ShellWord:
     return _ShellWord(literal=literal, shell_assignment=assignment)
 

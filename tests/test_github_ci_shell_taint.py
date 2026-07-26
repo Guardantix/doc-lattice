@@ -2498,6 +2498,9 @@ def test_source_payload_persists_assignment_fails_closed(spelling: str) -> None:
     does variable assignments, so it cannot rule out a marker-composing assignment such as
     ``X=doc-``. Before this fix the body below certified clean and executed the marker; the
     control shows the identical flow through a direct eval payload already refuses correctly.
+    The written content ``X=doc-`` carries the marker fragment ``doc-``, which is what gates the
+    refusal -- see ``test_marker_free_write_then_source_still_certifies`` for the companion
+    over-refusal guard, where the sourced content carries no such fragment.
     """
     control = "eval 'X=doc-'; eval \"$X\"lattice"
     exploit = f"printf 'X=doc-' > s.sh; {spelling} s.sh; eval \"$X\"lattice"
@@ -2507,6 +2510,42 @@ def test_source_payload_persists_assignment_fails_closed(spelling: str) -> None:
 
     assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
     assert exploit_result.incomplete_reason == "shell source payload state cannot be represented"
+
+
+def test_source_payload_split_across_boundary_fails_closed() -> None:
+    """A marker fragment can land on either side of the source boundary.
+
+    ``echo 'X=doc' > s.sh`` writes a fragment ending in ``doc`` (echo's trailing newline is
+    stripped the same way command substitution's is before this is checked); the later
+    ``eval "${X}-lattice"`` supplies the rest as authored literal text. Neither this analysis nor
+    a byte-for-byte read of the sourced file alone reveals the full marker, only the composition
+    does -- which is exactly why the fix asks the resource's content whether it leaves a
+    fresh-start DFA scan in a nonzero state, not whether the file's own text completes the match.
+    """
+    exploit = "echo 'X=doc' > s.sh; source s.sh; eval \"${X}-lattice\""
+
+    result = scan_doc_lattice_invocations(exploit)
+
+    assert result.incomplete_reason == "shell source payload state cannot be represented"
+
+
+def test_marker_free_write_then_source_still_certifies() -> None:
+    """Over-refusal guard: the ordinary "generate an env file, then source it" CI idiom.
+
+    Review finding on the first pass of this fix: an unconditional "any script-written source
+    target fails closed" rule refused this body even though it carries the marker nowhere --
+    ``REGION=us-east-1`` has no ``d`` character at all, so it cannot contribute any "doc"/
+    separator/"lattice" progress under any reading. `direct_doc_lattice_invocations` turns any
+    non-``None`` `incomplete_reason` into a raised `ConfigError`, so this shape would have broken
+    an entirely ordinary CI step. The fix must gate the refusal on the sourced content actually
+    being able to carry a marker fragment, not merely on the target being one this script wrote.
+    """
+    body = 'echo "REGION=us-east-1" > env.sh; source env.sh; aws configure set region "$REGION"'
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
 
 
 def test_static_eval_programs_are_empty_for_a_dynamic_argument() -> None:
