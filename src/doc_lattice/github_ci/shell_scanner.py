@@ -6,6 +6,7 @@ from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
+    _ANSI_C_SIMPLE_ESCAPES,
     _QUOTED_FUNCTION_POSITIONAL_STAR,
     _STATIC_EVAL_SHADOW_NAMES,
     TAINT_REFUSAL_REASON,
@@ -403,6 +404,8 @@ _RECONCILE_OPTIONS_WITH_ARGUMENTS = frozenset({"--config", "--format", "--ref"})
 _RECONCILE_FLAGS = frozenset({"--all", "--dry-run", "--recover"})
 _RECONCILE_NON_MUTATING_OPTIONS = frozenset({"--dry-run"})
 _MODELED_SHELL_SINKS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "rksh"})
+# Standard input, output and error are the only descriptors the stream model carries content for.
+_MODELED_DESCRIPTORS = frozenset({0, 1, 2})
 
 # Retained-word certification marker. It follows Python distribution separator spelling and is
 # deliberately ASCII case-insensitive, so doc-lattice/doc_lattice/doc.lattice variants match
@@ -467,21 +470,6 @@ _UV_RUN_LAUNCHER = _LauncherOptions.build(
     _UV_RUN_FLAGS,
     _UV_RUN_NON_COMMAND_OPTIONS | _UV_HELP_OPTIONS,
 )
-_ANSI_C_SIMPLE_ESCAPES = {
-    "a": "\a",
-    "b": "\b",
-    "e": "\x1b",
-    "E": "\x1b",
-    "f": "\f",
-    "n": "\n",
-    "r": "\r",
-    "t": "\t",
-    "v": "\v",
-    "\\": "\\",
-    "'": "'",
-    '"': '"',
-    "?": "?",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -2149,9 +2137,14 @@ class _ShellScanner:
         final_scope = state.pending_compound_scope_id
         if final_scope is None and state.last_command_id is not None:
             final_scope = self.taint_builder.command_output_scope(state.last_command_id)
-        if final_scope is not None:
-            if not state.pipeline.stages or state.pipeline.stages[-1] != final_scope:
-                state.pipeline.stages.append(final_scope)
+        # The pop hands the trailing stage's stdout to the pipeline scope. It is only owed when
+        # that stage is genuinely new; a pipeline left without a final stage by a trailing ``|``
+        # resolves to the scope already recorded, and popping then would discard the stdout of an
+        # unrelated earlier command in the enclosing scope.
+        if final_scope is not None and (
+            not state.pipeline.stages or state.pipeline.stages[-1] != final_scope
+        ):
+            state.pipeline.stages.append(final_scope)
             if self.scope_stack and self._output_target():
                 self._output_target().pop()
         output: OutputExpr = (
@@ -2179,6 +2172,13 @@ class _ShellScanner:
     def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912, PLR0915
         if not state.words and not state.redirections:
             return None
+        if self.taint_builder is not None and _bare_exec_rebinds_modeled_descriptor(
+            state.words, state.redirections
+        ):
+            # The descriptor belongs to the shell from here on, not to this command, so binding
+            # the redirection to the ``exec`` alone would model every later command as writing to
+            # its original stream. Modeling the persistent rebinding is future work.
+            raise _ShellScanIncomplete("shell exec scope redirection cannot be represented")
         active_control = (
             self.scope_stack[-1].controls[-1]
             if self.scope_stack and self.scope_stack[-1].controls
@@ -3848,6 +3848,8 @@ def _deterministic_writer_evidence(  # noqa: PLR0911, PLR0912, PLR0915
     options_with_values = frozenset({"a", "d", "i", "n", "N", "p", "t", "u"})
     array_target = False
     read_raw = False
+    unbounded_record = False
+    unmodeled_descriptor = False
     index = 0
     while index < len(arguments):
         argument = arguments[index]
@@ -3861,16 +3863,19 @@ def _deterministic_writer_evidence(  # noqa: PLR0911, PLR0912, PLR0915
         flags = argument.literal[1:]
         array_target = array_target or "a" in flags
         read_raw = read_raw or "r" in flags
-        if set(flags) & {"d", "n", "N", "u"}:
-            return (
-                (),
-                choice(*(word.content for word in arguments)),
-                True,
-            )
+        # ``-d``, ``-n`` and ``-N`` hand the target a bounded prefix of the stream. A prefix can
+        # compose an authored marker the whole stream does not contain, so widening the target to
+        # the full stream would lose that flow; representing "any prefix" needs a projection
+        # operator the transfer summary does not have yet. ``-u`` instead reads a descriptor the
+        # stream model carries no content for.
+        unbounded_record = unbounded_record or bool(set(flags) & {"d", "n", "N"})
+        unmodeled_descriptor = unmodeled_descriptor or "u" in flags
         if len(flags) == 1 and flags in options_with_values:
             index += 1
         index += 1
-    if array_target:
+    # An array target is unrepresentable because element reads are not modeled, so widening it
+    # here would drop the flow instead of over-approximating it.
+    if array_target or unmodeled_descriptor or unbounded_record:
         return (
             (),
             choice(*(word.content for word in arguments)) if arguments else OutsideGap(),
@@ -4358,6 +4363,25 @@ def _skip_exec_wrapper(words: list[_ShellWord], start: int) -> _ResolvedIndex:
         else:
             return _ResolvedIndex(index, ambiguous)
     return _ResolvedIndex(index, ambiguous)
+
+
+def _bare_exec_rebinds_modeled_descriptor(
+    words: list[_ShellWord],
+    redirections: list[_RedirectionEvent],
+) -> bool:
+    """Report a bare ``exec`` that rebinds a descriptor the stream model reasons about."""
+    if not redirections:
+        return False
+    operands = [word for word in words if not word.shell_assignment]
+    if len(operands) != 1:
+        return False
+    head = operands[0]
+    if head.dynamic or head.literal != "exec":
+        return False
+    return any(
+        redirection.descriptor is None or redirection.descriptor in _MODELED_DESCRIPTORS
+        for redirection in redirections
+    )
 
 
 def _exec_option_requires_separate_argv0(literal: str) -> bool:

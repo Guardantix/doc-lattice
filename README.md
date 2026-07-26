@@ -685,7 +685,12 @@ are not modeled. Function, alias, `PATH`, and dynamic executable-name shadowing 
 command-identity limitations. These are
 absence-of-evidence boundaries, not trust claims: for example `curl ... | bash`,
 `eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` still certify.
-Malformed, oversized, cap-exhausting, or otherwise unreliably structured input exits 2.
+Malformed, oversized, cap-exhausting, or otherwise unreliably structured input exits 2. A bare
+`exec` that rebinds standard input, output, or error also exits 2, because the descriptor belongs
+to the shell from that point on rather than to the `exec` itself; `exec` on any other descriptor,
+and a redirection attached to a command or compound, are modeled as before. A `read` that uses
+`-a`, `-d`, `-n`, `-N`, or `-u` still exits 2 for the whole step, since a bounded prefix can
+compose a marker the full stream does not contain and array element reads are not modeled.
 
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context

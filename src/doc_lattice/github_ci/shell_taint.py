@@ -24,6 +24,24 @@ _UNICODE_MAX = 0x10FFFF
 _SURROGATE_MIN = 0xD800
 _SURROGATE_MAX = 0xDFFF
 _OCTAL_BYTE_MASK = 0xFF
+# The single Bash ``$'...'`` simple-escape table. The scanner, the first-pass static eval replay
+# and the second-pass reparser must agree byte for byte, or the value recorded for a variable
+# assigned inside an eval payload differs from the one Bash sets.
+_ANSI_C_SIMPLE_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -878,6 +896,13 @@ _STDIN_DEVICE_PATHS = frozenset({"/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"})
 # Bash blanks are space and tab only, so Python's broader ``str.isspace`` must not decide word
 # starts; newline and the shell metacharacters end a word as well.
 _SHELL_WORD_SEPARATORS = frozenset(" \t\n;&|<>()")
+# Comment recognition uses a narrower set on purpose. A parenthesis is a metacharacter only at
+# the top level; the ``)`` that closes ``$(( ))``, ``$( )``, ``<( )`` or ``>( )`` stays inside the
+# surrounding word, so Bash keeps a following ``#`` as data rather than opening a comment.
+# Distinguishing the two needs the full expansion grammar, so the stripper declines to treat any
+# parenthesis as a word start. That retains the occasional real ``(cmd)#comment`` as live text,
+# which can only add a refusal and never certify a marker the shell would still run.
+_SHELL_COMMENT_WORD_SEPARATORS = frozenset(" \t\n;&|<>")
 _SHELL_HEADS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "rksh"})
 _SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
 _SHELL_EAGER_STOPS = frozenset({"--help", "--version", "--dump-strings", "--dump-po-strings"})
@@ -938,6 +963,10 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
     """Select the shell source according to its literal option grammar."""
     index = head_index + 1
     stdin_selected = False
+    # ``-c`` only marks the command form. Bash keeps parsing options afterwards and takes the
+    # first operand as the command string, so an intervening ``--`` or option must not be
+    # mistaken for the payload.
+    command_selected = False
     while index < len(argv):
         port = argv[index]
         if port.dynamic:
@@ -951,7 +980,13 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             return _ShellSourceSelection(_ShellSourceKind.NONE)
         if literal in ("-", "--"):
             index += 1
-            if stdin_selected or index >= len(argv):
+            if index >= len(argv):
+                return _ShellSourceSelection(
+                    _ShellSourceKind.NONE if command_selected else _ShellSourceKind.STDIN
+                )
+            if command_selected:
+                return _ShellSourceSelection(_ShellSourceKind.COMMAND, argv_index=index)
+            if stdin_selected:
                 return _ShellSourceSelection(_ShellSourceKind.STDIN)
             return _ShellSourceSelection(_ShellSourceKind.SCRIPT, argv_index=index)
         if literal.startswith("--"):
@@ -971,9 +1006,7 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             short_options = literal[1:]
             for option_index, option in enumerate(short_options):
                 if option == "c":
-                    if index + 1 >= len(argv):
-                        return _ShellSourceSelection(_ShellSourceKind.NONE)
-                    return _ShellSourceSelection(_ShellSourceKind.COMMAND, argv_index=index + 1)
+                    command_selected = True
                 if option == "s":
                     stdin_selected = True
                 if option in {"o", "O"} and option_index == len(short_options) - 1:
@@ -989,9 +1022,14 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             else:
                 index += 1
             continue
+        if command_selected:
+            return _ShellSourceSelection(_ShellSourceKind.COMMAND, argv_index=index)
         if stdin_selected:
             return _ShellSourceSelection(_ShellSourceKind.STDIN)
         return _ShellSourceSelection(_ShellSourceKind.SCRIPT, argv_index=index)
+    # ``bash -c`` without an operand is a usage error, so nothing is executed.
+    if command_selected:
+        return _ShellSourceSelection(_ShellSourceKind.NONE)
     return _ShellSourceSelection(_ShellSourceKind.STDIN)
 
 
@@ -1158,6 +1196,24 @@ class _TransferSummary:
             projection_incomplete=False,
         )
 
+    @classmethod
+    def unknown(cls) -> _TransferSummary:
+        """Return the summary for content whose exact text is no longer known."""
+        # ``compose`` unions acceptance from both sides, so accepting from every entry state
+        # keeps this alternative accepting under any surrounding text. That makes it an upper
+        # bound for every concrete value it stands in for.
+        transfer = _DfaTransfer(tuple((_DFA_START, True) for _ in range(_DFA_STATE_COUNT)))
+        return cls(
+            full=transfer,
+            stripped=transfer,
+            newline_only=False,
+            first_record=transfer,
+            record_open=True,
+            literal_texts=frozenset(),
+            projection_opaque=True,
+            projection_incomplete=True,
+        )
+
     def compose(self, following: _TransferSummary) -> _TransferSummary:
         """Return this summary followed by another summary."""
         stripped = (
@@ -1198,6 +1254,8 @@ class _TransferSummary:
 _ContentValue: TypeAlias = frozenset[_TransferSummary]  # noqa: UP040
 _EPSILON = _TransferSummary.literal("")
 _OUTSIDE_VALUE = frozenset({_EPSILON, _TransferSummary.barrier()})
+# The top of the projection lattice, used where an exact projection is no longer computable.
+_UNKNOWN_VALUE = frozenset({_TransferSummary.unknown()})
 
 
 def _merge_content_summaries(
@@ -1295,7 +1353,12 @@ def _project_read_value(
             if target_count == 1 and alternative.first_record.entries[_DFA_START][1]:
                 projected.add(_TransferSummary.literal("doc-lattice"))
                 continue
-            raise _TaintLimitExceeded("shell read projection cannot be represented")
+            # The exact field split is gone, so the target could hold any substring of the
+            # record, including one that leaves a partial marker open for the text that follows.
+            # Widening to the top of the lattice keeps that flow visible at every sink instead of
+            # refusing the whole body, which a marker-free chain of reads does not deserve.
+            projected.update(_UNKNOWN_VALUE)
+            continue
         if alternative.projection_opaque:
             projected.add(_TransferSummary.barrier())
             for literal_text in alternative.literal_texts:
@@ -3625,6 +3688,7 @@ def _strip_active_shell_comments(program: str) -> str:
     """Remove exact Bash comments while preserving quoted and escaped ``#`` bytes."""
     stripped: list[str] = []
     quote: str | None = None
+    ansi_c_quote = False
     at_word_start = True
     index = 0
     while index < len(program):
@@ -3633,7 +3697,8 @@ def _strip_active_shell_comments(program: str) -> str:
             stripped.append(character)
             if character == quote:
                 quote = None
-            elif character == "\\" and quote == '"' and index + 1 < len(program):
+                ansi_c_quote = False
+            elif character == "\\" and (quote == '"' or ansi_c_quote) and index + 1 < len(program):
                 index += 1
                 stripped.append(program[index])
             index += 1
@@ -3648,6 +3713,9 @@ def _strip_active_shell_comments(program: str) -> str:
             continue
         if character in {"'", '"'}:
             quote = character
+            # ``$'...'`` honours backslash escapes, so a ``\'`` inside it does not close the
+            # word and the bytes after it are still quoted data rather than a comment.
+            ansi_c_quote = character == "'" and index > 0 and program[index - 1] == "$"
             stripped.append(character)
             at_word_start = False
             index += 1
@@ -3657,27 +3725,13 @@ def _strip_active_shell_comments(program: str) -> str:
                 index += 1
             continue
         stripped.append(character)
-        at_word_start = character in _SHELL_WORD_SEPARATORS
+        at_word_start = character in _SHELL_COMMENT_WORD_SEPARATORS
         index += 1
     return "".join(stripped)
 
 
 def _decode_ansi_c_eval_word(body: str) -> str:
     """Decode Bash ANSI-C quoting needed by static eval command words."""
-    simple = {
-        "a": "\a",
-        "b": "\b",
-        "e": "\x1b",
-        "E": "\x1b",
-        "f": "\f",
-        "n": "\n",
-        "r": "\r",
-        "t": "\t",
-        "v": "\v",
-        "\\": "\\",
-        "'": "'",
-        '"': '"',
-    }
     decoded: list[str] = []
     index = 0
     while index < len(body):
@@ -3690,8 +3744,8 @@ def _decode_ansi_c_eval_word(body: str) -> str:
         if escaped == "\n":
             index += 2
             continue
-        if escaped in simple:
-            decoded.append(simple[escaped])
+        if escaped in _ANSI_C_SIMPLE_ESCAPES:
+            decoded.append(_ANSI_C_SIMPLE_ESCAPES[escaped])
             index += 2
             continue
         if escaped in {"x", "u", "U"}:
@@ -3757,6 +3811,9 @@ def _static_eval_program_commands(
         punctuation_chars=";&|<>()\n",
     )
     lexer.commenters = ""
+    # ``shlex`` tests whitespace before punctuation, so a newline left in ``whitespace`` would
+    # silently join the commands on either side of it into one word list.
+    lexer.whitespace = lexer.whitespace.replace("\n", "")
     lexer.whitespace_split = True
     metadata = _static_eval_word_metadata(program)
     if metadata is None:
@@ -3781,7 +3838,9 @@ def _static_eval_program_commands(
                         tuple(word_eligibility),
                         tuple(source_words),
                         active_function_names=active_function_names,
-                        asynchronous=lexeme == "&",
+                        # Adjacent separators lex as one run, so the operator that actually
+                        # terminates the command is the run with its trailing newlines removed.
+                        asynchronous=lexeme.rstrip("\n") == "&",
                     )
                 )
                 words.clear()
@@ -4428,19 +4487,31 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 return " ".join(arguments)
         return None
 
+    # Only a call site reads the lexical snapshot, and a call site needs a defined function, so
+    # a body without one never pays for the per-command copy.
+    defines_functions = any(
+        command.defines_function_context_id is not None for command in evidence.commands
+    )
     resolved_commands: list[_CommandEvidence] = []
     for command in evidence.commands:
         context = command.function_context_id
         environment = command_environments[command.command_id]
         exact_values = exact_state_for(context, environment)
-        exact_values_before[command.command_id] = dict(exact_values)
-        charge_edges(len(exact_values))
-        eval_values = dict(exact_values)
-        charge_edges(len(eval_values))
-        for assignment in command.definite_assignments:
-            apply_exact_assignment(assignment, eval_values, conditional=False)
+        if defines_functions:
+            exact_values_before[command.command_id] = dict(exact_values)
+            charge_edges(len(exact_values))
+        eval_candidates = bool(_builtin_eval_candidates(command))
+        # The eval view only differs from the lexical state when this command carries its own
+        # definite assignments, so the copy is owed only then.
+        if eval_candidates and command.definite_assignments:
+            eval_values = dict(exact_values)
+            charge_edges(len(eval_values))
+            for assignment in command.definite_assignments:
+                apply_exact_assignment(assignment, eval_values, conditional=False)
+        else:
+            eval_values = exact_values
 
-        resolved_program = exact_eval_program(command, eval_values)
+        resolved_program = exact_eval_program(command, eval_values) if eval_candidates else None
         resolved = (
             replace(command, resolved_eval_program=resolved_program)
             if resolved_program is not None
@@ -5471,6 +5542,12 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
     ] = {}
     global_set_before: dict[int, frozenset[str]] = {}
     global_unset_before: dict[int, frozenset[str]] = {}
+    # Only function call sites read these snapshots. Copying the global state for every command
+    # would cost one entry per live variable per command, so a body of plain assignments would
+    # exhaust the edge budget quadratically in the number of distinct names.
+    snapshot_command_ids = {
+        command.command_id for sites in call_sites_by_context.values() for command in sites
+    }
 
     def global_state_for(
         environment: int,
@@ -5561,10 +5638,11 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
     for command in evidence.commands:
         environment = command_environments[command.command_id]
         global_values, global_set, global_unset = global_state_for(environment)
-        global_values_before[command.command_id] = dict(global_values)
-        global_set_before[command.command_id] = frozenset(global_set)
-        global_unset_before[command.command_id] = frozenset(global_unset)
-        charge_edges(len(global_values) + len(global_set) + len(global_unset))
+        if command.command_id in snapshot_command_ids:
+            global_values_before[command.command_id] = dict(global_values)
+            global_set_before[command.command_id] = frozenset(global_set)
+            global_unset_before[command.command_id] = frozenset(global_unset)
+            charge_edges(len(global_values) + len(global_set) + len(global_unset))
         if command.function_context_id is not None:
             continue
         status = conditional_execution[command.command_id]
@@ -6379,21 +6457,6 @@ _EVAL_SURROGATE_MIN = 0xD800
 _EVAL_SURROGATE_MAX = 0xDFFF
 _EVAL_SPECIAL_PARAMETERS = frozenset("@*#?-$!0123456789")
 _EVAL_COMMAND_SUBSTITUTION_REASON = "shell taint eval command substitution cannot be bounded"
-_EVAL_ANSI_C_SIMPLE_ESCAPES = {
-    "a": "\a",
-    "b": "\b",
-    "e": "\x1b",
-    "E": "\x1b",
-    "f": "\f",
-    "n": "\n",
-    "r": "\r",
-    "t": "\t",
-    "v": "\v",
-    "\\": "\\",
-    "'": "'",
-    '"': '"',
-    "?": "?",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -6900,8 +6963,8 @@ def _eval_ansi_c_escape(text: str, start: int) -> tuple[str, int]:  # noqa: PLR0
     if start >= len(text):
         return "\\", start
     character = text[start]
-    if character in _EVAL_ANSI_C_SIMPLE_ESCAPES:
-        return _EVAL_ANSI_C_SIMPLE_ESCAPES[character], start + 1
+    if character in _ANSI_C_SIMPLE_ESCAPES:
+        return _ANSI_C_SIMPLE_ESCAPES[character], start + 1
     if character in "01234567":
         return _eval_ansi_c_digits(text, start, 8, 3, byte_mask=True)
     if character == "x":

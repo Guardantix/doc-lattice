@@ -12,7 +12,7 @@ from typer.main import get_command
 
 from doc_lattice.cli.application import create_app
 from doc_lattice.error_types import ConfigError, ProjectError
-from doc_lattice.github_ci import shell_scanner
+from doc_lattice.github_ci import shell_scanner, shell_taint
 from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS,
     _DOC_LATTICE_ROOT_OPTIONS,
@@ -489,6 +489,23 @@ def test_split_pipeline_stdout_reaches_shell_stdin():
 @pytest.mark.parametrize(
     "script",
     [
+        'P=doc-\nbash -c -- "$P"lattice\n',
+        'P=doc-\nsh -c -- "$P"lattice\n',
+        'P=doc-\nbash -uec -- "$P"lattice\n',
+        'P=doc-\nbash -c -x "$P"lattice\n',
+        'P=doc-\nbash -c --norc "$P"lattice\n',
+    ],
+    ids=("bash", "sh", "cluster", "short-option", "long-option"),
+)
+def test_shell_options_after_c_do_not_hide_the_command_operand(script: str):
+    # Bash keeps parsing options after ``-c``; the first operand is the command string, so a
+    # ``--`` or another option in between must not be mistaken for the payload.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "printf '%s%s\\n' doc- 'lattice reconcile' |& bash",
         "printf '%s%s\\n' doc- 'lattice reconcile' 2>/dev/null |& bash",
         "printf '%s%s\\n' doc- 'lattice reconcile' |& { bash; }",
@@ -497,6 +514,64 @@ def test_split_pipeline_stdout_reaches_shell_stdin():
 )
 def test_combined_pipeline_output_reaches_shell_stdin(script: str):
     assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'V=$(echo doc-; echo z | )\neval "$V"lattice\n',
+        'V=$(echo doc-; echo z |)\neval "$V"lattice\n',
+        'V=$(echo doc-; echo z | ; )\neval "$V"lattice\n',
+        'V=$({ echo doc-; echo z | })\neval "$V"lattice\n',
+    ],
+    ids=("spaced", "tight", "terminated", "brace-group"),
+)
+def test_pipeline_without_a_final_stage_keeps_sibling_output(script: str):
+    # A trailing ``|`` leaves the pipeline without a new final stage. Finalizing it must not
+    # discard the stdout an earlier command already contributed to the enclosing scope.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=doc-\nexec > f\necho "${X}lattice"\nbash f\n',
+        'X=doc-\nexec >> f\necho "${X}lattice"\nbash f\n',
+        'X=doc-\nexec 1> f\necho "${X}lattice"\nbash f\n',
+        'X=doc-\nexec &> f\necho "${X}lattice"\nbash f\n',
+        'X=doc-\nexec > f\n( echo "${X}lattice" )\nbash f\n',
+        "exec < payload.sh\nX=doc-\nread -r line\n",
+    ],
+    ids=("stdout", "append", "explicit-descriptor", "combined", "nested-scope", "stdin"),
+)
+def test_exec_scope_redirection_is_not_certified(script: str):
+    # ``exec > f`` rebinds the whole shell's descriptor, so the redirection cannot be modeled
+    # as belonging to the ``exec`` command alone. Until it is modeled the scan must fail closed.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell exec scope redirection cannot be represented"
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "exec 3> f\necho hello\n",
+        "exec 3< f\necho hello\n",
+        "exec 3>&-\necho hello\n",
+        "exec 4>&3\necho hello\n",
+        "exec bash -c 'echo hello'\n",
+        "echo hello > f\nbash f\n",
+    ],
+    ids=("open", "open-input", "close", "duplicate", "wrapper", "command-redirection"),
+)
+def test_exec_without_a_modeled_descriptor_still_certifies(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(
@@ -3045,6 +3120,11 @@ MARKER_REFUSE_CASES = [
     ("sh short-option cluster", "sh -lc 'doc-lattice reconcile'"),
     ("bash operand becomes arg0", "bash -c 'echo ok' doc-lattice"),
     ("bash value-less long option before -c", "bash --norc -c 'doc-lattice check'"),
+    ("end-of-options operand after -c", "bash -c -- 'doc-lattice reconcile'"),
+    ("end-of-options operand after sh -c", "sh -c -- 'doc-lattice reconcile'"),
+    ("end-of-options operand after cluster", "bash -uec -- 'doc-lattice reconcile'"),
+    ("option after -c still precedes the payload", "bash -c -x 'doc-lattice reconcile'"),
+    ("long option after -c still precedes the payload", "bash -c --norc 'doc-lattice reconcile'"),
     ("dynamic dispatcher selector", "bash $OPT 'doc-lattice lint'"),
     ("source plain head marker argv", "source ./doc-lattice-env.sh"),
     ("dot plain head marker argv", ". ./doc-lattice-env.sh"),
@@ -4216,6 +4296,46 @@ def test_read_unmodeled_record_options_fail_closed(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        'read -N 4 X <<<doc-X; eval "$X"lattice',
+        'read -n 4 X <<<doc-X; eval "$X"lattice',
+        'printf "%s%s" doc- lattice | { read -r -d "" x; eval "$x"; }',
+    ],
+    ids=("exact-count", "maximum-count", "delimiter"),
+)
+def test_read_bounded_prefix_is_not_widened_to_the_whole_stream(script: str):
+    # A bounded ``read`` prefix can compose a marker the full stream does not contain, so any
+    # future widening of ``-d``/``-n``/``-N`` has to keep these refusing.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "\n".join(f"PKG_{index}=name{index}" for index in range(300)),
+        "\n".join(f"V{index}=x{index}; echo $V{index}" for index in range(300)),
+        "\n".join(f'PKG_{index}="name {index}"' for index in range(300)),
+    ],
+    ids=("assign", "assign-and-read", "quoted"),
+)
+def test_many_distinct_assignments_stay_within_the_taint_budget(body: str):
+    # The contextualization pass only needs a global snapshot at function call sites, so a
+    # marker-free body of plain assignments must not consume the edge budget quadratically.
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_function_call_site_still_sees_preceding_global_assignments():
+    assert_taint_refusal('f() { eval "$V"lattice; }\nV=doc-\nf\n')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         'read -u 3 X 3<<<doc-; eval "$X"lattice',
         'X=doc-; read -u 3 X 3<<<safe; eval "$X"lattice',
     ],
@@ -4310,6 +4430,33 @@ def test_read_deferred_projection_over_literal_cap_fails_closed():
 
     assert result.invocations == NONE
     assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "cat changed.txt | while read -r f; do printf '%s\\n' \"$f\"; done"
+        ' | while read -r g; do echo "$g"; done',
+        'cat a | while read -r f; do echo "$f"; done'
+        " | while read -r g; do printf '%s' \"$g\"; done",
+        'cat a | while read -r f; do echo "$f"; done | while read -r g; do echo "$g"; done | cat',
+    ],
+    ids=("printf-consumer", "printf-producer", "trailing-cat"),
+)
+def test_chained_read_loops_certify_without_a_marker(script: str):
+    # The second ``read`` consumes a projection the first loop already widened. Losing the exact
+    # field split must widen the value rather than refuse a marker-free body outright.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_chained_read_loops_still_refuse_marker_flow_into_a_sink():
+    assert_taint_refusal(
+        'printf "%s%s\\n" doc- lattice | while read -r f; do printf "%s\\n" "$f"; done'
+        ' | while read -r g; do eval "$g"; done'
+    )
 
 
 def test_read_deferred_projection_at_literal_cap_reaches_eval():
@@ -5244,6 +5391,69 @@ def test_static_eval_assignment_only_command_persists_control():
     assert_taint_refusal("X=safe; eval 'X=doc-'; eval \"$X\"lattice")
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "X=safe; eval 'X=doc-\ntrue'; eval \"$X\"lattice",
+        "X=safe; eval 'true\nX=doc-'; eval \"$X\"lattice",
+        "X=safe; eval 'true\nX=doc-\ntrue'; eval \"$X\"lattice",
+        "X=safe; eval 'true\n\nX=doc-'; eval \"$X\"lattice",
+        "eval 'true\ndoc-lattice reconcile'",
+    ],
+    ids=("leading", "trailing", "middle", "blank-line", "invocation"),
+)
+def test_static_eval_newline_separates_payload_commands(script: str):
+    # A newline ends a command inside an eval payload, so an assignment on its own line
+    # persists instead of reading as a prefix to the command on the next line.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    ("program", "expected"),
+    [
+        ("X=doc-\ntrue", (("X=doc-",), ("true",))),
+        ("X=doc- true", (("X=doc-", "true"),)),
+        ('X="doc-\nlattice"', (("X=doc-\nlattice",),)),
+        ("echo a\n\necho b", (("echo", "a"), ("echo", "b"))),
+        ("echo a &\necho b", (("echo", "a"), ("echo", "b"))),
+    ],
+    ids=("newline", "blank", "quoted-newline", "blank-line", "background"),
+)
+def test_static_eval_program_commands_split_on_unquoted_newlines(
+    program: str, expected: tuple[tuple[str, ...], ...]
+):
+    commands = shell_taint._static_eval_program_commands(program)
+
+    assert tuple(command.words for command in commands) == expected
+
+
+def test_ansi_c_escape_table_has_one_definition():
+    assert shell_scanner._ANSI_C_SIMPLE_ESCAPES is shell_taint._ANSI_C_SIMPLE_ESCAPES
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [(r"\?", "?"), (r"\a", "\a"), (r"\\", "\\"), (r"\E", "\x1b"), (r"\'", "'")],
+    ids=("question", "bell", "backslash", "escape", "quote"),
+)
+def test_decode_ansi_c_eval_word_uses_the_shared_escape_table(body: str, expected: str):
+    # The first-pass replay has to decode exactly what the scanner and the second pass do,
+    # or the value recorded for an eval-assigned variable differs from what Bash sets.
+    assert shell_taint._decode_ansi_c_eval_word(body) == expected
+
+
+def test_static_eval_background_newline_still_marks_asynchronous():
+    commands = shell_taint._static_eval_program_commands("false &\ntrue")
+
+    assert commands[0].asynchronous is True
+    assert commands[1].asynchronous is False
+
+
 def test_static_eval_command_prefix_is_visible_to_same_command_control():
     assert_taint_refusal('eval "X=doc- bash -c \'eval \\"\\$X\\"lattice\'"')
 
@@ -5270,6 +5480,67 @@ def test_static_eval_inactive_comment_markers_remain_taint_controls(script: str)
 
     assert result.invocations == NONE
     assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "eval 'echo $((1))#x; doc-lattice reconcile --apply'",
+        "eval 'echo $((1>0))#x; doc-lattice reconcile'",
+        "eval 'echo $((1&1))#x; doc-lattice reconcile'",
+        "eval 'N=$((2*3))#x; doc-lattice reconcile'",
+        "eval 'echo $(( 1 ))#x && doc-lattice reconcile'",
+        "eval 'echo $(echo q)#x; doc-lattice reconcile'",
+        "eval 'cat <(echo q)#x; doc-lattice reconcile'",
+        "eval 'echo `echo q`#x; doc-lattice reconcile'",
+        "eval 'echo (echo q)#x; doc-lattice reconcile'",
+    ],
+    ids=(
+        "arithmetic",
+        "arithmetic-compare",
+        "arithmetic-bitwise",
+        "arithmetic-assignment",
+        "arithmetic-spaced",
+        "command-substitution",
+        "process-substitution",
+        "backquote",
+        "subshell",
+    ),
+)
+def test_static_eval_expansion_close_does_not_begin_a_comment(script: str):
+    # Bash keeps ``$((1))#x`` in one word, so the ``#`` cannot open a comment and the
+    # command list after it stays live.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+def test_static_eval_ansi_c_escaped_quote_does_not_expose_a_comment():
+    # ``$'a\'b'`` keeps the escaped quote inside the word, so the trailing ``#`` is data.
+    result = scan_doc_lattice_invocations(r"""eval 'echo $'"'"'a\'"'"'b # doc-lattice reconcile'""")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "eval 'echo x # doc-lattice reconcile'",
+        "eval 'echo x;# doc-lattice reconcile'",
+        "eval '# doc-lattice reconcile'",
+        "eval 'echo x\n# doc-lattice reconcile'",
+    ],
+    ids=("blank", "semicolon", "command-position", "newline"),
+)
+def test_static_eval_real_comments_still_certify(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(

@@ -465,3 +465,14 @@ sinks. Marker-free dynamic execution and a marker whose required character comes
 external content continue to certify with the boundary disclosed. `audit.py` still invokes the
 scanner independently for each step; future job-level aggregation can consume the evidence shape
 without changing the parser/analysis ownership boundary.
+
+Two constructs rebind state the per-command evidence shape cannot carry, so they fail closed at
+the scanner rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes
+the enclosing shell scope for every later command, which the per-command `redirections` field
+cannot express. A `read` that uses `-a`, `-d`, `-n`, `-N`, or `-u` either writes an array, whose
+element reads are not modeled, or reads a bounded prefix, which can compose a marker the full
+stream does not contain; widening either to the whole stream would drop the flow instead of
+over-approximating it. Where an exact projection is merely lost rather than absent, the solver
+instead widens to the top of the content lattice, an alternative that accepts from every DFA
+entry state, so the value stays visible at each sink and only a body that actually reaches one
+is refused.
