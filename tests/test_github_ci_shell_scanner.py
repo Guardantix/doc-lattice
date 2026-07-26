@@ -8013,6 +8013,46 @@ def test_command_head_position_is_an_execution_sink(script: str):
     assert_taint_refusal(script)
 
 
+def test_issue_125_suffix_composed_command_name_is_marker_checked() -> None:
+    """A command name composed from a variable and a literal suffix executes the marker.
+
+    ``j=doc-; "$j"lattice reconcile`` (issue #125) is the command-name-position instance of
+    AD-18's premise: authored fragments composing a marker across a variable boundary. This is
+    not a regression: the same body certifies clean on ``main``.
+    """
+    assert_taint_refusal('j=doc-; "$j"lattice reconcile')
+
+
+def test_issue_125_exact_value_head_control_keeps_refusing() -> None:
+    """The exact-value control shows head resolution already covers a single exact value.
+
+    ``j=doc-lattice; "$j" reconcile`` refuses through the command-local resolver (a
+    marker-bearing command that is not a certified invocation) rather than through the taint
+    execution-sink path the suffix-composed case above uses, so only the refusal itself, not
+    its reason, is asserted here.
+    """
+    result = scan_doc_lattice_invocations('j=doc-lattice; "$j" reconcile')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'd=git; "$d" status',
+        'p=my; "$p"tool run',
+    ],
+    ids=("exact-value-benign-head", "suffix-composed-benign-head"),
+)
+def test_issue_125_benign_composed_command_name_still_certifies(script: str) -> None:
+    """A composed head with no authored marker in it must not be over-refused."""
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
 @pytest.mark.parametrize(
     "script",
     [
