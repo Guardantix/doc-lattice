@@ -794,6 +794,7 @@ class _ControlFrame:
     prior_branch_status: bool | None = False
     body_status: bool | None = None
     prune_unreachable_effects: bool = False
+    command_start: int = 0
 
 
 @dataclass(slots=True)
@@ -1152,6 +1153,7 @@ class _ShellScanner:
             scope_id=builder.allocate_scope(),
             parent_scope_id=self._container_scope_id(),
             parent_outputs=self._output_target(),
+            command_start=len(builder.commands),
         )
         if kind in {"if", "while", "until"}:
             frame.phase = "test"
@@ -1183,6 +1185,11 @@ class _ShellScanner:
         if not controls or controls[-1] is not frame:
             raise _ShellScanIncomplete("ambiguous nested shell control flow")
         controls.pop()
+        binding_command_id = (
+            builder.commands[frame.command_start].command_id
+            if frame.command_start < len(builder.commands)
+            else None
+        )
         builder.scopes.append(
             _StreamScopeEvidence(
                 frame.scope_id,
@@ -1191,6 +1198,7 @@ class _ShellScanner:
                 None,
                 output,
                 loop_bindings=loop_bindings,
+                binding_command_id=binding_command_id,
             )
         )
         frame.parent_outputs.append(ScopeOutput(frame.scope_id))

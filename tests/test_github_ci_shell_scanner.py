@@ -8317,3 +8317,62 @@ def test_case_patterns_spelled_as_reserved_words_still_certify(script: str):
 def test_case_arm_marker_flow_survives_the_pattern_fix():
     """The reserved-word pattern fix must not weaken case-arm taint."""
     assert_taint_refusal('A=doc-; B=lattice\ncase "$1" in\n  a) M="$A$B" ;;\nesac\neval "$M"\n')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f(){ for c in "$1"; do eval "${c}lattice reconcile"; done; }; f doc-',
+        'f(){ for c in "$@"; do eval "${c}lattice reconcile"; done; }; f doc-',
+        'f(){ for c in "$V"; do eval "${c}lattice reconcile"; done; }; V=doc- f',
+    ],
+    ids=("positional-one", "positional-at", "temp-env"),
+)
+def test_loop_header_positional_and_temp_env_reach_eval(script: str):
+    """A loop header inside a function body must see positional and temp-env context (#129)."""
+    assert_taint_refusal(script)
+
+
+def test_loop_header_over_local_positional_value_reaches_eval():
+    """A ``local`` copy of ``$1`` read through a loop header must still reach the sink.
+
+    This is the case #129's follow-up comment says the fix must close: fixing #127 stopped
+    ``local NAME=value`` from being misclassified, which incidentally widened this into a
+    false-safe because the loop scope still had no ``binding_command_id`` to resolve ``$1``
+    against for the ``local`` rename.
+    """
+    assert_taint_refusal(
+        'f(){ local c="$1"; for x in "$c"; do eval "${x}lattice reconcile"; done; }; f doc-'
+    )
+
+
+def test_loop_header_over_local_literal_value_reaches_eval():
+    """A ``local`` copy of a literal marker read through a loop header must still refuse."""
+    assert_taint_refusal(
+        'f(){ local c=doc-; for x in "$c"; do eval "${x}lattice reconcile"; done; }; f'
+    )
+
+
+def test_loop_variable_survives_the_loop_for_a_later_eval():
+    """The loop scope's compound assignment must anchor to a real command, not just its own body.
+
+    ``c`` is read by an ``eval`` after the loop closes, so this exercises the
+    ``binding_command_id``-gated ``fixed_point_overrides`` narrowing (``shell_taint.py``, the
+    ``compound_assignments``/``eval_shadow_names`` machinery in ``_eval_command_environments``)
+    for a command that is not itself the loop's first body command.
+    """
+    assert_taint_refusal('f(){ for c in "$1"; do :; done; eval "${c}lattice reconcile"; }; f doc-')
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'f(){ eval "${1}lattice reconcile"; }; f doc-',
+        'f(){ local c="$1"; eval "${c}lattice reconcile"; }; f doc-',
+        'f(){ c="$1"; for x in "$c"; do eval "${x}lattice reconcile"; done; }; f doc-',
+    ],
+    ids=("no-loop", "local-no-loop", "global-assignment-loop"),
+)
+def test_loop_header_positional_controls_still_refuse(script: str):
+    """Controls that isolate the loop scope anchor as the #129 cause must keep refusing."""
+    assert_taint_refusal(script)

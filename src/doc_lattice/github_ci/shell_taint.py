@@ -4994,6 +4994,18 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         ):
             preliminary_call_sites.setdefault(callee, []).append(command)
 
+    commands_by_id = {command.command_id: command for command in evidence.commands}
+    loop_binding_expressions_by_context: dict[int, list[ContentExpr]] = {}
+    for scope in evidence.scopes:
+        if scope.binding_command_id is None or not scope.loop_bindings:
+            continue
+        anchor = commands_by_id.get(scope.binding_command_id)
+        if anchor is None or anchor.function_context_id is None:
+            continue
+        loop_binding_expressions_by_context.setdefault(anchor.function_context_id, []).extend(
+            binding.content for binding in scope.loop_bindings
+        )
+
     positional_references_by_context: dict[int, frozenset[str]] = {}
     for context in function_contexts:
         positional_names: set[str] = set()
@@ -5016,6 +5028,8 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             )
             for expression in expressions:
                 positional_names.update(_expression_function_positionals(expression))
+        for expression in loop_binding_expressions_by_context.get(context, ()):
+            positional_names.update(_expression_function_positionals(expression))
         positional_references_by_context[context] = frozenset(positional_names)
 
     function_names_by_context = {
