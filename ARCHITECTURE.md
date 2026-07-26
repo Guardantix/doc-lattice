@@ -404,7 +404,13 @@ Stream scopes aggregate command stdout with `Sequence`, `Choice`, and reflexive-
 summary. A call to a function defined in the same body reproduces that function scope's aggregated
 stdout, so wrapping a producer in a function preserves the handoff. A pipeline keeps its
 producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
-command inside a control body, while a compound consumer still binds the compound scope. Parameter
+command inside a control body, while a compound consumer still binds the compound scope. A command
+naming a static resource operand this body writes, such as `cat s.sh`, or reading a process
+substitution such as `cat <(...)`, reproduces that resource's or substitution's content the same
+way redirected stdin does; all three are the same generic unknown-command's-stdout assumption, so
+the redirection, named-operand, and process-substitution forms of the same handoff are inside the
+modeled may-output boundary together rather than reading as different boundaries. Only content this
+body never writes stays outside it as absence of evidence. Parameter
 default/alternate forms produce in-word choices, assign-default also emits a conditional variable
 definition, and every other parameter operator keeps three alternatives: an empty string, the
 subject variable unchanged, and the variable beside its authored operand. The empty alternative
@@ -459,9 +465,34 @@ subshell groups, and the function effects and call-graph names a payload contrib
 cycles, nameref targets that are not static variable names, and command prefixes that cannot be
 represented fail closed.
 
-The replay is reached from `eval` alone. A `source` or `.` payload does not enter it, so state a
-sourced script establishes is not observed by a later sink; that gap is tracked in issue #133. A
-shell `-c` payload does not enter it either, which is harmless on its own because a child shell's
+A recovered plain assignment, one that is not a `local`/`declare`/`typeset` genuinely scoped inside
+a function context and not a nameref alias, is lowered into the same flow-definition graph an
+authored assignment uses, so every sink observes it, not only a later `eval`:
+`eval 'X=doc-'; bash -c "$X"'lattice check'` refuses on this path even though no `eval` reads `$X`.
+A `declare`/`typeset` an eval payload recovers outside a function context is an ordinary global
+assignment in Bash and is lowered the same way. The same declaration builtins recovered genuinely
+inside a function context, and nameref-aliasing assignments, stay on the exact-table-only path
+above and so are visible only to a later `eval`; that narrower scope is a documented, deliberate
+residual, not a regression. A payload the `eval` itself builds from dynamic content, such as a
+command substitution or an untracked `declare`, is issue #114's complement: this sub-analysis never
+recovers a mutation from it at all, so neither the exact-table path nor this lowering has anything
+to act on.
+
+The replay is reached from `eval` alone. A `source` or `.` payload's state effects are
+architecturally unreachable to it: recovering them exactly would need a second, resource-shaped
+exact-literal table threaded through the same bootstrap phase that builds the variable table, which
+does not exist and is not a scoped fix to add. Instead, `source`/`.`, and a shell's glob script
+operand, fail closed narrowly, only when the target is a resource this same body writes and that
+resource's own content could plausibly carry a marker fragment, checked across every DFA entry
+state and, separately, each `NAME=VALUE`-shaped line's isolated value, so a suffix fragment written
+as `Y=lattice` is caught the same way a variable-borne one already is. A target this body never
+writes, or one it writes with content that cannot advance the marker, stays outside the analysis's
+scope and certifies, so the ordinary `echo "REGION=us-east-1" > env.sh; source env.sh` idiom is
+unaffected. A `source`/`.` target that resolves to a dynamic filename or to a process-substitution
+operand is untouched by this rule and remains open; that gap, and true exact-literal replay for
+`source` matching `eval`'s, are tracked in issue #133.
+
+A shell `-c` payload does not enter it either, which is harmless on its own because a child shell's
 assignments do not persist into the parent, and its own parameter references are covered by the
 second pass described below. A payload the tokenizer cannot accept is missing evidence rather than
 absent evidence, so it fails closed instead of leaving previously recovered state uninvalidated
@@ -478,13 +509,13 @@ fail-closed; modeling export status precisely is future work.
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing
 `eval` has no natural terminating point, and this engine is defense in depth behind human review,
-not the boundary that contains untrusted code. Values bearing arithmetic expansion and `eval`
-nested inside an `eval` payload are therefore not modeled, and an array assignment fails closed
-rather than being interpreted.
-Verification under real bash on 2026-07-25 confirmed that nested `eval` does persist its
-assignments to the current shell, so that is a known false-safe gap rather than evidence of safety.
-Closing it belongs in a bounded guard that fails closed on an unmodeled state-carrying construct,
-not in more interpretation.
+not the boundary that contains untrusted code. Values bearing arithmetic expansion are therefore
+not modeled, and an array assignment fails closed rather than being interpreted. An `eval` nested
+inside an `eval` payload is the bounded guard this stop-line prescribes rather than an unmodeled
+gap: verification under real bash confirmed that a nested `eval` does persist its assignments to
+the current shell, so the replay raises `shell nested eval state cannot be represented` instead of
+leaving that state unrepresented (issue #114), without recursively interpreting the inner payload
+or gating the guard on its content.
 
 Brace groups and loop bodies are the exception to that stop-line and are modeled, because they
 persist their assignments the same way and are cheap to replay. `_STATIC_EVAL_MUTATION_PREFIXES`
@@ -514,7 +545,13 @@ beyond generic may-output, arbitrary encoding/transforms, dynamic resource alias
 descriptor state carried across commands by a bare `exec`, eval payload constructs outside the
 bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
 This list is the boundary as designed, not a complete inventory of what the engine currently
-misses; open gaps against this decision are tracked in issues #125 through #141. A `read` beyond
+misses; open gaps against this decision are tracked in issues #125 through #141, and this
+enumeration itself is not exhaustive. Two further gaps outside these categories: a compound
+command's stdout redirected into an output process substitution is not yet linked into that
+substitution's consumer, only a simple command's is (issue #116), and `lastpipe` state reached
+through a function call site or a loop back edge is widened only for a pipeline whose last stage is
+a `read` writing from stdin, not for every conditional-on-lastpipe context such as a trailing `eval`
+(issue #118). A `read` beyond
 the first record of a shared stream is projected as record one, so a marker split across later
 records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
 over-refusal it interacts with is issue #119.

@@ -4554,6 +4554,16 @@ def _static_status_not(status: bool | None) -> bool | None:
     return None if status is None else not status
 
 
+# Load bearing: these are the leading keywords `_static_eval_mutations` strips before looking for
+# an assignment/command word, so a compound construct's own opening keyword does not stop it from
+# reaching the assignment inside. `{`, `do`, `while`, and `until` in particular are what makes a
+# brace group's or a loop body's mutation get replayed at all -- `eval '{ X=doc-; }'` and
+# `eval 'for i in 1; do X=doc-; done'` need `{` and `do` stripped so `X=doc-` is still recognized as
+# a prefix assignment, per AD-18's "brace groups and loop bodies are the exception to that
+# stop-line and are modeled" (ARCHITECTURE.md). Removing any of the four looks like dead weight
+# against that text, but it silently drops the mutation instead of raising, which reopens a false
+# certification: the `eval-brace-group-assignment` and `eval-loop-body-assignment` fixtures in
+# tests/test_github_ci_shell_scanner.py pin both cases refusing.
 _STATIC_EVAL_MUTATION_PREFIXES = frozenset(
     {"coproc", "do", "elif", "else", "if", "then", "time", "until", "while", "{"}
 )
