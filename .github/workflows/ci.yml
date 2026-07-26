@@ -80,10 +80,7 @@ jobs:
 
       - name: Determine target tag
         id: target
-        run: |
-          version="$(uv run --no-sync python -c 'import doc_lattice; print(doc_lattice.__version__)')"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+        run: uv run --no-sync python scripts/release_target.py
 
       - name: Tag-health gate
         id: gate
@@ -101,13 +98,14 @@ jobs:
 
       - name: Smoke-test the commit
         if: steps.gate.outputs.proceed == 'true'
+        env:
+          REF: git+https://github.com/Guardantix/doc-lattice@${{ github.sha }}
+          FIXTURE: tests/fixtures/release-smoke/.doc-lattice.yml
         run: |
-          ref="git+https://github.com/Guardantix/doc-lattice@${GITHUB_SHA}"
-          fixture="tests/fixtures/release-smoke/.doc-lattice.yml"
-          uvx --python 3.13 --from "${ref}" doc-lattice check --config "${fixture}"
-          uvx --python 3.13 --from "${ref}" doc-lattice lint --config "${fixture}"
+          uvx --python 3.13 --from "${REF}" doc-lattice check --config "${FIXTURE}"
+          uvx --python 3.13 --from "${REF}" doc-lattice lint --config "${FIXTURE}"
           workdir="$(mktemp -d)"
-          ( cd "${workdir}" && uvx --python 3.13 --from "${ref}" doc-lattice init )
+          ( cd "${workdir}" && uvx --python 3.13 --from "${REF}" doc-lattice init )
 
       - name: Create and push the tag
         if: steps.gate.outputs.create_tag == 'true'
