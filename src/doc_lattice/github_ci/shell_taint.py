@@ -2020,6 +2020,62 @@ _DescriptorBindings = dict[int, tuple[RedirectionTarget | _ImplicitPipeTarget, b
 _INHERITED_OUTPUT_DESCRIPTORS = frozenset({1, 2})
 
 
+def _resolve_output_descriptor_source(
+    descriptor: int,
+    bindings: _DescriptorBindings,
+    inherited: _DescriptorBindings | None,
+    guarded: frozenset[int],
+) -> tuple[RedirectionTarget | _ImplicitPipeTarget, bool]:
+    """Chase a ``>&N`` source through any deferred duplication hops to its concrete target.
+
+    A duplication that does not itself route stdout (for example ``exec 3>&4`` inside a body
+    that also has ``>&3``) is left unresolved in ``bindings`` rather than collapsed to a dynamic
+    placeholder when it is created, so this walk -- not the point a duplication is bound -- is
+    where the guard has to apply. Resolving eagerly at the binding site let an intermediate
+    duplication collapse into a placeholder before the guard could see it, and a later
+    duplication of that placeholder skipped the guard entirely because its source was already
+    "found".
+
+    Args:
+        descriptor: The descriptor a ``>&N`` redirection names as its source.
+        bindings: The bindings this command or compound has established so far.
+        inherited: Descriptor bindings an enclosing compound installed, or ``None``.
+        guarded: Descriptors some other command or compound in this body binds, directly or
+            through a duplication chain reaching one.
+
+    Returns:
+        The concrete or dynamic target the chain resolves to.
+
+    Raises:
+        _TaintLimitExceeded: If the chain reaches an unresolved reference to a guarded
+            descriptor, or the chain does not terminate within the descriptors visited so far.
+    """
+    visited: set[int] = set()
+    current = descriptor
+    while True:
+        if current in visited:
+            raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+        visited.add(current)
+        found = bindings.get(current)
+        if found is None and inherited is not None:
+            found = inherited.get(current)
+        if found is None:
+            if current in guarded and current not in _INHERITED_OUTPUT_DESCRIPTORS:
+                # A bare ``exec 3> f`` rebinds the descriptor for the rest of the shell, which
+                # the per-command redirection evidence cannot carry. Resolving the source to a
+                # dynamic target here would discard this command's stdout instead of routing
+                # it, so an authored marker could reach a file the scan reads as unwritten.
+                # A descriptor no part of this body binds is a runtime error in Bash rather
+                # than missing evidence, so it keeps the existing dynamic-target behavior.
+                raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+            return (DynamicResourceTarget(), False)
+        target, append = found
+        if isinstance(target, DescriptorTarget):
+            current = target.descriptor
+            continue
+        return (target, append)
+
+
 def _output_bindings(
     events: tuple[_RedirectionEvent, ...],
     *,
@@ -2038,7 +2094,9 @@ def _output_bindings(
             whose source is one of these but is not visible here has to fail closed.
 
     Returns:
-        The final binding per output descriptor.
+        The final binding per output descriptor. A descriptor this event set duplicates without
+        ever routing it to stdout may still hold an unresolved ``DescriptorTarget`` reference;
+        see ``_resolve_output_descriptor_source``.
 
     Raises:
         _TaintLimitExceeded: If a write routes stdout through a guarded descriptor whose binding
@@ -2049,28 +2107,19 @@ def _output_bindings(
         if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
             continue
         if isinstance(event.target, DescriptorTarget):
-            source = bindings.get(event.target.descriptor)
-            if source is None and inherited is not None:
-                source = inherited.get(event.target.descriptor)
-            if source is None:
-                routes_stdout = (
-                    event.descriptor == 1
-                    or event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS
+            routes_stdout = (
+                event.descriptor == 1 or event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS
+            )
+            if routes_stdout:
+                binding = _resolve_output_descriptor_source(
+                    event.target.descriptor, bindings, inherited, guarded
                 )
-                if (
-                    routes_stdout
-                    and event.target.descriptor in guarded
-                    and event.target.descriptor not in _INHERITED_OUTPUT_DESCRIPTORS
-                ):
-                    # A bare ``exec 3> f`` rebinds the descriptor for the rest of the shell, which
-                    # the per-command redirection evidence cannot carry. Resolving the source to a
-                    # dynamic target here would discard this command's stdout instead of routing
-                    # it, so an authored marker could reach a file the scan reads as unwritten.
-                    # A descriptor no part of this body binds is a runtime error in Bash rather
-                    # than missing evidence, so it keeps the existing dynamic-target behavior.
-                    raise _TaintLimitExceeded("shell descriptor source cannot be represented")
-                source = (DynamicResourceTarget(), False)
-            binding = source
+            else:
+                # Defer resolution: a duplication that never routes to stdout here might still
+                # be dereferenced by a later duplication that does. Storing the raw reference
+                # keeps that later lookup subject to the same guard instead of inheriting an
+                # already-collapsed placeholder.
+                binding = (event.target, event.operator in _APPEND_REDIRECTION_OPERATORS)
         else:
             binding = (event.target, event.operator in _APPEND_REDIRECTION_OPERATORS)
         if event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS:
@@ -2084,6 +2133,11 @@ def _output_bindings(
 def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]:
     """Return the non-standard output descriptors some command or compound in this body binds.
 
+    A descriptor that only ever appears as a duplication of another (``exec 3>&4``) is guarded
+    transitively when the descriptor it duplicates is, so a duplication chain cannot walk an
+    unresolved reference out from under the guard by hopping through an intermediate descriptor
+    ``_guarded_output_descriptors`` previously did not track.
+
     Args:
         evidence: The typed shell execution evidence for one run body.
 
@@ -2091,18 +2145,32 @@ def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]
         The descriptors a ``>&N`` source may legitimately refer to, so an unresolved reference to
         one of them is missing evidence rather than a Bash runtime error.
     """
-    return frozenset(
-        event.descriptor
-        for events in (
-            *(command.redirections for command in evidence.commands),
-            *(scope.redirections for scope in evidence.scopes),
-        )
-        for event in events
-        if event.descriptor is not None
-        and event.descriptor not in _INHERITED_OUTPUT_DESCRIPTORS
-        and event.operator in _OUTPUT_REDIRECTION_OPERATORS
-        and not isinstance(event.target, DescriptorTarget)
-    )
+    direct: set[int] = set()
+    dependents: dict[int, list[int]] = {}
+    for events in (
+        *(command.redirections for command in evidence.commands),
+        *(scope.redirections for scope in evidence.scopes),
+    ):
+        for event in events:
+            if (
+                event.descriptor is None
+                or event.descriptor in _INHERITED_OUTPUT_DESCRIPTORS
+                or event.operator not in _OUTPUT_REDIRECTION_OPERATORS
+            ):
+                continue
+            if isinstance(event.target, DescriptorTarget):
+                dependents.setdefault(event.target.descriptor, []).append(event.descriptor)
+            else:
+                direct.add(event.descriptor)
+    guarded = set(direct)
+    pending = list(direct)
+    while pending:
+        current = pending.pop()
+        for dependent in dependents.get(current, ()):
+            if dependent not in guarded:
+                guarded.add(dependent)
+                pending.append(dependent)
+    return frozenset(guarded)
 
 
 def _scope_inherited_bindings(
@@ -2149,30 +2217,236 @@ def _scope_inherited_bindings(
     return resolved
 
 
+_InputDescriptorBindings = dict[int, "ContentExpr | DescriptorTarget"]
+
+# Descriptor 0 is always open in the enclosing shell, so a ``<&0`` source that no authored
+# redirection bound is inherited stdin rather than missing evidence.
+_INHERITED_INPUT_DESCRIPTORS = frozenset({0})
+
+
+@dataclass(frozen=True, slots=True)
+class _InputDescriptorContext:
+    """Bundled state for resolving ``<&N`` sources across the scopes of one evidence body."""
+
+    scope_bindings: dict[int, _InputDescriptorBindings]
+    guarded: frozenset[int]
+
+
+def _guarded_input_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]:
+    """Return the non-standard input descriptors some command or compound in this body binds.
+
+    A descriptor that only ever appears as a duplication of another (``exec 3<&4``) is guarded
+    transitively when the descriptor it duplicates is, mirroring the output-side treatment in
+    ``_guarded_output_descriptors``.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        The descriptors a ``<&N`` source may legitimately refer to, so an unresolved reference
+        to one of them is missing evidence rather than a Bash runtime error.
+    """
+    direct: set[int] = set()
+    dependents: dict[int, list[int]] = {}
+    for events in (
+        *(command.redirections for command in evidence.commands),
+        *(scope.redirections for scope in evidence.scopes),
+    ):
+        for event in events:
+            if (
+                event.descriptor is None
+                or event.descriptor in _INHERITED_INPUT_DESCRIPTORS
+                or event.operator not in _INPUT_REDIRECTION_OPERATORS
+            ):
+                continue
+            if isinstance(event.target, DescriptorTarget):
+                dependents.setdefault(event.target.descriptor, []).append(event.descriptor)
+            else:
+                direct.add(event.descriptor)
+    guarded = set(direct)
+    pending = list(direct)
+    while pending:
+        current = pending.pop()
+        for dependent in dependents.get(current, ()):
+            if dependent not in guarded:
+                guarded.add(dependent)
+                pending.append(dependent)
+    return frozenset(guarded)
+
+
+def _resolve_input_descriptor_source(
+    descriptor: int,
+    bindings: _InputDescriptorBindings,
+    inherited: _InputDescriptorBindings | None,
+    guarded: frozenset[int],
+) -> ContentExpr:
+    """Chase a ``<&N`` source through any deferred duplication hops to its content.
+
+    Mirrors ``_resolve_output_descriptor_source``: a duplication that does not itself route to
+    descriptor zero is left unresolved rather than collapsed into a certifying ``OutsideGap()``
+    when it is created, so this walk is where the guard applies.
+
+    Args:
+        descriptor: The descriptor a ``<&N`` redirection names as its source.
+        bindings: The bindings this command or compound has established so far.
+        inherited: Descriptor bindings an enclosing compound installed, or ``None``.
+        guarded: Descriptors some other command or compound in this body binds, directly or
+            through a duplication chain reaching one.
+
+    Returns:
+        The content expression the chain resolves to.
+
+    Raises:
+        _TaintLimitExceeded: If the chain reaches an unresolved reference to a guarded
+            descriptor, or the chain does not terminate within the descriptors visited so far.
+    """
+    visited: set[int] = set()
+    current = descriptor
+    while True:
+        if current in visited:
+            raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+        visited.add(current)
+        found = bindings.get(current)
+        if found is None and inherited is not None:
+            found = inherited.get(current)
+        if found is None:
+            if current in guarded and current not in _INHERITED_INPUT_DESCRIPTORS:
+                # ``exec 3< f`` rebinds the descriptor for the rest of the shell, which the
+                # per-command redirection evidence cannot carry. Substituting a certifying
+                # ``OutsideGap()`` here would discard this read instead of routing it, so an
+                # authored marker could reach a sink through a source the scan reads as absent.
+                raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+            return OutsideGap()
+        if isinstance(found, DescriptorTarget):
+            current = found.descriptor
+            continue
+        return found
+
+
+def _input_redirection_expression(
+    event: _RedirectionEvent,
+    bindings: _InputDescriptorBindings,
+    inherited: _InputDescriptorBindings | None,
+    process_resources: dict[int, _ProcessResourceEvidence],
+    guarded: frozenset[int],
+) -> ContentExpr | DescriptorTarget:
+    """Return one input redirection event's binding, deferring an unrouted duplication."""
+    expression: ContentExpr | DescriptorTarget
+    if isinstance(event.target, StaticResourceTarget):
+        expression = ResourceRef(event.target.key)
+    elif isinstance(event.target, ContentTarget):
+        expression = event.target.content
+    elif isinstance(event.target, ProcessResourceTarget):
+        expression = _process_resource_input(event.target.resource_id, process_resources)
+    elif isinstance(event.target, NullTarget):
+        expression = LiteralTransfer("")
+    elif isinstance(event.target, DescriptorTarget):
+        if event.descriptor == 0:
+            expression = _resolve_input_descriptor_source(
+                event.target.descriptor, bindings, inherited, guarded
+            )
+        else:
+            # Defer resolution: see ``_output_bindings`` for why collapsing this now would let
+            # a later duplication skip the guard.
+            expression = event.target
+    else:
+        # A dynamic or otherwise unrecognized target is external content this analysis cannot
+        # name.
+        expression = OutsideGap()
+    return expression
+
+
 def _replay_input_bindings(
     events: tuple[_RedirectionEvent, ...],
     initial: ContentExpr,
     process_resources: dict[int, _ProcessResourceEvidence],
+    *,
+    inherited: _InputDescriptorBindings | None = None,
+    guarded: frozenset[int] = frozenset(),
 ) -> ContentExpr:
     """Replay ordered stdin bindings over one inherited descriptor-zero expression."""
-    bindings: dict[int, ContentExpr] = {0: initial}
+    bindings: _InputDescriptorBindings = {0: initial}
     for event in sorted(events, key=lambda candidate: candidate.ordinal):
         if event.descriptor is None or event.operator not in _INPUT_REDIRECTION_OPERATORS:
             continue
-        if isinstance(event.target, StaticResourceTarget):
-            expression = ResourceRef(event.target.key)
-        elif isinstance(event.target, ContentTarget):
-            expression = event.target.content
-        elif isinstance(event.target, ProcessResourceTarget):
-            expression = _process_resource_input(event.target.resource_id, process_resources)
-        elif isinstance(event.target, NullTarget):
-            expression = LiteralTransfer("")
-        elif isinstance(event.target, DescriptorTarget):
-            expression = bindings.get(event.target.descriptor, OutsideGap())
-        else:
-            expression = OutsideGap()
-        bindings[event.descriptor] = expression
-    return bindings[0]
+        bindings[event.descriptor] = _input_redirection_expression(
+            event, bindings, inherited, process_resources, guarded
+        )
+    result = bindings[0]
+    # Descriptor zero is always routed through the guarded chase above, so it can never be left
+    # as a deferred reference here.
+    return result if not isinstance(result, DescriptorTarget) else OutsideGap()
+
+
+def _input_descriptor_bindings(
+    events: tuple[_RedirectionEvent, ...],
+    process_resources: dict[int, _ProcessResourceEvidence],
+    *,
+    inherited: _InputDescriptorBindings | None = None,
+) -> _InputDescriptorBindings:
+    """Replay input descriptor mutations left-to-right without a pipe-provided seed.
+
+    Builds the descriptor table one structured scope installs so a nested scope's own ``<&N``
+    replay can resolve a source its local redirections do not bind, mirroring
+    ``_scope_inherited_bindings`` on the output side.
+    """
+    bindings: _InputDescriptorBindings = {}
+    for event in sorted(events, key=lambda candidate: candidate.ordinal):
+        if event.descriptor is None or event.operator not in _INPUT_REDIRECTION_OPERATORS:
+            continue
+        bindings[event.descriptor] = _input_redirection_expression(
+            event, bindings, inherited, process_resources, frozenset()
+        )
+    return bindings
+
+
+def _scope_inherited_input_bindings(
+    evidence: _ShellTaintEvidence,
+    process_resources: dict[int, _ProcessResourceEvidence],
+) -> dict[int, _InputDescriptorBindings]:
+    """Return the input descriptor bindings each structured scope installs for its contents.
+
+    Mirrors ``_scope_inherited_bindings`` on the output side.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        process_resources: Process-substitution resources referenced by descriptor.
+
+    Returns:
+        A mapping from scope id to the bindings visible inside that scope, with an inner
+        compound's redirections overriding an outer one's.
+    """
+    scopes = {scope.scope_id: scope for scope in evidence.scopes}
+    resolved: dict[int, _InputDescriptorBindings] = {}
+    state: dict[int, int] = {}
+    for root in scopes:
+        if root in resolved:
+            continue
+        pending = [(root, False)]
+        while pending:
+            scope_id, expanded = pending.pop()
+            if scope_id in resolved:
+                continue
+            scope = scopes[scope_id]
+            parent_id = scope.parent_scope_id
+            parent = resolved.get(parent_id, {}) if parent_id is not None else {}
+            resolved_parent = (
+                parent_id is None or parent_id not in scopes or state.get(parent_id) == 1
+            )
+            if expanded or resolved_parent:
+                bindings: _InputDescriptorBindings = dict(parent)
+                bindings.update(
+                    _input_descriptor_bindings(
+                        scope.redirections, process_resources, inherited=parent
+                    )
+                )
+                resolved[scope_id] = bindings
+                state[scope_id] = 2
+                continue
+            state[scope_id] = 1
+            pending.append((scope_id, True))
+            pending.append((parent_id, False))
+    return resolved
 
 
 def _pipe_source(
@@ -2227,6 +2501,7 @@ def _resolved_scope_inputs(
     direct_inputs: dict[int, ContentExpr],
     resources: dict[int, _ProcessResourceEvidence],
     active_scopes: set[int],
+    descriptors: _InputDescriptorContext,
 ) -> dict[int, ContentExpr]:
     """Resolve inherited scope stdin iteratively, replaying each scope's redirects."""
     memo: dict[int, ContentExpr] = {}
@@ -2256,10 +2531,15 @@ def _resolved_scope_inputs(
             inherited = memo[current]
         for current in reversed(path):
             scope = scopes[current]
+            parent_id = scope.parent_scope_id
             inherited = _replay_input_bindings(
                 scope.redirections,
                 direct_inputs.get(current, inherited),
                 resources,
+                inherited=descriptors.scope_bindings.get(parent_id, {})
+                if parent_id is not None
+                else {},
+                guarded=descriptors.guarded,
             )
             memo[current] = inherited
     return memo
@@ -2307,7 +2587,10 @@ def _apply_scope_inputs(
         command_inputs.setdefault(command_id, expression)
 
 
-def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
+def _pipe_inputs(
+    evidence: _ShellTaintEvidence,
+    descriptors: _InputDescriptorContext,
+) -> dict[int, ContentExpr]:
     """Return stdin expressions from pipes and output process resources through scope entries."""
     commands = {command.command_id: command for command in evidence.commands}
     scopes = {scope.scope_id: scope for scope in evidence.scopes}
@@ -2331,7 +2614,13 @@ def _pipe_inputs(evidence: _ShellTaintEvidence) -> dict[int, ContentExpr]:
     _apply_scope_inputs(
         command_inputs,
         active_scopes,
-        _resolved_scope_inputs(scopes, scope_inputs, resources, active_scopes),
+        _resolved_scope_inputs(
+            scopes,
+            scope_inputs,
+            resources,
+            active_scopes,
+            descriptors,
+        ),
         _scope_input_commands(scopes, command_scopes),
         _scope_depths(scopes),
     )
@@ -2355,12 +2644,25 @@ def _input_expression(
     command: _CommandEvidence,
     pipe_inputs: dict[int, ContentExpr],
     process_resources: dict[int, _ProcessResourceEvidence],
+    command_scope_paths: dict[int, tuple[int, ...]],
+    descriptors: _InputDescriptorContext,
 ) -> ContentExpr:
-    """Replay ordered input descriptor bindings and return descriptor zero."""
+    """Replay ordered input descriptor bindings and return descriptor zero.
+
+    Args:
+        command: The command whose stdin expression this replay resolves.
+        pipe_inputs: Stdin expressions from pipes and output process resources, by command id.
+        process_resources: Process-substitution resources referenced by descriptor.
+        command_scope_paths: Each command's structured scope ancestry, outermost to innermost.
+        descriptors: Input descriptor bindings and guarded descriptors for this evidence body.
+    """
+    enclosing = command_scope_paths.get(command.command_id, ())
     return _replay_input_bindings(
         command.redirections,
         pipe_inputs.get(command.command_id, OutsideGap()),
         process_resources,
+        inherited=descriptors.scope_bindings.get(enclosing[-1], {}) if enclosing else {},
+        guarded=descriptors.guarded,
     )
 
 
@@ -2499,8 +2801,13 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     limits: TaintLimits,
 ) -> _ShellTaintEvidence:
     """Attach finalized stdin and exact bounded read-field projections."""
-    pipe_inputs = _pipe_inputs(evidence)
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
+    command_scope_paths = _command_scope_paths(evidence)
+    input_descriptors = _InputDescriptorContext(
+        scope_bindings=_scope_inherited_input_bindings(evidence, process_resources),
+        guarded=_guarded_input_descriptors(evidence),
+    )
+    pipe_inputs = _pipe_inputs(evidence, input_descriptors)
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
@@ -2569,7 +2876,13 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 conditional=False,
             )
         stdin = _strip_one_trailing_newline(
-            _input_expression(command, pipe_inputs, process_resources)
+            _input_expression(
+                command,
+                pipe_inputs,
+                process_resources,
+                command_scope_paths,
+                input_descriptors,
+            )
         )
         exact_stdin = _exact_content_literal(stdin, command_values, limits)
         read_target_count = next(
@@ -6589,9 +6902,19 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
     guarded_descriptors = _guarded_output_descriptors(evidence)
     command_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
-    pipe_inputs = _pipe_inputs(evidence)
+    input_descriptors = _InputDescriptorContext(
+        scope_bindings=_scope_inherited_input_bindings(evidence, process_resources),
+        guarded=_guarded_input_descriptors(evidence),
+    )
+    pipe_inputs = _pipe_inputs(evidence, input_descriptors)
     inputs = {
-        command.command_id: _input_expression(command, pipe_inputs, process_resources)
+        command.command_id: _input_expression(
+            command,
+            pipe_inputs,
+            process_resources,
+            command_paths,
+            input_descriptors,
+        )
         for command in evidence.commands
     }
     variable_writes: list[_FlowWrite] = []

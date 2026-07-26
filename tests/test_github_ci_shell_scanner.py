@@ -43,6 +43,7 @@ from doc_lattice.github_ci.shell_taint import (
 
 NONE = ()
 LINEAR = (("linear", False),)
+_BASH = shutil.which("bash", path=os.defpath)
 RECONCILE = (("reconcile", False),)
 RECONCILE_DRY = (("reconcile", True),)
 CHECK = (("check", False),)
@@ -239,6 +240,14 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         """eval 'command -p export X=doc-'; eval "$X"'lattice check'""",
         {},
     ),
+    (
+        # The verified false-safe from issue #135: ``/dev/stdout`` on the write side used to be
+        # modeled as an ordinary static file, which replaced the implicit pipe target and made
+        # ``_pipe_source`` discard the taint instead of routing it into the ``bash`` consumer.
+        "dev-stdout-write-side",
+        'A=doc-; printf "%s\\n" "${A}lattice reconcile" > /dev/stdout | bash',
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -297,6 +306,25 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         "printf 'Y=lattice' > s.sh; . s.sh; eval \"doc-$Y\"",
         {},
         "shell source payload state cannot be represented",
+    ),
+    (
+        # Multi-hop output descriptor duplication (issue #135): an intermediate ``exec 3>&4``
+        # used to collapse into a dynamic placeholder before the guard could see it, and the
+        # later ``>&3`` inherited that placeholder without re-checking the guard.
+        "output-descriptor-duplication-chain",
+        "exec 4> run.sh\nexec 3>&4\nprintf '%s%s\\n' doc- 'lattice reconcile' >&3\nbash run.sh\n",
+        {},
+        "shell descriptor source cannot be represented",
+    ),
+    (
+        # Multi-hop input descriptor duplication (issue #135): the input side had no inherited
+        # chain or guard, so an ``exec 3< task.sh`` opened in one command and duplicated via
+        # ``0<&3`` in a separate, sibling command silently substituted a certifying
+        # ``OutsideGap()`` instead of failing closed.
+        "input-descriptor-duplication-chain",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > task.sh\nexec 3< task.sh\nbash 0<&3\n",
+        {},
+        "shell descriptor source cannot be represented",
     ),
 ]
 
@@ -715,6 +743,48 @@ def test_write_to_an_unbound_descriptor_fails_closed(script: str):
     assert result.incomplete_reason == "shell descriptor source cannot be represented"
     with pytest.raises(ConfigError, match=r"shell scan incomplete"):
         direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f"exec 4> run.sh\nexec 3>&4\n{SPLIT_MARKER} >&3\nbash run.sh\n",
+        f"exec 4> run.sh\nexec 3>&4\nexec 5>&3\n{SPLIT_MARKER} >&5\nbash run.sh\n",
+        f"exec 4> run.sh\n{SPLIT_MARKER} 3>&4 >&3\nbash run.sh\n",
+    ],
+    ids=("two-hop", "three-hop", "same-command-two-hop"),
+)
+def test_duplication_chain_through_an_intermediate_hop_fails_closed(script: str):
+    # ``exec 3>&4`` duplicates an unresolved reference to a descriptor (4) some other command in
+    # this body binds directly (``exec 4> run.sh``). Collapsing that duplication into a dynamic
+    # placeholder at the point it is created -- rather than at the point something finally routes
+    # stdout through it -- let a later ``>&3`` inherit the placeholder without re-checking whether
+    # the chain it stands in for reaches a guarded descriptor. Verified against real bash: this
+    # executes the shim. It must fail closed the same way the direct one-hop form does.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell descriptor source cannot be represented"
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "exec 3>&4\necho hello\n",
+        f"exec 3>&4\n{SPLIT_MARKER} >&5\nbash run.sh\n",
+        f"{SPLIT_MARKER} 3>&4 >&3\nbash run.sh\n",
+    ],
+    ids=("duplicate-of-unbound", "unrelated-descriptor", "duplicate-never-guarded"),
+)
+def test_duplication_chain_to_an_unguarded_descriptor_still_certifies(script: str):
+    # A duplication chain that never reaches a descriptor some other command binds directly is
+    # not a runtime error and is not a marker-relevant write, so it must stay certified.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(
@@ -6804,6 +6874,59 @@ def test_duplicated_static_input_descriptor_reaches_shell_stdin_sink():
     assert_taint_refusal("printf '%s%s' 'doc-' 'lattice reconcile' > task.sh; bash 3< task.sh 0<&3")
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\nexec 3< task.sh\nbash 0<&3\n",
+        "exec 3< unrelated.txt\nbash 0<&3\n",
+    ],
+    ids=("marker-file", "unrelated-file"),
+)
+def test_exec_opened_input_descriptor_duplicated_across_commands_fails_closed(script: str):
+    # ``exec 3< task.sh`` rebinds the descriptor for the rest of the shell, the input-side mirror
+    # of the output ``exec N> f`` case. A later, separate command's ``0<&3`` cannot see that
+    # binding directly, so it must fail closed instead of silently discarding the read -- the
+    # same conservative treatment the output side gives an unbound descriptor regardless of
+    # whether the file it names turns out to be marker-relevant. Verified against real bash: the
+    # ``marker-file`` case executes the shim.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell descriptor source cannot be represented"
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+def test_compound_scope_input_descriptor_binding_routes_authored_reads():
+    # ``0<&3`` inside a compound resolves against the descriptor the compound itself bound, the
+    # input-side mirror of the output compound-scope routing case. Verified against real bash:
+    # this executes the shim.
+    assert_taint_refusal(
+        "printf '%s%s\\n' 'doc-' 'lattice reconcile' > task.sh\n{ bash 0<&3; } 3< task.sh\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "bash 0<&3\n",
+        "{ bash 0<&3; } 3< unrelated.txt\n",
+    ],
+    ids=("descriptor-never-opened", "unrelated-file-compound"),
+)
+def test_input_duplication_to_an_unguarded_or_correctly_routed_descriptor_still_certifies(
+    script: str,
+):
+    # A ``<&N`` reference to a descriptor nothing in the body binds directly is a runtime error
+    # in Bash rather than missing evidence. A compound's own binding is visible to what it
+    # encloses, so a nested ``<&N`` resolves directly to the enclosing scope's descriptor rather
+    # than failing closed, and unrelated content carries no marker either way.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
 def test_duplicated_static_output_descriptor_receives_stdout():
     assert_taint_refusal("printf '%s%s' 'doc-' 'lattice reconcile' 3> task.sh 1>&3; bash task.sh")
 
@@ -7239,6 +7362,54 @@ def test_stdout_alias_back_to_implicit_pipe_reaches_consumer(script: str):
     ids=("null", "descriptor-away", "alias-then-null"),
 )
 def test_final_stdout_binding_away_from_implicit_pipe_stays_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # The exact false-safe from issue #135, verified under real bash 5.2 with a doc-lattice
+        # shim on PATH: this certifies clean today and executes the shim.
+        'A=doc-; printf "%s\\n" "${A}lattice reconcile" > /dev/stdout | bash',
+        "printf '%s%s\\n' doc- lattice > /dev/fd/1 | bash",
+        "printf '%s%s\\n' doc- lattice > /proc/self/fd/1 | bash",
+        "printf '%s%s\\n' doc- lattice &> /dev/stdout | bash",
+    ],
+    ids=("dev-stdout", "dev-fd-1", "proc-self-fd-1", "combined-dev-stdout"),
+)
+def test_dev_fd_write_family_names_the_descriptor_it_aliases(script: str):
+    # ``/dev/stdout``, ``/dev/fd/N`` and ``/proc/self/fd/N`` are descriptor aliases on the write
+    # side, not ordinary files. Modeling them as a static resource replaced the implicit pipe
+    # target, so ``_pipe_source`` annihilated the taint instead of routing it.
+    assert_taint_refusal(script)
+
+
+def test_dev_fd_write_family_routes_through_a_bound_descriptor():
+    # ``/dev/fd/4`` names descriptor 4 the same way ``>&4`` would, so a write through it must be
+    # subject to the same duplication-guard treatment as an explicit ``>&N``.
+    script = f"exec 4> run.sh\n{SPLIT_MARKER} > /dev/fd/4\nbash run.sh\n"
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell descriptor source cannot be represented"
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf '%s%s\\n' doc- lattice > /dev/fd/3 | bash",
+        "printf '%s%s\\n' doc- lattice > /dev/stdout\nbash run.sh\n",
+    ],
+    ids=("unrelated-descriptor", "no-consumer"),
+)
+def test_dev_fd_write_family_unrelated_target_still_certifies(script: str):
+    # ``/dev/fd/3`` names a descriptor nothing in the body binds, and writing ``/dev/stdout``
+    # with no pipe consumer never reaches an execution sink either way.
     result = scan_doc_lattice_invocations(script)
 
     assert result.incomplete_reason is None
@@ -7902,6 +8073,7 @@ def _marker_executes_under_bash(
     return probe.exists(), completed.stderr
 
 
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
 @pytest.mark.parametrize(
     ("_description", "script", "extra_environment"),
     PHASE_TWO_RUNTIME_REFUSALS,
@@ -7921,6 +8093,7 @@ def test_phase_two_refusal_fixture_executes_marker_under_real_bash(
     assert executed, stderr
 
 
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
 @pytest.mark.parametrize(
     ("_description", "script", "extra_environment", "reason"),
     PHASE_TWO_FAIL_CLOSED_REFUSALS,
