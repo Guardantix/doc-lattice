@@ -85,6 +85,9 @@ _COMMAND_PREFIXES = frozenset(
     }
 )
 _SHELL_ASSIGNMENT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# An array literal element spelled ``[subscript]=value`` or ``[subscript]+=value``. Bash accepts
+# the bracket quoted, so this matches the decoded literal rather than the authored spelling.
+_SHELL_ARRAY_SUBSCRIPT_ELEMENT_RE = re.compile(r"\[.*\]\+?=")
 _PYTHON_DISTRIBUTION_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 _PYTHON_DISTRIBUTION_SEPARATOR_RE = re.compile(r"[-_.]+")
 _UV_REQUIREMENT_SUFFIX_STARTS = frozenset("([<>=!~@;")
@@ -494,6 +497,26 @@ class _ShellWord:
     keyword_eligible: bool = True
     argv_ports: tuple[_WordContentPort, ...] | None = None
     brace_expansion_error: str | None = None
+
+
+def _is_array_subscript_element(literal: str) -> bool:
+    """Return whether an array literal element addresses an explicit subscript.
+
+    An unquoted ``(`` inside an arithmetic subscript ends the word, so ``[1+(2)]=lattice`` reaches
+    this check as the fragment ``[1+``. A leading ``[`` with no closing ``]`` is exactly that
+    truncation, and treating it as a subscript keeps the split spelling from slipping past. A
+    bracket expression such as ``[a-z]*.md`` closes its bracket and assigns nothing, so it stays an
+    ordinary element.
+
+    Args:
+        literal: The element word's decoded literal, after quote removal.
+
+    Returns:
+        True when the element assigns through a subscript rather than appending in order.
+    """
+    if not literal.startswith("["):
+        return False
+    return "]" not in literal or _SHELL_ARRAY_SUBSCRIPT_ELEMENT_RE.match(literal) is not None
 
 
 def _loop_header_words(words: list[_ShellWord], kind: str) -> list[_ShellWord] | None:
@@ -1527,15 +1550,46 @@ class _ShellScanner:
         state: _CommandScanState,
         depth: int,
     ) -> int:
-        """Consume compound assignment data while retaining executable expansions.
+        """Consume compound assignment data and compose it into the pending assignment.
 
-        Element words never join the command's argv, but their decoded marker facts still
-        aggregate into ``state.command_has_marker``: an array literal such as
-        ``cmds=(doc-lattice reconcile)`` feeds a later dynamic execution the scanner cannot
-        follow, so it must fail closed exactly like the scalar ``X=doc-lattice`` assignment.
+        Element words never join the command's argv, so an array literal holds its value as
+        ``concat(choice("", e1), ..., choice("", en))`` over the element contents in literal
+        order. Every read shape selects some subset of that expression: a single subscript picks
+        one element and empties the rest, ``${NAME}`` picks element zero the same way, and a
+        joined ``${NAME[*]}`` under an emptied ``IFS`` is the whole concatenation. Element
+        separators are dropped, which over-approximates in the fail-closed direction. An empty
+        literal composes to the empty transfer, which is then the array's real value rather than
+        the fabricated one a bare ``NAME=`` word carried before.
+
+        Their decoded marker facts still aggregate into ``state.command_has_marker`` as well, so
+        an array literal such as ``cmds=(doc-lattice reconcile)`` keeps failing closed when it
+        feeds a dynamic execution the scanner cannot follow.
+
+        An element spelled ``[subscript]=value`` leaves literal order no longer equal to index
+        order, and a joined read concatenates by index, so that spelling fails closed instead.
         """
         if depth > _MAX_SHELL_RECURSION_DEPTH:
             raise _ShellScanIncomplete("recursion limit exceeded")
+        contents: list[ContentExpr] = []
+        end = self._consume_array_elements(index, limit, state, depth, contents)
+        if state.words:
+            state.words[-1] = replace(
+                state.words[-1],
+                assignment_content=concat(
+                    *(choice(LiteralTransfer(""), content) for content in contents)
+                ),
+            )
+        return end
+
+    def _consume_array_elements(
+        self,
+        index: int,
+        limit: int,
+        state: _CommandScanState,
+        depth: int,
+        contents: list[ContentExpr],
+    ) -> int:
+        """Scan one compound assignment body, appending each element's content to ``contents``."""
         parentheses = 1
         at_word_start = True
         while index < limit:
@@ -1572,7 +1626,10 @@ class _ShellScanner:
                 reject_extglob=False,
             )
             if next_index != index:
+                if _is_array_subscript_element(word.literal):
+                    raise _ShellScanIncomplete("array element subscript cannot be represented")
                 state.command_has_marker = state.command_has_marker or word.has_doc_lattice_marker
+                contents.append(word.content)
                 index = next_index
                 at_word_start = False
                 continue
@@ -3821,7 +3878,11 @@ def _deterministic_writer_evidence(  # noqa: PLR0911, PLR0912, PLR0915
     words: list[_ShellWord],
     executable: _ExecutableEvidence | None,
 ) -> tuple[tuple[_AssignmentEvidence, ...], ContentExpr | None, bool]:
-    """Return bounded assignments from deterministic ``printf -v`` and ``read`` forms."""
+    """Return bounded assignments from deterministic ``printf -v`` and ``read`` forms.
+
+    ``mapfile`` and its ``readarray`` synonym share this dispatch only to report that they write a
+    target the transfer summary cannot represent.
+    """
     if executable is None:
         return (), None, False
     pending = [executable]
@@ -3832,7 +3893,7 @@ def _deterministic_writer_evidence(  # noqa: PLR0911, PLR0912, PLR0915
         if (
             not candidate.external_lookup
             and candidate.argv_index is not None
-            and candidate.name in {"printf", "read"}
+            and candidate.name in {"mapfile", "printf", "read", "readarray"}
             and candidate.literal == candidate.name
         ):
             executable_index = candidate.argv_index
@@ -3843,6 +3904,15 @@ def _deterministic_writer_evidence(  # noqa: PLR0911, PLR0912, PLR0915
         return (), None, False
 
     arguments = words[executable_index + 1 :]
+    if builtin_name in {"mapfile", "readarray"}:
+        # Both spellings only ever write an array, and the stream model carries no per-element
+        # content for one, so widening the target would drop the flow instead of over-approximating
+        # it. This matches the ``read -a`` treatment below.
+        return (
+            (),
+            choice(*(word.content for word in arguments)) if arguments else OutsideGap(),
+            True,
+        )
     if builtin_name == "printf":
         if not arguments or arguments[0].dynamic:
             return (

@@ -1,13 +1,5 @@
 # doc-lattice shell taint fuzzer baseline
 # producer	carrier	sink	wrapper
-array-element	alternate	eval	none
-array-element	braced	eval	none
-array-element	default	eval	none
-array-element	direct	eval	case-arm
-array-element	direct	eval	none
-array-element	strip-prefix	eval	none
-array-element	strip-suffix	eval	none
-array-element	substitute	eval	none
 eval-assign	alternate	eval	none
 eval-assign	braced	sh-c	none
 eval-assign	default	eval	none

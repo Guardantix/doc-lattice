@@ -681,13 +681,16 @@ In practice this means marker-free dynamic execution still certifies. `curl ... 
 `eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` are all clean,
 because no authored fragment composes the marker. Oversized or cap-exhausting input exits 2.
 
-Three constructs exit 2 for the whole step rather than being modeled. A bare `exec` that rebinds
+Four constructs exit 2 for the whole step rather than being modeled. A bare `exec` that rebinds
 standard input, output, or error exits 2, because the descriptor belongs to the shell from that
 point on rather than to the `exec` itself; a redirection attached to a command or compound is
-modeled instead. A `read` that uses `-a`, `-d`, `-n`, `-N`, or `-u` exits 2, since a bounded prefix
-can compose a marker the full stream does not contain. A `set --` or `shift` that rewrites the
-positional parameters outside a function body exits 2, because positional binding is modeled for
-function contexts only.
+modeled instead. A `read` that uses `-a`, `-d`, `-n`, `-N`, or `-u`, and every `mapfile` or
+`readarray`, exits 2, since a stream supplies no per-element content for an array target and a
+bounded prefix can compose a marker the full stream does not contain. An array literal element
+spelled `[subscript]=value` exits 2, because literal order is then no longer index order while a
+joined read concatenates by index; an array literal whose elements carry their content directly is
+modeled instead. A `set --` or `shift` that rewrites the positional parameters outside a function
+body exits 2, because positional binding is modeled for function contexts only.
 
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context

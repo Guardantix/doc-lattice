@@ -413,7 +413,17 @@ ungapped pass-through alternative means a transform whose pattern does not match
 either, so `A=doc-; bash -c "${A#zz}lattice"` refuses. Bounded static brace expansion fans one
 lexical word into ordered argv ports; because
 brace expansion precedes parameter expansion, an authored comma list expands even when a member's
-content is dynamic. `for`/`select` iteration words join into loop-variable evidence, and a header
+content is dynamic. An array literal holds `concat(choice("", e1), ..., choice("", en))` over its
+element contents in literal order, so one expression covers `${A}`, `${A[i]}`, `${A[@]}`,
+`${A[*]}`, and their slices: each read independently selects a subset, a single subscript picking
+one element and emptying the rest. Element separators are dropped, which over-approximates in the
+fail-closed direction, and `A+=(w)` composes through the existing append path. An element spelled
+`[subscript]=value` leaves literal order no longer equal to index order while a joined read
+concatenates by index, so that spelling fails closed at the scanner. Fields an element produces by
+word splitting recombine without their separator, so `X="doc- lattice"; A=($X); eval
+"${A[0]}${A[1]}"` still certifies; that is the same splitting boundary this decision already
+records for loop headers rather than a new one. `for`/`select` iteration words join into
+loop-variable evidence, and a header
 this scan cannot enumerate, whether an arithmetic header, implicit positionals, word splitting, or
 pathname expansion, contributes an external gap rather than failing the scan; `while`/`until`
 repeat the test list around each body iteration; `case` `;&` and `;;&` preserve fallthrough
@@ -466,8 +476,9 @@ fail-closed; modeling export status precisely is future work.
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing
 `eval` has no natural terminating point, and this engine is defense in depth behind human review,
-not the boundary that contains untrusted code. Array assignment and element reads, values bearing
-arithmetic expansion, and `eval` nested inside an `eval` payload are therefore not modeled.
+not the boundary that contains untrusted code. Values bearing arithmetic expansion and `eval`
+nested inside an `eval` payload are therefore not modeled, and an array assignment fails closed
+rather than being interpreted.
 Verification under real bash on 2026-07-25 confirmed that nested `eval` does persist its
 assignments to the current shell, so that is a known false-safe gap rather than evidence of safety.
 Closing it belongs in a bounded guard that fails closed on an unmodeled state-carrying construct,
@@ -477,9 +488,14 @@ Brace groups and loop bodies are the exception to that stop-line and are modeled
 persist their assignments the same way and are cheap to replay. `_STATIC_EVAL_MUTATION_PREFIXES`
 carries the `{`, `do`, `while`, and `until` keyword entries that make this work, and those four
 entries are load bearing: removing them as apparent dead weight reopens a real false certification.
-Array assignment inside a payload is worse than unmodeled, because it records a fabricated empty
-value rather than an unknown one, which is a positive safety assertion the analysis has not earned;
-that is tracked in issue #132.
+An array assignment inside a payload was worse than unmodeled, and not for the reason issue #132
+first recorded: the payload tokenizer lexes an unquoted `(` as a command separator, so
+`eval 'A=(doc-)'` recorded the scalar `A = ""` and scattered the elements into following commands.
+That empty value is a positive safety assertion the analysis had not earned. The compound
+spelling, a `NAME[subscript]=` element write, and a `declare`, `local`, `readonly`, or `typeset`
+carrying `-a` or `-A` now all fail closed, which is the bounded guard this stop-line prescribes. A
+quoted or escaped `(` stays inside its word, where it really is one scalar character, and still
+certifies.
 
 Variable, resource, and stream reference resolution is a monotone least fixed point and is
 independent of source order. Append accumulation is not: a `+=` write seeds from the value present
@@ -522,9 +538,11 @@ external shadow of `command` or `builtin` is not reinterpreted as a wrapper.
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
 shell scope for every later command, which the per-command `redirections` field cannot express. A
-`read` that uses `-a`, `-d`, `-n`, `-N`, or `-u` either writes an array, whose element reads are
-not modeled, or reads a bounded prefix, which can compose a marker the full stream does not
-contain; widening either to the whole stream would drop the flow instead of over-approximating it.
+`read` that uses `-a`, `-d`, `-n`, `-N`, or `-u`, and every `mapfile` or its `readarray` synonym,
+either writes an array from a stream the model carries no per-element content for, or reads a
+bounded prefix, which can compose a marker the full stream does not contain; widening either to
+the whole stream would drop the flow instead of over-approximating it. An array literal supplies
+its element contents directly and so is composed rather than refused.
 A `set --` or `shift` outside a function body rewrites positional parameters that are bound for
 function contexts only. The first two refuse at the scanner and the third refuses in the taint
 module. Where an exact projection is merely lost rather than absent, the solver

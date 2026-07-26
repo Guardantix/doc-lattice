@@ -222,6 +222,7 @@ class _StaticEvalCommand:
     execution_status: bool | None = True
     active_function_names: frozenset[str] = frozenset()
     asynchronous: bool = False
+    array_compound: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -4036,6 +4037,10 @@ def _static_eval_program_commands(
                         # Adjacent separators lex as one run, so the operator that actually
                         # terminates the command is the run with its trailing newlines removed.
                         asynchronous=lexeme.rstrip("\n") == "&",
+                        # ``(`` never opens a subshell directly after an assignment prefix, so an
+                        # unquoted one there begins a compound array assignment whose elements the
+                        # lexer scatters into the following commands.
+                        array_compound="(" in lexeme and _static_eval_assignment_prefix(words[-1]),
                     )
                 )
                 words.clear()
@@ -4104,6 +4109,8 @@ def _static_status_not(status: bool | None) -> bool | None:
 _STATIC_EVAL_MUTATION_PREFIXES = frozenset(
     {"coproc", "do", "elif", "else", "if", "then", "time", "until", "while", "{"}
 )
+# Options that declare an indexed or associative array rather than a scalar.
+_STATIC_EVAL_ARRAY_DECLARATION_FLAGS = frozenset("aA")
 
 
 def _static_eval_wrapped_executable(
@@ -4300,6 +4307,30 @@ def _static_assignment_word(word: str) -> _AssignmentEvidence | None:
     return _AssignmentEvidence(name, LiteralTransfer(value), append=append)
 
 
+def _static_eval_assignment_prefix(word: str) -> bool:
+    """Return whether an eval payload word is an assignment awaiting its value.
+
+    Only an unquoted ``(`` lexes apart from the word before it, and bash reads that position as a
+    compound assignment rather than a subshell. A quoted or escaped ``(`` stays inside the word,
+    where it really is one scalar character, so this deliberately does not match it.
+    """
+    return word.endswith("=") and _static_variable_name(word[:-1].removesuffix("+"))
+
+
+def _static_eval_element_assignment(word: str) -> bool:
+    """Return whether an already-tokenized eval payload word writes one array element.
+
+    ``NAME[subscript]=`` is not a variable name, so ``_static_assignment_word`` declines it and
+    the word becomes an executable the analysis then finds no evidence for. The write is real, so
+    it fails closed instead.
+    """
+    name, separator, _ = word.partition("=")
+    if not separator:
+        return False
+    target, bracket, subscript = name.removesuffix("+").partition("[")
+    return bool(bracket) and subscript.endswith("]") and _static_variable_name(target)
+
+
 def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
     """Lower one static eval assignment RHS with its second-pass quote semantics."""
     quote: str | None = None
@@ -4364,6 +4395,8 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
     for parsed in _static_eval_commands(command):
         if parsed.execution_status is False:
             continue
+        if parsed.array_compound:
+            raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
         words = parsed.words
         index = 0
         while index < len(words) and parsed.keyword_eligible[index]:
@@ -4376,6 +4409,8 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                     index += 1
         prefix_assignments: list[_StaticEvalAssignment] = []
         while index < len(words):
+            if _static_eval_element_assignment(words[index]):
+                raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
             assignment = _static_assignment_word(words[index])
             if assignment is None:
                 break
@@ -4416,6 +4451,12 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                 for word in words[index + 1 :]
                 if word.startswith(("-", "+")) and word not in {"-", "+"}
             )
+            if any(
+                set(option[1:]) & _STATIC_EVAL_ARRAY_DECLARATION_FLAGS
+                for option in options
+                if option.startswith("-")
+            ):
+                raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
             force_global = executable in {"declare", "typeset"} and any(
                 option.startswith("-") and "g" in option[1:] for option in options
             )
@@ -4426,6 +4467,8 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                     nameref_action = option.startswith("-")
             for word_index in range(index + 1, len(words)):
                 word = words[word_index]
+                if _static_eval_element_assignment(word):
+                    raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
                 assignment = _static_assignment_word(word)
                 if assignment is not None:
                     if nameref_action is False:

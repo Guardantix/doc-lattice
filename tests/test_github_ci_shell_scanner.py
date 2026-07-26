@@ -37,6 +37,8 @@ from doc_lattice.github_ci.shell_taint import (
     LiteralTransfer,
     RepeatOutput,
     SequenceOutput,
+    choice,
+    concat,
 )
 
 NONE = ()
@@ -1504,6 +1506,155 @@ def test_direct_doc_lattice_invocations_fails_closed_on_marker_bearing_array_lit
 )
 def test_direct_doc_lattice_invocations_scans_executable_array_contexts(script, expected):
     assert direct_doc_lattice_invocations(script) == expected
+
+
+def test_array_literal_assignment_composes_its_element_contents():
+    # The ``A=`` word was built before ``(`` was seen, so the pending assignment used to keep the
+    # empty token run it started with and record ``A = ""``: a claim the variable holds nothing.
+    scanner = _ShellScanner("A=(doc- lattice)", classify_commands=False)
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    assignments = [
+        assignment for command in builder.commands for assignment in command.definite_assignments
+    ]
+    assert [assignment.name for assignment in assignments] == ["A"]
+    assert assignments[0].content == concat(
+        choice(LiteralTransfer(""), LiteralTransfer("doc-")),
+        choice(LiteralTransfer(""), LiteralTransfer("lattice")),
+    )
+
+
+def test_empty_array_literal_assignment_keeps_the_empty_transfer():
+    scanner = _ShellScanner("A=()", classify_commands=False)
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    assignments = [
+        assignment for command in builder.commands for assignment in command.definite_assignments
+    ]
+    assert [(assignment.name, assignment.content) for assignment in assignments] == [
+        ("A", LiteralTransfer(""))
+    ]
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=(doc-)\neval "${A}lattice"\n',
+        'A=(doc-)\neval "${A[0]}lattice"\n',
+        'A=(doc-)\neval "${A[@]}lattice"\n',
+        'A=(doc-)\neval "${A[*]}lattice"\n',
+        'A=(doc-)\neval "${A[@]:0:1}lattice"\n',
+        'A=(doc-)\nB=lattice\neval "$A$B"\n',
+        'A=(doc-)\nA+=(lattice)\neval "${A[0]}${A[1]}"\n',
+        'declare -a A=(doc-)\neval "${A[0]}lattice"\n',
+        'f() {\n  local -a A=(doc-)\n  eval "${A[0]}lattice"\n}\nf\n',
+        'export A=(doc-)\neval "${A[0]}lattice"\n',
+        'readonly A=(doc-)\neval "${A[0]}lattice"\n',
+        'A=(doc- lattice)\nIFS=\neval "${A[*]}"\n',
+    ],
+    ids=(
+        "bare-reference",
+        "subscript-read",
+        "at-read",
+        "star-read",
+        "slice-read",
+        "second-variable",
+        "append-literal",
+        "declare-indexed",
+        "local-indexed",
+        "export",
+        "readonly",
+        "joined-under-empty-ifs",
+    ),
+)
+def test_array_literal_element_content_reaching_a_later_eval_fails_closed(script: str):
+    # One composed value covers every read shape, because each read independently selects a
+    # subset of the elements. Composition across two reads then covers the ordered pairs.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        (
+            'A=([1]=lattice [0]=doc-)\nIFS=\neval "${A[*]}"\n',
+            "array element subscript cannot be represented",
+        ),
+        (
+            'A=([1+(2)]=lattice [0+(1)]=doc-)\nIFS=\neval "${A[*]}"\n',
+            "array element subscript cannot be represented",
+        ),
+        (
+            'mapfile -t A <<< "doc-"\neval "${A[0]}lattice"\n',
+            "shell builtin writer cannot be represented",
+        ),
+        (
+            'readarray -t A <<< "doc-"\neval "${A[0]}lattice"\n',
+            "shell builtin writer cannot be represented",
+        ),
+        (
+            'mapfile -t A < <(printf "doc-\\n")\neval "${A[0]}lattice"\n',
+            "shell builtin writer cannot be represented",
+        ),
+    ],
+    ids=(
+        "explicit-subscript",
+        "arithmetic-subscript",
+        "mapfile",
+        "readarray",
+        "mapfile-process-substitution",
+    ),
+)
+def test_unrepresentable_array_write_fails_closed_with_its_reason(script: str, reason: str):
+    # A joined read concatenates by index, so an explicit subscript breaks the literal-order
+    # model. ``mapfile`` and ``readarray`` take their elements from a stream the model carries no
+    # per-element content for, which is why ``read -a`` already refuses.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == reason
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A[0]=doc-\nA[1]=lattice\neval "${A[0]}${A[1]}"\n',
+        'A[0]=doc-\neval "${A[0]}lattice"\n',
+        'declare A\nA[0]=doc-\neval "${A[0]}lattice"\n',
+        'set -f\nA[0]=doc-\neval "${A[0]}lattice"\n',
+    ],
+    ids=("pair", "single", "after-declare", "noglob"),
+)
+def test_element_assignment_outside_a_literal_stays_refused(script: str):
+    # ``A[0]=doc-`` is not a recognized assignment, so the word becomes the executable and its
+    # ``[0]`` trips the glob rule. This pins that fail-closed path rather than fixing it.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "executable word uses brace or glob expansion"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=([a-z]*.md doc.md)\ndoc-lattice check\n",
+        'A=(alpha beta)\nIFS=\neval "${A[*]}"\ndoc-lattice check\n',
+    ],
+    ids=("bracket-expression-element", "marker-free-join"),
+)
+def test_marker_free_array_literal_still_certifies(script: str):
+    # A bracket expression closes its bracket and assigns nothing, so it stays an ordinary
+    # element rather than tripping the subscript guard.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == CHECK
 
 
 @pytest.mark.parametrize(

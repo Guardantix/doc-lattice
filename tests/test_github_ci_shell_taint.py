@@ -2291,6 +2291,71 @@ def test_static_eval_nameref_hazard_fails_closed(program: str, message: str) -> 
     assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
 
 
+@pytest.mark.parametrize(
+    "program",
+    [
+        "A=(doc-)",
+        "A=(doc- lattice)",
+        "A+=(lattice)",
+        "A=()",
+        "declare A=(doc-)",
+        "export A=(doc-)",
+        "readonly A=(doc-)",
+        "A[0]=doc-",
+        "A[0]+=doc-",
+        "declare -a A",
+        "local -A A",
+        "typeset -a A",
+    ],
+    ids=(
+        "compound",
+        "compound-two-elements",
+        "compound-append",
+        "compound-empty",
+        "declare-compound",
+        "export-compound",
+        "readonly-compound",
+        "element",
+        "element-append",
+        "declare-indexed",
+        "local-associative",
+        "typeset-indexed",
+    ),
+)
+def test_static_eval_array_assignment_fails_closed(program: str) -> None:
+    # The payload tokenizer lexes an unquoted ``(`` as a command separator, so ``A=(doc-)`` used
+    # to record the scalar ``A = ""`` and scatter its elements into the following commands.
+    with pytest.raises(
+        _TaintLimitExceeded,
+        match="shell eval array assignment cannot be represented",
+    ) as raised:
+        _static_eval_mutations(_eval_command(program, function_context_id=1))
+
+    assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("program", "content"),
+    [
+        ("A='(doc-)'", LiteralTransfer("(doc-)")),
+        ("A=\\(doc-\\)", LiteralTransfer("(doc-)")),
+    ],
+    ids=("quoted", "escaped"),
+)
+def test_static_eval_keeps_a_quoted_parenthesis_scalar(program: str, content: ContentExpr) -> None:
+    # A quoted or escaped ``(`` stays inside its word, where it really is one scalar character.
+    assignments, unsets = _static_eval_mutations(_eval_command(program))
+
+    assert unsets == ()
+    assert [(item.assignment.name, item.assignment.content) for item in assignments] == [
+        ("A", content)
+    ]
+
+
+def test_static_eval_array_assignment_in_an_unreachable_branch_is_pruned() -> None:
+    assert _static_eval_mutations(_eval_command("if false; then A=(doc-); fi")) == ((), ())
+
+
 def test_static_eval_prunes_mutations_of_an_unreachable_branch() -> None:
     program = "if false; then X=doc-; fi"
     parsed = _static_eval_program_commands(program)
