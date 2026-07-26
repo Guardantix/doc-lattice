@@ -2513,6 +2513,7 @@ class _ShellScanner:
                         port.content,
                         dynamic=word.dynamic,
                         process_resource_id=word.process_resource_id,
+                        active_argv_expansion=_argv_port_active_argv_expansion(word, port),
                     )
                     for port in ports
                 )
@@ -4168,6 +4169,7 @@ def _is_modeled_taint_sink(words: list[_ShellWord], executable: _ExecutableEvide
             word.content,
             dynamic=word.dynamic,
             process_resource_id=word.process_resource_id,
+            active_argv_expansion=word.active_argv_expansion,
         )
         for word in words
     )
@@ -4384,6 +4386,30 @@ def _has_active_argv_expansion(syntax: str) -> bool:
             brace_separators[-1] = True
         previous_period = character == "."
     return False
+
+
+def _argv_port_active_argv_expansion(word: _ShellWord, port: _WordContentPort) -> bool:
+    """Return whether one expanded argv port can still resolve to a different word at run time.
+
+    Brace expansion (``{a,b}``, ``{1..3}``) is fully resolved into concrete alternatives before
+    ``word.argv_ports`` exists, so a single-alternative range such as ``{01..01}`` must not
+    inherit the parent word's flag once its own expanded literal carries no remaining glob syntax
+    -- it names exactly one file, the same as if it had been typed directly. An unquoted glob
+    character survives brace expansion untouched (``ta{s,t}*.sh`` still widens both resulting
+    alternatives), so re-checking each expanded literal for one keeps that case caught. The
+    unexpanded fallback port is the word itself, where the word's own quote-aware flag is already
+    correct and does not need recomputing from its (quote-stripped) literal text.
+
+    Args:
+        word: The shell word this port was produced from.
+        port: One argv port, either an expanded brace alternative or the identity fallback.
+
+    Returns:
+        Whether this specific port can still expand into a different argv shape at run time.
+    """
+    if word.argv_ports is None:
+        return word.active_argv_expansion
+    return _has_active_argv_expansion(port.literal)
 
 
 def _skip_shell_prefixes(

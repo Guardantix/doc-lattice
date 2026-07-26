@@ -2867,3 +2867,161 @@ def test_eval_assignment_transfer_skips_a_multi_argument_command() -> None:
     )
 
     assert _eval_assignment_transfers(command) == ()
+
+
+def test_mid_cluster_short_option_o_widens_instead_of_dropping_the_sink() -> None:
+    """Issue #137: ``-o``/``-O`` mid-cluster used to drop the ``-c`` payload as the sink.
+
+    ``bash -oe pipefail -c PAYLOAD`` sets both ``errexit`` (``-e``) and ``pipefail`` (``-o
+    pipefail``) under real Bash 5.2: ``-o`` always takes its value from the NEXT argv word, even
+    when it is not the cluster's last character, and the remaining characters in the same word
+    keep being read as ordinary short options. Before this fix, ``_select_shell_source`` only
+    special-cased ``-o``/``-O`` when it was the cluster's last character, so it fell through and
+    misread ``pipefail`` -- the option's own value -- as the script operand, never reaching
+    ``-c``'s real payload.
+    """
+    control = "X=doc-; bash -c \"$X\"'lattice check'"
+    exploit = "X=doc-; bash -oe pipefail -c \"$X\"'lattice check'"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+@pytest.mark.parametrize(
+    ("cluster", "value"),
+    [("-oe", "pipefail"), ("-eo", "pipefail"), ("-Oe", "extglob"), ("-eO", "extglob")],
+    ids=("o-first", "o-last", "O-first", "O-last"),
+)
+def test_mid_cluster_short_option_o_or_O_any_position_refuses(cluster: str, value: str) -> None:
+    """Every cluster position, and both the ``-o`` and ``-O`` spellings, hit the same fix."""
+    exploit = f"X=doc-; bash {cluster} {value} -c \"$X\"'lattice check'"
+
+    result = scan_doc_lattice_invocations(exploit)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
+def test_mid_cluster_short_option_o_marker_free_still_certifies() -> None:
+    """Over-refusal guard: the widened corner must only refuse when it could carry marker flow."""
+    body = "bash -oe pipefail -c 'echo hi'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "option", ["-norc", "-posix", "-noprofile", "-noediting", "-restricted", "-login"]
+)
+def test_single_dash_long_option_widens_instead_of_dropping_the_sink(option: str) -> None:
+    """Issue #137: a single-dash GNU long option used to be decomposed as a short-option cluster.
+
+    ``-norc``/``-posix`` and their siblings are whole-word option spellings Bash accepts with one
+    leading dash, behaving exactly like ``--norc``/``--posix`` (verified under real Bash 5.2).
+    Before this fix ``_select_shell_source`` had no atomic recognition for the single-dash
+    spelling, so it fell into the short-option-cluster fallback and decomposed the word letter by
+    letter -- ``-norc``, for example, contains a ``c``, so the loop wrongly set
+    ``command_selected`` and treated the script operand that followed as a ``-c`` command string
+    rather than a script, so the file's own tracked marker-bearing content was never reached as a
+    sink.
+    """
+    control = "X=doc-; printf '%s' \"$X\"'lattice check' > t.sh; bash t.sh"
+    exploit = f"X=doc-; printf '%s' \"$X\"'lattice check' > t.sh; bash {option} t.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_single_dash_long_option_marker_free_target_still_certifies() -> None:
+    """Over-refusal guard: an untracked target behind a single-dash long option still certifies."""
+    body = "bash -norc README.md"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_glob_script_operand_widens_instead_of_resolving_to_an_exact_name() -> None:
+    """Issue #137: an unquoted glob script operand used to resolve to its own literal name.
+
+    ``_ArgPort`` did not carry ``active_argv_expansion`` -- the same flag ``_ShellWord`` already
+    computes elsewhere in this analysis for an unquoted glob, brace, or bracket expression -- so
+    ``bash ta*.sh`` resolved the operand as the literal, almost certainly nonexistent, resource key
+    ``"ta*.sh"`` instead of widening to the file(s) an unquoted ``*`` can expand to at run time.
+    One of those, ``task.sh``, is a file this same body's own ``printf`` tracked a marker-bearing
+    write to.
+
+    A glob's exact match set is genuinely unknowable without reading the filesystem, so once
+    ``_select_shell_source`` widens to ``AMBIGUOUS`` the general sink machinery alone resolves to
+    ``OutsideGap()`` -- an opaque, external unknown that is not itself proof of marker composition
+    and would still certify clean. ``_glob_script_operand_state_unrepresentable`` closes that gap
+    the same way ``_source_payload_state_unrepresentable`` does for a sourced file: it stays narrow
+    to a resource this same script writes, matched against the authored pattern.
+    """
+    control = "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; bash task.sh"
+    exploit = "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; bash ta*.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert (
+        exploit_result.incomplete_reason == "shell glob script operand state cannot be represented"
+    )
+
+
+def test_source_dashdash_widens_instead_of_dropping_the_sink() -> None:
+    """Issue #137: ``source --``'s end-of-options marker used to be mistaken for the operand.
+
+    ``source -- ./task.sh`` is ordinary Bash: ``--`` ends option parsing for the ``source``
+    builtin and ``./task.sh`` is the file sourced (verified under real Bash 5.2). The operand
+    lookup took the word immediately after the executable unconditionally, so it read ``--``
+    itself as the operand; the resource lookup for the key ``"--"`` never matched the tracked
+    ``task.sh`` write, so the sourced file's marker-bearing content was never reached as a sink.
+    """
+    control = "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; source task.sh"
+    exploit = "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; source -- ./task.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_source_dashdash_marker_free_target_still_certifies() -> None:
+    """Over-refusal guard: an untracked target behind ``source --`` still certifies."""
+    body = "source -- README.md"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_shell_option_grammar_normal_bash_c_still_certifies() -> None:
+    """Brief's baseline over-refusal guard: an ordinary marker-free ``bash -c`` still certifies."""
+    body = "bash -c 'echo hi'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_shell_option_grammar_exact_script_operand_still_certifies() -> None:
+    """Brief's baseline over-refusal guard: an exact, untracked script operand still certifies."""
+    body = "bash script.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None

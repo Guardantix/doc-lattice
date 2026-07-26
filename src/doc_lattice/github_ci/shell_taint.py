@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import shlex
 from collections import ChainMap
 from dataclasses import dataclass, field, replace
@@ -181,6 +182,7 @@ class _ArgPort:
     content: ContentExpr
     dynamic: bool = False
     process_resource_id: int | None = None
+    active_argv_expansion: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -905,8 +907,33 @@ _SHELL_WORD_SEPARATORS = frozenset(" \t\n;&|<>()")
 # which can only add a refusal and never certify a marker the shell would still run.
 _SHELL_COMMENT_WORD_SEPARATORS = frozenset(" \t\n;&|<>")
 _SHELL_HEADS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "rksh"})
-_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
-_SHELL_EAGER_STOPS = frozenset({"--help", "--version", "--dump-strings", "--dump-po-strings"})
+_SHELL_LONG_OPTION_NAMES_WITH_VALUE = frozenset({"rcfile", "init-file", "emulate"})
+_SHELL_EAGER_STOP_NAMES = frozenset({"help", "version", "dump-strings", "dump-po-strings"})
+# Bash accepts a subset of its GNU long options spelled with a single leading dash -- ``bash
+# -norc`` and ``bash -posix`` behave exactly like ``--norc``/``--posix`` (verified under real Bash
+# 5.2). Recognizing these atomically keeps them out of the short-option-cluster fallback, which
+# would otherwise decompose the word letter by letter and misread an internal ``o``, ``s``, or
+# ``c`` as the unrelated short option of that letter (``-norc`` and ``-posix`` both contain one).
+_SHELL_SINGLE_DASH_LONG_OPTION_NAMES = frozenset(
+    {
+        "debug",
+        "debugger",
+        "dump-po-strings",
+        "dump-strings",
+        "help",
+        "init-file",
+        "login",
+        "noediting",
+        "noprofile",
+        "norc",
+        "posix",
+        "pretty-print",
+        "rcfile",
+        "restricted",
+        "verbose",
+        "version",
+    }
+)
 _INPUT_REDIRECTION_OPERATORS = frozenset({"<", "<<", "<<-", "<<<", "<&", "<>"})
 _OUTPUT_REDIRECTION_OPERATORS = frozenset({">", ">|", ">>", ">&", "<>", "&>", "&>>"})
 _APPEND_REDIRECTION_OPERATORS = frozenset({">>", "&>>"})
@@ -976,6 +1003,35 @@ def _normalized_shell_head(name: str | None) -> str | None:
     return name.casefold().removesuffix(".exe")
 
 
+def _shell_long_option_name(literal: str) -> str | None:
+    """Return the GNU long option name a ``--name`` or recognized single-dash word spells.
+
+    Bash accepts several of its GNU long options with a single leading dash as a compatibility
+    spelling (``-norc`` behaves exactly like ``--norc``, verified under real Bash 5.2). Recognizing
+    that spelling atomically, before the short-option-cluster fallback ever sees the word, keeps a
+    name such as ``-norc`` or ``-posix`` from being decomposed letter by letter, where its internal
+    ``o``, ``s``, or ``c`` would otherwise be misread as the unrelated short option of that letter.
+    A double-dash word is recognized unconditionally, matching every long option Bash accepts that
+    way whether or not this analysis tracks it individually.
+
+    Args:
+        literal: One argv word's literal text.
+
+    Returns:
+        The option name without its leading dash(es), or None when the word does not spell a long
+        option in either form.
+    """
+    if literal.startswith("--") and literal[2:]:
+        return literal[2:]
+    if (
+        literal.startswith("-")
+        and not literal.startswith("--")
+        and literal[1:] in _SHELL_SINGLE_DASH_LONG_OPTION_NAMES
+    ):
+        return literal[1:]
+    return None
+
+
 def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellSourceSelection:  # noqa: PLR0911, PLR0912
     """Select the shell source according to its literal option grammar."""
     index = head_index + 1
@@ -986,15 +1042,18 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
     command_selected = False
     while index < len(argv):
         port = argv[index]
-        if port.dynamic:
+        if port.dynamic or port.active_argv_expansion:
+            # An unquoted glob or other argv-widening syntax can resolve to a different word (or
+            # several) at run time, exactly like a variable expansion this analysis cannot read
+            # statically. Treating it the same way keeps a glob script operand (``bash ta*.sh``)
+            # from resolving to its literal, almost certainly nonexistent, name instead of
+            # widening to every word it could become.
             return _ShellSourceSelection(
                 _ShellSourceKind.AMBIGUOUS,
                 candidate_indices=tuple(range(index, len(argv))),
                 include_stdin=True,
             )
         literal = port.literal
-        if literal in _SHELL_EAGER_STOPS:
-            return _ShellSourceSelection(_ShellSourceKind.NONE)
         if literal in ("-", "--"):
             index += 1
             if index >= len(argv):
@@ -1006,10 +1065,17 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             if stdin_selected:
                 return _ShellSourceSelection(_ShellSourceKind.STDIN)
             return _ShellSourceSelection(_ShellSourceKind.SCRIPT, argv_index=index)
-        if literal.startswith("--"):
-            if literal in _SHELL_LONG_OPTIONS_WITH_VALUE:
+        long_option_name = _shell_long_option_name(literal)
+        if long_option_name is not None:
+            if long_option_name in _SHELL_EAGER_STOP_NAMES:
+                return _ShellSourceSelection(_ShellSourceKind.NONE)
+            if long_option_name in _SHELL_LONG_OPTION_NAMES_WITH_VALUE:
                 value_index = index + 1
-                if value_index >= len(argv) or argv[value_index].dynamic:
+                if (
+                    value_index >= len(argv)
+                    or argv[value_index].dynamic
+                    or argv[value_index].active_argv_expansion
+                ):
                     return _ShellSourceSelection(
                         _ShellSourceKind.AMBIGUOUS,
                         candidate_indices=tuple(range(index, len(argv))),
@@ -1021,23 +1087,34 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             continue
         if literal and literal[0] in "-+":
             short_options = literal[1:]
-            for option_index, option in enumerate(short_options):
+            # ``-o``/``-O`` always take their value from the NEXT argv word, never from the
+            # remainder of the current word, regardless of where in the cluster they appear
+            # (verified under real Bash 5.2: ``bash -oe pipefail -c '...'`` sets both ``errexit``
+            # and ``pipefail``, so ``-o`` reached across to the following word for its value while
+            # ``e`` stayed a plain flag in the same cluster). Consuming a whole extra word per
+            # occurrence, rather than only when ``o``/``O`` is the cluster's last character, keeps
+            # a mid-cluster ``-o`` from letting the option's value word be misread as the script or
+            # command operand.
+            consumed_values = 0
+            for option in short_options:
                 if option == "c":
                     command_selected = True
-                if option == "s":
+                elif option == "s":
                     stdin_selected = True
-                if option in {"o", "O"} and option_index == len(short_options) - 1:
-                    value_index = index + 1
-                    if value_index >= len(argv) or argv[value_index].dynamic:
+                elif option in {"o", "O"}:
+                    value_index = index + 1 + consumed_values
+                    if (
+                        value_index >= len(argv)
+                        or argv[value_index].dynamic
+                        or argv[value_index].active_argv_expansion
+                    ):
                         return _ShellSourceSelection(
                             _ShellSourceKind.AMBIGUOUS,
                             candidate_indices=tuple(range(index, len(argv))),
                             include_stdin=True,
                         )
-                    index += 2
-                    break
-            else:
-                index += 1
+                    consumed_values += 1
+            index += 1 + consumed_values
             continue
         if command_selected:
             return _ShellSourceSelection(_ShellSourceKind.COMMAND, argv_index=index)
@@ -10220,7 +10297,12 @@ def _script_port_expression(port: _ArgPort, stdin: ContentExpr) -> ContentExpr:
     """Return a static script resource reference or an external gap."""
     if port.process_resource_id is not None:
         return OutsideGap()
-    key = normalize_static_resource(port.literal, dynamic=port.dynamic)
+    # An unquoted glob such as ``ta*.sh`` resolves to whatever file(s) match at run time, not to
+    # its own literal text, so it is treated the same as a dynamic port: an unresolvable name
+    # rather than an exact (and almost certainly nonexistent) resource key.
+    key = normalize_static_resource(
+        port.literal, dynamic=port.dynamic or port.active_argv_expansion
+    )
     if key is None:
         return OutsideGap()
     if key in _STDIN_DEVICE_PATHS:
@@ -10237,6 +10319,31 @@ def _shell_script_source_expression(
     if port.process_resource_id is not None:
         return _process_resource_input(port.process_resource_id, process_resources)
     return _script_port_expression(port, stdin)
+
+
+def _source_operand_index(command: _CommandEvidence, argv_index: int) -> int:
+    """Return the argv index of a ``source``/``.`` candidate's operand, honoring ``--``.
+
+    ``source -- ./task.sh`` is ordinary Bash: ``--`` ends option parsing for the builtin and
+    ``./task.sh`` is the file named. Without skipping it, the word immediately after the
+    executable is ``--`` itself, so the operand lookup misses the real target entirely and the
+    sourced file's content never reaches either sink check below.
+
+    Args:
+        command: The command evidence being inspected.
+        argv_index: The argv index of the resolved ``source``/``.`` executable.
+
+    Returns:
+        The argv index of the operand, past a leading literal ``--`` when present.
+    """
+    index = argv_index + 1
+    if (
+        index < len(command.argv)
+        and not command.argv[index].dynamic
+        and command.argv[index].literal == "--"
+    ):
+        index += 1
+    return index
 
 
 def _candidate_sink_expressions(  # noqa: PLR0911
@@ -10268,7 +10375,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911
     if name == "eval" and literal == "eval" and not executable.external_lookup:
         return (_eval_arguments_raw(command, executable),)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
-        operand_index = executable.argv_index + 1
+        operand_index = _source_operand_index(command, executable.argv_index)
         if operand_index >= len(command.argv):
             return ()
         operand = command.argv[operand_index]
@@ -10573,13 +10680,15 @@ def _source_payload_state_unrepresentable(
             continue
         if executable.external_lookup:
             continue
-        operand_index = executable.argv_index + 1
+        operand_index = _source_operand_index(command, executable.argv_index)
         if operand_index >= len(command.argv):
             continue
         operand = command.argv[operand_index]
         if operand.process_resource_id is not None:
             continue
-        key = normalize_static_resource(operand.literal, dynamic=operand.dynamic)
+        key = normalize_static_resource(
+            operand.literal, dynamic=operand.dynamic or operand.active_argv_expansion
+        )
         if key is None or key not in resources:
             continue
         content = _evaluate_with_tables(
@@ -10587,6 +10696,56 @@ def _source_payload_state_unrepresentable(
         )
         if _resource_marker_fragment_capable(content):
             return True
+    return False
+
+
+def _glob_script_operand_state_unrepresentable(
+    command: _CommandEvidence,
+    resources: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a shell's glob script operand could reach a script-tracked marker.
+
+    An unquoted glob such as ``ta*.sh`` in ``bash ta*.sh`` resolves at run time to whatever file(s)
+    match the pattern in the current directory -- state this deterministic analysis cannot read.
+    ``_select_shell_source`` already widens this to an ``AMBIGUOUS`` selection so the operand is
+    never silently dropped as the sink, but the general widening alone resolves to ``OutsideGap()``
+    (issue #133's opaque, externally-unknown placeholder), which is not itself proof of marker
+    composition and would certify clean even when this exact evidence graph tracks the answer.
+
+    This is the same shape as ``_source_payload_state_unrepresentable`` for a sourced file: rather
+    than guess which file(s) the pattern matches, it stays narrow to resources this same script
+    itself writes, matching each one's key against the authored pattern with Bash's own
+    case-sensitive glob semantics and failing closed only when a match's content could plausibly
+    carry a marker fragment. A target no part of this script writes is already outside every other
+    sink check's purview for the same reason a non-tracked ``source`` target is.
+
+    Args:
+        command: The command whose executable candidates may be a shell.
+        resources: The solved resource table; a key present here is one this script writes.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether some argv position selects a glob operand whose pattern matches a script-tracked
+        resource whose content could plausibly carry the marker.
+    """
+    for executable in _iter_executable_evidence(command.executable):
+        if executable.argv_index is None or executable.name is None:
+            continue
+        if _normalized_shell_head(executable.name) not in _SHELL_HEADS:
+            continue
+        selection = _select_shell_source(command.argv, executable.argv_index)
+        if selection.kind is not _ShellSourceKind.AMBIGUOUS or not selection.candidate_indices:
+            continue
+        port = command.argv[selection.candidate_indices[0]]
+        if not port.active_argv_expansion:
+            continue
+        for key in resources:
+            if not isinstance(key, str) or not fnmatch.fnmatchcase(key, port.literal):
+                continue
+            content = _evaluate_with_tables(ResourceRef(key), {}, resources, {}, limits)
+            if _resource_marker_fragment_capable(content):
+                return True
     return False
 
 
@@ -10790,6 +10949,8 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                 limits,
             ):
                 raise _TaintLimitExceeded("shell source payload state cannot be represented")
+            if _glob_script_operand_state_unrepresentable(command, solved.resources, limits):
+                raise _TaintLimitExceeded("shell glob script operand state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
