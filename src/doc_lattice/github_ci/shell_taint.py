@@ -9945,6 +9945,49 @@ def _shell_command_payload_marker_capable(
     return False
 
 
+def _source_payload_state_unrepresentable(
+    command: _CommandEvidence,
+    resources: Mapping[str | int, _ContentValue],
+) -> bool:
+    """Return whether a ``source``/``.`` candidate reads a script-tracked resource this analysis
+    cannot replay.
+
+    AD-18 replays an ``eval`` payload's state effects because the exact text sits directly in the
+    command's own arguments, so ``_static_eval_mutations`` can tokenize it. A ``source`` payload's
+    state effects live in a FILE the argument only names, and this analysis has no exact-literal
+    model of a resource's content the way it does variable assignments (issue #133), so it cannot
+    reconstruct what a sourced file assigns. A target this same script never writes is already
+    outside every other sink check's purview (it is opaque, pre-existing content this analysis
+    was never going to be able to reason about), so this stays narrow to resources the script
+    itself writes, where silently ignoring ``source``'s effects would reproduce the reported
+    false-safe.
+
+    Args:
+        command: The command whose executable candidates may be ``source``/``.``.
+        resources: The solved resource table; a key present here is one this script writes.
+
+    Returns:
+        Whether this command sources a script-tracked resource whose state effects go unmodeled.
+    """
+    for executable in _iter_executable_evidence(command.executable):
+        if executable.argv_index is None or executable.name is None:
+            continue
+        if executable.name not in {"source", "."} or executable.literal != executable.name:
+            continue
+        if executable.external_lookup:
+            continue
+        operand_index = executable.argv_index + 1
+        if operand_index >= len(command.argv):
+            continue
+        operand = command.argv[operand_index]
+        if operand.process_resource_id is not None:
+            continue
+        key = normalize_static_resource(operand.literal, dynamic=operand.dynamic)
+        if key is not None and key in resources:
+            return True
+    return False
+
+
 def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
@@ -10137,6 +10180,8 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                     )
                 ):
                     return True, TAINT_REFUSAL_REASON
+            if _source_payload_state_unrepresentable(command, solved.resources):
+                raise _TaintLimitExceeded("shell source payload state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:

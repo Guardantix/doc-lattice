@@ -274,6 +274,18 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         {},
         "shell nested eval state cannot be represented",
     ),
+    (
+        "source-persists-assignment",
+        "printf 'X=doc-' > s.sh; source s.sh; eval \"$X\"lattice",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "dot-source-persists-assignment",
+        "printf 'X=doc-' > s.sh; . s.sh; eval \"$X\"lattice",
+        {},
+        "shell source payload state cannot be represented",
+    ),
 ]
 
 

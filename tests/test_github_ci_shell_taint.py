@@ -2488,6 +2488,27 @@ def test_static_eval_programs_fall_back_to_joined_literal_arguments() -> None:
     assert _static_eval_programs(command) == ("X=doc- Y=2",)
 
 
+@pytest.mark.parametrize("spelling", ["source", "."])
+def test_source_payload_persists_assignment_fails_closed(spelling: str) -> None:
+    """Verified false-safe from issue #133, reproduced under real Bash 5.2.
+
+    AD-18 replays an eval payload's state effects because the payload text is directly in the
+    command's own arguments. A source payload's state effects live in a FILE the argument only
+    names, and this analysis has no exact-literal model of a sourced file's content the way it
+    does variable assignments, so it cannot rule out a marker-composing assignment such as
+    ``X=doc-``. Before this fix the body below certified clean and executed the marker; the
+    control shows the identical flow through a direct eval payload already refuses correctly.
+    """
+    control = "eval 'X=doc-'; eval \"$X\"lattice"
+    exploit = f"printf 'X=doc-' > s.sh; {spelling} s.sh; eval \"$X\"lattice"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == "shell source payload state cannot be represented"
+
+
 def test_static_eval_programs_are_empty_for_a_dynamic_argument() -> None:
     command = _command(
         1,
