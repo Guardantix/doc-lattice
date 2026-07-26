@@ -7972,34 +7972,54 @@ def test_phase_two_launcher_and_selector_sinks_refuse(script):
     assert_taint_refusal(script)
 
 
+# (description, script, extra_environment) triples, structured like PHASE_TWO_RUNTIME_REFUSALS
+# and PHASE_TWO_FAIL_CLOSED_REFUSALS above so the same real-bash differential harness can run
+# in the opposite direction: every one of these certifies (no recorded invocation, no incomplete
+# reason), and issue #139 asks that the certification be checked against real bash too, not just
+# taken on faith. See test_phase_two_mandatory_certification_fixture_does_not_execute_under_bash.
+PHASE_TWO_MANDATORY_CERTIFICATIONS = [
+    (
+        "marker-free-generated-script",
+        "echo 'make build' > run.sh; bash run.sh",
+        {},
+    ),
+    (
+        "eval-space-barrier",
+        "eval doc- lattice",
+        {},
+    ),
+    (
+        "shell-c-ignores-stdin",
+        "bash -c 'echo ok' <<'EOF'\ndoc-lattice reconcile\nEOF\n",
+        {},
+    ),
+    (
+        "external-eval-lookup",
+        'X=doc-\nX+=lattice\nenv eval "$X"\n',
+        {},
+    ),
+    (
+        "redirection-name-is-not-content",
+        "bash -c 'echo hi' > doc-lattice.log",
+        {},
+    ),
+    (
+        "dynamic-resource-identity",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "stderr-does-not-carry-stdout-payload",
+        "printf '%s%s\\n' doc- 'lattice reconcile' 2> task.sh; bash task.sh",
+        {},
+    ),
+]
+
+
 @pytest.mark.parametrize(
     "script",
-    [
-        "echo 'make build' > run.sh; bash run.sh",
-        "eval doc- lattice",
-        """\
-bash -c 'echo ok' <<'EOF'
-doc-lattice reconcile
-EOF
-""",
-        """\
-X=doc-
-X+=lattice
-env eval "$X"
-""",
-        "bash -c 'echo hi' > doc-lattice.log",
-        ("P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh"),
-        ("printf '%s%s\\n' doc- 'lattice reconcile' 2> task.sh; bash task.sh"),
-    ],
-    ids=[
-        "marker-free-generated-script",
-        "eval-space-barrier",
-        "shell-c-ignores-stdin",
-        "external-eval-lookup",
-        "redirection-name-is-not-content",
-        "dynamic-resource-identity",
-        "stderr-does-not-carry-stdout-payload",
-    ],
+    [script for _description, script, _environment in PHASE_TWO_MANDATORY_CERTIFICATIONS],
+    ids=[description for description, _script, _environment in PHASE_TWO_MANDATORY_CERTIFICATIONS],
 )
 def test_phase_two_mandatory_certification_rows(script):
     result = scan_doc_lattice_invocations(script)
@@ -8114,8 +8134,77 @@ def test_fail_closed_refusal_fixture_executes_marker_under_real_bash(
     assert executed, stderr
 
 
+# Issue #139: "dynamic-resource-identity" is a verified exception, not a fixture bug. Its write
+# target is spelled "$P", a variable reference, so the scanner classifies it as a
+# DynamicResourceTarget at the redirection site and never connects it to the literal "task.sh"
+# read target -- even though P is assigned the literal "task.sh" a line earlier and the two
+# resources are the same file at runtime. ARCHITECTURE.md documents "dynamic resource aliases" as
+# part of the designed absence-of-evidence boundary (not the fail-closed guarantee's scope), and
+# the open gaps in that boundary are tracked as separate issues (#125-#141) rather than folded
+# into this one. Confirmed under real bash: this fixture's doc-lattice stub DOES execute, so it
+# is intentionally excluded from the "never executes" assertion below and tracked instead as
+# issue #151, rather than silently dropped or asserted false.
+_DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP = "dynamic-resource-identity"
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
+@pytest.mark.parametrize(
+    ("_description", "script", "extra_environment"),
+    [
+        row
+        for row in PHASE_TWO_MANDATORY_CERTIFICATIONS
+        if row[0] != _DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP
+    ],
+    ids=[
+        row[0]
+        for row in PHASE_TWO_MANDATORY_CERTIFICATIONS
+        if row[0] != _DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP
+    ],
+)
+def test_phase_two_mandatory_certification_fixture_does_not_execute_under_bash(
+    _description,
+    script,
+    extra_environment,
+    tmp_path: Path,
+):
+    """Certify-direction differential (issue #139).
+
+    ``_marker_executes_under_bash`` was only ever applied to refusal fixtures, to prove they are
+    true positives. It was never applied in the opposite direction, to prove a certified fixture
+    (no recorded invocation, no incomplete reason) is a true negative -- that the doc-lattice
+    stub genuinely never runs. That is the one mechanism that would mechanically catch an
+    inverted or shadowed guard condition routing input down the certify path with the rest of
+    the suite still green.
+    """
+    scan = scan_doc_lattice_invocations(script)
+    executed, stderr = _marker_executes_under_bash(script, extra_environment, tmp_path)
+
+    assert scan.invocations == NONE
+    assert scan.incomplete_reason is None
+    assert not executed, (
+        f"certified fixture {_description!r} executed the doc-lattice stub under real bash: "
+        f"{stderr}"
+    )
+
+
 def test_select_header_retaining_marker_fails_closed():
-    assert_marker_refusal("select c in doc-lattice; do :; done </dev/null")
+    """The marker sits in a ``select`` header word list, never reaching the taint layer.
+
+    #139: this used the any-reason ``assert_marker_refusal`` helper. AD-17's per-word check
+    refuses this structurally (by word position) before any command executes, so asserting
+    ``assert_taint_refusal`` here would pin a reason that is not actually true for this row.
+    Pin the real AD-17 reason instead.
+    """
+    script = "select c in doc-lattice; do :; done </dev/null"
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert (
+        result.incomplete_reason
+        == "marker-bearing command is not a certified doc-lattice invocation"
+    )
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
 
 
 @pytest.mark.parametrize(
@@ -8508,12 +8597,36 @@ def test_marker_free_dynamic_loop_headers_stay_clean(script: str):
         'for f in doc-lattice; do eval "$f"; done',
         'A=doc-lattice; for f in $A; do eval "$f"; done',
         'for f in doc-lattice*; do eval "$f"; done',
-        'for f in doc-{lattice,x}; do eval "$f"; done',
     ],
-    ids=("literal", "unquoted-variable", "glob-prefix", "brace-alternative"),
+    ids=("literal", "unquoted-variable", "glob-prefix"),
 )
-def test_marker_bearing_loop_values_still_refuse(script: str):
-    assert_marker_refusal(script)
+def test_marker_bearing_loop_values_still_refuse_via_ad17(script: str):
+    """These loop values never reach the taint layer: AD-17's per-word check refuses first.
+
+    #139: the original single test used ``assert_marker_refusal``, which accepts any reason,
+    so a regression that disabled loop-value taint detection entirely would have kept these
+    three rows green (see ``test_marker_bearing_loop_values_still_refuse_via_taint`` for the
+    fourth, brace-alternative row, whose true refusal reason is the taint layer's).
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert (
+        result.incomplete_reason
+        == "marker-bearing command is not a certified doc-lattice invocation"
+    )
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+def test_marker_bearing_loop_values_still_refuse_via_taint():
+    """The brace-alternative loop value is the row that actually reaches the taint layer.
+
+    #139: split out of the any-reason ``assert_marker_refusal`` parametrization (see
+    ``test_marker_bearing_loop_values_still_refuse_via_ad17``) because this is the one row
+    whose real refusal reason is the taint layer's, not AD-17's per-word check.
+    """
+    assert_taint_refusal('for f in doc-{lattice,x}; do eval "$f"; done')
 
 
 @pytest.mark.parametrize(

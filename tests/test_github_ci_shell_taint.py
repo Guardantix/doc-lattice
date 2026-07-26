@@ -41,6 +41,8 @@ from doc_lattice.github_ci.shell_taint import (
     _ContentValue,
     _contextualize_evidence,
     _eval_assignment_transfers,
+    _eval_command_substitution_closing,
+    _eval_reparse_content,
     _eval_reparse_literal,
     _eval_syntax_expression,
     _EvalSyntaxContext,
@@ -2165,6 +2167,65 @@ def test_every_flow_bound_fails_closed(
 ) -> None:
     with pytest.raises(_TaintLimitExceeded, match=message):
         _solve_flow_definitions(definitions, limits=limits)
+
+
+def test_eval_reparse_depth_cap_is_a_taint_limits_field_that_shrinks() -> None:
+    """Issue #139: the eval reparse depth cap must be shrinkable to prove the guard fires.
+
+    ``_MAX_EVAL_REPARSE_DEPTH`` used to be a module constant no test could reach. Promoted
+    into ``TaintLimits.max_eval_reparse_depth``, a deeply nested (but otherwise unremarkable)
+    ``Concat`` now exhausts it deterministically.
+    """
+    with pytest.raises(_TaintLimitExceeded, match="shell taint eval reparse depth limit exceeded"):
+        _eval_reparse_content(_deep_concat(50), TaintLimits(max_eval_reparse_depth=5))
+
+
+def test_eval_reparse_branch_cap_is_a_taint_limits_field_that_shrinks() -> None:
+    """Issue #139: the eval reparse branch cap must be shrinkable to prove the guard fires."""
+    with pytest.raises(_TaintLimitExceeded, match="shell taint eval reparse branch limit exceeded"):
+        _eval_reparse_content(
+            Choice((LiteralTransfer("a"), LiteralTransfer("b"))),
+            TaintLimits(max_eval_reparse_branches=1),
+        )
+
+
+def test_eval_command_substitution_depth_cap_shrinks_with_taint_limits() -> None:
+    """The nested ``$(...)`` closing scanner shares the promoted depth field, not a constant."""
+    with pytest.raises(
+        _TaintLimitExceeded, match="shell taint eval command substitution cannot be bounded"
+    ):
+        _eval_command_substitution_closing(
+            "$(x)", 0, limits=TaintLimits(max_eval_reparse_depth=0), depth=1
+        )
+
+
+def test_eval_command_substitution_depth_cap_fails_closed_end_to_end() -> None:
+    """A nested command substitution inside an authored ``eval`` body exhausts the shrunk cap.
+
+    This is the end-to-end path (through ``analyze_marker_taint``), not just the direct unit
+    call, so it proves the promoted field actually reaches the scanning entry point.
+    """
+    command = _command(
+        1,
+        _arg("eval"),
+        _arg("$($(x))", LiteralTransfer("$($(x))")),
+        name="eval",
+    )
+
+    assert analyze_marker_taint(
+        _ShellTaintEvidence(commands=(command,)),
+        limits=TaintLimits(max_eval_reparse_depth=0),
+    ) == (True, "shell taint eval command substitution cannot be bounded")
+
+
+def test_eval_syntax_append_depth_cap_shrinks_with_taint_limits() -> None:
+    """The eval-syntax second-pass appender shares the promoted depth field via its context."""
+    with pytest.raises(_TaintLimitExceeded, match="shell taint eval reparse depth limit exceeded"):
+        _solve_eval_syntax_variables(
+            (_FlowWrite("X", _deep_concat(50)),),
+            {},
+            TaintLimits(max_eval_reparse_depth=5),
+        )
 
 
 def test_deep_local_content_substitution_fails_with_stable_bound() -> None:

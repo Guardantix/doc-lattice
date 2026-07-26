@@ -138,6 +138,8 @@ class TaintLimits:
     max_brace_expansions: int = 4_096
     max_brace_depth: int = 16
     max_exact_value_chars: int = 8_192
+    max_eval_reparse_branches: int = 256
+    max_eval_reparse_depth: int = 128
 
 
 class _TaintLimitExceeded(ProjectError):
@@ -7278,8 +7280,6 @@ def _eval_arguments_raw(command: _CommandEvidence, executable: _ExecutableEviden
     return concat(*parts)
 
 
-_MAX_EVAL_REPARSE_BRANCHES = 256
-_MAX_EVAL_REPARSE_DEPTH = 128
 _EVAL_QUOTE_STATES = (None, "'", '"')
 _EVAL_ANSI_OCTAL_BASE = 8
 _EVAL_UNICODE_MAX = 0x10FFFF
@@ -7422,7 +7422,7 @@ def _eval_reparse_branches(
     limits: TaintLimits,
 ) -> list[tuple[ContentExpr, str | None]]:
     """Reparse content while retaining quote state across symbolic expression boundaries."""
-    if depth > _MAX_EVAL_REPARSE_DEPTH:
+    if depth > limits.max_eval_reparse_depth:
         raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
     if isinstance(expression, LiteralTransfer):
         parsed, resulting_quote = _eval_reparse_literal(expression.text, quote, limits)
@@ -7439,7 +7439,7 @@ def _eval_reparse_branches(
                     limits=limits,
                 ):
                     expanded.append((concat(prefix, suffix), resulting_quote))
-                    if len(expanded) > _MAX_EVAL_REPARSE_BRANCHES:
+                    if len(expanded) > limits.max_eval_reparse_branches:
                         raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
             branches = expanded
         return branches
@@ -7454,7 +7454,7 @@ def _eval_reparse_branches(
                     limits=limits,
                 )
             )
-            if len(branches) > _MAX_EVAL_REPARSE_BRANCHES:
+            if len(branches) > limits.max_eval_reparse_branches:
                 raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
         return branches
     return [(expression, quote)]
@@ -7487,7 +7487,7 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
     defer_incomplete_parameter: bool,
 ) -> tuple[tuple[_ContentToken, ...], str | None, str]:
     """Tokenize eval text while retaining active brace and quote provenance."""
-    if depth > _MAX_EVAL_REPARSE_DEPTH:
+    if depth > limits.max_eval_reparse_depth:
         raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
     tokens: list[_ContentToken] = []
     index = 0
@@ -7537,7 +7537,7 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
             continue
         if text.startswith("$(", index) and not text.startswith("$((", index):
             if (
-                _eval_command_substitution_closing(text, index) is None
+                _eval_command_substitution_closing(text, index, limits=limits) is None
                 and defer_incomplete_parameter
             ):
                 return tuple(tokens), quote, text[index:]
@@ -7550,7 +7550,7 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
             if index + 1 == len(text) and defer_incomplete_parameter:
                 return tuple(tokens), quote, text[index:]
             if text.startswith("${", index):
-                closing = _eval_parameter_closing(text, index)
+                closing = _eval_parameter_closing(text, index, limits=limits)
                 if closing is None:
                     if defer_incomplete_parameter:
                         return tuple(tokens), quote, text[index:]
@@ -7597,10 +7597,11 @@ def _eval_command_substitution_closing(
     text: str,
     start: int,
     *,
+    limits: TaintLimits,
     depth: int = 0,
 ) -> int | None:
     """Return the balanced closing parenthesis for one active eval-time ``$(...)``."""
-    if depth > _MAX_EVAL_REPARSE_DEPTH:
+    if depth > limits.max_eval_reparse_depth:
         raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
     index = start + 2
     parentheses = 1
@@ -7626,6 +7627,7 @@ def _eval_command_substitution_closing(
             nested_closing = _eval_command_substitution_closing(
                 text,
                 index,
+                limits=limits,
                 depth=depth + 1,
             )
             if nested_closing is None:
@@ -7672,7 +7674,7 @@ def _eval_quoted_advance(text: str, index: int, quote: str) -> tuple[int, str | 
     return index + 1, (None if character == quote else quote)
 
 
-def _eval_parameter_closing(text: str, start: int) -> int | None:
+def _eval_parameter_closing(text: str, start: int, *, limits: TaintLimits) -> int | None:
     """Return the balanced closing brace for an eval-time parameter expansion."""
     index = start + 2
     nested = 1
@@ -7686,7 +7688,7 @@ def _eval_parameter_closing(text: str, start: int) -> int | None:
             index += 2
             continue
         if text.startswith("$(", index) and not text.startswith("$((", index):
-            substitution_closing = _eval_command_substitution_closing(text, index)
+            substitution_closing = _eval_command_substitution_closing(text, index, limits=limits)
             if substitution_closing is None:
                 return None
             index = substitution_closing + 1
@@ -8390,7 +8392,7 @@ def _eval_syntax_append(
     depth: int = 0,
 ) -> _EvalSyntaxValue:
     """Append authored eval syntax to one bounded streaming parse state."""
-    if depth > _MAX_EVAL_REPARSE_DEPTH:
+    if depth > context.limits.max_eval_reparse_depth:
         raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
     if isinstance(expression, LiteralTransfer):
         tokens, resulting_quote, pending_parameter = _eval_reparse_tokens_streaming(
