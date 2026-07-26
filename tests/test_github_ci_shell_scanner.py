@@ -8680,8 +8680,9 @@ def test_eval_snapshot_shortcut_still_runs_the_second_pass():
         'case "$1" in\n  until) echo a ;;\n  *) echo b ;;\nesac\n',
         'case "$1" in\n  for) echo a ;;\n  *) echo b ;;\nesac\n',
         'case "$1" in\n  select) echo a ;;\n  *) echo b ;;\nesac\n',
+        'case "$1" in\n  case) echo a ;;\n  *) echo b ;;\nesac\n',
     ],
-    ids=("if", "while", "until", "for", "select"),
+    ids=("if", "while", "until", "for", "select", "case"),
 )
 def test_case_patterns_spelled_as_reserved_words_still_certify(script: str):
     """A case pattern is not a command position, so it must not open a control compound."""
@@ -8694,6 +8695,79 @@ def test_case_patterns_spelled_as_reserved_words_still_certify(script: str):
 def test_case_arm_marker_flow_survives_the_pattern_fix():
     """The reserved-word pattern fix must not weaken case-arm taint."""
     assert_taint_refusal('A=doc-; B=lattice\ncase "$1" in\n  a) M="$A$B" ;;\nesac\neval "$M"\n')
+
+
+def test_case_pattern_spelled_case_certifies_from_the_issue_repro():
+    """#124: ``case)`` is ordinary Bash and must not inherit a downstream dynamic-header reason."""
+    result = scan_doc_lattice_invocations("case $x in case) echo a ;; *) echo b ;; esac")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_case_pattern_spelled_case_certifies_as_a_later_arm():
+    """The first-arm header capture must not be re-triggered by a later arm's own literal."""
+    result = scan_doc_lattice_invocations(
+        'case "$1" in\n  y) echo y ;;\n  case) echo a ;;\n  *) echo b ;;\nesac\n'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_case_pattern_spelled_case_still_reaches_the_invocation_sink():
+    """A ``case)`` arm's own content must still be visible to invocation classification."""
+    result = scan_doc_lattice_invocations(
+        'case "$1" in\n  case) doc-lattice linear ;;\n  *) echo b ;;\nesac\n'
+    )
+
+    assert result.invocations == LINEAR
+    assert result.incomplete_reason is None
+
+
+def test_case_pattern_spelled_esac_reports_its_own_reason():
+    """#124: ``esac)`` is never valid Bash (``esac`` always terminates at pattern-start), but the
+    prior behavior inherited an unrelated brace/glob reason from downstream argv resolution."""
+    result = scan_doc_lattice_invocations("case $x in esac) echo a ;; *) echo b ;; esac")
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "keyword-shaped case pattern cannot be scanned safely"
+
+
+def test_case_pattern_spelled_esac_reports_its_own_reason_as_a_later_arm():
+    result = scan_doc_lattice_invocations(
+        'case "$1" in\n  y) echo y ;;\n  esac) echo a ;;\n  *) echo b ;;\nesac\n'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "keyword-shaped case pattern cannot be scanned safely"
+
+
+def test_quoted_case_pattern_spelled_esac_still_certifies():
+    """A quoted ``"esac"`` is an ordinary literal pattern, not the reserved word."""
+    result = scan_doc_lattice_invocations(
+        'case "$1" in\n  "esac") echo a ;;\n  *) echo b ;;\nesac\n'
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_nine_arm_dispatch_table_certifies():
+    """#124: an ordinary nine-way dispatch on a job matrix or subcommand must not be refused."""
+    arms = " ".join(f"a{index}) echo {index} ;;" for index in range(9))
+    result = scan_doc_lattice_invocations(f'case "$1" in {arms} esac')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_sixteen_arm_dispatch_table_certifies():
+    arms = " ".join(f"a{index}) echo {index} ;;" for index in range(16))
+    result = scan_doc_lattice_invocations(f'case "$1" in {arms} esac')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(

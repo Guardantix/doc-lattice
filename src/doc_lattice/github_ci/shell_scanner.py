@@ -71,7 +71,12 @@ _LOOP_HEADER_NAME_WORDS = 2
 _CASE_HEADER_PATTERN_WORDS = 4
 _CASE_HEADER_SUBJECT_WORDS = 3
 _MAX_CASE_ARMS = 256
-_MAX_CASE_DYNAMIC_BRANCHES = 8
+# Bounds the alternative width the taint solver explores per case statement (how many arms whose
+# match against the subject cannot be resolved statically it will retain), not the total arm
+# count; every exhaustion still fails closed. 32 comfortably covers a real subcommand or
+# job-matrix dispatch table (#124) without materially widening the solver's search space; see
+# scripts/bench_sections.py and the seeded fuzz run in scripts/fuzz_shell_taint.py.
+_MAX_CASE_DYNAMIC_BRANCHES = 32
 
 _COMMAND_PREFIXES = frozenset(
     {
@@ -1531,6 +1536,7 @@ class _ShellScanner:
             if next_index == index:
                 index += 1
                 continue
+            self._reject_stray_pattern_start_esac_paren(state, word, next_index, limit, terminator)
             self._record_word(state, word)
             index = next_index
         self._flush_command(state)
@@ -1928,12 +1934,9 @@ class _ShellScanner:
         # like a command position. A pattern spelled ``if``/``while``/``for``/``case`` is ordinary
         # Bash and must not open a control compound, which would then fail the ``esac`` match.
         # The empty-arm ``esac)`` form is a real terminator and is handled below.
+        pattern_start_esac = self._is_pattern_start_esac(state, word)
         in_case_pattern = (
-            bool(state.cases)
-            and state.cases[-1].phase == "pattern"
-            and not (
-                not word.dynamic and word.literal == "esac" and state.cases[-1].at_pattern_start
-            )
+            bool(state.cases) and state.cases[-1].phase == "pattern" and not pattern_start_esac
         )
         if not in_case_pattern:
             self._handle_control_word(state, word, command_position=command_position)
@@ -1953,7 +1956,7 @@ class _ShellScanner:
                 case.phase = "pattern"
                 case.at_pattern_start = True
             elif not word.dynamic and case.phase == "pattern":
-                if word.literal == "esac" and case.at_pattern_start:
+                if pattern_start_esac:
                     state.cases.pop()
                 else:
                     case.at_pattern_start = False
@@ -2122,6 +2125,68 @@ class _ShellScanner:
             return
         self._prefix_stop(state)
 
+    def _is_pattern_start_esac(self, state: _CommandScanState, word: _ShellWord) -> bool:
+        """Return whether ``word`` is a bare ``esac`` at a case's pattern-start position.
+
+        Real Bash always recognizes a bare ``esac`` here as the case terminator regardless of
+        what follows, so it can never be an ordinary pattern literal at this position. A quoted
+        or otherwise ineligible spelling (``"esac"``) is unaffected and stays an ordinary literal.
+        """
+        return (
+            not word.dynamic
+            and word.keyword_eligible
+            and word.literal == "esac"
+            and bool(state.cases)
+            and state.cases[-1].phase == "pattern"
+            and state.cases[-1].at_pattern_start
+        )
+
+    def _reject_stray_pattern_start_esac_paren(
+        self,
+        state: _CommandScanState,
+        word: _ShellWord,
+        next_index: int,
+        limit: int,
+        terminator: str | None,
+    ) -> None:
+        """Raise a dedicated reason for the invalid ``esac)`` case-pattern shape (#124).
+
+        Real Bash commits to ``esac`` as the case terminator at pattern-start unconditionally, so
+        anything besides a command separator or the end of input next is a syntax error;
+        ``esac)`` is the shape a scanned dispatch script is likely to spell. Reporting it here
+        keeps the reason on the pattern itself rather than whatever unrelated downstream check
+        the stale terminator state happens to trip. A caller scanning a paren-terminated region
+        (a subshell or ``$(...)``) is excluded: there the very next ``)`` legitimately closes
+        that enclosing region, as in the existing ``$(case x in x) ...;; esac)`` fixtures, and is
+        handled by the terminator match instead of this diagnostic.
+        """
+        if terminator == ")" or not self._is_pattern_start_esac(state, word):
+            return
+        lookahead_index = self._next_significant_index(next_index, limit)
+        if lookahead_index < limit and self.source[lookahead_index] == ")":
+            raise _ShellScanIncomplete("keyword-shaped case pattern cannot be scanned safely")
+
+    def _next_significant_index(self, index: int, limit: int) -> int:
+        """Return the index of the next token-starting character, skipping insignificant text.
+
+        Mirrors the whitespace, line-continuation, and comment handling that
+        ``_consume_command_boundary`` would otherwise cross, without mutating any scan state, so
+        a caller can classify what immediately follows a word.
+        """
+        while index < limit:
+            if self.source.startswith("\\\n", index):
+                index += 2
+                continue
+            character = self.source[index]
+            if character in " \t\n":
+                index += 1
+                continue
+            if character == "#":
+                index = self._comment_end(index, limit)
+                continue
+            break
+        return index
+
     def _consume_case_pattern_close(self, state: _CommandScanState) -> bool:
         if not state.cases or state.cases[-1].phase != "pattern":
             return False
@@ -2132,7 +2197,11 @@ class _ShellScanner:
             frame = self._matching_control({"case"})
             if frame is None or frame.phase not in {"word", "pattern"}:
                 raise _ShellScanIncomplete("ambiguous case control flow")
-            if state.words and state.words[0].literal == "case":
+            # ``frame.case_word`` is set exactly once, the first time this branch runs for the
+            # frame, so it is the authoritative signal that ``state.words`` still carries the
+            # unparsed header rather than checking whether the first accumulated word reads
+            # ``case``: a later arm's own pattern can literally be the word ``case`` too (#124).
+            if frame.case_word is None:
                 if len(state.words) < _CASE_HEADER_PATTERN_WORDS or state.words[2].literal != "in":
                     raise _ShellScanIncomplete("dynamic case header cannot be scanned safely")
                 frame.case_word = state.words[1]
