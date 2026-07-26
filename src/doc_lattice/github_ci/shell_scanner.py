@@ -4526,7 +4526,11 @@ def _skip_builtin_wrapper(
     *,
     external_lookup: bool,
 ) -> _ResolvedIndex:
-    """Expose a supported literal Bash builtin target or one ambiguous successor."""
+    """Expose a supported literal Bash builtin target or one ambiguous successor.
+
+    A supported literal builtin target is recorded as effective-head evidence, so writer
+    builtins such as ``read`` and ``printf -v`` stay visible through the ``builtin`` wrapper.
+    """
     index = start
     if index < len(words) and not words[index].dynamic and words[index].literal == "--":
         index += 1
@@ -4536,7 +4540,7 @@ def _skip_builtin_wrapper(
     if _command_boundary_word_may_disappear(target) or target.dynamic:
         return _ResolvedIndex(index + 1, ambiguous=True)
     if target.literal not in {"builtin", "command", "exec"}:
-        if target.literal in {"eval", "source", "."}:
+        if target.literal in _BASH_REDIRECTION_ASSIGNMENT_BUILTINS:
             resolution.record_executable(index, external_lookup=external_lookup)
         return _ResolvedIndex(None)
     return _ResolvedIndex(index)

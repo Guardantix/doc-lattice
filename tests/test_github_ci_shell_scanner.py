@@ -4738,6 +4738,128 @@ def test_read_dynamic_target_fails_closed():
 @pytest.mark.parametrize(
     "script",
     [
+        'builtin read -r c <<<"doc-lattice check"; eval "$c"',
+        'builtin -- read -r c <<<"doc-lattice check"; eval "$c"',
+        'command builtin read -r c <<<"doc-lattice check"; eval "$c"',
+        'builtin builtin read -r c <<<"doc-lattice check"; eval "$c"',
+        'builtin printf -v X %s%s doc- lattice; eval "$X"',
+        'builtin printf -vX %s%s doc- lattice; eval "$X"',
+        'shopt -s lastpipe; printf %s%s doc- lattice | builtin read -r c; eval "$c"',
+    ],
+    ids=(
+        "read",
+        "double-dash-read",
+        "command-builtin-read",
+        "nested-builtin-read",
+        "printf-v",
+        "printf-v-joined",
+        "lastpipe-pipeline-read",
+    ),
+)
+def test_builtin_wrapped_writer_builtins_reach_later_eval(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'builtin read -r c <<<"safe check"; eval "$c"',
+        'builtin -- read -r c <<<"safe check"; eval "$c"',
+        'command builtin read -r c <<<"safe check"; eval "$c"',
+        'builtin builtin read -r c <<<"safe check"; eval "$c"',
+        'builtin printf -v X %s%s safe value; eval "$X"',
+        'builtin printf -vX %s%s safe value; eval "$X"',
+        'shopt -s lastpipe; printf %s%s safe value | builtin read -r c; eval "$c"',
+    ],
+    ids=(
+        "read",
+        "double-dash-read",
+        "command-builtin-read",
+        "nested-builtin-read",
+        "printf-v",
+        "printf-v-joined",
+        "lastpipe-pipeline-read",
+    ),
+)
+def test_builtin_wrapped_writer_builtins_preserve_clean_controls(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'builtin mapfile -t A <<< "doc-"\neval "${A[0]}lattice"\n',
+        'builtin readarray -t A <<< "doc-"\neval "${A[0]}lattice"\n',
+        'builtin read -a A <<< "doc-"\neval "${A[0]}lattice"\n',
+        'TARGET=X; builtin read "$TARGET" <<<doc-; eval "$X"lattice',
+    ],
+    ids=("mapfile", "readarray", "read-array-option", "dynamic-target"),
+)
+def test_builtin_wrapped_unrepresentable_writers_fail_closed(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell builtin writer cannot be represented"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'exec builtin read -r c <<<"doc-lattice check"; eval "$c"',
+        'env builtin read -r c <<<"doc-lattice check"; eval "$c"',
+    ],
+    ids=("exec", "env"),
+)
+def test_external_lookup_of_builtin_wrapper_records_no_writer_evidence(script: str):
+    # ``exec`` and ``env`` force an external lookup of ``builtin``, which Bash has no external
+    # binary for, so the wrapped ``read`` never runs and no marker reaches a sink.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'builtin export X=doc-; eval "$X"lattice',
+        'builtin declare X=doc-; eval "$X"lattice',
+        'f() { builtin local X=doc-; eval "$X"lattice; }; f',
+        'X=doc-; builtin unset X; eval "$X"lattice',
+        'builtin notabuiltin X=doc-; eval "$X"lattice',
+    ],
+    ids=("export", "declare", "local", "unset", "non-builtin-target"),
+)
+def test_builtin_wrapped_assignment_builtins_preserve_refusals(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'builtin echo X=doc-; eval "$X"lattice',
+        'builtin true X=doc-; eval "$X"lattice',
+        'echo X=doc-; eval "$X"lattice',
+        'true X=doc-; eval "$X"lattice',
+    ],
+    ids=("builtin-echo", "builtin-true", "echo", "true"),
+)
+def test_builtin_wrapped_non_assignment_builtins_certify_argv_operands(script: str):
+    # Over-refusal removal, not a weakening: preserving the real ``echo``/``true`` head restores
+    # the argv boundary, so an assignment-shaped operand stops being read as an assignment. The
+    # unprefixed controls already certify clean, and Bash agrees that no variable is written.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         'P="safe:doc_"; P+=lattice; IFS=:_ read A X <<<"$P"; eval "$X"',
         'P=doc-; P+=lattice; IFS=:- read X <<<"$P"; eval "$X"',
         'read X <<EOF\ndoc-\nignored\nEOF\neval "$X"lattice',
