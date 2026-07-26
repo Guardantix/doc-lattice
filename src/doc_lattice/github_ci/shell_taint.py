@@ -9945,35 +9945,78 @@ def _shell_command_payload_marker_capable(
     return False
 
 
+def _summary_marker_fragment_capable(summary: _TransferSummary) -> bool:
+    """Return whether any DFA entry state finds marker-relevant progress in this summary.
+
+    ``_marker_capable`` asks only "does this text, scanned fresh (entry state zero), complete the
+    marker" -- exactly right for a value that is itself a full, final sink. This instead asks
+    whether *any* of the 11 possible entry states -- standing in for "whatever partial match, if
+    any, was already in progress when this text starts" -- either completes the marker or leaves
+    the scan somewhere other than idle. A prefix fragment such as ``doc-`` shows this from entry
+    state zero already (it advances the scan on its own). A suffix fragment such as ``lattice``
+    shows nothing from entry state zero (nothing in it is special starting fresh) but completes
+    the marker outright from ``_LATTICE_START_STATE``, the entry state standing for "already
+    matched doc and a separator." Checking every entry state instead of only zero is required for
+    the second case; skip length-zero content is the one thing this must never flag, since a
+    zero-length text's every "exit" is trivially its own entry state (no character was ever
+    processed to justify calling that "progress"), which would otherwise fire on any resource
+    whose solved value includes a routine empty/unwritten alternative.
+
+    Args:
+        summary: One alternative from a resource's solved content value.
+
+    Returns:
+        Whether some entry state finds this text able to advance toward or complete the marker.
+    """
+    entries = summary.stripped.entries
+    is_identity_transfer = all(
+        exit_state == entry and not accepted for entry, (exit_state, accepted) in enumerate(entries)
+    )
+    if is_identity_transfer:
+        # Every entry state maps back to itself with no acceptance: the identity transfer, which
+        # only zero-length text produces (no character was processed to leave any entry state).
+        return False
+    return any(accepted or exit_state != _DFA_START for exit_state, accepted in entries)
+
+
 def _resource_marker_fragment_capable(value: _ContentValue) -> bool:
     """Return whether a resource's own content could plausibly compose the marker.
 
-    ``_marker_capable`` asks only "does this text alone complete the marker starting fresh" --
-    exactly right for a value that is itself a full, final sink. A sourced file's raw content
-    instead gets read into variables this analysis cannot extract (issue #133), so instead of
-    asking whether the file completes the marker on its own, this asks whether scanning it from a
-    fresh start leaves the DFA in a state other than idle -- carrying "doc"/separator/"lattice"
-    progress that a boundary this analysis can't see (an unmodeled assignment, then a later
-    literal continuation such as ``eval "$X"lattice``) could complete. Trailing newlines are
-    stripped the same way command substitution's are, since a shell variable's value from an
-    assigned line never includes its own line terminator.
+    A sourced file's content gets read into variables this analysis cannot extract (issue #133),
+    so this checks two things instead of relying on an exact-literal replay:
 
-    Only entry state zero (a fresh scan) is checked, not every possible entry state: composing
-    from a nonzero entry state is only meaningful for text known to be adjacent to a specific
-    prior fragment, and an empty alternative's other entries trivially "exit" at their own
-    (nonzero) entry state with no text processed at all, which would make this fire on any
-    resource content whatsoever.
+    1. The resource's raw content itself, across every DFA entry state
+       (`_summary_marker_fragment_capable`) -- catches both a prefix fragment like ``doc-`` and,
+       for content with no ``NAME=`` structure at all, a bare partial fragment like ``-lattice``.
+    2. Each ``NAME=VALUE``-shaped line's *value* in isolation, using the same tokenizer eval's own
+       payload replay uses (`_static_assignment_word`). This is required, not merely thorough: a
+       suffix fragment written as ``Y=lattice`` never shows progress from any entry state as raw
+       bytes, because the literal ``Y=`` resets the scan before ``lattice`` is ever reached --
+       only the isolated value ``lattice`` reveals it can complete a marker a preceding ``doc-``
+       started elsewhere. The non-source control that already refuses this same composition
+       (`Y=lattice; eval "doc-$Y"`) sees this because its assignment parser extracts the value
+       directly off the AST; a sourced file's bytes carry no such parse, so this reconstructs the
+       same value the cheapest sound way available.
 
     Args:
         value: The resource's solved content value.
 
     Returns:
-        Whether any alternative leaves fresh-start progress the marker DFA could still complete.
+        Whether any alternative, or any assignment-shaped line's value within it, could plausibly
+        advance toward or complete the marker.
     """
     for alternative in value:
-        exit_state, accepted = alternative.stripped.entries[_DFA_START]
-        if accepted or exit_state != _DFA_START:
+        if _summary_marker_fragment_capable(alternative):
             return True
+        for text in alternative.literal_texts:
+            for line in text.splitlines():
+                assignment = _static_assignment_word(line)
+                if assignment is None or not isinstance(assignment.content, LiteralTransfer):
+                    continue
+                if _summary_marker_fragment_capable(
+                    _TransferSummary.literal(assignment.content.text)
+                ):
+                    return True
     return False
 
 

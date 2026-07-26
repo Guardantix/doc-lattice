@@ -286,6 +286,18 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         {},
         "shell source payload state cannot be represented",
     ),
+    (
+        "source-persists-suffix-assignment",
+        "printf 'Y=lattice' > s.sh; source s.sh; eval \"doc-$Y\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "dot-source-persists-suffix-assignment",
+        "printf 'Y=lattice' > s.sh; . s.sh; eval \"doc-$Y\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
 ]
 
 

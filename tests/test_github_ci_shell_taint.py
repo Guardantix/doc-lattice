@@ -2498,9 +2498,10 @@ def test_source_payload_persists_assignment_fails_closed(spelling: str) -> None:
     does variable assignments, so it cannot rule out a marker-composing assignment such as
     ``X=doc-``. Before this fix the body below certified clean and executed the marker; the
     control shows the identical flow through a direct eval payload already refuses correctly.
-    The written content ``X=doc-`` carries the marker fragment ``doc-``, which is what gates the
-    refusal -- see ``test_marker_free_write_then_source_still_certifies`` for the companion
-    over-refusal guard, where the sourced content carries no such fragment.
+    The written content ``X=doc-`` carries the marker fragment ``doc-`` as a PREFIX -- see
+    ``test_source_payload_suffix_fragment_fails_closed`` for the mirror-image SUFFIX case, and
+    ``test_marker_free_write_then_source_still_certifies`` for the companion over-refusal guard,
+    where the sourced content carries no such fragment either way.
     """
     control = "eval 'X=doc-'; eval \"$X\"lattice"
     exploit = f"printf 'X=doc-' > s.sh; {spelling} s.sh; eval \"$X\"lattice"
@@ -2510,6 +2511,48 @@ def test_source_payload_persists_assignment_fails_closed(spelling: str) -> None:
 
     assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
     assert exploit_result.incomplete_reason == "shell source payload state cannot be represented"
+
+
+@pytest.mark.parametrize("spelling", ["source", "."])
+def test_source_payload_suffix_fragment_fails_closed(spelling: str) -> None:
+    """Round-2 review finding: the fix's first pass only detected PREFIX fragments.
+
+    Verified under real Bash 5.2. ``_resource_marker_fragment_capable`` originally checked only
+    the fresh-start DFA entry state, which finds a fragment like ``doc-`` (it advances the scan on
+    its own) but structurally cannot find ``lattice`` -- scanned fresh, "lattice" never leaves
+    state zero, since nothing about it is special without already having matched ``doc-`` first.
+    The non-source control proves the general composition machinery already gets this right in
+    both directions (it resolves ``$Y`` to the real assigned value via the ordinary AST-level
+    assignment parser, not a byte scan of a file), which is what made this a genuine, in-scope gap
+    rather than an inherent limit: a sourced file's bytes carry no such parse, so the fix has to
+    reconstruct the isolated value itself before checking it from every entry state.
+    """
+    control = 'Y=lattice; eval "doc-$Y"'
+    exploit = f"printf 'Y=lattice' > s.sh; {spelling} s.sh; eval \"doc-$Y\""
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == "shell source payload state cannot be represented"
+
+
+@pytest.mark.parametrize("spelling", ["source", "."])
+def test_marker_free_suffix_shaped_write_then_source_still_certifies(spelling: str) -> None:
+    """Over-refusal guard for the round-2 suffix fix, mirroring the prefix-side guard.
+
+    ``TAG=latest`` is suffix-shaped (a ``NAME=VALUE`` line whose value gets used as a suffix) but
+    is not the marker: the DFA requires literal ``lattice`` (double ``t``, then ``ice``), not
+    ``latest``, so ``doc-$TAG`` never completes it. This proves checking every DFA entry state
+    for the isolated assignment value did not regress into flagging any suffix-shaped write
+    whatsoever -- it still requires the actual marker text.
+    """
+    body = f'printf "TAG=latest" > t.sh; {spelling} t.sh; echo "doc-$TAG"'
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
 
 
 def test_source_payload_split_across_boundary_fails_closed() -> None:
