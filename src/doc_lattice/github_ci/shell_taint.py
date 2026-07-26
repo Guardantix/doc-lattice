@@ -1062,6 +1062,11 @@ def choice(*parts: ContentExpr) -> ContentExpr:
         else:
             flattened.append(part)
 
+    if not flattened:
+        # ``Choice(())`` evaluates to the lattice bottom, and ``_compose_values`` annihilates
+        # bottom, so an empty choice would erase a marker held by a sibling fragment of the same
+        # Concat. An alternative-free expansion contributes nothing, which is epsilon.
+        return LiteralTransfer("")
     if len(flattened) == 1:
         return flattened[0]
     return Choice(tuple(flattened))
@@ -1600,6 +1605,46 @@ class _SolvedFlow:
         )
 
 
+def _expression_variable_names(expression: ContentExpr) -> set[str]:
+    """Return every variable name one content expression reads."""
+    names: set[str] = set()
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, VariableRef | _SecondPassVariableRef):
+            names.add(current.name)
+            continue
+        if isinstance(current, _SecondPassConditionalAssignment):
+            names.add(current.name)
+            pending.append(current.operand)
+            continue
+        if isinstance(current, Choice | Concat):
+            pending.extend(current.parts)
+    return names
+
+
+def _cyclic_write_keys(writes: tuple[_FlowWrite, ...]) -> frozenset[str | int]:
+    """Return the write keys that participate in a variable-reference cycle."""
+    dependencies: dict[str | int, set[str]] = {}
+    for write in writes:
+        dependencies.setdefault(write.key, set()).update(
+            _expression_variable_names(write.expression)
+        )
+    cyclic: set[str | int] = set()
+    for key, direct in dependencies.items():
+        reached: set[str] = set()
+        pending = list(direct)
+        while pending:
+            name = pending.pop()
+            if name in reached:
+                continue
+            reached.add(name)
+            pending.extend(dependencies.get(name, ()))
+        if key in reached:
+            cyclic.add(key)
+    return frozenset(cyclic)
+
+
 def _solve_flow_definitions(
     definitions: _FlowDefinitions,
     *,
@@ -1613,8 +1658,16 @@ def _solve_flow_definitions(
     if entries > limits.max_table_entries:
         raise _TaintLimitExceeded("shell taint table entry limit exceeded")
 
+    # Keys on a reference cycle are seeded with epsilon rather than the lattice bottom. Bottom
+    # means "unreachable" and ``_compose_values`` annihilates it, so a key whose write set is
+    # entirely self- or mutually-referential would never leave bottom and would read as
+    # marker-free even though Bash expands the not-yet-assigned read to the empty string. Keys
+    # off a cycle keep bottom, which is what the declared-forward-reference and definite-setness
+    # models depend on.
+    cyclic_variables = _cyclic_write_keys(definitions.variable_writes)
     variables: dict[str | int, _ContentValue] = {
-        write.key: frozenset() for write in definitions.variable_writes
+        write.key: (frozenset({_EPSILON}) if write.key in cyclic_variables else frozenset())
+        for write in definitions.variable_writes
     }
     resources: dict[str | int, _ContentValue] = {
         write.key: frozenset() for write in definitions.resource_writes
@@ -1943,20 +1996,64 @@ def _scope_input_commands(
     return memo
 
 
+_DescriptorBindings = dict[int, tuple[RedirectionTarget | _ImplicitPipeTarget, bool]]
+
+# Descriptors 1 and 2 are always open in the enclosing shell, so a ``>&1``/``>&2`` source that no
+# authored redirection bound is inherited stdout/stderr rather than missing evidence.
+_INHERITED_OUTPUT_DESCRIPTORS = frozenset({1, 2})
+
+
 def _output_bindings(
     events: tuple[_RedirectionEvent, ...],
     *,
     implicit_pipe: bool = False,
-) -> dict[int, tuple[RedirectionTarget | _ImplicitPipeTarget, bool]]:
-    """Replay output descriptor mutations left-to-right."""
-    bindings: dict[int, tuple[RedirectionTarget | _ImplicitPipeTarget, bool]] = (
-        {1: (_ImplicitPipeTarget(), False)} if implicit_pipe else {}
-    )
+    inherited: _DescriptorBindings | None = None,
+    guarded: frozenset[int] = frozenset(),
+) -> _DescriptorBindings:
+    """Replay output descriptor mutations left-to-right.
+
+    Args:
+        events: The redirection events attached to one command or compound.
+        implicit_pipe: Whether descriptor 1 starts bound to this stage's pipe endpoint.
+        inherited: Descriptor bindings an enclosing compound installed, consulted only to
+            resolve a ``>&N`` source this event set does not bind itself.
+        guarded: Descriptors some other command or compound in this body binds. A stdout write
+            whose source is one of these but is not visible here has to fail closed.
+
+    Returns:
+        The final binding per output descriptor.
+
+    Raises:
+        _TaintLimitExceeded: If a write routes stdout through a guarded descriptor whose binding
+            the evidence cannot name.
+    """
+    bindings: _DescriptorBindings = {1: (_ImplicitPipeTarget(), False)} if implicit_pipe else {}
     for event in sorted(events, key=lambda candidate: candidate.ordinal):
         if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
             continue
         if isinstance(event.target, DescriptorTarget):
-            binding = bindings.get(event.target.descriptor, (DynamicResourceTarget(), False))
+            source = bindings.get(event.target.descriptor)
+            if source is None and inherited is not None:
+                source = inherited.get(event.target.descriptor)
+            if source is None:
+                routes_stdout = (
+                    event.descriptor == 1
+                    or event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS
+                )
+                if (
+                    routes_stdout
+                    and event.target.descriptor in guarded
+                    and event.target.descriptor not in _INHERITED_OUTPUT_DESCRIPTORS
+                ):
+                    # A bare ``exec 3> f`` rebinds the descriptor for the rest of the shell, which
+                    # the per-command redirection evidence cannot carry. Resolving the source to a
+                    # dynamic target here would discard this command's stdout instead of routing
+                    # it, so an authored marker could reach a file the scan reads as unwritten.
+                    # A descriptor no part of this body binds is a runtime error in Bash rather
+                    # than missing evidence, so it keeps the existing dynamic-target behavior.
+                    raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+                source = (DynamicResourceTarget(), False)
+            binding = source
         else:
             binding = (event.target, event.operator in _APPEND_REDIRECTION_OPERATORS)
         if event.operator in _COMBINED_OUTPUT_REDIRECTION_OPERATORS:
@@ -1965,6 +2062,74 @@ def _output_bindings(
         else:
             bindings[event.descriptor] = binding
     return bindings
+
+
+def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]:
+    """Return the non-standard output descriptors some command or compound in this body binds.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        The descriptors a ``>&N`` source may legitimately refer to, so an unresolved reference to
+        one of them is missing evidence rather than a Bash runtime error.
+    """
+    return frozenset(
+        event.descriptor
+        for events in (
+            *(command.redirections for command in evidence.commands),
+            *(scope.redirections for scope in evidence.scopes),
+        )
+        for event in events
+        if event.descriptor is not None
+        and event.descriptor not in _INHERITED_OUTPUT_DESCRIPTORS
+        and event.operator in _OUTPUT_REDIRECTION_OPERATORS
+        and not isinstance(event.target, DescriptorTarget)
+    )
+
+
+def _scope_inherited_bindings(
+    evidence: _ShellTaintEvidence,
+) -> dict[int, _DescriptorBindings]:
+    """Return the descriptor bindings each structured scope installs for the commands inside it.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        A mapping from scope id to the bindings visible inside that scope, with an inner
+        compound's redirections overriding an outer one's.
+    """
+    scopes = {scope.scope_id: scope for scope in evidence.scopes}
+    resolved: dict[int, _DescriptorBindings] = {}
+    # An explicit stack keeps a deep or reverse-ordered scope chain within Python's recursion
+    # budget; ``state`` marks a scope as in-progress so a malformed parent cycle stops instead of
+    # looping forever.
+    state: dict[int, int] = {}
+    for root in scopes:
+        if root in resolved:
+            continue
+        pending = [(root, False)]
+        while pending:
+            scope_id, expanded = pending.pop()
+            if scope_id in resolved:
+                continue
+            scope = scopes[scope_id]
+            parent_id = scope.parent_scope_id
+            parent = resolved.get(parent_id, {}) if parent_id is not None else {}
+            resolved_parent = (
+                parent_id is None or parent_id not in scopes or state.get(parent_id) == 1
+            )
+            if expanded or resolved_parent:
+                bindings = dict(parent)
+                bindings.update(_output_bindings(scope.redirections, inherited=parent))
+                resolved[scope_id] = bindings
+                state[scope_id] = 2
+                continue
+            state[scope_id] = 1
+            pending.append((scope_id, True))
+            pending.append((parent_id, False))
+    return resolved
 
 
 def _replay_input_bindings(
@@ -2458,7 +2623,11 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             unsupported_builtin_write=(command.unsupported_builtin_write or read_ifs_unknown),
         )
         commands.append(routed)
-        conditional = command.conditionally_executed
+        # ``if``/``elif``/``else`` branch uncertainty lives in ``execution_status``, not in
+        # ``conditionally_executed``. Without it an assignment inside an untaken branch replaced
+        # the live value, and the exact ``read`` projection below substituted that stale text as a
+        # literal.
+        conditional = command.conditionally_executed or command.execution_status is not True
         assignment_only = not command.argv or command.executable.argv_index is None
         if assignment_only:
             for assignment in routed.definite_assignments:
@@ -2760,16 +2929,18 @@ def _refresh_runtime_eval_programs(
             command.function_context_id,
             command_environments[command.command_id],
         )
-        eval_values = dict(values)
-        for assignment in command.definite_assignments:
-            apply_exact(assignment, eval_values, conditional=False)
+        # Bash expands every word of a command before performing that command's own assignment
+        # prefix, so ``C=true eval "$C"`` runs the old ``C``. Expanding with the post-assignment
+        # values resolved the payload to the new one and certified the marker the shell still ran.
+        # A standalone-assignment command has no eval candidate, so this map is the right one for
+        # both shapes.
         programs = {
             program
             for executable in _builtin_eval_candidates(command)
             for program in (
                 _exact_content_literal(
                     _eval_arguments_raw(command, executable),
-                    eval_values,
+                    values,
                     limits,
                 ),
             )
@@ -2784,11 +2955,15 @@ def _refresh_runtime_eval_programs(
         )
         refreshed.append(refreshed_command)
 
+        # ``conditionally_executed`` only covers ``&&``/``||`` operands, ``case`` bodies and
+        # function bodies. Branch uncertainty from ``if``/``elif``/``else`` lives in
+        # ``execution_status``, which ``_contextualize_evidence`` already consults, so a write
+        # inside an untaken branch must not be replayed as definite here either.
         conditional = (
             command.function_effect_conditional
             if command.function_context_id is not None
             else command.conditionally_executed
-        )
+        ) or command.execution_status is not True
         assignment_only = not command.argv or command.executable.argv_index is None
         if assignment_only:
             for assignment in command.definite_assignments:
@@ -2798,6 +2973,13 @@ def _refresh_runtime_eval_programs(
             *command.function_effect_assignments,
         ):
             apply_exact(assignment, values, conditional=conditional)
+        # ``command.assignments`` carries the conditional ``${name=word}``/``${name:=word}``
+        # writes and the persisting redirection assignments this replay does not model. Leaving
+        # them out kept the stale prior value in the table and then published it as the
+        # authoritative eval program, so drop the name instead of asserting the old text.
+        for assignment in command.assignments:
+            if assignment.conditional or assignment.assign_if_null:
+                apply_exact(assignment, values, conditional=True)
         eval_assignments, eval_unsets = _static_eval_mutations(refreshed_command)
         for mutation in eval_assignments:
             apply_exact(mutation.assignment, values, conditional=conditional)
@@ -3097,9 +3279,22 @@ def _producer_stdout(
 
 
 def _static_write_definitions(
-    events: tuple[_RedirectionEvent, ...], output: ContentExpr
+    events: tuple[_RedirectionEvent, ...],
+    output: ContentExpr,
+    inherited: _DescriptorBindings | None = None,
+    guarded: frozenset[int] = frozenset(),
 ) -> tuple[_FlowWrite, ...]:
-    """Replay output descriptors and return static resource writes they receive."""
+    """Replay output descriptors and return static resource writes they receive.
+
+    Args:
+        events: The redirection events attached to one command or compound.
+        output: The stdout content this command or compound produces.
+        inherited: Descriptor bindings the enclosing compounds installed.
+        guarded: Descriptors some other command or compound in this body binds.
+
+    Returns:
+        The static resource writes the replayed descriptors receive.
+    """
     writes: list[_FlowWrite] = []
     for event in sorted(events, key=lambda candidate: candidate.ordinal):
         if event.descriptor is None or event.operator not in _OUTPUT_REDIRECTION_OPERATORS:
@@ -3109,7 +3304,7 @@ def _static_write_definitions(
             and event.operator not in _APPEND_REDIRECTION_OPERATORS
         ):
             writes.append(_FlowWrite(event.target.key, LiteralTransfer("")))
-    bindings = _output_bindings(events)
+    bindings = _output_bindings(events, inherited=inherited, guarded=guarded)
     for descriptor, (target, append) in bindings.items():
         if not isinstance(target, StaticResourceTarget):
             continue
@@ -5286,10 +5481,17 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
     for command in evidence.commands:
         context = command.function_context_id
         if context is None:
+            # Positional binding and ``set``/``shift`` mutation are modeled for function contexts
+            # only. A body that rewrites ``$@`` at top level would otherwise leave ``$1`` external
+            # and non-authored, so `set -- "$M"; "$1"` has to fail closed the same way the
+            # function form already does.
+            if positional_mutation_kind(command) is not None:
+                raise _TaintLimitExceeded("dynamic top-level positional mutation")
             call_time_resolved_commands.append(command)
             continue
         states = call_time_values.setdefault(context, [])
         programs: set[str] = set()
+        unresolved_program = False
         next_states: dict[tuple[tuple[str, str], ...], dict[str, str]] = {}
         for values in states:
             eval_values = dict(values)
@@ -5312,6 +5514,12 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             program = exact_eval_program(command, eval_values)
             if program is not None:
                 programs.add(program)
+            elif _builtin_eval_candidates(command):
+                # One entry variant resolved exactly and another did not. Publishing only the
+                # resolved ones makes the set look authoritative downstream, which drops the
+                # unresolved (and possibly tainted) payload instead of falling back to the raw
+                # eval arguments.
+                unresolved_program = True
             resolved_variant = (
                 replace(
                     command,
@@ -5400,7 +5608,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 resolved_eval_program=None,
                 resolved_eval_programs=tuple(sorted(programs)),
             )
-            if programs
+            if programs and not unresolved_program
             else command
         )
         call_time_resolved_commands.append(resolved)
@@ -6206,6 +6414,8 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
     environments, _lexical_parents = _scope_environment_ids(evidence.scopes)
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
     command_paths = _command_scope_paths(evidence)
+    scope_bindings = _scope_inherited_bindings(evidence)
+    guarded_descriptors = _guarded_output_descriptors(evidence)
     command_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
     pipe_inputs = _pipe_inputs(evidence)
@@ -6354,7 +6564,18 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                 )
         output = _producer_stdout(command, inputs[command.command_id], limits)
         stream_writes.append(_FlowWrite(command.output_scope_id, output))
-        resource_writes.extend(_static_write_definitions(command.redirections, output))
+        # A ``>&N`` inside a compound resolves against the descriptor that compound bound, so the
+        # enclosing chain has to be visible here. Without it the write resolved to an unnamed
+        # dynamic target and was dropped, laundering the content into a file read as unwritten.
+        enclosing = command_paths[command.command_id]
+        resource_writes.extend(
+            _static_write_definitions(
+                command.redirections,
+                output,
+                scope_bindings.get(enclosing[-1], {}) if enclosing else {},
+                guarded_descriptors,
+            )
+        )
 
     lowering = _OutputLowering(command_scopes)
     target_environments = set(environments.values()) | set(command_environments.values())
@@ -6421,7 +6642,14 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
             )
         )
         resource_writes.extend(
-            _static_write_definitions(scope.redirections, StreamRef(scope.scope_id))
+            _static_write_definitions(
+                scope.redirections,
+                StreamRef(scope.scope_id),
+                scope_bindings.get(scope.parent_scope_id, {})
+                if scope.parent_scope_id is not None
+                else {},
+                guarded_descriptors,
+            )
         )
 
     return (
@@ -6908,7 +7136,10 @@ def _eval_parameter_content(  # noqa: PLR0911
         return choice(variable, operand)
     if operator in {"+", ":+"}:
         return choice(LiteralTransfer(""), operand)
-    return choice(LiteralTransfer(""), concat(OutsideGap(), operand, OutsideGap()))
+    # An unmodeled transform (``#``, ``%``, ``/``, ``^``, ``,``, ``:off:len``, ``?``) still derives
+    # its result from the parameter, so the variable has to stay beside the authored operand.
+    # Dropping it made ``${M#x}`` inert even when ``M`` composed the marker.
+    return choice(LiteralTransfer(""), concat(OutsideGap(), variable, operand, OutsideGap()))
 
 
 def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
@@ -7349,6 +7580,23 @@ def _eval_syntax_token(  # noqa: PLR0911, PLR0912
     return _cap_eval_syntax(value, limits)
 
 
+_SECOND_PASS_ACTIVE_CHARACTERS = frozenset("\\'\"$`{}")
+
+
+def _second_pass_inert(value: _ContentValue) -> bool:
+    """Return whether eval's second parse would leave every alternative's text unchanged."""
+    for alternative in value:
+        if alternative.projection_incomplete:
+            return False
+        if any(
+            character in _SECOND_PASS_ACTIVE_CHARACTERS
+            for literal_text in alternative.literal_texts
+            for character in literal_text
+        ):
+            return False
+    return True
+
+
 def _eval_syntax_variable_transition(  # noqa: PLR0912
     name: str | int,
     state: _EvalSyntaxState,
@@ -7365,6 +7613,7 @@ def _eval_syntax_variable_transition(  # noqa: PLR0912
         and snapshot != raw
         and not _marker_capable(snapshot)
         and not state.parameter_text
+        and _second_pass_inert(snapshot)
     ):
         return _cap_eval_syntax(
             frozenset(
@@ -7438,7 +7687,7 @@ def _eval_syntax_variable_transition(  # noqa: PLR0912
         context.active_transitions.remove(key)
 
 
-def _eval_syntax_append(  # noqa: PLR0911
+def _eval_syntax_append(
     expression: ContentExpr,
     state: _EvalSyntaxState,
     context: _EvalSyntaxContext,
@@ -7547,7 +7796,10 @@ def _eval_syntax_append(  # noqa: PLR0911
         )
         return _cap_eval_syntax(value, context.limits)
     if not isinstance(expression, Concat):
-        return _eval_syntax_outside(state.quote)
+        # Returning the outside value here would discard the incoming state, including a marker
+        # prefix already accumulated, and read as "no marker". An unhandled node type is missing
+        # evidence, so it has to fail closed like every other unrepresentable shape.
+        raise _MalformedTaintEvidence("shell taint eval syntax expression cannot be structured")
     value = frozenset({state})
     for part in _coalesced_eval_parts(expression.parts):
         value = _cap_eval_syntax(
@@ -8937,7 +9189,16 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
                     evaluation_layer=layer,
                 )
                 source_order_override_keys.add(_scoped_variable_name(environment, name))
+        # ``function_effect_unsets`` is a flat list that does not preserve its position among the
+        # ordered effect assignments, and it is applied after all of them. An ``unset`` that the
+        # body performs *before* assigning the same name would therefore erase the live value, so
+        # a name the same effect set also assigns keeps its assignment.
+        effect_assigned_names = {
+            assignment.name for assignment in command.function_effect_assignments
+        }
         for target in command.function_effect_unsets:
+            if target in effect_assigned_names:
+                continue
             target_environment = _scoped_variable_environment(target)
             name = _unscoped_variable_name(target)
             if target_environment in function_contexts:
@@ -9373,6 +9634,51 @@ def _executable_alternate_count(executable: _ExecutableEvidence) -> int:
     return sum(1 for _ in _iter_executable_evidence(executable)) - 1
 
 
+def _shell_command_payload_marker_capable(
+    command: _CommandEvidence,
+    context: _EvalSyntaxContext,
+    environment: _EvalCommandEnvironment,
+) -> bool:
+    """Return whether a shell ``-c`` payload composes the marker through its own expansion.
+
+    AD-18 puts shell ``-c`` in the interpreted-payload set beside ``eval``, but only ``eval``
+    reached the second-parse machinery. A literal payload such as ``bash -c '$A$B'`` is expanded by
+    the child shell, so its parameter references have to resolve against this body's values the
+    same way an ``eval`` payload's do. Resolving from the whole variable table rather than the
+    exported subset over-approximates, which keeps the check fail-closed.
+
+    Args:
+        command: The command whose executable candidates may be a shell.
+        context: The eval-syntax context holding the solved variable tables.
+        environment: The per-command execution environment for this body.
+
+    Returns:
+        Whether any shell ``-c`` payload's second parse can accept the marker.
+    """
+    for executable in _iter_executable_evidence(command.executable):
+        if executable.argv_index is None or executable.name is None:
+            continue
+        if _normalized_shell_head(executable.name) not in _SHELL_HEADS:
+            continue
+        selection = _select_shell_source(command.argv, executable.argv_index)
+        if selection.kind is not _ShellSourceKind.COMMAND or selection.argv_index is None:
+            continue
+        if any(
+            summary.full.entries[_DFA_START][1]
+            for state in _eval_syntax_expression(
+                command.argv[selection.argv_index].content,
+                None,
+                context,
+                environment_variables=environment.variables,
+                fixed_point_overrides=environment.fixed_point_overrides,
+                definitely_set_variables=environment.definitely_set,
+            )
+            for summary in _finalize_eval_syntax(state, context)
+        ):
+            return True
+    return False
+
+
 def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
@@ -9527,6 +9833,12 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
         }
         for command in evidence.commands:
             if command in eval_commands and _eval_sink_marker_capable(
+                command,
+                eval_context,
+                command_environments[command.command_id],
+            ):
+                return True, TAINT_REFUSAL_REASON
+            if _shell_command_payload_marker_capable(
                 command,
                 eval_context,
                 command_environments[command.command_id],

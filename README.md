@@ -675,11 +675,16 @@ This contract is step-local and marker-anchored, not a general proof that dynami
 is safe. Audit does not aggregate across steps, jobs, `uses:` actions, or reusable workflows. It
 also has no authored evidence for external environment values, external files, or unresolved
 producer output beyond the generic may-output rule; for encoding or transform synthesis such as
-`base64 -d`, `tr`, or `sed`; for dynamic path identity, `..`, `cd`, rename, or symlink aliases; or
-for file-descriptor duplication and movement. Unsupported parameter transforms surface their
+`base64 -d`, `tr`, or `sed`; or for dynamic path identity, `..`, `cd`, rename, or symlink aliases.
+A `>&N` write resolves against the descriptor an enclosing compound bound, so
+`{ ... >&3; } 3> out.sh` routes into `out.sh`; a write through a descriptor another part of the
+body binds but that this command cannot see, such as one opened by a bare `exec 3> out.sh`, exits
+2 instead. Unsupported parameter transforms surface their
 authored literal operands but do not model the variable-derived transform. An `eval`, shell `-c`,
 or `source` payload is interpreted for its state effects only when it is exact literal text, and
 only for assignments, declaration builtins, `unset`, `if`/`case` reachability, and subshell groups.
+A shell `-c` payload's own parameter references are resolved against this body's values, which
+over-approximates the exported subset the child would actually inherit.
 Loop bodies, brace groups, arrays, arithmetic-bearing values, and nested `eval` inside a payload
 are not modeled. Function, alias, `PATH`, and dynamic executable-name shadowing remain the
 command-identity limitations. These are
@@ -687,10 +692,13 @@ absence-of-evidence boundaries, not trust claims: for example `curl ... | bash`,
 `eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` still certify.
 Malformed, oversized, cap-exhausting, or otherwise unreliably structured input exits 2. A bare
 `exec` that rebinds standard input, output, or error also exits 2, because the descriptor belongs
-to the shell from that point on rather than to the `exec` itself; `exec` on any other descriptor,
-and a redirection attached to a command or compound, are modeled as before. A `read` that uses
+to the shell from that point on rather than to the `exec` itself; `exec` on any other descriptor
+still certifies on its own, and a redirection attached to a command or compound is modeled. A
+`read` that uses
 `-a`, `-d`, `-n`, `-N`, or `-u` still exits 2 for the whole step, since a bounded prefix can
 compose a marker the full stream does not contain and array element reads are not modeled.
+A `set --` or `shift` that rewrites the positional parameters outside a function body also exits
+2, because positional binding is modeled for function contexts only.
 
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context

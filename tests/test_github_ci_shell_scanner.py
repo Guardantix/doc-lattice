@@ -574,6 +574,118 @@ def test_exec_without_a_modeled_descriptor_still_certifies(script: str):
     assert result.incomplete_reason is None
 
 
+SPLIT_MARKER = "printf '%s%s\\n' doc- 'lattice reconcile'"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f"{{ {SPLIT_MARKER} >&3; }} 3> run.sh\nbash run.sh\n",
+        f"( {SPLIT_MARKER} >&3 ) 3> run.sh\nbash run.sh\n",
+        f"for i in 1; do {SPLIT_MARKER} >&3; done 3> run.sh\nbash run.sh\n",
+        f"while :; do {SPLIT_MARKER} >&3; break; done 3> run.sh\nbash run.sh\n",
+        f"{{ {SPLIT_MARKER} >&4; }} 3> other.sh 4> run.sh\nbash run.sh\n",
+        f"{{ {{ {SPLIT_MARKER} >&3; }}; }} 3> run.sh\nbash run.sh\n",
+        f"{{ {SPLIT_MARKER} >&2; }} 2> run.sh\nbash run.sh\n",
+    ],
+    ids=(
+        "brace-group",
+        "subshell",
+        "for-loop",
+        "while-loop",
+        "second-descriptor",
+        "nested-group",
+        "stderr",
+    ),
+)
+def test_compound_scope_descriptor_binding_routes_authored_writes(script: str):
+    # ``>&3`` inside a compound resolves against the descriptor the compound itself bound, so the
+    # write lands in the enclosing scope's file rather than being discarded as an unknown target.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f"{{ {SPLIT_MARKER} >&3; }} 3> other.sh\nbash run.sh\n",
+        f"{{ {SPLIT_MARKER} >&3; }} 3> /dev/null\nbash run.sh\n",
+        "{ echo hello >&3; } 3> run.sh\nbash run.sh\n",
+        "{ echo hello >&2; } 2> run.sh\nbash run.sh\n",
+        "echo hello >&2\nbash run.sh\n",
+        "echo hello 2>&1\nbash run.sh\n",
+        f"{SPLIT_MARKER} >&3\nbash run.sh\n",
+    ],
+    ids=(
+        "unrelated-file",
+        "null-target",
+        "marker-free",
+        "marker-free-stderr",
+        "inherited-stderr",
+        "stderr-to-stdout",
+        "descriptor-never-opened",
+    ),
+)
+def test_compound_scope_descriptor_binding_keeps_unrelated_writes_certified(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f"exec 3> run.sh\n{SPLIT_MARKER} >&3\nbash run.sh\n",
+        f"exec 3> run.sh\n{{ {SPLIT_MARKER} >&3; }}\nbash run.sh\n",
+        f"exec 3> run.sh\nfor i in 1; do {SPLIT_MARKER} >&3; done\nbash run.sh\n",
+        f"{{ x; }} 3> run.sh\n{SPLIT_MARKER} >&3\nbash run.sh\n",
+    ],
+    ids=("exec-open", "exec-group", "exec-loop", "sibling-compound"),
+)
+def test_write_to_an_unbound_descriptor_fails_closed(script: str):
+    # ``exec 3> run.sh`` rebinds the descriptor for the rest of the shell, which the per-command
+    # redirection evidence cannot carry. A later ``>&3`` therefore routes this command's stdout
+    # somewhere the scan cannot name, so it must fail closed instead of discarding the write.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "shell descriptor source cannot be represented"
+    with pytest.raises(ConfigError, match=r"shell scan incomplete"):
+        direct_doc_lattice_invocations(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=doc-; B='lattice reconcile'; export A B; bash -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; sh -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; bash -c 'echo x; $A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; bash -c 'eval $A$B'",
+    ],
+    ids=("bash", "sh", "later-command", "nested-eval"),
+)
+def test_shell_c_payload_reparses_parameter_references(script: str):
+    # AD-18 puts shell ``-c`` in the interpreted-payload set alongside ``eval``. A literal payload
+    # naming a variable that composes the marker has to be reparsed the same way.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=hello; export A; bash -c 'echo $A'",
+        "A=doc-; B='lattice reconcile'; bash -c 'echo static'",
+        "A=doc-; export A; bash -c 'echo ${A}x'",
+    ],
+    ids=("marker-free", "unreferenced", "non-composing"),
+)
+def test_shell_c_payload_reparse_keeps_marker_free_bodies_certified(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
 @pytest.mark.parametrize(
     "script",
     [
@@ -7729,3 +7841,120 @@ def test_marker_free_brace_expansions_stay_clean(script: str):
 )
 def test_dynamic_brace_members_keep_their_marker_flow(script: str):
     assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A="$A doc-"\nbash -c "${A}lattice"\n',
+        'for i in a b; do ARGS="$ARGS doc-"; done\nbash -c "${ARGS}lattice"\n',
+        'A="$C"doc-; B="$A"; C="$B"\nbash -c "${C}lattice"\n',
+    ],
+    ids=("self-reference", "loop-accumulator", "three-cycle"),
+)
+def test_cyclic_variable_definitions_keep_their_marker_flow(script: str):
+    """A reference cycle must not resolve to the lattice bottom and read as marker-free."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=doc-; B=lattice; M=\"$A$B\"\neval '${M#x} --help'\n",
+        "A=doc-; B=lattice; M=\"$A$B\"\neval '${M%x} --help'\n",
+        "A=doc-; B=lattice; M=\"$A$B\"\neval '${M/x/y} --help'\n",
+        "A=doc-; B=lattice; M=\"$A$B\"\neval '${M^^} --help'\n",
+        "A=doc-; B=lattice; M=\"$A$B\"\neval '${M:0:20} --help'\n",
+    ],
+    ids=("prefix", "suffix", "replace", "upper", "substring"),
+)
+def test_unmodeled_parameter_transforms_keep_their_operand_variable(script: str):
+    """An unmodeled transform still derives from its parameter, so the variable must survive."""
+    assert_taint_refusal(script)
+
+
+def test_top_level_positional_mutation_fails_closed():
+    """``set --`` is modeled for function contexts only, so a top-level rewrite must refuse."""
+    script = 'A=doc-; B=lattice; M="$A$B"\nset -- "$M"\n"$1" --help\n'
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "dynamic top-level positional mutation"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'P=doc-\nCMD="${P}lattice reconcile"\nif [ -n "$FOO" ]; then\n  CMD=true\nfi\n'
+        'declare -n ref=CMD\neval "$CMD"\n',
+        'P=doc-\nDATA="${P}lattice reconcile"\nif [ -n "$FOO" ]; then\n  DATA=true\nfi\n'
+        'read -r V <<< "$DATA"\nbash -c "$V"\n',
+    ],
+    ids=("eval-replay", "builtin-writer"),
+)
+def test_untaken_if_branch_writes_do_not_clobber_the_live_value(script: str):
+    """Branch uncertainty lives in ``execution_status``, not in ``conditionally_executed``."""
+    assert_taint_refusal(script)
+
+
+def test_eval_prefix_assignment_does_not_resolve_its_own_payload():
+    """Bash expands the command words before performing the command's assignment prefix."""
+    assert_taint_refusal('P=doc-\nC="${P}lattice reconcile"\ndeclare -n ref=C\nC=true eval "$C"\n')
+
+
+def test_conditional_parameter_assignment_is_not_replayed_as_a_stale_value():
+    """``${C:=word}`` is unmodeled by the runtime replay, so the prior text must not persist."""
+    assert_taint_refusal(
+        'P=doc-\nC=\n: "${C:=${P}lattice reconcile}"\ndeclare -n ref=Z\neval "$C"\n'
+    )
+
+
+def test_partially_resolved_eval_programs_fall_back_to_the_raw_payload():
+    """A variant the replay cannot resolve must not be dropped by the resolved-variant set."""
+    assert_taint_refusal(
+        'A=doc-; B=lattice; M="$A$B"\nf() { eval "$CMD"; }\n'
+        "CMD='echo ok'\nf\nCMD=\"$HOME\"'; echo $M'\nf\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=doc-; B=lattice\nf() { unset M; M="$A$B"; }\nf\neval "$M --help"\n',
+        'A=doc-; B=lattice\nf() { M=x; unset M; M="$A$B"; }\nf\neval "$M --help"\n',
+        'A=doc-; B=lattice\ng() { unset M; }\nf() { g; M="$A$B"; }\nf\neval "$M --help"\n',
+    ],
+    ids=("unset-then-assign", "assign-unset-assign", "callee-unset"),
+)
+def test_function_effect_unsets_do_not_erase_a_later_assignment(script: str):
+    """Effect unsets are unordered, so a name the same effect set assigns keeps its value."""
+    assert_taint_refusal(script)
+
+
+def test_eval_snapshot_shortcut_still_runs_the_second_pass():
+    """A snapshot whose text is inert as literal bytes can still compose a marker when reparsed."""
+    assert_taint_refusal("f() { A='do\\c'; }\nf\nB=lattice\neval \"echo $A-$B\"\nA=zz\n")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'case "$1" in\n  if) echo a ;;\n  *) echo b ;;\nesac\n',
+        'case "$1" in\n  while) echo a ;;\n  *) echo b ;;\nesac\n',
+        'case "$1" in\n  until) echo a ;;\n  *) echo b ;;\nesac\n',
+        'case "$1" in\n  for) echo a ;;\n  *) echo b ;;\nesac\n',
+        'case "$1" in\n  select) echo a ;;\n  *) echo b ;;\nesac\n',
+    ],
+    ids=("if", "while", "until", "for", "select"),
+)
+def test_case_patterns_spelled_as_reserved_words_still_certify(script: str):
+    """A case pattern is not a command position, so it must not open a control compound."""
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_case_arm_marker_flow_survives_the_pattern_fix():
+    """The reserved-word pattern fix must not weaken case-arm taint."""
+    assert_taint_refusal('A=doc-; B=lattice\ncase "$1" in\n  a) M="$A$B" ;;\nesac\neval "$M"\n')

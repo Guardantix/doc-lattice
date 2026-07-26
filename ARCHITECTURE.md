@@ -416,7 +416,14 @@ pathname expansion, contributes an external gap rather than failing the scan; `w
 repeat the test list around each body iteration; `case` `;&` and `;;&` preserve fallthrough
 sequence. Ordered descriptor replay installs pipeline endpoints first and then applies redirections
 left to right, so only final descriptor bindings route bytes while earlier truncations retain their
-empty-file side effect.
+empty-file side effect. A `>&N` source resolves first against the command's own events and then
+against the bindings its enclosing compounds installed, innermost first, so
+`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. Descriptors 1 and 2 are
+always inherited from the enclosing shell and need no such binding. Any other descriptor that some
+part of the body binds, but that this command's lexical chain cannot supply, is missing evidence
+rather than an inherited stream: a bare `exec 3> out.sh` rebinds the shell scope, which the
+per-command `redirections` field cannot carry, so a later `>&3` fails closed. A descriptor nothing
+in the body binds is a Bash runtime error rather than a flow, so it keeps routing nowhere.
 
 Execution sinks are `eval`, shell `-c`, selected shell stdin, and static script execution through a
 shell operand, direct path, `source`, or `.`. A `/dev/stdin`, `/dev/fd/0`, or `/proc/self/fd/0`
@@ -439,6 +446,12 @@ subshell groups, and the function effects and call-graph names a payload contrib
 cycles, nameref targets that are not static variable names, and command prefixes that cannot be
 represented fail closed. A payload the tokenizer cannot accept contributes no evidence.
 
+A shell `-c` payload also enters the parameter second pass, not only the state-effect replay. The
+child expands the payload itself, so `export A B; bash -c '$A$B'` composes the marker although no
+word of the parent command carries it. Those references resolve against this body's whole variable
+table rather than the exported subset the child would inherit, which over-approximates and so stays
+fail-closed; modeling export status precisely is future work.
+
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing
 `eval` has no natural terminating point, and this engine is defense in depth behind human review,
@@ -456,9 +469,11 @@ resolved exact value length, and successful fixed-point updates have determinist
 exhaustion fails closed, so an eval payload that grows itself cannot exhaust time or memory. The
 absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
 beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, unsupported
-parameter transforms beyond their authored operands, descriptor aliasing, eval payload constructs
-outside the bounded exact-literal set above, and AD-17's function, alias, `PATH`, and
-dynamic-executable limitations.
+parameter transforms beyond their authored operands, shell-scope descriptor state carried across
+commands by a bare `exec`, eval payload constructs outside the bounded exact-literal set above, and
+AD-17's function, alias, `PATH`, and dynamic-executable limitations. A `read` beyond the first
+record of a shared stream is projected as record one, so a marker split across later records is not
+yet seen; closing that needs the content-lattice top projection tracked in issue #119.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
 that execute authored marker content now exit 2, including launcher-wrapped and ambiguous-selector
 sinks. Marker-free dynamic execution and a marker whose required character comes only from

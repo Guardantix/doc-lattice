@@ -1809,9 +1809,22 @@ class _ShellScanner:
         state.compound_redirection_ordinal = 0
         state.command_has_marker = state.command_has_marker or word.has_doc_lattice_marker
         command_position = state.at_command_position
-        self._handle_control_word(state, word, command_position=command_position)
+        # After ``;;`` the command scan resets, so the first word of the next case *pattern* looks
+        # like a command position. A pattern spelled ``if``/``while``/``for``/``case`` is ordinary
+        # Bash and must not open a control compound, which would then fail the ``esac`` match.
+        # The empty-arm ``esac)`` form is a real terminator and is handled below.
+        in_case_pattern = (
+            bool(state.cases)
+            and state.cases[-1].phase == "pattern"
+            and not (
+                not word.dynamic and word.literal == "esac" and state.cases[-1].at_pattern_start
+            )
+        )
+        if not in_case_pattern:
+            self._handle_control_word(state, word, command_position=command_position)
         if (
-            not word.dynamic
+            not in_case_pattern
+            and not word.dynamic
             and word.keyword_eligible
             and command_position
             and word.literal == "case"
