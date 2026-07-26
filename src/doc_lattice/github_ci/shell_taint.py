@@ -930,6 +930,22 @@ _STREAM_SCOPE_KINDS = frozenset(
 _SHARED_ENVIRONMENT_SCOPE_KINDS = frozenset(
     {"brace_group", "case", "for", "if", "select", "until", "while"}
 )
+# A Bash function definition persists past the compound that contained it: once the defining
+# statement runs, the name stays callable for the rest of that shell, independent of whether the
+# statement itself sat inside a body that might run zero or more times. A command's own
+# ``execution_status`` is conservatively ``None`` (conditional) for every command inside a
+# repeating or ``case`` body, since the scanner does not attempt to prove a loop or case body runs
+# at least once -- but that conditionality describes the body as a whole, not a per-iteration
+# branch the definition could uniquely miss. AD-18's "reproduces that function scope's aggregated
+# stdout" already holds unconditionally for a top-level, ``if``-branch, subshell, or brace-group
+# definition (whose own execution status is definite); this set extends the same registration to
+# a definition whose defining statement has any control ancestor in one of these repeating or
+# ``case`` kinds, without relaxing the definite-status requirement for any other conditional shape
+# (for example an unresolved dynamic ``if`` condition), which stays out of scope for this set. The
+# ambiguous-status branch this set gates must only ever *add* a definition, never pop or overwrite
+# one: an ambiguous body may or may not run, so an unset or redefinition it contains may or may not
+# take effect, and dropping/overwriting an existing linkage on that uncertainty is fail-open.
+_REPEATING_DEFINITION_SCOPE_KINDS = frozenset({"case", "for", "select", "until", "while"})
 _PROCESS_RESOURCE_DIRECTIONS = frozenset({"input", "output"})
 
 
@@ -4894,6 +4910,27 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
 
     active_definitions_by_environment: dict[int, dict[str, int]] = {}
     active_definitions_before: dict[int, dict[str, int]] = {}
+    scope_kinds = {scope.scope_id: scope.kind for scope in evidence.scopes}
+    scope_parents = {scope.scope_id: scope.parent_scope_id for scope in evidence.scopes}
+    repeating_scope_ancestor: dict[int, bool] = {}
+
+    def registers_within_repeating_body(container_scope_id: int) -> bool:
+        """Return whether any control ancestor of a command's scope repeats or is a ``case`` arm."""
+        cached = repeating_scope_ancestor.get(container_scope_id)
+        if cached is not None:
+            return cached
+        visited: set[int] = set()
+        current: int | None = container_scope_id
+        result = False
+        while current is not None and current not in visited:
+            visited.add(current)
+            if scope_kinds.get(current) in _REPEATING_DEFINITION_SCOPE_KINDS:
+                result = True
+                break
+            current = scope_parents.get(current)
+        charge_edges(len(visited))
+        repeating_scope_ancestor[container_scope_id] = result
+        return result
 
     def active_definitions_for(environment: int) -> dict[str, int]:
         cached = active_definitions_by_environment.get(environment)
@@ -4909,7 +4946,8 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         active_definitions = active_definitions_for(environment)
         active_definitions_before[command.command_id] = dict(active_definitions)
         charge_edges(len(active_definitions))
-        if conditional_execution[command.command_id] is True:
+        status = conditional_execution[command.command_id]
+        if status is True:
             if (
                 command.defines_function_name is not None
                 and command.defines_function_context_id is not None
@@ -4919,6 +4957,21 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 )
             for name in _unset_function_names(command):
                 active_definitions.pop(name, None)
+        elif status is None and registers_within_repeating_body(command.container_scope_id):
+            # Ambiguous status means the body may or may not run, so an unset or redefinition
+            # here may or may not take effect -- popping or overwriting on that uncertainty would
+            # be fail-open. Only adding a definition that was not already active is safe: a call
+            # site can always reach this definition (the body ran) even when it cannot prove the
+            # body ran, and an existing definition survives regardless of whether this ambiguous
+            # body executed.
+            if (
+                command.defines_function_name is not None
+                and command.defines_function_context_id is not None
+            ):
+                active_definitions.setdefault(
+                    command.defines_function_name,
+                    command.defines_function_context_id,
+                )
 
     definitions_by_name: dict[str, list[tuple[int, int]]] = {}
     for command in evidence.commands:

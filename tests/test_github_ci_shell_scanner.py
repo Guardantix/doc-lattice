@@ -5382,6 +5382,39 @@ def test_function_lifetime_applies_definitely_executed_unsets(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        "p(){ printf %s doc-; }\n"
+        "for w in a b; do\n"
+        '  if [ "$w" = zzz ]; then unset -f p; fi\n'
+        "done\n"
+        "v=$(p)\n"
+        'eval "${v}lattice reconcile"',
+        "p(){ printf %s doc-; }\n"
+        "for w in a b; do\n"
+        '  if [ "$w" = zzz ]; then p(){ printf %s safe; }; fi\n'
+        "done\n"
+        "v=$(p)\n"
+        'eval "${v}lattice reconcile"',
+    ],
+    ids=("ambiguous-unset-in-loop", "ambiguous-redefinition-in-loop"),
+)
+def test_function_lifetime_ambiguous_unset_or_redefinition_in_loop_stays_refusing(script: str):
+    """An unset/redefinition under ambiguous (loop-body) status must not drop a live linkage.
+
+    #142's fix registers a definition found inside a repeating/``case`` body even though its own
+    execution status is ambiguous (``None``), because the body might run. That registration must
+    only ever *add* a definition under that ambiguity, never pop or overwrite one: an unset or a
+    redefinition nested inside a conditional (here an ``if`` whose test the scanner cannot
+    resolve) inside the loop body is itself no more than ambiguous, so it may or may not run. A
+    call reached only through the outer (unconditional) loop iterations that do *not* take that
+    inner branch still resolves to the original, still-live definition, so dropping or overwriting
+    the linkage on the inner branch's uncertainty would incorrectly certify a real execution path.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "X=safe; f() { eval '${X:=doc-}lattice'; }; unset X; f",
         "X=safe; f() { eval '${X:=doc-}lattice'; }; X=doc-; f",
         'X=safe; f() { eval "$X"lattice; }; eval "X=doc-"; f',
@@ -8375,4 +8408,71 @@ def test_loop_variable_survives_the_loop_for_a_later_eval():
 )
 def test_loop_header_positional_controls_still_refuse(script: str):
     """Controls that isolate the loop scope anchor as the #129 cause must keep refusing."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'for w in a; do\np(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\ndone',
+        'while :; do\np(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\nbreak\ndone',
+        "until false; do\np(){ printf %s doc-; }; v=$(p)\n"
+        'eval "${v}lattice reconcile"\nbreak\ndone',
+        'case x in x)\np(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\n;; esac',
+        'for w in a; do\np(){ printf %s doc-; }\ndone\nv=$(p)\neval "${v}lattice reconcile"',
+    ],
+    ids=("for", "while", "until", "case", "define-inside-call-after-loop"),
+)
+def test_function_defined_in_loop_or_case_body_reaches_eval(script: str):
+    """A function defined inside a repeating or ``case`` body must keep its stdout evidence (#142).
+
+    AD-18 says a call to a function defined in the same body reproduces that function scope's
+    aggregated stdout, but that previously held only for top-level, ``if``-branch, subshell, and
+    brace-group definitions. A definition whose statement sits inside a ``for``/``select``/
+    ``while``/``until``/``case`` body never registered as an active definition, because the
+    scanner only ever recorded a function as callable from a command whose own execution status
+    was provably ``True`` -- and every command inside a repeating or ``case`` body carries a
+    conditional (``None``) execution status, even when, as here, the body demonstrably runs. The
+    call site does not matter: defining the function inside the loop and calling it only after
+    the loop closes fails the same way, which isolates the definition scope rather than the call.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'p(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"',
+        'p(){ printf %s doc-; }\nfor w in a; do v=$(p); eval "${v}lattice reconcile"; done',
+        'if true; then\np(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\nfi',
+    ],
+    ids=("no-wrapper", "def-before-loop", "if-true-wrapper"),
+)
+def test_function_defined_in_loop_or_case_body_controls_still_refuse(script: str):
+    """Controls isolating the enclosing scope kind as the #142 cause must keep refusing.
+
+    Each control keeps the function-definition-and-call shape but removes the repeating/``case``
+    wrapper around the definition, so these must have refused before the fix and must keep
+    refusing after it.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'for w in a; do\nv=doc-\neval "${v}lattice reconcile"\ndone',
+        'while :; do\nv=doc-\neval "${v}lattice reconcile"\nbreak\ndone',
+        'until false; do\nv=doc-\neval "${v}lattice reconcile"\nbreak\ndone',
+        'case x in x)\nv=doc-\neval "${v}lattice reconcile"\n;; esac',
+    ],
+    ids=("for", "while", "until", "case"),
+)
+def test_plain_assignment_in_loop_or_case_body_still_refuses(script: str):
+    """A plain assignment substituted for the function producer already refuses (#142 note).
+
+    The issue notes the wrappers are not independently broken: a plain assignment in place of the
+    function-producer under every wrapper already refused before this fix, which isolates the
+    false-safe to function-definition handling specifically.
+    """
     assert_taint_refusal(script)
