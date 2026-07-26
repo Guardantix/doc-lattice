@@ -1962,6 +1962,29 @@ def test_direct_doc_lattice_invocations_discards_only_malformed_fragment():
     assert direct_doc_lattice_invocations(script) == (("check", False),)
 
 
+def test_scan_doc_lattice_invocations_records_incomplete_reason_for_unterminated_backtick():
+    # Real Bash treats an unterminated backtick as a syntax error and executes nothing (issue
+    # #123). The scanner must refuse rather than silently drop the remainder of the run body
+    # and certify it as marker-free.
+    script = "echo `oops\nprintf '%s%s\\n' doc- 'lattice reconcile' > run.sh\nbash run.sh\n"
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == "unterminated command substitution cannot be scanned"
+
+
+def test_scan_doc_lattice_invocations_still_refuses_closed_backtick_marker_handoff():
+    # Control: closing the backtick isolates the cause to the dropped region above rather than
+    # to the marker-handoff flow itself, which must keep refusing on its own merits.
+    script = "echo `oops`\nprintf '%s%s\\n' doc- 'lattice reconcile' > run.sh\nbash run.sh\n"
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is not None
+
+
 @pytest.mark.parametrize(
     ("script", "expected"),
     [

@@ -3415,7 +3415,7 @@ class _ShellScanner:
                 continue
             body.append(character)
             index += 1
-        return index, 0
+        raise _ShellScanIncomplete("unterminated command substitution cannot be scanned")
 
     def _command_operator_at(self, index: int, limit: int) -> str | None:
         for operator in _COMMAND_OPERATORS:
