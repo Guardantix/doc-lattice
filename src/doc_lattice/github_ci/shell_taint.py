@@ -8462,6 +8462,10 @@ class _ShellExecutionContext:
     context_id: int
     scope_id: int | None
     conditional_on_lastpipe: bool = False
+    # Whether this pipe's consumer contains a ``read`` writing a value from stdin (issue #118).
+    # The body-wide ``lastpipe`` override in ``_execution_environment_ids`` only applies to this
+    # narrow shape, matching the issue's cheap interim rather than the full CFG may-analysis.
+    pipeline_read: bool = False
 
 
 def _control_command_ranges(
@@ -8527,6 +8531,23 @@ def _command_execution_contexts(  # noqa: PLR0912
     }
     output_commands = {command.output_scope_id: command.command_id for command in evidence.commands}
     output_scopes = {command.command_id: command.output_scope_id for command in evidence.commands}
+    commands_by_id = {command.command_id: command for command in evidence.commands}
+
+    def is_pipeline_read(command_id: int) -> bool:
+        # Identify the ``read`` builtin through ``executable`` identity rather than
+        # ``builtin_assignments[*].from_stdin``: ``_resolve_builtin_writer_evidence`` routes that
+        # flag to ``False`` once a read is projected, and this predicate must stay correct across
+        # every stage that re-derives execution environments (issue #118), including after that
+        # routing has already run.
+        command = commands_by_id.get(command_id)
+        if command is None:
+            return False
+        return any(
+            executable.name == "read"
+            and executable.literal == "read"
+            and not executable.external_lookup
+            for executable in _iter_executable_evidence(command.executable)
+        )
 
     def add(command_id: int, context: _ShellExecutionContext) -> None:
         key = (context.kind, context.context_id)
@@ -8563,10 +8584,15 @@ def _command_execution_contexts(  # noqa: PLR0912
                     output_scopes[pipe.consumer_command_id],
                     None,
                     conditional_on_lastpipe=True,
+                    pipeline_read=is_pipeline_read(pipe.consumer_command_id),
                 ),
             )
         elif pipe.consumer_scope_id is not None:
-            for command_id in commands_by_scope.get(pipe.consumer_scope_id, ()):
+            consumer_command_ids = commands_by_scope.get(pipe.consumer_scope_id, ())
+            consumer_pipeline_read = any(
+                is_pipeline_read(command_id) for command_id in consumer_command_ids
+            )
+            for command_id in consumer_command_ids:
                 add(
                     command_id,
                     _ShellExecutionContext(
@@ -8574,6 +8600,7 @@ def _command_execution_contexts(  # noqa: PLR0912
                         pipe.consumer_scope_id,
                         pipe.consumer_scope_id,
                         conditional_on_lastpipe=True,
+                        pipeline_read=consumer_pipeline_read,
                     ),
                 )
 
@@ -8638,7 +8665,18 @@ def _command_execution_contexts(  # noqa: PLR0912
 def _execution_environment_ids(  # noqa: PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
 ) -> tuple[dict[int, int], dict[int, int | None], dict[int, bool]]:
-    """Return persistent command environments and their source-ordered lastpipe state."""
+    """Return persistent command environments and their source-ordered lastpipe state.
+
+    ``enabled()`` below is a single source-order forward pass, memoized per environment, so it
+    mismodels a pipeline reached through a function call site or a loop back edge whose actual
+    ``shopt -s lastpipe`` takes effect after the pipeline's textual position but before its
+    runtime execution (issue #118). Rather than the full CFG may-analysis the issue describes,
+    this applies the issue's cheap interim narrowly: a pipe whose last stage is a ``read``
+    writing from stdin (``context.pipeline_read``) is treated as running in the current shell,
+    and therefore persisting its write, whenever ``shopt -s lastpipe`` appears anywhere in the
+    body -- not just when source order already proves it enabled. Every other conditional-on-
+    lastpipe context (eval, or any other last-stage command) keeps the exact source-order state.
+    """
     lexical_environments, lexical_parents = _scope_environment_ids(evidence.scopes)
     environment_parents = dict(lexical_parents)
     contexts = _command_execution_contexts(evidence)
@@ -8649,6 +8687,9 @@ def _execution_environment_ids(  # noqa: PLR0912, PLR0915
     consumer_isolation: dict[tuple[int, str, int], bool] = {}
     enabled_by_environment: dict[int, bool] = {}
     conditional_commands = _control_conditional_commands(evidence)
+    lastpipe_enabled_anywhere = any(
+        _shopt_lastpipe_action(command) is True for command in evidence.commands
+    )
 
     def allocate(parent: int, context: _ShellExecutionContext) -> int:
         nonlocal next_environment
@@ -8695,7 +8736,10 @@ def _execution_environment_ids(  # noqa: PLR0912, PLR0915
             for context in by_depth.get(depth, ()):
                 if context.conditional_on_lastpipe:
                     key = (environment, context.kind, context.context_id)
-                    isolated = consumer_isolation.setdefault(key, not enabled(environment))
+                    body_wide = lastpipe_enabled_anywhere and context.pipeline_read
+                    isolated = consumer_isolation.setdefault(
+                        key, not (enabled(environment) or body_wide)
+                    )
                     if not isolated:
                         continue
                 environment = allocate(environment, context)
@@ -8705,7 +8749,10 @@ def _execution_environment_ids(  # noqa: PLR0912, PLR0915
         for context in by_depth.get(len(path), ()):
             if context.conditional_on_lastpipe:
                 key = (environment, context.kind, context.context_id)
-                isolated = consumer_isolation.setdefault(key, not enabled(environment))
+                body_wide = lastpipe_enabled_anywhere and context.pipeline_read
+                isolated = consumer_isolation.setdefault(
+                    key, not (enabled(environment) or body_wide)
+                )
                 if not isolated:
                     continue
             environment = allocate(environment, context)

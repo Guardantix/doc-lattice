@@ -4926,6 +4926,52 @@ def test_read_opaque_prefix_preserves_clean_suffix_control(read_option: str):
     assert result.incomplete_reason is None
 
 
+def test_lastpipe_enabled_after_function_definition_reaches_eval_at_call_site():
+    # Issue #118: the pipe textually precedes the ``shopt -s lastpipe`` that is actually in
+    # effect once ``f`` is called, so a single source-order forward pass over the function body
+    # sees the pipe as isolated. Under real Bash the call happens after lastpipe is enabled, so
+    # the last stage runs in the current shell and ``c`` persists into the ``eval``.
+    assert_taint_refusal(
+        "f() { printf '%s%s\\n' doc- 'lattice check' | read -r c; eval \"$c\"; };"
+        " shopt -s lastpipe; f"
+    )
+
+
+def test_lastpipe_enabled_on_loop_back_edge_reaches_eval():
+    # Issue #118: the ``shopt -s lastpipe`` at the bottom of the loop body only takes effect
+    # starting with the second iteration (the back edge), while a single forward pass sees the
+    # pipe once, textually before the ``shopt``, and models it as isolated.
+    assert_taint_refusal(
+        "for i in 1 2; do"
+        " printf '%s%s\\n' doc- 'lattice check' | read -r c;"
+        ' [ -n "$c" ] && eval "$c";'
+        " shopt -s lastpipe;"
+        " done"
+    )
+
+
+def test_lastpipe_anywhere_without_marker_pipeline_read_stays_clean():
+    # Over-refusal guard: ``shopt -s lastpipe`` appears in the body, but the value ``read``
+    # writes never reaches an execution sink, so the body-wide lastpipe treatment must not
+    # manufacture a refusal out of nothing.
+    result = scan_doc_lattice_invocations('shopt -s lastpipe; echo hi | read -r c; echo "$c"')
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+def test_pipeline_read_without_lastpipe_preserves_isolated_control():
+    # Over-refusal guard: with no ``shopt -s lastpipe`` anywhere in the body, the last pipeline
+    # stage stays isolated under default Bash semantics, so the ``read`` must not persist and
+    # the flow must keep certifying exactly as it did before issue #118's fix.
+    result = scan_doc_lattice_invocations(
+        "printf '%s%s\\n' doc- 'lattice check' | read -r c; eval \"$c\""
+    )
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
 @pytest.mark.parametrize("writer", ["R=doc-", "read R <<<doc-"], ids=("assignment", "read"))
 def test_nameref_writes_update_referent(writer: str):
     assert_taint_refusal(f'X=safe; declare -n R=X; {writer}; eval "$X"lattice')
