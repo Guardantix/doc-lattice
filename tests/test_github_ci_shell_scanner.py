@@ -8554,6 +8554,48 @@ def test_cyclic_variable_definitions_keep_their_marker_flow(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        'X="$X"; eval "doc-${X}lattice check"',
+        'A="$B"; B="$A"; eval "doc-${A}lattice check"',
+    ],
+    ids=("self-reference", "mutual-reference"),
+)
+def test_issue_115_self_and_mutual_reference_exploits_stay_refused(script: str):
+    """Regression pin for issue #115's two verified false-safes.
+
+    ``_solve_flow_definitions`` used to seed every written key with the lattice bottom, so a
+    variable whose only definition read itself (or, mutually, read a partner that read it back)
+    never rose above bottom, and ``_compose_values`` annihilates bottom -- the authored marker
+    silently disappeared from the solved value and the step certified clean, even though Bash
+    expands the not-yet-assigned read to the empty string and the surrounding literals
+    reconstitute the marker exactly. Commit 56801b1 closed this by seeding reference-cycle write
+    keys with epsilon instead of bottom (``_cyclic_write_keys`` in shell_taint.py), which is
+    already sufficient for both exploits below. This test exists purely to pin that closure: a
+    future change to the seed (or to cycle detection) that reopens either exploit must fail this
+    test, not rediscover the bug under real Bash again.
+    """
+    assert_taint_refusal(script)
+
+
+def test_issue_115_non_cyclic_control_still_refuses():
+    """Control for issue #115: isolates the reference-cycle seed as the mechanism, not the marker.
+
+    This body carries the authored marker with no variable involved at all, so it refused before
+    56801b1 and must keep refusing with its own (non-taint-flow) reason afterward -- proving the
+    two tests above are pinning the reference-cycle seed specifically, not some broader change in
+    what counts as a refusal.
+    """
+    result = scan_doc_lattice_invocations('eval "doc-lattice check"')
+
+    assert result.invocations == NONE
+    assert (
+        result.incomplete_reason
+        == "marker-bearing command is not a certified doc-lattice invocation"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "A=doc-; B=lattice; M=\"$A$B\"\neval '${M#x} --help'\n",
         "A=doc-; B=lattice; M=\"$A$B\"\neval '${M%x} --help'\n",
         "A=doc-; B=lattice; M=\"$A$B\"\neval '${M/x/y} --help'\n",
