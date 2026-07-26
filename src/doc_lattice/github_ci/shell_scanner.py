@@ -2637,22 +2637,6 @@ class _ShellScanner:
         )
         return _ProcessSubstitution(end, resource_id, scope_id, direction)
 
-    def _scan_nested_commands(
-        self,
-        start: int,
-        limit: int,
-        *,
-        terminator: str | None,
-        depth: int,
-    ) -> int:
-        """Scan an isolated shell scope without attaching it to top-level taint evidence."""
-        taint_builder = self.taint_builder
-        self.taint_builder = None
-        try:
-            return self._scan_commands(start, limit, terminator=terminator, depth=depth)
-        finally:
-            self.taint_builder = taint_builder
-
     def _redirection_at(
         self,
         index: int,

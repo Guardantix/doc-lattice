@@ -160,7 +160,6 @@ class _FlowWrite:
     expression: ContentExpr
     append: bool = False
     strip_trailing_newlines: bool = False
-    first_record: bool = False
     read_ifs: str | None = None
     read_target_index: int | None = None
     read_target_count: int | None = None
@@ -199,7 +198,6 @@ class _AssignmentEvidence:
     read_target_index: int | None = None
     read_target_count: int | None = None
     read_raw: bool = False
-    read_first_record: bool = False
     read_ifs: str | None = None
     nameref_unset: bool = False
 
@@ -1418,25 +1416,6 @@ def _strip_trailing_newlines(value: _ContentValue) -> _ContentValue:
     )
 
 
-def _first_record(value: _ContentValue) -> _ContentValue:
-    """Project each stream alternative through its first record delimiter."""
-    return frozenset(
-        _TransferSummary(
-            full=alternative.first_record,
-            stripped=alternative.first_record,
-            newline_only=False,
-            first_record=alternative.first_record,
-            record_open=True,
-            literal_texts=frozenset(
-                literal_text.partition("\n")[0] for literal_text in alternative.literal_texts
-            ),
-            projection_opaque=alternative.projection_opaque,
-            projection_incomplete=alternative.projection_incomplete,
-        )
-        for alternative in value
-    )
-
-
 def _project_read_value(
     value: _ContentValue,
     ifs: str,
@@ -1560,7 +1539,6 @@ def _flow_write_identity(
     str | int,
     bool,
     bool,
-    bool,
     str | None,
     int | None,
     int | None,
@@ -1572,7 +1550,6 @@ def _flow_write_identity(
         write.key,
         write.append,
         write.strip_trailing_newlines,
-        write.first_record,
         write.read_ifs,
         write.read_target_index,
         write.read_target_count,
@@ -1788,8 +1765,11 @@ def _solve_flow_definitions(
             value = _evaluate_with_tables(write.expression, variables, resources, streams, limits)
             if write.strip_trailing_newlines:
                 value = _cap_value(_strip_trailing_newlines(value), limits)
-            if write.first_record:
-                value = _cap_value(_first_record(value), limits)
+            # This is the record-one projection site: today every write is projected as a
+            # single record. Issue #121 (read-past-first-record) will need to reintroduce a
+            # "project the whole write through its first record delimiter" primitive here,
+            # analogous to the retired ``_first_record`` helper, once a caller can request
+            # reading past the first record.
             if (
                 write.read_ifs is not None
                 and write.read_target_index is not None
@@ -3014,7 +2994,6 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 read_target_index=(assignment.read_target_index if deferred_projection else None),
                 read_target_count=(assignment.read_target_count if deferred_projection else None),
                 read_raw=assignment.read_raw if deferred_projection else False,
-                read_first_record=False,
                 read_ifs=ifs_value if deferred_projection else None,
             )
 
@@ -7094,7 +7073,6 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                         ),
                         assignment.content,
                         append=assignment.append,
-                        first_record=assignment.read_first_record,
                         read_ifs=assignment.read_ifs,
                         read_target_index=assignment.read_target_index,
                         read_target_count=assignment.read_target_count,
@@ -7108,7 +7086,6 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                         assignment.name,
                         assignment.content,
                         append=assignment.append,
-                        first_record=assignment.read_first_record,
                         read_ifs=assignment.read_ifs,
                         read_target_index=assignment.read_target_index,
                         read_target_count=assignment.read_target_count,
@@ -7125,7 +7102,6 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                         ),
                         assignment.content,
                         append=assignment.append,
-                        first_record=assignment.read_first_record,
                         read_ifs=assignment.read_ifs,
                         read_target_index=assignment.read_target_index,
                         read_target_count=assignment.read_target_count,
@@ -7157,7 +7133,6 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                             ),
                             assignment.content,
                             append=assignment.append,
-                            first_record=assignment.read_first_record,
                             read_ifs=assignment.read_ifs,
                             read_target_index=assignment.read_target_index,
                             read_target_count=assignment.read_target_count,
