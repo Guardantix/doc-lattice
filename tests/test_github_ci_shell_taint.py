@@ -9,6 +9,7 @@ from doc_lattice.github_ci.shell_scanner import (
     _effective_executable_evidence,
     _ScanBudget,
     _ShellWord,
+    scan_doc_lattice_invocations,
 )
 from doc_lattice.github_ci.shell_taint import (
     Choice,
@@ -2406,11 +2407,57 @@ def test_static_eval_prunes_mutations_of_an_unreachable_branch() -> None:
     assert _static_eval_mutations(_eval_command(program)) == ((), ())
 
 
-def test_static_eval_payload_the_tokenizer_rejects_contributes_no_evidence() -> None:
-    program = "X='doc-"
+@pytest.mark.parametrize(
+    "program",
+    [
+        "X='doc-",
+        'X="doc-',
+        "X=doc- \\",
+    ],
+    ids=("unterminated-single-quote", "unterminated-double-quote", "trailing-backslash"),
+)
+def test_static_eval_unacceptable_payload_fails_closed(program: str) -> None:
+    # issue #134: a payload the tokenizer cannot accept used to contribute no evidence at all,
+    # silently discarding any mutation (or a later sink's dependence on one) instead of
+    # refusing. Missing evidence is not the same as no evidence, so this must fail closed.
+    with pytest.raises(
+        _TaintLimitExceeded, match="shell eval payload cannot be tokenized"
+    ) as raised:
+        _static_eval_program_commands(program)
 
-    assert _static_eval_program_commands(program) == ()
-    assert _static_eval_mutations(_eval_command(program)) == ((), ())
+    assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
+
+    with pytest.raises(_TaintLimitExceeded, match="shell eval payload cannot be tokenized"):
+        _static_eval_mutations(_eval_command(program))
+
+
+def test_static_eval_backslash_newline_continuation_matches_the_unsplit_payload() -> None:
+    # A backslash-newline line continuation is ordinary, reachable Bash (issue #134): Bash
+    # removes it before parsing, joining the two lines with no character inserted. The
+    # tokenizer now does the same, so a continued and an unsplit payload recover the exact
+    # same assignment instead of the continuation silently losing the mutation.
+    continued = _static_eval_mutations(_eval_command("X=doc- \\\n; true"))
+    unsplit = _static_eval_mutations(_eval_command("X=doc-; true"))
+
+    assert continued == unsplit
+    assert [item.assignment.content for item in continued[0]] == [LiteralTransfer("doc-")]
+
+
+def test_eval_payload_line_continuation_false_safe_is_closed() -> None:
+    # Verified false-safe from issue #134, reproduced under real Bash 5.2: the continuation
+    # used to defeat the eval payload tokenizer entirely, so the marker flow through the
+    # recovered assignment went undetected and the body certified clean. Bash's own line
+    # continuation is ordinary and reachable, so the fix teaches the tokenizer to join it
+    # rather than merely refusing whenever it appears; the body now refuses through the same
+    # marker-flow mechanism as the unsplit control below, which already refused correctly.
+    exploit = "eval 'X=doc- \\\n; true'; eval \"$X\"lattice"
+    control = "eval 'X=doc-; true'; eval \"$X\"lattice"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
 
 
 def test_static_eval_commands_split_an_exact_payload_on_separators() -> None:

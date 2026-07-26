@@ -463,9 +463,11 @@ The replay is reached from `eval` alone. A `source` or `.` payload does not ente
 sourced script establishes is not observed by a later sink; that gap is tracked in issue #133. A
 shell `-c` payload does not enter it either, which is harmless on its own because a child shell's
 assignments do not persist into the parent, and its own parameter references are covered by the
-second pass described below. A payload the tokenizer cannot accept contributes no evidence and
-does not invalidate previously recovered state, so it certifies rather than refusing; under a
-fail-closed contract that is a defect rather than a boundary, and it is tracked in issue #134.
+second pass described below. A payload the tokenizer cannot accept is missing evidence rather than
+absent evidence, so it fails closed instead of leaving previously recovered state uninvalidated
+(issue #134). A backslash-newline line continuation is removed before the metadata walk and the
+`shlex` pass so the two stay in lockstep, matching Bash's own line-continuation handling, since that
+form is common and benign enough to model rather than refuse by construction.
 
 A shell `-c` payload also enters the parameter second pass, not only the state-effect replay. The
 child expands the payload itself, so `export A B; bash -c '$A$B'` composes the marker although no

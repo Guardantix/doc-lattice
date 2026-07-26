@@ -3926,6 +3926,45 @@ def _strip_active_shell_comments(program: str) -> str:
     return "".join(stripped)
 
 
+def _strip_eval_line_continuations(program: str) -> str:
+    """Remove an unescaped backslash-newline line continuation outside single quotes.
+
+    Bash removes an unquoted or double-quoted ``\\`` immediately followed by a newline from
+    its input stream before further parsing, joining the two lines with no character
+    inserted. A backslash retains no such meaning inside plain single quotes or ``$'...'``,
+    which this function's quote tracker treats identically, so a continuation there is left
+    untouched, matching real Bash.
+    """
+    stripped: list[str] = []
+    quote: str | None = None
+    index = 0
+    length = len(program)
+    while index < length:
+        character = program[index]
+        if quote == "'":
+            stripped.append(character)
+            if character == "'":
+                quote = None
+            index += 1
+            continue
+        if character == "\\" and index + 1 < length:
+            following = program[index + 1]
+            if following == "\n":
+                index += 2
+                continue
+            stripped.append(character)
+            stripped.append(following)
+            index += 2
+            continue
+        if character == quote:
+            quote = None
+        elif quote is None and character in {"'", '"'}:
+            quote = character
+        stripped.append(character)
+        index += 1
+    return "".join(stripped)
+
+
 def _decode_ansi_c_eval_word(body: str) -> str:
     """Decode Bash ANSI-C quoting needed by static eval command words."""
     decoded: list[str] = []
@@ -3994,13 +4033,18 @@ def _static_eval_commands(command: _CommandEvidence) -> tuple[_StaticEvalCommand
     return tuple(commands)
 
 
-def _static_eval_program_commands(
+def _static_eval_program_commands(  # noqa: PLR0915
     program: str,
     *,
     active_function_names: frozenset[str] = frozenset(),
 ) -> tuple[_StaticEvalCommand, ...]:
     """Tokenize one exact eval program and retain reserved-word eligibility."""
     program = _strip_active_shell_comments(program)
+    # Bash removes a line continuation before its own lexer ever sees quotes or words, so this
+    # runs once, ahead of both the metadata walk and the ``shlex`` pass below, keeping them in
+    # lockstep. Left unhandled, an ordinary continuation both misaligns ``shlex``'s token count
+    # against ``metadata`` and desyncs the two independent quote trackers below (issue #134).
+    program = _strip_eval_line_continuations(program)
     lexer = shlex.shlex(
         _static_eval_shlex_program(program),
         posix=True,
@@ -4013,7 +4057,10 @@ def _static_eval_program_commands(
     lexer.whitespace_split = True
     metadata = _static_eval_word_metadata(program)
     if metadata is None:
-        return ()
+        # An eval payload the tokenizer cannot accept is missing evidence, not the absence of
+        # any: silently contributing nothing here let a prior mutation, or a later sink's
+        # dependence on one, certify by omission (issue #134). Fail closed instead.
+        raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
     metadata_index = 0
     commands: list[_StaticEvalCommand] = []
     words: list[str] = []
@@ -4023,8 +4070,8 @@ def _static_eval_program_commands(
     skip_redirection_target = False
     try:
         tokens = tuple(lexer)
-    except ValueError:
-        return ()
+    except ValueError as error:
+        raise _TaintLimitExceeded("shell eval payload cannot be tokenized") from error
     for lexeme in tokens:
         if lexeme and all(character in ";&|()\n" for character in lexeme):
             if words:
@@ -4062,7 +4109,9 @@ def _static_eval_program_commands(
             skip_redirection_target = True
             continue
         if metadata_index >= len(metadata):
-            return ()
+            # ``shlex`` and the metadata walk disagree on word count for this payload; treat the
+            # mismatch as missing evidence rather than none (issue #134).
+            raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
         token_metadata = metadata[metadata_index]
         metadata_index += 1
         if skip_redirection_target:
@@ -4073,7 +4122,7 @@ def _static_eval_program_commands(
         source_words.append(token_metadata.source)
         redirection_prefixes.append(token_metadata.redirection_prefix)
     if metadata_index != len(metadata):
-        return ()
+        raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
     if words:
         commands.append(
             _StaticEvalCommand(
