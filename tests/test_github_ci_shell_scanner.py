@@ -5574,6 +5574,37 @@ def test_function_lifetime_ambiguous_unset_or_redefinition_in_loop_stays_refusin
 @pytest.mark.parametrize(
     "script",
     [
+        "p(){ printf %s doc-; }\n"
+        "if [ -e x ]; then unset -f p; fi\n"
+        "v=$(p)\n"
+        'eval "${v}lattice reconcile"',
+        "p(){ printf %s doc-; }\n"
+        "if [ -e x ]; then p(){ printf %s safe; }; fi\n"
+        "v=$(p)\n"
+        'eval "${v}lattice reconcile"',
+    ],
+    ids=("ambiguous-unset-in-dynamic-if", "ambiguous-redefinition-in-dynamic-if"),
+)
+def test_function_lifetime_ambiguous_unset_or_redefinition_in_dynamic_if_stays_refusing(
+    script: str,
+):
+    """An unset/redefinition under ambiguous (dynamic-``if``) status must not drop a live linkage.
+
+    #145 extends #142's registration to a definition found inside a dynamic ``if`` body, whose own
+    execution status is ambiguous (``None``), because the branch might run. That registration must
+    only ever *add* a definition under that ambiguity, never pop or overwrite one: an unset or a
+    redefinition inside a branch whose test the scanner cannot resolve is itself no more than
+    ambiguous, so it may or may not run. A call reached on the path where that branch is not taken
+    still resolves to the original, still-live definition, so dropping or overwriting the linkage
+    on the branch's uncertainty would incorrectly certify a real execution path. These pin the
+    asymmetry and refuse both before and after the #145 fix.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "X=safe; f() { eval '${X:=doc-}lattice'; }; unset X; f",
         "X=safe; f() { eval '${X:=doc-}lattice'; }; X=doc-; f",
         'X=safe; f() { eval "$X"lattice; }; eval "X=doc-"; f',
@@ -9004,6 +9035,72 @@ def test_plain_assignment_in_loop_or_case_body_still_refuses(script: str):
 
     The issue notes the wrappers are not independently broken: a plain assignment in place of the
     function-producer under every wrapper already refused before this fix, which isolates the
+    false-safe to function-definition handling specifically.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'if [ -e x ]; then\np(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\nfi',
+        "if [ -e x ]; then :; elif [ -e y ]; then\n"
+        'p(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\nfi',
+        "if [ -e x ]; then :; else\n"
+        'p(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\nfi',
+        'if [ -e x ]; then\np(){ printf %s doc-; }\nfi\nv=$(p)\neval "${v}lattice reconcile"',
+    ],
+    ids=("then", "elif", "else", "define-inside-call-after-if"),
+)
+def test_function_defined_in_dynamic_if_body_reaches_eval(script: str):
+    """A function defined inside a dynamic ``if`` body must keep its stdout evidence (#145).
+
+    #142 registered a definition found inside a repeating or ``case`` body even though its own
+    execution status is ambiguous, but deliberately left the dynamic ``if`` chain out: a command
+    inside ``if <unresolved-test>; then ... fi`` also carries a conditional (``None``) execution
+    status, so its definition never became callable and the function scope's aggregated stdout was
+    never reproduced at the call site. A dynamic ``then``, ``elif``, or ``else`` branch has the
+    same body-may-run character as a loop body, so the split marker below reaches an execution
+    sink unseen. The call site does not matter: defining the function inside the dynamic ``if``
+    and calling it only after ``fi`` fails the same way, which isolates the definition scope
+    rather than the call.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'p(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"',
+        'if true; then\np(){ printf %s doc-; }; v=$(p)\neval "${v}lattice reconcile"\nfi',
+    ],
+    ids=("no-wrapper", "if-true-wrapper"),
+)
+def test_function_defined_in_dynamic_if_body_controls_still_refuse(script: str):
+    """Controls isolating the unresolved ``if`` test as the #145 cause must keep refusing.
+
+    Each control keeps the function-definition-and-call shape but removes the *dynamic* part of
+    the wrapper: no wrapper at all, and a statically true ``if`` whose body already carried a
+    definite execution status and so already registered through the ``True`` arm. Both refused
+    before the fix and must keep refusing after it.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'if [ -e x ]; then\nv=doc-\neval "${v}lattice reconcile"\nfi',
+        'if [ -e x ]; then :; elif [ -e y ]; then\nv=doc-\neval "${v}lattice reconcile"\nfi',
+        'if [ -e x ]; then :; else\nv=doc-\neval "${v}lattice reconcile"\nfi',
+    ],
+    ids=("then", "elif", "else"),
+)
+def test_plain_assignment_in_dynamic_if_body_still_refuses(script: str):
+    """A plain assignment substituted for the function producer already refuses (#145 note).
+
+    The dynamic ``if`` wrapper is not independently broken: a plain assignment in place of the
+    function-producer under every branch shape already refused before this fix, which isolates the
     false-safe to function-definition handling specifically.
     """
     assert_taint_refusal(script)
