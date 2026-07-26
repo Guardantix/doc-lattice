@@ -1,5 +1,6 @@
 """Tests for pure authored-marker shell taint analysis."""
 
+import time
 from dataclasses import replace
 
 import pytest
@@ -12,6 +13,7 @@ from doc_lattice.github_ci.shell_scanner import (
     scan_doc_lattice_invocations,
 )
 from doc_lattice.github_ci.shell_taint import (
+    TAINT_REFUSAL_REASON,
     Choice,
     ChoiceOutput,
     CommandOutput,
@@ -722,6 +724,71 @@ def test_eval_variable_syntax_mutual_cycle_obeys_fixed_point_cap() -> None:
             {},
             TaintLimits(max_fixed_point_updates=1),
         )
+
+
+_EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS = 2.0
+
+
+def test_eval_syntax_self_referential_append_certifies_promptly() -> None:
+    """Reproduce #140: a marker-free self-referential append feeding an eval sink.
+
+    ``_EvalSyntaxValue`` had no analogue of ``_merge_content_summaries``, so the join that
+    accumulates alternatives for one eval-syntax variable was a bare set union over exact
+    ``literal_texts``. AD-18 promises marker-free dynamic execution keeps certifying, and it
+    must do so quickly rather than limping to that verdict.
+    """
+    script = 'ARGS="$ARGS --quiet"; eval "mytool $ARGS"'
+
+    start = time.monotonic()
+    result = scan_doc_lattice_invocations(script)
+    elapsed = time.monotonic() - start
+
+    assert result.incomplete_reason is None
+    assert elapsed < _EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS, (
+        f"eval syntax fixed point took {elapsed:.2f}s, expected under "
+        f"{_EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS}s"
+    )
+
+
+def test_eval_syntax_seeded_self_referential_append_certifies_promptly() -> None:
+    """A seeded self-referential reassignment must collapse, not diverge.
+
+    A prior independent write gives ``ARGS`` a real starting alternative, so the fixed point
+    in ``_solve_eval_syntax_variables`` genuinely grows the tracked value across passes instead
+    of bottoming out immediately: each outer pass re-derives ``ARGS``'s self-referential write
+    against the wider value the previous pass installed, so the join walked one more exact
+    literal alternative (``--verbose --quiet``, then that plus one more composition, and so on)
+    every pass instead of collapsing equal DFA behavior. Before the fix this took roughly 20s
+    and then refused on the alternative cap; nothing here ever composes the doc-lattice marker.
+    """
+    script = 'ARGS="--verbose"\nARGS="$ARGS --quiet"\neval "mytool $ARGS"'
+
+    start = time.monotonic()
+    result = scan_doc_lattice_invocations(script)
+    elapsed = time.monotonic() - start
+
+    assert result.incomplete_reason is None
+    assert elapsed < _EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS, (
+        f"eval syntax fixed point took {elapsed:.2f}s, expected under "
+        f"{_EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS}s"
+    )
+
+
+def test_eval_syntax_marker_bearing_self_referential_append_still_refuses() -> None:
+    """Collapsing surplus alternatives must widen to top, never drop the marker flow.
+
+    Neither authored assignment word contains the full ``doc-lattice`` marker on its own, so
+    this exercises the eval-syntax taint solver rather than the earlier syntactic
+    marker-bearing-word check. The two self-referential appends compose the marker only through
+    content flow, and collapsing past the alternative cap must widen to
+    ``projection_incomplete`` (the top of the projection lattice) rather than silently dropping
+    the composing alternative, so this must still refuse.
+    """
+    script = 'ARGS="${ARGS}doc-"\nARGS="${ARGS}lattice"\neval "$ARGS"'
+
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
 def test_eval_conditional_assignment_obeys_augmented_edge_cap() -> None:

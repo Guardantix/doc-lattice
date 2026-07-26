@@ -7244,6 +7244,20 @@ class _EvalSyntaxState:
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
     conditional_decisions: tuple[tuple[_SecondPassConditionalAssignment, bool], ...] = ()
 
+    def __post_init__(self) -> None:
+        """Enforce that a cleared literal projection always widens instead of vanishing.
+
+        A summary whose ``literal_texts`` is empty without ``projection_incomplete`` set would
+        make ``_project_read_value`` silently drop the alternative instead of widening it to the
+        top of the projection lattice. ``_merge_eval_syntax_states`` is the one place that clears
+        an eval-syntax state's ``literal_texts``, so this catches a future join that gets the
+        pairing wrong (issue #140).
+        """
+        if not self.summary.literal_texts and not self.summary.projection_incomplete:
+            raise _MalformedTaintEvidence(
+                "shell taint eval syntax state cleared literal projection without widening"
+            )
+
 
 _EvalSyntaxValue: TypeAlias = frozenset[_EvalSyntaxState]  # noqa: UP040
 _EvalSyntaxPrograms: TypeAlias = dict[  # noqa: UP040
@@ -7804,10 +7818,89 @@ def _eval_syntax_outside(
     )
 
 
+_EvalSyntaxMergeKey: TypeAlias = tuple[  # noqa: UP040
+    str | None,
+    tuple[_ContentToken, ...],
+    int,
+    int,
+    tuple[tuple[str, _ContentValue], ...],
+    tuple[tuple[str, _ContentValue], ...],
+    tuple[tuple[str, _ContentValue], ...],
+    frozenset[str],
+    str,
+    tuple[_AssignmentEvidence, ...],
+    tuple[tuple[_SecondPassConditionalAssignment, bool], ...],
+    _DfaTransfer,
+    _DfaTransfer,
+    bool,
+    _DfaTransfer,
+    bool,
+]
+
+
+def _merge_eval_syntax_states(states: Iterable[_EvalSyntaxState]) -> _EvalSyntaxValue:
+    """Merge equal eval-syntax behavior while retaining bounded literal alternatives.
+
+    Mirrors ``_merge_content_summaries`` for ``_EvalSyntaxValue``. Without this, the join that
+    accumulates alternatives for one eval-syntax variable was a bare set union over exact
+    ``literal_texts``: a self-referential append composed a new, wholly distinct literal on
+    every replay of the write history, so the join walked ``a``, ``ab``, ``abb``, and so on
+    instead of collapsing states that behave identically except for that exact text (issue
+    #140). States that share every field but the summary's literal projection collapse into one
+    entry, widening to ``projection_incomplete`` once their combined literal alternatives pass
+    ``_MAX_TRACKED_LITERAL_ALTERNATIVES`` instead of growing without bound.
+    """
+    merged: dict[_EvalSyntaxMergeKey, _EvalSyntaxState] = {}
+    for state in states:
+        summary = state.summary
+        key: _EvalSyntaxMergeKey = (
+            state.quote,
+            state.brace_tokens,
+            state.brace_depth,
+            state.applied_appends,
+            state.local_variables,
+            state.environment_variables,
+            state.fixed_point_overrides,
+            state.definitely_set_variables,
+            state.parameter_text,
+            state.conditional_assignments,
+            state.conditional_decisions,
+            summary.full,
+            summary.stripped,
+            summary.newline_only,
+            summary.first_record,
+            summary.record_open,
+        )
+        prior = merged.get(key)
+        if prior is None:
+            merged[key] = state
+            continue
+        if prior == state:
+            continue
+        prior_summary = prior.summary
+        literal_texts = prior_summary.literal_texts | summary.literal_texts
+        projection_incomplete = (
+            prior_summary.projection_incomplete
+            or summary.projection_incomplete
+            or len(literal_texts) > _MAX_TRACKED_LITERAL_ALTERNATIVES
+        )
+        merged[key] = replace(
+            prior,
+            summary=replace(
+                prior_summary,
+                literal_texts=(frozenset() if projection_incomplete else literal_texts),
+                projection_opaque=(prior_summary.projection_opaque or summary.projection_opaque),
+                projection_incomplete=projection_incomplete,
+            ),
+        )
+    return frozenset(merged.values())
+
+
 def _cap_eval_syntax(value: _EvalSyntaxValue, limits: TaintLimits) -> _EvalSyntaxValue:
-    if len(value) > limits.max_alternatives:
+    merged = _merge_eval_syntax_states(value)
+    if len(merged) > limits.max_alternatives:
         raise _TaintLimitExceeded("shell taint eval syntax alternative limit exceeded")
-    return value
+    return merged
 
 
 def _eval_environment_variables(
