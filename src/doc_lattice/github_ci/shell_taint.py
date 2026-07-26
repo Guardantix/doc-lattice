@@ -4864,7 +4864,16 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
             force_global = executable in {"declare", "typeset"} and any(
                 option.startswith("-") and "g" in option[1:] for option in options
             )
-            local = executable in {"declare", "local", "typeset"} and not force_global
+            # Outside a function, `declare`/`typeset` (like a bare assignment) create a plain
+            # global variable -- only inside a function do they shadow the caller with a local
+            # one. `local` itself is already gated on function context above (it is a bash error
+            # otherwise, so no mutation is recorded at all); mirror that gate here so `declare`/
+            # `typeset` at the top level are not mislabeled local (issue #117 follow-up).
+            local = (
+                executable in {"declare", "local", "typeset"}
+                and not force_global
+                and command.function_context_id is not None
+            )
             nameref_action: bool | None = None
             for option in options:
                 if "n" in option[1:] and executable in {"declare", "local", "typeset"}:
@@ -5159,7 +5168,6 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if resolved_program is not None
             else command
         )
-        resolved_commands.append(resolved)
 
         status = (
             None
@@ -5168,6 +5176,31 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             and command.execution_status is True
             else command.execution_status
         )
+        eval_assignments, eval_unsets = (
+            _static_eval_mutations(resolved) if status is not False else ((), ())
+        )
+        # issue #117: a recovered eval assignment used to feed only this command's own
+        # exact-literal table below, so it reached AD-18's "a later sink observes it" promise
+        # only for another eval reading that table. `_build_flow_definitions` lowers
+        # `resolved.assignments` for every sink, so threading the plain (non-local,
+        # non-nameref-aliasing) mutations onto it puts an eval-replayed assignment on the same
+        # footing as an authored one. Local declarations and nameref aliasing stay on the
+        # exact-table-only path -- routing them soundly needs function-scope and alias-target
+        # bookkeeping this lowering does not have, so leaving them alone extends a pre-existing,
+        # narrower gap rather than introducing a new one.
+        lowered_eval_assignments = tuple(
+            mutation.assignment
+            for mutation in eval_assignments
+            if not mutation.local
+            and mutation.assignment.nameref_target is None
+            and not mutation.assignment.nameref_unset
+        )
+        if lowered_eval_assignments:
+            resolved = replace(
+                resolved, assignments=(*resolved.assignments, *lowered_eval_assignments)
+            )
+        resolved_commands.append(resolved)
+
         if status is False:
             continue
         conditional = status is None
@@ -5177,7 +5210,6 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if assignment_only
             else command.builtin_assignments
         )
-        eval_assignments, eval_unsets = _static_eval_mutations(resolved)
         for assignment in (
             *assignments,
             *(mutation.assignment for mutation in eval_assignments),

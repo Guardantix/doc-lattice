@@ -2161,11 +2161,15 @@ def test_static_eval_ignores_assignment_prefix_words_of_an_executed_command() ->
 @pytest.mark.parametrize(
     ("program", "expected_local", "expected_force_global"),
     [
-        ("declare X=v", True, False),
+        # Outside a function, `declare`/`typeset` create a plain global variable, exactly like a
+        # bare assignment -- only inside a function (see the dedicated test below) do they shadow
+        # the caller. Issue #117 follow-up: these two used to be mislabeled local=True with no
+        # function-context gate, which excluded them from the eval-replayed-assignment lowering.
+        ("declare X=v", False, False),
         ("declare -g X=v", False, True),
         ("export X=v", False, False),
         ("readonly X=v", False, False),
-        ("typeset X=v", True, False),
+        ("typeset X=v", False, False),
         ("typeset -g X=v", False, True),
     ],
     ids=("declare", "declare-global", "export", "readonly", "typeset", "typeset-global"),
@@ -2182,6 +2186,18 @@ def test_static_eval_declaration_builtin_carries_its_scope(
         expected_local,
         expected_force_global,
     )
+
+
+def test_static_eval_declare_inside_a_function_context_is_scoped_local() -> None:
+    """Companion to the top-level case above: inside a function, `declare` (like `local`) IS
+    genuinely local, so it must still carry `local=True` there. Only the no-function-context case
+    was mislabeled.
+    """
+    assignments, _ = _static_eval_mutations(_eval_command("declare X=v", function_context_id=7))
+
+    assert len(assignments) == 1
+    assert assignments[0].assignment.name == "X"
+    assert (assignments[0].local, assignments[0].force_global) == (True, False)
 
 
 def test_static_eval_local_declaration_inside_a_function_context_is_scoped_local() -> None:
@@ -2649,6 +2665,102 @@ def test_static_eval_programs_are_empty_for_a_dynamic_argument() -> None:
     )
 
     assert _static_eval_programs(command) == ()
+
+
+def test_eval_replayed_assignment_reaches_a_bash_c_sink() -> None:
+    """Verified false-safe from issue #117, reproduced under real Bash 5.2.
+
+    AD-18 claims an eval payload's recovered assignments are retained "so a later sink observes
+    them", but that was only ever wired into the exact-literal table another eval reads --
+    ``_build_flow_definitions`` never saw them, so any NON-eval sink missed the assignment
+    entirely. The control shows the identical flow through a direct (non-eval) assignment already
+    refuses; before this fix the eval-replayed form certified clean and executed the marker.
+    """
+    control = "X=doc-; bash -c \"$X\"'lattice check'"
+    exploit = "eval 'X=doc-'; bash -c \"$X\"'lattice check'"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_eval_replayed_assignment_reaches_a_written_script_sink() -> None:
+    """Companion false-safe for issue #117 through a written-script, not a ``bash -c``, sink.
+
+    Isolates the same missing lowering through a different non-eval sink shape: the eval-replayed
+    value composes the marker into a file this same body then executes with a plain ``bash``.
+    """
+    control = "X=doc-; printf '%s' \"$X\"'lattice check' > t.sh; bash t.sh"
+    exploit = "eval 'X=doc-'; printf '%s' \"$X\"'lattice check' > t.sh; bash t.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_eval_replayed_assignment_control_via_eval_sink_still_refuses() -> None:
+    """Control for issue #117: the eval-sink form already refused via the exact-literal table.
+
+    This isolates the missing lowering as the cause of the false-safes above rather than the
+    assignment recovery itself -- the exact table already threads this assignment to another
+    eval's payload; it is only the non-eval sinks that were blind to it.
+    """
+    exploit = "eval 'X=doc-'; eval \"$X\"'lattice check'"
+
+    result = scan_doc_lattice_invocations(exploit)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
+@pytest.mark.parametrize("keyword", ["declare", "typeset"])
+def test_eval_replayed_top_level_declare_reaches_a_bash_c_sink(keyword: str) -> None:
+    """Follow-up false-safe found in review of #117, reproduced under real Bash 5.2.
+
+    ``bash -c 'eval "declare X=doc-"; echo "$X"'`` prints ``doc-``: outside a function,
+    ``declare``/``typeset`` (like a bare assignment) create a plain GLOBAL variable, only
+    shadowing the caller when used INSIDE a function. ``_static_eval_mutations`` mislabeled a
+    top-level ``declare``/``typeset`` as ``local=True`` (bare ``local`` is correctly gated on
+    function context two lines above, but ``declare``/``typeset`` were not), so the #117 lowering
+    excluded them via its ``not mutation.local`` filter and this recipe kept certifying clean
+    through a non-eval sink after that fix landed.
+    """
+    exploit = f"eval '{keyword} X=doc-'; bash -c \"$X\"'lattice check'"
+
+    result = scan_doc_lattice_invocations(exploit)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
+def test_eval_replayed_in_function_declare_stays_scoped() -> None:
+    """Scoping control for the declare/typeset fix above: must not over-refuse.
+
+    ``bash -c 'f(){ eval "declare X=doc-"; }; f; echo "${X:-unset}"'`` prints ``unset``: a
+    ``declare`` inside a function IS genuinely local and must not persist to the caller. This
+    proves the fix is gated on ``command.function_context_id``, not a blanket "declare is always
+    global" change that would itself be an unsound new false-safe.
+    """
+    body = "f(){ eval 'declare X=doc-'; }; f; bash -c \"$X\"'lattice check'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_eval_replayed_assignment_marker_free_still_certifies() -> None:
+    """Over-refusal guard for the #117 lowering itself: a marker-free eval-replayed value must
+    not flip an ordinary body to refuse.
+    """
+    body = "eval 'X=safe'; bash -c \"$X\"'run'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(
