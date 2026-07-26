@@ -507,10 +507,17 @@ disclosed. `audit.py` still invokes the scanner independently for each step; fut
 aggregation can consume the evidence shape without changing the parser/analysis ownership
 boundary.
 
-A sink reached through a launcher such as `timeout`, `xargs`, or `nohup`, or through a head this
-scan cannot resolve to an exact name, is not yet recognized and still certifies. That is a gap
-against this decision rather than part of it, and it is tracked in issue #130 along with the
-unread `ambiguous` executable evidence the selector would need.
+Execution sinks are recognized in three further positions, none of which requires an allowlist of
+command names. A command name composed across a variable boundary is itself a sink, because Bash
+executes the head after expansion; a head that already resolves to a marker name stays outside this
+check because the command-local resolver owns it. A head this scan cannot resolve to an exact name
+carries `ambiguous` executable evidence and selects a shell source anyway, rather than dropping the
+sink, on the same reasoning AD-17 used to reject an inert-head allowlist. An unrecognized head that
+names a shell later in its own argv, such as `timeout`, `nohup`, `nice`, `setsid`, `stdbuf`,
+`flock`, or `sudo`, selects from that shell, and a shell whose operand is missing behind such a
+launcher takes the launcher's standard input as its payload, which is what `xargs bash -c` does. An
+`external_lookup` head keeps its existing treatment and does not select a nested shell, so an
+external shadow of `command` or `builtin` is not reinterpreted as a wrapper.
 
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing

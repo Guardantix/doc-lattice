@@ -7756,6 +7756,78 @@ def test_marker_free_loop_opened_on_a_control_keyword_line_stays_clean(script: s
 
 
 @pytest.mark.parametrize(
+    "script",
+    [
+        'v=doc-\n"${v}lattice" reconcile',
+        'v=doc-\n"$v"lattice reconcile',
+        'v=doc-\nX="${v}lattice"; "$X" reconcile',
+        'bash -c "${UNSET:-doc-lattice} reconcile"',
+        'v=doc-\n"${v}lattice"',
+    ],
+    ids=("braced", "unquoted", "indirect", "default-operand", "no-arguments"),
+)
+def test_command_head_position_is_an_execution_sink(script: str):
+    """A head composed across a variable boundary executes, so it must be checked."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=doc-; B=lattice; timeout 60 bash -c "$A$B reconcile"',
+        'A=doc-; B=lattice; nohup bash -c "$A$B reconcile"',
+        'A=doc-; B=lattice; nice -n 5 bash -c "$A$B reconcile"',
+        'A=doc-; B=lattice; setsid sh -c "$A$B reconcile"',
+        'A=doc-; B=lattice; stdbuf -oL bash -c "$A$B reconcile"',
+        'A=doc-; B=lattice; echo "$A$B reconcile" | xargs bash -c',
+    ],
+    ids=("timeout", "nohup", "nice", "setsid", "stdbuf", "xargs"),
+)
+def test_a_shell_reached_through_a_launcher_is_an_execution_sink(script: str):
+    """An unrecognized head may exec a shell that appears later in its own argv."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=doc-; B=lattice; S=bash; $S -c "$A$B reconcile"',
+        'A=doc-; B=lattice; "$SHELL" -c "$A$B reconcile"',
+        'A=doc-; B=lattice; ${SHELL} -c "$A$B reconcile"',
+    ],
+    ids=("assigned-head", "quoted-environment-head", "braced-environment-head"),
+)
+def test_an_unresolvable_head_keeps_its_payload_as_a_sink(script: str):
+    """`ambiguous` executable evidence must widen rather than remove the sink."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=safe; B=thing; timeout 60 bash -c "$A$B reconcile"',
+        'A=safe; B=thing; S=bash; $S -c "$A$B reconcile"',
+        'v=safe\n"${v}thing" reconcile',
+        'A=doc-; B=lattice; echo "$A$B"',
+        'A=doc-; B=lattice; printf "%s\\n" "$A$B"',
+        'TOOL=/opt/bin/helper; "$TOOL" --version',
+    ],
+    ids=(
+        "launcher-marker-free",
+        "dynamic-head-marker-free",
+        "head-marker-free",
+        "echo-is-not-a-launcher",
+        "printf-is-not-a-launcher",
+        "unrelated-dynamic-head",
+    ),
+)
+def test_marker_free_and_resolved_launcher_forms_stay_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
     "blank",
     ["\v", "\f", "\r", "\xa0"],
     ids=("vertical-tab", "form-feed", "carriage-return", "no-break-space"),

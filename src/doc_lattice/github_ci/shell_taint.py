@@ -9559,7 +9559,7 @@ def _shell_script_source_expression(
     return _script_port_expression(port, stdin)
 
 
-def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
+def _candidate_sink_expressions(  # noqa: PLR0911
     command: _CommandEvidence,
     executable: _ExecutableEvidence,
     stdin: ContentExpr,
@@ -9575,6 +9575,16 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
         key = normalize_static_resource(literal, dynamic=False)
         if key is not None:
             direct_sinks = (ResourceRef(key),)
+    if executable.argv_index < len(command.argv) and not _resolves_to_marker_name(name):
+        head_port = command.argv[executable.argv_index]
+        if head_port.dynamic:
+            # Bash executes the command name after expansion, so a head composed across a
+            # variable boundary is an execution sink. A fully literal head needs no such check
+            # because AD-17's per-word marker rule already covers it, and adding one would
+            # refuse every certified invocation. A head that already resolves to a marker name,
+            # such as ``"$RUNNER_TEMP/venv/bin/doc-lattice"``, is a recognized invocation that
+            # the resolver certifies, so it stays outside this check for the same reason.
+            direct_sinks = (head_port.content, *direct_sinks)
     if name == "eval" and literal == "eval" and not executable.external_lookup:
         return (_eval_arguments_raw(command, executable),)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
@@ -9586,30 +9596,115 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
             return (_process_resource_input(operand.process_resource_id, process_resources),)
         return (_script_port_expression(operand, stdin),)
     if _normalized_shell_head(executable.name) in _SHELL_HEADS:
-        selection = _select_shell_source(command.argv, executable.argv_index)
-        if selection.kind is _ShellSourceKind.NONE:
-            return direct_sinks
-        if selection.kind is _ShellSourceKind.STDIN:
-            return (stdin, *direct_sinks)
-        if selection.kind is _ShellSourceKind.COMMAND:
-            if selection.argv_index is None:
-                return direct_sinks
-            return (command.argv[selection.argv_index].content, *direct_sinks)
-        if selection.kind is _ShellSourceKind.SCRIPT:
-            if selection.argv_index is None:
-                return direct_sinks
-            port = command.argv[selection.argv_index]
-            return (_shell_script_source_expression(port, process_resources, stdin), *direct_sinks)
-        candidates: list[ContentExpr] = []
-        for index in selection.candidate_indices:
-            port = command.argv[index]
-            candidates.extend(
-                (port.content, _shell_script_source_expression(port, process_resources, stdin))
-            )
-        if selection.include_stdin:
-            candidates.append(stdin)
-        return (choice(*candidates), *direct_sinks)
+        return _shell_source_sinks(
+            command, executable.argv_index, stdin, process_resources, direct_sinks
+        )
+    if executable.ambiguous:
+        # The head could not be resolved to an exact name, so it may be a shell. AD-17 rejects
+        # treating an unresolved head as inert, and the same reasoning applies on the sink side:
+        # select from the first argv position rather than removing the sink. The resolver's own
+        # index points at a later word here, so the unresolved head word is added separately.
+        unresolved = tuple(port.content for port in command.argv[:1] if port.dynamic)
+        return _shell_source_sinks(
+            command, 0, stdin, process_resources, (*unresolved, *direct_sinks)
+        )
+    launcher_index = (
+        None if executable.external_lookup else _nested_shell_index(command, executable.argv_index)
+    )
+    if launcher_index is not None:
+        # An unrecognized head such as ``timeout``, ``nohup``, or ``xargs`` may exec a shell that
+        # appears later in its own argv. Selecting from that shell keeps the payload a sink
+        # without an allowlist of launcher names, which AD-17's founding principle rules out.
+        return _shell_source_sinks(
+            command, launcher_index, stdin, process_resources, direct_sinks, from_launcher=True
+        )
     return direct_sinks
+
+
+def _resolves_to_marker_name(name: str | None) -> bool:
+    """Return whether a resolved executable name already carries the authored marker.
+
+    Such a head is a recognized invocation the command-local resolver certifies or refuses under
+    AD-17, so the taint pass does not treat its command-name word as a separate sink.
+
+    Args:
+        name: The resolved executable name, or None when the head did not resolve.
+
+    Returns:
+        Whether the name contains the marker.
+    """
+    if name is None:
+        return False
+    return _marker_capable(frozenset({_TransferSummary.literal(name)}))
+
+
+def _nested_shell_index(command: _CommandEvidence, head_index: int) -> int | None:
+    """Return the argv index of a shell this command may exec, beyond its own head.
+
+    Args:
+        command: The command evidence being inspected.
+        head_index: The argv index of the command's own resolved head.
+
+    Returns:
+        The index of the first literal shell word after the head, or None when there is none.
+    """
+    for index in range(head_index + 1, len(command.argv)):
+        port = command.argv[index]
+        if port.dynamic:
+            return None
+        if _normalized_shell_head(port.literal) in _SHELL_HEADS:
+            return index
+    return None
+
+
+def _shell_source_sinks(  # noqa: PLR0911, PLR0913
+    command: _CommandEvidence,
+    head_index: int,
+    stdin: ContentExpr,
+    process_resources: dict[int, _ProcessResourceEvidence],
+    direct_sinks: tuple[ContentExpr, ...],
+    *,
+    from_launcher: bool = False,
+) -> tuple[ContentExpr, ...]:
+    """Return the sink expressions a shell invocation at one argv index can execute.
+
+    Args:
+        command: The command evidence being inspected.
+        head_index: The argv index the shell option grammar is read from.
+        stdin: The command's finalized standard input expression.
+        process_resources: Process substitution evidence for operand resolution.
+        direct_sinks: Sinks already established for this command.
+        from_launcher: Whether this shell was reached through an unrecognized head.
+
+    Returns:
+        The shell payload sinks followed by the established direct sinks.
+    """
+    selection = _select_shell_source(command.argv, head_index)
+    if selection.kind is _ShellSourceKind.NONE:
+        # ``xargs bash -c`` names no operand of its own because the launcher supplies one from
+        # its standard input, so a missing operand behind a launcher is a stdin payload rather
+        # than the usage error it would be for a directly invoked shell.
+        return (stdin, *direct_sinks) if from_launcher else direct_sinks
+    if selection.kind is _ShellSourceKind.STDIN:
+        return (stdin, *direct_sinks)
+    if selection.kind is _ShellSourceKind.COMMAND:
+        if selection.argv_index is None:
+            return direct_sinks
+        return (command.argv[selection.argv_index].content, *direct_sinks)
+    if selection.kind is _ShellSourceKind.SCRIPT:
+        if selection.argv_index is None:
+            return direct_sinks
+        port = command.argv[selection.argv_index]
+        return (_shell_script_source_expression(port, process_resources, stdin), *direct_sinks)
+    candidates: list[ContentExpr] = []
+    for index in selection.candidate_indices:
+        port = command.argv[index]
+        candidates.extend(
+            (port.content, _shell_script_source_expression(port, process_resources, stdin))
+        )
+    if selection.include_stdin:
+        candidates.append(stdin)
+    return (choice(*candidates), *direct_sinks)
 
 
 def _iter_executable_evidence(executable: _ExecutableEvidence) -> Iterator[_ExecutableEvidence]:
