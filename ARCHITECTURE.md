@@ -406,9 +406,12 @@ stdout, so wrapping a producer in a function preserves the handoff. A pipeline k
 producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
 command inside a control body, while a compound consumer still binds the compound scope. Parameter
 default/alternate forms produce in-word choices, assign-default also emits a conditional variable
-definition, and every other parameter operator keeps an empty-string alternative beside its
-authored operand, so a transform that can erase its value cannot hide a marker across the
-expansion. Bounded static brace expansion fans one lexical word into ordered argv ports; because
+definition, and every other parameter operator keeps three alternatives: an empty string, the
+subject variable unchanged, and the variable beside its authored operand. The empty alternative
+means a transform that can erase its value cannot hide a marker across the expansion, and the
+ungapped pass-through alternative means a transform whose pattern does not match cannot hide one
+either, so `A=doc-; bash -c "${A#zz}lattice"` refuses. Bounded static brace expansion fans one
+lexical word into ordered argv ports; because
 brace expansion precedes parameter expansion, an authored comma list expands even when a member's
 content is dynamic. `for`/`select` iteration words join into loop-variable evidence, and a header
 this scan cannot enumerate, whether an arithmetic header, implicit positionals, word splitting, or
@@ -436,15 +439,23 @@ operand, or stdin; if a dynamic selector could choose a marker-capable authored 
 closed.
 
 Exact eval payload interpretation is a bounded sub-analysis, not a shell interpreter. When an
-`eval`, shell `-c`, or `source` payload resolves to exact literal text, that text is tokenized and
-its state effects are replayed so a later sink observes them. This is what refuses
+`eval` payload resolves to exact literal text, that text is tokenized and its state effects are
+replayed so a later sink observes them. This is what refuses
 `X=safe; eval 'X=doc-'; eval "$X"lattice`, where no single payload carries the marker. It models
 scalar assignments and assignment prefixes, the `declare`, `export`, `local`, `readonly`, and
 `typeset` declaration builtins including `-g` and `-n` namerefs, `unset`, the `builtin` and
 `command` wrappers, `if`/`elif`/`else` reachability by literal command status, `case` arm bodies,
 subshell groups, and the function effects and call-graph names a payload contributes. Nameref
 cycles, nameref targets that are not static variable names, and command prefixes that cannot be
-represented fail closed. A payload the tokenizer cannot accept contributes no evidence.
+represented fail closed.
+
+The replay is reached from `eval` alone. A `source` or `.` payload does not enter it, so state a
+sourced script establishes is not observed by a later sink; that gap is tracked in issue #133. A
+shell `-c` payload does not enter it either, which is harmless on its own because a child shell's
+assignments do not persist into the parent, and its own parameter references are covered by the
+second pass described below. A payload the tokenizer cannot accept contributes no evidence and
+does not invalidate previously recovered state, so it certifies rather than refusing; under a
+fail-closed contract that is a defect rather than a boundary, and it is tracked in issue #134.
 
 A shell `-c` payload also enters the parameter second pass, not only the state-effect replay. The
 child expands the payload itself, so `export A B; bash -c '$A$B'` composes the marker although no
@@ -455,39 +466,61 @@ fail-closed; modeling export status precisely is future work.
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing
 `eval` has no natural terminating point, and this engine is defense in depth behind human review,
-not the boundary that contains untrusted code. Loop bodies (`for`, `while`, `until`), brace groups,
-array assignment and element reads, values bearing arithmetic expansion, and `eval` nested inside an
-`eval` payload are therefore not modeled. Verification under real bash on 2026-07-25 confirmed that
-brace groups, loop bodies, and nested `eval` do persist their assignments to the current shell, so
-those three are known false-safe gaps rather than evidence of safety. Closing them belongs in a
-bounded guard that fails closed on an unmodeled state-carrying construct, not in more
-interpretation.
+not the boundary that contains untrusted code. Array assignment and element reads, values bearing
+arithmetic expansion, and `eval` nested inside an `eval` payload are therefore not modeled.
+Verification under real bash on 2026-07-25 confirmed that nested `eval` does persist its
+assignments to the current shell, so that is a known false-safe gap rather than evidence of safety.
+Closing it belongs in a bounded guard that fails closed on an unmodeled state-carrying construct,
+not in more interpretation.
 
-Variable, resource, and stream references are solved by monotone least fixed point, independent of
-source order. Alternative width, expression nodes, table entries, graph edges, brace expansion,
-resolved exact value length, and successful fixed-point updates have deterministic caps; every
-exhaustion fails closed, so an eval payload that grows itself cannot exhaust time or memory. The
-absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
-beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, unsupported
-parameter transforms beyond their authored operands, shell-scope descriptor state carried across
-commands by a bare `exec`, eval payload constructs outside the bounded exact-literal set above, and
-AD-17's function, alias, `PATH`, and dynamic-executable limitations. A `read` beyond the first
-record of a shared stream is projected as record one, so a marker split across later records is not
-yet seen; closing that needs the content-lattice top projection tracked in issue #119.
+Brace groups and loop bodies are the exception to that stop-line and are modeled, because they
+persist their assignments the same way and are cheap to replay. `_STATIC_EVAL_MUTATION_PREFIXES`
+carries the `{`, `do`, `while`, and `until` keyword entries that make this work, and those four
+entries are load bearing: removing them as apparent dead weight reopens a real false certification.
+Array assignment inside a payload is worse than unmodeled, because it records a fabricated empty
+value rather than an unknown one, which is a positive safety assertion the analysis has not earned;
+that is tracked in issue #132.
+
+Variable, resource, and stream reference resolution is a monotone least fixed point and is
+independent of source order. Append accumulation is not: a `+=` write seeds from the value present
+at its first visit, so write order sequences the result. Both orderings agree with Bash, but a
+refactor that canonicalizes write tuples would change verdicts and must not be treated as a safe
+rewrite. Alternative width, expression nodes, table entries, graph edges, brace expansion, resolved
+exact value length, and successful fixed-point updates have deterministic caps that refuse on
+exhaustion, so an eval payload that grows itself cannot exhaust time or memory. The two exact-text
+projection caps are the exception: they widen to the top of the content lattice instead of
+refusing, as described at the end of this decision.
+
+The absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
+beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, shell-scope
+descriptor state carried across commands by a bare `exec`, eval payload constructs outside the
+bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
+This list is the boundary as designed, not a complete inventory of what the engine currently
+misses; open gaps against this decision are tracked in issues #125 through #141. A `read` beyond
+the first record of a shared stream is projected as record one, so a marker split across later
+records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
+over-refusal it interacts with is issue #119.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
-that execute authored marker content now exit 2, including launcher-wrapped and ambiguous-selector
-sinks. Marker-free dynamic execution and a marker whose required character comes only from
-external content continue to certify with the boundary disclosed. `audit.py` still invokes the
-scanner independently for each step; future job-level aggregation can consume the evidence shape
-without changing the parser/analysis ownership boundary.
+that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
+required character comes only from external content continue to certify with the boundary
+disclosed. `audit.py` still invokes the scanner independently for each step; future job-level
+aggregation can consume the evidence shape without changing the parser/analysis ownership
+boundary.
 
-Two constructs rebind state the per-command evidence shape cannot carry, so they fail closed at
-the scanner rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes
-the enclosing shell scope for every later command, which the per-command `redirections` field
-cannot express. A `read` that uses `-a`, `-d`, `-n`, `-N`, or `-u` either writes an array, whose
-element reads are not modeled, or reads a bounded prefix, which can compose a marker the full
-stream does not contain; widening either to the whole stream would drop the flow instead of
-over-approximating it. Where an exact projection is merely lost rather than absent, the solver
+A sink reached through a launcher such as `timeout`, `xargs`, or `nohup`, or through a head this
+scan cannot resolve to an exact name, is not yet recognized and still certifies. That is a gap
+against this decision rather than part of it, and it is tracked in issue #130 along with the
+unread `ambiguous` executable evidence the selector would need.
+
+Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
+rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
+shell scope for every later command, which the per-command `redirections` field cannot express. A
+`read` that uses `-a`, `-d`, `-n`, `-N`, or `-u` either writes an array, whose element reads are
+not modeled, or reads a bounded prefix, which can compose a marker the full stream does not
+contain; widening either to the whole stream would drop the flow instead of over-approximating it.
+A `set --` or `shift` outside a function body rewrites positional parameters that are bound for
+function contexts only. The first two refuse at the scanner and the third refuses in the taint
+module. Where an exact projection is merely lost rather than absent, the solver
 instead widens to the top of the content lattice, an alternative that accepts from every DFA
 entry state, so the value stays visible at each sink and only a body that actually reaches one
 is refused.

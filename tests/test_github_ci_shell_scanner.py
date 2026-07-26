@@ -7678,6 +7678,84 @@ def test_unsupported_parameter_transform_keeps_empty_expansion_alternative(scrip
 
 
 @pytest.mark.parametrize(
+    "script",
+    [
+        'A=doc-; bash -c "${A#zz}lattice reconcile"',
+        'A=doc-; bash -c "${A%zz}lattice reconcile"',
+        'A=doc-; bash -c "${A/zz/yy}lattice reconcile"',
+        'A=doc-; bash -c "${A:0}lattice reconcile"',
+        'A=doc-; bash -c "${A^^zz}lattice reconcile"',
+        'A=doc-; eval "${A#zz}lattice reconcile"',
+    ],
+    ids=(
+        "strip-prefix",
+        "strip-suffix",
+        "substitute",
+        "offset",
+        "case-fold",
+        "eval-sink",
+    ),
+)
+def test_unsupported_parameter_transform_keeps_its_subject_variable(script: str):
+    """An unmodeled transform derives its result from the parameter, so the value must survive."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'X=doc-; declare Y="${X}lattice"; bash -c "$Y reconcile"',
+        'X=doc-; export Y="${X}lattice"; bash -c "$Y reconcile"',
+        'X=doc-; readonly Y="${X}lattice"; bash -c "$Y reconcile"',
+        'X=doc-; typeset Y="${X}lattice"; bash -c "$Y reconcile"',
+        'f(){ X=doc-; local Y="${X}lattice"; bash -c "$Y reconcile"; }; f',
+    ],
+    ids=("declare", "export", "readonly", "typeset", "local"),
+)
+def test_declaration_builtins_keep_a_dynamic_assignment(script: str):
+    """A word spelled ``NAME=value`` is never an option, so its content must be retained."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'for f in a; do for c in doc-; do eval "$c"lattice reconcile; done; done',
+        'if true; then for c in doc-; do bash -c "${c}lattice reconcile"; done; fi',
+        'if false; then :; else for c in doc-; do eval "${c}lattice reconcile"; done; fi',
+        "for i in x; do for j in y; do printf '%s%s\\n' doc- 'lattice go'; done; done | bash",
+        'for f in a; do select c in doc-; do eval "$c"lattice reconcile; done; done',
+    ],
+    ids=(
+        "nested-do",
+        "then",
+        "else",
+        "discarded-body-output",
+        "select",
+    ),
+)
+def test_loop_opened_on_a_control_keyword_line_keeps_its_flow(script: str):
+    """``do``/``then``/``else`` do not flush, so the opener is not the first retained word."""
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'for f in a; do for c in x; do echo "$c"; done; done',
+        'if true; then for c in x; do echo "$c"; done; fi',
+        'for i in x; do for j in y; do printf "%s\\n" safe; done; done | bash',
+    ],
+    ids=("nested-do", "then", "piped-body"),
+)
+def test_marker_free_loop_opened_on_a_control_keyword_line_stays_clean(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
     "blank",
     ["\v", "\f", "\r", "\xa0"],
     ids=("vertical-tab", "form-feed", "carriage-return", "no-break-space"),

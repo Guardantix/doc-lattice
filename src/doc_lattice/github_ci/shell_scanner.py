@@ -153,6 +153,9 @@ _COMMAND_OPERATORS = (
 )
 _WORD_BREAKS = frozenset(" \t\n;&|()<>")
 _PARAMETER_OPERATORS = (":-", ":=", ":+", "-", "=", "+")
+# ``do``, ``then``, and ``else`` open a body without flushing the accumulating command, so a
+# compound opened on the same line keeps them ahead of its own first word.
+_BODY_OPENING_KEYWORDS = frozenset({"do", "then", "else"})
 _BASH_REDIRECTION_ASSIGNMENT_BUILTINS = frozenset(
     {
         ".",
@@ -491,6 +494,31 @@ class _ShellWord:
     keyword_eligible: bool = True
     argv_ports: tuple[_WordContentPort, ...] | None = None
     brace_expansion_error: str | None = None
+
+
+def _loop_header_words(words: list[_ShellWord], kind: str) -> list[_ShellWord] | None:
+    """Return the iteration header slice, skipping body keywords already consumed.
+
+    ``do``, ``then``, and ``else`` transition the enclosing control frame without flushing the
+    command, so a ``for`` or ``select`` opened on the same line is not the first retained word.
+    Matching only at index zero silently skipped the header, which discarded both the loop
+    binding and the body's accumulated stdout.
+
+    Args:
+        words: The retained words of the command being flushed.
+        kind: The active control frame's kind, either ``for`` or ``select``.
+
+    Returns:
+        The header words beginning at the opener, or None when this command is not that header.
+    """
+    for index, word in enumerate(words):
+        if word.dynamic or not word.keyword_eligible:
+            return None
+        if word.literal == kind:
+            return words[index:]
+        if word.literal not in _BODY_OPENING_KEYWORDS:
+            return None
+    return None
 
 
 @dataclass(slots=True)
@@ -2201,14 +2229,13 @@ class _ShellScanner:
             active_control is not None
             and active_control.kind in {"for", "select"}
             and active_control.phase == "header"
-            and state.words
-            and state.words[0].literal == active_control.kind
+            and (header_words := _loop_header_words(state.words, active_control.kind)) is not None
         ):
             if self.classify_commands:
                 # A loop header is never itself a certified invocation, so a retained
                 # marker in it must still fail closed.
                 _reject_marker_bearing_non_invocation(state.command_has_marker)
-            self._capture_loop_header(active_control, state.words)
+            self._capture_loop_header(active_control, header_words)
             state.reset_command()
             return None
         if (
@@ -3112,8 +3139,16 @@ class _ShellScanner:
                             ),
                         )
                     else:
+                        # An unmodeled transform (``#``, ``%``, ``/``, ``^``, ``,``, ``:off:len``,
+                        # ``?``) derives its result from the parameter, so three outcomes stay
+                        # reachable: it can erase the value, it can pass the value through when
+                        # its pattern does not match, and it can surface its authored operand.
+                        # The pass-through alternative has to be ungapped, or a marker split
+                        # across ``${M#x}`` and the literal beside it could not compose.
                         content = choice(
-                            LiteralTransfer(""), concat(OutsideGap(), operand, OutsideGap())
+                            LiteralTransfer(""),
+                            variable,
+                            concat(OutsideGap(), variable, operand, OutsideGap()),
                         )
                     return _ShellExpansion(
                         index,
@@ -3393,9 +3428,10 @@ def direct_doc_lattice_invocations(
     reaches an execution sink. External content is represented as absence of authored evidence,
     never as a claim that the content is inert.
 
-    The scanner intentionally does not aggregate across run steps or model aliases, functions,
-    PATH shadowing, external files or environment content, dynamic resource identity, arbitrary
-    encoding/transform programs, descriptor aliasing, actions, or reusable workflows.
+    The scanner intentionally does not aggregate across run steps or resolve aliases, PATH
+    shadowing, external files or environment content, dynamic resource identity, arbitrary
+    encoding/transform programs, actions, or reusable workflows. Functions defined in the same
+    body and ``>&N`` descriptor aliasing are modeled; see AD-18 in ARCHITECTURE.md.
 
     Args:
         script: Literal Bash source to scan.
@@ -3623,7 +3659,11 @@ def _assignment_builtin_evidence(  # noqa: PLR0912, PLR0915
                 nameref = setting_attributes
                 remove_nameref = not setting_attributes
             continue
-        if options_enabled and word.dynamic:
+        if options_enabled and word.dynamic and word.assignment_name is None:
+            # A word spelled ``NAME=`` can never be an option, so only a dynamic word without an
+            # assignment name is an unreadable option. Treating a well-formed assignment as one
+            # discarded exact content the word already carried, and ``unknown_builtin_content``
+            # reaches eval dependencies alone, so no other sink observed it.
             dynamic_options = True
             unknown.append(word.content)
             unsupported_nameref = unsupported_nameref or nameref
