@@ -256,6 +256,24 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         {},
         "marker-bearing command is not a certified doc-lattice invocation",
     ),
+    (
+        "nested-eval-persists-assignment",
+        'X=safe; eval \'eval "X=doc-"\'; eval "$X"lattice reconcile',
+        {},
+        "shell nested eval state cannot be represented",
+    ),
+    (
+        "nested-eval-command-wrapper-persists-assignment",
+        'X=safe; eval \'command eval "X=doc-"\'; eval "$X"lattice reconcile',
+        {},
+        "shell nested eval state cannot be represented",
+    ),
+    (
+        "nested-eval-builtin-wrapper-persists-assignment",
+        'X=safe; eval \'builtin eval "X=doc-"\'; eval "$X"lattice reconcile',
+        {},
+        "shell nested eval state cannot be represented",
+    ),
 ]
 
 
@@ -1195,6 +1213,23 @@ ACCEPTANCE_CASES = [
         INCOMPLETE,
     ),
     ("uv run no-sync remains certified", "uv run --no-sync doc-lattice linear", LINEAR),
+    # Negative controls for the nested-eval fail-closed guard (issue #114): each keeps the
+    # nested eval payload from ever persisting its assignment, so the sink never sees the marker.
+    (
+        "nested-eval-shadowed-by-function-remains-certified",
+        'eval(){ :; }; eval \'eval "X=doc-"\'; eval "$X"lattice reconcile',
+        NONE,
+    ),
+    (
+        "nested-eval-in-unreachable-branch-remains-certified",
+        'if false; then eval \'eval "X=doc-"\'; fi; eval "$X"lattice reconcile',
+        NONE,
+    ),
+    (
+        "nested-eval-asynchronous-remains-certified",
+        'eval \'eval "X=doc-" &\'; eval "$X"lattice reconcile',
+        NONE,
+    ),
 ]
 
 

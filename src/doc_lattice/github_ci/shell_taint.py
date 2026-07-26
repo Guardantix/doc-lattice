@@ -19,7 +19,7 @@ _MAX_BRACE_INTEGER_DIGITS = 256
 _MAX_FUNCTION_EFFECT_DEPTH = 64
 _MAX_LOCAL_SUBSTITUTION_DEPTH = 128
 _QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
-_STATIC_EVAL_SHADOW_NAMES = frozenset({"builtin", "command", "false", "true"})
+_STATIC_EVAL_SHADOW_NAMES = frozenset({"builtin", "command", "eval", "false", "true"})
 _UNICODE_MAX = 0x10FFFF
 _SURROGATE_MIN = 0xD800
 _SURROGATE_MAX = 0xDFFF
@@ -4397,6 +4397,18 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
             continue
         if parsed.array_compound:
             raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
+        nested_eval_executable = _static_eval_executable(parsed)
+        if (
+            command.execution_status is not False
+            and nested_eval_executable is not None
+            and nested_eval_executable.name == "eval"
+            and not parsed.asynchronous
+            and (
+                nested_eval_executable.bypasses_functions
+                or nested_eval_executable.name not in parsed.active_function_names
+            )
+        ):
+            raise _TaintLimitExceeded("shell nested eval state cannot be represented")
         words = parsed.words
         index = 0
         while index < len(words) and parsed.keyword_eligible[index]:

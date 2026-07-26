@@ -2294,6 +2294,48 @@ def test_static_eval_nameref_hazard_fails_closed(program: str, message: str) -> 
 @pytest.mark.parametrize(
     "program",
     [
+        'eval "X=doc-"',
+        'command eval "X=doc-"',
+        'builtin eval "X=doc-"',
+    ],
+    ids=("plain", "command-wrapper", "builtin-wrapper"),
+)
+def test_static_eval_nested_eval_fails_closed(program: str) -> None:
+    # A nested ``eval`` persists its assignment to the calling shell under real bash, but the
+    # interpreter does not recurse into eval payloads, so the mutation would otherwise silently
+    # contribute no evidence (issue #114).
+    with pytest.raises(
+        _TaintLimitExceeded, match="shell nested eval state cannot be represented"
+    ) as raised:
+        _static_eval_mutations(_eval_command(program))
+
+    assert isinstance(raised.value, ProjectError)
+    assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
+
+
+def test_static_eval_nested_eval_shadowed_by_a_function_does_not_fail_closed() -> None:
+    # A function named ``eval`` shadows the builtin, so the payload's ``eval`` word never runs
+    # the real builtin and never persists state.
+    command = replace(_eval_command('eval "X=doc-"'), active_function_names=frozenset({"eval"}))
+
+    assert _static_eval_mutations(command) == ((), ())
+
+
+def test_static_eval_nested_eval_in_an_unreachable_branch_does_not_fail_closed() -> None:
+    # The outer eval invocation itself is statically unreachable, so its payload never runs.
+    command = replace(_eval_command('eval "X=doc-"'), execution_status=False)
+
+    assert _static_eval_mutations(command) == ((), ())
+
+
+def test_static_eval_nested_eval_asynchronous_does_not_persist_state() -> None:
+    # An asynchronous nested eval runs in a subshell whose mutations do not reach the caller.
+    assert _static_eval_mutations(_eval_command('eval "X=doc-" &')) == ((), ())
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
         "A=(doc-)",
         "A=(doc- lattice)",
         "A+=(lattice)",
