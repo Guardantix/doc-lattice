@@ -326,6 +326,58 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         {},
         "shell descriptor source cannot be represented",
     ),
+    # Issue #150: unquoted glob operands that real bash expands onto the tracked marker-bearing
+    # ``task.sh``. Each of these certified clean before the glob guards were widened to the
+    # ``source`` builtin, to key-space normalized patterns, to every ambiguous candidate word,
+    # and to a shell reached through an unrecognized launcher.
+    (
+        "source-glob-operand",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; source ta*.sh",
+        {},
+        "shell source glob operand state cannot be represented",
+    ),
+    (
+        "dot-source-glob-operand",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; . ta*.sh",
+        {},
+        "shell source glob operand state cannot be represented",
+    ),
+    (
+        "source-dotslash-glob-operand",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; source ./ta*.sh",
+        {},
+        "shell source glob operand state cannot be represented",
+    ),
+    (
+        "dotslash-glob-script-operand",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; bash ./ta*.sh",
+        {},
+        "shell glob script operand state cannot be represented",
+    ),
+    (
+        "launcher-glob-script-operand",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; timeout 5 bash ta*.sh",
+        {},
+        "shell glob script operand state cannot be represented",
+    ),
+    (
+        # ``p*`` expands onto the tracked ``pipefail`` file, so ``-o`` consumes a valid option
+        # name and the real script operand is the glob that follows it.
+        "option-value-glob-shifts-script-operand",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; echo x > pipefail; bash -o p* ta*.sh",
+        {},
+        "shell glob script operand state cannot be represented",
+    ),
+    (
+        # ``--rcfile`` reads its value file outright under an interactive shell. Confirmed
+        # reliable and non-interactive here: ``</dev/null`` with no controlling terminal still
+        # sources the matched file and exits zero. Sibling ``bash -o ta*`` shapes are taint-level
+        # tests only -- real bash aborts them with "invalid option name" and never runs anything.
+        "rcfile-glob-value",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; bash --rcfile ta*.sh -i </dev/null",
+        {},
+        "shell glob script operand state cannot be represented",
+    ),
 ]
 
 
@@ -8042,6 +8094,27 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
     (
         "stderr-does-not-carry-stdout-payload",
         "printf '%s%s\\n' doc- 'lattice reconcile' 2> task.sh; bash task.sh",
+        {},
+    ),
+    # Issue #150 over-refusal guards: the widened glob guards must stay narrow to a tracked
+    # target whose own content could carry the marker, matched by the operand that really names
+    # a file.
+    (
+        "marker-free-source-glob",
+        "printf 'REGION=us-east-1\\n' > task.sh; source ta*.sh",
+        {},
+    ),
+    (
+        "unmatched-source-glob",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; source zz*.sh",
+        {},
+    ),
+    (
+        # Only the first ``source`` operand names a file; every later word is a positional
+        # parameter for the sourced script. ``env.sh`` is touched so real bash sources an empty
+        # file cleanly rather than failing on a missing one.
+        "source-extra-args-are-positional",
+        "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; touch env.sh; source env.sh ta*.sh",
         {},
     ),
 ]

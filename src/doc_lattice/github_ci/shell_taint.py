@@ -10627,6 +10627,126 @@ def _resource_marker_fragment_capable(value: _ContentValue) -> bool:
     return False
 
 
+def _resource_key_patterns(literal: str) -> tuple[str, ...]:
+    """Return the glob patterns one authored operand word can match a resource key with.
+
+    Resource keys are lexically normalized before they enter the tables, so ``./task.sh`` is
+    stored as ``task.sh``. An authored pattern is not normalized anywhere, which is why
+    ``bash ./ta*.sh`` matched no key at all no matter which file Bash expanded it onto (issue
+    #150). Running the authored literal through ``normalize_static_resource`` brings the pattern
+    into the same space as the keys: the normalizer only splits on ``/`` and rejoins, so every
+    glob metacharacter inside a path component survives untouched and the result is still a
+    pattern rather than a resolved name.
+
+    Matching the union of both spellings is monotone over matching the raw literal alone, so this
+    can only add refusals to what the guards already found. The over-approximations it accepts all
+    point the same fail-closed way: a lexical ``..`` in a pattern is collapsed without knowing what
+    the intervening component expands to, a backslash-escaped ``\\*`` stays a ``fnmatch``
+    metacharacter rather than the literal Bash would match, and ``*`` is allowed to cross ``/``
+    where Bash would not. Each widens the match set, never narrows it.
+
+    Args:
+        literal: One argv word's authored literal text, carrying glob metacharacters.
+
+    Returns:
+        The raw pattern, followed by its key-space normalization when that differs.
+    """
+    normalized = normalize_static_resource(literal, dynamic=False)
+    if normalized is None or normalized == literal:
+        return (literal,)
+    return (literal, normalized)
+
+
+def _glob_ports_reach_tracked_marker(
+    ports: Iterable[_ArgPort],
+    variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether any glob-expanding argv word can match a marker-bearing tracked resource.
+
+    This is the narrow match operation both glob guards share. A glob's exact match set is
+    genuinely unknowable without reading the filesystem, so rather than guess which file(s) a
+    pattern names it stays inside the resources this same script writes, matching each key with
+    Bash's own case-sensitive glob semantics and failing closed only when a match's content could
+    plausibly carry a marker fragment. A target no part of this script writes is opaque,
+    pre-existing content already outside every other sink check's purview.
+
+    Only a word carrying ``active_argv_expansion`` is inspected. A word whose expansion is a plain
+    variable reference is ``dynamic`` instead and is handled by the ordinary sink machinery, and a
+    brace-expanded word loses the flag per resulting port, so neither reaches this match.
+
+    The two callers supply deliberately different tables. The shell-head caller passes empty
+    variable and stream tables because a shell operand's own resource content is the whole
+    question there; the ``source`` caller passes the command's solved variable and stream tables,
+    matching what ``_source_payload_state_unrepresentable`` already resolves the exact operand
+    with.
+
+    Args:
+        ports: The argv words this route could resolve its target from.
+        variables: The variable table used to resolve a matched resource's content.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The stream table used to resolve a matched resource's content.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether some inspected word's pattern matches a script-tracked resource whose content
+        could plausibly carry the marker.
+    """
+    for port in ports:
+        if not port.active_argv_expansion:
+            continue
+        patterns = _resource_key_patterns(port.literal)
+        for key in resources:
+            if not isinstance(key, str):
+                continue
+            if not any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
+                continue
+            content = _evaluate_with_tables(ResourceRef(key), variables, resources, streams, limits)
+            if _resource_marker_fragment_capable(content):
+                return True
+    return False
+
+
+def _shell_source_head_index(  # noqa: PLR0911
+    command: _CommandEvidence, executable: _ExecutableEvidence
+) -> int | None:
+    """Return the argv index a shell option grammar is read from for one executable candidate.
+
+    ``_candidate_sink_expressions`` reaches ``_shell_source_sinks`` by three distinct routes, and
+    the glob guard used to recognize only the first of them, so the same exploit spelled through a
+    launcher certified (issue #150). This mirrors that dispatch route for route so the guard sees
+    exactly the argv positions the sink machinery does. The pre-shell builtin returns are mirrored
+    too, and are load-bearing rather than decorative: without them ``source env.sh bash ta*.sh``
+    would find ``bash`` by the launcher search and refuse a command whose later words are only
+    positional parameters for the sourced script.
+
+    Args:
+        command: The command evidence being inspected.
+        executable: One resolved executable candidate of that command.
+
+    Returns:
+        The argv index to read the shell option grammar from, or None when this candidate does not
+        reach a shell.
+    """
+    if executable.argv_index is None or executable.name is None:
+        return None
+    name = executable.name
+    literal = executable.literal
+    if name == "eval" and literal == "eval" and not executable.external_lookup:
+        return None
+    if name in {"source", "."} and literal == name and not executable.external_lookup:
+        return None
+    if _normalized_shell_head(name) in _SHELL_HEADS:
+        return executable.argv_index
+    if executable.ambiguous:
+        return 0
+    if executable.external_lookup:
+        return None
+    return _nested_shell_index(command, executable.argv_index)
+
+
 def _source_payload_state_unrepresentable(
     command: _CommandEvidence,
     sink_variables: Mapping[str | int, _ContentValue],
@@ -10690,6 +10810,63 @@ def _source_payload_state_unrepresentable(
     return False
 
 
+def _source_glob_operand_state_unrepresentable(
+    command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a ``source``/``.`` glob operand could read a script-tracked marker.
+
+    ``source ta*.sh`` is ordinary Bash: the builtin's operand is expanded before the file is
+    named, so the pattern resolves at run time to whatever matches in the current directory --
+    state this deterministic analysis cannot read. ``_source_payload_state_unrepresentable``
+    carries issue #133's framing that a sourced file's state effects live in a FILE the argument
+    only names, but it asks ``normalize_static_resource`` for an exact key with ``dynamic=`` set
+    for exactly this case, so a glob operand resolved to None and the exact guard skipped it
+    (issue #150). This closes that gap the same narrow way, over the pattern rather than an exact
+    name.
+
+    The two guards are disjoint by construction: the exact guard drops a glob operand through its
+    ``dynamic=... or active_argv_expansion`` argument, and this one drops a non-glob operand
+    through the shared helper's ``active_argv_expansion`` predicate.
+
+    Only the operand is supplied. Every word after it becomes a positional parameter for the
+    sourced script rather than a second source target (verified under real Bash 5.2), so scanning
+    later words would refuse bodies Bash never runs the marker in. ``_source_operand_index``'s
+    literal ``--`` check needs no glob handling of its own for the same reason it needs none
+    today: a word carrying argv expansion can never spell the exact two characters ``--``.
+
+    Args:
+        command: The command whose executable candidates may be ``source``/``.``.
+        sink_variables: The per-command solved variable table, for resolving a matched resource.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving a matched resource.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether this command sources a glob operand whose pattern matches a script-tracked
+        resource whose content could plausibly carry the marker.
+    """
+    for executable in _iter_executable_evidence(command.executable):
+        if executable.argv_index is None or executable.name is None:
+            continue
+        if executable.name not in {"source", "."} or executable.literal != executable.name:
+            continue
+        if executable.external_lookup:
+            continue
+        operand_index = _source_operand_index(command, executable.argv_index)
+        if operand_index >= len(command.argv):
+            continue
+        operand = command.argv[operand_index]
+        if operand.process_resource_id is not None:
+            continue
+        if _glob_ports_reach_tracked_marker((operand,), sink_variables, resources, streams, limits):
+            return True
+    return False
+
+
 def _glob_script_operand_state_unrepresentable(
     command: _CommandEvidence,
     resources: Mapping[str | int, _ContentValue],
@@ -10706,10 +10883,25 @@ def _glob_script_operand_state_unrepresentable(
 
     This is the same shape as ``_source_payload_state_unrepresentable`` for a sourced file: rather
     than guess which file(s) the pattern matches, it stays narrow to resources this same script
-    itself writes, matching each one's key against the authored pattern with Bash's own
-    case-sensitive glob semantics and failing closed only when a match's content could plausibly
-    carry a marker fragment. A target no part of this script writes is already outside every other
-    sink check's purview for the same reason a non-tracked ``source`` target is.
+    itself writes. A target no part of this script writes is already outside every other sink
+    check's purview for the same reason a non-tracked ``source`` target is.
+
+    Three things widen this past its first form, each closing a confirmed false-safe (issue #150):
+
+    1. ``_shell_source_head_index`` mirrors all three routes ``_candidate_sink_expressions`` uses
+       to reach the shell option grammar, not just a shell that is the command's own head, so the
+       launcher spelling ``timeout 5 bash ta*.sh`` is seen too. The ambiguous route is mirrored for
+       fail-closure rather than reachability: no run body constructs it today, because a command
+       whose head is unresolved and whose operand carries a glob refuses earlier at the
+       executable-word check. That earlier check is a separate guard whose scope could narrow, so
+       the mirror stays.
+    2. Every candidate word of the ambiguous selection is scanned, not only the first. Once the
+       expansion count of one word is unknown, any later word can shift into the operand position
+       (``bash -o p* ta*.sh`` expands ``p*`` onto a tracked ``pipefail`` file, making the glob that
+       follows the real script operand). This is the same reason ``_shell_source_sinks`` builds a
+       choice over every candidate rather than committing to one.
+    3. Patterns are matched in resource-key space as well as as authored
+       (``_resource_key_patterns``), so a ``./`` prefixed pattern can match the key it names.
 
     Args:
         command: The command whose executable candidates may be a shell.
@@ -10721,22 +10913,20 @@ def _glob_script_operand_state_unrepresentable(
         resource whose content could plausibly carry the marker.
     """
     for executable in _iter_executable_evidence(command.executable):
-        if executable.argv_index is None or executable.name is None:
+        head_index = _shell_source_head_index(command, executable)
+        if head_index is None:
             continue
-        if _normalized_shell_head(executable.name) not in _SHELL_HEADS:
-            continue
-        selection = _select_shell_source(command.argv, executable.argv_index)
+        selection = _select_shell_source(command.argv, head_index)
         if selection.kind is not _ShellSourceKind.AMBIGUOUS or not selection.candidate_indices:
             continue
-        port = command.argv[selection.candidate_indices[0]]
-        if not port.active_argv_expansion:
-            continue
-        for key in resources:
-            if not isinstance(key, str) or not fnmatch.fnmatchcase(key, port.literal):
-                continue
-            content = _evaluate_with_tables(ResourceRef(key), {}, resources, {}, limits)
-            if _resource_marker_fragment_capable(content):
-                return True
+        if _glob_ports_reach_tracked_marker(
+            (command.argv[index] for index in selection.candidate_indices),
+            {},
+            resources,
+            {},
+            limits,
+        ):
+            return True
     return False
 
 
@@ -10940,6 +11130,14 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                 limits,
             ):
                 raise _TaintLimitExceeded("shell source payload state cannot be represented")
+            if _source_glob_operand_state_unrepresentable(
+                command,
+                sink_variables,
+                solved.resources,
+                solved.streams,
+                limits,
+            ):
+                raise _TaintLimitExceeded("shell source glob operand state cannot be represented")
             if _glob_script_operand_state_unrepresentable(command, solved.resources, limits):
                 raise _TaintLimitExceeded("shell glob script operand state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):

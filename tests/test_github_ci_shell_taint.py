@@ -3086,3 +3086,244 @@ def test_shell_option_grammar_exact_script_operand_still_certifies() -> None:
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+# Issue #150: four confirmed false-safes where an unquoted glob operand certified clean while
+# real Bash executed the authored marker. Each family below pins a control that already refused
+# beside the exploit spelling that slipped past, plus the over-refusal guards that must keep
+# certifying so the fix stays narrow to script-tracked, marker-bearing targets.
+_MARKER_WRITE = "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; "
+_SHELL_GLOB_REASON = "shell glob script operand state cannot be represented"
+_SOURCE_GLOB_REASON = "shell source glob operand state cannot be represented"
+
+
+@pytest.mark.parametrize("head", ["source", "."], ids=("source", "dot"))
+def test_source_glob_operand_fails_closed(head: str) -> None:
+    """Issue #150: a glob ``source`` operand reached the tracked marker file and certified.
+
+    ``source ta*.sh`` is ordinary Bash: the builtin's operand is expanded before the file is
+    named, so the pattern resolves at run time to whatever matches in the current directory --
+    here ``task.sh``, a file this same body's own ``printf`` tracked a marker-bearing write to
+    (verified under real Bash 5.2). ``_source_payload_state_unrepresentable`` asked
+    ``normalize_static_resource`` for an exact key with ``dynamic=`` set for exactly this case, so
+    a glob operand resolved to None and the guard skipped it entirely, leaving nothing else to
+    reach the sourced file's content.
+    """
+    control = _MARKER_WRITE + "source task.sh"
+    exploit = _MARKER_WRITE + f"{head} ta*.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == _SOURCE_GLOB_REASON
+
+
+def test_source_dashdash_glob_operand_fails_closed() -> None:
+    """Issue #150: ``--`` ends the builtin's option parsing, so the glob still names the file."""
+    body = _MARKER_WRITE + "source -- ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == _SOURCE_GLOB_REASON
+
+
+def test_source_dotslash_glob_operand_fails_closed() -> None:
+    """Issue #150: a ``./`` prefixed pattern needs key-space normalization to match at all.
+
+    The raw pattern ``./ta*.sh`` never ``fnmatch``es the normalized resource key ``task.sh``,
+    so matching the authored spelling alone certified this even once the operand was reached.
+    """
+    body = _MARKER_WRITE + "source ./ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == _SOURCE_GLOB_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _MARKER_WRITE + "source env.sh ta*.sh",
+        _MARKER_WRITE + "touch env.sh; source env.sh ta*.sh",
+    ],
+    ids=("absent-target", "empty-target"),
+)
+def test_source_later_arguments_are_positional_parameters_not_targets(body: str) -> None:
+    """Over-refusal guard: only the first ``source`` operand names a file.
+
+    Every word after it becomes a positional parameter for the sourced script, never a second
+    source target (verified under real Bash 5.2). A glob-operand guard that scanned later
+    arguments would match ``ta*.sh`` against the tracked marker-bearing ``task.sh`` and refuse a
+    body real Bash never runs the marker in.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_source_glob_marker_free_target_still_certifies() -> None:
+    """Over-refusal guard: a matched but marker-free tracked target still certifies."""
+    body = "printf 'REGION=us-east-1\\n' > task.sh; source ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_source_glob_unmatched_pattern_still_certifies() -> None:
+    """Over-refusal guard: a pattern matching no tracked resource still certifies."""
+    body = _MARKER_WRITE + "source zz*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_dotslash_glob_script_operand_fails_closed() -> None:
+    """Issue #150: ``bash ./ta*.sh`` certified because the raw pattern never matched the key.
+
+    ``_glob_script_operand_state_unrepresentable`` matched each tracked resource key against the
+    operand's authored literal only. Resource keys are lexically normalized (``./task.sh`` is
+    stored as ``task.sh``), so a pattern carrying a ``./`` prefix could not match any key no
+    matter which file real Bash expanded it to.
+    """
+    control = _MARKER_WRITE + "bash ./task.sh"
+    exploit = _MARKER_WRITE + "bash ./ta*.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == _SHELL_GLOB_REASON
+
+
+def test_dotslash_glob_marker_free_target_still_certifies() -> None:
+    """Over-refusal guard: pattern normalization must not refuse a marker-free tracked target.
+
+    The content has to end with the marker scan idle to be marker-free at all. ``make build``
+    does not: its trailing ``d`` is the marker's own first character, so it leaves the scan
+    mid-match and the already-shipped ``bash ta*.sh`` route refuses it too.
+    """
+    body = "printf 'REGION=us-east-1\\n' > task.sh; bash ./ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "bash -o ta* -c 'echo hi'",
+        "bash -eo ta* -c 'echo hi'",
+        "bash -O ta* -c 'echo hi'",
+        "bash -o ta*",
+        "bash --rcfile ta*.sh",
+        "bash --init-file ta*.sh",
+    ],
+    ids=(
+        "short-o",
+        "mid-cluster-o",
+        "short-O",
+        "short-o-trailing",
+        "long-rcfile",
+        "long-init-file",
+    ),
+)
+def test_option_value_glob_fails_closed(tail: str) -> None:
+    """Issue #150: a glob in an option's VALUE position widened but was never inspected.
+
+    ``_select_shell_source`` widens to ``AMBIGUOUS`` from the option word itself when the value
+    that follows carries argv expansion, so ``candidate_indices[0]`` is the literal ``-o`` or
+    ``--rcfile`` word rather than the glob. The guard only inspected that first candidate, found
+    no ``active_argv_expansion`` on it, and certified -- even though ``--rcfile ta*.sh`` makes
+    Bash read the matched file outright.
+    """
+    body = _MARKER_WRITE + tail
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == _SHELL_GLOB_REASON
+
+
+def test_option_value_glob_marker_free_still_certifies() -> None:
+    """Over-refusal guard: an option-value glob with nothing tracked still certifies."""
+    body = "bash -o ta* -c 'echo hi'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_option_value_glob_shift_reaches_script_operand() -> None:
+    """Issue #150: an option-value glob can shift a later word into the operand position.
+
+    ``bash -o p* ta*.sh`` expands ``p*`` to the tracked ``pipefail`` file, so ``-o`` consumes it
+    as a valid option name and the script operand really is ``ta*.sh`` -- the tracked
+    marker-bearing ``task.sh`` (verified under real Bash 5.2). Scanning every candidate word,
+    rather than only the first, is what reaches it once the expansion count is unknown.
+    """
+    body = _MARKER_WRITE + "echo x > pipefail; bash -o p* ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == _SHELL_GLOB_REASON
+
+
+@pytest.mark.parametrize("launcher", ["timeout 5", "nohup"], ids=("timeout", "nohup"))
+def test_launcher_glob_script_operand_fails_closed(launcher: str) -> None:
+    """Issue #150: a shell reached through an unrecognized launcher skipped the glob guard.
+
+    ``_candidate_sink_expressions`` already routes ``timeout 5 bash ...`` to the shell option
+    grammar through ``_nested_shell_index``, but the glob guard only recognized a shell that was
+    the command's own resolved head, so the launcher spelling of the same exploit certified.
+    """
+    control = _MARKER_WRITE + f"{launcher} bash task.sh"
+    exploit = _MARKER_WRITE + f"{launcher} bash ta*.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == _SHELL_GLOB_REASON
+
+
+def test_launcher_glob_marker_free_target_still_certifies() -> None:
+    """Over-refusal guard: the launcher route must not refuse a marker-free tracked target.
+
+    ``make build`` would not serve here: its trailing ``d`` is the marker's own first character,
+    so it leaves the marker scan mid-match and every glob route refuses it, this one included.
+    """
+    body = "printf 'REGION=us-east-1\\n' > task.sh; timeout 5 bash ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "head",
+    ['command "$RUNNER"', 'exec "$RUNNER"', 'builtin -- "$RUNNER"'],
+    ids=("command", "exec", "builtin"),
+)
+def test_ambiguous_glob_script_operand_route_is_not_constructible(head: str) -> None:
+    """Issue #150: the ambiguous shell route's glob guard is a mirror, not a reachable exploit.
+
+    ``_candidate_sink_expressions`` reads the shell option grammar from argv index zero when the
+    head cannot be resolved to an exact name, and the glob guard mirrors that route for
+    fail-closure. No run body reaches it: a command whose head is unresolved and whose operand
+    carries a glob refuses earlier, at the executable-word check, as pinned here. The mirror is
+    kept because the earlier check is a separate guard whose scope could narrow.
+    """
+    body = _MARKER_WRITE + f"{head} ta*.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == "executable word uses brace or glob expansion"
