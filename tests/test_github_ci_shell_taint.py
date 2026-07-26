@@ -2591,6 +2591,55 @@ def test_marker_free_write_then_source_still_certifies() -> None:
     assert result.incomplete_reason is None
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=doc-; printf "%s\\n" "${A}lattice reconcile" > s.sh; cat s.sh | bash',
+        'A=doc-; cat <(printf "%s\\n" "${A}lattice reconcile") | bash',
+    ],
+    ids=("named-operand", "process-substitution"),
+)
+def test_producer_stdout_links_named_operand_and_process_substitution(script: str) -> None:
+    """Verified false-safes from issue #136, reproduced under real Bash 5.2.
+
+    ``_producer_stdout`` already assumed a command may echo its stdin back out (the redirection
+    form ``cat < s.sh | bash`` already refuses), but it did not extend that same may-output
+    assumption to a resource a command names as an OPERAND, nor to a process substitution it
+    reads. Both are the most idiomatic CI file handoffs into a shell and both used to certify
+    clean while actually executing the split marker.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
+def test_producer_stdout_redirection_form_control_still_refuses() -> None:
+    """Control for issue #136: the redirection form already modeled this handoff correctly."""
+    control = 'A=doc-; printf "%s\\n" "${A}lattice reconcile" > s.sh; cat < s.sh | bash'
+
+    result = scan_doc_lattice_invocations(control)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
+def test_producer_stdout_named_operand_stays_content_aware() -> None:
+    """Over-refusal guard: naming a resource operand must not fail closed unconditionally.
+
+    ``cat file | bash`` is one of the most common CI idioms there is. The fix must only treat a
+    named operand as a possible stdout source when that resource actually carries a tracked
+    marker-bearing write within this evidence graph -- mirroring how the redirection form already
+    behaves -- not refuse every ``cat <anything> | bash`` regardless of content.
+    """
+    body = "cat README.md | bash"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
 def test_static_eval_programs_are_empty_for_a_dynamic_argument() -> None:
     command = _command(
         1,

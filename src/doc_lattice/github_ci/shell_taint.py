@@ -3580,7 +3580,10 @@ def _printf_b_unrepresentable(command: _CommandEvidence, limits: TaintLimits) ->
 
 
 def _producer_stdout(
-    command: _CommandEvidence, stdin: ContentExpr, limits: TaintLimits
+    command: _CommandEvidence,
+    stdin: ContentExpr,
+    limits: TaintLimits,
+    process_resources: dict[int, _ProcessResourceEvidence],
 ) -> ContentExpr:
     """Return a conservative stdout expression for one command."""
     executable = command.executable
@@ -3594,15 +3597,26 @@ def _producer_stdout(
         return LiteralTransfer("")
     head_index = command.executable.argv_index
     payload_start = head_index + 1 if head_index is not None else min(1, len(command.argv))
-    argv_content = concat(*(port.content for port in command.argv[payload_start:]))
+    operand_ports = command.argv[payload_start:]
+    argv_content = concat(*(port.content for port in operand_ports))
     if not executable.alternates and not command.called_function_context_ids:
         literal_printf = _literal_printf_stdout(command, limits)
         if literal_printf is not None:
             return literal_printf
+    # A command may reproduce a resource it names as an operand, or a process substitution it
+    # reads, the same way it may reproduce its stdin (issue #136): the redirection form
+    # ``cat < s.sh`` and the operand form ``cat s.sh`` are the same handoff idiom and must resolve
+    # to the same content. Reusing ``_shell_script_source_expression`` keeps this content-aware --
+    # an operand that names an untracked resource resolves to no marker-bearing evidence, so an
+    # ordinary ``cat README.md | bash`` still certifies.
+    operand_sources = tuple(
+        _shell_script_source_expression(port, process_resources, stdin) for port in operand_ports
+    )
     return choice(
         OutsideGap(),
         argv_content,
         stdin,
+        *operand_sources,
         # A call reproduces the stdout its function body aggregated into that scope.
         *(StreamRef(context) for context in command.called_function_context_ids),
     )
@@ -7056,7 +7070,7 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                         choice(OutsideGap(), command.unknown_builtin_content),
                     )
                 )
-        output = _producer_stdout(command, inputs[command.command_id], limits)
+        output = _producer_stdout(command, inputs[command.command_id], limits, process_resources)
         stream_writes.append(_FlowWrite(command.output_scope_id, output))
         # A ``>&N`` inside a compound resolves against the descriptor that compound bound, so the
         # enclosing chain has to be visible here. Without it the write resolved to an unnamed
