@@ -444,8 +444,15 @@ rather than an inherited stream: a bare `exec 3> out.sh` rebinds the shell scope
 per-command `redirections` field cannot carry, so a later `>&3` fails closed. A descriptor nothing
 in the body binds is a Bash runtime error rather than a flow, so it keeps routing nowhere.
 
-Execution sinks are `eval`, shell `-c`, selected shell stdin, and static script execution through a
-shell operand, direct path, `source`, or `.`. The command-name word is a sink on the same footing,
+Execution sinks are `eval`, shell `-c`, selected shell stdin, a registered `trap` action, and
+static script execution through a shell operand, direct path, `source`, or `.`. A `trap` action is
+shell source the shell reads and executes when the signal arrives, so deferring its expansion to
+that moment is what hid it rather than any difference in what it runs: as a value the ordinary
+single-quoted action is inert text, so it takes the same second parse an `eval` payload takes and
+`A=doc-; trap '${A}lattice reconcile' EXIT` refuses. The three spellings that register nothing are
+excluded rather than over-refused: `-l` and `-p` print instead of registering, and a literal `-`
+restores the default disposition. Whether a signal ever arrives is not modeled, so a trap on a
+signal this body never sends still refuses. The command-name word is a sink on the same footing,
 because Bash executes it after expansion. That holds whether the head resolves to a name, resolves
 ambiguously, or resolves to nothing at all: a command no argv word of which carries literal text,
 such as `A=doc-; B=lattice; "$A$B"`, gives the resolver no text to read, and reading that as "runs
@@ -460,7 +467,13 @@ existing assignment, keyword, `builtin`, `command`, `exec`, `env`, `time`, `copr
 `uvx`, and `uv tool run` grammar. Its `external_lookup` provenance prevents an external `env eval`
 from being mistaken for the shell builtin. The shell source selector chooses `-c`, a script
 operand, or stdin; if a dynamic selector could choose a marker-capable authored port, it fails
-closed.
+closed. An `--rcfile`/`--init-file` value is read in addition to whichever of those three the
+grammar selects, because Bash reads that file before the selected source; skipping it as an inert
+option argument left no sink for it at all and certified
+`bash --rcfile env.sh -ic :`. The interactive gate Bash applies to an rcfile is deliberately not
+modeled, since recognizing it would mean narrowing a refusal on `-i` evidence the body itself
+supplies, which AD-17's founding principle rules out. `--emulate` stays excluded because its value
+is a mode name rather than a path.
 
 Exact eval payload interpretation is a bounded sub-analysis, not a shell interpreter. When an
 `eval` payload resolves to exact literal text, that text is tokenized and its state effects are
@@ -506,16 +519,35 @@ payload writes, not what sourcing that file would then assign.
 The replay is reached from `eval` alone. A `source` or `.` payload's state effects are
 architecturally unreachable to it: recovering them exactly would need a second, resource-shaped
 exact-literal table threaded through the same bootstrap phase that builds the variable table, which
-does not exist and is not a scoped fix to add. Instead, `source`/`.`, and a shell's glob script
-operand, fail closed narrowly, only when the target is a resource this same body writes and that
-resource's own content could plausibly carry a marker fragment, checked across every DFA entry
-state and, separately, each `NAME=VALUE`-shaped line's isolated value, so a suffix fragment written
-as `Y=lattice` is caught the same way a variable-borne one already is. A target this body never
-writes, or one it writes with content that cannot advance the marker, stays outside the analysis's
-scope and certifies, so the ordinary `echo "REGION=us-east-1" > env.sh; source env.sh` idiom is
-unaffected. A `source`/`.` target that resolves to a dynamic filename or to a process-substitution
-operand is untouched by this rule and remains open; that gap, and true exact-literal replay for
-`source` matching `eval`'s, are tracked in issue #133.
+does not exist and is not a scoped fix to add. Instead, every route that names a file this body
+writes and then has it read as shell source fails closed narrowly, only when the target is a
+resource this same body writes and that resource's own content could plausibly carry a marker
+fragment. Four routes carry the rule: `source`/`.`, a shell's glob script operand, a shell's exact
+script operand, and an `--rcfile`/`--init-file` value.
+
+The content test differs by whether the file's state returns to this body, and the difference is
+load bearing rather than cosmetic. For `source`/`.` it merges into the current shell, so the test
+asks both whether the file's raw content could continue a partial match begun OUTSIDE the file,
+checked across every DFA entry state, and, separately, whether any `NAME=VALUE`-shaped line's
+isolated value could, so a suffix fragment written as `Y=lattice` is caught the same way a
+variable-borne one already is. For a file a CHILD shell runs, the raw half is dropped and only the
+assignment half applies: a child's variables never return here, so the composition to detect is one
+the file performs within itself, and ordinary script text answers the raw question yes
+(`make build` ends in `d` and so advances the scan from the idle entry state), which refused a
+mandatory certification row. Content that is already the whole marker still refuses on every route,
+through the value the operand contributes to the sink path. A target this body never writes, or one
+it writes with content that cannot advance the marker, stays outside the analysis's scope and
+certifies, so the ordinary `echo "REGION=us-east-1" > env.sh; source env.sh` idiom is unaffected.
+
+Without the exact-script-operand route, `printf '%s\n' 'A=doc-' '"${A}lattice" reconcile' > env.sh;
+bash env.sh` certified while `source env.sh` and `bash e*.sh` refused the identical file. One class
+stays open on the child-run routes as a consequence of the narrower content test and is recorded
+rather than silently dropped: a file supplying part of the marker literally and the rest from an
+EXPORTED parent variable composes across the one boundary a child does inherit, and neither the
+guard nor the value route second-parses a script operand's content to see it. A `source`/`.` target
+that resolves to a dynamic filename or to a process-substitution operand is untouched by this rule
+and remains open; that gap, and true exact-literal replay for `source` matching `eval`'s, are
+tracked in issue #133.
 
 A shell `-c` payload does not enter the body-wide lowering either, because a child shell's
 assignments genuinely do not persist into the parent. They do persist into the rest of that
@@ -541,14 +573,24 @@ fail-closed; modeling export status precisely is future work. Every modeled disp
 reaches that pass, not only a shell that is the command's own head, so a launcher-spelled or
 unresolved-head shell is second-parsed too; where the argv shape is uncertain the pass reads each
 retained candidate word rather than committing to one, mirroring the choice the sink selector
-builds over the same set. A script operand and a standard-input payload stay with the sink path,
-which already models a file's content and a stream's content directly. The operands after the
-payload word are bound as the child's positional parameters, starting at `$0` rather than `$1`, so
-`bash -c '$0$1 reconcile' doc- lattice` composes the marker out of words that are plain argv in the
-parent. Each operand is evaluated in the parent environment, which is where those words actually
-expand. The same positionals reached from a shell function's call site are not bound, because those
-arguments are applied by substitution over flow effects rather than stored as variables; that gap
-is tracked in issue #160.
+builds over the same set. A script operand stays with the sink path, which already models a file's
+content directly, plus the state guard above. The operands after the payload word are bound as the
+child's positional parameters, so `bash -c '$0$1 reconcile' doc- lattice` composes the marker out of
+words that are plain argv in the parent. Each operand is evaluated in the parent environment, which
+is where those words actually expand. The same positionals reached from a shell function's call
+site are not bound, because those arguments are applied by substitution over flow effects rather
+than stored as variables; that gap is tracked in issue #160.
+
+A standard-input program enters the same second pass, reached by its own route because the program
+is a stream rather than an argv word. `bash -s -- doc- lattice` binds its trailing operands as
+positionals too, and the starting offset differs by dispatch form: a `-c` payload's operands begin
+at `$0`, while `-s` leaves `$0` as the shell's own name and begins at `$1`, both verified under real
+Bash 5.2. Binding a `-s` list from `$0` would shift every parameter by one and miss the composition.
+The pass runs whether or not operands accompany the program, because an exported parent variable is
+visible to that child as well. It can only read a program it can see as text, so the heredoc and
+herestring spellings refuse while a program arriving through a pipe or a redirection does not: the
+eval-syntax walk folds `ResourceRef` and `StreamRef` into the same opaque token it uses for
+`OutsideGap`, which is issue #159 reached by this route rather than by `eval`.
 
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing

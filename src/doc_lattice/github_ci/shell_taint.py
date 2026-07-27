@@ -915,6 +915,12 @@ _SHELL_HEADS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "
 # through ``command``/``env``/``exec`` still selects a shell that appears later in its own argv.
 _EXTERNAL_WRAPPER_SHADOW_NAMES = frozenset({"builtin", "command", "exec"})
 _SHELL_LONG_OPTION_NAMES_WITH_VALUE = frozenset({"rcfile", "init-file", "emulate"})
+# The subset of those whose value NAMES A FILE the shell reads as its own source before it reaches
+# the ``-c`` payload or script operand. Skipping the value word as an inert option argument dropped
+# that file entirely, so ``bash --rcfile env.sh -ic :`` certified while Bash 5.2 executed the marker
+# ``env.sh`` composes. ``emulate`` is deliberately absent: its value is a mode name (``sh``,
+# ``ksh``), not a path, so reading it as a script source would name a file nothing runs.
+_SHELL_INIT_FILE_OPTION_NAMES = frozenset({"rcfile", "init-file"})
 _SHELL_EAGER_STOP_NAMES = frozenset({"help", "version", "dump-strings", "dump-po-strings"})
 # Bash accepts a subset of its GNU long options spelled with a single leading dash -- ``bash
 # -norc`` and ``bash -posix`` behave exactly like ``--norc``/``--posix`` (verified under real Bash
@@ -1107,12 +1113,20 @@ class _ShellSourceKind(str, Enum):  # noqa: UP042
 
 @dataclass(frozen=True, slots=True)
 class _ShellSourceSelection:
-    """A selected shell source port or conservative ambiguity set."""
+    """A selected shell source port or conservative ambiguity set.
+
+    ``init_file_indices`` is orthogonal to ``kind``: an ``--rcfile``/``--init-file`` value names a
+    file the shell reads IN ADDITION to whichever source the option grammar finally selects, so it
+    accumulates across the whole walk and is reported alongside every kind rather than replacing
+    one. ``argv_index`` carries the first positional operand for a ``STDIN`` selection, which is
+    where a ``-s`` invocation's ``$1`` begins.
+    """
 
     kind: _ShellSourceKind
     argv_index: int | None = None
     candidate_indices: tuple[int, ...] = ()
     include_stdin: bool = False
+    init_file_indices: tuple[int, ...] = ()
 
 
 def _normalized_shell_head(name: str | None) -> str | None:
@@ -1151,8 +1165,31 @@ def _shell_long_option_name(literal: str) -> str | None:
     return None
 
 
-def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellSourceSelection:  # noqa: PLR0911, PLR0912
-    """Select the shell source according to its literal option grammar."""
+def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellSourceSelection:
+    """Select the shell source according to its literal option grammar.
+
+    The walk itself is ``_walk_shell_source``. This wrapper owns the ``--rcfile``/``--init-file``
+    values the walk collects along the way and stamps them onto whichever selection it returns,
+    which keeps the walk's many exits from each having to carry them.
+
+    Args:
+        argv: The command's argv ports.
+        head_index: The argv index the shell option grammar is read from.
+
+    Returns:
+        The selected shell source, carrying any init-file values the grammar named.
+    """
+    init_files: list[int] = []
+    selection = _walk_shell_source(argv, head_index, init_files)
+    if not init_files:
+        return selection
+    return replace(selection, init_file_indices=tuple(init_files))
+
+
+def _walk_shell_source(  # noqa: PLR0911, PLR0912
+    argv: tuple[_ArgPort, ...], head_index: int, init_files: list[int]
+) -> _ShellSourceSelection:
+    """Walk one shell's literal option grammar, collecting init-file values into ``init_files``."""
     index = head_index + 1
     stdin_selected = False
     # ``-c`` only marks the command form. Bash keeps parsing options afterwards and takes the
@@ -1182,7 +1219,9 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
             if command_selected:
                 return _ShellSourceSelection(_ShellSourceKind.COMMAND, argv_index=index)
             if stdin_selected:
-                return _ShellSourceSelection(_ShellSourceKind.STDIN)
+                # ``bash -s -- doc- lattice`` reads its program from stdin and binds the words
+                # after ``--`` as the child's positionals, starting at ``$1``.
+                return _ShellSourceSelection(_ShellSourceKind.STDIN, argv_index=index)
             return _ShellSourceSelection(_ShellSourceKind.SCRIPT, argv_index=index)
         long_option_name = _shell_long_option_name(literal)
         if long_option_name is not None:
@@ -1200,6 +1239,8 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
                         candidate_indices=tuple(range(index, len(argv))),
                         include_stdin=True,
                     )
+                if long_option_name in _SHELL_INIT_FILE_OPTION_NAMES:
+                    init_files.append(value_index)
                 index += 2
             else:
                 index += 1
@@ -1238,7 +1279,8 @@ def _select_shell_source(argv: tuple[_ArgPort, ...], head_index: int) -> _ShellS
         if command_selected:
             return _ShellSourceSelection(_ShellSourceKind.COMMAND, argv_index=index)
         if stdin_selected:
-            return _ShellSourceSelection(_ShellSourceKind.STDIN)
+            # As above: with ``-s`` in effect the first operand is ``$1``, not the program.
+            return _ShellSourceSelection(_ShellSourceKind.STDIN, argv_index=index)
         return _ShellSourceSelection(_ShellSourceKind.SCRIPT, argv_index=index)
     # ``bash -c`` without an operand is a usage error, so nothing is executed.
     if command_selected:
@@ -10738,6 +10780,53 @@ def _source_operand_index(command: _CommandEvidence, argv_index: int) -> int:
     return index
 
 
+def _trap_action_index(command: _CommandEvidence, argv_index: int) -> int | None:
+    """Return the argv index of a ``trap`` action, or None when the command registers none.
+
+    ``help trap`` specifies the grammar as ``trap [-lp] [[ARG] SIGNAL_SPEC ...]``: ARG is read and
+    executed when the shell receives the named signal, and an ``EXIT`` action runs when the shell
+    exits. Deferring expansion to that moment is exactly what made the action invisible here --
+    nothing dispatched a sink for the literal ``trap`` builtin, so ``A=doc-;
+    trap '${A}lattice reconcile' EXIT`` certified while Bash 5.2 executed the marker on exit.
+
+    Three spellings register nothing and are excluded rather than over-refused. ``-l`` and ``-p``
+    make the builtin print instead of register. A literal ``-`` as ARG resets the trap to its
+    default. An empty ARG ignores the signal, and that case needs no special handling because empty
+    text composes no marker.
+
+    A dynamic word in the option position is treated as the action rather than skipped, since this
+    analysis cannot tell an option from an action it cannot read, and reading one word too early
+    can only add a refusal.
+
+    Args:
+        command: The command evidence being inspected.
+        argv_index: The argv index of the resolved ``trap`` executable.
+
+    Returns:
+        The argv index of the action word, or None when this command registers no action.
+    """
+    index = argv_index + 1
+    while index < len(command.argv):
+        port = command.argv[index]
+        if port.dynamic:
+            return index
+        literal = port.literal
+        if literal == "--":
+            index += 1
+            break
+        if literal.startswith("-") and literal[1:] and set(literal[1:]) <= {"l", "p"}:
+            # The builtin prints its traps rather than registering one, so nothing is deferred.
+            return None
+        break
+    if index >= len(command.argv):
+        return None
+    port = command.argv[index]
+    if not port.dynamic and port.literal == "-":
+        # ``trap - EXIT`` restores the default disposition and registers no action.
+        return None
+    return index
+
+
 def _unresolved_head_sinks(
     command: _CommandEvidence,
     stdin: ContentExpr,
@@ -10776,7 +10865,7 @@ def _unresolved_head_sinks(
     return _shell_source_sinks(command, 0, stdin, process_resources, unresolved)
 
 
-def _candidate_sink_expressions(  # noqa: PLR0911
+def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
     command: _CommandEvidence,
     executable: _ExecutableEvidence,
     stdin: ContentExpr,
@@ -10804,6 +10893,13 @@ def _candidate_sink_expressions(  # noqa: PLR0911
             direct_sinks = (head_port.content, *direct_sinks)
     if name == "eval" and literal == "eval" and not executable.external_lookup:
         return (_eval_arguments_raw(command, executable),)
+    if name == "trap" and literal == "trap" and not executable.external_lookup:
+        # The action is shell source the shell runs later, so it is a sink for the same reason an
+        # ``eval`` argument is. The deferral is what hid it, not any difference in what it runs.
+        action_index = _trap_action_index(command, executable.argv_index)
+        if action_index is None:
+            return direct_sinks
+        return (command.argv[action_index].content, *direct_sinks)
     if name in {"source", "."} and literal == name and not executable.external_lookup:
         operand_index = _source_operand_index(command, executable.argv_index)
         if operand_index >= len(command.argv):
@@ -10912,6 +11008,17 @@ def _shell_source_sinks(  # noqa: PLR0911, PLR0913
         The shell payload sinks followed by the established direct sinks.
     """
     selection = _select_shell_source(command.argv, head_index)
+    if selection.init_file_indices:
+        # An ``--rcfile``/``--init-file`` value is read IN ADDITION to the selected source, so it
+        # joins the direct sinks rather than replacing any branch's own result. Every branch below
+        # splats ``direct_sinks``, so folding it in here reaches all five selection kinds.
+        direct_sinks = (
+            *(
+                _shell_script_source_expression(command.argv[index], process_resources, stdin)
+                for index in selection.init_file_indices
+            ),
+            *direct_sinks,
+        )
     if selection.kind is _ShellSourceKind.NONE:
         # ``xargs bash -c`` names no operand of its own because the launcher supplies one from
         # its standard input, so a missing operand behind a launcher is a stdin payload rather
@@ -11069,29 +11176,33 @@ def _child_shell_payload_assignments(
 
 
 def _child_shell_positional_environment(
-    command: _CommandEvidence,
-    payload_index: int,
+    operands: tuple[_ArgPort, ...],
+    first_offset: int,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
 ) -> _EvalCommandEnvironment:
     """Return the payload environment with the child's positional parameters bound.
 
-    The operands after the payload word become the child's positional parameters, starting at
-    ``$0`` rather than ``$1``, so ``bash -c '$0$1 reconcile' doc- lattice`` composes the marker
-    out of words that are plain argv in the parent. Each operand is evaluated in the parent
-    environment, which is where those words actually expand, so a parent ``$1`` among them still
-    reads the parent's own positional rather than the binding being installed here.
+    The operands a shell is given after its program become the child's positional parameters, so
+    ``bash -c '$0$1 reconcile' doc- lattice`` composes the marker out of words that are plain argv
+    in the parent. Each operand is evaluated in the parent environment, which is where those words
+    actually expand, so a parent ``$1`` among them still reads the parent's own positional rather
+    than the binding being installed here.
+
+    ``first_offset`` differs by dispatch form and is not cosmetic. A ``-c`` payload's operands start
+    at ``$0``, while a ``-s`` (stdin program) invocation leaves ``$0`` as the shell's own name and
+    starts its operands at ``$1`` -- both verified under real Bash 5.2. Binding a ``-s`` operand
+    list from ``$0`` would shift every parameter by one and miss the composition entirely.
 
     Args:
-        command: The command whose argv holds the payload.
-        payload_index: The argv index of the interpreted payload word.
+        operands: The argv ports the child receives as positional parameters, in order.
+        first_offset: The positional number the first operand binds to.
         context: The eval-syntax context holding the solved variable tables.
         environment: The per-command execution environment for this body.
 
     Returns:
         The environment to second-parse this payload under, before its own assignments.
     """
-    operands = command.argv[payload_index + 1 :]
     if not operands:
         return environment
     if len(operands) > context.limits.max_table_entries:
@@ -11103,8 +11214,11 @@ def _child_shell_positional_environment(
     )
     overrides: dict[str, _ContentValue] = dict(environment.fixed_point_overrides)
     overrides.update(
-        (str(offset), _evaluate_with_tables(port.content, inherited, {}, {}, context.limits))
-        for offset, port in enumerate(operands)
+        (
+            str(offset),
+            _evaluate_with_tables(port.content, inherited, {}, {}, context.limits),
+        )
+        for offset, port in enumerate(operands, start=first_offset)
     )
     return replace(environment, fixed_point_overrides=tuple(overrides.items()))
 
@@ -11162,8 +11276,39 @@ def _child_shell_assignment_environment(
     )
 
 
+def _shell_stdin_positional_operands(
+    command: _CommandEvidence, executable: _ExecutableEvidence
+) -> tuple[_ArgPort, ...] | None:
+    """Return the operands a stdin-program shell binds as positionals, or None if it selects none.
+
+    ``bash -s -- doc- lattice`` reads its program from standard input and binds the trailing words
+    as ``$1``, ``$2``, ... . Those words are plain argv in the parent, so the child composes the
+    marker out of text this analysis can already read, exactly as the ``-c`` operand case did
+    before it was bound. ``None`` distinguishes "this candidate does not read its program from
+    stdin" from "it does, with no operands".
+
+    Args:
+        command: The command evidence being inspected.
+        executable: One resolved executable candidate of that command.
+
+    Returns:
+        The operand ports, empty when the shell reads stdin but is given none, or None when this
+        candidate does not select a stdin program at all.
+    """
+    head_index = _shell_source_head_index(command, executable)
+    if head_index is None:
+        return None
+    selection = _select_shell_source(command.argv, head_index)
+    if selection.kind is not _ShellSourceKind.STDIN:
+        return None
+    if selection.argv_index is None:
+        return ()
+    return command.argv[selection.argv_index :]
+
+
 def _shell_command_payload_marker_capable(
     command: _CommandEvidence,
+    stdin: ContentExpr,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
 ) -> bool:
@@ -11186,16 +11331,59 @@ def _shell_command_payload_marker_capable(
     (issue #157), and the ambiguous route reads the option grammar across a wrapper's own options
     (issue #158).
 
+    A shell that reads its program from standard input is second-parsed here too. It reaches the
+    same machinery by a different route, because the program is a stream rather than an argv word:
+    ``printf '%s\\n' '$1$2 reconcile' | bash -s -- doc- lattice`` and its heredoc spelling both
+    compose the marker from operands that are plain argv in the parent, which is the same flow the
+    ``-c`` operand binding closes, one dispatch form over. The stdin program is parsed whether or
+    not operands accompany it, because an EXPORTED parent variable is visible to that child as
+    well, so gating the parse on the presence of operands would certify the exported spelling.
+
     Args:
         command: The command whose executable candidates may be a shell.
+        stdin: The command's finalized standard input expression, read as shell source when a
+            candidate selects a stdin program.
         context: The eval-syntax context holding the solved variable tables.
         environment: The per-command execution environment for this body.
 
     Returns:
-        Whether any shell ``-c`` payload's second parse can accept the marker.
+        Whether any shell ``-c`` or stdin payload's second parse can accept the marker.
     """
     scanned: set[int] = set()
     for executable in _iter_executable_evidence(command.executable):
+        if (
+            executable.name == "trap"
+            and executable.literal == "trap"
+            and not executable.external_lookup
+            and executable.argv_index is not None
+        ):
+            # A trap action is ordinarily single-quoted so the shell defers its expansion to the
+            # moment the signal arrives, which is precisely the shape the value route cannot see:
+            # as a VALUE the word is the inert text ``${A}lattice``. Reading it as shell source is
+            # the same second parse an ``eval`` payload gets.
+            action_index = _trap_action_index(command, executable.argv_index)
+            if action_index is not None and action_index not in scanned:
+                scanned.add(action_index)
+                action = command.argv[action_index].content
+                if _payload_second_parse_marker_capable(action, context, environment):
+                    return True
+                # The action runs as a unit when the signal arrives, so a fragment it assigns to
+                # itself is composed there rather than in this body's flow: ``trap 'A=doc-;
+                # "$A"lattice reconcile' EXIT`` composes the marker entirely inside the action.
+                # This is the same recovery the ``-c`` payload gets, and it may raise on state
+                # this analysis cannot represent, so it runs only after the plain parse declined.
+                assigned = _child_shell_assignment_environment(
+                    command, action_index, context, environment
+                )
+                if assigned is not None and _payload_second_parse_marker_capable(
+                    action, context, assigned
+                ):
+                    return True
+        operands = _shell_stdin_positional_operands(command, executable)
+        if operands is not None:
+            positional = _child_shell_positional_environment(operands, 1, context, environment)
+            if _payload_second_parse_marker_capable(stdin, context, positional):
+                return True
         for index in _shell_payload_candidate_indices(command, executable):
             if index in scanned:
                 # Routes converge on shared words, and a parse depends only on the word and this
@@ -11207,7 +11395,9 @@ def _shell_command_payload_marker_capable(
             # every body the ordinary parse already catches. Recovering the payload's own
             # assignments can raise on state this analysis cannot represent, which is only
             # allowed to decide a body that would otherwise certify.
-            positional = _child_shell_positional_environment(command, index, context, environment)
+            positional = _child_shell_positional_environment(
+                command.argv[index + 1 :], 0, context, environment
+            )
             if _payload_second_parse_marker_capable(payload, context, positional):
                 return True
             assigned = _child_shell_assignment_environment(command, index, context, positional)
@@ -11278,9 +11468,36 @@ def _resource_marker_fragment_capable(value: _ContentValue) -> bool:
         Whether any alternative, or any assignment-shaped line's value within it, could plausibly
         advance toward or complete the marker.
     """
+    return any(
+        _summary_marker_fragment_capable(alternative) for alternative in value
+    ) or _resource_assignment_marker_fragment_capable(value)
+
+
+def _resource_assignment_marker_fragment_capable(value: _ContentValue) -> bool:
+    """Return whether a resource ASSIGNS a marker fragment to one of its own variables.
+
+    This is the second half of ``_resource_marker_fragment_capable`` on its own, for the callers
+    that must not use the first half. The raw whole-content check asks whether the file's bytes
+    could continue a partial match that began OUTSIDE the file, which is the right question for
+    ``source``: the file's state merges into the current shell, so a fragment it leaves behind
+    composes with authored text in the same body.
+
+    It is the wrong question for a file a CHILD shell runs, because ordinary script text answers it
+    yes. ``make build`` ends in ``d`` and so advances the scan from the idle entry state; ``echo
+    hello`` does the same from another. Applying it to ``bash run.sh`` refused
+    ``echo 'make build' > run.sh; bash run.sh``, which is a mandatory certification row and about
+    as ordinary as a CI body gets. A child shell's variables never return to this body, so the
+    composition that route has to detect is one the file performs WITHIN ITSELF, and the tractable
+    evidence for that is the file's own assignments. Content that is already the whole marker still
+    refuses, through the value the script operand contributes to the sink path.
+
+    Args:
+        value: The resource's solved content value.
+
+    Returns:
+        Whether any assignment-shaped line's value could advance toward or complete the marker.
+    """
     for alternative in value:
-        if _summary_marker_fragment_capable(alternative):
-            return True
         for text in alternative.literal_texts:
             for line in text.splitlines():
                 assignment = _static_assignment_word(line)
@@ -11467,19 +11684,52 @@ def _source_payload_state_unrepresentable(
         if operand_index >= len(command.argv):
             continue
         operand = command.argv[operand_index]
-        if operand.process_resource_id is not None:
-            continue
-        key = normalize_static_resource(
-            operand.literal, dynamic=operand.dynamic or operand.active_argv_expansion
-        )
-        if key is None or key not in resources:
-            continue
-        content = _evaluate_with_tables(
-            ResourceRef(key), sink_variables, resources, streams, limits
-        )
-        if _resource_marker_fragment_capable(content):
+        if _port_reads_tracked_marker_content(operand, sink_variables, resources, streams, limits):
             return True
     return False
+
+
+def _port_reads_tracked_marker_content(  # noqa: PLR0913
+    port: _ArgPort,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+    *,
+    assignments_only: bool = False,
+) -> bool:
+    """Return whether one operand names a script-tracked resource that could carry the marker.
+
+    This is the rule shared by every "a file's state effects go unmodeled" guard: the operand has
+    to name a resource THIS script writes (an unwritten target is opaque pre-existing content that
+    was never in this analysis's purview), and that resource's own content has to be able to carry
+    a marker fragment. A process substitution operand is excluded because it names no static key.
+
+    Args:
+        port: The operand word naming the file.
+        sink_variables: The per-command solved variable table, for resolving the resource.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving the resource.
+        limits: The bound on content evaluation this analysis stays within.
+        assignments_only: Whether to ask only whether the file assigns a marker fragment to its own
+            variables, which is the question for a file a CHILD shell runs. See
+            ``_resource_assignment_marker_fragment_capable`` for why the whole-content check is
+            unusable there.
+
+    Returns:
+        Whether this operand reads script-tracked content that could plausibly carry the marker.
+    """
+    if port.process_resource_id is not None:
+        return False
+    key = normalize_static_resource(
+        port.literal, dynamic=port.dynamic or port.active_argv_expansion
+    )
+    if key is None or key not in resources:
+        return False
+    content = _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits)
+    if assignments_only:
+        return _resource_assignment_marker_fragment_capable(content)
+    return _resource_marker_fragment_capable(content)
 
 
 def _source_glob_operand_state_unrepresentable(
@@ -11603,6 +11853,89 @@ def _glob_script_operand_state_unrepresentable(
     return False
 
 
+def _shell_script_operand_state_unrepresentable(
+    command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a shell reads a script-tracked file whose state effects go unmodeled.
+
+    ``_source_payload_state_unrepresentable`` makes this exact argument for ``source``/``.``, and
+    ``_glob_script_operand_state_unrepresentable`` makes it for a shell whose script operand is a
+    glob. The EXACT script operand of a shell was the one spelling of the same idea with no guard,
+    so ``printf '%s\\n' 'A=doc-' '"${A}lattice" reconcile' > env.sh; bash env.sh`` certified while
+    the ``source env.sh`` and ``bash e*.sh`` spellings of the identical file both refused, and real
+    Bash 5.2 executed the marker. The file's content does reach the sink as a VALUE through
+    ``_shell_script_source_expression``, which is why content that is already the whole marker
+    refuses; what has no model is the file's own state effects, so content that merely composes the
+    marker once the child shell runs it was dropped.
+
+    Three port sets reach this, matching the ones that actually name a file the shell reads:
+
+    1. The ``SCRIPT`` selection's operand, the direct ``bash env.sh`` spelling.
+    2. Every ``AMBIGUOUS`` candidate, for the same reason ``_shell_source_sinks`` builds a choice
+       over all of them rather than committing to one: once the argv shape is uncertain any of
+       those words can land in the operand position.
+    3. Every ``--rcfile``/``--init-file`` value, which Bash reads BEFORE the selected source. The
+       option grammar previously skipped that word as an inert option argument, so
+       ``bash --rcfile env.sh -ic :`` reached no sink for it at all (issue from the Codex review
+       round). The value is checked whatever the final selection kind is, because the shell reads
+       it in addition to, not instead of, that source.
+
+    The interactive gate Bash applies to an rcfile is deliberately not modeled. Bash reads the file
+    only when the shell is interactive, so a non-interactive ``bash --rcfile env.sh -c :`` runs
+    nothing from it; recognizing that would mean tracking ``-i`` through the same option grammar an
+    attacker controls, and AD-17's founding principle rules out narrowing a refusal on evidence the
+    body itself supplies. The content gate keeps the cost of over-approximating here to a file this
+    script writes whose content could carry the marker.
+
+    The content test is ``assignments_only``, unlike the ``source`` guard's. A child shell's
+    variables never return to this body, so the composition to detect is one the file performs
+    within itself; asking the broader cross-boundary question instead refused
+    ``echo 'make build' > run.sh; bash run.sh``. One class stays open as a result and is recorded
+    rather than silently dropped: a file that supplies part of the marker literally and the rest
+    from an EXPORTED parent variable composes across the boundary in the one direction a child does
+    inherit, and neither this guard nor the value route second-parses a script operand's content to
+    see it.
+
+    Args:
+        command: The command whose executable candidates may be a shell.
+        sink_variables: The per-command solved variable table, for resolving the resource.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving the resource.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether some shell source names a script-tracked resource whose state effects go unmodeled
+        and whose content could plausibly carry the marker.
+    """
+    for executable in _iter_executable_evidence(command.executable):
+        head_index = _shell_source_head_index(command, executable)
+        if head_index is None:
+            continue
+        selection = _select_shell_source(command.argv, head_index)
+        indices: tuple[int, ...] = selection.init_file_indices
+        if selection.kind is _ShellSourceKind.SCRIPT and selection.argv_index is not None:
+            indices = (*indices, selection.argv_index)
+        elif selection.kind is _ShellSourceKind.AMBIGUOUS:
+            indices = (*indices, *selection.candidate_indices)
+        for index in indices:
+            if index >= len(command.argv):
+                continue
+            if _port_reads_tracked_marker_content(
+                command.argv[index],
+                sink_variables,
+                resources,
+                streams,
+                limits,
+                assignments_only=True,
+            ):
+                return True
+    return False
+
+
 def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
@@ -11631,7 +11964,7 @@ def _sink_expressions(
     return tuple(expressions)
 
 
-def analyze_marker_taint(  # noqa: PLR0911, PLR0912
+def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
     limits: TaintLimits = TaintLimits(),  # noqa: B008
@@ -11763,13 +12096,14 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                 command_environments[command.command_id],
             ):
                 return True, TAINT_REFUSAL_REASON
+            stdin = inputs[command.command_id]
             if _shell_command_payload_marker_capable(
                 command,
+                stdin,
                 eval_context,
                 command_environments[command.command_id],
             ):
                 return True, TAINT_REFUSAL_REASON
-            stdin = inputs[command.command_id]
             sink_variables: Mapping[str | int, _ContentValue] = ChainMap(
                 dict(command_environments[command.command_id].fixed_point_overrides),
                 solved.variables,
@@ -11814,6 +12148,14 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                 raise _TaintLimitExceeded("shell source glob operand state cannot be represented")
             if _glob_script_operand_state_unrepresentable(command, solved.resources, limits):
                 raise _TaintLimitExceeded("shell glob script operand state cannot be represented")
+            if _shell_script_operand_state_unrepresentable(
+                command,
+                sink_variables,
+                solved.resources,
+                solved.streams,
+                limits,
+            ):
+                raise _TaintLimitExceeded("shell script operand state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:

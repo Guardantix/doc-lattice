@@ -4213,3 +4213,237 @@ def test_a_fully_dynamic_command_head_keeps_marker_free_bodies_certified(body: s
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+# Codex review round on PR #112. Every body below was verified under real Bash 5.2 with a
+# ``doc-lattice`` shim on ``PATH``, paired with the matched control recorded beside it.
+@pytest.mark.parametrize(
+    "body",
+    [
+        """printf '%s\\n' 'A=doc-' '"${A}lattice" reconcile' > env.sh; bash env.sh""",
+        """printf '%s\\n' 'A=doc-' 'eval "${A}lattice"' > env.sh; bash env.sh""",
+        """printf '%s\\n' 'A=doc-' '"${A}lattice" reconcile' > env.sh; bash ./env.sh""",
+        """printf '%s\\n' 'A=doc-' '"${A}lattice" reconcile' > env.sh; timeout 5 bash env.sh""",
+    ],
+    ids=("plain", "eval-inside", "dot-slash-spelling", "behind-a-launcher"),
+)
+def test_shell_script_operand_state_fails_closed(body: str) -> None:
+    """The exact script operand of a shell had no state-effects guard at all.
+
+    ``_source_payload_state_unrepresentable`` makes this argument for ``source``/``.`` and
+    ``_glob_script_operand_state_unrepresentable`` makes it for a glob operand, so ``source env.sh``
+    and ``bash e*.sh`` both refused the identical file while ``bash env.sh`` certified and executed
+    the marker. The file's content does reach the sink as a VALUE, which is why content that is
+    already the whole marker refuses; what had no model is the file's own state effects, so content
+    that only COMPOSES the marker once the child shell runs it was dropped.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == "shell script operand state cannot be represented"
+
+
+@pytest.mark.parametrize("spelling", ["--rcfile", "--init-file", "-rcfile", "-init-file"])
+def test_shell_init_file_option_value_fails_closed(spelling: str) -> None:
+    """Codex finding: an ``--rcfile``/``--init-file`` value was skipped as an inert option word.
+
+    Bash reads that file before the ``-c`` payload, so ``bash --rcfile env.sh -ic :`` executed the
+    marker ``env.sh`` composes while the scanner certified. The option grammar consumed the value
+    and moved on, so no sink was ever built for it. The single-dash spellings are the ones Bash
+    accepts as compatibility forms and are recognized atomically for the same reason ``-norc`` is.
+    """
+    body = (
+        """printf '%s\\n' 'A=doc-' 'eval "${A}lattice"' > env.sh; """
+        f"""bash {spelling} env.sh -ic :"""
+    )
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == "shell script operand state cannot be represented"
+
+
+def test_shell_init_file_option_value_reaches_the_value_sink() -> None:
+    """An init file whose content is already the whole marker refuses through the sink path.
+
+    This is the companion route to the state guard above: the value the option names now
+    contributes a script-source expression, so it no longer needs the state guard to be seen.
+    """
+    body = """printf '%s%s\\n' doc- lattice > env.sh; bash --rcfile env.sh -ic :"""
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """echo 'make build' > run.sh; bash run.sh""",
+        """printf '%s\\n' 'echo hello' > run.sh; bash run.sh""",
+        """printf 'REGION=us-east-1\\n' > env.sh; bash env.sh""",
+        """printf 'TAG=latest\\n' > env.sh; bash --rcfile env.sh -ic :""",
+    ],
+    ids=("make-build", "echo-hello", "region-assignment", "tag-assignment"),
+)
+def test_shell_script_operand_keeps_ordinary_generated_scripts_certified(body: str) -> None:
+    """Over-refusal guard: the content test for a child-run file is assignments-only.
+
+    The ``source`` guard also asks whether the file's raw bytes could continue a partial match that
+    began OUTSIDE the file, which is right when the file's state merges into the current shell.
+    Ordinary script text answers that yes -- ``make build`` ends in ``d`` and so advances the scan
+    from the idle entry state -- and applying it here refused a mandatory certification row. A child
+    shell's variables never return to this body, so only the file's own assignments matter.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "bash -s -- doc- lattice <<'EOF'\n$1$2 reconcile\nEOF",
+        "bash -s doc- lattice <<'EOF'\n$1$2 reconcile\nEOF",
+        """bash -s -- doc- lattice <<< '$1$2 reconcile'""",
+        "timeout 5 bash -s -- doc- lattice <<'EOF'\n$1$2 reconcile\nEOF",
+        "export A=doc-; export B=lattice; bash -s <<'EOF'\n$A$B reconcile\nEOF",
+    ],
+    ids=(
+        "heredoc-with-dash-dash",
+        "heredoc-without-dash-dash",
+        "herestring",
+        "behind-a-launcher",
+        "exported-parent-variables",
+    ),
+)
+def test_shell_stdin_program_binds_child_positionals(body: str) -> None:
+    """Codex finding: a stdin program was returned raw, with no second parse and no positionals.
+
+    ``bash -s -- doc- lattice`` binds the trailing words as ``$1``, ``$2``, ... , so the child
+    composes the marker out of text that is plain argv in the parent -- the same flow the ``-c``
+    operand binding closes, one dispatch form over. Verified under real Bash 5.2.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+def test_shell_stdin_positionals_start_at_one_not_zero() -> None:
+    """``-s`` leaves ``$0`` as the shell's own name, unlike ``-c``, which binds it from argv.
+
+    Binding a ``-s`` operand list from ``$0`` would shift every parameter by one, so this body has
+    to stay certified: Bash 5.2 runs ``$0`` as ``bash`` and never names the marker.
+    """
+    body = "bash -s -- doc- lattice <<'EOF'\n$0 reconcile\nEOF"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "bash -s -- saf e <<'EOF'\n$1$2 reconcile\nEOF",
+        "bash -s -- doc- lattice <<'EOF'\necho hello\nEOF",
+        """printf '%s\\n' 'echo hello' | bash -s""",
+    ],
+    ids=("inert-operands", "no-positional-reference", "ordinary-piped-script"),
+)
+def test_shell_stdin_program_keeps_marker_free_bodies_certified(body: str) -> None:
+    """Over-refusal guard for the stdin second parse and the ordinary pipe-into-shell idiom."""
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """printf '%s\\n' '$1$2 reconcile' | bash -s -- doc- lattice""",
+        """printf '%s\\n' '$1$2 reconcile' > p.sh; bash -s -- doc- lattice < p.sh""",
+        """export A=doc-; export B=lattice; printf '%s\\n' '$A$B reconcile' | bash -s""",
+    ],
+    ids=("pipe-carrier", "file-carrier", "pipe-with-exported-variables"),
+)
+def test_shell_stdin_program_from_a_ref_carrier_is_a_known_gap(body: str) -> None:
+    """Issue #159 again, reached by the stdin route rather than by ``eval``.
+
+    The positional binding above is carrier-independent, but the second parse can only read a
+    program it can see as text. ``_eval_syntax_append`` folds ``ResourceRef`` and ``StreamRef`` into
+    the same opaque token it uses for ``OutsideGap``, so a program arriving through a pipe or a
+    redirection loses its content before any binding can apply. The heredoc and herestring
+    spellings of the identical flow refuse, which isolates this to the carrier rather than to the
+    binding. Verified under real Bash 5.2: these certify and execute the marker.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """A=doc-; trap '${A}lattice reconcile' EXIT""",
+        """A=doc-; trap -- '${A}lattice reconcile' EXIT""",
+        """trap 'A=doc-; "$A"lattice reconcile' EXIT""",
+        """f() { A=doc-; trap '${A}lattice reconcile' EXIT; }; f""",
+        """A=doc-; B=lattice; trap "$A$B reconcile" EXIT""",
+    ],
+    ids=(
+        "deferred-expansion",
+        "after-dash-dash",
+        "action-assigns-its-own-fragment",
+        "registered-inside-a-function",
+        "value-route",
+    ),
+)
+def test_trap_action_is_an_interpreted_sink(body: str) -> None:
+    """Codex finding: no sink was dispatched for the literal ``trap`` builtin.
+
+    ``help trap`` specifies that the action is read and executed when the signal arrives, and that
+    an ``EXIT`` action runs on shell exit. Deferring expansion to that moment is what hid it: as a
+    VALUE the single-quoted word is the inert text ``${A}lattice``, so it needs the same second
+    parse an ``eval`` payload gets. Verified under real Bash 5.2.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """A=doc-; trap - EXIT""",
+        """A=doc-; trap -p EXIT""",
+        """trap -l""",
+        """A=doc-; trap '' EXIT""",
+        """A=safe; trap '${A}thing reconcile' EXIT""",
+        """trap 'rm -f /tmp/build.lock' EXIT""",
+    ],
+    ids=(
+        "reset-to-default",
+        "print-disposition",
+        "list-signals",
+        "ignore-signal",
+        "inert-action",
+        "ordinary-cleanup",
+    ),
+)
+def test_trap_registrations_that_run_nothing_stay_certified(body: str) -> None:
+    """Over-refusal guard: three spellings register no action, and an inert one composes nothing.
+
+    ``-l`` and ``-p`` make the builtin print rather than register, a literal ``-`` restores the
+    default disposition, and an empty action ignores the signal.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
