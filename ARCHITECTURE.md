@@ -416,7 +416,14 @@ definition, and every other parameter operator keeps three alternatives: an empt
 subject variable unchanged, and the variable beside its authored operand. The empty alternative
 means a transform that can erase its value cannot hide a marker across the expansion, and the
 ungapped pass-through alternative means a transform whose pattern does not match cannot hide one
-either, so `A=doc-; bash -c "${A#zz}lattice"` refuses. Bounded static brace expansion fans one
+either, so `A=doc-; bash -c "${A#zz}lattice"` refuses. That argument covers a transform HIDING a
+marker its subject already carries, and it does not extend to one FORMING a marker by deleting
+characters: the transformed text is not among the three alternatives, so `X=docX-;
+"${X/X/}lattice"` certifies while Bash composes the marker. The two directions are easy to
+conflate because prefix removal happens to be safe for an incidental reason, the untransformed
+value already composing, which is why the `${A#zz}` example above refuses while the `${X%zz}`
+mirror image does not. Issue #172 tracks the formation direction across the substitution, removal,
+and substring operators in both passes. Bounded static brace expansion fans one
 lexical word into ordered argv ports; because
 brace expansion precedes parameter expansion, an authored comma list expands even when a member's
 content is dynamic. An array literal holds `concat(choice("", e1), ..., choice("", en))` over its
@@ -522,8 +529,24 @@ exact-literal table threaded through the same bootstrap phase that builds the va
 does not exist and is not a scoped fix to add. Instead, every route that names a file this body
 writes and then has it read as shell source fails closed narrowly, only when the target is a
 resource this same body writes and that resource's own content could plausibly carry a marker
-fragment. Four routes carry the rule: `source`/`.`, a shell's glob script operand, a shell's exact
-script operand, and an `--rcfile`/`--init-file` value.
+fragment. Five routes carry the rule: `source`/`.`, a shell's glob script operand, a shell's exact
+script operand, an `--rcfile`/`--init-file` value, and a `BASH_ENV` value.
+
+`BASH_ENV` is the one route argv structurally cannot show. A non-interactive Bash child reads that
+file before its selected program, so `export BASH_ENV=env.sh; bash -c :` executed a tracked file's
+marker while the argv-driven source selector had nothing to select. Both value spellings are read:
+an exported variable, found by unscoped name across every scope because the child inherits whichever
+is live, and the per-command prefix assignment, which is scoped to the command and never reaches the
+body-wide table. Export status is deliberately not modeled, so a `BASH_ENV` this body sets without
+exporting is read too, which over-approximates in the fail-closed direction. This route adds
+`_marker_capable` to the child-run content test above, because no sink expression reads this file:
+without it, a file composing the whole marker with no assignment in it would have nothing to refuse
+on. The POSIX `ENV` spelling of the same channel reaches no guard and is issue #173. It is not the
+one-name widening it appears to be, because the two variables have opposite interactivity gates:
+Bash reads `BASH_ENV` when non-interactive, a POSIX shell reads `ENV` when interactive, and `bash`
+not in POSIX mode reads `ENV` never. Refusing on the name alone would therefore refuse bodies that
+read nothing, which is a measurable cost rather than a free widening, and gating on `-i` instead
+would contradict the `--rcfile` reasoning above; that issue records the choice as open.
 
 The content test differs by whether the file's state returns to this body, and the difference is
 load bearing rather than cosmetic. For `source`/`.` it merges into the current shell, so the test
@@ -682,3 +705,58 @@ module. Where an exact projection is merely lost rather than absent, the solver
 instead widens to the top of the content lattice, an alternative that accepts from every DFA
 entry state, so the value stays visible at each sink and only a body that actually reaches one
 is refused.
+
+### AD-19: A reported false certification is triaged, not automatically fixed
+
+**Date:** 2026-07-27
+**Status:** Accepted
+**Context:** AD-18 states a stop-line for the eval sub-analysis, on the grounds that an interpreter
+chasing `eval` has no natural terminating point and this engine is defense in depth behind human
+review rather than the boundary that contains untrusted code. Review practice did not inherit that
+reasoning. Each review round on PR #112 reported every false certification at the same severity and
+each was fixed on arrival, so the branch absorbed four rounds in one day and the loop had no
+terminating condition: certifying non-execution over Bash plus everything on `PATH` is undecidable
+in general, and the next shelf up is already reachable. Verified under real Bash at f866617,
+`python3 -c 'import os; os.system("doc" + "-lattice reconcile")'` certifies and executes the
+marker, while the same body with the marker spelled literally refuses on AD-17's retained-word
+rule. The difference is not a modeling gap in the shell analysis; the composition happens inside
+another language's string semantics, and closing it means interpreting that language. Without a
+stated disposition rule, a finding inside a boundary AD-18 already discloses is indistinguishable
+from a defect in the implementation of that boundary.
+**Decision:** A reported false certification is verified first and classified second, and only one
+class is fixed on sight.
+
+Verification is unchanged and non-negotiable: reproduce under real Bash with a `doc-lattice` shim on
+`PATH` using the differential oracle in `scripts/fuzz_shell_taint.py`, and build a control that
+isolates the claimed cause from the sink, the carrier, and the composition. An unreproduced report
+is not triaged at all.
+
+A model-integrity finding is a construct the analysis claims to handle that silently produces no
+evidence: a lowering site that yields nothing where the model asserts something, a sink position
+that registers no sink, a guard whose route recognizes a narrower set than the route it mirrors, or
+a documented invariant the code does not hold. These are defects in this engine rather than
+limitations of it, their number is bounded by the size of this codebase, and they are dangerous
+precisely because they are silent. They are fixed, with over-refusal measured against the frozen
+references rather than asserted.
+
+A boundary-extension finding is a channel or subsystem the analysis never modeled: another
+interpreter, a launcher's own input grammar, a shell startup channel, an expansion primitive with no
+lowering. These are unbounded in number, and each fix widens the surface that must then be
+maintained and re-measured. The default disposition is to file the issue with its verified repro and
+control, pin the behavior as certifying in the test suite so it cannot regress unnoticed, and
+disclose the class in AD-18. One is modeled only when the spelling is plausible in a benign workflow
+or the guard collapses into an existing change point at measured-zero over-refusal cost.
+
+Interpreters other than the shell are categorically out, by the same reasoning AD-18 applies to
+`eval`. No finding of that shape is fixed, whatever its reported severity.
+
+Two rules bind both classes. A finding that falsifies a claim in a decision record corrects that
+record even when the code is left alone, because a decision record that overclaims is itself a
+defect. A fix is never accepted on the strength of its own test alone: over-refusal is measured
+against the frozen adversarial corpus and the seeded fuzz corpora named in AD-18, so the cost of
+each widening is known rather than assumed.
+**Consequences:** Review findings become classified inputs rather than obligations, and the review
+loop terminates. The engine's disclosed boundary can grow deliberately instead of by whichever
+channel a reviewer happened to probe. The cost is explicit: pinned certifying bodies are known
+evasions that remain open, so the boundary AD-18 discloses is load bearing and this analysis stays
+defense in depth behind human review of workflow changes, never the sole control.
