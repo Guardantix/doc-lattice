@@ -7331,6 +7331,15 @@ _EvalSyntaxPrograms: TypeAlias = dict[  # noqa: UP040
     tuple[tuple[int, _FlowWrite], ...],
 ]
 _EvalSyntaxTransitionKey: TypeAlias = tuple[str | int, _EvalSyntaxState]  # noqa: UP040
+_EvalSyntaxSlot: TypeAlias = tuple[str | int, str | None]  # noqa: UP040
+
+
+@dataclass(frozen=True, slots=True)
+class _EvalSyntaxTransition:
+    """One memoized transition value with the solved-table slots deriving it observed."""
+
+    value: _EvalSyntaxValue
+    observed: frozenset[_EvalSyntaxSlot]
 
 
 @dataclass(slots=True)
@@ -7344,8 +7353,9 @@ class _EvalSyntaxContext:
     environment_index: dict[int, tuple[tuple[str, _ContentValue], ...]] = field(
         default_factory=dict
     )
-    transitions: dict[_EvalSyntaxTransitionKey, _EvalSyntaxValue] = field(default_factory=dict)
+    transitions: dict[_EvalSyntaxTransitionKey, _EvalSyntaxTransition] = field(default_factory=dict)
     active_transitions: set[_EvalSyntaxTransitionKey] = field(default_factory=set)
+    observations: list[set[_EvalSyntaxSlot]] = field(default_factory=list)
     variable_overlays: dict[
         tuple[int, int, int],
         tuple[
@@ -7362,9 +7372,44 @@ class _EvalSyntaxContext:
         if not self.environment_index:
             self.environment_index = _eval_environment_index(self.raw_variables)
 
-    def invalidate_transitions(self) -> None:
-        """Discard memoized transitions after the solved variable table changes."""
-        self.transitions.clear()
+    def invalidate_transitions(self, slot: _EvalSyntaxSlot) -> None:
+        """Discard only memoized transitions that observed one rewritten variable table slot.
+
+        ``variables`` is read from exactly one place, the cycle-detected ``VariableRef`` branch of
+        ``_eval_syntax_append``, and every other input to a replayed transition is immutable for
+        the life of the pass. So an entry that never observed ``slot`` cannot have changed, and
+        clearing the whole table instead made the ordered pass quadratic in its write count
+        (issue #149).
+        """
+        stale = [key for key, transition in self.transitions.items() if slot in transition.observed]
+        for key in stale:
+            del self.transitions[key]
+
+    def begin_observations(self) -> None:
+        """Start recording which variable table slots the transition being derived observes."""
+        self.observations.append(set())
+
+    def end_observations(self) -> frozenset[_EvalSyntaxSlot]:
+        """Finish one recording, propagating its slots to every enclosing derivation.
+
+        A derivation that reuses a nested value depends on whatever that value depended on, so
+        the slots have to travel outward. Losing them here would retain an enclosing entry that a
+        write already invalidated, which is the one way this cache turns unsound rather than slow.
+        """
+        observed = self.observations.pop()
+        for enclosing in self.observations:
+            enclosing.update(observed)
+        return frozenset(observed)
+
+    def observe_slot(self, slot: _EvalSyntaxSlot) -> None:
+        """Record one variable table read against every derivation in progress."""
+        for frame in self.observations:
+            frame.add(slot)
+
+    def inherit_observations(self, observed: frozenset[_EvalSyntaxSlot]) -> None:
+        """Carry a reused transition's recorded slots into every derivation in progress."""
+        for frame in self.observations:
+            frame.update(observed)
 
     def variables_for(self, state: _EvalSyntaxState) -> Mapping[str | int, _ContentValue]:
         """Return one cached layered variable view for token evaluation."""
@@ -8298,7 +8343,7 @@ def _second_pass_inert(value: _ContentValue) -> bool:
     return True
 
 
-def _eval_syntax_variable_transition(  # noqa: PLR0912
+def _eval_syntax_variable_transition(
     name: str | int,
     state: _EvalSyntaxState,
     context: _EvalSyntaxContext,
@@ -8325,7 +8370,8 @@ def _eval_syntax_variable_transition(  # noqa: PLR0912
     key = (name, state)
     cached = context.transitions.get(key)
     if cached is not None:
-        return cached
+        context.inherit_observations(cached.observed)
+        return cached.value
     if key in context.active_transitions:
         raise _TaintLimitExceeded("shell taint eval syntax fixed-point update limit exceeded")
     program = context.programs.get(name)
@@ -8338,54 +8384,68 @@ def _eval_syntax_variable_transition(  # noqa: PLR0912
             context,
         )
     context.active_transitions.add(key)
+    context.begin_observations()
     try:
-        value: _EvalSyntaxValue = frozenset()
-        changed = True
-        while changed:
-            changed = False
-            for write_index, write in program:
-                if write.append:
-                    base = value
-                    if not base:
-                        base = _eval_syntax_token(
-                            state,
-                            _ContentToken(OutsideGap(), "", False),
-                            context,
-                        )
-                    produced = frozenset(
-                        after
-                        for current in base
-                        for after in _eval_syntax_append_write(
-                            write.expression,
-                            current,
-                            write_index,
-                            context,
-                            depth=depth + 1,
-                        )
-                    )
-                else:
-                    produced = _eval_syntax_append(
-                        write.expression,
+        value = _replay_eval_syntax_program(state, program, context, depth=depth)
+    finally:
+        observed = context.end_observations()
+        context.active_transitions.remove(key)
+    if len(context.transitions) >= context.limits.max_table_entries:
+        raise _TaintLimitExceeded("shell taint eval syntax transition table limit exceeded")
+    context.transitions[key] = _EvalSyntaxTransition(value, observed)
+    return value
+
+
+def _replay_eval_syntax_program(
+    state: _EvalSyntaxState,
+    program: tuple[tuple[int, _FlowWrite], ...],
+    context: _EvalSyntaxContext,
+    *,
+    depth: int,
+) -> _EvalSyntaxValue:
+    """Widen one variable's write program to a fixed point from one incoming eval state."""
+    value: _EvalSyntaxValue = frozenset()
+    changed = True
+    while changed:
+        changed = False
+        for write_index, write in program:
+            if write.append:
+                base = value
+                if not base:
+                    base = _eval_syntax_token(
                         state,
+                        _ContentToken(OutsideGap(), "", False),
+                        context,
+                    )
+                produced = frozenset(
+                    after
+                    for current in base
+                    for after in _eval_syntax_append_write(
+                        write.expression,
+                        current,
+                        write_index,
                         context,
                         depth=depth + 1,
                     )
-                widened = _cap_eval_syntax(value | produced, context.limits)
-                if widened == value:
-                    continue
-                value = widened
-                context.transition_updates += 1
-                if context.transition_updates > context.limits.max_fixed_point_updates:
-                    raise _TaintLimitExceeded(
-                        "shell taint eval syntax fixed-point update limit exceeded"
-                    )
-                changed = True
-        if len(context.transitions) >= context.limits.max_table_entries:
-            raise _TaintLimitExceeded("shell taint eval syntax transition table limit exceeded")
-        context.transitions[key] = value
-        return value
-    finally:
-        context.active_transitions.remove(key)
+                )
+            else:
+                produced = _eval_syntax_append(
+                    write.expression,
+                    state,
+                    context,
+                    depth=depth + 1,
+                )
+            widened = _cap_eval_syntax(value | produced, context.limits)
+            if widened == value:
+                continue
+            value = widened
+            context.transition_updates += 1
+            if context.transition_updates > context.limits.max_fixed_point_updates:
+                raise _TaintLimitExceeded(
+                    "shell taint eval syntax fixed-point update limit exceeded"
+                )
+            changed = True
+    return value
 
 
 def _eval_syntax_append(
@@ -8434,10 +8494,9 @@ def _eval_syntax_append(
                 raise _TaintLimitExceeded(
                     "shell taint eval syntax fixed-point update limit exceeded"
                 )
-            suffixes = context.variables.get(
-                (expression.name, state.quote),
-                _eval_syntax_outside(state.quote),
-            )
+            slot = (expression.name, state.quote)
+            context.observe_slot(slot)
+            suffixes = context.variables.get(slot, _eval_syntax_outside(state.quote))
             return _cap_eval_syntax(
                 frozenset(
                     replace(
@@ -8612,13 +8671,23 @@ def _ordered_eval_syntax_variables(
     writes: tuple[_FlowWrite, ...],
     raw_variables: dict[str | int, _ContentValue],
     limits: TaintLimits,
+    solved_variables: dict[tuple[str | int, str | None], _EvalSyntaxValue],
 ) -> dict[tuple[str | int, str | None], _EvalSyntaxValue]:
-    """Apply writes once in source order for eval's second parsing pass."""
+    """Apply writes once in source order for eval's second parsing pass.
+
+    The ordered result accumulates separately from the table a cycle-detected read falls back on.
+    That fallback is ``_solve_eval_syntax_variables``' solved table, which is fixed for the whole
+    pass, so a memoized transition stays valid across writes instead of being invalidated by every
+    one of them (issue #149). Feeding the fallback a half-built ordered table also read
+    not-yet-written slots as the empty set, which drops an alternative rather than widening it.
+    Append accumulation still seeds from the ordered value, which is the order-sensitive behavior
+    AD-18 records.
+    """
     variables = {
         (write.key, quote): frozenset() for write in writes for quote in _EVAL_QUOTE_STATES
     }
     context = _EvalSyntaxContext(
-        variables,
+        dict(solved_variables),
         raw_variables,
         limits,
         _eval_syntax_programs(writes),
@@ -8656,7 +8725,6 @@ def _ordered_eval_syntax_variables(
                     environment=environment,
                 )
             variables[(write.key, quote)] = value
-            context.invalidate_transitions()
     return variables
 
 
@@ -8716,7 +8784,7 @@ def _solve_eval_syntax_variables(
                 if widened == prior:
                     continue
                 variables[(write.key, quote)] = widened
-                context.invalidate_transitions()
+                context.invalidate_transitions((write.key, quote))
                 updates += 1
                 if updates > limits.max_fixed_point_updates:
                     raise _TaintLimitExceeded(
@@ -11054,6 +11122,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912
                 eval_writes,
                 solved.variables,
                 limits,
+                eval_syntax_variables,
             )
             if eval_commands
             else {}

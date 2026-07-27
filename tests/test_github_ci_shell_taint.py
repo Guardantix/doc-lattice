@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from doc_lattice.error_types import ProjectError
+from doc_lattice.github_ci import shell_taint
 from doc_lattice.github_ci.shell_scanner import (
     _effective_executable_evidence,
     _ScanBudget,
@@ -38,6 +39,7 @@ from doc_lattice.github_ci.shell_taint import (
     _AssignmentEvidence,
     _build_flow_definitions,
     _CommandEvidence,
+    _ContentToken,
     _ContentValue,
     _contextualize_evidence,
     _eval_assignment_transfers,
@@ -46,12 +48,15 @@ from doc_lattice.github_ci.shell_taint import (
     _eval_reparse_literal,
     _eval_syntax_expression,
     _EvalSyntaxContext,
+    _EvalSyntaxState,
+    _EvalSyntaxTransition,
     _evaluate_closed,
     _ExecutableEvidence,
     _FlowDefinitions,
     _FlowWrite,
     _is_function_positional_parameter,
     _marker_capable,
+    _ordered_eval_syntax_variables,
     _OutputLowering,
     _PipeEvidence,
     _ProcessResourceEvidence,
@@ -791,6 +796,188 @@ def test_eval_syntax_marker_bearing_self_referential_append_still_refuses() -> N
     result = scan_doc_lattice_invocations(script)
 
     assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+def _eval_syntax_state(literal: str = "x") -> _EvalSyntaxState:
+    """Return one real eval-syntax parse state for transition-table bookkeeping tests."""
+    context = _EvalSyntaxContext({}, {}, TaintLimits(), {})
+    return next(iter(_eval_syntax_expression(LiteralTransfer(literal), None, context)))
+
+
+def test_eval_syntax_invalidation_keeps_a_transition_that_observed_no_slot() -> None:
+    """A transition computed without reading the solved table cannot be stale (issue #149).
+
+    ``context.variables`` is read at exactly one site: the cycle-detected ``VariableRef`` branch
+    of ``_eval_syntax_append``. Every other input to a replayed transition is immutable for the
+    life of the pass, so an entry that never reached that site is independent of later writes and
+    must survive them.
+    """
+    context = _EvalSyntaxContext({}, {}, TaintLimits(), {})
+    key = ("A", _eval_syntax_state())
+    context.begin_observations()
+    context.transitions[key] = _EvalSyntaxTransition(frozenset(), context.end_observations())
+
+    context.invalidate_transitions(("A", None))
+
+    assert key in context.transitions
+
+
+def test_eval_syntax_invalidation_drops_only_transitions_observing_the_written_slot() -> None:
+    """Invalidation is scoped to the rewritten ``(name, quote)`` slot, not the whole table."""
+    context = _EvalSyntaxContext({}, {}, TaintLimits(), {})
+    observing = ("A", _eval_syntax_state("observing"))
+    unrelated = ("B", _eval_syntax_state("unrelated"))
+    for key, slot in ((observing, ("A", None)), (unrelated, ("B", '"'))):
+        context.begin_observations()
+        context.observe_slot(slot)
+        context.transitions[key] = _EvalSyntaxTransition(frozenset(), context.end_observations())
+
+    context.invalidate_transitions(("A", None))
+
+    assert observing not in context.transitions
+    assert unrelated in context.transitions
+
+
+def test_eval_syntax_nested_observations_propagate_to_the_enclosing_transition() -> None:
+    """An enclosing transition inherits every slot its nested computations observed.
+
+    Without this an outer entry would be retained on the strength of its own direct reads while
+    depending on an inner value that the same write invalidated, which is the one way this cache
+    turns unsound rather than merely slow.
+    """
+    context = _EvalSyntaxContext({}, {}, TaintLimits(), {})
+
+    context.begin_observations()
+    context.begin_observations()
+    context.observe_slot(("inner", None))
+    inner = context.end_observations()
+    outer = context.end_observations()
+
+    assert inner == frozenset({("inner", None)})
+    assert outer == inner
+
+
+def test_eval_syntax_cache_hit_propagates_the_cached_transitions_observed_slots() -> None:
+    """Reusing a memoized transition carries its recorded dependencies to the caller."""
+    context = _EvalSyntaxContext({}, {}, TaintLimits(), {})
+
+    context.begin_observations()
+    context.inherit_observations(frozenset({("cached", "'")}))
+    observed = context.end_observations()
+
+    assert observed == frozenset({("cached", "'")})
+
+
+_ACCUMULATING_WRITES = (
+    _FlowWrite("ARGS", LiteralTransfer("--a0")),
+    _FlowWrite("ARGS", concat(VariableRef("ARGS"), LiteralTransfer(" --a1"))),
+)
+
+
+def test_ordered_eval_syntax_pass_never_invalidates_its_memoized_transitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordered pass reads a fixed fallback table, so no write can stale a transition.
+
+    Its own result accumulates in a separate dictionary. Sharing one dictionary for both meant
+    every write changed the table a cycle-detected read falls back on, which invalidated the memo
+    table once per write and made the pass quadratic (issue #149).
+    """
+    invalidated: list[tuple[str | int, str | None]] = []
+    original = _EvalSyntaxContext.invalidate_transitions
+
+    def record(self: _EvalSyntaxContext, slot: tuple[str | int, str | None]) -> None:
+        invalidated.append(slot)
+        original(self, slot)
+
+    solved = _solve_eval_syntax_variables(_ACCUMULATING_WRITES, {}, TaintLimits())
+    monkeypatch.setattr(_EvalSyntaxContext, "invalidate_transitions", record)
+    _ordered_eval_syntax_variables(_ACCUMULATING_WRITES, {}, TaintLimits(), solved)
+
+    assert invalidated == []
+
+
+def test_ordered_eval_syntax_pass_leaves_the_solved_fallback_table_untouched() -> None:
+    """Ordered results must not leak back into the table the fallback reads."""
+    solved = _solve_eval_syntax_variables(_ACCUMULATING_WRITES, {}, TaintLimits())
+    before = dict(solved)
+
+    ordered = _ordered_eval_syntax_variables(_ACCUMULATING_WRITES, {}, TaintLimits(), solved)
+
+    assert solved == before
+    assert ordered is not solved
+
+
+def _eval_syntax_token_calls(monkeypatch: pytest.MonkeyPatch, script: str) -> int:
+    """Count second-pass token steps one scan spends, as an execution-independent work meter."""
+    calls = 0
+    original = shell_taint._eval_syntax_token
+
+    def counted(
+        state: _EvalSyntaxState,
+        token: _ContentToken,
+        context: _EvalSyntaxContext,
+    ) -> frozenset[_EvalSyntaxState]:
+        nonlocal calls
+        calls += 1
+        return original(state, token, context)
+
+    monkeypatch.setattr(shell_taint, "_eval_syntax_token", counted)
+    assert scan_doc_lattice_invocations(script).incomplete_reason is None
+    return calls
+
+
+def _self_referential_accumulation(writes: int) -> str:
+    """Build the ``ARGS="$ARGS --flag"`` accumulation idiom feeding one eval sink."""
+    lines = ['ARGS="--a0"']
+    lines.extend(f'ARGS="$ARGS --a{index}"' for index in range(1, writes))
+    lines.append('eval "mytool $ARGS"')
+    return "\n".join(lines)
+
+
+def test_eval_syntax_accumulation_work_grows_linearly_in_write_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin #149: clearing the whole transition table per write made the pass quadratic.
+
+    ``_ordered_eval_syntax_variables`` walks writes times three quote states and each replayed
+    transition re-derives a variable's whole write program, so discarding every memoized
+    transition after every write made second-pass token work grow with the square of the write
+    count: 15,172 then 59,332 then 234,052 token steps at 20, 40, and 80 writes, or 3.9x per
+    doubling. Scoping invalidation to the rewritten slot takes that to 1.9x per doubling. The
+    bound is deliberately loose because it separates quadratic from linear, not one constant
+    factor from another, and counting token steps keeps it independent of machine speed.
+    """
+    smaller = _eval_syntax_token_calls(monkeypatch, _self_referential_accumulation(20))
+    larger = _eval_syntax_token_calls(monkeypatch, _self_referential_accumulation(40))
+
+    assert larger < smaller * 2.5, (
+        f"second-pass token work grew {larger / smaller:.1f}x when the write count doubled, "
+        "which is the quadratic transition-cache invalidation of issue #149"
+    )
+
+
+def test_eval_syntax_long_accumulation_still_certifies() -> None:
+    """Sixty marker-free accumulating writes keep certifying, and promptly."""
+    start = time.monotonic()
+    result = scan_doc_lattice_invocations(_self_referential_accumulation(60))
+    elapsed = time.monotonic() - start
+
+    assert result.incomplete_reason is None
+    assert elapsed < _EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS, (
+        f"eval syntax second pass took {elapsed:.2f}s, expected under "
+        f"{_EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS}s"
+    )
+
+
+def test_eval_syntax_long_accumulation_carrying_the_marker_still_refuses() -> None:
+    """Retaining memoized transitions must not lose marker flow through the same idiom."""
+    script = _self_referential_accumulation(60).replace(
+        'ARGS="$ARGS --a30"',
+        'ARGS="$ARGS doc-lattice"',
+    )
+
+    assert scan_doc_lattice_invocations(script).incomplete_reason is not None
 
 
 def test_eval_conditional_assignment_obeys_augmented_edge_cap() -> None:
