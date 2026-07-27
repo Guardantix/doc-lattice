@@ -3514,3 +3514,215 @@ def test_ambiguous_glob_script_operand_route_is_not_constructible(head: str) -> 
     result = scan_doc_lattice_invocations(body)
 
     assert result.incomplete_reason == "executable word uses brace or glob expansion"
+
+
+# Issue #154: the shell ``-c`` payload second pass recognized a shell only at an executable
+# candidate's own argv index, so every dispatch spelling except the direct head skipped the second
+# parse and certified a body real Bash runs the marker in. Each family below pins the direct-head
+# control that already refused beside the spelling that slipped past, plus the over-refusal guards
+# and the selections that must stay outside the pass so the fix stays narrow to interpreted
+# payloads.
+_LITERAL_PAYLOAD = "A=doc-; B='lattice reconcile'; export A B; "
+_MARKER_FREE_PAYLOAD = "A=safe; B=thing; export A B; "
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    ["timeout 60", "nohup", "nice -n 5", "setsid", "stdbuf -oL"],
+    ids=("timeout", "nohup", "nice", "setsid", "stdbuf"),
+)
+def test_launcher_spelled_shell_c_payload_fails_closed(launcher: str) -> None:
+    """Issue #154: a shell reached through a launcher never entered the payload second pass.
+
+    ``_candidate_sink_expressions`` already dispatches ``timeout 60 bash ...`` to the shell option
+    grammar through ``_nested_shell_index``, but ``_shell_command_payload_marker_capable`` required
+    the shell name at an executable candidate's own argv index, so the launcher spelling skipped
+    the second parse. The child shell expands the single-quoted payload itself, so the marker is
+    composed although no word of the parent command carries it (verified under real Bash 5.2).
+    """
+    control = _LITERAL_PAYLOAD + "bash -c '$A$B'"
+    exploit = _LITERAL_PAYLOAD + f"{launcher} bash -c '$A$B'"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+@pytest.mark.parametrize(
+    "head",
+    ["S=bash; $S", '"$SHELL"', "${SHELL}"],
+    ids=("assigned-head", "quoted-environment-head", "braced-environment-head"),
+)
+def test_dynamic_head_shell_c_payload_fails_closed(head: str) -> None:
+    """Issue #154: an unresolved head reaches the option grammar but skipped the second parse.
+
+    ``_shell_source_head_index`` reads the grammar from argv index zero when the head cannot be
+    resolved to an exact name, which selects the ``-c`` payload here. The expansion direction of
+    the same body already refused through the ordinary sink path, which isolates the gap to the
+    literal-payload second pass rather than to ambiguous head handling in general.
+    """
+    control = _LITERAL_PAYLOAD + "bash -c '$A$B'"
+    exploit = _LITERAL_PAYLOAD + f"{head} -c '$A$B'"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+@pytest.mark.parametrize("wrapper", ["command", "exec"], ids=("command", "exec"))
+def test_wrapped_dynamic_head_shell_c_payload_fails_closed(wrapper: str) -> None:
+    """Issue #154: a wrapped dynamic head yields an ambiguous selection, not an exact one.
+
+    ``_select_shell_source`` retains every remaining candidate once the argv shape is uncertain,
+    so these bodies select ``_ShellSourceKind.AMBIGUOUS`` rather than ``COMMAND``. A gate that
+    accepted only the exact ``COMMAND`` selection still skipped them, which is why the pass scans
+    every candidate word the same way ``_shell_source_sinks`` builds a choice over all of them.
+    """
+    control = _LITERAL_PAYLOAD + "bash -c '$A$B'"
+    exploit = _LITERAL_PAYLOAD + f"S=bash; {wrapper} \"$S\" -c '$A$B'"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "OPT=pipefail; bash -o \"$OPT\" -c '$A$B'",
+        "RC=rc.sh; bash --rcfile \"$RC\" -c '$A$B'",
+        "OPT=pipefail; timeout 60 bash -o \"$OPT\" -c '$A$B'",
+    ],
+    ids=("short-o", "long-rcfile", "launcher-short-o"),
+)
+def test_dynamic_shell_option_value_shell_c_payload_fails_closed(tail: str) -> None:
+    """Issue #154: a dynamic option value widens the selection past the exact ``COMMAND`` kind.
+
+    The head here is an ordinary literal ``bash``, so the direct route was never the problem: the
+    dynamic value of ``-o`` or ``--rcfile`` makes ``_select_shell_source`` return an ambiguous
+    candidate set, which the exact-only gate dropped. The ``-c`` payload is one of those
+    candidates.
+    """
+    control = _LITERAL_PAYLOAD + "bash -c '$A$B'"
+    exploit = _LITERAL_PAYLOAD + tail
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "timeout 60 bash -c '$A$B'",
+        "nohup bash -c '$A$B'",
+        "S=bash; $S -c '$A$B'",
+        "S=bash; command \"$S\" -c '$A$B'",
+        "OPT=pipefail; bash -o \"$OPT\" -c '$A$B'",
+    ],
+    ids=("launcher", "nohup", "dynamic-head", "wrapped-dynamic-head", "dynamic-option-value"),
+)
+def test_widened_payload_routes_keep_marker_free_bodies_certified(tail: str) -> None:
+    """Over-refusal guard: every widened route must still certify a marker-free payload."""
+    body = _MARKER_FREE_PAYLOAD + tail
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_script_operand_selection_stays_out_of_the_payload_second_pass() -> None:
+    """Issue #154: a script operand names a file, so it is the sink path's business, not this pass.
+
+    ``timeout 60 bash '$A$B'`` reaches the option grammar through the launcher route and selects
+    ``_ShellSourceKind.SCRIPT``: the operand is a filename spelled ``$A$B``, which real Bash
+    reports as missing rather than expanding (verified under real Bash 5.2, the shim never runs).
+    Second-parsing that text as shell source would compose the marker and refuse, so the exclusion
+    is what keeps this certified. A script's own content already reaches the sink path through
+    ``_shell_script_source_expression``.
+    """
+    body = _LITERAL_PAYLOAD + "timeout 60 bash '$A$B'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_source_pre_shell_exclusion_survives_the_widened_payload_routes() -> None:
+    """Issue #154: only the first ``source`` operand names a file; later words are positional.
+
+    ``_shell_source_head_index`` returns None for a ``source`` head before any launcher search
+    runs, and that early return is load-bearing here: without it the search would find ``bash`` at
+    the second word and second-parse ``'$A$B'`` as a shell payload, when both words are only
+    positional parameters for the sourced script. Real Bash runs nothing (verified under 5.2).
+    """
+    body = _LITERAL_PAYLOAD + "touch env.sh; source env.sh bash -c '$A$B'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_builtin_wrapped_shell_is_not_a_payload_route() -> None:
+    """Issue #154: ``builtin`` cannot reach a shell, so it is not a route this pass must cover.
+
+    Verified under real Bash 5.2: ``builtin bash -c ...`` fails with ``builtin: bash: not a shell
+    builtin`` and executes nothing, so certifying it is correct rather than a gap. The ``command``
+    and ``exec`` spellings of the same shape do run, which is why they refuse and this one does
+    not.
+    """
+    body = _LITERAL_PAYLOAD + "S=bash; builtin -- \"$S\" -c '$A$B'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("wrapper", ["command", "exec"], ids=("command", "exec"))
+def test_wrapper_with_a_dynamic_head_and_dynamic_payload_is_a_known_gap(wrapper: str) -> None:
+    """Issue #157: this body has no executable evidence at all, so it has no sink to widen.
+
+    The head resolver finds no nameable word after the wrapper when every remaining word is
+    dynamic, so ``_candidate_sink_expressions`` returns at its first guard and the ambiguous route
+    is never entered. The literal-payload sibling refuses because its last word is nameable, which
+    inverts the usual ordering between the two directions. Verified under real Bash 5.2: this
+    certifies and executes the marker.
+    """
+    body = _LITERAL_PAYLOAD + f'S=bash; {wrapper} "$S" -c "$A$B"'
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "head",
+    ['exec -a sh "$S"', 'command -- "$S"'],
+    ids=("exec-dash-a", "command-dash-dash"),
+)
+def test_wrapper_option_grammar_shifts_the_ambiguous_selection_is_a_known_gap(head: str) -> None:
+    """Issue #158: the ambiguous route reads the shell option grammar across the wrapper's options.
+
+    Anchoring at argv index zero makes ``_select_shell_source`` walk ``exec``'s ``-a`` value and
+    ``command``'s ``--`` as if they were the shell's own grammar, so it returns a ``SCRIPT``
+    selection pointing at a wrapper operand and never reaches the ``-c`` payload. Their
+    literal-head counterparts refuse, which isolates this to the dynamic head. Verified under real
+    Bash 5.2: these certify and execute the marker.
+    """
+    body = _LITERAL_PAYLOAD + f"S=bash; {head} -c '$A$B'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason is None

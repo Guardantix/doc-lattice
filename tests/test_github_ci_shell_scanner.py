@@ -248,6 +248,39 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         'A=doc-; printf "%s\\n" "${A}lattice reconcile" > /dev/stdout | bash',
         {},
     ),
+    # Issue #154: a shell reached through any dispatch route other than its own head skipped the
+    # ``-c`` payload second pass, so the child shell's own expansion of a single-quoted payload
+    # composed the marker unseen. Each row below certified clean while executing the shim.
+    (
+        "launcher-literal-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; timeout 60 bash -c '$A$B'",
+        {},
+    ),
+    (
+        "nohup-literal-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; nohup bash -c '$A$B'",
+        {},
+    ),
+    (
+        "dynamic-head-literal-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; $S -c '$A$B'",
+        {},
+    ),
+    (
+        "command-wrapped-dynamic-head-literal-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; command \"$S\" -c '$A$B'",
+        {},
+    ),
+    (
+        "exec-wrapped-dynamic-head-literal-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; exec \"$S\" -c '$A$B'",
+        {},
+    ),
+    (
+        "dynamic-shell-option-value-literal-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; OPT=pipefail; bash -o \"$OPT\" -c '$A$B'",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -8239,6 +8272,26 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; touch env.sh; source env.sh ta*.sh",
         {},
     ),
+    # Issue #154 over-refusal guards: the widened payload routes must stay narrow to a payload
+    # the child shell really interprets, and to one that really composes the marker.
+    (
+        "marker-free-launcher-literal-c-payload",
+        "A=safe; B=thing; export A B; timeout 60 bash -c '$A$B'",
+        {},
+    ),
+    (
+        "marker-free-dynamic-head-literal-c-payload",
+        "A=safe; B=thing; export A B; S=bash; $S -c '$A$B'",
+        {},
+    ),
+    (
+        # A script operand is a filename, not an interpreted payload. Real bash reports ``$A$B``
+        # missing rather than expanding it, so second-parsing that text would refuse a body that
+        # runs nothing.
+        "script-operand-is-not-a-c-payload",
+        "A=doc-; B='lattice reconcile'; export A B; timeout 60 bash '$A$B'",
+        {},
+    ),
 ]
 
 
@@ -8659,6 +8712,57 @@ def test_a_shell_reached_through_a_launcher_is_an_execution_sink(script: str):
 def test_an_unresolvable_head_keeps_its_payload_as_a_sink(script: str):
     """`ambiguous` executable evidence must widen rather than remove the sink."""
     assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=doc-; B='lattice reconcile'; export A B; timeout 60 bash -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; nohup sh -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; $S -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; command \"$S\" -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; exec \"$S\" -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; OPT=pipefail; bash -o \"$OPT\" -c '$A$B'",
+    ],
+    ids=(
+        "launcher",
+        "launcher-sh",
+        "dynamic-head",
+        "command-wrapped-dynamic-head",
+        "exec-wrapped-dynamic-head",
+        "dynamic-option-value",
+    ),
+)
+def test_every_shell_dispatch_route_enters_the_c_payload_second_pass(script: str):
+    # Issue #154: the two tests above cover the expansion direction, where the parent command's
+    # own word carries the composed marker. A single-quoted payload is composed by the child
+    # shell instead, so it reaches the marker only through the second parse, which recognized a
+    # shell at an executable candidate's own argv index alone.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=safe; B=thing; export A B; timeout 60 bash -c '$A$B'",
+        "A=safe; B=thing; export A B; S=bash; command \"$S\" -c '$A$B'",
+        "A=safe; B=thing; export A B; OPT=pipefail; bash -o \"$OPT\" -c '$A$B'",
+        "A=doc-; B='lattice reconcile'; export A B; S=bash; builtin -- \"$S\" -c '$A$B'",
+    ],
+    ids=(
+        "launcher",
+        "wrapped-dynamic-head",
+        "dynamic-option-value",
+        "builtin-cannot-reach-a-shell",
+    ),
+)
+def test_widened_c_payload_routes_keep_clean_bodies_certified(script: str):
+    # The last row is not marker-free: ``builtin`` can only run shell builtins, so real bash
+    # fails it with "not a shell builtin" and runs nothing. Certifying it is correct.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(

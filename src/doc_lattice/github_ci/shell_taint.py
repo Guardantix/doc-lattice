@@ -10575,6 +10575,67 @@ def _executable_alternate_count(executable: _ExecutableEvidence) -> int:
     return sum(1 for _ in _iter_executable_evidence(executable)) - 1
 
 
+def _payload_second_parse_marker_capable(
+    expression: ContentExpr,
+    context: _EvalSyntaxContext,
+    environment: _EvalCommandEnvironment,
+) -> bool:
+    """Return whether one interpreted payload's second parse can accept the marker.
+
+    Args:
+        expression: The payload word's content, read as shell source rather than as a value.
+        context: The eval-syntax context holding the solved variable tables.
+        environment: The per-command execution environment for this body.
+
+    Returns:
+        Whether the payload's second parse composes the marker.
+    """
+    return any(
+        summary.full.entries[_DFA_START][1]
+        for state in _eval_syntax_expression(
+            expression,
+            None,
+            context,
+            environment_variables=environment.variables,
+            fixed_point_overrides=environment.fixed_point_overrides,
+            definitely_set_variables=environment.definitely_set,
+        )
+        for summary in _finalize_eval_syntax(state, context)
+    )
+
+
+def _shell_payload_candidate_indices(
+    command: _CommandEvidence, executable: _ExecutableEvidence
+) -> tuple[int, ...]:
+    """Return the argv indices one executable candidate may run as an interpreted ``-c`` payload.
+
+    Only two of the five selection kinds name such a payload. ``COMMAND`` names it exactly.
+    ``AMBIGUOUS`` means the argv shape is uncertain, so ``_select_shell_source`` deliberately
+    retains every remaining word rather than committing to one, and any of them can still land in
+    the payload position; this mirrors the choice ``_shell_source_sinks`` builds over the same set.
+    ``SCRIPT`` is excluded because it names a file rather than an interpreted payload, so reading
+    its text as shell source would be a category error, and the file's own content already reaches
+    the sink path through ``_shell_script_source_expression``. ``STDIN`` and ``NONE`` name no argv
+    word at all.
+
+    Args:
+        command: The command evidence being inspected.
+        executable: One resolved executable candidate of that command.
+
+    Returns:
+        The argv indices to second-parse, empty when this candidate reaches no payload.
+    """
+    head_index = _shell_source_head_index(command, executable)
+    if head_index is None:
+        return ()
+    selection = _select_shell_source(command.argv, head_index)
+    if selection.kind is _ShellSourceKind.COMMAND:
+        return () if selection.argv_index is None else (selection.argv_index,)
+    if selection.kind is _ShellSourceKind.AMBIGUOUS:
+        return selection.candidate_indices
+    return ()
+
+
 def _shell_command_payload_marker_capable(
     command: _CommandEvidence,
     context: _EvalSyntaxContext,
@@ -10588,6 +10649,17 @@ def _shell_command_payload_marker_capable(
     same way an ``eval`` payload's do. Resolving from the whole variable table rather than the
     exported subset over-approximates, which keeps the check fail-closed.
 
+    The route this reaches a shell by is ``_shell_source_head_index``, the same entry point the
+    glob guard uses, rather than the shell name at an executable candidate's own argv index. That
+    narrower test saw only the direct head, so every other spelling ``_candidate_sink_expressions``
+    dispatches through skipped the second parse and certified a body real Bash runs the marker in:
+    a launcher such as ``timeout 60 bash -c '$A$B'``, an unresolved head such as ``$S -c '$A$B'``,
+    and, through the ambiguous selection, a wrapped head or a dynamic shell option value
+    (issue #154). Two spellings stay open and are tracked separately: a wrapper whose head and
+    payload are both dynamic produces no executable evidence for any route to start from
+    (issue #157), and the ambiguous route reads the option grammar across a wrapper's own options
+    (issue #158).
+
     Args:
         command: The command whose executable candidates may be a shell.
         context: The eval-syntax context holding the solved variable tables.
@@ -10596,27 +10668,18 @@ def _shell_command_payload_marker_capable(
     Returns:
         Whether any shell ``-c`` payload's second parse can accept the marker.
     """
+    scanned: set[int] = set()
     for executable in _iter_executable_evidence(command.executable):
-        if executable.argv_index is None or executable.name is None:
-            continue
-        if _normalized_shell_head(executable.name) not in _SHELL_HEADS:
-            continue
-        selection = _select_shell_source(command.argv, executable.argv_index)
-        if selection.kind is not _ShellSourceKind.COMMAND or selection.argv_index is None:
-            continue
-        if any(
-            summary.full.entries[_DFA_START][1]
-            for state in _eval_syntax_expression(
-                command.argv[selection.argv_index].content,
-                None,
-                context,
-                environment_variables=environment.variables,
-                fixed_point_overrides=environment.fixed_point_overrides,
-                definitely_set_variables=environment.definitely_set,
-            )
-            for summary in _finalize_eval_syntax(state, context)
-        ):
-            return True
+        for index in _shell_payload_candidate_indices(command, executable):
+            if index in scanned:
+                # Routes converge on shared words, and a parse depends only on the word and this
+                # command's own context, so a repeated index cannot reach a different answer.
+                continue
+            scanned.add(index)
+            if _payload_second_parse_marker_capable(
+                command.argv[index].content, context, environment
+            ):
+                return True
     return False
 
 
@@ -10783,8 +10846,9 @@ def _shell_source_head_index(  # noqa: PLR0911
     """Return the argv index a shell option grammar is read from for one executable candidate.
 
     ``_candidate_sink_expressions`` reaches ``_shell_source_sinks`` by three distinct routes, and
-    the glob guard used to recognize only the first of them, so the same exploit spelled through a
-    launcher certified (issue #150). This mirrors that dispatch route for route so the guard sees
+    the guards beside it used to recognize only the first of them, so the same exploit spelled
+    through a launcher certified: for the glob guard in issue #150, and for the ``-c`` payload
+    second pass in issue #154. This mirrors that dispatch route for route so both consumers see
     exactly the argv positions the sink machinery does. The pre-shell builtin returns are mirrored
     too, and are load-bearing rather than decorative: without them ``source env.sh bash ta*.sh``
     would find ``bash`` by the launcher search and refuse a command whose later words are only

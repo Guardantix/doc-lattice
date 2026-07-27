@@ -504,7 +504,12 @@ A shell `-c` payload also enters the parameter second pass, not only the state-e
 child expands the payload itself, so `export A B; bash -c '$A$B'` composes the marker although no
 word of the parent command carries it. Those references resolve against this body's whole variable
 table rather than the exported subset the child would inherit, which over-approximates and so stays
-fail-closed; modeling export status precisely is future work.
+fail-closed; modeling export status precisely is future work. Every modeled dispatch spelling
+reaches that pass, not only a shell that is the command's own head, so a launcher-spelled or
+unresolved-head shell is second-parsed too; where the argv shape is uncertain the pass reads each
+retained candidate word rather than committing to one, mirroring the choice the sink selector
+builds over the same set. A script operand and a standard-input payload stay with the sink path,
+which already models a file's content and a stream's content directly.
 
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing
