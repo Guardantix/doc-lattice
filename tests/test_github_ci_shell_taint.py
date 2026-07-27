@@ -4628,3 +4628,90 @@ def test_launcher_fed_shell_over_refusal_guards(body: str) -> None:
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+# Codex review round 3. A non-interactive Bash child reads the file BASH_ENV names BEFORE the
+# -c, script, or stdin program it was selected to run. Nothing selected it: _select_shell_source
+# reads argv, and this arrives through the environment, so no argv-driven route can see it.
+_BASH_ENV_WRITE = "printf '%s\\n' 'A=doc-' '\"${A}lattice\" reconcile' > env.sh\n"
+_BASH_ENV_REASON = "shell BASH_ENV source state cannot be represented"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _BASH_ENV_WRITE + "export BASH_ENV=env.sh\nbash -c :",
+        _BASH_ENV_WRITE + "BASH_ENV=env.sh bash -c :",
+        _BASH_ENV_WRITE + "export BASH_ENV=./env.sh\nbash -c :",
+        _BASH_ENV_WRITE + "P=env.sh\nexport BASH_ENV=$P\nbash -c :",
+        _BASH_ENV_WRITE + "export BASH_ENV=env.sh\nbash s.sh",
+        _BASH_ENV_WRITE + "export BASH_ENV=env.sh\ntimeout 5 bash -c :",
+        (
+            "A=doc-\nprintf '%s\\n' \"${A}lattice reconcile\" > env.sh\n"
+            "export BASH_ENV=env.sh\nbash -c :"
+        ),
+    ],
+    ids=(
+        "exported-variable",
+        "per-command-prefix-assignment",
+        "dot-slash-spelling",
+        "value-resolved-through-a-variable",
+        "script-dispatch-form",
+        "behind-a-launcher",
+        "file-content-composes-the-whole-marker",
+    ),
+)
+def test_bash_env_child_shell_source_fails_closed(body: str) -> None:
+    """Codex finding: BASH_ENV named a child shell source no argv-driven route could see.
+
+    Verified under real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``. The same file reached by
+    an argv-selected route already refuses on both spellings that name it there,
+    ``bash --rcfile env.sh -ic :`` and ``. ./env.sh``, which isolates the environment channel
+    rather than the file or its content.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _BASH_ENV_REASON
+
+
+def test_bash_env_unexported_over_approximates_pending_issue_122() -> None:
+    """Export status is not modeled, so an unexported BASH_ENV refuses although Bash ignores it.
+
+    This is the same over-approximation the ``-c`` payload second pass already makes, tracked as
+    issue #122. Narrowing it would mean reading export evidence the body itself supplies, which
+    AD-17's founding principle rules out. Pinned so the cost is visible rather than discovered.
+    """
+    result = scan_doc_lattice_invocations(_BASH_ENV_WRITE + "BASH_ENV=env.sh\nbash -c :")
+
+    assert result.incomplete_reason == _BASH_ENV_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "printf '%s\\n' 'echo hi' > env.sh\nexport BASH_ENV=env.sh\nbash -c :",
+        "printf '%s\\n' 'make build' > env.sh\nexport BASH_ENV=env.sh\nbash -c :",
+        "printf '%s\\n' 'REGION=us-east-1' > env.sh\nexport BASH_ENV=env.sh\nbash -c :",
+        "export BASH_ENV=/etc/profile.d/ci.sh\nbash -c :",
+        _BASH_ENV_WRITE + "export BASH_ENV=env.sh\necho done",
+    ],
+    ids=(
+        "inert-file",
+        "ordinary-script-text",
+        "config-file-idiom",
+        "target-this-body-never-writes",
+        "command-reaches-no-shell",
+    ),
+)
+def test_bash_env_over_refusal_guards(body: str) -> None:
+    """Over-refusal guards: the content gate and the tracked-target rule keep this narrow.
+
+    ``make build`` is the case the raw fragment question would refuse, since it ends in ``d`` and
+    so advances the scan from the idle entry state; the child-run content gate asks only what the
+    file assigns to its own variables, plus whether it composes the marker outright.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None

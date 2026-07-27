@@ -12217,6 +12217,95 @@ def _script_operand_composes_from_arguments(  # noqa: PLR0913
     )
 
 
+def _bash_env_shell_source_unrepresentable(
+    command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a child shell sources a script-tracked ``BASH_ENV`` with unmodeled effects.
+
+    A non-interactive Bash child reads the file ``BASH_ENV`` names BEFORE the ``-c``, script, or
+    stdin program it was selected to run, so that file's state effects are the child's. Nothing
+    selected it: ``_select_shell_source`` reads argv, and this arrives through the environment, so
+
+        printf '%s\\n' 'A=doc-' '"${A}lattice" reconcile' > env.sh
+        export BASH_ENV=env.sh
+        bash -c :
+
+    certified while Bash 5.2 executed the marker. The same file reached by an argv-selected route
+    already refuses on both spellings that name it there, ``bash --rcfile env.sh -ic :`` and
+    ``. ./env.sh``, which isolates the environment channel rather than the file or its content.
+
+    This is the ``--rcfile`` fix's counterpart for the channel argv cannot show. Both value
+    spellings are read: an exported variable from an earlier command, and the per-command prefix
+    assignment ``BASH_ENV=env.sh bash -c :``, which is scoped to the command and so never reaches
+    the body-wide table.
+
+    Export status is deliberately not modeled, so a ``BASH_ENV`` this body sets without exporting
+    refuses although the child never sees it. That is the same over-approximation the whole
+    ``-c`` payload second pass already makes, tracked as issue #122, and narrowing it would mean
+    reading export evidence the body itself supplies, which AD-17's founding principle rules out.
+
+    The content gate is the one the child-run routes share, plus the completed marker. A child
+    shell's variables never return to this body, so the composition to detect is one the file
+    performs within itself, and ``_resource_assignment_marker_fragment_capable`` is the tractable
+    evidence for that. ``_marker_capable`` is asked alongside it because no sink expression reads
+    this file, unlike the argv-selected routes where the operand's own value reaches the sink path:
+    without it a file whose content composes the whole marker would have nothing to refuse on.
+    Asking the raw FRAGMENT question instead is what would refuse
+    ``echo 'make build' > env.sh``, the same trap the assignments-only split already documents.
+
+    Args:
+        command: The command whose executable candidates may be a shell.
+        sink_variables: The per-command solved variable table, for resolving the value and target.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving the resource.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether a shell in this command sources a script-tracked ``BASH_ENV`` file that could
+        compose the marker.
+    """
+    if all(
+        _shell_source_head_index(command, executable) is None
+        for executable in _iter_executable_evidence(command.executable)
+    ):
+        return False
+    # Variables live under scoped keys, so every scope that spells this name is read rather than
+    # one reconstructed scope. Reading them all is the fail-closed direction: the child inherits
+    # whichever one is live, and this analysis does not track which that is.
+    values = [
+        value
+        for name, value in sink_variables.items()
+        if isinstance(name, str) and _unscoped_variable_name(name) == "BASH_ENV"
+    ]
+    values.extend(
+        _evaluate_with_tables(assignment.content, sink_variables, resources, streams, limits)
+        for assignment in (
+            *command.assignments,
+            *command.definite_assignments,
+            *command.builtin_assignments,
+        )
+        if _unscoped_variable_name(assignment.name) == "BASH_ENV"
+    )
+    for value in values:
+        for alternative in value:
+            for text in alternative.literal_texts:
+                key = normalize_static_resource(text, dynamic=False)
+                if key is None or key not in resources:
+                    continue
+                content = _evaluate_with_tables(
+                    ResourceRef(key), sink_variables, resources, streams, limits
+                )
+                if _marker_capable(content) or _resource_assignment_marker_fragment_capable(
+                    content
+                ):
+                    return True
+    return False
+
+
 def _launcher_shell_head_index(
     command: _CommandEvidence, executable: _ExecutableEvidence
 ) -> int | None:
@@ -12722,6 +12811,14 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 raise _TaintLimitExceeded(
                     "launcher-fed shell positional state cannot be represented"
                 )
+            if _bash_env_shell_source_unrepresentable(
+                command,
+                sink_variables,
+                solved.resources,
+                solved.streams,
+                limits,
+            ):
+                raise _TaintLimitExceeded("shell BASH_ENV source state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
