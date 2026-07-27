@@ -63,6 +63,7 @@ from doc_lattice.github_ci.shell_taint import (
     _ordered_eval_syntax_variables,
     _OutputLowering,
     _PipeEvidence,
+    _PositionalBinding,
     _ProcessResourceEvidence,
     _RedirectionEvent,
     _scoped_variable_name,
@@ -78,6 +79,7 @@ from doc_lattice.github_ci.shell_taint import (
     _StreamScopeEvidence,
     _strip_trailing_newlines,
     _substitute_local_contents,
+    _substituted_text_composes_marker,
     _TaintLimitExceeded,
     analyze_marker_taint,
     choice,
@@ -4798,6 +4800,192 @@ def test_launcher_fed_shell_over_refusal_guards(body: str) -> None:
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+# Issue #176. Every positional reference used to be substituted by ONE string, the concatenation
+# of all the caller's arguments, on the claim that substituting the same text everywhere was sound
+# without solving which argument lands at which position. It is not: a file selecting a
+# NON-ADJACENT subset composes a marker the concatenation never spells. ``bash s.sh doc- SAFE
+# lattice`` against ``"$1$3"`` joins to ``doc-SAFElattice``, which carries no marker progress in
+# either its plain or its doubled form, while Bash expands ``$1$3`` to ``doc-lattice`` and runs it.
+# Each reference is now replaced by a CHOICE over the individual arguments and their join, so the
+# marker DFA covers every assignment of arguments to references at once without enumerating them.
+# Every refusing body below executes the marker under real Bash 5.2 with a ``doc-lattice`` shim on
+# ``PATH``, and every certifying one runs no marker, confirmed with the differential oracle in
+# ``scripts/fuzz_shell_taint.py``.
+_POSITIONAL_SUBSET_SCRIPT = "printf '%s\\n' '\"$1$3\" reconcile' > s.sh; "
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_SUBSET_SCRIPT + "bash s.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "bash ./s.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "sh s.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "timeout 60 bash s.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "source s.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + ". ./s.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + 'F=s.sh; source "$F" doc- SAFE lattice',
+        _POSITIONAL_SUBSET_SCRIPT + "source s*.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "bash s*.sh doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + 'F=s.sh; bash "$F" doc- SAFE lattice',
+        _POSITIONAL_SUBSET_SCRIPT + "bash --rcfile s.sh -ic : X doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "bash --init-file s.sh -ic : X doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "export BASH_ENV=s.sh; bash -c : X doc- SAFE lattice",
+        _POSITIONAL_SUBSET_SCRIPT + "BASH_ENV=s.sh bash -c : X doc- SAFE lattice",
+        "printf '%s\\n' '\"${1}${3}\" reconcile' > s.sh; bash s.sh doc- SAFE lattice",
+        "printf '%s\\n' '\"$1$5\" reconcile' > s.sh; bash s.sh doc- A B C lattice",
+    ],
+    ids=(
+        "exact-operand",
+        "dot-slash-operand",
+        "sh-head",
+        "behind-a-launcher",
+        "source-builtin",
+        "dot-builtin",
+        "source-operand-through-a-variable",
+        "source-glob-operand",
+        "glob-script-operand",
+        "variable-script-operand",
+        "rcfile-startup-file",
+        "init-file-startup-file",
+        "bash-env-exported",
+        "bash-env-prefix-assignment",
+        "braced-positionals",
+        "four-arguments-apart",
+    ),
+)
+def test_shell_script_positional_subset_selection_fails_closed(body: str) -> None:
+    """Issue #176: a file reading a non-adjacent subset of its arguments certified everywhere.
+
+    The joined string the analysis substituted, ``doc-SAFElattice``, composes nothing whether it
+    is read once or doubled, so condition 3 answered no on all six routes that reach the shared
+    helper. Replacing each reference with a choice over the individual arguments lets the marker
+    DFA see ``$1`` taking ``doc-`` while ``$3`` takes ``lattice``, which is what Bash does.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _POSITIONAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_SUBSET_SCRIPT + "printf '%s\\n' doc- SAFE lattice | xargs bash s.sh",
+        _POSITIONAL_SUBSET_SCRIPT + "printf '%s\\n' doc- SAFE lattice | xargs bash s*.sh",
+        "printf '%s\\n' doc- SAFE lattice | xargs sh -c '$0$2 reconcile'",
+    ],
+    ids=(
+        "launcher-fed-script-operand",
+        "launcher-fed-glob-script-operand",
+        "launcher-fed-payload",
+    ),
+)
+def test_launcher_fed_positional_subset_selection_fails_closed(body: str) -> None:
+    """Issue #176: launcher input is bound word by word, so a subset of its words composes too.
+
+    A launcher splits its input into words and appends them as separate argv entries. Joining them
+    into ``doc-SAFElattice`` lost that structure twice over: the cheap fragment precheck answered
+    no, so the composition test never ran, and the composition test would have answered no too.
+    Each input WORD is now a text a positional can bind to, beside the join the model already had.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _LAUNCHER_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_SUBSET_SCRIPT + "bash s.sh build test deploy",
+        _POSITIONAL_SUBSET_SCRIPT + "bash s.sh --verbose --quiet --color",
+        _POSITIONAL_SUBSET_SCRIPT + "source s.sh build test deploy",
+        _POSITIONAL_SUBSET_SCRIPT + "bash --rcfile s.sh -ic : X build test deploy",
+        _POSITIONAL_SUBSET_SCRIPT + "export BASH_ENV=s.sh; bash -c : X build test deploy",
+        _POSITIONAL_SUBSET_SCRIPT + "printf '%s\\n' build test deploy | xargs bash s.sh",
+        _POSITIONAL_SUBSET_SCRIPT + "bash s.sh",
+        "printf '%s\\n' 'run build' > s.sh; bash s.sh doc- SAFE lattice",
+        "bash s.sh doc- SAFE lattice",
+    ],
+    ids=(
+        "ordinary-words",
+        "ordinary-flags",
+        "ordinary-words-through-source",
+        "ordinary-words-through-an-rcfile",
+        "ordinary-words-through-bash-env",
+        "ordinary-words-through-a-launcher",
+        "no-arguments",
+        "file-ignores-its-arguments",
+        "operand-names-no-tracked-file",
+    ),
+)
+def test_positional_subset_selection_over_refusal_guards(body: str) -> None:
+    """Widening one string into a choice adds alternatives, not a fragment question.
+
+    ``build`` and ``deploy`` both end in ``d`` and so advance the scan from the idle entry state,
+    which is the trap a marker-FRAGMENT question over the arguments falls into. The choice is still
+    substituted at the reference positions the file actually spells, so ordinary argument lists,
+    ordinary flags and a file that ignores its arguments all stay certified on every route.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_positional_choice_keeps_the_joined_alternative_it_replaces() -> None:
+    """The joined text stays an alternative, so the widening cannot remove an existing refusal.
+
+    A file with ONE reference and a caller passing two arguments refuses only through the joined
+    alternative: ``doc-lattice`` is neither argument on its own, and Bash binds ``$1`` to ``doc-``
+    alone, so this is a refusal of a body that runs no marker. It is kept deliberately. Dropping
+    the join in favor of the per-argument texts would remove it, and removing it would also remove
+    the word-splitting case the join stands in for, where one argument the caller spells becomes
+    several words the child concatenates back.
+    """
+    body = "printf '%s\\n' '\"$1\" reconcile' > s.sh; bash s.sh doc- lattice"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _POSITIONAL_REASON
+
+
+def test_positional_binding_choice_respects_the_alternative_cap() -> None:
+    """A binding wider than the alternative cap raises rather than narrowing the choice.
+
+    The substituted expression is evaluated through the same bounded evaluator the rest of the
+    module uses, so a choice this analysis cannot represent fails closed at the shared cap instead
+    of silently dropping alternatives and certifying on a narrower model than the one intended.
+    """
+    binding = _PositionalBinding(parts=("doc-", "lattice", "build"), joined="doc-latticebuild")
+
+    with pytest.raises(_TaintLimitExceeded):
+        _substituted_text_composes_marker(
+            '"$1$2" reconcile',
+            binding,
+            TaintLimits(max_alternatives=2),
+            include_zero=False,
+        )
+
+
+def test_positional_binding_choice_covers_every_argument_and_their_join() -> None:
+    """Each argument, each argument's own alternatives, and their join are all bindable."""
+    binding = _PositionalBinding(parts=("doc-", "SAFE", "lattice"), joined="doc-SAFElattice")
+
+    assert binding.texts == ("doc-", "SAFE", "lattice", "doc-SAFElattice")
+    assert binding.fragment_capable is True
+    assert _substituted_text_composes_marker(
+        '"$1$3" reconcile', binding, TaintLimits(), include_zero=False
+    )
+    assert not _substituted_text_composes_marker(
+        '"$1$3" reconcile',
+        _PositionalBinding(parts=("build", "test"), joined="buildtest"),
+        TaintLimits(),
+        include_zero=False,
+    )
 
 
 # Codex review round 3. A non-interactive Bash child reads the file BASH_ENV names BEFORE the

@@ -582,10 +582,21 @@ conjunction: the target names a resource this body writes, that file's content r
 caller-supplied positional, and substituting the arguments into the file's own text composes the
 marker. The third condition substitutes rather than asking whether an argument is marker-fragment
 capable, which is the trap the content test documents above: `build` ends in `d` and so advances the
-scan from the idle entry state, which would refuse `bash s.sh build`. Substituting one joined string
-for every reference is what makes it sound without solving which argument lands where, and the
-doubling that produces is a deliberate over-approximation that also surfaces the reversed argument
-order across the seam.
+scan from the idle entry state, which would refuse `bash s.sh build`. Each reference is replaced by
+a choice over the individual arguments together with their joined concatenation, because the true
+binding is one member of that choice at every position and this analysis does not solve which. The
+joined member is load bearing twice over: it keeps the rule monotone with the single-string model
+that preceded it, so no refusal that model earned is lost, and it covers an argument word that
+splits into several the child then concatenates.
+
+Substituting one joined string at every reference, which is what this rule did when it was first
+written, was recorded here as what made it sound without solving which argument lands where. That
+was wrong in the under-refusal direction, and a file selecting a non-adjacent subset is the
+counterexample: `printf '%s\n' '"$1$3" reconcile' > s.sh; bash s.sh doc- SAFE lattice` composes the
+marker while the joined string `doc-SAFElattice` and its doubling do not contain it. The choice
+formulation is the fix, and it stays linear rather than enumerating assignments of arguments to
+references. The over-approximation the doubling provides is kept rather than traded away, so a file
+reading its arguments in the other order, such as `"$2$1"`, still refuses.
 
 This rule reaches every route the content test reaches, through one shared enumeration rather than
 each route's own guard. Written into the exact script operand's guard alone, it left the `source`,

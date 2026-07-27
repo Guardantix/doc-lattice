@@ -12051,33 +12051,40 @@ def _resource_references_positional_parameters(
 
 
 def _substitute_positional_references(
-    text: str, replacement: str, *, include_zero: bool = False
-) -> str:
-    """Return the file's text with every caller-supplied positional replaced by one string.
+    text: str, replacement: ContentExpr, *, include_zero: bool = False
+) -> ContentExpr:
+    """Return the file's text as an expression with every positional replaced by one choice.
 
-    Substituting the SAME string for every reference is what makes this sound without solving
-    which argument lands at which position. Two adjacent references such as ``"$1$2"`` therefore
-    yield that string twice in a row, which surfaces a composition the caller spells in the other
-    order: arguments ``lattice doc-`` produce ``latticedoc-latticedoc-``, where the marker appears
-    across the seam exactly as the child composes it from ``"$2$1"``.
+    Substituting a CHOICE over the caller's arguments, rather than one string, is what makes this
+    sound without solving which argument lands at which position. The true binding of any one
+    reference is a member of that choice, so composing the choices in the order the file spells
+    them over-approximates every assignment of arguments to references at once, and the marker DFA
+    that evaluates the result does the work. Enumerating the assignments instead would be
+    exponential in the reference count; this stays linear because a ``Choice`` is one node and
+    ``_merge_content_summaries`` collapses alternatives that share a DFA transfer.
+
+    Substituting one joined string was unsound for a file selecting a NON-ADJACENT subset of its
+    arguments: ``printf '%s\\n' '"$1$3" reconcile' > s.sh; bash s.sh doc- SAFE lattice`` runs the
+    marker under real Bash 5.2 while the joined ``doc-SAFElattice`` composes nothing (issue #176).
 
     Args:
         text: One literal alternative of the file's own content.
-        replacement: The text every positional reference is replaced by.
+        replacement: The expression every positional reference is replaced by, normally the choice
+            ``_PositionalBinding.expression`` builds.
         include_zero: Whether ``$0`` counts as a caller-supplied positional. See
             ``_text_references_positional_parameters`` for why the two dispatch forms differ.
 
     Returns:
-        The substituted text.
+        The substituted expression, in the file's own order.
     """
-    pieces: list[str] = []
+    pieces: list[ContentExpr] = []
     index = 0
     start = 0
     while True:
         index = text.find("$", index)
         if index == -1 or index + 1 >= len(text):
-            pieces.append(text[start:])
-            return "".join(pieces)
+            pieces.append(LiteralTransfer(text[start:]))
+            return concat(*pieces)
         following = text[index + 1]
         end = -1
         if following == "{":
@@ -12093,24 +12100,69 @@ def _substitute_positional_references(
         if end == -1:
             index += 1
             continue
-        pieces.append(text[start:index])
+        pieces.append(LiteralTransfer(text[start:index]))
         pieces.append(replacement)
         start = end
         index = end
 
 
-def _arguments_joined_text(
+@dataclass(frozen=True, slots=True)
+class _PositionalBinding:
+    """Every text one caller-supplied positional reference could bind to.
+
+    ``parts`` holds the individually selectable texts: one per argument word a caller spells, or
+    one per word a launcher's input splits into. ``joined`` holds every one of them concatenated
+    in order, which is what the whole analysis used to substitute on its own.
+
+    Keeping ``joined`` as an alternative beside the parts is load bearing rather than tidy. It
+    makes the choice model MONOTONE with the joined-string model it replaces, so every text the
+    old one matched is still matched and no refusal this family already makes can be removed by
+    the change. It is also the alternative that covers word splitting, where one argument the
+    caller spells splits into several words the child concatenates back, and the multi-alternative
+    argument, whose own alternatives this cannot tell apart at the seam.
+    """
+
+    parts: tuple[str, ...]
+    joined: str
+
+    @property
+    def texts(self) -> tuple[str, ...]:
+        """Return every text a single positional reference could bind to, without duplicates."""
+        return tuple(dict.fromkeys((*self.parts, self.joined)))
+
+    @property
+    def expression(self) -> ContentExpr:
+        """Return the choice a positional reference is replaced by."""
+        return choice(*(LiteralTransfer(text) for text in self.texts))
+
+    @property
+    def fragment_capable(self) -> bool:
+        """Return whether any bindable text could carry marker-relevant progress.
+
+        This is the fallback the routes take when the text a reference sits in cannot be read, so
+        the reference's placement is unknown and nothing narrower than the bound text is
+        available. Asking it of every alternative rather than only the joined text is the same
+        widening ``expression`` performs, one lattice level up.
+        """
+        return any(
+            _summary_marker_fragment_capable(_TransferSummary.literal(text)) for text in self.texts
+        )
+
+
+def _argument_positional_binding(
     arguments: Iterable[_ArgPort],
     sink_variables: Mapping[str | int, _ContentValue],
     resources: Mapping[str | int, _ContentValue],
     streams: Mapping[str | int, _ContentValue],
     limits: TaintLimits,
-) -> str:
-    """Return every argument word's literal text concatenated in argv order.
+) -> _PositionalBinding:
+    """Return what a positional reference can bind to, given the argv words a shell is handed.
 
-    Argv order is deliberate. It is the order that composes the marker when the child reads the
-    arguments in the order they were given, and the doubling in
-    ``_substitute_positional_references`` covers the orders it does not.
+    Each argument contributes its own literal text as a separately selectable alternative, since a
+    file is free to read any subset of its arguments in any order. Every alternative that one
+    argument's content solves to contributes too, because a reference binds one of them rather
+    than their concatenation. Argv order still drives ``joined``: it is the order that composes
+    the marker when the child reads the arguments in the order they were given.
 
     Args:
         arguments: The argv words after the script operand, in order.
@@ -12120,13 +12172,17 @@ def _arguments_joined_text(
         limits: The bound on content evaluation this analysis stays within.
 
     Returns:
-        The concatenated literal text of every argument.
+        The binding those arguments supply.
     """
+    parts: list[str] = []
     pieces: list[str] = []
     for argument in arguments:
         value = _evaluate_with_tables(argument.content, sink_variables, resources, streams, limits)
-        pieces.extend(sorted(text for alternative in value for text in alternative.literal_texts))
-    return "".join(pieces)
+        alternatives = sorted(text for alternative in value for text in alternative.literal_texts)
+        parts.extend(alternatives)
+        parts.append("".join(alternatives))
+        pieces.extend(alternatives)
+    return _PositionalBinding(parts=tuple(parts), joined="".join(pieces))
 
 
 @dataclass(frozen=True, slots=True)
@@ -12319,7 +12375,9 @@ def _shell_script_positional_state_unrepresentable(
        documents one function over: ordinary text answers it yes, because ``build`` ends in ``d``
        and so advances the scan from the idle entry state, and it refused ``bash s.sh build``.
        Substituting reads the file's real structure, so a fragment only counts where the file
-       actually places it.
+       actually places it. What each reference is substituted BY is a choice over every argument,
+       not one joined string, because a file is free to select a non-adjacent subset of its
+       arguments; see ``_substitute_positional_references``.
 
     All three were originally applied at the exact script operand alone, one route out of the seven
     its sibling content test covers, so the same file reached by ``source``, by a glob or variable
@@ -12340,34 +12398,43 @@ def _shell_script_positional_state_unrepresentable(
     for read in _shell_positional_reads(command, sink_variables, resources, streams, limits):
         if not read.keys:
             continue
-        joined = _arguments_joined_text(read.arguments, sink_variables, resources, streams, limits)
-        if not joined:
+        binding = _argument_positional_binding(
+            read.arguments, sink_variables, resources, streams, limits
+        )
+        if not binding.joined:
             continue
         for key in read.keys:
             content = _evaluate_with_tables(
                 ResourceRef(key), sink_variables, resources, streams, limits
             )
-            if _resource_composes_marker_from_text(content, joined, include_zero=read.include_zero):
+            if _resource_composes_marker_from_binding(
+                content, binding, limits, include_zero=read.include_zero
+            ):
                 return True
     return False
 
 
-def _resource_composes_marker_from_text(
-    content: _ContentValue, joined: str, *, include_zero: bool
+def _resource_composes_marker_from_binding(
+    content: _ContentValue,
+    binding: _PositionalBinding,
+    limits: TaintLimits,
+    *,
+    include_zero: bool,
 ) -> bool:
-    """Return whether a tracked file composes the marker once one text fills its positionals.
+    """Return whether a tracked file composes the marker once its positionals are bound.
 
     This is conditions 2 and 3 of ``_shell_script_positional_state_unrepresentable`` on their own,
     shared by every route that resolves a tracked file and by the launcher-fed route, which differ
-    only in where the text a positional binds to comes from.
+    only in where the texts a positional binds to come from.
 
     Args:
         content: The tracked resource's solved content value.
-        joined: The text every positional reference is replaced by.
+        binding: Every text one positional reference could bind to.
+        limits: The bound on content evaluation this analysis stays within.
         include_zero: Whether ``$0`` counts as a caller-supplied positional for this dispatch form.
 
     Returns:
-        Whether the file composes the marker once that text is substituted.
+        Whether the file composes the marker once that binding is substituted.
     """
     if not _resource_references_positional_parameters(content, include_zero=include_zero):
         return False
@@ -12379,11 +12446,11 @@ def _resource_composes_marker_from_text(
     ]
     if not readable:
         # The file references a positional but this analysis cannot read its text to see where.
-        # Nothing narrower than the bound text itself is available, so the unreadable case falls
-        # back to the fragment question.
-        return _summary_marker_fragment_capable(_TransferSummary.literal(joined))
+        # Nothing narrower than the bound texts themselves is available, so the unreadable case
+        # falls back to the fragment question.
+        return binding.fragment_capable
     return any(
-        _substituted_text_composes_marker(text, joined, include_zero=include_zero)
+        _substituted_text_composes_marker(text, binding, limits, include_zero=include_zero)
         for text in readable
     )
 
@@ -12546,7 +12613,10 @@ def _launcher_input_marker_fragment_capable(summary: _TransferSummary) -> bool:
     asked, which is what the launcher does to them.
 
     The raw form is asked too, since a single input word carrying a partial fragment is the case
-    joining cannot make any more visible.
+    joining cannot make any more visible. So is each individual WORD, because the child can bind
+    a non-adjacent subset of them: ``printf '%s\\n' doc- SAFE lattice`` joins to
+    ``doc-SAFElattice``, which carries no marker progress at all, while the child binding only the
+    first and third words composes the marker outright (issue #176).
 
     OPAQUE input answers no, which is the one place this deliberately does not fail closed. An
     opaque standard input is the step's own, or an untracked file's, and that is pre-existing
@@ -12569,8 +12639,9 @@ def _launcher_input_marker_fragment_capable(summary: _TransferSummary) -> bool:
     if _summary_marker_fragment_capable(summary):
         return True
     return any(
-        _summary_marker_fragment_capable(_TransferSummary.literal("".join(text.split())))
+        _summary_marker_fragment_capable(_TransferSummary.literal(candidate))
         for text in summary.literal_texts
+        for candidate in ("".join(text.split()), *text.split())
     )
 
 
@@ -12634,17 +12705,24 @@ def _launcher_shell_positional_state_unrepresentable(  # noqa: PLR0913
     fed = _evaluate_with_tables(stdin, sink_variables, resources, streams, limits)
     if not any(_launcher_input_marker_fragment_capable(alternative) for alternative in fed):
         return False
-    joined = "".join(
-        sorted(
-            "".join(text.split())
-            for alternative in fed
-            if not alternative.projection_opaque
-            for text in alternative.literal_texts
-        )
+    readable = sorted(
+        text
+        for alternative in fed
+        if not alternative.projection_opaque
+        for text in alternative.literal_texts
+    )
+    # A launcher splits its input into WORDS and appends them as separate argv entries, so each
+    # word is a text one positional can bind to on its own, and the whitespace-free join of one
+    # alternative is what a child concatenating all of them sees.
+    binding = _PositionalBinding(
+        parts=tuple(
+            candidate for text in readable for candidate in (*text.split(), "".join(text.split()))
+        ),
+        joined="".join("".join(text.split()) for text in readable),
     )
     return any(
         _shell_source_composes_from_launcher_input(
-            command, head_index, joined, sink_variables, resources, streams, limits
+            command, head_index, binding, sink_variables, resources, streams, limits
         )
         for head_index in candidates
     )
@@ -12653,7 +12731,7 @@ def _launcher_shell_positional_state_unrepresentable(  # noqa: PLR0913
 def _shell_source_composes_from_launcher_input(  # noqa: PLR0913
     command: _CommandEvidence,
     head_index: int,
-    joined: str,
+    binding: _PositionalBinding,
     sink_variables: Mapping[str | int, _ContentValue],
     resources: Mapping[str | int, _ContentValue],
     streams: Mapping[str | int, _ContentValue],
@@ -12661,7 +12739,7 @@ def _shell_source_composes_from_launcher_input(  # noqa: PLR0913
 ) -> bool:
     """Return whether the shell source at one argv index composes the marker from launcher input.
 
-    Substituting the joined input into every positional reference is the same technique
+    Substituting the input into every positional reference is the same technique
     ``_shell_script_positional_state_unrepresentable`` applies to visibly spelled arguments, and it
     is required here for the same reason: asking only whether the input is marker-FRAGMENT capable
     refused ``ls *.md | xargs -n1 sh -c 'echo $0'``, because ``.md`` ends in ``d`` and so advances
@@ -12673,7 +12751,7 @@ def _shell_source_composes_from_launcher_input(  # noqa: PLR0913
     Args:
         command: The command evidence being inspected.
         head_index: The argv index the shell option grammar is read from.
-        joined: Every readable input alternative's words joined, the text a positional may bind to.
+        binding: Every text a positional may bind to, one per input word plus their join.
         sink_variables: The per-command solved variable table.
         resources: The solved resource table.
         streams: The solved stream table.
@@ -12703,59 +12781,80 @@ def _shell_source_composes_from_launcher_input(  # noqa: PLR0913
         if port.dynamic:
             # A payload this analysis cannot read as text could place the input anywhere, so the
             # unreadable case falls back to the fragment question over the input itself.
-            if _summary_marker_fragment_capable(_TransferSummary.literal(joined)):
+            if binding.fragment_capable:
                 return True
             continue
-        if _substituted_text_composes_marker(port.literal, joined, include_zero=True):
+        if _substituted_text_composes_marker(port.literal, binding, limits, include_zero=True):
             return True
     for index in operand_indices:
         if index >= len(command.argv):
             continue
-        if _script_operand_composes_from_text(
-            command.argv[index], joined, sink_variables, resources, streams, limits
+        if _script_operand_composes_from_binding(
+            command.argv[index], binding, sink_variables, resources, streams, limits
         ):
             return True
     return False
 
 
-def _substituted_text_composes_marker(text: str, joined: str, *, include_zero: bool) -> bool:
-    """Return whether substituting one text into every positional reference composes the marker."""
+def _substituted_text_composes_marker(
+    text: str, binding: _PositionalBinding, limits: TaintLimits, *, include_zero: bool
+) -> bool:
+    """Return whether binding the caller's texts into every positional composes the marker.
+
+    The substituted expression is closed, holding only literal segments of the file's own text and
+    one choice per reference, so it is evaluated against empty tables. Evaluation still goes
+    through ``_evaluate_with_tables`` rather than ``_evaluate_closed`` so that an alternative width
+    no bound can represent raises ``_TaintLimitExceeded`` and fails closed, the way every other
+    evaluation in this module does, instead of silently narrowing the choice.
+
+    Args:
+        text: One literal alternative of the shell source being read.
+        binding: Every text one positional reference could bind to.
+        limits: The bound on content evaluation this analysis stays within.
+        include_zero: Whether ``$0`` counts as a caller-supplied positional for this dispatch form.
+
+    Returns:
+        Whether some assignment of those texts to the references composes the marker.
+    """
     if not _text_references_positional_parameters(text, include_zero=include_zero):
         return False
-    substituted = _substitute_positional_references(text, joined, include_zero=include_zero)
-    return _marker_capable(frozenset({_TransferSummary.literal(substituted)}))
+    substituted = _substitute_positional_references(
+        text, binding.expression, include_zero=include_zero
+    )
+    return _marker_capable(_evaluate_with_tables(substituted, {}, {}, {}, limits))
 
 
-def _script_operand_composes_from_text(  # noqa: PLR0913
+def _script_operand_composes_from_binding(  # noqa: PLR0913
     operand: _ArgPort,
-    joined: str,
+    binding: _PositionalBinding,
     sink_variables: Mapping[str | int, _ContentValue],
     resources: Mapping[str | int, _ContentValue],
     streams: Mapping[str | int, _ContentValue],
     limits: TaintLimits,
 ) -> bool:
-    """Return whether a tracked script operand composes the marker from one supplied text.
+    """Return whether a tracked script operand composes the marker from one supplied binding.
 
     Resolution and composition are both the shared ones, so a launcher-fed shell reaches the same
     tracked files through a glob or variable operand that a visibly spelled argument list reaches
     (``_port_tracked_resource_keys``), and asks them the same question
-    (``_resource_composes_marker_from_text``).
+    (``_resource_composes_marker_from_binding``).
 
     Args:
         operand: The argv word naming the script.
-        joined: The text a positional may bind to.
+        binding: Every text a positional may bind to.
         sink_variables: The per-command solved variable table.
         resources: The solved resource table.
         streams: The solved stream table.
         limits: The bound on content evaluation this analysis stays within.
 
     Returns:
-        Whether the tracked file composes the marker once that text is substituted.
+        Whether the tracked file composes the marker once that binding is substituted.
     """
     return any(
-        _resource_composes_marker_from_text(
+        _resource_composes_marker_from_binding(
             _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits),
-            joined,
+            binding,
+            limits,
             include_zero=False,
         )
         for key in _port_tracked_resource_keys(operand, resources)
