@@ -2277,12 +2277,20 @@ class _ShellScanner:
                 [producer_scope],
                 len(self.scope_stack[-1].controls) if self.scope_stack else 0,
             )
+            stage_is_new = True
         elif not state.pipeline.stages or state.pipeline.stages[-1] != producer_scope:
             state.pipeline.stages.append(producer_scope)
+            stage_is_new = True
+        else:
+            stage_is_new = False
         state.pending_pipe_producer = producer_scope
         state.pending_pipe_stderr = includes_stderr
         state.pending_compound_scope_id = None
-        if self.scope_stack and self._output_target():
+        # The pop hands this stage's stdout to the pipeline scope, so it is owed only when the
+        # stage is genuinely new. Popping for a scope already recorded as the trailing stage would
+        # discard the stdout of an unrelated earlier command in the enclosing scope, exactly as
+        # guarded in ``_finalize_pipeline``.
+        if stage_is_new and self.scope_stack and self._output_target():
             self._output_target().pop()
 
     def _finalize_pipeline(self, state: _CommandScanState) -> None:
