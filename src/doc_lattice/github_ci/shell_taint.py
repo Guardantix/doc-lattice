@@ -4903,6 +4903,11 @@ def _static_eval_resource_writes(
     A branch whose literal status is False contributes nothing, matching the reachability rule
     ``_static_eval_mutations`` already applies to a payload's assignments.
 
+    The payload runs with the enclosing ``eval``'s own descriptors already installed, so those
+    bindings, not just the enclosing compounds', are what a payload ``>&1`` resolves against.
+    Passing the compound bindings alone left ``eval 'printf X=doc- >&1' > s.sh`` with descriptor
+    1 unresolved and dropped the write, while the authored brace-group analogue refused.
+
     Args:
         command: The command whose payload may perform writes.
         environment: The execution environment that command runs in.
@@ -4915,6 +4920,7 @@ def _static_eval_resource_writes(
     """
     if not _static_eval_programs(command):
         return ()
+    payload_bindings = _output_bindings(command.redirections, inherited=inherited, guarded=guarded)
     writes: list[_FlowWrite] = []
     for parsed in _static_eval_commands(command):
         if parsed.execution_status is False or not parsed.redirections:
@@ -4923,7 +4929,7 @@ def _static_eval_resource_writes(
             _static_write_definitions(
                 parsed.redirections,
                 _static_eval_command_stdout(parsed, environment, scoped=scoped),
-                inherited,
+                payload_bindings,
                 guarded,
             )
         )

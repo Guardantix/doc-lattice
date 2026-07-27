@@ -3257,6 +3257,45 @@ def test_eval_payload_write_of_a_named_resource_operand_reaches_a_sink() -> None
     assert result.incomplete_reason == "authored marker flow reaches an execution sink"
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    [">&1", "> /dev/fd/1", "> /dev/stdout"],
+    ids=("descriptor-duplication", "dev-fd", "dev-stdout"),
+)
+def test_eval_payload_write_through_the_enclosing_eval_descriptor(spelling: str) -> None:
+    """Issue #146: a payload runs with the enclosing eval's own descriptors installed.
+
+    ``eval 'printf X=doc- >&1' > s.sh`` routes the payload's stdout into ``s.sh`` under real bash
+    5.2, because the payload duplicates a descriptor the eval command itself bound. Passing only
+    the enclosing scope's bindings left descriptor 1 unresolved, so the write was dropped and the
+    body certified. The authored brace-group analogue ``{ printf X=doc- >&1; } > s.sh`` already
+    refuses, so this closes a route the payload spelling recognized more narrowly than the
+    authored one.
+    """
+    control = f'{{ printf X=doc- {spelling}; }} > s.sh; source s.sh; eval "${{X}}lattice check"'
+    exploit = f"eval 'printf X=doc- {spelling}' > s.sh; source s.sh; eval \"${{X}}lattice check\""
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "shell source payload state cannot be represented"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_eval_payload_write_to_an_unbound_descriptor_registers_nothing() -> None:
+    """Over-refusal guard: a descriptor nothing in the body binds is a Bash error, not a flow.
+
+    AD-18 records that a descriptor no part of the body binds keeps routing nowhere, so the
+    payload route must not fabricate a write for one either.
+    """
+    body = "eval 'printf X=doc- >&7'; source s.sh; eval \"${X}lattice check\""
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
 def test_eval_payload_write_without_a_sink_still_certifies() -> None:
     """Over-refusal guard: AD-18's sink boundary survives the lowering.
 

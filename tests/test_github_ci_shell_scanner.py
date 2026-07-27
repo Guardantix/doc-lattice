@@ -472,6 +472,20 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         {},
         "shell source payload state cannot be represented",
     ),
+    # A payload runs with the enclosing eval's own descriptors installed, so these duplicate a
+    # descriptor that command itself bound. The authored brace-group analogue already refused.
+    (
+        "eval-payload-duplicates-the-eval-descriptor",
+        "eval 'printf X=doc- >&1' > s.sh; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "eval-payload-writes-through-dev-fd",
+        "eval 'printf X=doc- > /dev/fd/1' > s.sh; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
 ]
 
 
