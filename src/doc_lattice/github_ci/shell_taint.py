@@ -11732,6 +11732,47 @@ def _port_reads_tracked_marker_content(  # noqa: PLR0913
     return _resource_marker_fragment_capable(content)
 
 
+def _port_tracked_resource_keys(
+    port: _ArgPort, resources: Mapping[str | int, _ContentValue]
+) -> tuple[str, ...]:
+    """Return every script-tracked resource key one operand word could name.
+
+    This is the resolution half of ``_port_reads_tracked_marker_content`` and
+    ``_glob_ports_reach_tracked_marker`` put in one place, so a guard that has to ask a question
+    ABOUT the named file, rather than only about its content, reaches every spelling both of those
+    reach between them. The content half arrived at that union across two guards, one exact and one
+    glob; the positional half was written into the exact one alone and so recognized only the
+    directly spelled operand (issue #175).
+
+    The three spellings resolve exactly as the content half resolves them. An exactly spelled word
+    normalizes to a single key. A word carrying ``active_argv_expansion`` matches by its own
+    pattern, in both authored and key space (``_resource_key_patterns``). A ``dynamic`` word matches
+    every tracked key with ``*``, because the name it resolves to is not knowable here at all. A
+    process substitution operand names no static key and so resolves to nothing.
+
+    Args:
+        port: The operand word naming the file.
+        resources: The solved resource table; a key present here is one this script writes.
+
+    Returns:
+        Every tracked resource key this word could name, empty when it names none.
+    """
+    if port.process_resource_id is not None:
+        return ()
+    if port.dynamic or port.active_argv_expansion:
+        patterns = ("*",) if port.dynamic else _resource_key_patterns(port.literal)
+        return tuple(
+            key
+            for key in resources
+            if isinstance(key, str)
+            and any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
+        )
+    key = normalize_static_resource(port.literal, dynamic=False)
+    if key is None or key not in resources:
+        return ()
+    return (key,)
+
+
 def _source_glob_operand_state_unrepresentable(
     command: _CommandEvidence,
     sink_variables: Mapping[str | int, _ContentValue],
@@ -11981,7 +12022,9 @@ def _positional_reference_start(character: str, *, include_zero: bool = False) -
     return character.isdigit() and (include_zero or character != "0")
 
 
-def _resource_references_positional_parameters(value: _ContentValue) -> bool:
+def _resource_references_positional_parameters(
+    value: _ContentValue, *, include_zero: bool = False
+) -> bool:
     """Return whether a script-tracked file's own content reads a caller-supplied positional.
 
     Content this analysis cannot read as text answers yes. A resource whose solved value is opaque
@@ -11990,6 +12033,8 @@ def _resource_references_positional_parameters(value: _ContentValue) -> bool:
 
     Args:
         value: The resource's solved content value.
+        include_zero: Whether ``$0`` counts as a caller-supplied positional. See
+            ``_text_references_positional_parameters`` for why the dispatch forms differ.
 
     Returns:
         Whether any alternative reads a positional parameter, or is unreadable as text.
@@ -11997,7 +12042,10 @@ def _resource_references_positional_parameters(value: _ContentValue) -> bool:
     for alternative in value:
         if alternative.projection_opaque or alternative.projection_incomplete:
             return True
-        if any(_text_references_positional_parameters(text) for text in alternative.literal_texts):
+        if any(
+            _text_references_positional_parameters(text, include_zero=include_zero)
+            for text in alternative.literal_texts
+        ):
             return True
     return False
 
@@ -12081,6 +12129,160 @@ def _arguments_joined_text(
     return "".join(pieces)
 
 
+@dataclass(frozen=True, slots=True)
+class _PositionalRead:
+    """One tracked file a shell reads, paired with the positionals that shell binds for it.
+
+    ``keys`` is every script-tracked resource the naming word could resolve to, ``arguments`` the
+    argv words the reading shell binds as positional parameters, and ``include_zero`` whether
+    ``$0`` is one of those caller-supplied words for that dispatch form.
+    """
+
+    keys: tuple[str, ...]
+    arguments: tuple[_ArgPort, ...]
+    include_zero: bool
+
+
+def _shell_child_argument_bindings(
+    command: _CommandEvidence, selection: _ShellSourceSelection
+) -> tuple[tuple[tuple[_ArgPort, ...], bool], ...]:
+    """Return the positional bindings a selected shell holds while it reads its startup files.
+
+    A ``--rcfile``/``--init-file`` value and a ``BASH_ENV`` target are read BEFORE the program the
+    option grammar selected, but the child's positional parameters are already bound by then, so a
+    startup file's ``$1`` is the selected program's first argument rather than anything beside the
+    option. Verified under real Bash 5.2 with a shim on ``PATH``: a ``BASH_ENV`` file spelling
+    ``"$0" reconcile`` runs the marker for ``bash -c : doc-lattice`` and does not for
+    ``bash -s doc-lattice``.
+
+    That is the whole difference between the forms, and it is the ``include_zero`` flag:
+
+    - ``COMMAND``: ``bash -c PROGRAM w0 w1 ...`` binds ``$0`` to the first word after the payload,
+      so every word after it is caller supplied and ``$0`` counts.
+    - ``SCRIPT``: the child's ``$0`` is the script's own path, so only the words after the operand
+      are caller supplied.
+    - ``STDIN``: ``bash -s w1 w2`` starts its operands at ``$1``, with ``$0`` left as the shell's
+      own name, so the selection's first operand index is already ``$1``.
+    - ``AMBIGUOUS``: the argv shape is uncertain, so each candidate is read as both the
+      operands-start-here form and the program-here form, which is the same widening
+      ``_shell_source_sinks`` performs by building a choice over the whole candidate set. Adding
+      words to a binding is not monotone (a wider join can break a composition that spanned the
+      seam between the file's text and the argument), so the forms are enumerated rather than
+      merged into one maximal list.
+
+    Args:
+        command: The command whose argv the selection indexes.
+        selection: The shell source selection made from that argv.
+
+    Returns:
+        Each ``(arguments, include_zero)`` binding the child could hold, empty when it binds none.
+    """
+    argv = command.argv
+    index = selection.argv_index
+    if selection.kind is _ShellSourceKind.COMMAND and index is not None:
+        return ((argv[index + 1 :], True),)
+    if selection.kind is _ShellSourceKind.SCRIPT and index is not None:
+        return ((argv[index + 1 :], False),)
+    if selection.kind is _ShellSourceKind.STDIN and index is not None:
+        return ((argv[index:], False),)
+    if selection.kind is _ShellSourceKind.AMBIGUOUS:
+        return tuple(
+            binding
+            for candidate in selection.candidate_indices
+            if candidate < len(argv)
+            for binding in ((argv[candidate:], False), (argv[candidate + 1 :], True))
+        )
+    return ()
+
+
+def _shell_positional_reads(
+    command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> Iterator[_PositionalRead]:
+    """Yield every script-tracked file this command's shells read, with that shell's arguments.
+
+    This is the single place the seven shell-source routes of the state-unrepresentable family are
+    enumerated for the positional question, mirroring the way ``_port_reads_tracked_marker_content``
+    is the single place they all ask the content question. The positional test was originally
+    written into the exact script operand's own guard, so a tracked file that composes the marker
+    out of caller-supplied arguments certified on every other spelling of the same read (issue
+    #175). Adding a route means adding it here rather than growing an eighth guard.
+
+    Each route supplies exactly two things, and nothing else about it varies:
+
+    1. ``source``/``.``: the operand names the file, in all three of its exact, glob and dynamic
+       spellings, and the words after the operand are the sourced script's positionals. The child
+       is the CURRENT shell, whose ``$0`` the builtin leaves untouched, so ``$0`` is excluded.
+    2. A shell's ``SCRIPT`` operand, and every ``AMBIGUOUS`` candidate, with the words after that
+       operand as its arguments and ``$0`` excluded as the script's own path.
+    3. Every ``--rcfile``/``--init-file`` value and every tracked ``BASH_ENV`` target, whose
+       arguments are the selected program's, per ``_shell_child_argument_bindings``.
+
+    Args:
+        command: The command whose executable candidates may read a shell source.
+        sink_variables: The per-command solved variable table, for resolving a ``BASH_ENV`` value.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving a ``BASH_ENV`` value.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Yields:
+        One record per file-and-arguments pairing a shell in this command could read.
+    """
+    argv = command.argv
+    environment_keys: tuple[str, ...] | None = None
+    for executable in _iter_executable_evidence(command.executable):
+        if (
+            executable.argv_index is not None
+            and executable.name in {"source", "."}
+            and executable.literal == executable.name
+            and not executable.external_lookup
+        ):
+            operand_index = _source_operand_index(command, executable.argv_index)
+            if operand_index < len(argv):
+                yield _PositionalRead(
+                    _port_tracked_resource_keys(argv[operand_index], resources),
+                    argv[operand_index + 1 :],
+                    include_zero=False,
+                )
+            continue
+        head_index = _shell_source_head_index(command, executable)
+        if head_index is None:
+            continue
+        selection = _select_shell_source(argv, head_index)
+        operand_indices: tuple[int, ...] = ()
+        if selection.kind is _ShellSourceKind.SCRIPT and selection.argv_index is not None:
+            operand_indices = (selection.argv_index,)
+        elif selection.kind is _ShellSourceKind.AMBIGUOUS:
+            operand_indices = selection.candidate_indices
+        for index in operand_indices:
+            if index < len(argv):
+                yield _PositionalRead(
+                    _port_tracked_resource_keys(argv[index], resources),
+                    argv[index + 1 :],
+                    include_zero=False,
+                )
+        if environment_keys is None:
+            environment_keys = _bash_env_tracked_keys(
+                command, sink_variables, resources, streams, limits
+            )
+        startup_keys = (
+            tuple(
+                key
+                for index in selection.init_file_indices
+                if index < len(argv)
+                for key in _port_tracked_resource_keys(argv[index], resources)
+            )
+            + environment_keys
+        )
+        if not startup_keys:
+            continue
+        for arguments, include_zero in _shell_child_argument_bindings(command, selection):
+            yield _PositionalRead(startup_keys, arguments, include_zero=include_zero)
+
+
 def _shell_script_positional_state_unrepresentable(
     command: _CommandEvidence,
     sink_variables: Mapping[str | int, _ContentValue],
@@ -12088,7 +12290,7 @@ def _shell_script_positional_state_unrepresentable(
     streams: Mapping[str | int, _ContentValue],
     limits: TaintLimits,
 ) -> bool:
-    """Return whether a shell's script operand composes the marker from the arguments it is given.
+    """Return whether a shell source composes the marker from the arguments its shell is given.
 
     ``_shell_script_operand_state_unrepresentable`` reads the file's own assignments, which is the
     composition a file performs out of text it contains. A file can also compose out of text the
@@ -12119,82 +12321,55 @@ def _shell_script_positional_state_unrepresentable(
        Substituting reads the file's real structure, so a fragment only counts where the file
        actually places it.
 
-    ``$0`` is deliberately not a trigger, because a script's ``$0`` is its own path rather than a
-    word the caller chose. The ``AMBIGUOUS`` selection is scanned alongside the exact one for the
-    same reason every guard here scans it: once the argv shape is uncertain any candidate can land
-    in the operand position, and the words after it are then its arguments.
+    All three were originally applied at the exact script operand alone, one route out of the seven
+    its sibling content test covers, so the same file reached by ``source``, by a glob or variable
+    operand, by ``--rcfile``/``--init-file``, or through ``BASH_ENV`` certified (issue #175).
+    ``_shell_positional_reads`` now enumerates every route once and this applies the conditions to
+    what it yields, so no route can carry the test without the others.
 
     Args:
-        command: The command whose executable candidates may be a shell.
+        command: The command whose executable candidates may read a shell source.
         sink_variables: The per-command solved variable table, for resolving the resource.
         resources: The solved resource table; a key present here is one this script writes.
         streams: The solved stream table, for resolving the resource.
         limits: The bound on content evaluation this analysis stays within.
 
     Returns:
-        Whether some shell runs a script-tracked file that reads a marker-capable argument.
+        Whether some shell reads a script-tracked file that composes the marker from its arguments.
     """
-    for executable in _iter_executable_evidence(command.executable):
-        head_index = _shell_source_head_index(command, executable)
-        if head_index is None:
+    for read in _shell_positional_reads(command, sink_variables, resources, streams, limits):
+        if not read.keys:
             continue
-        selection = _select_shell_source(command.argv, head_index)
-        if selection.kind is _ShellSourceKind.SCRIPT and selection.argv_index is not None:
-            operand_indices: tuple[int, ...] = (selection.argv_index,)
-        elif selection.kind is _ShellSourceKind.AMBIGUOUS:
-            operand_indices = selection.candidate_indices
-        else:
+        joined = _arguments_joined_text(read.arguments, sink_variables, resources, streams, limits)
+        if not joined:
             continue
-        if any(
-            _script_operand_composes_from_arguments(
-                command, index, sink_variables, resources, streams, limits
+        for key in read.keys:
+            content = _evaluate_with_tables(
+                ResourceRef(key), sink_variables, resources, streams, limits
             )
-            for index in operand_indices
-            if index < len(command.argv)
-        ):
-            return True
+            if _resource_composes_marker_from_text(content, joined, include_zero=read.include_zero):
+                return True
     return False
 
 
-def _script_operand_composes_from_arguments(  # noqa: PLR0913
-    command: _CommandEvidence,
-    index: int,
-    sink_variables: Mapping[str | int, _ContentValue],
-    resources: Mapping[str | int, _ContentValue],
-    streams: Mapping[str | int, _ContentValue],
-    limits: TaintLimits,
+def _resource_composes_marker_from_text(
+    content: _ContentValue, joined: str, *, include_zero: bool
 ) -> bool:
-    """Return whether one script operand's tracked file composes the marker from its arguments.
+    """Return whether a tracked file composes the marker once one text fills its positionals.
 
-    The three conditions ``_shell_script_positional_state_unrepresentable`` documents are applied
-    here in order, cheapest first.
+    This is conditions 2 and 3 of ``_shell_script_positional_state_unrepresentable`` on their own,
+    shared by every route that resolves a tracked file and by the launcher-fed route, which differ
+    only in where the text a positional binds to comes from.
 
     Args:
-        command: The command whose argv holds the operand.
-        index: The argv index of the script operand.
-        sink_variables: The per-command solved variable table.
-        resources: The solved resource table.
-        streams: The solved stream table.
-        limits: The bound on content evaluation this analysis stays within.
+        content: The tracked resource's solved content value.
+        joined: The text every positional reference is replaced by.
+        include_zero: Whether ``$0`` counts as a caller-supplied positional for this dispatch form.
 
     Returns:
-        Whether this operand's file composes the marker once its arguments are substituted.
+        Whether the file composes the marker once that text is substituted.
     """
-    operand = command.argv[index]
-    if operand.process_resource_id is not None:
-        return False
-    key = normalize_static_resource(
-        operand.literal, dynamic=operand.dynamic or operand.active_argv_expansion
-    )
-    if key is None or key not in resources:
-        return False
-    content = _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits)
-    if not _resource_references_positional_parameters(content):
-        return False
-    arguments = _arguments_joined_text(
-        command.argv[index + 1 :], sink_variables, resources, streams, limits
-    )
-    if not arguments:
+    if not _resource_references_positional_parameters(content, include_zero=include_zero):
         return False
     readable = [
         text
@@ -12204,15 +12379,11 @@ def _script_operand_composes_from_arguments(  # noqa: PLR0913
     ]
     if not readable:
         # The file references a positional but this analysis cannot read its text to see where.
-        # Nothing narrower than the arguments themselves is available, so the unreadable case
-        # falls back to the fragment question.
-        return _summary_marker_fragment_capable(_TransferSummary.literal(arguments))
+        # Nothing narrower than the bound text itself is available, so the unreadable case falls
+        # back to the fragment question.
+        return _summary_marker_fragment_capable(_TransferSummary.literal(joined))
     return any(
-        _marker_capable(
-            frozenset(
-                {_TransferSummary.literal(_substitute_positional_references(text, arguments))}
-            )
-        )
+        _substituted_text_composes_marker(text, joined, include_zero=include_zero)
         for text in readable
     )
 
@@ -12273,6 +12444,39 @@ def _bash_env_shell_source_unrepresentable(
         for executable in _iter_executable_evidence(command.executable)
     ):
         return False
+    for key in _bash_env_tracked_keys(command, sink_variables, resources, streams, limits):
+        content = _evaluate_with_tables(
+            ResourceRef(key), sink_variables, resources, streams, limits
+        )
+        if _marker_capable(content) or _resource_assignment_marker_fragment_capable(content):
+            return True
+    return False
+
+
+def _bash_env_tracked_keys(
+    command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> tuple[str, ...]:
+    """Return every script-tracked resource key this command's ``BASH_ENV`` could name.
+
+    This is the channel half of ``_bash_env_shell_source_unrepresentable`` on its own, so the
+    content question that guard asks and the positional question
+    ``_shell_script_positional_state_unrepresentable`` asks resolve the same targets from the same
+    two value spellings rather than each recognizing its own set.
+
+    Args:
+        command: The command whose prefix assignments may set ``BASH_ENV``.
+        sink_variables: The per-command solved variable table, for the exported spelling.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving a prefix assignment's value.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Every tracked resource key a ``BASH_ENV`` value in scope for this command names.
+    """
     # Variables live under scoped keys, so every scope that spells this name is read rather than
     # one reconstructed scope. Reading them all is the fail-closed direction: the child inherits
     # whichever one is live, and this analysis does not track which that is.
@@ -12290,20 +12494,14 @@ def _bash_env_shell_source_unrepresentable(
         )
         if _unscoped_variable_name(assignment.name) == "BASH_ENV"
     )
+    keys: list[str] = []
     for value in values:
         for alternative in value:
             for text in alternative.literal_texts:
                 key = normalize_static_resource(text, dynamic=False)
-                if key is None or key not in resources:
-                    continue
-                content = _evaluate_with_tables(
-                    ResourceRef(key), sink_variables, resources, streams, limits
-                )
-                if _marker_capable(content) or _resource_assignment_marker_fragment_capable(
-                    content
-                ):
-                    return True
-    return False
+                if key is not None and key in resources and key not in keys:
+                    keys.append(key)
+    return tuple(keys)
 
 
 def _launcher_shell_head_index(
@@ -12538,6 +12736,11 @@ def _script_operand_composes_from_text(  # noqa: PLR0913
 ) -> bool:
     """Return whether a tracked script operand composes the marker from one supplied text.
 
+    Resolution and composition are both the shared ones, so a launcher-fed shell reaches the same
+    tracked files through a glob or variable operand that a visibly spelled argument list reaches
+    (``_port_tracked_resource_keys``), and asks them the same question
+    (``_resource_composes_marker_from_text``).
+
     Args:
         operand: The argv word naming the script.
         joined: The text a positional may bind to.
@@ -12549,26 +12752,13 @@ def _script_operand_composes_from_text(  # noqa: PLR0913
     Returns:
         Whether the tracked file composes the marker once that text is substituted.
     """
-    if operand.process_resource_id is not None:
-        return False
-    key = normalize_static_resource(
-        operand.literal, dynamic=operand.dynamic or operand.active_argv_expansion
-    )
-    if key is None or key not in resources:
-        return False
-    content = _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits)
-    if not _resource_references_positional_parameters(content):
-        return False
-    readable = [
-        text
-        for alternative in content
-        if not (alternative.projection_opaque or alternative.projection_incomplete)
-        for text in alternative.literal_texts
-    ]
-    if not readable:
-        return _summary_marker_fragment_capable(_TransferSummary.literal(joined))
     return any(
-        _substituted_text_composes_marker(text, joined, include_zero=False) for text in readable
+        _resource_composes_marker_from_text(
+            _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits),
+            joined,
+            include_zero=False,
+        )
+        for key in _port_tracked_resource_keys(operand, resources)
     )
 
 

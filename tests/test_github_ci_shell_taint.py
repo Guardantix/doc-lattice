@@ -4534,6 +4534,169 @@ def test_shell_script_positional_over_refusal_guards(body: str) -> None:
     assert result.incomplete_reason is None
 
 
+# Issue #175. The positional-composition test above was written into the exact script operand's own
+# guard, while the assignment content test it sits beside is applied at every route in the same
+# family. The same tracked file therefore certified on all six other spellings of the same read.
+# Every body below executes the marker under real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``,
+# confirmed with the differential oracle in ``scripts/fuzz_shell_taint.py``.
+_POSITIONAL_INERT_SCRIPT = "printf '%s\\n' 'run \"$1\"' > s.sh; "
+_POSITIONAL_ZERO_SCRIPT = "printf '%s\\n' '\"$0\" reconcile' > s.sh; "
+_POSITIONAL_ZERO_ONE_SCRIPT = "printf '%s\\n' '\"$0$1\" reconcile' > s.sh; "
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_SCRIPT + "source s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + ". ./s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "source -- s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + 'F=s.sh; source "$F" doc- lattice',
+        _POSITIONAL_SCRIPT + "source s*.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash s*.sh doc- lattice",
+        _POSITIONAL_SCRIPT + 'F=s.sh; bash "$F" doc- lattice',
+        _POSITIONAL_SCRIPT + "bash --rcfile s.sh -ic : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash --init-file s.sh -ic : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "timeout 5 bash --rcfile s.sh -ic : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash --rcfile s.sh -i t.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "export BASH_ENV=s.sh; bash -c : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "BASH_ENV=s.sh bash -c : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "export BASH_ENV=s.sh; bash -s doc- lattice </dev/null",
+        _POSITIONAL_SCRIPT + "export BASH_ENV=s.sh; bash $FLAGS -c : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash --rcfile s.sh $FLAGS -ic : sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash --rcfile s.sh -i q*.txt doc- lattice",
+    ],
+    ids=(
+        "source-builtin",
+        "dot-builtin",
+        "source-past-end-of-options",
+        "source-operand-through-a-variable",
+        "source-glob-operand",
+        "glob-script-operand",
+        "variable-script-operand",
+        "rcfile-startup-file",
+        "init-file-startup-file",
+        "rcfile-behind-a-launcher",
+        "rcfile-beside-a-script-dispatch",
+        "bash-env-exported",
+        "bash-env-prefix-assignment",
+        "bash-env-stdin-dispatch",
+        "bash-env-under-an-ambiguous-option-word",
+        "rcfile-under-an-ambiguous-option-word",
+        "rcfile-under-an-ambiguous-glob-operand",
+    ),
+)
+def test_shell_source_positional_routes_fail_closed(body: str) -> None:
+    """Issue #175: the positional test now covers every route its sibling content test covers.
+
+    Each spelling names the SAME tracked file with the SAME arguments as the exact script operand
+    control, which already refused, so the route rather than the file, the composition or the sink
+    is what these isolate. ``source`` and ``.`` take the words after the operand as the sourced
+    script's positionals; a glob or variable operand resolves through the same widened match the
+    content half already uses; and a ``--rcfile``/``--init-file`` value or a ``BASH_ENV`` target is
+    read by a child whose positionals the selected program's operands already bound.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _POSITIONAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_INERT_SCRIPT + "source s.sh build",
+        _POSITIONAL_INERT_SCRIPT + ". ./s.sh build",
+        _POSITIONAL_INERT_SCRIPT + 'F=s.sh; source "$F" build',
+        _POSITIONAL_INERT_SCRIPT + "source s*.sh build",
+        _POSITIONAL_INERT_SCRIPT + "bash s*.sh build",
+        _POSITIONAL_INERT_SCRIPT + 'F=s.sh; bash "$F" build',
+        _POSITIONAL_INERT_SCRIPT + "bash --rcfile s.sh -ic : sh build",
+        _POSITIONAL_INERT_SCRIPT + "export BASH_ENV=s.sh; bash -c : sh build",
+        _POSITIONAL_SCRIPT + "source s.sh",
+        _POSITIONAL_SCRIPT + "bash --rcfile s.sh -ic :",
+        _POSITIONAL_SCRIPT + "export BASH_ENV=s.sh; bash -c :",
+        "source /etc/profile.d/ci.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash --rcfile s.sh --version",
+        _POSITIONAL_SCRIPT + "export BASH_ENV=s.sh; bash --version",
+        _POSITIONAL_SCRIPT + "source --",
+    ],
+    ids=(
+        "source-ordinary-argument",
+        "dot-ordinary-argument",
+        "source-operand-through-a-variable",
+        "source-glob-operand",
+        "glob-script-operand",
+        "variable-script-operand",
+        "rcfile-ordinary-argument",
+        "bash-env-ordinary-argument",
+        "source-without-arguments",
+        "rcfile-without-arguments",
+        "bash-env-without-arguments",
+        "source-target-this-body-never-writes",
+        "rcfile-beside-an-eager-stop-option",
+        "bash-env-beside-an-eager-stop-option",
+        "source-names-no-operand-at-all",
+    ),
+)
+def test_shell_source_positional_route_over_refusal_guards(body: str) -> None:
+    """The widened routes keep all three conditions, so the ordinary spellings still certify.
+
+    ``build`` ends in ``d`` and so advances the scan from the idle entry state, which is exactly
+    the trap a marker-FRAGMENT question over the arguments falls into; substituting instead reads
+    where the file actually places the argument. Sourcing a helper with arguments is an ordinary CI
+    idiom, so this direction is what keeps the ``source`` route's cost at zero.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_ZERO_ONE_SCRIPT + "export BASH_ENV=s.sh; bash -c : doc- lattice",
+        _POSITIONAL_ZERO_ONE_SCRIPT + "bash --rcfile s.sh -ic : doc- lattice",
+    ],
+    ids=("bash-env-command-form", "rcfile-command-form"),
+)
+def test_startup_file_dollar_zero_is_caller_supplied_for_the_command_form(body: str) -> None:
+    """A ``-c`` child's ``$0`` is the first operand, so a startup file's ``$0`` is caller supplied.
+
+    Verified under real Bash 5.2: a ``BASH_ENV`` file spelling ``"$0" reconcile`` runs the marker
+    for ``bash -c : doc-lattice`` and does not for ``bash -s doc-lattice``. Substituting ``$1``
+    alone leaves ``"$0lattice" reconcile``, which composes nothing, so excluding ``$0`` on this
+    form would certify a body Bash runs the marker in.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _POSITIONAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_ZERO_SCRIPT + "source s.sh doc- lattice",
+        _POSITIONAL_ZERO_SCRIPT + ". ./s.sh doc- lattice",
+        _POSITIONAL_ZERO_SCRIPT + "export BASH_ENV=s.sh; bash -s doc- lattice </dev/null",
+        _POSITIONAL_ZERO_SCRIPT + "bash s.sh doc- lattice",
+    ],
+    ids=("source-builtin", "dot-builtin", "bash-env-stdin-form", "script-operand"),
+)
+def test_startup_file_dollar_zero_excluded_where_the_caller_never_chose_it(body: str) -> None:
+    """The other three dispatch forms leave ``$0`` outside the caller's reach, so it must not fire.
+
+    ``source`` leaves the current shell's ``$0`` untouched, ``bash -s`` starts its operands at
+    ``$1`` with ``$0`` left as the shell's own name, and a script operand's ``$0`` is its own path.
+    Real Bash runs no marker in any of these, and each would refuse if ``$0`` counted everywhere.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
 # Codex review round 3. A launcher appends words to the command it runs, taken from its own
 # standard input (``xargs --help``: "Run COMMAND with arguments INITIAL-ARGS and more arguments
 # read from input"). Those words are the child shell's positional parameters and no argv position
@@ -4554,6 +4717,10 @@ _LAUNCHER_REASON = "launcher-fed shell positional state cannot be represented"
             "printf '%s\\n' '\"$1$2\" reconcile' > s.sh; "
             "printf '%s\\n' doc- lattice | xargs bash s.sh"
         ),
+        (
+            "printf '%s\\n' '\"$1$2\" reconcile' > s.sh; "
+            "printf '%s\\n' doc- lattice | xargs bash s*.sh"
+        ),
     ],
     ids=(
         "one-word-at-dollar-zero",
@@ -4563,6 +4730,7 @@ _LAUNCHER_REASON = "launcher-fed shell positional state cannot be represented"
         "input-supplies-only-the-prefix",
         "nested-launchers",
         "launcher-fed-script-operand",
+        "launcher-fed-glob-script-operand",
     ),
 )
 def test_launcher_fed_shell_positionals_fail_closed(body: str) -> None:
@@ -4602,6 +4770,7 @@ def test_launcher_fed_shell_exported_variable_control_still_refuses() -> None:
         "printf '%s%s\\n' doc- lattice | xargs -n1 sh -c 'echo hi'",
         "cat list.txt | xargs -n1 sh -c '$0 reconcile'",
         "sh -c '$0 build'",
+        "printf '%s\\n' 'run \"$1\"' > s.sh; ls *.md | xargs -n1 bash s*.sh",
     ],
     ids=(
         "launcher-reads-nothing",
@@ -4613,6 +4782,7 @@ def test_launcher_fed_shell_exported_variable_control_still_refuses() -> None:
         "payload-references-no-positional",
         "opaque-input-is-outside-purview",
         "direct-shell-is-not-a-launcher",
+        "glob-operand-whose-file-composes-nothing",
     ),
 )
 def test_launcher_fed_shell_over_refusal_guards(body: str) -> None:

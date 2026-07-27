@@ -572,6 +572,32 @@ that resolves to a dynamic filename or to a process-substitution operand is unto
 and remains open; that gap, and true exact-literal replay for `source` matching `eval`'s, are
 tracked in issue #133.
 
+A tracked file can also compose out of text its CALLER supplies rather than text it contains, since
+every word after the operand becomes the child's `$1`, `$2`, and so on, so
+`printf '%s\n' '"$1$2" reconcile' > s.sh; bash s.sh doc- lattice` executes the marker with no
+assignment anywhere in the file for the content test to find. Reparsing the file with its argv bound
+is not available, because that parse reads a program as text and a script operand's content arrives
+as a `ResourceRef` the eval layer folds into an opaque token (issue #159), so this fails closed on a
+conjunction: the target names a resource this body writes, that file's content reads a
+caller-supplied positional, and substituting the arguments into the file's own text composes the
+marker. The third condition substitutes rather than asking whether an argument is marker-fragment
+capable, which is the trap the content test documents above: `build` ends in `d` and so advances the
+scan from the idle entry state, which would refuse `bash s.sh build`. Substituting one joined string
+for every reference is what makes it sound without solving which argument lands where, and the
+doubling that produces is a deliberate over-approximation that also surfaces the reversed argument
+order across the seam.
+
+This rule reaches every route the content test reaches, through one shared enumeration rather than
+each route's own guard. Written into the exact script operand's guard alone, it left the `source`,
+glob-operand, variable-operand, `--rcfile`/`--init-file`, and `BASH_ENV` spellings of the identical
+read certifying (issue #175), which is the per-route guard shape recorded in issue #176. Whether
+`$0` counts is the one thing that varies, and it varies by what binds it: a script operand's `$0` is
+the script's own path and a `source` builtin leaves the caller's `$0` untouched, so both exclude it,
+while a startup file read by a `bash -c` child sees the caller's first operand there and includes
+it. One residual is disclosed rather than closed: on `source`, where the file's state merges back
+into this shell, binding a marker FRAGMENT to a variable the parent then completes is enough, and
+asking the whole-marker question of the substituted text does not see it (issue #177).
+
 A shell `-c` payload does not enter the body-wide lowering either, because a child shell's
 assignments genuinely do not persist into the parent. They do persist into the rest of that
 payload, though, so the same extractor recovers them for the payload's own second pass alone,
