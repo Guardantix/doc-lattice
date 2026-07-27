@@ -660,12 +660,38 @@ whether that concrete spelling would execute on one host. Consequently forms suc
 words are marker-checked like scalar assignment values. Comments and discarded redirection
 targets are not retained command words.
 
-Executable classification is syntactic basename resolution, not proof of runtime identity. Audit
-does not model function, alias, or `PATH` shadowing; variables used as executable names; arbitrary
-scripts, actions, reusable workflows, or renamed wrappers; or cross-command data flow such as file
-handoff, variable-plus-`eval`, pipelines, heredoc/herestring bodies, and markers assembled across
-words. Malformed, oversized, or otherwise unreliably inspectable workflows also exit 2 instead of
-being treated as safe.
+Executable classification is syntactic basename resolution, not proof of runtime identity. Within
+each individual `run:` body, audit also evaluates authored marker flow after the command-local
+resolver pass. Certification means no authored fragments compose the ASCII
+`doc[-_.]+lattice` marker along a modeled content flow and reach an execution sink in that body.
+Modeled flows include variable assignment and append, producer stdout, pipes, heredocs,
+herestrings, command and process substitutions, static file writes and reads, shell script/stdin/
+`-c` source selection, `eval`, `source`/`.`, bounded parameter alternatives and brace argv
+fan-out, structured stream scopes, loop binding/repetition, and descriptor-aware final bindings.
+Resolved doc-lattice invocations and the phase-1 retained-word refusals keep their existing
+outcomes.
+
+This contract is step-local and marker-anchored, not a general proof that dynamic shell execution
+is safe. Audit does not aggregate across steps, jobs, `uses:` actions, or reusable workflows.
+[AD-18](ARCHITECTURE.md) owns the modeled-flow boundary and records which shell constructs the
+analysis interprets, which it deliberately does not, and where the absence of evidence is a
+disclosed gap rather than a safety claim.
+
+In practice this means marker-free dynamic execution still certifies. `curl ... | bash`,
+`eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` are all clean,
+because no authored fragment composes the marker. Oversized or cap-exhausting input exits 2.
+
+Four constructs exit 2 for the whole step rather than being modeled. A bare `exec` that rebinds
+standard input, output, or error exits 2, because the descriptor belongs to the shell from that
+point on rather than to the `exec` itself; a redirection attached to a command or compound is
+modeled instead. A `read` that uses `-a`, `-d`, `-n`, `-N`, or `-u`, and every `mapfile` or
+`readarray`, exits 2, since a stream supplies no per-element content for an array target and a
+bounded prefix can compose a marker the full stream does not contain. An array literal element
+spelled `[subscript]=value` exits 2, because literal order is then no longer index order while a
+joined read concatenates by index; an array literal whose elements carry their content directly is
+modeled instead. A `set --` or `shift` that rewrites the positional parameters outside a function
+body exits 2, because positional binding is modeled for function contexts only.
+
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
 access because it forwards every available caller secret, so it always produces a

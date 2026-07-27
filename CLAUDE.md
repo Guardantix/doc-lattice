@@ -32,10 +32,36 @@ uv run --group dev python scripts/check_typing_boundaries.py src
 uv run --group dev python scripts/check_version_sync.py
 uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
+
+uv run python scripts/fuzz_shell_taint.py --self-check
+uv run python scripts/fuzz_shell_taint.py \
+  --iterations 1200 --seed 1 --baseline tests/fixtures/shell_taint_fuzz_baseline.tsv
 ```
 
 Pre-commit runs formatting, linting, type and boundary checks, version sync, secret detection,
 and repository hygiene checks. If a hook changes a file, re-stage it before committing.
+
+`scripts/fuzz_shell_taint.py` differentially tests the CI shell taint analysis against real Bash.
+It generates run bodies from a compositional grammar, executes each one, and reports every body
+Bash runs the authored marker in that the scanner certified. Run `--self-check` first: it validates
+the execution oracle in both directions, and a fuzz result means nothing if that fails. The
+baseline records the known-failing recipes tracked in the open `security` issues, so a run exits
+non-zero only for a signature outside it.
+
+The baseline is specific to the seed and iteration count it was captured at, which is the seed 1
+run above. Other seeds surface further signatures, most of them the same known families, so a clean
+gate run is evidence about that seed rather than proof that no unbaselined signature exists. Widen
+the search with another seed when a change is broad, and triage what it finds against the open
+issues. Regenerate the baseline with `--write-baseline` only when those issues are fixed, never to
+silence a new finding and never to absorb another seed's signatures.
+
+To score a hand-written body instead of a generated one, import `Case`, `Recipe`, and `execute`
+from that script and pair `execute` with `scan_doc_lattice_invocations`. That is how a suspected
+false certification and its control get confirmed before an issue is filed.
+
+Changes to the taint analysis or the scanner should be checked against this tool as well as
+pytest, since the suite pins known behavior while the fuzzer searches for behavior nobody has
+pinned yet.
 
 ## Enforced repository rules
 

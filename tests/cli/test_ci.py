@@ -1292,3 +1292,38 @@ def test_ci_refresh_requires_repository(tmp_path: Path, monkeypatch):
     assert result.exit_code == 2
     stderr = Text.from_ansi(result.stderr).plain
     assert "Missing option '--repository'" in stderr
+
+
+def test_ci_audit_cross_command_marker_handoff_exits_two(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _install(tmp_path)
+    workflow = tmp_path / ".github/workflows/cross-command-smuggle.yml"
+    workflow.write_text(
+        """\
+name: cross-command smuggle
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  smuggle:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          printf '%s%s\\n' doc- 'lattice reconcile' > task.sh
+          bash task.sh
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["ci", "audit", "--repository", "Guardantix/doc-lattice"],
+    )
+
+    assert result.exit_code == 2
+    assert "CONFIG_ERROR" in result.stderr
+    assert "shell scan incomplete: authored marker flow reaches an execution sink" in result.stderr
