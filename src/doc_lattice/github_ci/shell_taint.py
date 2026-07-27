@@ -3959,6 +3959,25 @@ def _is_function_positional_parameter(name: str) -> bool:
     )
 
 
+def _is_second_pass_positional_parameter(name: str) -> bool:
+    """Return whether a second-pass parameter reads a positional an enclosing call can bind.
+
+    This is ``_is_function_positional_parameter`` plus ``$0``, which that predicate deliberately
+    excludes: inside a shell function ``$0`` is the script name rather than a call argument, so
+    letting function-argument substitution reach it would be wrong. A shell ``-c`` payload binds
+    it from the first operand after the payload word instead, so the second parse has to be able
+    to name it. Everywhere else ``0`` stays unbound and resolves to the same absent-evidence value
+    the previous ``OutsideGap`` lowering produced.
+
+    Args:
+        name: The parameter name as the second-pass reparse spells it.
+
+    Returns:
+        Whether the name reads a bindable positional parameter.
+    """
+    return name == "0" or _is_function_positional_parameter(name)
+
+
 def _function_positional_index(name: str, argument_count: int) -> int | None:
     """Return a bounded zero-based call-argument index, or None when absent."""
     digits = name.lstrip("0")
@@ -8059,7 +8078,7 @@ def _eval_parameter_content(  # noqa: PLR0911
     depth: int,
 ) -> ContentExpr:
     """Lower one balanced eval-time parameter expansion without dropping authored operands."""
-    if _is_function_positional_parameter(contents):
+    if _is_second_pass_positional_parameter(contents):
         return _SecondPassVariableRef(contents)
     if contents in _EVAL_SPECIAL_PARAMETERS:
         return OutsideGap()
@@ -8104,13 +8123,13 @@ def _eval_parameter_name(text: str, start: int) -> tuple[str | None, int]:
         closing = text.find("}", name_start)
         if closing != -1:
             name = text[name_start:closing]
-            if _is_function_positional_parameter(name):
+            if _is_second_pass_positional_parameter(name):
                 return name, closing + 1
         name_end = _eval_identifier_end(text, name_start)
         if name_end > name_start and name_end < len(text) and text[name_end] == "}":
             return text[name_start:name_end], name_end + 1
         return None, start + 1
-    if index < len(text) and _is_function_positional_parameter(text[index]):
+    if index < len(text) and _is_second_pass_positional_parameter(text[index]):
         return text[index], index + 1
     name_end = _eval_identifier_end(text, index)
     return (text[index:name_end], name_end) if name_end > index else (None, start + 1)
@@ -10692,6 +10711,44 @@ def _source_operand_index(command: _CommandEvidence, argv_index: int) -> int:
     return index
 
 
+def _unresolved_head_sinks(
+    command: _CommandEvidence,
+    stdin: ContentExpr,
+    process_resources: dict[int, _ProcessResourceEvidence],
+) -> tuple[ContentExpr, ...]:
+    """Return the sinks a command whose head resolved to no name still executes.
+
+    The resolver names nothing when no argv word carries literal text, because there is no text
+    for it to read: ``A=doc-; B=lattice; "$A$B"`` resolves to no executable at all. That is not
+    the same as running nothing, and treating it as such made the command contribute no sink and
+    certified a body Bash runs the marker in. It also made the issue #131 head-sink rule depend on
+    argument shape rather than on the head: ``X=doc-; "${X}lattice"`` refuses because ``lattice``
+    is literal text the resolver can name, and ``A=doc-; B=lattice; "$A$B" x`` refuses because the
+    literal ``x`` makes the selection ambiguous and reinstates the head, while the fully composed
+    spelling of the same invocation certified.
+
+    An unresolved head is handled here exactly as an ambiguous one is: the head word is a sink
+    because Bash executes the command name after expansion, and the head may itself be a shell, so
+    the option grammar is read from argv index zero as well. AD-17 rejects reading an unresolved
+    head as inert, and this is that rule applied on the sink side.
+
+    A command with no argv word runs nothing at all -- a bare assignment such as ``A=doc-`` is the
+    common case -- so it keeps contributing no sink.
+
+    Args:
+        command: The command whose head resolved to no name.
+        stdin: The command's finalized standard input expression.
+        process_resources: Process substitution evidence for operand resolution.
+
+    Returns:
+        The sink expressions this command can execute.
+    """
+    if not command.argv:
+        return ()
+    unresolved = tuple(port.content for port in command.argv[:1] if port.dynamic)
+    return _shell_source_sinks(command, 0, stdin, process_resources, unresolved)
+
+
 def _candidate_sink_expressions(  # noqa: PLR0911
     command: _CommandEvidence,
     executable: _ExecutableEvidence,
@@ -10700,7 +10757,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911
 ) -> tuple[ContentExpr, ...]:
     """Return conservative sink expressions for one resolved executable candidate."""
     if executable.argv_index is None or executable.name is None:
-        return ()
+        return _unresolved_head_sinks(command, stdin, process_resources)
     name = executable.name
     literal = executable.literal
     direct_sinks: tuple[ContentExpr, ...] = ()
@@ -10923,6 +10980,146 @@ def _shell_payload_candidate_indices(
     return ()
 
 
+def _child_shell_payload_assignments(
+    command: _CommandEvidence,
+    payload_index: int,
+    limits: TaintLimits,
+) -> tuple[_AssignmentEvidence, ...]:
+    """Return the assignments a literal shell ``-c`` payload performs on itself.
+
+    The payload runs in a child shell, so its own commands execute before the words that follow
+    them in the same payload expand. Reading the payload only as a value expanded against the
+    parent's variables therefore misses every fragment the payload composes itself, and
+    ``bash -c 'A=doc-; "$A"lattice reconcile'`` certified while the ``eval`` spelling of the same
+    body already refused.
+
+    The payload is handed to ``_static_eval_mutations`` as an exact eval program, so the child's
+    assignments are recovered by the one extractor that already implements assignment-prefix
+    words, the declaration builtins, namerefs, and per-branch reachability. A payload this
+    analysis cannot resolve to exact text contributes nothing here; its content still reaches the
+    ordinary sink path, which is what refuses the double-quoted spelling.
+
+    Args:
+        command: The command whose argv holds the payload.
+        payload_index: The argv index of the interpreted payload word.
+        limits: The bounds this scan runs under.
+
+    Returns:
+        The payload's own assignments, in payload order.
+    """
+    payload = _exact_content_literal(command.argv[payload_index].content, {}, limits)
+    if payload is None:
+        return ()
+    mutations, _unsets = _static_eval_mutations(
+        replace(command, resolved_eval_program=None, resolved_eval_programs=(payload,))
+    )
+    return tuple(
+        replace(
+            mutation.assignment,
+            content=(
+                mutation.assignment.content
+                if mutation.eval_content is None
+                else mutation.eval_content
+            ),
+        )
+        for mutation in mutations
+    )
+
+
+def _child_shell_positional_environment(
+    command: _CommandEvidence,
+    payload_index: int,
+    context: _EvalSyntaxContext,
+    environment: _EvalCommandEnvironment,
+) -> _EvalCommandEnvironment:
+    """Return the payload environment with the child's positional parameters bound.
+
+    The operands after the payload word become the child's positional parameters, starting at
+    ``$0`` rather than ``$1``, so ``bash -c '$0$1 reconcile' doc- lattice`` composes the marker
+    out of words that are plain argv in the parent. Each operand is evaluated in the parent
+    environment, which is where those words actually expand, so a parent ``$1`` among them still
+    reads the parent's own positional rather than the binding being installed here.
+
+    Args:
+        command: The command whose argv holds the payload.
+        payload_index: The argv index of the interpreted payload word.
+        context: The eval-syntax context holding the solved variable tables.
+        environment: The per-command execution environment for this body.
+
+    Returns:
+        The environment to second-parse this payload under, before its own assignments.
+    """
+    operands = command.argv[payload_index + 1 :]
+    if not operands:
+        return environment
+    if len(operands) > context.limits.max_table_entries:
+        raise _TaintLimitExceeded("shell payload positional operands cannot be represented")
+    inherited: Mapping[str | int, _ContentValue] = ChainMap(
+        dict(environment.fixed_point_overrides),
+        dict(environment.variables),
+        context.raw_variables,
+    )
+    overrides: dict[str, _ContentValue] = dict(environment.fixed_point_overrides)
+    overrides.update(
+        (str(offset), _evaluate_with_tables(port.content, inherited, {}, {}, context.limits))
+        for offset, port in enumerate(operands)
+    )
+    return replace(environment, fixed_point_overrides=tuple(overrides.items()))
+
+
+def _child_shell_assignment_environment(
+    command: _CommandEvidence,
+    payload_index: int,
+    context: _EvalSyntaxContext,
+    environment: _EvalCommandEnvironment,
+) -> _EvalCommandEnvironment | None:
+    """Return the payload environment with the payload's own assignments applied.
+
+    Assignments are installed as fixed-point overrides, the layer that already sits above the
+    inherited environment. Each joins with whatever the name held on entry instead of replacing
+    it, because this parse collapses the payload to a single position and a use that precedes its
+    assignment still reads the inherited value. Joining keeps both readings live, which is the
+    fail-closed direction and matches how a non-definite authored assignment is applied.
+
+    Args:
+        command: The command whose argv holds the payload.
+        payload_index: The argv index of the interpreted payload word.
+        context: The eval-syntax context holding the solved variable tables.
+        environment: The payload environment with positional parameters already bound.
+
+    Returns:
+        The environment the payload's own assignments produce, or None when it assigns nothing.
+    """
+    assignments = _child_shell_payload_assignments(command, payload_index, context.limits)
+    if not assignments:
+        return None
+    overrides: dict[str | int, _ContentValue] = dict(environment.fixed_point_overrides)
+    inherited: dict[str | int, _ContentValue] = dict(environment.variables)
+    # ``overrides`` is the first map deliberately: each assignment has to be visible to the ones
+    # after it, the way the payload's own source order runs them.
+    layered: ChainMap[str | int, _ContentValue] = ChainMap(
+        overrides,
+        inherited,
+        context.raw_variables,
+    )
+    for assignment in assignments:
+        name = _unscoped_variable_name(assignment.name)
+        value = _evaluate_with_tables(assignment.content, layered, {}, {}, context.limits)
+        prior = layered.get(name, _OUTSIDE_VALUE)
+        overrides[name] = _cap_value(
+            _compose_values(prior, value) if assignment.append else _join_values(prior, value),
+            context.limits,
+        )
+    return replace(
+        environment,
+        # Every key is a variable name this function or the inherited overrides put there, so the
+        # narrowing only restates what the table already holds.
+        fixed_point_overrides=tuple(
+            (name, value) for name, value in overrides.items() if isinstance(name, str)
+        ),
+    )
+
+
 def _shell_command_payload_marker_capable(
     command: _CommandEvidence,
     context: _EvalSyntaxContext,
@@ -10963,8 +11160,17 @@ def _shell_command_payload_marker_capable(
                 # command's own context, so a repeated index cannot reach a different answer.
                 continue
             scanned.add(index)
-            if _payload_second_parse_marker_capable(
-                command.argv[index].content, context, environment
+            payload = command.argv[index].content
+            # The positional binding cannot fail, so it runs first and keeps the taint reason on
+            # every body the ordinary parse already catches. Recovering the payload's own
+            # assignments can raise on state this analysis cannot represent, which is only
+            # allowed to decide a body that would otherwise certify.
+            positional = _child_shell_positional_environment(command, index, context, environment)
+            if _payload_second_parse_marker_capable(payload, context, positional):
+                return True
+            assigned = _child_shell_assignment_environment(command, index, context, positional)
+            if assigned is not None and _payload_second_parse_marker_capable(
+                payload, context, assigned
             ):
                 return True
     return False

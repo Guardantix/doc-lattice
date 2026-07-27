@@ -445,7 +445,15 @@ per-command `redirections` field cannot carry, so a later `>&3` fails closed. A 
 in the body binds is a Bash runtime error rather than a flow, so it keeps routing nowhere.
 
 Execution sinks are `eval`, shell `-c`, selected shell stdin, and static script execution through a
-shell operand, direct path, `source`, or `.`. A `/dev/stdin`, `/dev/fd/0`, or `/proc/self/fd/0`
+shell operand, direct path, `source`, or `.`. The command-name word is a sink on the same footing,
+because Bash executes it after expansion. That holds whether the head resolves to a name, resolves
+ambiguously, or resolves to nothing at all: a command no argv word of which carries literal text,
+such as `A=doc-; B=lattice; "$A$B"`, gives the resolver no text to read, and reading that as "runs
+nothing" rather than "runs something unknown" left it with no sink and certified the shortest
+evasion available. An unresolved head is therefore routed exactly as an ambiguous one is, which is
+AD-17's refusal to read an unresolved head as inert applied on the sink side. A command with no
+argv word at all, such as a bare assignment, still runs nothing and contributes no sink. A
+`/dev/stdin`, `/dev/fd/0`, or `/proc/self/fd/0`
 script operand resolves to that command's own stdin instead of to a static resource no writer
 reaches. Effective-head evidence comes from the complete
 existing assignment, keyword, `builtin`, `command`, `exec`, `env`, `time`, `coproc`, `uv run`,
@@ -509,9 +517,17 @@ unaffected. A `source`/`.` target that resolves to a dynamic filename or to a pr
 operand is untouched by this rule and remains open; that gap, and true exact-literal replay for
 `source` matching `eval`'s, are tracked in issue #133.
 
-A shell `-c` payload does not enter it either, which is harmless on its own because a child shell's
-assignments do not persist into the parent, and its own parameter references are covered by the
-second pass described below. A payload the tokenizer cannot accept is missing evidence rather than
+A shell `-c` payload does not enter the body-wide lowering either, because a child shell's
+assignments genuinely do not persist into the parent. They do persist into the rest of that
+payload, though, so the same extractor recovers them for the payload's own second pass alone,
+where they join whatever the name held on entry rather than replacing it: the pass collapses the
+payload to a single position, so a use that precedes its assignment must keep reading the inherited
+value. Without that, `bash -c 'A=doc-; "$A"lattice reconcile'` certified while the `eval` spelling
+of the same body refused. A payload whose own state this extractor cannot represent, such as one
+containing an array assignment or a nested `eval`, fails closed, matching how the `eval` route
+already treats both; that check runs only after the ordinary parse has declined, so it decides no
+body the ordinary parse already refuses. A payload the tokenizer cannot accept is missing evidence
+rather than
 absent evidence, so it fails closed instead of leaving previously recovered state uninvalidated
 (issue #134). A backslash-newline line continuation is removed before the metadata walk and the
 `shlex` pass so the two stay in lockstep, matching Bash's own line-continuation handling, since that
@@ -526,7 +542,13 @@ reaches that pass, not only a shell that is the command's own head, so a launche
 unresolved-head shell is second-parsed too; where the argv shape is uncertain the pass reads each
 retained candidate word rather than committing to one, mirroring the choice the sink selector
 builds over the same set. A script operand and a standard-input payload stay with the sink path,
-which already models a file's content and a stream's content directly.
+which already models a file's content and a stream's content directly. The operands after the
+payload word are bound as the child's positional parameters, starting at `$0` rather than `$1`, so
+`bash -c '$0$1 reconcile' doc- lattice` composes the marker out of words that are plain argv in the
+parent. Each operand is evaluated in the parent environment, which is where those words actually
+expand. The same positionals reached from a shell function's call site are not bound, because those
+arguments are applied by substitution over flow effects rather than stored as variables; that gap
+is tracked in issue #160.
 
 The stop-line is deliberate. This sub-analysis interprets exact literal payloads only, never
 dynamic ones, and growth beyond the constructs listed above is out of scope: an interpreter chasing

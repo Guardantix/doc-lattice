@@ -3950,21 +3950,99 @@ def test_builtin_wrapped_shell_is_not_a_payload_route() -> None:
     assert result.incomplete_reason is None
 
 
-@pytest.mark.parametrize("wrapper", ["command", "exec"], ids=("command", "exec"))
-def test_wrapper_with_a_dynamic_head_and_dynamic_payload_is_a_known_gap(wrapper: str) -> None:
-    """Issue #157: this body has no executable evidence at all, so it has no sink to widen.
+# The ``-c`` payload second pass expanded the payload only against the parent's environment. It
+# therefore missed both of the ways a child shell's own state differs from the parent's: the
+# assignments the payload performs before the rest of it expands, and the operands after the
+# payload word, which the child binds as ``$0`` onward. Every refusing body below was verified
+# under real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``.
+@pytest.mark.parametrize(
+    "body",
+    [
+        """bash -c 'A=doc-; "$A"lattice reconcile'""",
+        """sh -c 'A=doc-; "$A"lattice reconcile'""",
+        """timeout 5 bash -c 'A=doc-; "$A"lattice reconcile'""",
+        """bash -c 'A=doc-; B=lattice; "$A$B" reconcile'""",
+        """bash -c 'export A=doc-; "$A"lattice reconcile'""",
+        """bash -c 'declare A=doc-; "$A"lattice reconcile'""",
+        """bash -c 'A=doc; A+=-; "$A"lattice reconcile'""",
+    ],
+    ids=(
+        "bash",
+        "sh",
+        "launcher",
+        "two-fragments",
+        "export",
+        "declare",
+        "append",
+    ),
+)
+def test_shell_c_payload_replays_its_own_assignments(body: str) -> None:
+    """A payload's own assignments run before the rest of the payload expands."""
+    result = scan_doc_lattice_invocations(body)
 
-    The head resolver finds no nameable word after the wrapper when every remaining word is
-    dynamic, so ``_candidate_sink_expressions`` returns at its first guard and the ambiguous route
-    is never entered. The literal-payload sibling refuses because its last word is nameable, which
-    inverts the usual ordering between the two directions. Verified under real Bash 5.2: this
-    certifies and executes the marker.
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """bash -c '$0$1 reconcile' doc- lattice""",
+        """bash -c '$1$2 reconcile' sh doc- lattice""",
+        """bash -c '${0}${1} reconcile' doc- lattice""",
+        """timeout 5 bash -c '$0$1 reconcile' doc- lattice""",
+    ],
+    ids=("dollar-zero", "later-positionals", "braced", "launcher"),
+)
+def test_shell_c_payload_binds_trailing_operands_as_positionals(body: str) -> None:
+    """Operands after a ``-c`` payload become the child's ``$0`` onward, not the parent's."""
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """bash -c 'A=safe; "$A" reconcile'""",
+        """bash -c 'A=doc-; "$A"umentation reconcile'""",
+        """bash -c '$1 reconcile'""",
+        """bash -c 'echo "$0"' doc- lattice""",
+        """bash -c 'A=doc-; echo "$A"' lattice""",
+    ],
+    ids=(
+        "inert-assignment",
+        "non-composing-assignment",
+        "unbound-positional",
+        "operands-not-composed",
+        "assignment-not-composed",
+    ),
+)
+def test_shell_c_payload_child_state_keeps_marker_free_bodies_certified(body: str) -> None:
+    """Neither the payload's assignments nor its operands may refuse a marker-free child."""
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize("wrapper", ["command", "exec"], ids=("command", "exec"))
+def test_wrapper_with_a_dynamic_head_and_dynamic_payload_fails_closed(wrapper: str) -> None:
+    """Issue #157: an unresolved head is now read as unknown rather than as nothing.
+
+    This body has no nameable word after the wrapper, so the resolver returns no executable at
+    all and ``_candidate_sink_expressions`` used to stop at its first guard, leaving the command
+    with no sink to widen. ``_unresolved_head_sinks`` now routes exactly that case through the
+    same entry the ambiguous selection uses, so the option grammar is read from argv index zero
+    and the ``-c`` payload becomes a sink. Verified under real Bash 5.2: this executes the marker.
     """
     body = _LITERAL_PAYLOAD + f'S=bash; {wrapper} "$S" -c "$A$B"'
 
     result = scan_doc_lattice_invocations(body)
 
-    assert result.incomplete_reason is None
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
 @pytest.mark.parametrize(
@@ -3985,4 +4063,153 @@ def test_wrapper_option_grammar_shifts_the_ambiguous_selection_is_a_known_gap(he
 
     result = scan_doc_lattice_invocations(body)
 
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """printf '%s%s\\n' doc- lattice | { read A; eval '$A reconcile'; }""",
+        """printf '%s%s %s\\n' doc- lattice reconcile | { read A B; eval '$A $B'; }""",
+        """printf '%s%s\\n' doc- lattice > s.txt; A=$(cat s.txt); eval '$A reconcile'""",
+        """printf '%s%s %s\\n' doc- lattice reconcile | eval "$(cat)\"""",
+        """printf '%s%s %s\\n' doc- lattice reconcile | { V=$(cat); eval "$V"; }""",
+    ],
+    ids=("read-one", "read-two", "resource", "stdin-substitution", "assigned-substitution"),
+)
+def test_eval_layer_drops_resource_and_stream_content_is_a_known_gap(body: str) -> None:
+    """Issue #159: the eval layer resolves content against empty resource and stream tables.
+
+    ``evaluate_assignment`` and ``_finalize_eval_syntax`` both pass ``{}`` for the resource and
+    stream tables, so a value arriving at an eval sink as a ``ResourceRef`` or ``StreamRef``
+    becomes an outside gap. Verified under real Bash 5.2: these certify and execute the marker.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """printf '%s%s\\n' doc- lattice | { read A; "$A" reconcile; }""",
+        """printf '%s%s\\n' doc- lattice > s.txt; A=$(cat s.txt); "$A" reconcile""",
+        """printf '%s%s %s\\n' doc- lattice reconcile | bash -c "$(cat)\"""",
+        """read A B <<< 'doc-lattice reconcile'; eval '$A $B'""",
+        """A=doc-; B=lattice; eval '$A$B reconcile'""",
+    ],
+    ids=(
+        "stream-to-head",
+        "resource-to-head",
+        "stream-to-shell-payload",
+        "literal-to-eval",
+        "literal-value-to-eval",
+    ),
+)
+def test_eval_layer_gap_is_confined_to_resource_and_stream_carriers(body: str) -> None:
+    """Issue #159 controls: the same content refuses through every other route.
+
+    A literal value reaching an eval sink refuses, so the eval layer's variable handling is sound
+    and only its resource and stream tables are missing. The ``bash -c`` control shows the pipe
+    content does reach a nested command substitution, which rules out a missing-stdin reading.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+def test_eval_second_parse_misses_function_positionals_is_a_known_gap() -> None:
+    """Issue #160: a function's call arguments never enter the tables the second parse reads.
+
+    They are applied by substitution over flow effect expressions rather than stored as variables,
+    so an ``eval`` payload inside a function reads ``$1`` as absent. The ``-c`` payload sibling is
+    fixed here because its positionals come from argv rather than from a call site. Verified under
+    real Bash 5.2: this certifies and executes the marker.
+    """
+    body = """f() { eval '$1$2 reconcile'; }; f doc- lattice"""
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """f() { "$1$2" reconcile; }; f doc- lattice""",
+        """f() { eval "$1$2 reconcile"; }; f doc- lattice""",
+    ],
+    ids=("ordinary-sink", "expanded-before-eval"),
+)
+def test_function_positional_gap_is_confined_to_the_second_parse(body: str) -> None:
+    """Issue #160 controls: the flow machinery does bind these call arguments."""
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+# A command whose every argv word is fully dynamic resolved to no executable at all, so
+# ``_candidate_sink_expressions`` stopped at its first guard and the command contributed no sink.
+# That made the issue #131 head-sink rule depend on argument shape rather than on the head, and it
+# certified the shortest evasion the scanner has: two assignments and one command. Every body below
+# was verified under real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``.
+@pytest.mark.parametrize(
+    "body",
+    [
+        'A=doc-; B=lattice; "$A$B"',
+        "A=doc-; B=lattice; $A$B",
+        'A=doc-; B=lattice; C="$A$B"; "$C"',
+        'A=doc-; B=lattice; "$A$B"; echo done',
+        'A=doc-; B=lattice; ( "$A$B" )',
+        'A=doc-; B=lattice; "$A$B" > /dev/null',
+        'A=doc-; B=lattice; V=1 "$A$B"',
+        'A=doc-; B=lattice; "$A$B" | cat',
+        'A=doc-; B=lattice; if "$A$B"; then :; fi',
+        'read A <<< doc-lattice; "$A"',
+        "A=$(printf '%s%s' doc- lattice); \"$A\"",
+    ],
+    ids=(
+        "quoted-concat",
+        "unquoted-concat",
+        "through-a-third-variable",
+        "followed-by-another-command",
+        "inside-a-subshell",
+        "with-a-redirection",
+        "behind-an-assignment-prefix",
+        "as-a-pipeline-producer",
+        "as-an-if-condition",
+        "from-a-herestring-read",
+        "from-a-command-substitution",
+    ),
+)
+def test_a_fully_dynamic_command_head_is_a_sink(body: str) -> None:
+    """An unresolved head is unknown, not inert, so it is a sink on the same footing as argv."""
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'A=doc-; B=lattice; "$A" "$B"',
+        'A=safe; B=thing; "$A$B"',
+        "A=doc-",
+        'A=doc-; B=umentation; "$A$B"',
+    ],
+    ids=("separate-words", "marker-free", "assignment-only", "non-composing"),
+)
+def test_a_fully_dynamic_command_head_keeps_marker_free_bodies_certified(body: str) -> None:
+    """Widening the unresolved head must not refuse a body that composes no marker.
+
+    ``"$A" "$B"`` is the load-bearing one: Bash runs ``doc-`` with ``lattice`` as an argument and
+    never names the marker, so it has to stay certified even though both words are dynamic and
+    their concatenation would compose it. A command with no argv word at all runs nothing.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
     assert result.incomplete_reason is None
