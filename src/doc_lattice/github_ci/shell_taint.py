@@ -909,6 +909,11 @@ _SHELL_WORD_SEPARATORS = frozenset(" \t\n;&|<>()")
 # which can only add a refusal and never certify a marker the shell would still run.
 _SHELL_COMMENT_WORD_SEPARATORS = frozenset(" \t\n;&|<>")
 _SHELL_HEADS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "rbash", "rzsh", "rksh"})
+
+# Wrapper builtins whose EXTERNAL shadow AD-18 declines to reinterpret as a launcher. The
+# suppression is scoped to these names alone: an ordinary external head such as ``timeout`` reached
+# through ``command``/``env``/``exec`` still selects a shell that appears later in its own argv.
+_EXTERNAL_WRAPPER_SHADOW_NAMES = frozenset({"builtin", "command", "exec"})
 _SHELL_LONG_OPTION_NAMES_WITH_VALUE = frozenset({"rcfile", "init-file", "emulate"})
 _SHELL_EAGER_STOP_NAMES = frozenset({"help", "version", "dump-strings", "dump-po-strings"})
 # Bash accepts a subset of its GNU long options spelled with a single leading dash -- ``bash
@@ -965,6 +970,7 @@ _REDIRECTION_OPERATORS = (
 # instead of routing it. The read side already resolves ``/dev/stdin`` correctly through the
 # script-source path lookup, so this recognition is write-side only.
 _DEV_FD_WRITE_PREFIXES = ("/dev/fd/", "/proc/self/fd/")
+_DEV_STD_WRITE_DESCRIPTORS = {"/dev/stdout": 1, "/dev/stderr": 2}
 _MAX_SHELL_DESCRIPTOR_DIGITS = 64
 
 
@@ -979,13 +985,22 @@ def _static_eval_descriptor(digits: str) -> int:
 
 
 def _dev_fd_write_descriptor(resource: str, parse_descriptor: Callable[[str], int]) -> int | None:
-    """Return the descriptor a normalized write-side ``/dev/fd`` family path names, if any."""
-    if resource == "/dev/stdout":
-        return 1
+    """Return the descriptor a normalized write-side ``/dev/fd`` family path names, if any.
+
+    ``/dev/stderr`` is recognized alongside ``/dev/stdout`` for the reason given above the prefix
+    table: without it, ``producer 2>&1 > /dev/stderr | bash`` modeled the write as an ordinary file
+    and discarded the taint, while the equivalent ``> /dev/fd/2`` spelling refused.
+
+    ``str.isdigit`` is true for non-ASCII decimal digits, which Bash does not accept as a
+    descriptor, so the suffix is restricted to ASCII before it is parsed.
+    """
+    descriptor = _DEV_STD_WRITE_DESCRIPTORS.get(resource)
+    if descriptor is not None:
+        return descriptor
     for prefix in _DEV_FD_WRITE_PREFIXES:
         if resource.startswith(prefix):
             suffix = resource[len(prefix) :]
-            if suffix.isdigit():
+            if suffix.isascii() and suffix.isdigit():
                 return parse_descriptor(suffix)
     return None
 
@@ -1023,7 +1038,10 @@ def resolve_redirection_target(
     """
     if process_resource_id is not None:
         return ProcessResourceTarget(process_resource_id)
-    if operator in {"<&", ">&"} and not dynamic and literal.isdigit():
+    # ``str.isdigit`` accepts non-ASCII decimal digits, which Bash does not read as a descriptor:
+    # ``>&`` followed by an Arabic-Indic digit creates a FILE named with that character. Treating
+    # it as a duplication routed the write into a descriptor and recorded no resource write.
+    if operator in {"<&", ">&"} and not dynamic and literal.isascii() and literal.isdigit():
         return DescriptorTarget(parse_descriptor(literal))
     resource = normalize_static_resource(literal, dynamic=dynamic)
     if resource == "/dev/null":
@@ -3303,9 +3321,13 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
                 routed if routed is not None else route_assignment(assignment)
             )
         routed_assignments = tuple(routed_assignments_list)
-        activate_builtin_declarations = not (
-            command.function_context_id is not None and command.builtin_force_global
-        )
+        # ``-g`` makes a nameref declaration MORE visible, not less: it outlives the function
+        # body. Suppressing alias registration for it left a later ``ref=...`` write recorded
+        # against ``ref`` rather than the aliased target, so
+        # ``f() { declare -g -n ref=cmd; ref="$A$B"; }; f; $cmd`` certified while the spelling
+        # without ``-g`` refused. The declaration is registered in the declaring environment;
+        # its persistence past the function's return stays the narrower disclosed gap.
+        activate_builtin_declarations = True
         routed_builtin = tuple(
             routed
             for assignment in command.builtin_assignments
@@ -4808,6 +4830,10 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
     index = 0
     negated = False
     literal_status_available = True
+    # ``{`` belongs here for the same reason ``_STATIC_EVAL_MUTATION_PREFIXES`` carries it: a brace
+    # group runs its body in the current shell. Omitting it resolved ``{ eval "$Y"; }`` to the head
+    # ``{``, so the nested-eval guard and the call-graph name collection both looked past the real
+    # command and ``eval '{ eval "$Y"; }'`` certified where the subshell spelling refused.
     control_prefixes = {
         "coproc",
         "do",
@@ -4818,6 +4844,7 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
         "time",
         "until",
         "while",
+        "{",
     }
     while index < len(command.words):
         word = command.words[index]
@@ -10798,8 +10825,16 @@ def _candidate_sink_expressions(  # noqa: PLR0911
         return _shell_source_sinks(
             command, 0, stdin, process_resources, (*unresolved, *direct_sinks)
         )
+    # ``external_lookup`` records how this command's own HEAD was reached, which says nothing
+    # about whether a later argv word is a shell. Suppressing the launcher search on it for every
+    # external head dropped the payload sink for ``command timeout 5 bash -c "$A$B"`` and the
+    # ``env``/``exec`` spellings of the same body, all of which Bash runs the marker in. Only an
+    # external shadow of a wrapper builtin keeps that suppression, which is the case AD-18
+    # actually reasons about.
     launcher_index = (
-        None if executable.external_lookup else _nested_shell_index(command, executable.argv_index)
+        None
+        if executable.external_lookup and executable.name in _EXTERNAL_WRAPPER_SHADOW_NAMES
+        else _nested_shell_index(command, executable.argv_index)
     )
     if launcher_index is not None:
         # An unrecognized head such as ``timeout``, ``nohup``, or ``xargs`` may exec a shell that
@@ -10831,6 +10866,13 @@ def _resolves_to_marker_name(name: str | None) -> bool:
 def _nested_shell_index(command: _CommandEvidence, head_index: int) -> int | None:
     """Return the argv index of a shell this command may exec, beyond its own head.
 
+    A dynamic word is skipped rather than ending the search. Abandoning the scan on the first
+    such word dropped the payload sink entirely, so one variable-spelled launcher option was
+    enough to certify a body Bash runs the marker in: ``D=5; timeout "$D" bash -c "$A$B"``
+    certified while the literal ``timeout 5`` spelling refused. Continuing past the word keeps
+    the later shell visible, which is the fail-closed direction, because selecting some sink is
+    always at least as conservative as selecting none.
+
     Args:
         command: The command evidence being inspected.
         head_index: The argv index of the command's own resolved head.
@@ -10841,7 +10883,7 @@ def _nested_shell_index(command: _CommandEvidence, head_index: int) -> int | Non
     for index in range(head_index + 1, len(command.argv)):
         port = command.argv[index]
         if port.dynamic:
-            return None
+            continue
         if _normalized_shell_head(port.literal) in _SHELL_HEADS:
             return index
     return None
@@ -11297,9 +11339,14 @@ def _glob_ports_reach_tracked_marker(
     plausibly carry a marker fragment. A target no part of this script writes is opaque,
     pre-existing content already outside every other sink check's purview.
 
-    Only a word carrying ``active_argv_expansion`` is inspected. A word whose expansion is a plain
-    variable reference is ``dynamic`` instead and is handled by the ordinary sink machinery, and a
-    brace-expanded word loses the flag per resulting port, so neither reaches this match.
+    A word carrying ``active_argv_expansion`` is matched by its own pattern. A ``dynamic`` word is
+    matched against every tracked key instead, because the name it resolves to is not knowable
+    here at all. The claim that the ordinary sink machinery already handles a ``dynamic`` operand
+    did not hold for this route: ``_script_port_expression`` maps such a port to ``OutsideGap``,
+    and the exact guard beside it drops the same port through its ``dynamic=`` argument, so
+    ``F=t.sh; source "$F"`` and ``F=t.sh; bash "$F"`` fell between the two guards and certified
+    bodies Bash runs the marker in. A brace-expanded word loses the expansion flag per resulting
+    port and is matched by its resolved literal.
 
     The two callers supply deliberately different tables. The shell-head caller passes empty
     variable and stream tables because a shell operand's own resource content is the whole
@@ -11319,9 +11366,9 @@ def _glob_ports_reach_tracked_marker(
         could plausibly carry the marker.
     """
     for port in ports:
-        if not port.active_argv_expansion:
+        if not port.active_argv_expansion and not port.dynamic:
             continue
-        patterns = _resource_key_patterns(port.literal)
+        patterns = ("*",) if port.dynamic else _resource_key_patterns(port.literal)
         for key in resources:
             if not isinstance(key, str):
                 continue
@@ -11367,7 +11414,7 @@ def _shell_source_head_index(  # noqa: PLR0911
         return executable.argv_index
     if executable.ambiguous:
         return 0
-    if executable.external_lookup:
+    if executable.external_lookup and name in _EXTERNAL_WRAPPER_SHADOW_NAMES:
         return None
     return _nested_shell_index(command, executable.argv_index)
 
@@ -11453,9 +11500,10 @@ def _source_glob_operand_state_unrepresentable(
     (issue #150). This closes that gap the same narrow way, over the pattern rather than an exact
     name.
 
-    The two guards are disjoint by construction: the exact guard drops a glob operand through its
-    ``dynamic=... or active_argv_expansion`` argument, and this one drops a non-glob operand
-    through the shared helper's ``active_argv_expansion`` predicate.
+    The exact guard drops a glob operand through its ``dynamic=... or active_argv_expansion``
+    argument, and this one covers it. The two overlap on a ``dynamic`` operand, which the shared
+    helper now matches against every tracked key: neither guard read that spelling before, so it
+    fell between them.
 
     Only the operand is supplied. Every word after it becomes a positional parameter for the
     sourced script rather than a second source target (verified under real Bash 5.2), so scanning

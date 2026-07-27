@@ -614,9 +614,17 @@ carries `ambiguous` executable evidence and selects a shell source anyway, rathe
 sink, on the same reasoning AD-17 used to reject an inert-head allowlist. An unrecognized head that
 names a shell later in its own argv, such as `timeout`, `nohup`, `nice`, `setsid`, `stdbuf`,
 `flock`, or `sudo`, selects from that shell, and a shell whose operand is missing behind such a
-launcher takes the launcher's standard input as its payload, which is what `xargs bash -c` does. An
-`external_lookup` head keeps its existing treatment and does not select a nested shell, so an
-external shadow of `command` or `builtin` is not reinterpreted as a wrapper.
+launcher takes the launcher's standard input as its payload, which is what `xargs bash -c` does. A
+dynamic word between the head and that shell is skipped rather than ending the search, because
+selecting some sink is always at least as conservative as selecting none. An `external_lookup` head
+declines to select a nested shell only when the head is itself one of `builtin`, `command`, or
+`exec`, so an external shadow of a wrapper builtin is not reinterpreted as a wrapper while an
+ordinary external head such as `timeout` still selects the shell later in its own argv.
+
+A `source`, `.`, or shell script operand whose value comes from a variable is matched against every
+resource this body writes. Such an operand resolves to no static key, so the exact target guard and
+the glob target guard both skipped it and `F=t.sh; source "$F"` certified a file the body itself
+wrote the marker into.
 
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
