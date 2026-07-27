@@ -4532,3 +4532,99 @@ def test_shell_script_positional_over_refusal_guards(body: str) -> None:
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+# Codex review round 3. A launcher appends words to the command it runs, taken from its own
+# standard input (``xargs --help``: "Run COMMAND with arguments INITIAL-ARGS and more arguments
+# read from input"). Those words are the child shell's positional parameters and no argv position
+# in the body spells them, so every operand binding this analysis performs sees an empty list.
+_LAUNCHER_REASON = "launcher-fed shell positional state cannot be represented"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "printf '%s%s\\n' doc- lattice | xargs -n1 sh -c '$0 reconcile'",
+        "printf '%s\\n' doc- lattice | xargs -n2 sh -c '$0$1 reconcile'",
+        "printf '%s\\n' doc- lattice | xargs sh -c '$0$1 reconcile'",
+        "printf '%s\\n' lattice doc- | xargs -n2 sh -c '$0$1 reconcile'",
+        "printf 'doc-\\n' | xargs -n1 sh -c '${0}lattice reconcile'",
+        "printf '%s%s\\n' doc- lattice | xargs -n1 timeout 5 sh -c '$0 reconcile'",
+        (
+            "printf '%s\\n' '\"$1$2\" reconcile' > s.sh; "
+            "printf '%s\\n' doc- lattice | xargs bash s.sh"
+        ),
+    ],
+    ids=(
+        "one-word-at-dollar-zero",
+        "two-words-split-across-records",
+        "no-arity-flag",
+        "input-words-in-the-other-order",
+        "input-supplies-only-the-prefix",
+        "nested-launchers",
+        "launcher-fed-script-operand",
+    ),
+)
+def test_launcher_fed_shell_positionals_fail_closed(body: str) -> None:
+    """Codex finding: launcher-supplied argv was outside the positional model.
+
+    ``printf '%s%s\\n' doc- lattice | xargs -n1 sh -c '$0 reconcile'`` executes the marker under
+    GNU xargs 4.9 and real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``. The direct spelling
+    ``sh -c '$0 reconcile' doc-lattice`` already refuses, and an exported parent variable in the
+    same ``xargs`` payload already refuses too, which isolates the launcher-fed argv rather than
+    the payload parse. Recognizing ``xargs`` by name is what AD-17 rules out, so the trigger is the
+    launcher's INPUT, the only channel any launcher has for argv this body never spells.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _LAUNCHER_REASON
+
+
+def test_launcher_fed_shell_exported_variable_control_still_refuses() -> None:
+    """The control proving the payload second pass does reach through a launcher already."""
+    body = "export A=doc-\nexport B=lattice\nprintf 'x\\n' | xargs -n1 sh -c '$A$B reconcile'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "timeout 60 sh -c '$0 reconcile'",
+        "ls *.md | xargs -n1 sh -c 'echo $0'",
+        "find . -name '*.md' | xargs -n1 sh -c 'echo $0'",
+        "git ls-files | xargs -n1 sh -c 'wc -l $0'",
+        "printf 'build\\n' | xargs sh -c 'echo hi'",
+        "printf 'make\\nbuild\\n' | xargs -n2 sh -c '$0 $1'",
+        "printf '%s%s\\n' doc- lattice | xargs -n1 sh -c 'echo hi'",
+        "cat list.txt | xargs -n1 sh -c '$0 reconcile'",
+        "sh -c '$0 build'",
+    ],
+    ids=(
+        "launcher-reads-nothing",
+        "glob-listing-into-a-shell",
+        "find-into-a-shell",
+        "git-ls-files-into-a-shell",
+        "ordinary-word-advances-the-dfa",
+        "ordinary-word-pair",
+        "payload-references-no-positional",
+        "opaque-input-is-outside-purview",
+        "direct-shell-is-not-a-launcher",
+    ),
+)
+def test_launcher_fed_shell_over_refusal_guards(body: str) -> None:
+    """Over-refusal guards keeping this narrow to input the body itself composes.
+
+    Substituting the input into the payload's own references rather than asking whether the input
+    is marker-FRAGMENT capable is what keeps the ordinary pipelines here certified: ``.md`` and
+    ``build`` both end in ``d`` and so advance the scan from the idle entry state. An opaque input
+    is the step's own or an untracked file's, which is pre-existing content outside this analysis's
+    purview by the rule every guard in this family applies to an unwritten target.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None

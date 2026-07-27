@@ -11936,19 +11936,24 @@ def _shell_script_operand_state_unrepresentable(
     return False
 
 
-def _text_references_positional_parameters(text: str) -> bool:
+def _text_references_positional_parameters(text: str, *, include_zero: bool = False) -> bool:
     """Return whether shell source text reads a positional parameter its caller supplies.
 
     Only the forms that can carry a caller's word into the child's own expansion count:
     ``$1``..``$9``, ``$@``, ``$*``, and the braced ``${1}``/``${@}``/``${*}`` spellings, including
     ``${1:-default}`` and the rest of the brace grammar, which all start with the same two
-    characters. ``$0`` is excluded because a script's ``$0`` is its own path rather than an operand
-    the caller chose, unlike a ``-c`` payload's; ``$#`` is excluded because a count cannot carry
-    marker text. A ``$`` that a backslash escapes still counts, since this reads raw file bytes
-    without knowing the quoting context each one lands in, and that direction over-approximates.
+    characters. ``$#`` is excluded because a count cannot carry marker text. A ``$`` that a
+    backslash escapes still counts, since this reads raw text without knowing the quoting context
+    each one lands in, and that direction over-approximates.
+
+    ``include_zero`` splits the two dispatch forms, which disagree about ``$0``. A SCRIPT operand's
+    ``$0`` is the script's own path rather than a word the caller chose, so it must not trigger. A
+    ``-c`` payload's ``$0`` is the first operand the caller supplies, which is exactly the position
+    ``xargs -n1`` binds its input word to, so for that form it must.
 
     Args:
-        text: One literal alternative of the file's own content.
+        text: One literal alternative of the shell source being read.
+        include_zero: Whether ``$0`` counts as a caller-supplied positional.
 
     Returns:
         Whether the text reads a caller-supplied positional parameter anywhere.
@@ -11960,16 +11965,20 @@ def _text_references_positional_parameters(text: str) -> bool:
             return False
         following = text[index + 1]
         if following == "{":
-            if index + 2 < len(text) and _positional_reference_start(text[index + 2]):
+            if index + 2 < len(text) and _positional_reference_start(
+                text[index + 2], include_zero=include_zero
+            ):
                 return True
-        elif _positional_reference_start(following):
+        elif _positional_reference_start(following, include_zero=include_zero):
             return True
         index += 1
 
 
-def _positional_reference_start(character: str) -> bool:
+def _positional_reference_start(character: str, *, include_zero: bool = False) -> bool:
     """Return whether one character after a ``$`` opens a caller-supplied positional reference."""
-    return character in {"@", "*"} or (character.isdigit() and character != "0")
+    if character in {"@", "*"}:
+        return True
+    return character.isdigit() and (include_zero or character != "0")
 
 
 def _resource_references_positional_parameters(value: _ContentValue) -> bool:
@@ -11993,7 +12002,9 @@ def _resource_references_positional_parameters(value: _ContentValue) -> bool:
     return False
 
 
-def _substitute_positional_references(text: str, replacement: str) -> str:
+def _substitute_positional_references(
+    text: str, replacement: str, *, include_zero: bool = False
+) -> str:
     """Return the file's text with every caller-supplied positional replaced by one string.
 
     Substituting the SAME string for every reference is what makes this sound without solving
@@ -12005,6 +12016,8 @@ def _substitute_positional_references(text: str, replacement: str) -> str:
     Args:
         text: One literal alternative of the file's own content.
         replacement: The text every positional reference is replaced by.
+        include_zero: Whether ``$0`` counts as a caller-supplied positional. See
+            ``_text_references_positional_parameters`` for why the two dispatch forms differ.
 
     Returns:
         The substituted text.
@@ -12021,9 +12034,11 @@ def _substitute_positional_references(text: str, replacement: str) -> str:
         end = -1
         if following == "{":
             closing = text.find("}", index + 2)
-            if closing != -1 and _positional_reference_start(text[index + 2]):
+            if closing != -1 and _positional_reference_start(
+                text[index + 2], include_zero=include_zero
+            ):
                 end = closing + 1
-        elif _positional_reference_start(following):
+        elif _positional_reference_start(following, include_zero=include_zero):
             end = index + 2
             while end < len(text) and following.isdigit() and text[end].isdigit():
                 end += 1
@@ -12199,6 +12214,272 @@ def _script_operand_composes_from_arguments(  # noqa: PLR0913
             )
         )
         for text in readable
+    )
+
+
+def _launcher_shell_head_index(
+    command: _CommandEvidence, executable: _ExecutableEvidence
+) -> int | None:
+    """Return the argv index of a shell this candidate reaches ONLY through a launcher.
+
+    This is the third of the routes ``_shell_source_head_index`` mirrors, isolated on its own. The
+    direct and ambiguous routes are excluded deliberately: a launcher is the only one of the three
+    that can hand the shell argv words this body never spells, so it is the only one whose
+    positional parameters can carry content from the launcher's own input.
+
+    Args:
+        command: The command evidence being inspected.
+        executable: One resolved executable candidate of that command.
+
+    Returns:
+        The launcher-reached shell's argv index, or None when this candidate reaches none.
+    """
+    if executable.argv_index is None or executable.name is None:
+        return None
+    name = executable.name
+    if name == "eval" and executable.literal == "eval" and not executable.external_lookup:
+        return None
+    if name in {"source", "."} and executable.literal == name and not executable.external_lookup:
+        return None
+    if _normalized_shell_head(name) in _SHELL_HEADS or executable.ambiguous:
+        return None
+    if executable.external_lookup and name in _EXTERNAL_WRAPPER_SHADOW_NAMES:
+        return None
+    return _nested_shell_index(command, executable.argv_index)
+
+
+def _launcher_input_marker_fragment_capable(summary: _TransferSummary) -> bool:
+    """Return whether a launcher's input could carry marker text into a child's argv.
+
+    A launcher splits its input into WORDS and passes them as separate argv entries, so the child
+    can concatenate what the input never spelled adjacently. Asking the ordinary fragment question
+    of the raw bytes misses exactly that: ``printf '%s\\n' doc- lattice`` produces
+    ``doc-\\nlattice\\n``, where the newline resets the scan, yet ``xargs -n2 sh -c '$0$1'`` binds
+    the two words and the child composes the marker. So the words are joined before the question is
+    asked, which is what the launcher does to them.
+
+    The raw form is asked too, since a single input word carrying a partial fragment is the case
+    joining cannot make any more visible.
+
+    OPAQUE input answers no, which is the one place this deliberately does not fail closed. An
+    opaque standard input is the step's own, or an untracked file's, and that is pre-existing
+    content outside this analysis's purview by the same rule every guard in this family applies to
+    an unwritten target. Answering yes there refused ``timeout 60 sh -c '$0 reconcile'``, an
+    ordinary body real Bash runs no marker in, since a launcher that reads nothing appends nothing
+    and ``$0`` stays the shell's own name. Truncated input is different and does answer yes: that
+    is this body's own content, unreadable only because it passed a tracking cap.
+
+    Args:
+        summary: One alternative of the command's solved standard input value.
+
+    Returns:
+        Whether the launcher's input could feed marker-composing words into the child's argv.
+    """
+    if summary.projection_opaque:
+        return False
+    if summary.projection_incomplete:
+        return True
+    if _summary_marker_fragment_capable(summary):
+        return True
+    return any(
+        _summary_marker_fragment_capable(_TransferSummary.literal("".join(text.split())))
+        for text in summary.literal_texts
+    )
+
+
+def _launcher_shell_positional_state_unrepresentable(  # noqa: PLR0913
+    command: _CommandEvidence,
+    stdin: ContentExpr,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a launcher can feed marker text into a shell's positional parameters.
+
+    A launcher appends words to the command it runs, taken from its own standard input:
+    ``xargs --help`` documents "Run COMMAND with arguments INITIAL-ARGS and more arguments read
+    from input". Those appended words are the child shell's positional parameters, and no argv
+    position in this body spells them, so
+    ``printf '%s%s\\n' doc- lattice | xargs -n1 sh -c '$0 reconcile'`` executes the marker under
+    GNU xargs 4.9 and Bash 5.2 while every operand binding this analysis performs sees an empty
+    operand list. The direct spelling ``sh -c '$0 reconcile' doc-lattice`` already refuses, which
+    isolates the launcher-fed argv rather than the payload parse: an exported parent variable in
+    the same ``xargs`` payload also already refuses, so the second pass does reach through it.
+
+    Recognizing ``xargs`` by name is what AD-17's founding principle rules out, and
+    ``_shell_source_sinks`` already reasons this way for the missing-operand case. So the trigger
+    is the launcher's INPUT rather than its name, which is the only channel any launcher has for
+    supplying argv this body never spells. That keeps the ordinary launcher certifying:
+    ``timeout 60 sh -c '$0 reconcile'`` reads a stdin that carries no marker text and stays
+    certified, which is correct, since Bash leaves ``$0`` as the shell's own name there.
+
+    Both dispatch forms a launcher can feed are covered. A ``-c`` payload's operands begin at
+    ``$0``, so ``$0`` counts for that form; a script operand's ``$0`` is its own path, so for that
+    form the trigger is the file's own reference to ``$1`` and up, the same condition
+    ``_shell_script_positional_state_unrepresentable`` applies to visibly spelled arguments.
+
+    This is scoped to the POSITIONAL channel. ``xargs -I{}`` substitutes its input into the
+    payload's own text rather than binding a positional, so no reference exists for this to find
+    and ``printf '%s%s\\n' doc- lattice | xargs -I{} sh -c '{} reconcile'`` still certifies while
+    real Bash runs the marker. Closing it needs a trigger that does not read the payload, and the
+    only one available refuses an inert payload beside the marker-bearing input, which is a
+    measurable over-refusal rather than a free widening. It is filed rather than absorbed here.
+
+    Args:
+        command: The command whose executable candidates may reach a shell through a launcher.
+        stdin: The command's finalized standard input expression, which a launcher reads argv from.
+        sink_variables: The per-command solved variable table.
+        resources: The solved resource table.
+        streams: The solved stream table.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether a launcher-reached shell reads a positional the launcher's input could supply.
+    """
+    candidates = [
+        head_index
+        for executable in _iter_executable_evidence(command.executable)
+        if (head_index := _launcher_shell_head_index(command, executable)) is not None
+    ]
+    if not candidates:
+        return False
+    fed = _evaluate_with_tables(stdin, sink_variables, resources, streams, limits)
+    if not any(_launcher_input_marker_fragment_capable(alternative) for alternative in fed):
+        return False
+    joined = "".join(
+        sorted(
+            "".join(text.split())
+            for alternative in fed
+            if not alternative.projection_opaque
+            for text in alternative.literal_texts
+        )
+    )
+    return any(
+        _shell_source_composes_from_launcher_input(
+            command, head_index, joined, sink_variables, resources, streams, limits
+        )
+        for head_index in candidates
+    )
+
+
+def _shell_source_composes_from_launcher_input(  # noqa: PLR0913
+    command: _CommandEvidence,
+    head_index: int,
+    joined: str,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether the shell source at one argv index composes the marker from launcher input.
+
+    Substituting the joined input into every positional reference is the same technique
+    ``_shell_script_positional_state_unrepresentable`` applies to visibly spelled arguments, and it
+    is required here for the same reason: asking only whether the input is marker-FRAGMENT capable
+    refused ``ls *.md | xargs -n1 sh -c 'echo $0'``, because ``.md`` ends in ``d`` and so advances
+    the scan from the idle entry state. Substituting reads where the payload actually places the
+    input, so it still catches the input supplying only part of the marker
+    (``printf 'doc-\\n' | xargs -n1 sh -c '${0}lattice reconcile'``) while leaving ordinary
+    pipelines certified.
+
+    Args:
+        command: The command evidence being inspected.
+        head_index: The argv index the shell option grammar is read from.
+        joined: Every readable input alternative's words joined, the text a positional may bind to.
+        sink_variables: The per-command solved variable table.
+        resources: The solved resource table.
+        streams: The solved stream table.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether the selected payload or script operand composes the marker from that input.
+    """
+    selection = _select_shell_source(command.argv, head_index)
+    if selection.kind is _ShellSourceKind.COMMAND and selection.argv_index is not None:
+        payload_indices: tuple[int, ...] = (selection.argv_index,)
+        operand_indices: tuple[int, ...] = ()
+    elif selection.kind is _ShellSourceKind.SCRIPT and selection.argv_index is not None:
+        payload_indices = ()
+        operand_indices = (selection.argv_index,)
+    elif selection.kind is _ShellSourceKind.AMBIGUOUS:
+        # Once the argv shape is uncertain any remaining word can land in either position, which
+        # is the same reason ``_shell_source_sinks`` builds a choice over the whole candidate set.
+        payload_indices = selection.candidate_indices
+        operand_indices = selection.candidate_indices
+    else:
+        return False
+    for index in payload_indices:
+        if index >= len(command.argv):
+            continue
+        port = command.argv[index]
+        if port.dynamic:
+            # A payload this analysis cannot read as text could place the input anywhere, so the
+            # unreadable case falls back to the fragment question over the input itself.
+            if _summary_marker_fragment_capable(_TransferSummary.literal(joined)):
+                return True
+            continue
+        if _substituted_text_composes_marker(port.literal, joined, include_zero=True):
+            return True
+    for index in operand_indices:
+        if index >= len(command.argv):
+            continue
+        if _script_operand_composes_from_text(
+            command.argv[index], joined, sink_variables, resources, streams, limits
+        ):
+            return True
+    return False
+
+
+def _substituted_text_composes_marker(text: str, joined: str, *, include_zero: bool) -> bool:
+    """Return whether substituting one text into every positional reference composes the marker."""
+    if not _text_references_positional_parameters(text, include_zero=include_zero):
+        return False
+    substituted = _substitute_positional_references(text, joined, include_zero=include_zero)
+    return _marker_capable(frozenset({_TransferSummary.literal(substituted)}))
+
+
+def _script_operand_composes_from_text(  # noqa: PLR0913
+    operand: _ArgPort,
+    joined: str,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a tracked script operand composes the marker from one supplied text.
+
+    Args:
+        operand: The argv word naming the script.
+        joined: The text a positional may bind to.
+        sink_variables: The per-command solved variable table.
+        resources: The solved resource table.
+        streams: The solved stream table.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether the tracked file composes the marker once that text is substituted.
+    """
+    if operand.process_resource_id is not None:
+        return False
+    key = normalize_static_resource(
+        operand.literal, dynamic=operand.dynamic or operand.active_argv_expansion
+    )
+    if key is None or key not in resources:
+        return False
+    content = _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits)
+    if not _resource_references_positional_parameters(content):
+        return False
+    readable = [
+        text
+        for alternative in content
+        if not (alternative.projection_opaque or alternative.projection_incomplete)
+        for text in alternative.literal_texts
+    ]
+    if not readable:
+        return _summary_marker_fragment_capable(_TransferSummary.literal(joined))
+    return any(
+        _substituted_text_composes_marker(text, joined, include_zero=False) for text in readable
     )
 
 
@@ -12430,6 +12711,17 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 limits,
             ):
                 raise _TaintLimitExceeded("shell script positional state cannot be represented")
+            if _launcher_shell_positional_state_unrepresentable(
+                command,
+                stdin,
+                sink_variables,
+                solved.resources,
+                solved.streams,
+                limits,
+            ):
+                raise _TaintLimitExceeded(
+                    "launcher-fed shell positional state cannot be represented"
+                )
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
