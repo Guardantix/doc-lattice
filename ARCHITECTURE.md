@@ -548,6 +548,19 @@ not in POSIX mode reads `ENV` never. Refusing on the name alone would therefore 
 read nothing, which is a measurable cost rather than a free widening, and gating on `-i` instead
 would contradict the `--rcfile` reasoning above; that issue records the choice as open.
 
+The startup files a shell reads IMPLICITLY are outside this decision's scope and are disclosed here
+rather than dropped. An interactive or login shell reads `~/.bashrc`, `~/.bash_profile`,
+`~/.profile`, and their system-wide counterparts without any argv word or tracked variable naming
+them, so `printf '%s\n' 'A=doc-' '"${A}lattice" reconcile' > "$HOME/.bashrc"; bash -ic :` executes
+the marker and certifies, while `--rcfile`, `BASH_ENV`, and `source` on the identical file all
+refuse. Every other route in this family resolves a file the body spells, as an operand, an option
+value, or a variable's value; an implicit startup file is spelled nowhere, so recognizing one means
+synthesizing paths from shell convention, and that set has no natural endpoint across login versus
+interactive shells and the shells beyond Bash. That places it on the boundary-extension side of the
+AD-19 line rather than the model-integrity side, where a guard fails to reach a route it mirrors.
+Issue #178 tracks it, and proposes closing this whole channel family, `BASH_ENV` and `ENV` included,
+with one decision over a written-down set of names rather than one name per report.
+
 The content test differs by whether the file's state returns to this body, and the difference is
 load bearing rather than cosmetic. For `source`/`.` it merges into the current shell, so the test
 asks both whether the file's raw content could continue a partial match begun OUTSIDE the file,
