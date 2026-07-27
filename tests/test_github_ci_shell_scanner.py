@@ -281,6 +281,27 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "A=doc-; B='lattice reconcile'; export A B; OPT=pipefail; bash -o \"$OPT\" -c '$A$B'",
         {},
     ),
+    # Issue #146: an output redirection performed INSIDE an exact eval payload registered no
+    # resource write at all, so the written file never entered the resource table and the
+    # ordinary script sink read a key the model believed was never written. Each row below
+    # certified clean while executing the shim. The rows whose sink is `source` instead land in
+    # PHASE_TWO_FAIL_CLOSED_REFUSALS, because registering the write is exactly what lets the
+    # content-gated source guard see the resource at all.
+    (
+        "eval-payload-write-then-append-script",
+        "eval 'printf doc- > s.sh'\nprintf 'lattice reconcile' >> s.sh\nbash s.sh",
+        {},
+    ),
+    (
+        "eval-payload-cat-operand-write",
+        "printf 'doc-' > s.sh\nprintf 'lattice check' >> s.sh\neval 'cat s.sh > t.sh'\nbash t.sh",
+        {},
+    ),
+    (
+        "eval-payload-append-write",
+        "printf 'doc-' > s.sh; eval \"printf 'lattice reconcile' >> s.sh\"; bash s.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -410,6 +431,46 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         "X=doc-; printf '%s' \"$X\"'lattice check' > task.sh; bash --rcfile ta*.sh -i </dev/null",
         {},
         "shell glob script operand state cannot be represented",
+    ),
+    # Issue #146: a write performed inside an exact eval payload registered no resource write, so
+    # the content-gated #133 source guard took its ``key not in resources`` escape and certified.
+    # Each row now reaches the identical reason its authored (non-eval) spelling already reaches,
+    # which is the parity the lowering exists to restore.
+    (
+        "eval-payload-write-then-source",
+        "eval 'printf X=doc- > s.sh'; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "eval-payload-write-from-a-variable-payload",
+        'P=\'printf X=doc- > s.sh\'; eval "$P"; source s.sh; eval "${X}lattice reconcile"',
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "eval-payload-write-expands-a-variable",
+        "V=doc-; eval 'printf X=$V > s.sh'; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "eval-payload-echo-write",
+        "eval 'echo X=doc- > s.sh'; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "eval-payload-clobber-write",
+        "eval 'printf X=doc- >| s.sh'; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
+    ),
+    (
+        "eval-payload-explicit-descriptor-write",
+        "eval 'printf X=doc- 1> s.sh'; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+        "shell source payload state cannot be represented",
     ),
 ]
 
@@ -8219,6 +8280,35 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
     (
         "marker-free-generated-script",
         "echo 'make build' > run.sh; bash run.sh",
+        {},
+    ),
+    # Issue #146 over-refusal guards. Lowering an eval payload's writes must not widen past the
+    # sink boundary AD-18 records: a write with no later execution sink, a statically dead
+    # branch, a marker-free env file, and a write that never reaches descriptor 1 all stay
+    # certified, and real bash runs the marker in none of them.
+    (
+        "eval-payload-write-without-a-sink",
+        "eval 'printf X=doc- > s.sh'; echo done",
+        {},
+    ),
+    (
+        "eval-payload-marker-free-write-then-source",
+        "eval 'printf REGION=us-east-1 > env.sh'; source env.sh; echo \"$REGION\"",
+        {},
+    ),
+    (
+        "eval-payload-dead-branch-write",
+        "eval 'if false; then printf X=doc- > s.sh; fi'; source s.sh; eval \"${X}lattice check\"",
+        {},
+    ),
+    (
+        "eval-payload-stderr-write",
+        "eval 'printf X=doc- 2> s.sh'; source s.sh; eval \"${X}lattice reconcile\"",
+        {},
+    ),
+    (
+        "eval-payload-discarded-write",
+        "eval 'printf X=doc- > /dev/null'; echo done",
         {},
     ),
     (

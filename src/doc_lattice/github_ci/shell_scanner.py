@@ -7,8 +7,9 @@ from enum import Enum, auto
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci.shell_taint import (
     _ANSI_C_SIMPLE_ESCAPES,
-    _OUTPUT_REDIRECTION_OPERATORS,
+    _MAX_SHELL_DESCRIPTOR_DIGITS,
     _QUOTED_FUNCTION_POSITIONAL_STAR,
+    _REDIRECTION_OPERATORS,
     _STATIC_EVAL_SHADOW_NAMES,
     TAINT_REFUSAL_REASON,
     ChoiceOutput,
@@ -17,18 +18,13 @@ from doc_lattice.github_ci.shell_taint import (
     ContentBuilder,
     ContentExpr,
     ContentTarget,
-    DescriptorTarget,
-    DynamicResourceTarget,
     LiteralTransfer,
-    NullTarget,
     OutputExpr,
     OutsideGap,
-    ProcessResourceTarget,
     RedirectionTarget,
     RepeatOutput,
     ScopeOutput,
     SequenceOutput,
-    StaticResourceTarget,
     StreamRef,
     VariableRef,
     _ArgPort,
@@ -48,7 +44,7 @@ from doc_lattice.github_ci.shell_taint import (
     analyze_marker_taint,
     choice,
     concat,
-    normalize_static_resource,
+    resolve_redirection_target,
     stream_ref_ids,
 )
 
@@ -58,7 +54,6 @@ _MAX_SHELL_SCAN_STEPS = 4_194_304
 _MAX_SHELL_RECURSION_DEPTH = 64
 _MAX_SHELL_INVOCATIONS = 10_000
 _MAX_LAUNCHER_NESTING_DEPTH = 64
-_MAX_SHELL_DESCRIPTOR_DIGITS = 64
 _OCTAL_BASE = 8
 _ANSI_C_OCTAL_BYTE_MASK = 0xFF
 _UNICODE_MAX = 0x10FFFF
@@ -131,20 +126,6 @@ _ENV_LONG_OPTION_KINDS = {
 }
 _ENV_SHORT_FLAGS = frozenset({"0", "i", "v"})
 _ENV_SHORT_REQUIRED = frozenset({"a", "C", "u"})
-_REDIRECTION_OPERATORS = (
-    "&>>",
-    "<<<",
-    "<<-",
-    "&>",
-    "<<",
-    ">>",
-    "<>",
-    ">&",
-    "<&",
-    ">|",
-    ">",
-    "<",
-)
 _COMMAND_OPERATORS = (
     ";;&",
     "&&",
@@ -877,27 +858,6 @@ def _parse_static_descriptor(digits: str) -> int:
         return int(digits)
     except ValueError as error:
         raise _ShellScanIncomplete("file descriptor cannot be scanned safely") from error
-
-
-# ``/dev/fd/N`` and ``/proc/self/fd/N`` are descriptor aliases on Linux, not ordinary files;
-# ``/dev/stdout`` is the fixed alias for descriptor 1. Modeling a write through one of these as a
-# static resource replaces the implicit pipe target a producer's own descriptor 1 would otherwise
-# carry, so a downstream ``_pipe_source`` lookup sees an ordinary file and discards the taint
-# instead of routing it. The read side already resolves ``/dev/stdin`` correctly through the
-# script-source path lookup, so this recognition is write-side only.
-_DEV_FD_WRITE_PREFIXES = ("/dev/fd/", "/proc/self/fd/")
-
-
-def _dev_fd_write_descriptor(resource: str) -> int | None:
-    """Return the descriptor a normalized write-side ``/dev/fd`` family path names, if any."""
-    if resource == "/dev/stdout":
-        return 1
-    for prefix in _DEV_FD_WRITE_PREFIXES:
-        if resource.startswith(prefix):
-            suffix = resource[len(prefix) :]
-            if suffix.isdigit():
-                return _parse_static_descriptor(suffix)
-    return None
 
 
 @dataclass(slots=True)
@@ -2666,20 +2626,13 @@ class _ShellScanner:
 
     @staticmethod
     def _redirection_target(word: _ShellWord, operator: str) -> RedirectionTarget:
-        if word.process_resource_id is not None:
-            return ProcessResourceTarget(word.process_resource_id)
-        if operator in {"<&", ">&"} and not word.dynamic and word.literal.isdigit():
-            return DescriptorTarget(_parse_static_descriptor(word.literal))
-        resource = normalize_static_resource(word.literal, dynamic=word.dynamic)
-        if resource == "/dev/null":
-            return NullTarget()
-        if resource is not None and operator in _OUTPUT_REDIRECTION_OPERATORS:
-            descriptor = _dev_fd_write_descriptor(resource)
-            if descriptor is not None:
-                return DescriptorTarget(descriptor)
-        if resource is not None:
-            return StaticResourceTarget(resource)
-        return DynamicResourceTarget()
+        return resolve_redirection_target(
+            word.literal,
+            operator,
+            dynamic=word.dynamic,
+            parse_descriptor=_parse_static_descriptor,
+            process_resource_id=word.process_resource_id,
+        )
 
     def _consume_redirection(
         self,

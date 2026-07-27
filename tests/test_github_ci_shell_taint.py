@@ -22,6 +22,8 @@ from doc_lattice.github_ci.shell_taint import (
     ContentBuilder,
     ContentExpr,
     ContentTarget,
+    DescriptorTarget,
+    DynamicResourceTarget,
     LiteralTransfer,
     NullTarget,
     OutputExpr,
@@ -51,7 +53,9 @@ from doc_lattice.github_ci.shell_taint import (
     _EvalSyntaxState,
     _EvalSyntaxTransition,
     _evaluate_closed,
+    _evaluate_with_tables,
     _ExecutableEvidence,
+    _expression_variable_names,
     _FlowDefinitions,
     _FlowWrite,
     _is_function_positional_parameter,
@@ -66,6 +70,7 @@ from doc_lattice.github_ci.shell_taint import (
     _solve_eval_syntax_variables,
     _solve_flow_definitions,
     _static_eval_command_names,
+    _static_eval_command_stdout,
     _static_eval_commands,
     _static_eval_mutations,
     _static_eval_program_commands,
@@ -87,6 +92,11 @@ def _can_mark(expression: ContentExpr, *, strip: bool = False) -> bool:
     if strip:
         value = _strip_trailing_newlines(value)
     return _marker_capable(value)
+
+
+def _can_mark_with_tables(expression: ContentExpr) -> bool:
+    """Resolve against empty tables, for an expression carrying resource or stream references."""
+    return _marker_capable(_evaluate_with_tables(expression, {}, {}, {}, TaintLimits()))
 
 
 def _deep_concat(depth: int) -> ContentExpr:
@@ -2804,6 +2814,81 @@ def test_static_eval_commands_split_an_exact_payload_on_separators() -> None:
     assert [item.words for item in parsed] == [("printf", "a"), ("declare", "-g", "X=1")]
 
 
+@pytest.mark.parametrize(
+    ("payload", "operator", "descriptor", "target"),
+    [
+        ("printf a > out.sh", ">", 1, StaticResourceTarget("out.sh")),
+        ("printf a >> out.sh", ">>", 1, StaticResourceTarget("out.sh")),
+        ("printf a >| out.sh", ">|", 1, StaticResourceTarget("out.sh")),
+        ("printf a 2> out.sh", ">", 2, StaticResourceTarget("out.sh")),
+        ("printf a &> out.sh", "&>", 1, StaticResourceTarget("out.sh")),
+        ("printf a >&2", ">&", 1, DescriptorTarget(2)),
+        ("printf a > /dev/null", ">", 1, NullTarget()),
+        ("printf a > /dev/fd/1", ">", 1, DescriptorTarget(1)),
+        ("printf a < in.sh", "<", 0, StaticResourceTarget("in.sh")),
+        ("printf a > $LOG", ">", 1, DynamicResourceTarget()),
+    ],
+)
+def test_static_eval_commands_retain_payload_redirections(
+    payload: str,
+    operator: str,
+    descriptor: int,
+    target: object,
+) -> None:
+    """Issue #146: an eval payload's own redirections are evidence, not noise.
+
+    The tokenizer used to drop the operator and skip its target word outright, so a write
+    performed inside an exact payload registered no resource write and a later sink read a key
+    the model believed was never written. Retaining the event is the first of the two halves;
+    ``test_eval_payload_write_reaches_a_sourced_sink`` pins the flow-graph half.
+    """
+    (parsed,) = _static_eval_commands(_eval_command(payload))
+
+    assert parsed.words == ("printf", "a")
+    assert [(item.operator, item.descriptor, item.target) for item in parsed.redirections] == [
+        (operator, descriptor, target)
+    ]
+
+
+def test_static_eval_commands_retain_a_brace_descriptor_without_a_number() -> None:
+    """A ``{fd}>`` names a descriptor Bash chooses at run time, so it binds nothing statically."""
+    (parsed,) = _static_eval_commands(_eval_command("printf a {fd}> out.sh"))
+
+    assert parsed.words == ("printf", "a")
+    assert [(item.operator, item.descriptor) for item in parsed.redirections] == [(">", None)]
+
+
+def test_static_eval_commands_order_payload_redirections_left_to_right() -> None:
+    """Ordinals sequence the replay, so a truncation before an append keeps its side effect."""
+    (parsed,) = _static_eval_commands(_eval_command("printf a > first.sh 2>> second.sh"))
+
+    assert [(item.ordinal, item.operator, item.target) for item in parsed.redirections] == [
+        (0, ">", StaticResourceTarget("first.sh")),
+        (1, ">>", StaticResourceTarget("second.sh")),
+    ]
+
+
+def test_static_eval_commands_separate_redirections_per_payload_command() -> None:
+    parsed = _static_eval_commands(_eval_command("printf a > first.sh; printf b > second.sh"))
+
+    assert [item.words for item in parsed] == [("printf", "a"), ("printf", "b")]
+    assert [[event.target for event in item.redirections] for item in parsed] == [
+        [StaticResourceTarget("first.sh")],
+        [StaticResourceTarget("second.sh")],
+    ]
+
+
+def test_static_eval_commands_fail_closed_on_an_unmodeled_redirection_operator() -> None:
+    """An operator run this analysis cannot name is missing evidence, not the absence of any.
+
+    Dropping it silently would leave the write it performs unmodeled while the rest of the
+    payload still contributed state, which is the same fail-closed reasoning issue #134 applied
+    to a payload the tokenizer cannot accept.
+    """
+    with pytest.raises(_TaintLimitExceeded, match="shell eval payload cannot be tokenized"):
+        _static_eval_commands(_eval_command("printf a >>| out.sh"))
+
+
 def test_static_eval_command_names_dedupe_in_first_use_order() -> None:
     names = _static_eval_command_names(_eval_command("printf a; printf b; declare -g X=1"))
 
@@ -3078,6 +3163,135 @@ def test_eval_replayed_assignment_marker_free_still_certifies() -> None:
     not flip an ordinary body to refuse.
     """
     body = "eval 'X=safe'; bash -c \"$X\"'run'"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_static_eval_command_stdout_carries_authored_operand_content() -> None:
+    """Issue #146: a payload command's operands are the content its redirection writes.
+
+    Without this the write registered no content the later sink could compose against, which is
+    what let ``eval 'printf X=doc- > s.sh'; source s.sh; eval "${X}lattice"`` certify.
+    """
+    (parsed,) = _static_eval_commands(_eval_command("printf X=doc- > s.sh"))
+
+    stdout = _static_eval_command_stdout(parsed, 0, scoped=False)
+
+    assert _can_mark_with_tables(concat(stdout, LiteralTransfer("lattice")))
+
+
+def test_static_eval_command_stdout_of_a_marker_free_operand_cannot_mark() -> None:
+    """Over-refusal guard: the ordinary generated-env-file idiom carries no fragment."""
+    (parsed,) = _static_eval_commands(_eval_command("printf REGION=us-east-1 > env.sh"))
+
+    stdout = _static_eval_command_stdout(parsed, 0, scoped=False)
+
+    assert not _can_mark_with_tables(concat(stdout, LiteralTransfer("lattice")))
+
+
+def test_static_eval_command_stdout_resolves_an_expanded_operand() -> None:
+    """The payload expands its own parameters, so the written content is not its source text."""
+    (parsed,) = _static_eval_commands(_eval_command("printf X=$V > s.sh"))
+
+    stdout = _static_eval_command_stdout(parsed, 0, scoped=False)
+
+    assert "V" in _expression_variable_names(stdout)
+
+
+def test_eval_payload_write_reaches_a_sourced_sink() -> None:
+    """Verified false-safe from issue #146, reproduced under real Bash 5.2.
+
+    The write happens inside the eval payload, so the target file was never registered in the
+    resource table and the content-gated ``source`` guard took its ``key not in resources``
+    escape. The control shows the identical flow through an authored redirection already
+    refuses, isolating the missing lowering rather than the guard itself as the cause.
+    """
+    control = 'printf X=doc- > s.sh; source s.sh; eval "${X}lattice check"'
+    exploit = "eval 'printf X=doc- > s.sh'; source s.sh; eval \"${X}lattice check\""
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason is not None
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_eval_payload_write_reaches_a_script_sink_without_source() -> None:
+    """Companion false-safe for issue #146 through a plain ``bash`` sink, not ``source``.
+
+    Isolates the mechanism as the missing resource write rather than anything source-specific:
+    the payload writes the marker prefix and an ordinary authored append completes it.
+    """
+    control = "printf doc- > s.sh\nprintf 'lattice check' >> s.sh\nbash s.sh"
+    exploit = "eval 'printf doc- > s.sh'\nprintf 'lattice check' >> s.sh\nbash s.sh"
+
+    control_result = scan_doc_lattice_invocations(control)
+    exploit_result = scan_doc_lattice_invocations(exploit)
+
+    assert control_result.incomplete_reason == "authored marker flow reaches an execution sink"
+    assert exploit_result.incomplete_reason == control_result.incomplete_reason
+
+
+def test_eval_payload_write_from_a_variable_payload_reaches_a_sink() -> None:
+    """The payload need not be spelled literally; an exactly resolved one behaves the same."""
+    exploit = 'P=\'printf X=doc- > s.sh\'; eval "$P"; source s.sh; eval "${X}lattice check"'
+
+    result = scan_doc_lattice_invocations(exploit)
+
+    assert result.incomplete_reason is not None
+
+
+def test_eval_payload_write_of_a_named_resource_operand_reaches_a_sink() -> None:
+    """A payload command naming a resource this body writes reproduces that content on stdout.
+
+    AD-18 already puts the ``cat s.sh`` handoff inside the modeled may-output boundary for an
+    authored command; the payload route models it the same way rather than a narrower one.
+    """
+    body = "printf 'doc-' > s.sh\nprintf 'lattice check' >> s.sh\neval 'cat s.sh > t.sh'\nbash t.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
+def test_eval_payload_write_without_a_sink_still_certifies() -> None:
+    """Over-refusal guard: AD-18's sink boundary survives the lowering.
+
+    Composing a marker into a file is not executing it. Only a body that actually reaches an
+    execution sink is refused, so the write alone must stay certified.
+    """
+    body = "eval 'printf X=doc- > s.sh'; echo done"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_eval_payload_dead_branch_write_still_certifies() -> None:
+    """Over-refusal guard: a statically dead payload branch registers no write.
+
+    ``_static_eval_mutations`` already skips a branch whose literal status is False; the write
+    lowering follows the same reachability rule rather than registering every write it can lex.
+    """
+    body = "eval 'if false; then printf X=doc- > s.sh; fi'; source s.sh; eval \"${X}lattice check\""
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_eval_payload_stderr_write_still_certifies() -> None:
+    """Over-refusal guard: only descriptor 1 carries the producer's content.
+
+    ``printf X=doc- 2> s.sh`` leaves ``s.sh`` empty under real bash, so registering the key with
+    opaque content must not make the later ``source`` fail closed.
+    """
+    body = "eval 'printf X=doc- 2> s.sh'; source s.sh; eval \"${X}lattice check\""
 
     result = scan_doc_lattice_invocations(body)
 

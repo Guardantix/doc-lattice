@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, TypeAlias
 from doc_lattice.error_types import ProjectError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
@@ -225,6 +225,7 @@ class _StaticEvalCommand:
     active_function_names: frozenset[str] = frozenset()
     asynchronous: bool = False
     array_compound: bool = False
+    redirections: tuple[_RedirectionEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +236,7 @@ class _StaticEvalExecutable:
     negated: bool
     bypasses_functions: bool
     literal_status_available: bool
+    argv_index: int = 0
 
 
 @dataclass(slots=True)
@@ -938,6 +940,103 @@ _INPUT_REDIRECTION_OPERATORS = frozenset({"<", "<<", "<<-", "<<<", "<&", "<>"})
 _OUTPUT_REDIRECTION_OPERATORS = frozenset({">", ">|", ">>", ">&", "<>", "&>", "&>>"})
 _APPEND_REDIRECTION_OPERATORS = frozenset({">>", "&>>"})
 _COMBINED_OUTPUT_REDIRECTION_OPERATORS = frozenset({"&>", "&>>"})
+# Ordered longest first so a prefix match never wins over the longer operator that contains it.
+# The scanner matches these against raw source text; the exact eval payload tokenizer matches an
+# already-lexed punctuation run against the same set, so a spelling neither recognizes fails
+# closed in both rather than being silently dropped by one of them.
+_REDIRECTION_OPERATORS = (
+    "&>>",
+    "<<<",
+    "<<-",
+    "&>",
+    "<<",
+    ">>",
+    "<>",
+    ">&",
+    "<&",
+    ">|",
+    ">",
+    "<",
+)
+# ``/dev/fd/N`` and ``/proc/self/fd/N`` are descriptor aliases on Linux, not ordinary files;
+# ``/dev/stdout`` is the fixed alias for descriptor 1. Modeling a write through one of these as a
+# static resource replaces the implicit pipe target a producer's own descriptor 1 would otherwise
+# carry, so a downstream ``_pipe_source`` lookup sees an ordinary file and discards the taint
+# instead of routing it. The read side already resolves ``/dev/stdin`` correctly through the
+# script-source path lookup, so this recognition is write-side only.
+_DEV_FD_WRITE_PREFIXES = ("/dev/fd/", "/proc/self/fd/")
+_MAX_SHELL_DESCRIPTOR_DIGITS = 64
+
+
+def _static_eval_descriptor(digits: str) -> int:
+    """Parse one bounded descriptor an exact eval payload spells, or fail closed."""
+    if len(digits) > _MAX_SHELL_DESCRIPTOR_DIGITS:
+        raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+    try:
+        return int(digits)
+    except ValueError as error:
+        raise _TaintLimitExceeded("shell eval payload cannot be tokenized") from error
+
+
+def _dev_fd_write_descriptor(resource: str, parse_descriptor: Callable[[str], int]) -> int | None:
+    """Return the descriptor a normalized write-side ``/dev/fd`` family path names, if any."""
+    if resource == "/dev/stdout":
+        return 1
+    for prefix in _DEV_FD_WRITE_PREFIXES:
+        if resource.startswith(prefix):
+            suffix = resource[len(prefix) :]
+            if suffix.isdigit():
+                return parse_descriptor(suffix)
+    return None
+
+
+def resolve_redirection_target(
+    literal: str,
+    operator: str,
+    *,
+    dynamic: bool,
+    parse_descriptor: Callable[[str], int],
+    process_resource_id: int | None = None,
+) -> RedirectionTarget:
+    """Resolve one redirection operand word to the target it names.
+
+    Two callers share this rule set: the scanner, which reads an authored redirection out of the
+    run body, and the exact eval payload tokenizer, which reads one out of a payload the body
+    only executes. Keeping the ``/dev/null``, ``/dev/fd`` family, descriptor duplication, and
+    dynamic fallbacks in one place is what stops the payload route from recognizing a narrower
+    set of targets than the authored route and certifying a write the authored spelling refuses
+    (issue #146).
+
+    The descriptor parser is supplied rather than fixed because each caller bounds and reports a
+    malformed descriptor in its own vocabulary: the scanner stops the scan, and the taint module
+    raises its own limit error.
+
+    Args:
+        literal: The operand word's literal text.
+        operator: The redirection operator this operand belongs to.
+        dynamic: Whether the operand's value is unknowable to this analysis.
+        parse_descriptor: The caller's bounded descriptor-digit parser.
+        process_resource_id: The process substitution this operand names, when it names one.
+
+    Returns:
+        The target this operand resolves to.
+    """
+    if process_resource_id is not None:
+        return ProcessResourceTarget(process_resource_id)
+    if operator in {"<&", ">&"} and not dynamic and literal.isdigit():
+        return DescriptorTarget(parse_descriptor(literal))
+    resource = normalize_static_resource(literal, dynamic=dynamic)
+    if resource == "/dev/null":
+        return NullTarget()
+    if resource is not None and operator in _OUTPUT_REDIRECTION_OPERATORS:
+        descriptor = _dev_fd_write_descriptor(resource, parse_descriptor)
+        if descriptor is not None:
+            return DescriptorTarget(descriptor)
+    if resource is not None:
+        return StaticResourceTarget(resource)
+    return DynamicResourceTarget()
+
+
 _STREAM_SCOPE_KINDS = frozenset(
     {
         "brace_group",
@@ -4436,6 +4535,51 @@ def _static_eval_commands(command: _CommandEvidence) -> tuple[_StaticEvalCommand
     return tuple(commands)
 
 
+def _static_eval_redirection_target(source_word: str, operator: str) -> RedirectionTarget:
+    """Resolve one exact eval payload redirection operand to the target it names.
+
+    The operand is reparsed with the payload's own second-pass quote and parameter semantics, so
+    a quoted ``'$LOG'`` names the literal file Bash names while an unquoted ``$LOG`` resolves to
+    no static key. The latter is the same dynamic target the authored path already declines to
+    write through, and stays tracked as issue #151 for both routes rather than being modeled
+    here.
+
+    Args:
+        source_word: The operand word exactly as the payload spells it.
+        operator: The redirection operator this operand belongs to.
+
+    Returns:
+        The target this operand resolves to.
+    """
+    literal = _exact_content_literal(
+        _eval_reparse_content(LiteralTransfer(source_word)), {}, TaintLimits()
+    )
+    return resolve_redirection_target(
+        source_word if literal is None else literal,
+        operator,
+        dynamic=literal is None,
+        parse_descriptor=_static_eval_descriptor,
+    )
+
+
+def _static_eval_redirection_descriptor(lexeme: str, prefix: str | None) -> int | None:
+    """Return the descriptor one exact eval payload redirection binds.
+
+    A ``{name}>`` names a descriptor Bash chooses at run time, so it binds none statically and
+    the replay skips it the same way the authored path skips its own dynamic descriptors.
+
+    Args:
+        lexeme: The redirection operator.
+        prefix: The descriptor prefix word attached to it, when it carries one.
+
+    Returns:
+        The descriptor this redirection binds, or None when Bash chooses it at run time.
+    """
+    if prefix is None:
+        return 0 if lexeme in _INPUT_REDIRECTION_OPERATORS else 1
+    return _static_eval_descriptor(prefix) if prefix.isdigit() else None
+
+
 def _static_eval_program_commands(  # noqa: PLR0915
     program: str,
     *,
@@ -4470,7 +4614,9 @@ def _static_eval_program_commands(  # noqa: PLR0915
     word_eligibility: list[bool] = []
     source_words: list[str] = []
     redirection_prefixes: list[bool] = []
-    skip_redirection_target = False
+    redirections: list[_RedirectionEvent] = []
+    # Non-None exactly while the next word is a redirection's target rather than an argv word.
+    pending_redirection: tuple[str, int | None] | None = None
     try:
         tokens = tuple(lexer)
     except ValueError as error:
@@ -4491,25 +4637,35 @@ def _static_eval_program_commands(  # noqa: PLR0915
                         # unquoted one there begins a compound array assignment whose elements the
                         # lexer scatters into the following commands.
                         array_compound="(" in lexeme and _static_eval_assignment_prefix(words[-1]),
+                        redirections=tuple(redirections),
                     )
                 )
                 words.clear()
                 word_eligibility.clear()
                 source_words.clear()
                 redirection_prefixes.clear()
-            skip_redirection_target = False
+                redirections.clear()
+            pending_redirection = None
             continue
         if (
             lexeme
             and any(character in "<>" for character in lexeme)
             and all(character in "<>&|" for character in lexeme)
         ):
+            if lexeme not in _REDIRECTION_OPERATORS:
+                # A punctuation run this analysis cannot name is missing evidence, not the
+                # absence of any: dropping it would leave the write it performs unmodeled while
+                # the rest of the payload still contributed state (issue #146, the same
+                # reasoning issue #134 applied to an untokenizable payload).
+                raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+            prefix: str | None = None
             if redirection_prefixes and redirection_prefixes[-1]:
+                prefix = source_words[-1]
                 words.pop()
                 word_eligibility.pop()
                 source_words.pop()
                 redirection_prefixes.pop()
-            skip_redirection_target = True
+            pending_redirection = (lexeme, _static_eval_redirection_descriptor(lexeme, prefix))
             continue
         if metadata_index >= len(metadata):
             # ``shlex`` and the metadata walk disagree on word count for this payload; treat the
@@ -4517,8 +4673,17 @@ def _static_eval_program_commands(  # noqa: PLR0915
             raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
         token_metadata = metadata[metadata_index]
         metadata_index += 1
-        if skip_redirection_target:
-            skip_redirection_target = False
+        if pending_redirection is not None:
+            operator, descriptor = pending_redirection
+            pending_redirection = None
+            redirections.append(
+                _RedirectionEvent(
+                    len(redirections),
+                    operator,
+                    descriptor,
+                    _static_eval_redirection_target(token_metadata.source, operator),
+                )
+            )
             continue
         words.append(lexeme)
         word_eligibility.append(token_metadata.keyword_eligible)
@@ -4533,6 +4698,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
                 tuple(word_eligibility),
                 tuple(source_words),
                 active_function_names=active_function_names,
+                redirections=tuple(redirections),
             )
         )
     return _annotate_static_eval_control(tuple(commands))
@@ -4614,6 +4780,7 @@ def _static_eval_wrapped_executable(
         negated=negated,
         bypasses_functions=bypasses_functions,
         literal_status_available=literal_status_available,
+        argv_index=index,
     )
 
 
@@ -4660,6 +4827,107 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
         negated=negated,
         literal_status_available=literal_status_available,
     )
+
+
+def _static_eval_operand_expressions(
+    parsed: _StaticEvalCommand, environment: int, *, scoped: bool
+) -> tuple[tuple[ContentExpr, ...], tuple[ContentExpr, ...]]:
+    """Lower one payload command's operand words into content and script-source expressions."""
+    executable = _static_eval_executable(parsed)
+    start = min(1, len(parsed.source_words)) if executable is None else executable.argv_index + 1
+    contents: list[ContentExpr] = []
+    sources: list[ContentExpr] = []
+    for source_word in parsed.source_words[start:]:
+        reparsed = _eval_reparse_content(LiteralTransfer(source_word))
+        content = _lower_eval_assignment_operand(reparsed, environment, scoped=scoped)
+        literal = _exact_content_literal(reparsed, {}, TaintLimits())
+        contents.append(content)
+        sources.append(
+            _script_port_expression(
+                _ArgPort(
+                    source_word if literal is None else literal,
+                    content,
+                    dynamic=literal is None,
+                ),
+                OutsideGap(),
+            )
+        )
+    return tuple(contents), tuple(sources)
+
+
+def _static_eval_command_stdout(
+    parsed: _StaticEvalCommand, environment: int, *, scoped: bool
+) -> ContentExpr:
+    """Return the authored stdout one exact eval payload command produces.
+
+    This mirrors ``_producer_stdout``'s conservative shape for an unknown command: an external
+    gap, the command's own argv content, and the content of any static resource it names as an
+    operand. Modeling the payload route more narrowly than the authored one is what let
+    ``eval 'cat s.sh > t.sh'`` certify while the authored spelling refused (issue #146).
+
+    Three limbs ``_producer_stdout`` carries are deliberately absent, each an over-approximation
+    in the fail-closed direction rather than a dropped flow: ``printf`` format exactness, which
+    is tied to the ``_CommandEvidence``/``_ArgPort`` graph the payload has no counterpart for;
+    real standard input, which the payload replay does not model; and the called-function stdout
+    limb, since a payload call site contributes no function scope here.
+
+    Args:
+        parsed: One tokenized command from an exact eval payload.
+        environment: The execution environment the enclosing eval command runs in.
+        scoped: Whether variable references resolve through scoped names.
+
+    Returns:
+        The content expression this payload command writes to its standard output.
+    """
+    contents, sources = _static_eval_operand_expressions(parsed, environment, scoped=scoped)
+    return choice(OutsideGap(), concat(*contents), *sources)
+
+
+def _static_eval_resource_writes(
+    command: _CommandEvidence,
+    environment: int,
+    inherited: _DescriptorBindings,
+    guarded: frozenset[int],
+    *,
+    scoped: bool,
+) -> tuple[_FlowWrite, ...]:
+    """Return the resource writes an exact eval payload's own redirections perform.
+
+    AD-18 replays a payload's state effects so a later sink observes them, but that replay only
+    ever reached variable assignments. A redirection inside the payload registered nothing, so
+    the file it wrote never entered the resource table at all and both the content-gated
+    ``source`` guard and the ordinary script sink read a key the model believed was never
+    written (issue #146). Lowering the write here, from the same ``_static_write_definitions``
+    the authored path uses, puts it on the same footing as an authored redirection.
+
+    A branch whose literal status is False contributes nothing, matching the reachability rule
+    ``_static_eval_mutations`` already applies to a payload's assignments.
+
+    Args:
+        command: The command whose payload may perform writes.
+        environment: The execution environment that command runs in.
+        inherited: Descriptor bindings the enclosing compounds installed.
+        guarded: Descriptors some other command or compound in this body binds.
+        scoped: Whether variable references resolve through scoped names.
+
+    Returns:
+        The static resource writes this command's exact eval payload performs.
+    """
+    if not _static_eval_programs(command):
+        return ()
+    writes: list[_FlowWrite] = []
+    for parsed in _static_eval_commands(command):
+        if parsed.execution_status is False or not parsed.redirections:
+            continue
+        writes.extend(
+            _static_write_definitions(
+                parsed.redirections,
+                _static_eval_command_stdout(parsed, environment, scoped=scoped),
+                inherited,
+                guarded,
+            )
+        )
+    return tuple(writes)
 
 
 def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
@@ -7176,12 +7444,25 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
         # enclosing chain has to be visible here. Without it the write resolved to an unnamed
         # dynamic target and was dropped, laundering the content into a file read as unwritten.
         enclosing = command_paths[command.command_id]
+        inherited_bindings = scope_bindings.get(enclosing[-1], {}) if enclosing else {}
         resource_writes.extend(
             _static_write_definitions(
                 command.redirections,
                 output,
-                scope_bindings.get(enclosing[-1], {}) if enclosing else {},
+                inherited_bindings,
                 guarded_descriptors,
+            )
+        )
+        # A write performed inside this command's own exact eval payload belongs at this point in
+        # body order, so a payload truncation before an authored append keeps its side effect and
+        # append accumulation stays sequenced the way AD-18 records (issue #146).
+        resource_writes.extend(
+            _static_eval_resource_writes(
+                command,
+                command_environments[command.command_id],
+                inherited_bindings,
+                guarded_descriptors,
+                scoped=scoped_variables,
             )
         )
 

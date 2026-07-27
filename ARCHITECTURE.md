@@ -478,6 +478,23 @@ command substitution or an untracked `declare`, is issue #114's complement: this
 recovers a mutation from it at all, so neither the exact-table path nor this lowering has anything
 to act on.
 
+An output redirection a payload performs is lowered the same way, into the resource-write graph an
+authored redirection uses, at the enclosing `eval`'s own position in body order so truncation and
+append accumulation stay sequenced. Without it a write inside a payload registered nothing at all,
+so the file it wrote never entered the resource table and both the `source` guard below and an
+ordinary script sink read a key the model believed was never written, certifying
+`eval 'printf X=doc- > s.sh'; source s.sh; eval "${X}lattice"` (issue #146). The payload command's
+standard output is modeled the way an unknown authored command's is: an external gap, its own argv
+content, and the content of any static resource it names as an operand, so the `cat s.sh > t.sh`
+handoff is inside the same may-output boundary by either spelling. Three limbs the authored model
+carries are absent here, each an over-approximation rather than a dropped flow: `printf` format
+exactness, real standard input, and called-function stdout. A branch whose literal status is False
+contributes no write, matching the reachability rule the assignment replay already applies, and a
+redirection whose target this analysis cannot name resolves to no static key at all, which is the
+same dynamic-resource-identity gap issue #151 tracks for the authored route. This lowering does not
+build the resource-shaped exact-literal state table the next paragraph rules out; it records what a
+payload writes, not what sourcing that file would then assign.
+
 The replay is reached from `eval` alone. A `source` or `.` payload's state effects are
 architecturally unreachable to it: recovering them exactly would need a second, resource-shaped
 exact-literal table threaded through the same bootstrap phase that builds the variable table, which
