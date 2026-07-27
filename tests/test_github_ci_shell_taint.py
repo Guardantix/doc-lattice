@@ -4447,3 +4447,88 @@ def test_trap_registrations_that_run_nothing_stay_certified(body: str) -> None:
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+# Codex review round 3. Every word after a shell's script operand becomes the child's ``$1``,
+# ``$2``, ... , so a tracked script that reads them composes out of text the CALLER supplies. The
+# assignments-only content test cannot see it, because the composing file need contain no
+# assignment at all. Each case below pins a control that already refused beside the spelling that
+# slipped past, plus the over-refusal guards that keep the conjunction narrow.
+_POSITIONAL_SCRIPT = "printf '%s\\n' '\"$1$2\" reconcile' > s.sh; "
+_POSITIONAL_REASON = "shell script positional state cannot be represented"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_SCRIPT + "bash s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash ./s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "sh s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "timeout 60 bash s.sh doc- lattice",
+        "printf '%s\\n' '\"${1}${2}\" reconcile' > s.sh; bash s.sh doc- lattice",
+        "printf '%s\\n' '\"$*\" reconcile' > s.sh; bash s.sh doc- lattice",
+        _POSITIONAL_SCRIPT + "bash s.sh lattice doc-",
+    ],
+    ids=(
+        "exact-operand",
+        "dot-slash-operand",
+        "sh-head",
+        "behind-a-launcher",
+        "braced-positionals",
+        "star-expansion",
+        "arguments-given-in-the-other-order",
+    ),
+)
+def test_shell_script_positional_arguments_fail_closed(body: str) -> None:
+    """Codex finding: a tracked script composing the marker from its arguments certified.
+
+    ``printf '%s\\n' '"$1$2" reconcile' > s.sh; bash s.sh doc- lattice`` executes the marker under
+    real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``, while nothing in the file is an
+    assignment for ``_shell_script_operand_state_unrepresentable`` to read. The ``-c`` spelling of
+    the identical composition already refuses through the operand binding that route received.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == _POSITIONAL_REASON
+
+
+def test_shell_script_positional_c_spelling_control_still_refuses() -> None:
+    """The control that isolates the dispatch form rather than the composition itself."""
+    result = scan_doc_lattice_invocations("""bash -c '"$1$2" reconcile' sh doc- lattice""")
+
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _POSITIONAL_SCRIPT + "bash s.sh",
+        _POSITIONAL_SCRIPT + "bash s.sh --verbose",
+        _POSITIONAL_SCRIPT + "bash s.sh build",
+        _POSITIONAL_SCRIPT + "bash s.sh make build",
+        "printf '%s\\n' 'echo hi' > s.sh; bash s.sh doc- lattice",
+        "printf '%s\\n' '\"$0\" reconcile' > s.sh; bash s.sh doc- lattice",
+        "bash s.sh doc- lattice",
+    ],
+    ids=(
+        "no-arguments",
+        "ordinary-flag",
+        "ordinary-word",
+        "ordinary-word-pair",
+        "file-ignores-its-arguments",
+        "dollar-zero-is-the-script-path",
+        "operand-names-no-tracked-file",
+    ),
+)
+def test_shell_script_positional_over_refusal_guards(body: str) -> None:
+    """Over-refusal guards: all three conditions must hold together before this refuses.
+
+    A file that ignores its arguments cannot compose out of them, ordinary arguments cannot carry
+    marker text, an unwritten target was never in this analysis's purview, and a script's ``$0`` is
+    its own path rather than a word the caller chose.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None

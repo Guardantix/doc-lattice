@@ -11936,6 +11936,272 @@ def _shell_script_operand_state_unrepresentable(
     return False
 
 
+def _text_references_positional_parameters(text: str) -> bool:
+    """Return whether shell source text reads a positional parameter its caller supplies.
+
+    Only the forms that can carry a caller's word into the child's own expansion count:
+    ``$1``..``$9``, ``$@``, ``$*``, and the braced ``${1}``/``${@}``/``${*}`` spellings, including
+    ``${1:-default}`` and the rest of the brace grammar, which all start with the same two
+    characters. ``$0`` is excluded because a script's ``$0`` is its own path rather than an operand
+    the caller chose, unlike a ``-c`` payload's; ``$#`` is excluded because a count cannot carry
+    marker text. A ``$`` that a backslash escapes still counts, since this reads raw file bytes
+    without knowing the quoting context each one lands in, and that direction over-approximates.
+
+    Args:
+        text: One literal alternative of the file's own content.
+
+    Returns:
+        Whether the text reads a caller-supplied positional parameter anywhere.
+    """
+    index = 0
+    while True:
+        index = text.find("$", index)
+        if index == -1 or index + 1 >= len(text):
+            return False
+        following = text[index + 1]
+        if following == "{":
+            if index + 2 < len(text) and _positional_reference_start(text[index + 2]):
+                return True
+        elif _positional_reference_start(following):
+            return True
+        index += 1
+
+
+def _positional_reference_start(character: str) -> bool:
+    """Return whether one character after a ``$`` opens a caller-supplied positional reference."""
+    return character in {"@", "*"} or (character.isdigit() and character != "0")
+
+
+def _resource_references_positional_parameters(value: _ContentValue) -> bool:
+    """Return whether a script-tracked file's own content reads a caller-supplied positional.
+
+    Content this analysis cannot read as text answers yes. A resource whose solved value is opaque
+    or truncated could reference anything, and the caller pairs this with a marker-capable argument
+    before refusing, so the unreadable case fails closed rather than certifying on absent evidence.
+
+    Args:
+        value: The resource's solved content value.
+
+    Returns:
+        Whether any alternative reads a positional parameter, or is unreadable as text.
+    """
+    for alternative in value:
+        if alternative.projection_opaque or alternative.projection_incomplete:
+            return True
+        if any(_text_references_positional_parameters(text) for text in alternative.literal_texts):
+            return True
+    return False
+
+
+def _substitute_positional_references(text: str, replacement: str) -> str:
+    """Return the file's text with every caller-supplied positional replaced by one string.
+
+    Substituting the SAME string for every reference is what makes this sound without solving
+    which argument lands at which position. Two adjacent references such as ``"$1$2"`` therefore
+    yield that string twice in a row, which surfaces a composition the caller spells in the other
+    order: arguments ``lattice doc-`` produce ``latticedoc-latticedoc-``, where the marker appears
+    across the seam exactly as the child composes it from ``"$2$1"``.
+
+    Args:
+        text: One literal alternative of the file's own content.
+        replacement: The text every positional reference is replaced by.
+
+    Returns:
+        The substituted text.
+    """
+    pieces: list[str] = []
+    index = 0
+    start = 0
+    while True:
+        index = text.find("$", index)
+        if index == -1 or index + 1 >= len(text):
+            pieces.append(text[start:])
+            return "".join(pieces)
+        following = text[index + 1]
+        end = -1
+        if following == "{":
+            closing = text.find("}", index + 2)
+            if closing != -1 and _positional_reference_start(text[index + 2]):
+                end = closing + 1
+        elif _positional_reference_start(following):
+            end = index + 2
+            while end < len(text) and following.isdigit() and text[end].isdigit():
+                end += 1
+        if end == -1:
+            index += 1
+            continue
+        pieces.append(text[start:index])
+        pieces.append(replacement)
+        start = end
+        index = end
+
+
+def _arguments_joined_text(
+    arguments: Iterable[_ArgPort],
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> str:
+    """Return every argument word's literal text concatenated in argv order.
+
+    Argv order is deliberate. It is the order that composes the marker when the child reads the
+    arguments in the order they were given, and the doubling in
+    ``_substitute_positional_references`` covers the orders it does not.
+
+    Args:
+        arguments: The argv words after the script operand, in order.
+        sink_variables: The per-command solved variable table.
+        resources: The solved resource table.
+        streams: The solved stream table.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        The concatenated literal text of every argument.
+    """
+    pieces: list[str] = []
+    for argument in arguments:
+        value = _evaluate_with_tables(argument.content, sink_variables, resources, streams, limits)
+        pieces.extend(sorted(text for alternative in value for text in alternative.literal_texts))
+    return "".join(pieces)
+
+
+def _shell_script_positional_state_unrepresentable(
+    command: _CommandEvidence,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether a shell's script operand composes the marker from the arguments it is given.
+
+    ``_shell_script_operand_state_unrepresentable`` reads the file's own assignments, which is the
+    composition a file performs out of text it contains. A file can also compose out of text the
+    CALLER supplies: every word after the script operand becomes the child's ``$1``, ``$2``, ... ,
+    so ``printf '%s\\n' '"$1$2" reconcile' > s.sh; bash s.sh doc- lattice`` executes the marker
+    under real Bash 5.2 with no assignment anywhere in the file for the assignments-only content
+    test to find. The ``-c`` spelling of the identical composition already refuses, through the
+    operand binding that route received; this is that binding's missing counterpart one dispatch
+    form over, and the sibling of the exported-parent-variable class AD-18 already discloses for
+    these same child-run routes.
+
+    Binding the arguments and second-parsing the file the way the ``-c`` route does is not
+    available here: that parse can only read a program it can see as text, and a script operand's
+    content reaches it as a ``ResourceRef`` that the eval layer folds into an opaque token
+    (issue #159). So this fails closed on the conjunction instead, which is what the reviewer's
+    report offered as the alternative and what keeps the cost bounded.
+
+    Three conditions have to hold together, and each one is load bearing for over-refusal:
+
+    1. The operand names a resource THIS script writes, the rule every guard in this family shares.
+       An unwritten target is pre-existing content that was never in this analysis's purview.
+    2. That file's own content reads a caller-supplied positional. A file that ignores its
+       arguments cannot compose out of them, which keeps ``bash deploy.sh --verbose`` certifying.
+    3. Substituting the arguments into that file's own text composes the marker. Asking instead
+       whether any argument is marker-FRAGMENT capable is the trap the ``source`` guard already
+       documents one function over: ordinary text answers it yes, because ``build`` ends in ``d``
+       and so advances the scan from the idle entry state, and it refused ``bash s.sh build``.
+       Substituting reads the file's real structure, so a fragment only counts where the file
+       actually places it.
+
+    ``$0`` is deliberately not a trigger, because a script's ``$0`` is its own path rather than a
+    word the caller chose. The ``AMBIGUOUS`` selection is scanned alongside the exact one for the
+    same reason every guard here scans it: once the argv shape is uncertain any candidate can land
+    in the operand position, and the words after it are then its arguments.
+
+    Args:
+        command: The command whose executable candidates may be a shell.
+        sink_variables: The per-command solved variable table, for resolving the resource.
+        resources: The solved resource table; a key present here is one this script writes.
+        streams: The solved stream table, for resolving the resource.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether some shell runs a script-tracked file that reads a marker-capable argument.
+    """
+    for executable in _iter_executable_evidence(command.executable):
+        head_index = _shell_source_head_index(command, executable)
+        if head_index is None:
+            continue
+        selection = _select_shell_source(command.argv, head_index)
+        if selection.kind is _ShellSourceKind.SCRIPT and selection.argv_index is not None:
+            operand_indices: tuple[int, ...] = (selection.argv_index,)
+        elif selection.kind is _ShellSourceKind.AMBIGUOUS:
+            operand_indices = selection.candidate_indices
+        else:
+            continue
+        if any(
+            _script_operand_composes_from_arguments(
+                command, index, sink_variables, resources, streams, limits
+            )
+            for index in operand_indices
+            if index < len(command.argv)
+        ):
+            return True
+    return False
+
+
+def _script_operand_composes_from_arguments(  # noqa: PLR0913
+    command: _CommandEvidence,
+    index: int,
+    sink_variables: Mapping[str | int, _ContentValue],
+    resources: Mapping[str | int, _ContentValue],
+    streams: Mapping[str | int, _ContentValue],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether one script operand's tracked file composes the marker from its arguments.
+
+    The three conditions ``_shell_script_positional_state_unrepresentable`` documents are applied
+    here in order, cheapest first.
+
+    Args:
+        command: The command whose argv holds the operand.
+        index: The argv index of the script operand.
+        sink_variables: The per-command solved variable table.
+        resources: The solved resource table.
+        streams: The solved stream table.
+        limits: The bound on content evaluation this analysis stays within.
+
+    Returns:
+        Whether this operand's file composes the marker once its arguments are substituted.
+    """
+    operand = command.argv[index]
+    if operand.process_resource_id is not None:
+        return False
+    key = normalize_static_resource(
+        operand.literal, dynamic=operand.dynamic or operand.active_argv_expansion
+    )
+    if key is None or key not in resources:
+        return False
+    content = _evaluate_with_tables(ResourceRef(key), sink_variables, resources, streams, limits)
+    if not _resource_references_positional_parameters(content):
+        return False
+    arguments = _arguments_joined_text(
+        command.argv[index + 1 :], sink_variables, resources, streams, limits
+    )
+    if not arguments:
+        return False
+    readable = [
+        text
+        for alternative in content
+        if not (alternative.projection_opaque or alternative.projection_incomplete)
+        for text in alternative.literal_texts
+    ]
+    if not readable:
+        # The file references a positional but this analysis cannot read its text to see where.
+        # Nothing narrower than the arguments themselves is available, so the unreadable case
+        # falls back to the fragment question.
+        return _summary_marker_fragment_capable(_TransferSummary.literal(arguments))
+    return any(
+        _marker_capable(
+            frozenset(
+                {_TransferSummary.literal(_substitute_positional_references(text, arguments))}
+            )
+        )
+        for text in readable
+    )
+
+
 def _sink_expressions(
     command: _CommandEvidence,
     stdin: ContentExpr,
@@ -12156,6 +12422,14 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 limits,
             ):
                 raise _TaintLimitExceeded("shell script operand state cannot be represented")
+            if _shell_script_positional_state_unrepresentable(
+                command,
+                sink_variables,
+                solved.resources,
+                solved.streams,
+                limits,
+            ):
+                raise _TaintLimitExceeded("shell script positional state cannot be represented")
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
             raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
