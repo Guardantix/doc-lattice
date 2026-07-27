@@ -733,7 +733,14 @@ def test_eval_variable_syntax_mutual_cycle_obeys_fixed_point_cap() -> None:
         )
 
 
-_EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS = 2.0
+# The three wall-clock assertions below separate "returns promptly" from the seconds-to-minutes
+# blowups of issues #140 and #149. They are not a constant-factor budget, so the bound is set for
+# the slowest runner rather than the fastest: the 3.13 CI job runs about twice as slowly as the
+# 3.14 one and roughly nine times as slowly as a development machine, which took the 60-write
+# accumulation from 0.3s locally to 2.6s there and failed a 2.0s bound three commits running. The
+# regressions these guard were 20s and 21s, and #149's token-step test is the machine-independent
+# guard against its quadratic invalidation returning, so headroom here costs nothing.
+_EVAL_SYNTAX_WALL_CLOCK_BOUND_SECONDS = 8.0
 
 
 def test_eval_syntax_self_referential_append_certifies_promptly() -> None:
