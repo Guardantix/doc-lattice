@@ -545,6 +545,50 @@ def test_a_bare_literal_guard_threshold_is_rejected() -> None:
     assert any("literal 100" in violation for violation in violations)
 
 
+def test_a_threshold_computed_one_statement_before_the_guard_is_rejected() -> None:
+    # Reading the condition alone let a new resource bound ship by taking one hop away from the
+    # guard: the condition then holds nothing but a boolean's name, and the magnitude deciding it
+    # sits in the writer that produced that boolean.
+    source = (
+        "def _guard(items):\n"
+        "    too_many = len(items) > 100\n"
+        "    if too_many:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("literal 100" in violation for violation in violations)
+
+
+def test_a_named_threshold_reached_through_the_writer_closure_is_rejected() -> None:
+    source = (
+        "_BUDGET = 512\n"
+        "def _guard(items):\n"
+        "    cap = _BUDGET\n"
+        "    too_many = len(items) > cap\n"
+        "    if too_many:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("_BUDGET" in violation for violation in violations)
+
+
+def test_a_writer_the_guard_condition_does_not_read_is_not_a_threshold() -> None:
+    # The closure is the one the fingerprint records, so an unrelated magnitude in the same
+    # function stays out of the rule and cannot fail the gate for a guard it does not decide.
+    source = (
+        "def _guard(items, other):\n"
+        "    unrelated = len(other) > 100\n"
+        "    if items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
 def test_structural_comparison_literals_are_accepted() -> None:
     # Emptiness and arity are not magnitudes: `remaining < 1` asks whether a limits-seeded counter
     # is exhausted, and `!= 1` asks about arity.
@@ -1193,7 +1237,7 @@ def test_fingerprint_tracks_the_early_return_a_test_free_origin_depends_on() -> 
     assert original[0].fingerprint != updated[0].fingerprint
 
 
-def test_control_flow_closure_ignores_computation_that_diverts_nothing() -> None:
+def test_reachability_closure_ignores_computation_that_diverts_nothing() -> None:
     # Reducing a branch to its test is what keeps an ordinary edit inside a long function from
     # churning a frozen record that only the surrounding control flow describes.
     edited = _LOOP_EXHAUSTION_SOURCE.replace("index += 1", "index += 2")
@@ -1204,7 +1248,7 @@ def test_control_flow_closure_ignores_computation_that_diverts_nothing() -> None
     assert original[0].fingerprint == updated[0].fingerprint
 
 
-def test_control_flow_closure_ignores_another_function() -> None:
+def test_reachability_closure_ignores_another_function() -> None:
     extended = _FALL_THROUGH_SOURCE + "\n\ndef _elsewhere(x):\n    if x:\n        return 1\n"
 
     original = checker.extract_origin_records(_FALL_THROUGH_SOURCE, "shell_taint.py")
@@ -1213,25 +1257,70 @@ def test_control_flow_closure_ignores_another_function() -> None:
     assert original[0].fingerprint == updated[0].fingerprint
 
 
-def test_control_flow_closure_leaves_a_guarded_origin_alone() -> None:
-    # A guard with a test already records that test and the writes feeding it. Widening the closure
-    # to every guard would make each one churn on any control-flow edit in its function, and a debt
+_PRECEDING_DIVERSION_SOURCE = (
+    "def _guard(value, other):\n"
+    "    if other:\n"
+    "        return 1\n"
+    "    if value > 3:\n"
+    '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.over-three", "too big"))\n'
+    "    return 0\n"
+)
+
+
+def test_fingerprint_tracks_the_diversion_that_precedes_a_guarded_origin() -> None:
+    # A guard's test says what it refuses once control arrives, never whether control arrives.
+    # Inverting an earlier branch that returns diverts execution around the guard, withdrawing it
+    # as completely as inverting its own condition, and leaves test, writers and qualname intact.
+    edited = _PRECEDING_DIVERSION_SOURCE.replace(
+        "    if other:\n        return 1\n", "    if not other:\n        return 1\n"
+    )
+
+    original = checker.extract_origin_records(_PRECEDING_DIVERSION_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_reachability_closure_ignores_a_diversion_that_can_only_run_later() -> None:
+    # The churn boundary. A statement after the origin, with no loop to bring it back around,
+    # cannot decide whether the origin was reached, so an edit there must not move the record: a
     # record that churns has to be regenerated, which is the laundering path the gate closes.
+    edited = _PRECEDING_DIVERSION_SOURCE.replace(
+        "    return 0\n", "    if value < 0:\n        return -1\n    return 0\n"
+    )
+
+    original = checker.extract_origin_records(_PRECEDING_DIVERSION_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_fingerprint_tracks_a_later_diversion_a_loop_brings_back_around() -> None:
+    # Lexical order settles reachability everywhere except inside a loop, where a statement after
+    # the origin runs again before the next iteration reaches it.
     source = (
-        "def _guard(value, other):\n"
-        "    if other:\n"
-        "        return 1\n"
-        "    if value > 3:\n"
-        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.over-three", "too big"))\n'
+        "def _guard(values):\n"
+        "    for value in values:\n"
+        "        if value > 3:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.over-three", "too big"))\n'
+        "        if value:\n"
+        "            break\n"
+        "    return 0\n"
     )
-    edited = source.replace(
-        "    if other:\n        return 1\n", "    if not other:\n        return 2\n"
-    )
+    edited = source.replace("        if value:\n", "        if not value:\n")
 
     original = checker.extract_origin_records(source, "shell_taint.py")
     updated = checker.extract_origin_records(edited, "shell_taint.py")
 
-    assert original[0].fingerprint == updated[0].fingerprint
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_reachability_closure_survives_an_origin_at_module_level() -> None:
+    source = 'raise _TaintLimitExceeded(GuardRefusal("taint.demo.module", "no scope"))\n'
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.module"]
 
 
 def test_compare_against_base_rejects_a_frozen_guard_whose_raising_computation_changed(

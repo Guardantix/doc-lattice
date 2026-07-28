@@ -866,9 +866,14 @@ arithmetic in the operand included, so `depth - 4096 > 0` is the same uninventor
 exactly as the bare literal does, and recognizing only bare literals let the computed spelling
 escape both halves at once, since a module-bound name is also exempt from the naming-convention
 check. A local binding is covered for the same reason, having neither a module binding nor a
-convention to fall back on. Zero and one are exempt because they spell emptiness and arity rather
-than a magnitude, which is also what keeps a counter seeded at zero from reading as a threshold,
-and a subscript index is a position rather than a magnitude.
+convention to fall back on. The search covers the writers feeding a guard's condition as well as
+the condition itself, the same closure the fingerprint records, because a comparison computed one
+statement earlier caps the scan exactly as an inline one does: `too_many = len(items) > 100`
+followed by `if too_many` leaves the magnitude nowhere the condition can see it, so reading the
+condition alone let any new bound ship by taking one hop away from the guard. Zero and one are
+exempt because they spell emptiness and arity rather than a magnitude, which is also what keeps a
+counter seeded at zero from reading as a threshold, and a subscript index is a position rather than
+a magnitude.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
@@ -902,14 +907,27 @@ condition, and everything that condition reads, untouched. A `while` needs no su
 because its test is already a guarding test.
 A record also covers the body of any declared transport the origin hands its refusal to, since the
 parameterized cycle detector owns the condition that decides its callers' refusals while minting no
-identifier of its own. A guard with no test at all, reached by falling through a chain of returns,
-by exhausting a loop, or through an `except` handler, records instead the same-scope control flow
-that decides whether it is reached: every branch test, loop header and diverting statement in its
-function. That flow is the only description such a guard has, and without it
-`scanner.descriptor.unparsable` survives byte-identically when the `return int(digits)` in its own
-`try` body becomes `return 0` and can no longer raise. A diverting statement is taken whole because
-the value it returns decides reachability, while a branch is reduced to its test so that an edit
-inside one branch's body does not churn a record outside it.
+identifier of its own.
+
+A condition says what a guard refuses once control arrives and nothing about whether control
+arrives, so every record covers in addition the control flow deciding the origin is reached at all:
+each branch test, loop header and diverting statement in its function that can execute before it.
+Diverting execution around a guard withdraws it as completely as inverting its condition, and does
+so without touching the test, the writers or the qualified name. The case for a guard that has a
+test is `scanner.env-option.static-split-string`: it sits behind an earlier
+`if not literal.startswith("--")` that returns, and dropping the `not` sends every long option down
+the short-option path so the guard can never fire. `scanner.descriptor.unparsable` is the case for
+one that has none: it fires only because the `return int(digits)` in its own `try` body can raise,
+and rewriting that to `return 0` withdraws it. Both survived byte-identically before this flow
+entered the record.
+
+Only what can run before the origin is taken. Lexical order settles that everywhere except inside a
+loop, where a statement after the origin runs again ahead of the next iteration, so an enclosing
+loop's whole body is taken back. A statement that can only run later cannot decide whether the
+origin was reached, and excluding it is what keeps a subsequent edit in the same function from
+churning the record. For the same reason a diverting statement is taken whole, because the value it
+returns decides reachability, while a branch is reduced to its test so an edit inside one branch's
+body does not churn a record outside it.
 
 A guard reached through an `except` handler needs more than that flow, because the handled
 exception types are all a `try` contributes to it: what decides whether the handler runs is the

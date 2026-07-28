@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -240,6 +240,7 @@ class _DerivationCache:
     written: dict[int, frozenset[str]] = field(default_factory=dict)
     configured: dict[int, frozenset[str]] = field(default_factory=dict)
     statements: dict[int, list[ast.stmt]] = field(default_factory=dict)
+    parents: dict[int, dict[int, ast.AST]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +465,64 @@ def _cached_scope_statements(scope: ast.AST, cache: _DerivationCache) -> list[as
     return statements
 
 
+def _cached_scope_parents(scope: ast.AST, cache: _DerivationCache) -> dict[int, ast.AST]:
+    """Return each of the scope's own statements mapped to the node holding it.
+
+    Descent follows `_scope_statements`, so an `except` clause and a `match` arm are linked even
+    though neither is a statement, and a nested function or class body is not entered.
+
+    Args:
+        scope: Enclosing function to link the statements of.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Holding nodes keyed by node identity.
+    """
+    parents = cache.parents.get(id(scope))
+    if parents is None:
+        parents = {}
+        pending: list[ast.AST] = [scope]
+        while pending:
+            node = pending.pop()
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.excepthandler | ast.match_case) or (
+                    isinstance(child, ast.stmt) and not isinstance(child, _SCOPES)
+                ):
+                    parents[id(child)] = node
+                    pending.append(child)
+        cache.parents[id(scope)] = parents
+    return parents
+
+
+def _repeated_statements(
+    origin: ast.stmt, scope: ast.AST, cache: _DerivationCache
+) -> frozenset[int]:
+    """Return the statements a loop around the origin can run before the origin runs again.
+
+    Lexical order decides what can execute before a statement everywhere except inside a loop,
+    where the statements after the origin run again ahead of the next iteration's origin. Taking
+    the outermost enclosing loop covers every inner one, since an inner loop's body is part of it.
+
+    Args:
+        origin: The statement that constructs the refusal.
+        scope: Enclosing function.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Node identities of the statements inside the outermost enclosing loop, empty when no loop
+        encloses the origin.
+    """
+    parents = _cached_scope_parents(scope, cache)
+    outermost: ast.stmt | None = None
+    node: ast.AST | None = origin
+    while (node := parents.get(id(node))) is not None:
+        if isinstance(node, ast.For | ast.AsyncFor | ast.While):
+            outermost = node
+    if outermost is None:
+        return frozenset()
+    return frozenset(id(statement) for statement in _scope_statements(outermost))
+
+
 def _group_digest(digest: str) -> str:
     """Return a truncated digest in hyphen-separated groups.
 
@@ -676,7 +735,7 @@ def _condition_writer_shapes(
     boundary and is not covered.
 
     A nested function or class body is outside the scope for the same reason and by the same rule
-    `_control_flow_shapes` uses: it does not run where it is written, so a write inside it decides
+    `_reachability_shapes` uses: it does not run where it is written, so a write inside it decides
     nothing about the guard around it, and folding one in would let an edit to an unrelated closure
     churn the guard's record.
 
@@ -705,6 +764,31 @@ def _writer_closure(
 ) -> tuple[str, ...]:
     """Return the shapes of the same-scope statements that transitively write these spellings.
 
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+        read: Seed spellings, extended in place as the fixpoint grows.
+        values: The subset read as whole values, extended in place alongside `read`.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Shapes in source order, empty when nothing is read or the origin is scope-free.
+    """
+    return tuple(
+        _cached_shape(statement, cache)
+        for statement in _writer_statements(origin, scope, read, values, cache)
+    )
+
+
+def _writer_statements(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    read: set[str],
+    values: set[str],
+    cache: _DerivationCache,
+) -> tuple[ast.stmt, ...]:
+    """Return the same-scope statements that transitively write these spellings.
+
     A statement qualifies by binding a spelling the closure reads, or by configuring a receiver the
     closure reads as a whole value. The second is what brings `lexer.commenters = ...` in for an
     operation that reads `lexer`, while keeping every `self.other = ...` out of a closure that
@@ -718,7 +802,7 @@ def _writer_closure(
         cache: Per-parse derivation memo.
 
     Returns:
-        Shapes in source order, empty when nothing is read or the origin is scope-free.
+        Statements in source order, empty when nothing is read or the origin is scope-free.
     """
     if scope is None or not read:
         return ()
@@ -742,10 +826,9 @@ def _writer_closure(
             read |= _statement_reads(statement)
             values |= _statement_value_reads(statement)
             grew = True
-    writers = sorted(
-        selected.values(), key=lambda statement: (statement.lineno, statement.col_offset)
+    return tuple(
+        sorted(selected.values(), key=lambda statement: (statement.lineno, statement.col_offset))
     )
-    return tuple(_cached_shape(statement, cache) for statement in writers)
 
 
 def _scope_statements(scope: ast.AST) -> list[ast.stmt]:
@@ -805,23 +888,33 @@ def _diverting_shape(statement: ast.stmt, cache: _DerivationCache) -> str | None
             return None
 
 
-def _control_flow_shapes(
+def _reachability_shapes(
     origin: ast.stmt, scope: ast.AST | None, cache: _DerivationCache | None = None
 ) -> tuple[str, ...]:
-    """Return the shapes of the control flow that decides whether a test-free origin is reached.
+    """Return the shapes of the control flow that decides whether the origin is reached at all.
 
-    A guard governed by an `if`, a `while` or a `match` arm records that test and the same-scope
-    writes feeding it. A guard reached by falling through a chain of returns, by exhausting a loop,
-    or through an `except` handler has no such test, so nothing about the code deciding it reaches
-    the refusal would otherwise enter the record. `scanner.descriptor.unparsable` is the concrete
-    case: it fires only because `return int(digits)` in its own `try` body can raise `ValueError`,
-    and rewriting that to `return 0` withdraws the guard while leaving a byte-identical record.
+    A guard's tests and the writers feeding them describe what it refuses once control arrives.
+    They say nothing about whether control arrives, and a guard is withdrawn as completely by
+    diverting execution around it as by inverting its condition. Two concrete cases, one for a
+    guard with a test and one for a guard without:
+
+    `scanner.env-option.static-split-string` sits under `if kind == "split"`, behind an earlier
+    `if not literal.startswith("--")` that returns. Dropping the `not` sends every long option down
+    the short-option path, so the guard can no longer fire, while its test, its writers and its
+    qualified name are all untouched.
+
+    `scanner.descriptor.unparsable` has no test at all. It fires only because `return int(digits)`
+    in its own `try` body can raise `ValueError`, and rewriting that to `return 0` withdraws it.
+
+    Only the statements that can execute before the origin are taken. Lexical order settles that
+    everywhere except inside a loop, where a statement after the origin runs again ahead of the
+    next iteration, so `_repeated_statements` adds an enclosing loop's whole body back. A statement
+    that can only run after the origin cannot decide whether the origin was reached, and excluding
+    it is what keeps a later edit in the same function from churning the record. Churn is what
+    forces the regeneration this gate exists to prevent.
 
     The scope is the enclosing function, the same boundary `_condition_writer_shapes` uses and for
-    the same reason. Within it every diverting statement is taken, not only the ones lexically
-    before the origin, because a loop lets a later statement run first. The cost is that any
-    control-flow edit in that function churns such a record; the remedy is the outcome this
-    inventory wants anyway, which is to classify the guard so it leaves the debt snapshot.
+    the same reason.
 
     Args:
         origin: The statement that constructs the refusal, hashed separately.
@@ -834,8 +927,13 @@ def _control_flow_shapes(
     if scope is None:
         return ()
     cache = cache if cache is not None else _DerivationCache()
+    repeated = _repeated_statements(origin, scope, cache)
+    position = (origin.lineno, origin.col_offset)
     statements = [
-        statement for statement in _cached_scope_statements(scope, cache) if statement is not origin
+        statement
+        for statement in _cached_scope_statements(scope, cache)
+        if statement is not origin
+        if (statement.lineno, statement.col_offset) < position or id(statement) in repeated
     ]
     statements.sort(key=lambda statement: (statement.lineno, statement.col_offset))
     return tuple(
@@ -1018,10 +1116,10 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         )
         governing = (*tests, *(loop.iter for loop in loops))
         writers = _condition_writer_shapes(statement, scope, governing, cache)
-        # A guard with a test records that test and what writes it; one without records the control
-        # flow that decides it is reached at all, and, when it is reached through a handler, the
-        # operation whose failure is the only condition it has.
-        flow = () if tests else _control_flow_shapes(statement, scope, cache)
+        # Every origin records the control flow that decides it is reached at all, since a test
+        # describes only what the guard refuses once control arrives. One reached through a handler
+        # records in addition the operation whose failure is the only condition it has.
+        flow = _reachability_shapes(statement, scope, cache)
         raising = (
             ()
             if tests
@@ -1180,6 +1278,14 @@ FIXED_SEMANTIC_BOUNDS = {
         "The number of words a complete `case` header spells before its first pattern: the "
         "reserved word, the subject, `in`, and the pattern itself. A grammatical arity, not a "
         "budget, and reached by authoring a shorter header."
+    ),
+    "_RANGE_PARTS_WITH_STEP": (
+        "The number of parts a brace range spells when it carries a step: start, stop and step. "
+        "A grammatical arity, not a budget, and reached by authoring the step."
+    ),
+    "_DFA_START": (
+        "The index of the marker automaton's start state. A position in the state vector rather "
+        "than a magnitude, and the same kind of quantity a subscript literal is exempt as."
     ),
     "_UNICODE_MAX": "The last Unicode code point. Not a budget; authorable as an escape.",
     "_SURROGATE_MIN": "The first surrogate code point. Not a budget; authorable as an escape.",
@@ -1379,6 +1485,12 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     would let a generically named bound, a computed one, a local one, and a raw literal each
     introduce a resource cap with no provenance.
 
+    The search covers the writers feeding the condition as well as the condition itself, the same
+    closure the fingerprint records. A comparison computed one statement earlier caps the scan
+    exactly as an inline one does: `too_many = len(items) > 100` followed by `if too_many` leaves
+    the magnitude nowhere the condition can see it, so reading the condition alone let any new
+    resource bound ship by taking one hop away from the guard.
+
     Args:
         source: Module source text, parsed but never executed.
         path: Module file name, used in messages.
@@ -1389,9 +1501,15 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     tree = ast.parse(source)
     annotations = _annotate(tree)
     bound, numeric = _module_constants(tree)
+    cache = _DerivationCache()
     violations: list[str] = []
     for statement, _call in _origin_calls_by_statement(tree):
-        nodes: tuple[ast.AST, ...] = (statement, *annotations.tests.get(id(statement), ()))
+        scope = annotations.scopes.get(id(statement))
+        tests = annotations.tests.get(id(statement), ())
+        writers = _writer_statements(
+            statement, scope, set(_read_spellings(tests)), set(_read_value_spellings(tests)), cache
+        )
+        nodes: tuple[ast.AST, ...] = (statement, *tests, *writers)
         local = _local_numeric_names(annotations.scopes.get(id(statement)))
         for name in sorted(_threshold_names(nodes, bound, numeric | local)):
             if name in FIXED_SEMANTIC_BOUNDS:
