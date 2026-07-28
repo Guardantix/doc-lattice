@@ -34,6 +34,8 @@ uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
 
 uv run --group dev python scripts/check_guard_inventory.py
+uv run --group dev python scripts/guard_witness_sweep.py
+uv run --group dev python scripts/guard_witness_sweep.py --trace 'eval "$X"lattice'
 
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
@@ -90,6 +92,13 @@ runs the base revision's copy of the checker against your tree and rejects any r
 not carry. When you remove a guard, record the identifier and the reason in
 `tests/fixtures/shell_guard_retirements.json`; that same base-owned run rejects an origin the base
 classified or froze that your tree no longer constructs.
+
+`scripts/guard_witness_sweep.py` searches for the inputs that classification needs. Its default
+sweep drives the replay corpus and fuzzer grammar through the public scan path once per shrunk
+cap and prints paste-ready witness rows for the guards still frozen as debt. When a sweep finds
+nothing, `--trace SCRIPT` reports which guard functions one candidate reaches at all, so the next
+candidate can be aimed one level deeper. It classifies nothing on its own: a row it prints is a
+candidate, and the suite then holds it to returning that exact identifier.
 
 ## Enforced repository rules
 
