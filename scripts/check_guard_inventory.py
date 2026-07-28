@@ -58,7 +58,18 @@ GUARDED_MODULES = (
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 RETIREMENT_PATH = "tests/fixtures/shell_guard_retirements.json"
 REGISTRY_PATH = "tests/guard_witnesses.py"
-CLASSIFICATION_CONSTRUCTORS = frozenset({"ReachableWitness", "InvariantWitness"})
+CLASSIFICATION_REGISTRIES = {
+    "REACHABLE_WITNESSES": (
+        "ReachableWitness",
+        ("origin_id", "script", "limits", "control_script", "control_guard_id"),
+        2,
+    ),
+    "INVARIANT_WITNESSES": (
+        "InvariantWitness",
+        ("origin_id", "rationale", "boundary_script", "boundary_evidence", "boundary_guard_id"),
+        4,
+    ),
+}
 
 REFUSAL_CONSTRUCTOR = "GuardRefusal"
 REFUSAL_EXCEPTIONS = frozenset(
@@ -990,6 +1001,87 @@ def classified_origin_ids(root: Path) -> frozenset[str]:
     return classified_ids_in_registry((root / REGISTRY_PATH).read_text(encoding="utf-8"))
 
 
+def _classification_registry_tuples(tree: ast.Module) -> dict[str, ast.Tuple]:
+    bindings = Counter(
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and node.id in CLASSIFICATION_REGISTRIES
+    )
+    assignments: dict[str, list[ast.expr | None]] = {
+        registry_name: [] for registry_name in CLASSIFICATION_REGISTRIES
+    }
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+                continue
+            registry_name = statement.targets[0].id
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            registry_name = statement.target.id
+        else:
+            continue
+        if registry_name in assignments:
+            assignments[registry_name].append(statement.value)
+
+    registries: dict[str, ast.Tuple] = {}
+    for registry_name, values in assignments.items():
+        if bindings[registry_name] != 1 or len(values) != 1:
+            raise ValueError(
+                f"{REGISTRY_PATH}: {registry_name} must have exactly one direct module-level "
+                "binding"
+            )
+        value = values[0]
+        if not isinstance(value, ast.Tuple):
+            raise ValueError(f"{REGISTRY_PATH}: {registry_name} must be a tuple literal")
+        registries[registry_name] = value
+    return registries
+
+
+def _classification_identifier(
+    entry: ast.expr,
+    *,
+    registry_name: str,
+    constructor: str,
+    fields: tuple[str, ...],
+    required_count: int,
+) -> str:
+    if not isinstance(entry, ast.Call) or _called_name(entry) != constructor:
+        raise ValueError(
+            f"{REGISTRY_PATH}: {registry_name} entries must directly call {constructor}"
+        )
+    if any(isinstance(argument, ast.Starred) for argument in entry.args):
+        raise ValueError(f"{REGISTRY_PATH}: {constructor} does not accept starred arguments")
+    if len(entry.args) > len(fields):
+        raise ValueError(
+            f"{REGISTRY_PATH}: {constructor} has too many positional arguments; "
+            f"expected at most {len(fields)}"
+        )
+
+    arguments = dict(zip(fields, entry.args, strict=False))
+    for keyword in entry.keywords:
+        if keyword.arg is None:
+            raise ValueError(f"{REGISTRY_PATH}: {constructor} does not accept keyword expansion")
+        if keyword.arg not in fields:
+            raise ValueError(f"{REGISTRY_PATH}: {constructor} has unexpected field {keyword.arg!r}")
+        if keyword.arg in arguments:
+            raise ValueError(
+                f"{REGISTRY_PATH}: {constructor} supplies {keyword.arg!r} more than once"
+            )
+        arguments[keyword.arg] = keyword.value
+
+    missing = [field for field in fields[:required_count] if field not in arguments]
+    if missing:
+        raise ValueError(
+            f"{REGISTRY_PATH}: {constructor} is missing required evidence field(s): "
+            f"{', '.join(missing)}"
+        )
+    identifier = arguments["origin_id"]
+    if not isinstance(identifier, ast.Constant) or not isinstance(identifier.value, str):
+        raise ValueError(f"{REGISTRY_PATH}: classification identifiers must be literals")
+    return identifier.value
+
+
 def classified_ids_in_registry(source: str) -> frozenset[str]:
     """Return every guard identifier one witness registry's source classifies.
 
@@ -1003,19 +1095,22 @@ def classified_ids_in_registry(source: str) -> frozenset[str]:
         Identifiers carried by a reachable or invariant witness.
 
     Raises:
-        ValueError: If a classification carries a non-literal identifier.
+        ValueError: If either executable registry or one of its entries is non-canonical.
     """
     tree = ast.parse(source)
     identifiers: set[str] = set()
-    for node in ast.walk(tree):
-        if _called_name(node) not in CLASSIFICATION_CONSTRUCTORS or not isinstance(node, ast.Call):
-            continue
-        if not node.args or not isinstance(node.args[0], ast.Constant):
-            raise ValueError(f"{REGISTRY_PATH}: classification identifiers must be literals")
-        identifier = node.args[0].value
-        if not isinstance(identifier, str):
-            raise ValueError(f"{REGISTRY_PATH}: classification identifiers must be literals")
-        identifiers.add(identifier)
+    registries = _classification_registry_tuples(tree)
+    for registry_name, (constructor, fields, required_count) in CLASSIFICATION_REGISTRIES.items():
+        identifiers.update(
+            _classification_identifier(
+                entry,
+                registry_name=registry_name,
+                constructor=constructor,
+                fields=fields,
+                required_count=required_count,
+            )
+            for entry in registries[registry_name].elts
+        )
     return frozenset(identifiers)
 
 

@@ -560,17 +560,121 @@ def test_classified_ids_are_read_from_the_registry_as_data() -> None:
     assert "scanner.source.character-limit" in classified
 
 
+def _registry_source(*, reachable: str = "()", invariant: str = "()") -> str:
+    return f"REACHABLE_WITNESSES = {reachable}\nINVARIANT_WITNESSES = {invariant}\n"
+
+
 def test_classified_ids_never_execute_the_candidate_registry(tmp_path: Path) -> None:
     # The checker runs from the protected base against a candidate tree, so the candidate's
     # registry must be parsed rather than imported.
     root = _fake_root(tmp_path, [])
     (root / checker.REGISTRY_PATH).write_text(
         'raise SystemExit("importing the candidate registry would run this")\n'
-        'X = (ReachableWitness("taint.demo.parsed", "script"),)\n',
+        'REACHABLE_WITNESSES = (ReachableWitness("taint.demo.parsed", "script"),)\n'
+        "INVARIANT_WITNESSES = ()\n",
         encoding="utf-8",
     )
 
     assert checker.classified_origin_ids(root) == frozenset({"taint.demo.parsed"})
+
+
+@pytest.mark.parametrize(
+    ("source", "registry_name"),
+    [
+        ("REACHABLE_WITNESSES = ()\n", "INVARIANT_WITNESSES"),
+        (
+            _registry_source() + "REACHABLE_WITNESSES = ()\n",
+            "REACHABLE_WITNESSES",
+        ),
+        (
+            _registry_source() + "if True:\n    REACHABLE_WITNESSES = ()\n",
+            "REACHABLE_WITNESSES",
+        ),
+        (
+            _registry_source(reachable="[]"),
+            "REACHABLE_WITNESSES",
+        ),
+    ],
+)
+def test_registry_requires_one_direct_tuple_binding(
+    source: str,
+    registry_name: str,
+) -> None:
+    with pytest.raises(ValueError, match=registry_name):
+        checker.classified_ids_in_registry(source)
+
+
+@pytest.mark.parametrize(
+    ("reachable", "message"),
+    [
+        (
+            '(InvariantWitness("taint.demo.x", "rationale", "script", lambda evidence: True),)',
+            "ReachableWitness",
+        ),
+        ('(ReachableWitness("taint.demo.x"),)', "script"),
+        ('(ReachableWitness("taint.demo.x", "script", unexpected=True),)', "unexpected"),
+        (
+            '(ReachableWitness("taint.demo.x", "script", script="other"),)',
+            "script",
+        ),
+        ("(ReachableWitness(*values),)", "starred"),
+        (
+            '(ReachableWitness("taint.demo.x", "script", **options),)',
+            "keyword expansion",
+        ),
+        (
+            '(ReachableWitness("taint.demo.x", "script", None, None, None, None),)',
+            "positional",
+        ),
+    ],
+)
+def test_registry_rejects_malformed_reachable_entries(
+    reachable: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        checker.classified_ids_in_registry(_registry_source(reachable=reachable))
+
+
+def test_registry_requires_invariant_boundary_evidence() -> None:
+    source = _registry_source(
+        invariant='(InvariantWitness("taint.demo.x", "rationale", "script"),)'
+    )
+
+    with pytest.raises(ValueError, match="boundary_evidence"):
+        checker.classified_ids_in_registry(source)
+
+
+def test_registry_accepts_required_evidence_by_keyword() -> None:
+    source = _registry_source(
+        reachable='(ReachableWitness(origin_id="taint.demo.x", script="script"),)'
+    )
+
+    assert checker.classified_ids_in_registry(source) == frozenset({"taint.demo.x"})
+
+
+def test_closure_rejects_a_classification_outside_the_executable_registry(
+    tmp_path: Path,
+) -> None:
+    origin_id = "scanner.descriptor.unparsable"
+    debt = [
+        record.as_json()
+        for record in checker.load_debt_records(_ROOT)
+        if record.origin_id != origin_id
+    ]
+    root = _fake_root(tmp_path, debt)
+    registry = root / checker.REGISTRY_PATH
+    registry.write_text(
+        registry.read_text(encoding="utf-8") + f'\nUNUSED = ReachableWitness("{origin_id}", "")\n',
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_closure_violations(root)
+
+    assert any(
+        f"{origin_id} is neither classified nor frozen as debt" in violation
+        for violation in violations
+    )
 
 
 def test_closure_holds_for_the_shipped_tree() -> None:
@@ -580,7 +684,8 @@ def test_closure_holds_for_the_shipped_tree() -> None:
 def test_closure_rejects_a_guard_that_is_neither_classified_nor_frozen(tmp_path: Path) -> None:
     root = _fake_root(tmp_path, [])
     (root / checker.REGISTRY_PATH).write_text(
-        'W = (ReachableWitness("scanner.source.character-limit", "x"),)\n',
+        'REACHABLE_WITNESSES = (ReachableWitness("scanner.source.character-limit", "x"),)\n'
+        "INVARIANT_WITNESSES = ()\n",
         encoding="utf-8",
     )
 
