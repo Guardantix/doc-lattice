@@ -44,6 +44,10 @@ def _fake_root(tmp_path: Path, debt_records: list[dict[str, str]]) -> Path:
         json.dumps({"schema": checker.SCHEMA_VERSION, "records": debt_records}),
         encoding="utf-8",
     )
+    registry = root / checker.REGISTRY_PATH
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    if not registry.exists():
+        shutil.copy(_ROOT / checker.REGISTRY_PATH, registry)
     return root
 
 
@@ -267,3 +271,163 @@ def test_compare_against_base_rejects_a_foreign_record_schema(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="record schema"):
         checker.compare_against_base(root, base)
+
+
+_NESTED_SOURCE = """
+def _guard(outer, inner):
+    if outer:
+        if inner > 3:
+            raise _TaintLimitExceeded(GuardRefusal("taint.demo.nested", "too big"))
+    return outer
+"""
+
+_ELIF_SOURCE = """
+def _guard(a, b):
+    if a:
+        raise _TaintLimitExceeded(GuardRefusal("taint.demo.first", "a"))
+    elif b > 3:
+        raise _TaintLimitExceeded(GuardRefusal("taint.demo.second", "b"))
+"""
+
+
+def test_fingerprint_tracks_the_innermost_guarding_condition() -> None:
+    # A guard nested inside another `if` must fingerprint its own test, not the outer one, or an
+    # inverted condition keeps a byte-identical debt record.
+    retargeted = _NESTED_SOURCE.replace("inner > 3", "inner < 3")
+
+    original = checker.extract_origin_records(_NESTED_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(retargeted, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_an_elif_condition() -> None:
+    retargeted = _ELIF_SOURCE.replace("b > 3", "b < 3")
+
+    original = {
+        r.origin_id: r.fingerprint for r in checker.extract_origin_records(_ELIF_SOURCE, "m")
+    }
+    updated = {r.origin_id: r.fingerprint for r in checker.extract_origin_records(retargeted, "m")}
+
+    assert original["taint.demo.second"] != updated["taint.demo.second"]
+    assert original["taint.demo.first"] == updated["taint.demo.first"]
+
+
+def test_threshold_provenance_sees_a_nested_guard_condition() -> None:
+    source = (
+        "def _guard(a, b):\n"
+        "    if a:\n"
+        "        if b > _MAX_UNDECLARED_THING:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("_MAX_UNDECLARED_THING" in violation for violation in violations)
+
+
+def test_keyword_spelled_text_refusal_is_rejected() -> None:
+    source = (
+        "def scan_doc_lattice_invocations(script):\n"
+        '    return ShellScanResult(invocations=(), verdict="source character limit exceeded")\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_scanner.py")
+
+    assert any("raw refusal text" in violation for violation in violations)
+
+
+def test_keyword_spelled_exception_text_is_rejected() -> None:
+    source = 'def f():\n    raise _TaintLimitExceeded(refusal="shell taint edge limit exceeded")\n'
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any("raw refusal text" in violation for violation in violations)
+
+
+def test_configured_limits_construction_away_from_a_boundary_is_rejected() -> None:
+    # Rejecting only the zero-argument spelling lets a helper restore production-scale caps under
+    # a shrunk scan budget.
+    source = "def _helper(e):\n    return _evaluate(e, TaintLimits(max_edges=50_000))\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs" in violation for violation in violations)
+
+
+def test_repository_gate_reports_every_implemented_property() -> None:
+    assert checker.main(["--root", str(_ROOT)]) == 0
+
+
+def test_repository_gate_fails_on_a_limits_violation(tmp_path: Path, capsys) -> None:
+    root = _fake_root(tmp_path, [])
+    module = root / checker.GUARDED_MODULES[0]
+    module.write_text(
+        module.read_text(encoding="utf-8")
+        + "\n\ndef _late_helper(e):\n    return _evaluate(e, TaintLimits())\n",
+        encoding="utf-8",
+    )
+
+    assert checker.main(["--root", str(root)]) == 1
+    assert "constructs default limits" in capsys.readouterr().err
+
+
+def test_classified_ids_are_read_from_the_registry_as_data() -> None:
+    classified = checker.classified_origin_ids(_ROOT)
+
+    assert "taint.evidence.stream-scope-kind" in classified
+    assert "scanner.source.character-limit" in classified
+
+
+def test_classified_ids_never_execute_the_candidate_registry(tmp_path: Path) -> None:
+    # The checker runs from the protected base against a candidate tree, so the candidate's
+    # registry must be parsed rather than imported.
+    root = _fake_root(tmp_path, [])
+    (root / checker.REGISTRY_PATH).write_text(
+        'raise SystemExit("importing the candidate registry would run this")\n'
+        'X = (ReachableWitness("taint.demo.parsed", "script"),)\n',
+        encoding="utf-8",
+    )
+
+    assert checker.classified_origin_ids(root) == frozenset({"taint.demo.parsed"})
+
+
+def test_closure_holds_for_the_shipped_tree() -> None:
+    assert checker.repository_closure_violations(_ROOT) == ()
+
+
+def test_closure_rejects_a_guard_that_is_neither_classified_nor_frozen(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path, [])
+    (root / checker.REGISTRY_PATH).write_text(
+        'W = (ReachableWitness("scanner.source.character-limit", "x"),)\n',
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_closure_violations(root)
+
+    assert any("neither classified nor frozen" in violation for violation in violations)
+
+
+def test_closure_rejects_a_guard_that_is_both_classified_and_frozen(tmp_path: Path) -> None:
+    record = next(
+        r
+        for r in checker.repository_origin_records(_ROOT)
+        if r.origin_id == "scanner.source.character-limit"
+    )
+    root = _fake_root(tmp_path, [record.as_json()])
+
+    violations = checker.repository_closure_violations(root)
+
+    assert any("both classified and frozen" in violation for violation in violations)
+
+
+def test_emit_debt_derives_the_unclassified_records(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path, [])
+
+    payload = json.loads(checker.emit_records(root))
+    derived = {record["origin_id"] for record in payload["records"]}
+
+    assert payload["schema"] == checker.SCHEMA_VERSION
+    assert derived == {
+        record.origin_id for record in checker.repository_origin_records(root)
+    } - checker.classified_origin_ids(root)

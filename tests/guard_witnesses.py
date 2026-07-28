@@ -20,6 +20,10 @@ See AD-20 in ARCHITECTURE.md for the durable decision this registry implements.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits, TaintLimits
 
@@ -58,12 +62,17 @@ class InvariantWitness:
             state, so a change that makes the origin reachable shows up as a changed outcome.
         boundary_guard_id: Guard origin the boundary script must report, or `None` when it
             certifies.
+        boundary_evidence: Predicate over the evidence the boundary script produces, asserting it
+            actually contains the structure this guard inspects. Without it a boundary row is
+            prose: these guards sit in validators that run for every scan, so "the condition was
+            evaluated" holds even for a script that builds nothing for it to inspect.
     """
 
     origin_id: str
     rationale: str
     boundary_script: str
     boundary_guard_id: str | None = None
+    boundary_evidence: Callable[[Any], bool] = lambda _evidence: True
 
 
 _EVIDENCE_SELF_CHECK = (
@@ -595,78 +604,102 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         f"{_EVIDENCE_SELF_CHECK} Every scope the builder allocates carries one of the declared "
         "stream-scope kinds.",
         "if true; then :; fi",
+        boundary_evidence=lambda evidence: bool(evidence.scopes),
     ),
     InvariantWitness(
         "taint.evidence.pipe-consumer-arity",
         f"{_EVIDENCE_SELF_CHECK} The builder records a pipe with exactly one of a consuming "
         "command and a consuming scope, never both and never neither.",
         "echo a | cat",
+        boundary_evidence=lambda evidence: bool(evidence.pipes),
     ),
     InvariantWitness(
         "taint.evidence.process-resource-direction",
         f"{_EVIDENCE_SELF_CHECK} Process resources are recorded with a declared direction.",
         "cat <(echo a)",
+        boundary_evidence=lambda evidence: bool(evidence.process_resources),
     ),
     InvariantWitness(
         "taint.evidence.duplicate-identifier",
         f"{_EVIDENCE_SELF_CHECK} Command, scope, resource and stream identifiers come from "
         "monotonic allocators, so two records cannot share one identifier.",
         "echo a; echo b",
+        boundary_evidence=lambda evidence: len(evidence.commands) > 1,
     ),
     InvariantWitness(
         "taint.evidence.unknown-parent-scope",
         f"{_EVIDENCE_SELF_CHECK} A scope's parent scope is an identifier the builder allocated "
         "before the child scope existed.",
         "if true; then (:); fi",
+        boundary_evidence=lambda evidence: any(
+            s.parent_scope_id is not None for s in evidence.scopes
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-parent-command",
         f"{_EVIDENCE_SELF_CHECK} A scope's parent command is an identifier the builder allocated "
         "for a command it already recorded.",
         "echo $(echo a)",
+        boundary_evidence=lambda evidence: any(
+            s.parent_command_id is not None for s in evidence.scopes
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-pipe-producer",
         f"{_EVIDENCE_SELF_CHECK} A pipe's producing stream is a stream the builder allocated.",
         "echo a | cat",
+        boundary_evidence=lambda evidence: bool(evidence.pipes),
     ),
     InvariantWitness(
         "taint.evidence.unknown-pipe-consumer-command",
         f"{_EVIDENCE_SELF_CHECK} A pipe's consuming command is a command the builder recorded.",
         "echo a | cat",
+        boundary_evidence=lambda evidence: any(
+            p.consumer_command_id is not None for p in evidence.pipes
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-pipe-consumer-scope",
         f"{_EVIDENCE_SELF_CHECK} A pipe's consuming scope is a scope the builder allocated.",
         "echo a | { :; }",
+        boundary_evidence=lambda evidence: any(
+            p.consumer_scope_id is not None for p in evidence.pipes
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-resource-scope",
         f"{_EVIDENCE_SELF_CHECK} A process resource names the scope it was allocated in.",
         "cat <(echo a)",
+        boundary_evidence=lambda evidence: bool(evidence.process_resources),
     ),
     InvariantWitness(
         "taint.evidence.unknown-redirection-resource",
         f"{_EVIDENCE_SELF_CHECK} A redirection to a process-resource target names a resource the "
         "builder allocated for the same body.",
         "cat <(echo a)",
+        boundary_evidence=lambda evidence: bool(evidence.process_resources),
     ),
     InvariantWitness(
         "taint.evidence.unknown-argv-resource",
         f"{_EVIDENCE_SELF_CHECK} An argv port's process-resource reference names a resource the "
         "builder allocated for the same body.",
         "cat <(echo a)",
+        boundary_evidence=lambda evidence: any(
+            port.process_resource_id is not None for c in evidence.commands for port in c.argv
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-output-node",
         f"{_EVIDENCE_SELF_CHECK} Output expressions are a closed union the builder constructs, so "
         "the exhaustive walk has no unhandled member to reach.",
         "if true; then echo a; fi",
+        boundary_evidence=lambda evidence: bool(evidence.scopes),
     ),
     InvariantWitness(
         "taint.evidence.unknown-output-input-node",
         f"{_EVIDENCE_SELF_CHECK} The same closed output union bounds the input walk.",
         "while true; do echo a; done",
+        boundary_evidence=lambda evidence: bool(evidence.scopes),
     ),
 )
 

@@ -65,6 +65,10 @@ jobs:
           # The base tree is not present otherwise: a pull_request run checks out the merge ref
           # and the pinned action fetches one commit by default.
           fetch-depth: 0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.13
       - name: Resolve the protected base revision
         id: base
         env:
@@ -80,9 +84,19 @@ jobs:
           # A branch's first push reports an all-zero predecessor and has no base to compare to.
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
             echo "resolved=" >> "$GITHUB_OUTPUT"
-          else
-            echo "resolved=$base" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # The commit that introduces this gate, and the first push to main after it merges,
+          # both have a base that carries neither the checker nor the debt snapshot. There is no
+          # earlier debt to compare against, so skip rather than fail. The tree-local closure
+          # check in the test suite still runs on every event.
+          if ! git cat-file -e "$base:scripts/check_guard_inventory.py" 2>/dev/null \
+            || ! git cat-file -e "$base:tests/fixtures/shell_guard_debt.json" 2>/dev/null; then
+            echo "base $base predates the guard inventory gate; skipping the comparison"
+            echo "resolved=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "resolved=$base" >> "$GITHUB_OUTPUT"
       - name: Extract the base-owned checker and debt snapshot
         if: steps.base.outputs.resolved != ''
         env:
@@ -100,7 +114,8 @@ jobs:
         # head change cannot weaken the extractor while making debt appear to shrink.
         run: |
           set -euo pipefail
-          python "$RUNNER_TEMP/base/check_guard_inventory.py" \
+          uv run --python 3.13 --no-project python \
+            "$RUNNER_TEMP/base/check_guard_inventory.py" \
             --root . \
             --compare-base "$RUNNER_TEMP/base/shell_guard_debt.json"
 

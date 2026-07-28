@@ -70,3 +70,23 @@ def test_guard_debt_runs_the_base_owned_checker_against_the_candidate_tree() -> 
     assert "$RUNNER_TEMP/base/check_guard_inventory.py" in script
     assert "--compare-base" in script
     assert "--root ." in script
+
+
+def test_guard_debt_tolerates_a_base_that_predates_the_gate() -> None:
+    # The commit that introduces the gate has a base with no checker and no debt snapshot, and so
+    # does the first push to main after it merges. `git show` would fail there under
+    # `set -euo pipefail` and block the release job.
+    script = _job_text()
+
+    assert "git cat-file -e" in script
+
+
+def test_guard_debt_runs_the_checker_on_a_pinned_interpreter() -> None:
+    # Every other job pins its interpreter; the base checker parses candidate source, so a
+    # runner default older than the candidate's syntax would surface as an opaque SyntaxError.
+    steps = _guard_debt_job()["steps"]
+    uses = [str(step.get("uses", "")) for step in steps]
+
+    assert any(reference.startswith("astral-sh/setup-uv@") for reference in uses)
+    assert "uv python install" in _job_text()
+    assert "uv run" in _job_text()

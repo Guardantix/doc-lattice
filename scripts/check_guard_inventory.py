@@ -42,6 +42,8 @@ GUARDED_MODULES = (
 )
 
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
+REGISTRY_PATH = "tests/guard_witnesses.py"
+CLASSIFICATION_CONSTRUCTORS = frozenset({"ReachableWitness", "InvariantWitness"})
 
 REFUSAL_CONSTRUCTOR = "GuardRefusal"
 REFUSAL_EXCEPTIONS = frozenset(
@@ -115,30 +117,35 @@ def _annotate(tree: ast.AST) -> tuple[dict[int, str], dict[int, str]]:
     names: dict[int, str] = {}
     conditions: dict[int, str] = {}
 
+    def conjoin(outer: str, test: str) -> str:
+        return test if not outer else f"{outer} and {test}"
+
     def descend(node: ast.AST, prefix: str, condition: str) -> None:
         for child in ast.iter_child_nodes(node):
             inner, inner_condition = prefix, condition
             if isinstance(child, _SCOPES):
                 inner = f"{prefix}.{child.name}" if prefix else child.name
                 inner_condition = ""
-            names[id(child)] = inner
-            conditions[id(child)] = inner_condition
-            if isinstance(child, ast.If):
-                test = " ".join(ast.unparse(child.test).split())
-                for statement in child.body:
-                    record(statement, inner, test)
-                for statement in child.orelse:
-                    record(statement, inner, f"not ({test})")
-                continue
-            if isinstance(child, ast.ExceptHandler):
-                handled = ast.unparse(child.type) if child.type is not None else "BaseException"
-                descend(child, inner, f"except {handled}")
-                continue
-            descend(child, inner, inner_condition)
+            record(child, inner, inner_condition)
 
     def record(node: ast.AST, prefix: str, condition: str) -> None:
         names[id(node)] = prefix
         conditions[id(node)] = condition
+        # An `if` nested directly inside another `if` body, and every `elif`, arrives here rather
+        # than through `descend`'s child loop. Handling it here is what keeps the innermost test
+        # in the recorded condition instead of the enclosing one.
+        if isinstance(node, ast.If):
+            test = " ".join(ast.unparse(node.test).split())
+            record(node.test, prefix, condition)
+            for statement in node.body:
+                record(statement, prefix, conjoin(condition, test))
+            for statement in node.orelse:
+                record(statement, prefix, conjoin(condition, f"not ({test})"))
+            return
+        if isinstance(node, ast.ExceptHandler):
+            handled = ast.unparse(node.type) if node.type is not None else "BaseException"
+            descend(node, prefix, conjoin(condition, f"except {handled}"))
+            return
         descend(node, prefix, condition)
 
     descend(tree, "", "")
@@ -277,9 +284,12 @@ def _refusal_carrier_violations(tree: ast.AST, names: dict[int, str], path: str)
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
         if node.func.id in REFUSAL_EXCEPTIONS:
-            candidates = list(node.args)
+            candidates = [*node.args, *(keyword.value for keyword in node.keywords)]
         elif node.func.id == RESULT_CONSTRUCTOR:
-            candidates = list(node.args[1:])
+            candidates = [
+                *node.args[1:],
+                *(keyword.value for keyword in node.keywords if keyword.arg != "invocations"),
+            ]
         else:
             continue
         qualname = names.get(id(node), "")
@@ -397,16 +407,19 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        if node.func.id not in LIMITS_CONSTRUCTORS or node.args or node.keywords:
+        if node.func.id not in LIMITS_CONSTRUCTORS:
             continue
         qualname = names.get(id(node), "")
         if (path, qualname.split(".")[0] if qualname else "") in LIMITS_BOUNDARIES:
             continue
         if (path, qualname) in LIMITS_BOUNDARIES:
             continue
+        # A configured construction is as dangerous as a default one: it restores production-scale
+        # caps under a shrunk scan budget, which is the failure this rule exists to prevent.
+        spelling = "default limits" if not (node.args or node.keywords) else "limits"
         violations.append(
-            f"{path}:{qualname or '<module>'} constructs default limits; accept the scan's "
-            f"limits instead so a shrunk cap reaches this guard"
+            f"{path}:{qualname or '<module>'} constructs {spelling}; accept the scan's limits "
+            f"instead so a shrunk cap reaches this guard"
         )
 
     for node in ast.walk(tree):
@@ -537,6 +550,85 @@ def repository_shape_violations(root: Path) -> tuple[str, ...]:
     return tuple(violations)
 
 
+def classified_origin_ids(root: Path) -> frozenset[str]:
+    """Return every guard identifier the witness registry classifies.
+
+    The registry is parsed, never imported: this checker runs from the protected base against a
+    candidate tree, so candidate code is only ever read as data.
+
+    Args:
+        root: Repository root holding the registry.
+
+    Returns:
+        Identifiers carried by a reachable or invariant witness.
+
+    Raises:
+        ValueError: If a classification carries a non-literal identifier.
+    """
+    tree = ast.parse((root / REGISTRY_PATH).read_text(encoding="utf-8"))
+    identifiers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in CLASSIFICATION_CONSTRUCTORS:
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            raise ValueError(f"{REGISTRY_PATH}: classification identifiers must be literals")
+        identifier = node.args[0].value
+        if not isinstance(identifier, str):
+            raise ValueError(f"{REGISTRY_PATH}: classification identifiers must be literals")
+        identifiers.add(identifier)
+    return frozenset(identifiers)
+
+
+def unclassified_origin_records(root: Path) -> tuple[OriginRecord, ...]:
+    """Return the canonical records of every guard origin the registry does not classify.
+
+    Args:
+        root: Repository root to derive from.
+
+    Returns:
+        Records ordered by identifier.
+    """
+    classified = classified_origin_ids(root)
+    return tuple(
+        record for record in repository_origin_records(root) if record.origin_id not in classified
+    )
+
+
+def repository_closure_violations(root: Path) -> tuple[str, ...]:
+    """Return every guard origin that is not classified exactly once.
+
+    Source origins must partition exactly into the witness registry and the frozen debt snapshot,
+    with the two disjoint.
+
+    Args:
+        root: Repository root to check.
+
+    Returns:
+        Human-readable violations, empty when the partition holds.
+    """
+    source = {record.origin_id for record in repository_origin_records(root)}
+    classified = classified_origin_ids(root)
+    debt = {record.origin_id for record in load_debt_records(root)}
+    return (
+        *(
+            f"{origin_id} is neither classified nor frozen as debt; add a witness to "
+            f"{REGISTRY_PATH} or freeze it"
+            for origin_id in sorted(source - classified - debt)
+        ),
+        *(
+            f"{origin_id} is both classified and frozen as debt; a classified guard carries "
+            f"evidence and must leave the debt snapshot"
+            for origin_id in sorted(classified & debt)
+        ),
+        *(
+            f"{origin_id} is classified or frozen but is not a guard origin in this tree"
+            for origin_id in sorted((classified | debt) - source)
+        ),
+    )
+
+
 def load_debt_records(root: Path) -> tuple[OriginRecord, ...]:
     """Return the frozen rollout debt records recorded in this tree.
 
@@ -568,15 +660,19 @@ def _decode_records(payload: dict[str, object], origin: str) -> tuple[OriginReco
 
 
 def emit_records(root: Path) -> str:
-    """Return the candidate tree's debt snapshot as schema-versioned JSON.
+    """Return the tree's derived debt snapshot as schema-versioned JSON.
+
+    The snapshot is derived from source rather than copied: it is exactly the guard origins the
+    witness registry does not classify, so regenerating it after a guard legitimately moves cannot
+    quietly retain a stale entry.
 
     Args:
-        root: Repository root to read from.
+        root: Repository root to derive from.
 
     Returns:
         JSON text with a trailing newline.
     """
-    records = load_debt_records(root)
+    records = unclassified_origin_records(root)
     payload = {"schema": SCHEMA_VERSION, "records": [record.as_json() for record in records]}
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -630,7 +726,12 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(emit_records(arguments.root))
         return 0
 
-    failures = list(repository_shape_violations(arguments.root))
+    failures = [
+        *repository_shape_violations(arguments.root),
+        *repository_limits_violations(arguments.root),
+        *repository_threshold_violations(arguments.root),
+        *repository_closure_violations(arguments.root),
+    ]
     if arguments.compare_base is not None:
         failures.extend(
             compare_against_base(

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import importlib.util
 import inspect
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -31,6 +33,7 @@ from doc_lattice.github_ci.shell_guards import (
     ScannerLimits,
 )
 from doc_lattice.github_ci.shell_scanner import (
+    ShellScanResult,
     _ScanBudget,
     _ShellScanIncomplete,
     _ShellScanner,
@@ -58,6 +61,10 @@ def _load_checker() -> ModuleType:
 
 
 checker = _load_checker()
+
+_ORIGIN_QUALNAMES = {
+    record.origin_id: record.qualname for record in checker.repository_origin_records(_ROOT)
+}
 
 
 def test_guard_refusal_carries_a_stable_origin_id_and_reason() -> None:
@@ -266,3 +273,130 @@ def test_every_witness_classifies_exactly_one_guard_origin() -> None:
 
     assert len(witnessed) == len(set(witnessed))
     assert len(invariant) == len(set(invariant))
+
+
+def test_an_unrecognized_verdict_projects_to_a_refusal_not_a_certification() -> None:
+    # Fail-closed discipline: only Certified may project to "no refusal", so a verdict variant
+    # added later cannot silently certify until someone updates this projection.
+    unrecognized = "a verdict this projection does not know"
+    result = ShellScanResult((), unrecognized)  # ty: ignore[invalid-argument-type]
+
+    assert result.incomplete_reason is not None
+    assert result.guard_id is None
+
+
+def test_a_negative_step_budget_is_rejected_rather_than_treated_as_unset() -> None:
+    with pytest.raises(ValueError, match="step budget"):
+        _ScanBudget(-2)
+
+
+def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
+    """Map each guard identifier to its module, its condition line, and its refusal line.
+
+    Line numbers are deliberately absent from the canonical origin record, which must stay stable
+    across edits. They are re-derived here, from the current source, purely so a boundary witness
+    can be held to executing the guard's own condition.
+    """
+    located: dict[str, tuple[str, int, int]] = {}
+    for module in checker.GUARDED_MODULES:
+        path = str(_ROOT / module)
+        tree = ast.parse((_ROOT / module).read_text(encoding="utf-8"))
+        parents = {
+            id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id != "GuardRefusal" or not isinstance(node.args[0], ast.Constant):
+                continue
+            origin_id = node.args[0].value
+            if not isinstance(origin_id, str):
+                continue
+            refusal_line = node.lineno
+            current: ast.AST | None = node
+            condition_line = 0
+            while current is not None:
+                current = parents.get(id(current))
+                if isinstance(current, ast.If):
+                    condition_line = current.test.lineno
+                    break
+                if isinstance(current, ast.FunctionDef):
+                    # A fall-through refusal has no branch of its own: reaching it means every
+                    # earlier arm declined. Its enclosing function's first executable statement,
+                    # skipping the docstring, is the nearest line whose execution shows the walk
+                    # ran over real evidence.
+                    body = [
+                        statement
+                        for statement in current.body
+                        if not (
+                            isinstance(statement, ast.Expr)
+                            and isinstance(statement.value, ast.Constant)
+                            and isinstance(statement.value.value, str)
+                        )
+                    ]
+                    condition_line = body[0].lineno
+                    break
+            located[origin_id] = (path, condition_line, refusal_line)
+    return located
+
+
+_GUARD_LINES = _guard_condition_lines()
+
+
+def _boundary_evidence(script: str) -> Any:
+    """Return the frozen taint evidence one boundary script produces."""
+    scanner = _ShellScanner(script.replace("\r\n", "\n"))
+    with contextlib.suppress(_ShellScanIncomplete):
+        scanner.scan()
+    assert scanner.taint_builder is not None
+    return scanner.taint_builder.freeze()
+
+
+def _executed_lines(script: str, path: str) -> set[int]:
+    """Return the line numbers executed in one guarded module while scanning this script."""
+    executed: set[int] = set()
+
+    def trace(frame: Any, event: str, _argument: Any) -> Any:
+        if frame.f_code.co_filename != path:
+            return None
+        if event == "line":
+            executed.add(frame.f_lineno)
+        return trace
+
+    sys.settrace(trace)
+    try:
+        scan_doc_lattice_invocations(script)
+    finally:
+        sys.settrace(None)
+    return executed
+
+
+@pytest.mark.parametrize(
+    "witness",
+    INVARIANT_WITNESSES,
+    ids=[witness.origin_id for witness in INVARIANT_WITNESSES],
+)
+def test_invariant_boundary_witness_evaluates_the_condition_it_claims_is_never_true(
+    witness: InvariantWitness,
+) -> None:
+    # Without this, an invariant row is prose: any certifying script satisfies a bare "the
+    # boundary does not reach the guard" assertion, and every one of these guards sits in a
+    # function that runs for every scan. The boundary must drive the guard's own condition, so
+    # the claim is about a condition that was evaluated over real evidence and found false.
+    path, condition_line, refusal_line = _GUARD_LINES[witness.origin_id]
+    assert condition_line, f"{witness.origin_id} has no enclosing condition to witness"
+
+    evidence = _boundary_evidence(witness.boundary_script)
+    assert witness.boundary_evidence(evidence), (
+        f"{witness.origin_id}: boundary script builds no evidence for this guard to inspect"
+    )
+
+    executed = _executed_lines(witness.boundary_script, path)
+
+    assert condition_line in executed, (
+        f"{witness.origin_id}: boundary script never evaluated the guard condition at "
+        f"{path}:{condition_line}"
+    )
+    assert refusal_line not in executed, (
+        f"{witness.origin_id}: boundary script reached the refusal at {path}:{refusal_line}"
+    )

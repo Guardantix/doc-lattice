@@ -862,12 +862,16 @@ class ShellScanResult:
 
     @property
     def incomplete_reason(self) -> str | None:
-        """Return the operator-facing reason the scan stopped, or None when it completed."""
+        """Return the operator-facing reason the scan stopped, or None when it completed.
+
+        Only `Certified` projects to "no refusal". Everything else refuses, so a verdict variant
+        added later fails closed here instead of certifying until this projection catches up.
+        """
+        if isinstance(self.verdict, Certified):
+            return None
         if isinstance(self.verdict, GuardRefusal):
             return self.verdict.reason
-        if isinstance(self.verdict, MarkerDetected):
-            return TAINT_REFUSAL_REASON
-        return None
+        return TAINT_REFUSAL_REASON
 
     @property
     def guard_id(self) -> str | None:
@@ -931,9 +935,16 @@ class _ScanBudget:
     limits: ScanLimits = field(default_factory=ScanLimits)
 
     def __post_init__(self) -> None:
-        """Derive the step counter from the scan limits unless an explicit budget was given."""
+        """Derive the step counter from the scan limits unless an explicit budget was given.
+
+        Raises:
+            ValueError: If an explicit budget is negative. Only the derive sentinel may be, so a
+                miscomputed count cannot silently grant a full production budget.
+        """
         if self.remaining_steps == _DERIVE_STEPS_FROM_LIMITS:
             self.remaining_steps = self.limits.scanner.max_scan_steps
+        elif self.remaining_steps < 0:
+            raise ValueError(f"a scan step budget cannot be negative: {self.remaining_steps}")
 
     def step(self) -> None:
         """Charge one scan step, raising when the declared step budget is exhausted."""
