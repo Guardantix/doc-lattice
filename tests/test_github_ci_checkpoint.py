@@ -1,15 +1,35 @@
 """Integrity gates for the issue #100 predeclaration checkpoint artifacts."""
 
 import hashlib
+import importlib.util
 import inspect
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 from doc_lattice.github_ci import shell_scanner
-from scripts import checkpoint_record_scanner_inputs as plugin
+
+_ROOT = Path(__file__).resolve().parents[1]
+_PLUGIN = _ROOT / "scripts/checkpoint_record_scanner_inputs.py"
+
+
+def _load_plugin() -> ModuleType:
+    # scripts/ is not an importable package, and the repository root is only on sys.path under
+    # `python -m pytest`. Loading by file location keeps this module collectable under the
+    # console-script invocation CI uses. Import is inert: the plugin patches in pytest_configure.
+    spec = importlib.util.spec_from_file_location("checkpoint_record_scanner_inputs", _PLUGIN)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+plugin = _load_plugin()
 
 CHECKPOINT = Path("tests/fixtures/github_ci_checkpoint")
 _FROZEN_ACCEPTANCE_AUTHORED_CASE_COUNT = 78
