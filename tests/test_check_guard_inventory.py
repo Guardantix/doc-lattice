@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -25,6 +29,23 @@ def _load_checker() -> ModuleType:
 
 
 checker = _load_checker()
+
+
+def _fake_root(tmp_path: Path, debt_records: list[dict[str, str]]) -> Path:
+    """Build a candidate tree that shares this repository's guarded modules."""
+    root = tmp_path / "candidate"
+    for module in checker.GUARDED_MODULES:
+        target = root / module
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(_ROOT / module, target)
+    debt = root / checker.DEBT_PATH
+    debt.parent.mkdir(parents=True, exist_ok=True)
+    debt.write_text(
+        json.dumps({"schema": checker.SCHEMA_VERSION, "records": debt_records}),
+        encoding="utf-8",
+    )
+    return root
+
 
 _ORIGIN_SOURCE = """
 def _guard(value):
@@ -201,3 +222,48 @@ def test_an_uninventoried_guard_threshold_is_rejected() -> None:
     violations = checker.find_threshold_violations(source, "shell_taint.py")
 
     assert any("_MAX_UNDECLARED_THING" in violation for violation in violations)
+
+
+def test_compare_against_base_rejects_debt_the_base_did_not_carry(tmp_path: Path) -> None:
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": []})
+    record = checker.repository_origin_records(_ROOT)[0]
+    root = _fake_root(tmp_path, [record.as_json()])
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any(record.origin_id in failure for failure in failures)
+
+
+def test_compare_against_base_accepts_debt_that_only_shrank(tmp_path: Path) -> None:
+    records = [record.as_json() for record in checker.repository_origin_records(_ROOT)[:2]]
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": records})
+    root = _fake_root(tmp_path, records[:1])
+
+    assert checker.compare_against_base(root, base) == ()
+
+
+def test_compare_against_base_rejects_debt_that_is_not_a_real_candidate_origin(
+    tmp_path: Path,
+) -> None:
+    # A base-owned checker must not take the candidate's own closure run on trust: a debt record
+    # naming an origin the candidate source does not contain is laundered debt.
+    invented = {
+        "origin_id": "taint.invented.guard",
+        "path": "shell_taint.py",
+        "qualname": "_nowhere",
+        "fingerprint": "0000-0000-0000-0000-0000-0000",
+    }
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": [invented]})
+    root = _fake_root(tmp_path, [invented])
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any("taint.invented.guard" in failure for failure in failures)
+
+
+def test_compare_against_base_rejects_a_foreign_record_schema(tmp_path: Path) -> None:
+    base = json.dumps({"schema": checker.SCHEMA_VERSION + 1, "records": []})
+    root = _fake_root(tmp_path, [])
+
+    with pytest.raises(ValueError, match="record schema"):
+        checker.compare_against_base(root, base)

@@ -56,9 +56,57 @@ jobs:
       - run: uv sync --locked --group dev
       - run: uv run --no-sync pytest
 
+  guard-debt:
+    name: Guard debt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The base tree is not present otherwise: a pull_request run checks out the merge ref
+          # and the pinned action fetches one commit by default.
+          fetch-depth: 0
+      - name: Resolve the protected base revision
+        id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_BASE_SHA" ]; then
+            base="$PR_BASE_SHA"
+          else
+            base="$PUSH_BEFORE_SHA"
+          fi
+          # A branch's first push reports an all-zero predecessor and has no base to compare to.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "resolved=" >> "$GITHUB_OUTPUT"
+          else
+            echo "resolved=$base" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Extract the base-owned checker and debt snapshot
+        if: steps.base.outputs.resolved != ''
+        env:
+          BASE_SHA: ${{ steps.base.outputs.resolved }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/base"
+          git show "$BASE_SHA:scripts/check_guard_inventory.py" \
+            > "$RUNNER_TEMP/base/check_guard_inventory.py"
+          git show "$BASE_SHA:tests/fixtures/shell_guard_debt.json" \
+            > "$RUNNER_TEMP/base/shell_guard_debt.json"
+      - name: Reject fail-closed guard debt the base did not already carry
+        if: steps.base.outputs.resolved != ''
+        # The checker is the base revision's copy and the candidate tree is only its input, so a
+        # head change cannot weaken the extractor while making debt appear to shrink.
+        run: |
+          set -euo pipefail
+          python "$RUNNER_TEMP/base/check_guard_inventory.py" \
+            --root . \
+            --compare-base "$RUNNER_TEMP/base/shell_guard_debt.json"
+
   release:
     name: Release
-    needs: [code-quality, tests, security-scan]
+    needs: [code-quality, tests, security-scan, guard-debt]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:

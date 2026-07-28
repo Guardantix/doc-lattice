@@ -593,12 +593,22 @@ def compare_against_base(root: Path, base_snapshot: str) -> tuple[str, ...]:
     """
     base = set(_decode_records(json.loads(base_snapshot), "base snapshot"))
     head = set(load_debt_records(root))
-    added = sorted(head - base, key=lambda record: record.origin_id)
-    return tuple(
+    source = set(repository_origin_records(root))
+    failures = [
         f"{record.origin_id} ({record.path}:{record.qualname}) is new fail-closed guard debt; "
         f"classify it as reachable or invariant instead of freezing it"
-        for record in added
+        for record in sorted(head - base, key=lambda record: record.origin_id)
+    ]
+    # The candidate's own closure run is not trusted here: this checker is the base revision's
+    # copy, so it re-derives the candidate's origins and rejects any debt record that does not
+    # describe one of them.
+    failures.extend(
+        f"{record.origin_id} ({record.path}:{record.qualname}) is frozen as debt but is not a "
+        f"guard origin in the candidate source; the record was laundered onto a guard that "
+        f"moved or no longer exists"
+        for record in sorted(head - source, key=lambda record: record.origin_id)
     )
+    return tuple(failures)
 
 
 def main(argv: list[str] | None = None) -> int:
