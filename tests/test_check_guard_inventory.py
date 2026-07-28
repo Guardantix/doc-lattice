@@ -265,12 +265,69 @@ def test_compare_against_base_rejects_debt_that_is_not_a_real_candidate_origin(
     assert any("taint.invented.guard" in failure for failure in failures)
 
 
-def test_compare_against_base_rejects_a_foreign_record_schema(tmp_path: Path) -> None:
+def test_compare_against_base_rejects_a_foreign_base_record_schema(tmp_path: Path) -> None:
+    # The base snapshot is this checker's own output, so a schema it did not write is corruption.
     base = json.dumps({"schema": checker.SCHEMA_VERSION + 1, "records": []})
     root = _fake_root(tmp_path, [])
 
     with pytest.raises(ValueError, match="record schema"):
         checker.compare_against_base(root, base)
+
+
+def test_compare_against_base_reads_a_candidate_snapshot_under_a_newer_schema(
+    tmp_path: Path,
+) -> None:
+    # A candidate that migrates the record schema runs against the base revision's checker, which
+    # predates the new schema. Decoding the candidate strictly would make every such migration
+    # unmergeable once this gate is on the protected base.
+    records = [record.as_json() for record in checker.repository_origin_records(_ROOT)[:2]]
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": records})
+    root = _fake_root(tmp_path, [])
+    (root / checker.DEBT_PATH).write_text(
+        json.dumps(
+            {
+                "schema": checker.SCHEMA_VERSION + 1,
+                "records": [{"origin_id": records[0]["origin_id"], "renamed_digest": "abcd"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert checker.compare_against_base(root, base) == ()
+
+
+def test_compare_against_base_rejects_a_candidate_snapshot_without_identifiers(
+    tmp_path: Path,
+) -> None:
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": []})
+    root = _fake_root(tmp_path, [])
+    (root / checker.DEBT_PATH).write_text(
+        json.dumps({"schema": checker.SCHEMA_VERSION + 1, "records": [{"guard": "x"}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=checker.IDENTITY_FIELD):
+        checker.compare_against_base(root, base)
+
+
+def test_compare_against_base_rejects_a_frozen_guard_whose_input_computation_changed(
+    tmp_path: Path,
+) -> None:
+    # The end-to-end form of the fingerprint's scope: a frozen guard is disabled by inverting the
+    # accumulation its condition reads, and the debt record must not survive that.
+    origin_id = "taint.eval-discovery.work-limit"
+    record = next(r for r in checker.repository_origin_records(_ROOT) if r.origin_id == origin_id)
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": [record.as_json()]})
+    root = _fake_root(tmp_path, [record.as_json()])
+    module = root / checker.GUARDED_MODULES[0]
+    source = module.read_text(encoding="utf-8")
+    inverted = source.replace("self.work += amount", "self.work -= amount", 1)
+    assert inverted != source
+    module.write_text(inverted, encoding="utf-8")
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any(origin_id in failure for failure in failures)
 
 
 _NESTED_SOURCE = """
@@ -313,6 +370,69 @@ def test_fingerprint_tracks_an_elif_condition() -> None:
     assert original["taint.demo.first"] == updated["taint.demo.first"]
 
 
+_FED_CONDITION_SOURCE = """
+class _Budget:
+    def charge(self, amount):
+        self.work += amount
+        self.unrelated = amount
+        if self.work > self.limits.max_work:
+            raise _TaintLimitExceeded(GuardRefusal("taint.demo.work-limit", "too much work"))
+"""
+
+
+def test_fingerprint_tracks_a_write_that_feeds_the_guard_condition() -> None:
+    # Inverting the accumulation disables the guard as completely as inverting its condition, and
+    # neither the qualname nor the origin statement moves when it happens.
+    inverted = _FED_CONDITION_SOURCE.replace("self.work += amount", "self.work -= amount")
+
+    original = checker.extract_origin_records(_FED_CONDITION_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(inverted, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_ignores_a_same_scope_write_the_condition_does_not_read() -> None:
+    # Scoping the digest to what the condition reads is what keeps an unrelated edit in a long
+    # function from churning every frozen record inside it.
+    edited = _FED_CONDITION_SOURCE.replace("self.unrelated = amount", "self.unrelated = amount + 1")
+
+    original = checker.extract_origin_records(_FED_CONDITION_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_fingerprint_tracks_a_write_through_a_subscript_the_condition_reads() -> None:
+    source = (
+        "def _guard(state, scope_id):\n"
+        "    state[scope_id] = 1\n"
+        "    if state.get(scope_id) == 1:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.cycle", "cycle"))\n'
+    )
+    edited = source.replace("state[scope_id] = 1", "state[scope_id] = 0")
+
+    original = checker.extract_origin_records(source, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_ignores_a_write_in_another_function() -> None:
+    source = (
+        "def _elsewhere(state):\n"
+        "    state.work = 0\n"
+        "def _guard(state):\n"
+        "    if state.work > state.limits.max_work:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.scoped", "too much"))\n'
+    )
+    edited = source.replace("state.work = 0", "state.work = 1")
+
+    original = checker.extract_origin_records(source, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
 def test_threshold_provenance_sees_a_nested_guard_condition() -> None:
     source = (
         "def _guard(a, b):\n"
@@ -324,6 +444,67 @@ def test_threshold_provenance_sees_a_nested_guard_condition() -> None:
     violations = checker.find_threshold_violations(source, "shell_taint.py")
 
     assert any("_MAX_UNDECLARED_THING" in violation for violation in violations)
+
+
+def test_a_generically_named_module_threshold_is_rejected() -> None:
+    # A resource bound does not have to be spelled `_MAX_...` to be one, so recognizing thresholds
+    # by naming convention alone leaves an unregistered cap with no provenance.
+    source = (
+        "ITEM_CEILING = 100\n"
+        "def _guard(items):\n"
+        "    if len(items) > ITEM_CEILING:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("ITEM_CEILING" in violation for violation in violations)
+
+
+def test_a_bare_literal_guard_threshold_is_rejected() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    if len(items) > 100:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("literal 100" in violation for violation in violations)
+
+
+def test_structural_comparison_literals_are_accepted() -> None:
+    # Emptiness and arity are not magnitudes: `remaining < 1` asks whether a limits-seeded counter
+    # is exhausted, and `!= 1` asks about arity.
+    source = (
+        "def _guard(results, remaining):\n"
+        "    if len(results) != 1 or remaining < 1:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_a_module_constant_that_is_not_numeric_is_not_a_threshold() -> None:
+    source = (
+        '_EVAL_REASON = "shell taint eval command substitution cannot be bounded"\n'
+        "def _guard(value):\n"
+        "    if value:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", _EVAL_REASON))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_an_inventoried_fixed_semantic_bound_is_accepted() -> None:
+    source = (
+        "_MAX_BRACE_INTEGER_DIGITS = 256\n"
+        "def _guard(digits):\n"
+        "    if digits > _MAX_BRACE_INTEGER_DIGITS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
 
 
 def test_keyword_spelled_text_refusal_is_rejected() -> None:

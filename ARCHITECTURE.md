@@ -848,7 +848,10 @@ content construction and the taint pass. `_ScanBudget` owns it and derives its c
 the children that already share the budget share exactly one limits value. `limits` is required on
 every internal limit-aware helper. Every threshold a guard references is either a field of that
 value or an inventoried fixed semantic bound with a recorded rationale, the latter reserved for
-quantities that are directly authorable rather than resource budgets.
+quantities that are directly authorable rather than resource budgets. A threshold is recognized
+structurally rather than by naming convention: any module-level numeric constant a guard
+references, and any bare numeric magnitude it compares against. Zero and one are exempt because
+they spell emptiness and arity rather than a magnitude.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
@@ -859,9 +862,20 @@ classification.
 Anything unclassified is frozen rollout debt that may only shrink. Source origins must partition
 exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
 canonical origin *records* rather than bare identifiers, so an unclassified guard cannot be moved
-or semantically edited while keeping its entry. Because a tree-local check cannot enforce that debt
-only shrinks, the comparison against the protected base runs the base revision's own copy of the
-checker with the candidate tree as inert input, on pushes as well as pull requests.
+or semantically edited while keeping its entry. A record covers the guarding condition and, within
+the enclosing function, the statements that write what that condition reads, because inverting an
+accumulation disables a guard as completely as inverting its test. The scope stops at the function
+deliberately: an unbounded dataflow closure would churn every frozen record on any edit to either
+module, and a record that churns constantly has to be regenerated, which is the laundering path
+this decision closes. A caller passing a different value into that function is outside the boundary
+and is not covered.
+
+Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
+protected base runs the base revision's own copy of the checker with the candidate tree as inert
+input, on pushes as well as pull requests. That checker reads only the identifiers the candidate
+freezes and re-derives their records itself, which is both why the candidate's own fingerprints are
+never trusted and how a candidate can migrate the record schema and the fingerprint derivation in
+one change: only the identifier field is fixed across schemas.
 **Consequences:** A refusal observed at the public boundary names the guard that produced it, so a
 test can pin a specific site instead of a shared message. New guards cannot arrive unclassified,
 and an untested guard cannot be quietly reclassified or laundered onto a different site. Shrunk

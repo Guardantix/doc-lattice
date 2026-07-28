@@ -13,9 +13,9 @@ It enforces three separable properties:
    returns are rejected, so a future change cannot reintroduce a text-only refusal.
 2. **Tree-local closure.** Source origin identifiers must partition exactly into the classified
    inventory and the frozen rollout debt set, with the two disjoint.
-3. **Debt monotonicity.** Compared against a base revision, the candidate's debt records must be
-   a subset of the base's. Freezing *records* rather than bare identifiers means an unclassified
-   guard cannot be moved or semantically edited while keeping its debt entry.
+3. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
+   re-derive to a record the base already carried. Freezing *records* rather than bare identifiers
+   means an unclassified guard cannot be moved or semantically edited while keeping its debt entry.
 
 Because the monotonicity check runs from the base revision's copy of this script against the
 candidate's source, the candidate is only ever parsed as data.
@@ -35,6 +35,16 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
+
+IDENTITY_FIELD = "origin_id"
+"""The one record field that is stable across record schemas, and the migration contract.
+
+A base-relative comparison reads only this field out of the candidate's snapshot and re-derives
+every other field from candidate source with its own extractor. A candidate may therefore migrate
+`SCHEMA_VERSION`, the record fields, and the fingerprint derivation in one change without the base
+revision's checker failing to decode the snapshot it is handed. Renaming this field is the one
+migration the gate cannot absorb.
+"""
 
 GUARDED_MODULES = (
     "src/doc_lattice/github_ci/shell_taint.py",
@@ -83,8 +93,9 @@ class OriginRecord:
         origin_id: The literal identifier the origin constructs.
         path: Repository-relative module the origin lives in.
         qualname: Enclosing qualified name, so moving a guard changes its record.
-        fingerprint: Digest over the qualname, the guarding condition, and the origin statement
-            shape with operator-facing reason text normalized away.
+        fingerprint: Digest over the qualname, the guarding condition, the origin statement shape
+            with operator-facing reason text normalized away, and the shapes of the same-scope
+            statements that write what the condition reads.
     """
 
     origin_id: str
@@ -112,44 +123,82 @@ class OriginRecord:
         )
 
 
-def _annotate(tree: ast.AST) -> tuple[dict[int, str], dict[int, str]]:
-    """Map every node to its enclosing qualified name and nearest guarding condition."""
+@dataclass(frozen=True, slots=True)
+class _Annotations:
+    """Per-node context derived from one parse of a guarded module.
+
+    Attributes:
+        names: Enclosing qualified name, keyed by node identity.
+        conditions: Nearest guarding condition as text, keyed by node identity.
+        tests: The guarding `if` tests themselves, outermost first, keyed by node identity. Text
+            conditions carry `except` clauses too and so are not always parseable; these are.
+        scopes: Nearest enclosing function, keyed by node identity, or `None` at class or module
+            level.
+    """
+
+    names: dict[int, str]
+    conditions: dict[int, str]
+    tests: dict[int, tuple[ast.expr, ...]]
+    scopes: dict[int, ast.AST | None]
+
+
+def _annotate(tree: ast.AST) -> _Annotations:
+    """Map every node to its enclosing scope, qualified name and nearest guarding condition."""
     names: dict[int, str] = {}
     conditions: dict[int, str] = {}
+    tests: dict[int, tuple[ast.expr, ...]] = {}
+    scopes: dict[int, ast.AST | None] = {}
 
     def conjoin(outer: str, test: str) -> str:
         return test if not outer else f"{outer} and {test}"
 
-    def descend(node: ast.AST, prefix: str, condition: str) -> None:
+    def descend(
+        node: ast.AST,
+        prefix: str,
+        condition: str,
+        guards: tuple[ast.expr, ...],
+        scope: ast.AST | None,
+    ) -> None:
         for child in ast.iter_child_nodes(node):
-            inner, inner_condition = prefix, condition
+            inner, inner_condition, inner_guards, inner_scope = prefix, condition, guards, scope
             if isinstance(child, _SCOPES):
                 inner = f"{prefix}.{child.name}" if prefix else child.name
                 inner_condition = ""
-            record(child, inner, inner_condition)
+                inner_guards = ()
+                inner_scope = None if isinstance(child, ast.ClassDef) else child
+            record(child, inner, inner_condition, inner_guards, inner_scope)
 
-    def record(node: ast.AST, prefix: str, condition: str) -> None:
+    def record(
+        node: ast.AST,
+        prefix: str,
+        condition: str,
+        guards: tuple[ast.expr, ...],
+        scope: ast.AST | None,
+    ) -> None:
         names[id(node)] = prefix
         conditions[id(node)] = condition
+        tests[id(node)] = guards
+        scopes[id(node)] = scope
         # An `if` nested directly inside another `if` body, and every `elif`, arrives here rather
         # than through `descend`'s child loop. Handling it here is what keeps the innermost test
         # in the recorded condition instead of the enclosing one.
         if isinstance(node, ast.If):
             test = " ".join(ast.unparse(node.test).split())
-            record(node.test, prefix, condition)
+            record(node.test, prefix, condition, guards, scope)
             for statement in node.body:
-                record(statement, prefix, conjoin(condition, test))
+                record(statement, prefix, conjoin(condition, test), (*guards, node.test), scope)
             for statement in node.orelse:
-                record(statement, prefix, conjoin(condition, f"not ({test})"))
+                negated = conjoin(condition, f"not ({test})")
+                record(statement, prefix, negated, (*guards, node.test), scope)
             return
         if isinstance(node, ast.ExceptHandler):
             handled = ast.unparse(node.type) if node.type is not None else "BaseException"
-            descend(node, prefix, conjoin(condition, f"except {handled}"))
+            descend(node, prefix, conjoin(condition, f"except {handled}"), guards, scope)
             return
-        descend(node, prefix, condition)
+        descend(node, prefix, condition, guards, scope)
 
-    descend(tree, "", "")
-    return names, conditions
+    descend(tree, "", "", (), None)
+    return _Annotations(names, conditions, tests, scopes)
 
 
 def _normalized_shape(statement: ast.stmt) -> str:
@@ -194,6 +243,86 @@ def _own_expressions(statement: ast.stmt) -> list[ast.AST]:
     return owned
 
 
+def _read_spellings(nodes: tuple[ast.expr, ...]) -> frozenset[str]:
+    """Return every name and dotted attribute spelling these expressions read."""
+    return frozenset(
+        ast.unparse(node)
+        for root in nodes
+        for node in ast.walk(root)
+        if isinstance(node, ast.Name | ast.Attribute)
+    )
+
+
+def _written_spellings(statement: ast.stmt) -> frozenset[str]:
+    """Return the spellings this statement binds, ignoring any nested statement's."""
+    targets: list[ast.expr] = []
+    match statement:
+        case ast.Assign() | ast.Delete():
+            targets.extend(statement.targets)
+        case ast.AugAssign() | ast.AnnAssign() | ast.For() | ast.AsyncFor():
+            targets.append(statement.target)
+        case ast.With() | ast.AsyncWith():
+            targets.extend(
+                item.optional_vars for item in statement.items if item.optional_vars is not None
+            )
+        case _:
+            pass
+    targets.extend(
+        node.target for node in _own_expressions(statement) if isinstance(node, ast.NamedExpr)
+    )
+
+    spellings: set[str] = set()
+    pending = list(targets)
+    while pending:
+        target = pending.pop()
+        if isinstance(target, ast.Tuple | ast.List):
+            pending.extend(target.elts)
+        elif isinstance(target, ast.Starred):
+            pending.append(target.value)
+        elif isinstance(target, ast.Subscript):
+            # `state[key] = ...` writes through `state`, which is how the condition reads it.
+            spellings.add(ast.unparse(target))
+            spellings.add(ast.unparse(target.value))
+        elif isinstance(target, ast.Name | ast.Attribute):
+            spellings.add(ast.unparse(target))
+    return frozenset(spellings)
+
+
+def _condition_writer_shapes(
+    origin: ast.stmt, scope: ast.AST | None, guards: tuple[ast.expr, ...]
+) -> tuple[str, ...]:
+    """Return the normalized shapes of same-scope statements that feed the guard's condition.
+
+    A guard is disabled as effectively by editing what its condition reads as by editing the
+    condition, and neither the qualified name nor the origin statement moves when that happens.
+    The scope is deliberately the enclosing function rather than the whole module: an unbounded
+    dataflow closure would churn every frozen record on any edit to either module, and a debt
+    record that churns constantly has to be regenerated, which is the laundering path this gate
+    exists to close. A caller passing a different value into this scope is outside that boundary
+    and is not covered.
+
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+        guards: The `if` tests governing the origin.
+
+    Returns:
+        Shapes in source order, empty when the guard is unconditional or scope-free.
+    """
+    read = _read_spellings(guards)
+    if scope is None or not read:
+        return ()
+    writers = [
+        statement
+        for statement in ast.walk(scope)
+        if isinstance(statement, ast.stmt)
+        if statement is not origin
+        if _written_spellings(statement) & read
+    ]
+    writers.sort(key=lambda statement: (statement.lineno, statement.col_offset))
+    return tuple(_normalized_shape(statement) for statement in writers)
+
+
 def _is_guard_refusal_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
@@ -235,7 +364,7 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         ValueError: If an origin constructs a non-literal identifier.
     """
     tree = ast.parse(source)
-    names, conditions = _annotate(tree)
+    annotations = _annotate(tree)
     records: list[OriginRecord] = []
     for statement, call in _origin_calls_by_statement(tree):
         if not call.args or not isinstance(call.args[0], ast.Constant):
@@ -243,10 +372,15 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         origin_id = call.args[0].value
         if not isinstance(origin_id, str):
             raise ValueError(f"{path}: guard identifier must be a string literal")
-        qualname = names.get(id(statement), "")
-        condition = conditions.get(id(statement), "")
+        qualname = annotations.names.get(id(statement), "")
+        condition = annotations.conditions.get(id(statement), "")
+        writers = _condition_writer_shapes(
+            statement,
+            annotations.scopes.get(id(statement)),
+            annotations.tests.get(id(statement), ()),
+        )
         digest = hashlib.sha256(
-            "\n".join((qualname, condition, _normalized_shape(statement))).encode("utf-8")
+            "\n".join((qualname, condition, _normalized_shape(statement), *writers)).encode("utf-8")
         ).hexdigest()
         records.append(OriginRecord(origin_id, path, qualname, _group_digest(digest)))
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
@@ -343,7 +477,7 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
         Human-readable violations, empty when every refusal shape is canonical.
     """
     tree = ast.parse(source)
-    names, _ = _annotate(tree)
+    names = _annotate(tree).names
     return (
         *_literal_id_violations(tree, path),
         *_refusal_carrier_violations(tree, names, path),
@@ -379,6 +513,11 @@ FIXED_SEMANTIC_BOUNDS = {
         "The number of IFS field alternatives a single read projection tracks is a modeling "
         "arity, reachable by authoring that many separators in one literal."
     ),
+    "_CASE_HEADER_PATTERN_WORDS": (
+        "The number of words a complete `case` header spells before its first pattern: the "
+        "reserved word, the subject, `in`, and the pattern itself. A grammatical arity, not a "
+        "budget, and reached by authoring a shorter header."
+    ),
     "_UNICODE_MAX": "The last Unicode code point. Not a budget; authorable as an escape.",
     "_SURROGATE_MIN": "The first surrogate code point. Not a budget; authorable as an escape.",
     "_SURROGATE_MAX": "The last surrogate code point. Not a budget; authorable as an escape.",
@@ -401,7 +540,7 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
         Human-readable violations, empty when limits flow from one scan-level value.
     """
     tree = ast.parse(source)
-    names, _ = _annotate(tree)
+    names = _annotate(tree).names
     violations: list[str] = []
 
     for node in ast.walk(tree):
@@ -447,22 +586,82 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
     return tuple(violations)
 
 
-def _threshold_names(statement: ast.stmt, condition: str) -> set[str]:
-    referenced = {
+_THRESHOLD_PREFIXES = ("_MAX_", "_EVAL_", "_SURROGATE")
+"""Naming conventions that mark a threshold even when the module does not define it, so a guard
+referencing an imported or not-yet-written bound is still caught."""
+
+STRUCTURAL_GUARD_LITERALS = frozenset({0, 1})
+"""Integer literals a guard may compare against without naming them.
+
+Zero and one are the emptiness and singleton cases: `remaining < 1` asks whether a counter that a
+limits field seeded is exhausted, and `len(results) != 1` asks about arity. Neither is a resource
+budget. Any other bare literal in a guard comparison is a magnitude with no recorded provenance,
+so it must be named and inventoried instead.
+"""
+
+
+def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the module-level bound names, and the subset bound to a numeric literal."""
+    bound: set[str] = set()
+    numeric: set[str] = set()
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        names = {target.id for target in targets if isinstance(target, ast.Name)}
+        bound |= names
+        value = node.value
+        if (
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, int | float)
+            and not isinstance(value.value, bool)
+        ):
+            numeric |= names
+    return frozenset(bound), frozenset(numeric)
+
+
+def _threshold_names(
+    nodes: tuple[ast.AST, ...], bound: frozenset[str], numeric: frozenset[str]
+) -> set[str]:
+    """Return every named threshold the guard's condition or origin statement references.
+
+    A module-level numeric constant is a threshold whatever it is called. A conventionally named
+    one the module does not define cannot be resolved here, so it is treated as a threshold too;
+    a name the module binds to something other than a number is not one.
+    """
+    return {
         node.id
-        for node in ast.walk(statement)
-        if isinstance(node, ast.Name) and node.id.startswith("_MAX_")
+        for root in nodes
+        for node in ast.walk(root)
+        if isinstance(node, ast.Name)
+        if node.id in numeric or (node.id.startswith(_THRESHOLD_PREFIXES) and node.id not in bound)
     }
-    referenced |= {
-        token
-        for token in condition.replace("(", " ").replace(")", " ").split()
-        if token.startswith("_MAX_") or token.startswith("_EVAL_") or token.startswith("_SURROGATE")
+
+
+def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
+    """Return every bare numeric magnitude the guard compares against."""
+    return {
+        operand.value
+        for root in nodes
+        for node in ast.walk(root)
+        if isinstance(node, ast.Compare)
+        for operand in (node.left, *node.comparators)
+        if isinstance(operand, ast.Constant)
+        if isinstance(operand.value, int | float) and not isinstance(operand.value, bool)
+        if operand.value not in STRUCTURAL_GUARD_LITERALS
     }
-    return {name.strip(".,:") for name in referenced}
 
 
 def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every guard threshold that is neither a limits field nor an inventoried bound.
+
+    A threshold is recognized structurally rather than by naming convention: any module-level
+    numeric constant the guard references, and any bare numeric magnitude it compares against.
+    Recognizing only conventionally named constants would let both a generically named bound and a
+    raw literal introduce a resource cap with no provenance.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -472,17 +671,23 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
         Human-readable violations, empty when every guard threshold has declared provenance.
     """
     tree = ast.parse(source)
-    _, conditions = _annotate(tree)
+    annotations = _annotate(tree)
+    bound, numeric = _module_constants(tree)
     violations: list[str] = []
     for statement, _call in _origin_calls_by_statement(tree):
-        condition = conditions.get(id(statement), "")
-        for name in sorted(_threshold_names(statement, condition)):
+        nodes: tuple[ast.AST, ...] = (statement, *annotations.tests.get(id(statement), ()))
+        for name in sorted(_threshold_names(nodes, bound, numeric)):
             if name in FIXED_SEMANTIC_BOUNDS:
                 continue
             violations.append(
                 f"{path}: guard threshold {name} is neither a scan-limits field nor an "
                 f"inventoried fixed semantic bound"
             )
+        violations.extend(
+            f"{path}: guard threshold literal {literal} has no provenance; take it from the "
+            f"scan's limits, or name it and inventory it as a fixed semantic bound"
+            for literal in sorted(_threshold_literals(nodes))
+        )
     return tuple(violations)
 
 
@@ -659,6 +864,31 @@ def _decode_records(payload: dict[str, object], origin: str) -> tuple[OriginReco
     return tuple(decoded)
 
 
+def _decode_identifiers(payload: dict[str, object], origin: str) -> tuple[str, ...]:
+    """Return the origin identifiers a snapshot claims, tolerating a foreign record schema.
+
+    Args:
+        payload: Decoded snapshot JSON.
+        origin: Snapshot name, used in messages.
+
+    Returns:
+        The claimed identifiers, in snapshot order.
+
+    Raises:
+        ValueError: If the records are not objects carrying a string identifier.
+    """
+    rows = payload.get("records", [])
+    if not isinstance(rows, list):
+        raise ValueError(f"{origin}: records must be a list")
+    identifiers: list[str] = []
+    for row in rows:
+        identifier = row.get(IDENTITY_FIELD) if isinstance(row, dict) else None
+        if not isinstance(identifier, str):
+            raise ValueError(f"{origin}: every record must carry a string {IDENTITY_FIELD}")
+        identifiers.append(identifier)
+    return tuple(identifiers)
+
+
 def emit_records(root: Path) -> str:
     """Return the tree's derived debt snapshot as schema-versioned JSON.
 
@@ -680,31 +910,51 @@ def emit_records(root: Path) -> str:
 def compare_against_base(root: Path, base_snapshot: str) -> tuple[str, ...]:
     """Return every way the candidate's debt grew relative to a base snapshot.
 
+    Nothing the candidate asserts about a guard is taken on trust. This checker is the base
+    revision's copy, so it reads only the identifiers the candidate freezes and re-derives their
+    records from candidate source with its own extractor. A record that the base did not carry is
+    new debt whether the identifier is new or the guard behind it was edited while frozen.
+
+    Reading the candidate snapshot by identifier alone is also what lets the record schema and the
+    fingerprint derivation migrate: see `IDENTITY_FIELD`. The base snapshot is the base revision's
+    own output and is still decoded strictly.
+
     Args:
         root: Repository root holding the candidate tree.
         base_snapshot: JSON text emitted by the base revision's snapshot.
 
     Returns:
         Human-readable failures, empty when debt only shrank or held steady.
+
+    Raises:
+        ValueError: If the base snapshot was written under a different record schema, or the
+            candidate snapshot does not carry identifiers.
     """
     base = set(_decode_records(json.loads(base_snapshot), "base snapshot"))
-    head = set(load_debt_records(root))
-    source = set(repository_origin_records(root))
-    failures = [
-        f"{record.origin_id} ({record.path}:{record.qualname}) is new fail-closed guard debt; "
-        f"classify it as reachable or invariant instead of freezing it"
-        for record in sorted(head - base, key=lambda record: record.origin_id)
-    ]
-    # The candidate's own closure run is not trusted here: this checker is the base revision's
-    # copy, so it re-derives the candidate's origins and rejects any debt record that does not
-    # describe one of them.
-    failures.extend(
-        f"{record.origin_id} ({record.path}:{record.qualname}) is frozen as debt but is not a "
-        f"guard origin in the candidate source; the record was laundered onto a guard that "
-        f"moved or no longer exists"
-        for record in sorted(head - source, key=lambda record: record.origin_id)
+    claimed = _decode_identifiers(
+        json.loads((root / DEBT_PATH).read_text(encoding="utf-8")), DEBT_PATH
     )
-    return tuple(failures)
+    derived: dict[str, list[OriginRecord]] = {}
+    for record in repository_origin_records(root):
+        derived.setdefault(record.origin_id, []).append(record)
+
+    grew: list[str] = []
+    laundered: list[str] = []
+    for origin_id in sorted(set(claimed)):
+        records = derived.get(origin_id)
+        if not records:
+            laundered.append(
+                f"{origin_id} is frozen as debt but is not a guard origin in the candidate "
+                f"source; the record was laundered onto a guard that moved or no longer exists"
+            )
+            continue
+        grew.extend(
+            f"{record.origin_id} ({record.path}:{record.qualname}) is new fail-closed guard debt; "
+            f"classify it as reachable or invariant instead of freezing it"
+            for record in records
+            if record not in base
+        )
+    return (*grew, *laundered)
 
 
 def main(argv: list[str] | None = None) -> int:
