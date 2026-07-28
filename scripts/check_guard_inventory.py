@@ -36,7 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -332,6 +332,22 @@ def _read_spellings(nodes: tuple[ast.expr, ...]) -> frozenset[str]:
     )
 
 
+def _statement_reads(statement: ast.stmt) -> frozenset[str]:
+    """Return the spellings this statement loads, ignoring any nested statement's.
+
+    Only `Load` occurrences count, so a binding target does not read itself and the closure that
+    follows a value back to its source cannot be seeded by the name it is being stored into. The
+    receiver of `state[key] = value` does load `state`, which is correct: that statement both reads
+    and writes it.
+    """
+    return frozenset(
+        ast.unparse(node)
+        for node in _own_expressions(statement)
+        if isinstance(node, ast.Name | ast.Attribute)
+        if isinstance(node.ctx, ast.Load)
+    )
+
+
 def _mutated_spellings(statement: ast.stmt) -> set[str]:
     """Return the receivers this statement mutates in place, ignoring any nested statement's.
 
@@ -393,11 +409,20 @@ def _condition_writer_shapes(
 
     A guard is disabled as effectively by editing what its condition reads as by editing the
     condition, and neither the qualified name nor the origin statement moves when that happens.
-    The scope is deliberately the enclosing function rather than the whole module: an unbounded
-    dataflow closure would churn every frozen record on any edit to either module, and a debt
-    record that churns constantly has to be regenerated, which is the laundering path this gate
-    exists to close. A caller passing a different value into this scope is outside that boundary
-    and is not covered.
+
+    The selection is a transitive closure, not one hop. A guard reading a single name is usually
+    two or more assignments away from the input that decides it, and stopping at the direct writer
+    leaves every statement behind it outside the record.
+    `_skip_static_env_option` is the concrete case: `scanner.env-option.static-split-string` tests
+    `kind`, written by `kind = _ENV_LONG_OPTION_KINDS[option]`, whose `option` comes from
+    `option, attached_value = _resolve_env_long_option(literal)`. Rewriting that call to a constant
+    withdraws the guard, and with a one-hop rule the fingerprint does not move.
+
+    The scope is deliberately the enclosing function rather than the whole module: a closure that
+    crossed call boundaries would churn every frozen record on any edit to either module, and a
+    debt record that churns constantly has to be regenerated, which is the laundering path this
+    gate exists to close. A caller passing a different value into this scope is outside that
+    boundary and is not covered.
 
     Args:
         origin: The statement that constructs the refusal, hashed separately.
@@ -407,17 +432,30 @@ def _condition_writer_shapes(
     Returns:
         Shapes in source order, empty when the guard is unconditional or scope-free.
     """
-    read = _read_spellings(guards)
+    read = set(_read_spellings(guards))
     if scope is None or not read:
         return ()
-    writers = [
+    candidates = [
         statement
         for statement in ast.walk(scope)
         if isinstance(statement, ast.stmt)
         if statement is not origin
-        if _written_spellings(statement) & read
     ]
-    writers.sort(key=lambda statement: (statement.lineno, statement.col_offset))
+    selected: dict[int, ast.stmt] = {}
+    grew = True
+    while grew:
+        grew = False
+        for statement in candidates:
+            if id(statement) in selected or not (_written_spellings(statement) & read):
+                continue
+            selected[id(statement)] = statement
+            # What this writer reads becomes part of the condition's dataflow, so the statements
+            # feeding *it* are selected on the next pass. The scope bounds the fixpoint.
+            read |= _statement_reads(statement)
+            grew = True
+    writers = sorted(
+        selected.values(), key=lambda statement: (statement.lineno, statement.col_offset)
+    )
     return tuple(_normalized_shape(statement) for statement in writers)
 
 

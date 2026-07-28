@@ -359,6 +359,35 @@ def _boundary_evidence(script: str) -> Any:
     return scanner.taint_builder.freeze()
 
 
+_VACUOUS_CONTROL_SCRIPT = ""
+"""An input that builds the evidence floor: one root scope, no command, pipe or resource.
+
+Every structure a guard could inspect is absent here, so a boundary-evidence predicate that holds
+for this control is not reporting anything the boundary script built.
+"""
+
+
+@pytest.mark.parametrize(
+    "witness",
+    INVARIANT_WITNESSES,
+    ids=[witness.origin_id for witness in INVARIANT_WITNESSES],
+)
+def test_invariant_boundary_evidence_predicate_rejects_the_empty_control(
+    witness: InvariantWitness,
+) -> None:
+    # Requiring the predicate to be non-empty is not enough: `lambda _: True` satisfies the
+    # boundary-evidence assertion for any script, and the line trace only shows the condition was
+    # evaluated, which holds for an unrelated certifying script because these guards sit in
+    # validators every scan runs. A predicate that cannot tell the boundary apart from an input
+    # that builds nothing supports no claim about the boundary, so it is rejected here.
+    control = _boundary_evidence(_VACUOUS_CONTROL_SCRIPT)
+
+    assert not witness.boundary_evidence(control), (
+        f"{witness.origin_id}: boundary evidence predicate also holds for the empty control, so "
+        f"it does not witness anything the boundary script built"
+    )
+
+
 def _executed_lines(script: str, path: str) -> set[int]:
     """Return the line numbers executed in one guarded module while scanning this script."""
     executed: set[int] = set()

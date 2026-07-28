@@ -417,6 +417,78 @@ def test_fingerprint_tracks_a_write_through_a_subscript_the_condition_reads() ->
     assert original[0].fingerprint != updated[0].fingerprint
 
 
+_TRANSITIVE_SOURCE = (
+    "def _guard(literal):\n"
+    "    option, attached = _resolve(literal)\n"
+    "    kind = _KINDS[option]\n"
+    "    if kind == 'split':\n"
+    '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.split", "unscannable"))\n'
+    "    return kind\n"
+)
+
+
+def test_fingerprint_tracks_a_write_two_hops_from_the_guard_condition() -> None:
+    # The condition reads `kind` alone, so only `kind = _KINDS[option]` writes what it reads
+    # directly. Pinning `option` to a constant makes the refusal unreachable while leaving the
+    # condition, the origin statement and the direct writer all byte-identical.
+    edited = _TRANSITIVE_SOURCE.replace("_resolve(literal)", "('debug', None)")
+
+    original = checker.extract_origin_records(_TRANSITIVE_SOURCE, "shell_scanner.py")
+    updated = checker.extract_origin_records(edited, "shell_scanner.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_the_real_env_option_guards_transitive_writer() -> None:
+    # The same defect on the shipped guard the closure was widened for.
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_scanner.py").read_text(encoding="utf-8")
+    edited = source.replace(
+        "    option, attached_value = _resolve_env_long_option(literal)\n",
+        '    option, attached_value = ("debug", None)\n',
+    )
+    assert edited != source
+
+    def fingerprint(text: str) -> str:
+        records = checker.extract_origin_records(text, "shell_scanner.py")
+        return next(
+            record.fingerprint
+            for record in records
+            if record.origin_id == "scanner.env-option.static-split-string"
+        )
+
+    assert fingerprint(source) != fingerprint(edited)
+
+
+def test_writer_closure_still_ignores_an_unrelated_chain_in_the_same_scope() -> None:
+    # Following values transitively must not degrade into hashing the whole function, or every
+    # frozen record churns on any edit to a long one and has to be regenerated.
+    edited = _TRANSITIVE_SOURCE.replace(
+        "    option, attached = _resolve(literal)\n",
+        "    option, attached = _resolve(literal)\n    noise = _unrelated(literal)\n",
+    )
+
+    original = checker.extract_origin_records(_TRANSITIVE_SOURCE, "shell_scanner.py")
+    updated = checker.extract_origin_records(edited, "shell_scanner.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_writer_closure_terminates_on_a_cyclic_dataflow() -> None:
+    # A loop that reads and rewrites the same name feeds itself; the fixpoint must still settle.
+    source = (
+        "def _guard(items):\n"
+        "    total = 0\n"
+        "    for item in items:\n"
+        "        total = total + item\n"
+        "    if total > 3:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.cyclic", "too much"))\n'
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.cyclic"]
+
+
 def test_fingerprint_ignores_a_write_in_another_function() -> None:
     source = (
         "def _elsewhere(state):\n"

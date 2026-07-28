@@ -864,7 +864,10 @@ identifier; an unreachable one carries a written rationale, a boundary script th
 validation to its nearest reachable state, and a required predicate over the evidence that script
 builds. A row asserting that a test exists somewhere is not classification, and neither is a
 boundary row whose evidence predicate is satisfied by any input at all, which is why that predicate
-has no default.
+has no default and why it is additionally required to be false for the evidence an empty script
+builds. Having no default only stops the predicate being omitted; a predicate that holds for the
+builder's floor of one root scope and nothing else reports nothing the boundary script constructed,
+and is vacuous whether it is spelled as a constant or as a test the floor happens to satisfy.
 
 Anything unclassified is frozen rollout debt that may only shrink. Source origins must partition
 exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
@@ -873,6 +876,11 @@ or semantically edited while keeping its entry. A record covers the guarding con
 is spelled as an `if`, a `while` or a `match` arm, and, within the enclosing function, the
 statements that write what that condition reads, in-place mutation of an accumulator included,
 because inverting or removing an accumulation disables a guard as completely as inverting its test.
+That selection is transitive: a condition usually reads a name two or more assignments away from
+the input deciding it, and stopping at the direct writer leaves everything behind it uncovered.
+`scanner.env-option.static-split-string` tests a `kind` written from an `option` resolved one call
+earlier, so a one-hop rule lets that call become a constant, withdrawing the guard, with the record
+byte-identical.
 A record also covers the body of any declared transport the origin hands its refusal to, since the
 parameterized cycle detector owns the condition that decides its callers' refusals while minting no
 identifier of its own. A guard with no test at all, reached by falling through a chain of returns,

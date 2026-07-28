@@ -26,6 +26,44 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits, TaintLimits
+from doc_lattice.github_ci.shell_taint import (
+    ChoiceOutput,
+    CommandOutput,
+    RepeatOutput,
+    ScopeOutput,
+    SequenceOutput,
+)
+
+
+def _output_nodes(output: Any) -> list[Any]:
+    """Return every node of one output expression tree, the root included.
+
+    The two exhaustive output walks fall through to their guard on a union member they do not
+    handle, so a boundary script only exercises them by building a tree they actually descend. An
+    empty script builds a single childless `SequenceOutput`, which is why a predicate over these
+    nodes has to count them rather than merely find one.
+    """
+    found: list[Any] = []
+    pending: list[Any] = [output]
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        if isinstance(node, SequenceOutput | ChoiceOutput):
+            pending.extend(node.parts)
+        elif isinstance(node, RepeatOutput):
+            pending.append(node.part)
+    return found
+
+
+def _scope_output_nodes(evidence: Any) -> list[Any]:
+    """Return every output node across every scope the boundary script built."""
+    return [
+        node
+        for scope in evidence.scopes
+        for root in (scope.output, scope.entry)
+        if root is not None
+        for node in _output_nodes(root)
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +102,10 @@ class InvariantWitness:
             actually contains the structure this guard inspects. Required, and deliberately without
             a default: a permissive default would restore the hole this field closes, because these
             guards sit in validators that run for every scan, so "the condition was evaluated"
-            holds even for a script that builds nothing for it to inspect.
+            holds even for a script that builds nothing for it to inspect. The predicate must also
+            be *false* for the evidence an empty script produces, which is the builder's floor of
+            one root scope and nothing else. A predicate that holds there discriminates nothing and
+            is vacuous however it is spelled, `lambda _: True` being only the plainest form.
         boundary_guard_id: Guard origin the boundary script must report, or `None` when it
             certifies.
     """
@@ -605,7 +646,9 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         f"{_EVIDENCE_SELF_CHECK} Every scope the builder allocates carries one of the declared "
         "stream-scope kinds.",
         "if true; then :; fi",
-        boundary_evidence=lambda evidence: bool(evidence.scopes),
+        # A root scope exists for every script including the empty one, so the boundary has to
+        # build a scope the builder allocated for authored structure.
+        boundary_evidence=lambda evidence: len(evidence.scopes) > 1,
     ),
     InvariantWitness(
         "taint.evidence.pipe-consumer-arity",
@@ -694,13 +737,25 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         f"{_EVIDENCE_SELF_CHECK} Output expressions are a closed union the builder constructs, so "
         "the exhaustive walk has no unhandled member to reach.",
         "if true; then echo a; fi",
-        boundary_evidence=lambda evidence: bool(evidence.scopes),
+        # The walk reaches this guard only by dispatching on a node it does not recognize, so the
+        # boundary must give it a tree it descends rather than the childless root an empty script
+        # produces. Both recursing and leaf members have to be present for that dispatch to be
+        # exercised over real evidence.
+        boundary_evidence=lambda evidence: (
+            len(_scope_output_nodes(evidence)) > 1
+            and any(isinstance(node, CommandOutput) for node in _scope_output_nodes(evidence))
+            and any(isinstance(node, ScopeOutput) for node in _scope_output_nodes(evidence))
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-output-input-node",
         f"{_EVIDENCE_SELF_CHECK} The same closed output union bounds the input walk.",
         "while true; do echo a; done",
-        boundary_evidence=lambda evidence: bool(evidence.scopes),
+        # `RepeatOutput` is the arm this walk owns beyond the shared ones, so the loop boundary
+        # is held to actually producing it.
+        boundary_evidence=lambda evidence: any(
+            isinstance(node, RepeatOutput) for node in _scope_output_nodes(evidence)
+        ),
     ),
 )
 
