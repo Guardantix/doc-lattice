@@ -43,7 +43,7 @@
       "qualname": "_ShellScanner._finish_case"
     },
     {
-      "fingerprint": "1ac3-30df-48be-097d-c1fb-d981",
+      "fingerprint": "5141-83d7-d7ba-14de-ea05-5fa7",
       "origin_id": "scanner.descriptor.unparsable",
       "path": "shell_scanner.py",
       "qualname": "_parse_static_descriptor"
@@ -97,7 +97,7 @@
       "qualname": "_resolve_output_descriptor_source"
     },
     {
-      "fingerprint": "7342-8b39-3e36-6e8b-14f3-babf",
+      "fingerprint": "b3ed-1472-3c26-82f5-1651-f32e",
       "origin_id": "taint.eval-ansi-c.unterminated-literal",
       "path": "shell_taint.py",
       "qualname": "_eval_ansi_c_literal"
@@ -109,7 +109,7 @@
       "qualname": "_append_eval_conditional_writes"
     },
     {
-      "fingerprint": "c328-98de-d2f2-95e0-3c5a-2cc8",
+      "fingerprint": "664d-ae6d-e4bb-3cb3-6ff5-c88c",
       "origin_id": "taint.eval-descriptor.unparsable",
       "path": "shell_taint.py",
       "qualname": "_static_eval_descriptor"
@@ -133,7 +133,7 @@
       "qualname": "_static_eval_mutations.route_assignment"
     },
     {
-      "fingerprint": "cda0-8849-34f6-2778-135a-6c77",
+      "fingerprint": "775b-0ad9-4bdc-f052-914c-c928",
       "origin_id": "taint.eval-payload.lex-error",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
@@ -253,7 +253,7 @@
       "qualname": "_validated_output_scope_refs"
     },
     {
-      "fingerprint": "3fc0-8cb6-f5e5-6be7-d5ed-bc04",
+      "fingerprint": "0b5c-f94b-da42-3d2b-f4c3-9ea8",
       "origin_id": "taint.evidence.output-graph-cycle",
       "path": "shell_taint.py",
       "qualname": "_validate_nested_evidence"
@@ -283,13 +283,13 @@
       "qualname": "_resolved_scope_inputs"
     },
     {
-      "fingerprint": "0098-24a3-eb6c-0dbb-cd8d-2653",
+      "fingerprint": "a951-7675-42ba-ebce-a0b0-ddaa",
       "origin_id": "taint.evidence.scope-parent-cycle",
       "path": "shell_taint.py",
       "qualname": "_validate_nested_evidence"
     },
     {
-      "fingerprint": "549f-c291-f1bb-6718-c50c-be48",
+      "fingerprint": "8ad2-7bc3-7a4b-a81c-f37a-5565",
       "origin_id": "taint.function-effects.unstructured-segment",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.ordered_effects"
@@ -391,5 +391,5 @@
       "qualname": "_project_read_value"
     }
   ],
-  "schema": 1
+  "schema": 2
 }

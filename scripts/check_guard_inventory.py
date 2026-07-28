@@ -36,7 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -149,8 +149,9 @@ class OriginRecord:
         qualname: Enclosing qualified name, so moving a guard changes its record.
         fingerprint: Digest over the qualname, the guarding condition, the origin statement shape
             with operator-facing reason text normalized away, the shapes of the same-scope
-            statements that write what the condition reads, and the shape of any declared transport
-            the origin statement hands its refusal to.
+            statements that write what the condition reads, the shape of any declared transport
+            the origin statement hands its refusal to, and, for an origin with no guarding test,
+            the same-scope control flow that decides whether it is reached.
     """
 
     origin_id: str
@@ -409,6 +410,95 @@ def _condition_writer_shapes(
     return tuple(_normalized_shape(statement) for statement in writers)
 
 
+def _scope_statements(scope: ast.AST) -> list[ast.stmt]:
+    """Return every statement the scope executes itself, excluding a nested scope's body.
+
+    A nested function or class body does not run where it is written, so its statements decide
+    nothing about whether the statements around it are reached.
+    """
+    found: list[ast.stmt] = []
+    pending: list[ast.AST] = [scope]
+    while pending:
+        node = pending.pop()
+        for child in ast.iter_child_nodes(node):
+            # An `except` clause and a `match` arm are not statements, so descending only through
+            # statements would drop the handler and arm bodies that hold the origins this rule is
+            # for.
+            if isinstance(child, ast.excepthandler | ast.match_case):
+                pending.append(child)
+            elif isinstance(child, ast.stmt) and not isinstance(child, _SCOPES):
+                found.append(child)
+                pending.append(child)
+    return found
+
+
+def _diverting_shape(statement: ast.stmt) -> str | None:
+    """Return the shape of the control this statement exerts, or `None` when it exerts none.
+
+    A branch is reduced to its test and a loop to its target and iterable, so an edit inside one
+    branch's body does not churn the record of a guard outside it. Statements that transfer control
+    are taken whole, because a `return` decides reachability through the value it returns:
+    `return int(digits)` can raise where `return 0` cannot.
+    """
+    match statement:
+        case ast.Return() | ast.Raise() | ast.Break() | ast.Continue():
+            return _normalized_shape(statement)
+        case ast.If() | ast.While():
+            return f"test {ast.dump(statement.test)}"
+        case ast.For() | ast.AsyncFor():
+            return f"for {ast.dump(statement.target)} in {ast.dump(statement.iter)}"
+        case ast.Match():
+            arms = [
+                part
+                for case in statement.cases
+                for part in (
+                    ast.dump(case.pattern),
+                    "" if case.guard is None else ast.dump(case.guard),
+                )
+            ]
+            return " ".join(("match", ast.dump(statement.subject), *arms))
+        case ast.Try() | ast.TryStar():
+            handled = (
+                "bare" if handler.type is None else ast.dump(handler.type)
+                for handler in statement.handlers
+            )
+            return " ".join(("try", *handled))
+        case _:
+            return None
+
+
+def _control_flow_shapes(origin: ast.stmt, scope: ast.AST | None) -> tuple[str, ...]:
+    """Return the shapes of the control flow that decides whether a test-free origin is reached.
+
+    A guard governed by an `if`, a `while` or a `match` arm records that test and the same-scope
+    writes feeding it. A guard reached by falling through a chain of returns, by exhausting a loop,
+    or through an `except` handler has no such test, so nothing about the code deciding it reaches
+    the refusal would otherwise enter the record. `scanner.descriptor.unparsable` is the concrete
+    case: it fires only because `return int(digits)` in its own `try` body can raise `ValueError`,
+    and rewriting that to `return 0` withdraws the guard while leaving a byte-identical record.
+
+    The scope is the enclosing function, the same boundary `_condition_writer_shapes` uses and for
+    the same reason. Within it every diverting statement is taken, not only the ones lexically
+    before the origin, because a loop lets a later statement run first. The cost is that any
+    control-flow edit in that function churns such a record; the remedy is the outcome this
+    inventory wants anyway, which is to classify the guard so it leaves the debt snapshot.
+
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+
+    Returns:
+        Shapes in source order, empty when the origin has no enclosing function.
+    """
+    if scope is None:
+        return ()
+    statements = [statement for statement in _scope_statements(scope) if statement is not origin]
+    statements.sort(key=lambda statement: (statement.lineno, statement.col_offset))
+    return tuple(
+        shape for statement in statements if (shape := _diverting_shape(statement)) is not None
+    )
+
+
 def _is_guard_refusal_call(node: ast.AST) -> bool:
     return _called_name(node) == REFUSAL_CONSTRUCTOR
 
@@ -483,16 +573,17 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
             raise ValueError(f"{path}: guard identifier must be a string literal")
         qualname = annotations.names.get(id(statement), "")
         condition = annotations.conditions.get(id(statement), "")
-        writers = _condition_writer_shapes(
-            statement,
-            annotations.scopes.get(id(statement)),
-            annotations.tests.get(id(statement), ()),
-        )
+        scope = annotations.scopes.get(id(statement))
+        tests = annotations.tests.get(id(statement), ())
+        writers = _condition_writer_shapes(statement, scope, tests)
+        # A guard with a test records that test and what writes it; one without records the control
+        # flow that decides it is reached at all, which is the only description that guard has.
+        flow = () if tests else _control_flow_shapes(statement, scope)
         called = {name for node in _own_expressions(statement) if (name := _called_name(node))}
         carried = tuple(shape for name, shape in sorted(transports.items()) if name in called)
         digest = hashlib.sha256(
             "\n".join(
-                (qualname, condition, _normalized_shape(statement), *writers, *carried)
+                (qualname, condition, _normalized_shape(statement), *writers, *carried, *flow)
             ).encode("utf-8")
         ).hexdigest()
         records.append(OriginRecord(origin_id, path, qualname, _group_digest(digest)))
@@ -951,6 +1042,11 @@ def repository_closure_violations(root: Path) -> tuple[str, ...]:
     would let a second, unwitnessed guard reuse an already-classified identifier and inherit its
     evidence, since every set-level relation still holds.
 
+    The retirement ledger is held disjoint from source origins for the same reason. A row naming a
+    guard that is still live has no effect on the withdrawal comparison, so nothing would reject it
+    when it is written; a later change could then delete that guard and have its removal absorbed
+    by a row it did not add, which is the ledger diff that was supposed to be the review signal.
+
     Args:
         root: Repository root to check.
 
@@ -961,8 +1057,14 @@ def repository_closure_violations(root: Path) -> tuple[str, ...]:
     source = {record.origin_id for record in records}
     classified = classified_origin_ids(root)
     debt = {record.origin_id for record in load_debt_records(root)}
+    retired = load_retired_origin_ids(root)
     sites = Counter(record.origin_id for record in records)
     return (
+        *(
+            f"{origin_id} is recorded as retired in {RETIREMENT_PATH} but is still a guard origin "
+            f"in this tree; retire a guard in the change that withdraws it, not before"
+            for origin_id in sorted(retired & source)
+        ),
         *(
             f"{origin_id} is constructed at {count} guard origins; one identifier classifies one "
             f"origin, so give each site its own identifier"

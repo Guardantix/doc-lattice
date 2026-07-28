@@ -875,7 +875,14 @@ statements that write what that condition reads, in-place mutation of an accumul
 because inverting or removing an accumulation disables a guard as completely as inverting its test.
 A record also covers the body of any declared transport the origin hands its refusal to, since the
 parameterized cycle detector owns the condition that decides its callers' refusals while minting no
-identifier of its own. The scope stops at the function
+identifier of its own. A guard with no test at all, reached by falling through a chain of returns,
+by exhausting a loop, or through an `except` handler, records instead the same-scope control flow
+that decides whether it is reached: every branch test, loop header and diverting statement in its
+function. That flow is the only description such a guard has, and without it
+`scanner.descriptor.unparsable` survives byte-identically when the `return int(digits)` in its own
+`try` body becomes `return 0` and can no longer raise. A diverting statement is taken whole because
+the value it returns decides reachability, while a branch is reduced to its test so that an edit
+inside one branch's body does not churn a record outside it. The scope stops at the function
 deliberately: an unbounded dataflow closure would churn every frozen record on any edit to either
 module, and a record that churns constantly has to be regenerated, which is the laundering path
 this decision closes. A caller passing a different value into that function is outside the boundary
@@ -899,7 +906,10 @@ Guard *withdrawal* is covered there too: the base's classified inventory is read
 snapshot, because deleting an origin together with its witness row leaves the partition exact and
 the debt comparison with nothing to inspect. A withdrawal is accepted only when the candidate's
 retirement ledger records the identifier and the reason, so removing a fail-closed guard is a
-declared, reviewable edit rather than a silent one.
+declared, reviewable edit rather than a silent one. Closure holds that ledger disjoint from the
+tree's guard origins, because a row naming a guard that is still live changes no comparison and so
+would be rejected by nothing when written, leaving a later change free to delete that guard and
+have the removal absorbed by a row it did not add.
 **Consequences:** A refusal observed at the public boundary names the guard that produced it, so a
 test can pin a specific site instead of a shared message. New guards cannot arrive unclassified,
 and an untested guard cannot be quietly reclassified or laundered onto a different site. Shrunk

@@ -898,3 +898,159 @@ def test_emit_debt_derives_the_unclassified_records(tmp_path: Path) -> None:
     assert derived == {
         record.origin_id for record in checker.repository_origin_records(root)
     } - checker.classified_origin_ids(root)
+
+
+_FALL_THROUGH_SOURCE = """
+def _classify(node):
+    if isinstance(node, Sequence):
+        return node.parts
+    if isinstance(node, Command):
+        return ()
+    raise _MalformedTaintEvidence(GuardRefusal("taint.demo.unknown-node", "cannot structure"))
+"""
+
+_LOOP_EXHAUSTION_SOURCE = """
+def _read_literal(text, start):
+    index = start
+    while index < len(text):
+        if text[index] == "'":
+            return index + 1
+        index += 1
+    raise _TaintLimitExceeded(GuardRefusal("taint.demo.unterminated", "unterminated literal"))
+"""
+
+
+def test_fingerprint_tracks_the_fall_through_chain_that_reaches_a_test_free_origin() -> None:
+    # A guard reached by falling through a chain of returns has no test of its own, so nothing
+    # about the code deciding it is reached would otherwise enter the record. Shadowing the last
+    # branch withdraws the guard exactly as inverting a condition would.
+    shadowed = _FALL_THROUGH_SOURCE.replace("isinstance(node, Command)", "True")
+
+    original = checker.extract_origin_records(_FALL_THROUGH_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(shadowed, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_the_loop_a_test_free_origin_falls_out_of() -> None:
+    widened = _LOOP_EXHAUSTION_SOURCE.replace("index < len(text)", "True")
+
+    original = checker.extract_origin_records(_LOOP_EXHAUSTION_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(widened, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_the_early_return_a_test_free_origin_depends_on() -> None:
+    # The diverting statement is taken whole rather than reduced to a header, because a `return`
+    # decides reachability through the value it returns.
+    diverted = _FALL_THROUGH_SOURCE.replace("return node.parts", "return ()")
+
+    original = checker.extract_origin_records(_FALL_THROUGH_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(diverted, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_control_flow_closure_ignores_computation_that_diverts_nothing() -> None:
+    # Reducing a branch to its test is what keeps an ordinary edit inside a long function from
+    # churning a frozen record that only the surrounding control flow describes.
+    edited = _LOOP_EXHAUSTION_SOURCE.replace("index += 1", "index += 2")
+
+    original = checker.extract_origin_records(_LOOP_EXHAUSTION_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_control_flow_closure_ignores_another_function() -> None:
+    extended = _FALL_THROUGH_SOURCE + "\n\ndef _elsewhere(x):\n    if x:\n        return 1\n"
+
+    original = checker.extract_origin_records(_FALL_THROUGH_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(extended, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_control_flow_closure_leaves_a_guarded_origin_alone() -> None:
+    # A guard with a test already records that test and the writes feeding it. Widening the closure
+    # to every guard would make each one churn on any control-flow edit in its function, and a debt
+    # record that churns has to be regenerated, which is the laundering path the gate closes.
+    source = (
+        "def _guard(value, other):\n"
+        "    if other:\n"
+        "        return 1\n"
+        "    if value > 3:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.over-three", "too big"))\n'
+    )
+    edited = source.replace(
+        "    if other:\n        return 1\n", "    if not other:\n        return 2\n"
+    )
+
+    original = checker.extract_origin_records(source, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_compare_against_base_rejects_a_frozen_guard_whose_raising_computation_changed(
+    tmp_path: Path,
+) -> None:
+    # The end-to-end form: this guard fires only because `int(digits)` in its own `try` body can
+    # raise, so rewriting that computation withdraws the refusal while touching neither the origin
+    # statement nor its qualname.
+    origin_id = "scanner.descriptor.unparsable"
+    record = next(r for r in checker.repository_origin_records(_ROOT) if r.origin_id == origin_id)
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": [record.as_json()]})
+    root = _fake_root(tmp_path, [record.as_json()])
+    module = root / checker.GUARDED_MODULES[1]
+    source = module.read_text(encoding="utf-8")
+    unreachable = source.replace("        return int(digits)\n", "        return 0\n", 1)
+    assert unreachable != source
+    module.write_text(unreachable, encoding="utf-8")
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any(origin_id in failure for failure in failures)
+
+
+def test_closure_rejects_a_retirement_for_a_guard_that_is_still_live(tmp_path: Path) -> None:
+    # A premature row has no effect on the withdrawal comparison, so nothing would reject it when
+    # it is written; a later change could then delete that guard and have its removal absorbed by a
+    # row it did not add, with no ledger diff in the change that actually withdraws the guard.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.RETIREMENT_PATH).write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "records": [
+                    {
+                        "origin_id": "scanner.source.character-limit",
+                        "reason": "planted ahead of the removal",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_closure_violations(root)
+
+    assert any("still a guard origin" in violation for violation in violations)
+
+
+def test_closure_keeps_a_retirement_for_a_guard_that_is_gone(tmp_path: Path) -> None:
+    # The ledger is a permanent record: its rows stay valid after the withdrawal merges, which is
+    # what keeps the diff that recorded the removal in the tree.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.RETIREMENT_PATH).write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "records": [{"origin_id": "taint.demo.long-gone", "reason": "withdrawn in #179"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert checker.repository_closure_violations(root) == ()
