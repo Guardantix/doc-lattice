@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import ModuleType
+
 import pytest
+from guard_witnesses import (
+    CLASSIFIED_IDS,
+    INVARIANT_IDS,
+    INVARIANT_WITNESSES,
+    REACHABLE_IDS,
+)
 
 from doc_lattice.error_types import ConfigError
 from doc_lattice.github_ci.shell_guards import (
@@ -20,6 +34,22 @@ from doc_lattice.github_ci.shell_taint import (
     _MalformedTaintEvidence,
     _TaintLimitExceeded,
 )
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_checker() -> ModuleType:
+    path = _ROOT / "scripts/check_guard_inventory.py"
+    spec = importlib.util.spec_from_file_location("check_guard_inventory", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+checker = _load_checker()
 
 
 def test_guard_refusal_carries_a_stable_origin_id_and_reason() -> None:
@@ -104,3 +134,31 @@ def test_incomplete_reason_projection_keeps_the_config_error_wording() -> None:
         direct_doc_lattice_invocations(script)
     with pytest.raises(ConfigError, match=r"^wf\.yml: shell scan incomplete: source character"):
         direct_doc_lattice_invocations(script, context="wf.yml")
+
+
+def test_guard_origins_partition_into_the_registry_and_frozen_debt() -> None:
+    source_ids = {record.origin_id for record in checker.repository_origin_records(_ROOT)}
+    debt_ids = {record.origin_id for record in checker.load_debt_records(_ROOT)}
+
+    assert not CLASSIFIED_IDS & debt_ids
+    assert source_ids == CLASSIFIED_IDS | debt_ids
+
+
+def test_reachable_and_invariant_classifications_are_disjoint() -> None:
+    assert not REACHABLE_IDS & INVARIANT_IDS
+
+
+def test_frozen_debt_records_still_describe_real_guard_origins() -> None:
+    source_records = set(checker.repository_origin_records(_ROOT))
+
+    assert set(checker.load_debt_records(_ROOT)) <= source_records
+
+
+def test_every_invariant_witness_carries_a_rationale() -> None:
+    for witness in INVARIANT_WITNESSES:
+        assert witness.rationale.strip(), witness.origin_id
+        assert witness.boundary_script.strip(), witness.origin_id
+
+
+def test_shipped_guard_modules_use_only_canonical_refusal_shapes() -> None:
+    assert checker.repository_shape_violations(_ROOT) == ()
