@@ -1097,6 +1097,70 @@ def _read_literal(text, start):
 """
 
 
+_ENCLOSING_LOOP_SOURCE = """
+def _walk(lexer, metadata):
+    tokens = tuple(lexer)
+    index = 0
+    for lexeme in tokens:
+        if index >= len(metadata):
+            raise _TaintLimitExceeded(GuardRefusal("taint.demo.exhausted", "count mismatch"))
+        index += 1
+    return index
+"""
+
+
+def test_fingerprint_tracks_the_loop_header_enclosing_a_tested_origin() -> None:
+    # The guard has a test of its own, so the control-flow closure does not apply, yet the loop
+    # header still decides whether the body runs at all. Emptying the iterable withdraws the guard
+    # without touching its condition or anything the condition reads.
+    withdrawn = _ENCLOSING_LOOP_SOURCE.replace("for lexeme in tokens:", "for lexeme in tokens[:0]:")
+
+    original = checker.extract_origin_records(_ENCLOSING_LOOP_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(withdrawn, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_the_writer_feeding_an_enclosing_loops_iterable() -> None:
+    # Recording the header alone is not enough: `for lexeme in tokens` reads identically whether
+    # `tokens` can be non-empty or not, so the statement that fills it has to be in the record too.
+    withdrawn = _ENCLOSING_LOOP_SOURCE.replace("tokens = tuple(lexer)", "tokens = ()")
+
+    original = checker.extract_origin_records(_ENCLOSING_LOOP_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(withdrawn, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_ignores_an_edit_outside_the_loop_that_governs_nothing() -> None:
+    # The negative control for both rules above: widening the closure must not make every edit in
+    # the enclosing function churn a frozen record.
+    edited = _ENCLOSING_LOOP_SOURCE.replace(
+        "    return index", "    unused = len(metadata)\n    return index"
+    )
+
+    original = checker.extract_origin_records(_ENCLOSING_LOOP_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_a_function_defined_in_a_loop_body_keeps_its_own_qualified_name() -> None:
+    # The loop rule walks the body itself rather than through the generic descent, so a nested
+    # function there would keep its parent's qualified name and its parent's guarding condition.
+    source = (
+        "def _outer(items):\n"
+        "    for item in items:\n"
+        "        def _inner(value):\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.nested", "no"))\n'
+        "        _inner(item)\n"
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.qualname for record in records] == ["_outer._inner"]
+
+
 def test_fingerprint_tracks_the_fall_through_chain_that_reaches_a_test_free_origin() -> None:
     # A guard reached by falling through a chain of returns has no test of its own, so nothing
     # about the code deciding it is reached would otherwise enter the record. Shadowing the last
@@ -1266,6 +1330,49 @@ def test_a_refusal_spelled_through_a_module_level_rebinding_is_still_a_guard_ori
     assert [record.origin_id for record in records] == ["taint.demo.rebound"]
 
 
+def test_a_refusal_spelled_through_an_attribute_rebinding_is_still_a_guard_origin() -> None:
+    # A call is recognized by its final name component, so `shell_guards.GuardRefusal(...)` is an
+    # origin; reading only bare-name bindings let the same spelling bound to a name escape.
+    source = (
+        "from doc_lattice.github_ci import shell_guards\n"
+        "_REFUSE = shell_guards.GuardRefusal\n"
+        "def analyze_marker_taint(evidence, *, limits):\n"
+        "    if evidence.edges:\n"
+        '        return _REFUSE("taint.demo.attribute-rebound", "nope")\n'
+        "    return Certified()\n"
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.attribute-rebound"]
+
+
+def test_a_refusal_spelled_through_an_annotated_rebinding_is_still_a_guard_origin() -> None:
+    source = (
+        "from doc_lattice.github_ci import shell_guards\n"
+        "_REFUSE: Final = shell_guards.GuardRefusal\n"
+        "def analyze_marker_taint(evidence, *, limits):\n"
+        "    if evidence.edges:\n"
+        '        return _REFUSE("taint.demo.annotated-rebound", "nope")\n'
+        "    return Certified()\n"
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.annotated-rebound"]
+
+
+def test_an_unrelated_attribute_binding_is_not_read_as_the_refusal_constructor() -> None:
+    source = (
+        "from doc_lattice.github_ci import shell_guards\n"
+        "_BUILD = shell_guards.Certified\n"
+        "def analyze_marker_taint(evidence, *, limits):\n"
+        "    return _BUILD()\n"
+    )
+
+    assert checker.extract_origin_records(source, "shell_taint.py") == ()
+
+
 def test_a_refusing_module_outside_the_guarded_tuple_is_rejected(tmp_path: Path) -> None:
     # GUARDED_MODULES is hand-maintained and drives every other rule, so a guard added in a module
     # missing from it leaves every partition exact with nothing reporting the omission.
@@ -1281,6 +1388,24 @@ def test_a_refusing_module_outside_the_guarded_tuple_is_rejected(tmp_path: Path)
 
     assert any("shell_taint_eval.py" in violation for violation in violations)
     assert any("not in GUARDED_MODULES" in violation for violation in violations)
+
+
+def test_a_refusing_module_in_a_guard_subpackage_is_rejected(tmp_path: Path) -> None:
+    # A module one directory down is exactly as invisible to GUARDED_MODULES as one beside it, so
+    # a top-level-only walk would be satisfied by moving a new guard into a subpackage.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    nested = root / checker.GUARD_MODULE_ROOT / "guards" / "eval_bounds.py"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_text(
+        "def _bound(depth, limits):\n"
+        "    if depth > limits.taint.max_eval_reparse_depth:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.eval.new-bound", "too deep"))\n',
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_coverage_violations(root)
+
+    assert any("guards/eval_bounds.py" in violation for violation in violations)
 
 
 def test_the_shipped_tree_inventories_every_refusing_module() -> None:

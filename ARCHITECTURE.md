@@ -845,11 +845,13 @@ so rewording a refusal message is not an identity change. One identifier names o
 site constructing an identifier that is already classified would inherit evidence it does not have,
 so the inventory rejects it. Every rule that recognizes a construction recognizes it by name
 whether it is spelled bare or through the module that defines it, and the names it answers to
-include every alias the module binds the constructor to, because an aliased construction in a
-verdict return is a well-formed verdict that no carrier rule would reject. The set of modules those
-rules read is derived from the guard package rather than trusted from a hand-maintained list: a
-guard added in an uninventoried module leaves every partition exact, so nothing else would report
-that a fail-closed guard shipped with no witness.
+include every alias the module binds the constructor to, whether that binding names it bare or
+through the module that defines it, because an aliased construction in a verdict return is a
+well-formed verdict that no carrier rule would reject. The set of modules those rules read is
+derived from the guard package rather than trusted from a hand-maintained list, and derived
+recursively: a guard added in an uninventoried module leaves every partition exact, so nothing else
+would report that a fail-closed guard shipped with no witness, and a module one directory down is
+exactly as uninventoried as one beside it.
 
 One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
 content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
@@ -892,6 +894,12 @@ the input deciding it, and stopping at the direct writer leaves everything behin
 `scanner.env-option.static-split-string` tests a `kind` written from an `option` resolved one call
 earlier, so a one-hop rule lets that call become a constant, withdrawing the guard, with the record
 byte-identical.
+An enclosing `for` governs a guard in its body as completely as a test does while exposing no test
+of its own, so a record also covers every enclosing loop's header and the closure of what writes
+its iterable. `taint.eval-payload.metadata-exhausted` is the concrete case: it sits under an `if`
+inside `for lexeme in tokens`, and emptying `tokens` makes it unreachable while leaving its
+condition, and everything that condition reads, untouched. A `while` needs no such treatment
+because its test is already a guarding test.
 A record also covers the body of any declared transport the origin hands its refusal to, since the
 parameterized cycle detector owns the condition that decides its callers' refusals while minting no
 identifier of its own. A guard with no test at all, reached by falling through a chain of returns,

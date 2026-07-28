@@ -33,14 +33,14 @@ import hashlib
 import json
 import sys
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -162,6 +162,34 @@ def _called_name(node: ast.AST) -> str | None:
     return None
 
 
+def _rebinding_targets(node: ast.AST) -> tuple[str | None, list[ast.expr]]:
+    """Return the constructor spelling a binding reads and the names it binds it to.
+
+    A call is recognized by its final name component everywhere here, so a binding must be read the
+    same way: `GR = shell_guards.GuardRefusal` names the constructor exactly as `GR = GuardRefusal`
+    does, and reading only the bare-name form is what let the first spelling escape every rule.
+
+    Args:
+        node: Any AST node.
+
+    Returns:
+        The name the right-hand side spells, or `None` when the node is not a value binding, paired
+        with the binding's targets.
+    """
+    match node:
+        case ast.Assign(value=value, targets=targets):
+            pass
+        case ast.AnnAssign(value=ast.expr() as value, target=target):
+            targets = [target]
+        case _:
+            return None, []
+    match value:
+        case ast.Name(id=spelling) | ast.Attribute(attr=spelling):
+            return spelling, targets
+        case _:
+            return None, []
+
+
 def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
     """Return every local name this module binds to the refusal constructor.
 
@@ -188,11 +216,10 @@ def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
     while grew:
         grew = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+            spelling, targets = _rebinding_targets(node)
+            if spelling is None or spelling not in names:
                 continue
-            if node.value.id not in names:
-                continue
-            rebound = {target.id for target in node.targets if isinstance(target, ast.Name)} - names
+            rebound = {target.id for target in targets if isinstance(target, ast.Name)} - names
             if rebound:
                 names |= rebound
                 grew = True
@@ -225,9 +252,10 @@ class OriginRecord:
         qualname: Enclosing qualified name, so moving a guard changes its record.
         fingerprint: Digest over the qualname, the guarding condition, the origin statement shape
             with operator-facing reason text normalized away, the shapes of the same-scope
-            statements that write what the condition reads, the shape of any declared transport
-            the origin statement hands its refusal to, and, for an origin with no guarding test,
-            the same-scope control flow that decides whether it is reached.
+            statements that write what the condition and any enclosing loop's iterable read, the
+            headers of those enclosing loops, the shape of any declared transport the origin
+            statement hands its refusal to, and, for an origin with no guarding test, the
+            same-scope control flow that decides whether it is reached.
     """
 
     origin_id: str
@@ -265,6 +293,8 @@ class _Annotations:
         tests: The guarding `if`, `while` and `match`-case tests themselves, outermost first, keyed
             by node identity. Text conditions carry `except` clauses and `match` patterns too and so
             are not always parseable; these are.
+        loops: The enclosing `for` statements, outermost first, keyed by node identity. A `while`
+            is absent because its test is already a guarding test; a `for` exposes none.
         scopes: Nearest enclosing function, keyed by node identity, or `None` at class or module
             level.
     """
@@ -272,7 +302,48 @@ class _Annotations:
     names: dict[int, str]
     conditions: dict[int, str]
     tests: dict[int, tuple[ast.expr, ...]]
+    loops: dict[int, tuple[ast.For | ast.AsyncFor, ...]]
     scopes: dict[int, ast.AST | None]
+
+
+@dataclass(frozen=True, slots=True)
+class _Context:
+    """The annotation state one node inherits from the code enclosing it.
+
+    Attributes:
+        prefix: Qualified name of the enclosing scope.
+        condition: Guarding condition as text, conjoined outermost first.
+        guards: The guarding tests themselves, outermost first.
+        loops: The enclosing `for` statements, outermost first.
+        scope: Nearest enclosing function, or `None` at class or module level.
+    """
+
+    prefix: str = ""
+    condition: str = ""
+    guards: tuple[ast.expr, ...] = ()
+    loops: tuple[ast.For | ast.AsyncFor, ...] = ()
+    scope: ast.AST | None = None
+
+    def under(self, condition: str, test: ast.expr | None = None) -> _Context:
+        """Return this context with one more guarding condition, and optionally its test."""
+        joined = condition if not self.condition else f"{self.condition} and {condition}"
+        guards = self.guards if test is None else (*self.guards, test)
+        return replace(self, condition=joined, guards=guards)
+
+    def inside(self, loop: ast.For | ast.AsyncFor) -> _Context:
+        """Return this context with one more enclosing loop."""
+        return replace(self, loops=(*self.loops, loop))
+
+    def entering(self, scope: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> _Context:
+        """Return the context a nested scope's body runs under.
+
+        Nothing enclosing the definition governs the body, which does not run where it is written,
+        so every guarding condition and enclosing loop is dropped and only the name accumulates.
+        """
+        return _Context(
+            prefix=f"{self.prefix}.{scope.name}" if self.prefix else scope.name,
+            scope=None if isinstance(scope, ast.ClassDef) else scope,
+        )
 
 
 def _annotate(tree: ast.AST) -> _Annotations:
@@ -280,73 +351,67 @@ def _annotate(tree: ast.AST) -> _Annotations:
     names: dict[int, str] = {}
     conditions: dict[int, str] = {}
     tests: dict[int, tuple[ast.expr, ...]] = {}
+    loops: dict[int, tuple[ast.For | ast.AsyncFor, ...]] = {}
     scopes: dict[int, ast.AST | None] = {}
 
-    def conjoin(outer: str, test: str) -> str:
-        return test if not outer else f"{outer} and {test}"
-
-    def descend(
-        node: ast.AST,
-        prefix: str,
-        condition: str,
-        guards: tuple[ast.expr, ...],
-        scope: ast.AST | None,
-    ) -> None:
+    def descend(node: ast.AST, context: _Context) -> None:
         for child in ast.iter_child_nodes(node):
-            inner, inner_condition, inner_guards, inner_scope = prefix, condition, guards, scope
-            if isinstance(child, _SCOPES):
-                inner = f"{prefix}.{child.name}" if prefix else child.name
-                inner_condition = ""
-                inner_guards = ()
-                inner_scope = None if isinstance(child, ast.ClassDef) else child
-            record(child, inner, inner_condition, inner_guards, inner_scope)
+            record(child, context)
 
-    def record(
-        node: ast.AST,
-        prefix: str,
-        condition: str,
-        guards: tuple[ast.expr, ...],
-        scope: ast.AST | None,
-    ) -> None:
-        names[id(node)] = prefix
-        conditions[id(node)] = condition
-        tests[id(node)] = guards
-        scopes[id(node)] = scope
+    def record(node: ast.AST, context: _Context) -> None:
+        # Entering a nested scope is handled here rather than in `descend`, because a body this
+        # function walks itself, such as an `if` or a `for` body, never passes through `descend`.
+        # A function defined in one of those bodies would otherwise keep its parent's qualified
+        # name, and carry a guarding condition that its own body does not actually run under.
+        if isinstance(node, _SCOPES):
+            context = context.entering(node)
+        names[id(node)] = context.prefix
+        conditions[id(node)] = context.condition
+        tests[id(node)] = context.guards
+        loops[id(node)] = context.loops
+        scopes[id(node)] = context.scope
         # An `if` nested directly inside another `if` body, and every `elif`, arrives here rather
         # than through `descend`'s child loop. Handling it here is what keeps the innermost test
         # in the recorded condition instead of the enclosing one. A `while` test decides a refusal
         # exactly as an `if` test does, so it is treated the same way.
         if isinstance(node, ast.If | ast.While):
             test = " ".join(ast.unparse(node.test).split())
-            record(node.test, prefix, condition, guards, scope)
+            record(node.test, context)
             for statement in node.body:
-                record(statement, prefix, conjoin(condition, test), (*guards, node.test), scope)
+                record(statement, context.under(test, node.test))
             for statement in node.orelse:
-                negated = conjoin(condition, f"not ({test})")
-                record(statement, prefix, negated, (*guards, node.test), scope)
+                record(statement, context.under(f"not ({test})", node.test))
+            return
+        # A `for` header decides whether its body runs at all, yet it exposes no test for the
+        # condition rules to pick up, so a guard nested in the body recorded nothing about it.
+        # Carrying the enclosing loops is what puts the header, and the writers feeding its
+        # iterable, inside that guard's record.
+        if isinstance(node, ast.For | ast.AsyncFor):
+            record(node.target, context)
+            record(node.iter, context)
+            for statement in (*node.body, *node.orelse):
+                record(statement, context.inside(node))
             return
         if isinstance(node, ast.Match):
             subject = " ".join(ast.unparse(node.subject).split())
-            record(node.subject, prefix, condition, guards, scope)
+            record(node.subject, context)
             for case in node.cases:
                 pattern = " ".join(ast.unparse(case.pattern).split())
-                arm = conjoin(condition, f"match {subject} case {pattern}")
-                arm_guards = guards
+                arm = context.under(f"match {subject} case {pattern}")
                 if case.guard is not None:
-                    arm = conjoin(arm, " ".join(ast.unparse(case.guard).split()))
-                    arm_guards = (*guards, case.guard)
-                    record(case.guard, prefix, condition, guards, scope)
+                    arm = arm.under(" ".join(ast.unparse(case.guard).split()), case.guard)
+                    record(case.guard, context)
                 for statement in case.body:
-                    record(statement, prefix, arm, arm_guards, scope)
+                    record(statement, arm)
             return
         if isinstance(node, ast.ExceptHandler):
             handled = ast.unparse(node.type) if node.type is not None else "BaseException"
-            descend(node, prefix, conjoin(condition, f"except {handled}"), guards, scope)
+            descend(node, context.under(f"except {handled}"))
             return
-        descend(node, prefix, condition, guards, scope)
+        descend(node, context)
 
-    descend(tree, "", "", (), None)
-    return _Annotations(names, conditions, tests, scopes)
+    descend(tree, _Context())
+    return _Annotations(names, conditions, tests, loops, scopes)
 
 
 def _normalized_shape(statement: ast.stmt) -> str:
@@ -589,10 +654,12 @@ def _condition_writer_shapes(
     guards: tuple[ast.expr, ...],
     cache: _DerivationCache | None = None,
 ) -> tuple[str, ...]:
-    """Return the normalized shapes of same-scope statements that feed the guard's condition.
+    """Return the normalized shapes of same-scope statements that feed what governs the guard.
 
     A guard is disabled as effectively by editing what its condition reads as by editing the
     condition, and neither the qualified name nor the origin statement moves when that happens.
+    An enclosing loop's iterable governs the guard the same way, so it seeds the closure alongside
+    the tests: emptying `tokens` in `for lexeme in tokens` withdraws every guard in that body.
 
     The selection is a transitive closure, not one hop. A guard reading a single name is usually
     two or more assignments away from the input that decides it, and stopping at the direct writer
@@ -616,7 +683,8 @@ def _condition_writer_shapes(
     Args:
         origin: The statement that constructs the refusal, hashed separately.
         scope: Enclosing function, or `None` at class or module level.
-        guards: The `if` tests governing the origin.
+        guards: The expressions governing the origin: the tests it sits under, and the iterable of
+            every enclosing loop.
         cache: Per-parse derivation memo, defaulting to one used for this call alone.
 
     Returns:
@@ -940,7 +1008,16 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         condition = annotations.conditions.get(id(statement), "")
         scope = annotations.scopes.get(id(statement))
         tests = annotations.tests.get(id(statement), ())
-        writers = _condition_writer_shapes(statement, scope, tests, cache)
+        loops = annotations.loops.get(id(statement), ())
+        # An enclosing loop governs the origin whether or not the origin has a test of its own, so
+        # its header and the writers feeding its iterable are recorded either way. For a test-free
+        # origin the control-flow closure names the same header a second time, which costs one
+        # repeated digest line and nothing else.
+        enclosing = tuple(
+            shape for loop in loops if (shape := _diverting_shape(loop, cache)) is not None
+        )
+        governing = (*tests, *(loop.iter for loop in loops))
+        writers = _condition_writer_shapes(statement, scope, governing, cache)
         # A guard with a test records that test and what writes it; one without records the control
         # flow that decides it is reached at all, and, when it is reached through a handler, the
         # operation whose failure is the only condition it has.
@@ -961,6 +1038,7 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
                     condition,
                     _cached_shape(statement, cache),
                     *writers,
+                    *enclosing,
                     *carried,
                     *flow,
                     *raising,
@@ -1410,7 +1488,10 @@ def repository_coverage_violations(root: Path) -> tuple[str, ...]:
     """
     guarded = set(GUARDED_MODULES)
     violations: list[str] = []
-    for path in sorted((root / GUARD_MODULE_ROOT).glob("*.py")):
+    # The walk is recursive: a guard added under a subpackage of this root is exactly as invisible
+    # to `GUARDED_MODULES` as one added beside it, and a rule that only listed the top level would
+    # be satisfied by moving the module one directory down.
+    for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
         module = path.relative_to(root).as_posix()
         if module in guarded:
             continue
