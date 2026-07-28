@@ -15,7 +15,10 @@ from doc_lattice.github_ci.shell_guards import (
     GuardRefusal,
     MarkerDetected,
     ScanVerdict,
+    TaintLimits,
 )
+
+__all__ = ["TaintLimits", "analyze_marker_taint"]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -23,8 +26,6 @@ if TYPE_CHECKING:
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
 _MAX_BRACE_INTEGER_DIGITS = 256
-_MAX_FUNCTION_EFFECT_DEPTH = 64
-_MAX_LOCAL_SUBSTITUTION_DEPTH = 128
 _QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
 _STATIC_EVAL_SHADOW_NAMES = frozenset({"builtin", "command", "eval", "false", "true"})
 _UNICODE_MAX = 0x10FFFF
@@ -130,22 +131,6 @@ ContentExpr: TypeAlias = (  # noqa: UP040
     | Concat
     | OutsideGap
 )
-
-
-@dataclass(frozen=True, slots=True)
-class TaintLimits:
-    """Deterministic caps for one taint pass."""
-
-    max_alternatives: int = 256
-    max_expression_nodes: int = 100_000
-    max_table_entries: int = 10_000
-    max_edges: int = 50_000
-    max_fixed_point_updates: int = 100_000
-    max_brace_expansions: int = 4_096
-    max_brace_depth: int = 16
-    max_exact_value_chars: int = 8_192
-    max_eval_reparse_branches: int = 256
-    max_eval_reparse_depth: int = 128
 
 
 class _TaintLimitExceeded(ProjectError):
@@ -750,7 +735,7 @@ class ContentBuilder:
 
     def build(
         self,
-        limits: TaintLimits = TaintLimits(),  # noqa: B008 - immutable limits value object
+        limits: TaintLimits,
         *,
         defer_brace_errors: bool = False,
     ) -> _BuiltContent:
@@ -1949,7 +1934,7 @@ def _cyclic_write_keys(writes: tuple[_FlowWrite, ...]) -> frozenset[str | int]:
 def _solve_flow_definitions(
     definitions: _FlowDefinitions,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> _SolvedFlow:
     nodes, edges, entries = _definition_counts(definitions)
     if nodes > limits.max_expression_nodes:
@@ -3575,7 +3560,7 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
             )
             if not routed.nameref_unset
         )
-        eval_assignments, _eval_unsets = _static_eval_mutations(command)
+        eval_assignments, _eval_unsets = _static_eval_mutations(command, limits=limits)
         for mutation in eval_assignments:
             if mutation.assignment.nameref_target is not None or mutation.assignment.nameref_unset:
                 route_assignment(mutation.assignment)
@@ -3620,10 +3605,7 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
     if saw_nameref:
         commands = list(
             _refresh_runtime_eval_programs(
-                tuple(commands),
-                command_environments,
-                environment_parents,
-                limits,
+                tuple(commands), command_environments, environment_parents, limits
             )
         )
     return replace(evidence, commands=tuple(commands))
@@ -3727,7 +3709,7 @@ def _refresh_runtime_eval_programs(
         for assignment in command.assignments:
             if assignment.conditional or assignment.assign_if_null:
                 apply_exact(assignment, values, conditional=True)
-        eval_assignments, eval_unsets = _static_eval_mutations(refreshed_command)
+        eval_assignments, eval_unsets = _static_eval_mutations(refreshed_command, limits=limits)
         for mutation in eval_assignments:
             apply_exact(mutation.assignment, values, conditional=conditional)
         unset_names, unknown_unset = _unset_action(command)
@@ -4269,6 +4251,7 @@ def _expression_function_positionals(expression: ContentExpr) -> set[str]:
 def _substitute_local_contents(
     expression: ContentExpr,
     local_contents: Mapping[str, ContentExpr],
+    limits: TaintLimits,
     *,
     resolving: frozenset[str] = frozenset(),
 ) -> ContentExpr:
@@ -4312,7 +4295,7 @@ def _substitute_local_contents(
             if replacement is None or name in active_names:
                 results.append(current)
                 continue
-            if depth >= _MAX_LOCAL_SUBSTITUTION_DEPTH:
+            if depth >= limits.max_local_substitution_depth:
                 raise _TaintLimitExceeded(
                     GuardRefusal(
                         "taint.local-substitution.depth-limit", "local substitution depth limit"
@@ -4828,20 +4811,28 @@ def _decode_ansi_c_eval_word(body: str) -> str:
     return "".join(decoded)
 
 
-def _static_eval_commands(command: _CommandEvidence) -> tuple[_StaticEvalCommand, ...]:
+def _static_eval_commands(
+    command: _CommandEvidence,
+    *,
+    limits: TaintLimits,
+) -> tuple[_StaticEvalCommand, ...]:
     """Tokenize bounded static eval input into simple command words."""
     commands: list[_StaticEvalCommand] = []
     for program in _static_eval_programs(command):
         commands.extend(
             _static_eval_program_commands(
-                program,
-                active_function_names=command.active_function_names,
+                program, active_function_names=command.active_function_names, limits=limits
             )
         )
     return tuple(commands)
 
 
-def _static_eval_redirection_target(source_word: str, operator: str) -> RedirectionTarget:
+def _static_eval_redirection_target(
+    source_word: str,
+    operator: str,
+    *,
+    limits: TaintLimits,
+) -> RedirectionTarget:
     """Resolve one exact eval payload redirection operand to the target it names.
 
     The operand is reparsed with the payload's own second-pass quote and parameter semantics, so
@@ -4858,7 +4849,7 @@ def _static_eval_redirection_target(source_word: str, operator: str) -> Redirect
         The target this operand resolves to.
     """
     literal = _exact_content_literal(
-        _eval_reparse_content(LiteralTransfer(source_word)), {}, TaintLimits()
+        _eval_reparse_content(LiteralTransfer(source_word), limits), {}, limits
     )
     return resolve_redirection_target(
         source_word if literal is None else literal,
@@ -4890,6 +4881,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
     program: str,
     *,
     active_function_names: frozenset[str] = frozenset(),
+    limits: TaintLimits,
 ) -> tuple[_StaticEvalCommand, ...]:
     """Tokenize one exact eval program and retain reserved-word eligibility."""
     program = _strip_active_shell_comments(program)
@@ -5003,7 +4995,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
                     len(redirections),
                     operator,
                     descriptor,
-                    _static_eval_redirection_target(token_metadata.source, operator),
+                    _static_eval_redirection_target(token_metadata.source, operator, limits=limits),
                 )
             )
             continue
@@ -5027,7 +5019,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
                 redirections=tuple(redirections),
             )
         )
-    return _annotate_static_eval_control(tuple(commands))
+    return _annotate_static_eval_control(tuple(commands), limits=limits)
 
 
 def _static_status_and(left: bool | None, right: bool | None) -> bool | None:
@@ -5110,7 +5102,11 @@ def _static_eval_wrapped_executable(
     )
 
 
-def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutable | None:
+def _static_eval_executable(
+    command: _StaticEvalCommand,
+    *,
+    limits: TaintLimits,
+) -> _StaticEvalExecutable | None:
     """Resolve one static eval command head and its literal negation."""
     index = 0
     negated = False
@@ -5149,7 +5145,7 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
     while (
         index < len(command.words)
         and _static_assignment_word(command.words[index]) is not None
-        and _static_eval_assignment_content(command.source_words[index]) is not None
+        and _static_eval_assignment_content(command.source_words[index], limits=limits) is not None
     ):
         index += 1
     return _static_eval_wrapped_executable(
@@ -5161,17 +5157,21 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
 
 
 def _static_eval_operand_expressions(
-    parsed: _StaticEvalCommand, environment: int, *, scoped: bool
+    parsed: _StaticEvalCommand,
+    environment: int,
+    *,
+    scoped: bool,
+    limits: TaintLimits,
 ) -> tuple[tuple[ContentExpr, ...], tuple[ContentExpr, ...]]:
     """Lower one payload command's operand words into content and script-source expressions."""
-    executable = _static_eval_executable(parsed)
+    executable = _static_eval_executable(parsed, limits=limits)
     start = min(1, len(parsed.source_words)) if executable is None else executable.argv_index + 1
     contents: list[ContentExpr] = []
     sources: list[ContentExpr] = []
     for source_word in parsed.source_words[start:]:
-        reparsed = _eval_reparse_content(LiteralTransfer(source_word))
+        reparsed = _eval_reparse_content(LiteralTransfer(source_word), limits)
         content = _lower_eval_assignment_operand(reparsed, environment, scoped=scoped)
-        literal = _exact_content_literal(reparsed, {}, TaintLimits())
+        literal = _exact_content_literal(reparsed, {}, limits)
         contents.append(content)
         sources.append(
             _script_port_expression(
@@ -5187,7 +5187,11 @@ def _static_eval_operand_expressions(
 
 
 def _static_eval_command_stdout(
-    parsed: _StaticEvalCommand, environment: int, *, scoped: bool
+    parsed: _StaticEvalCommand,
+    environment: int,
+    *,
+    scoped: bool,
+    limits: TaintLimits,
 ) -> ContentExpr:
     """Return the authored stdout one exact eval payload command produces.
 
@@ -5210,17 +5214,20 @@ def _static_eval_command_stdout(
     Returns:
         The content expression this payload command writes to its standard output.
     """
-    contents, sources = _static_eval_operand_expressions(parsed, environment, scoped=scoped)
+    contents, sources = _static_eval_operand_expressions(
+        parsed, environment, scoped=scoped, limits=limits
+    )
     return choice(OutsideGap(), concat(*contents), *sources)
 
 
-def _static_eval_resource_writes(
+def _static_eval_resource_writes(  # noqa: PLR0913
     command: _CommandEvidence,
     environment: int,
     inherited: _DescriptorBindings,
     guarded: frozenset[int],
     *,
     scoped: bool,
+    limits: TaintLimits,
 ) -> tuple[_FlowWrite, ...]:
     """Return the resource writes an exact eval payload's own redirections perform.
 
@@ -5253,13 +5260,13 @@ def _static_eval_resource_writes(
         return ()
     payload_bindings = _output_bindings(command.redirections, inherited=inherited, guarded=guarded)
     writes: list[_FlowWrite] = []
-    for parsed in _static_eval_commands(command):
+    for parsed in _static_eval_commands(command, limits=limits):
         if parsed.execution_status is False or not parsed.redirections:
             continue
         writes.extend(
             _static_write_definitions(
                 parsed.redirections,
-                _static_eval_command_stdout(parsed, environment, scoped=scoped),
+                _static_eval_command_stdout(parsed, environment, scoped=scoped, limits=limits),
                 payload_bindings,
                 guarded,
             )
@@ -5267,9 +5274,13 @@ def _static_eval_resource_writes(
     return tuple(writes)
 
 
-def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
+def _static_eval_literal_status(
+    command: _StaticEvalCommand,
+    *,
+    limits: TaintLimits,
+) -> bool | None:
     """Return exact status for a resolved, unshadowed true/false eval command."""
-    executable = _static_eval_executable(command)
+    executable = _static_eval_executable(command, limits=limits)
     if (
         executable is None
         or executable.name not in {"false", "true"}
@@ -5286,6 +5297,8 @@ def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
 
 def _annotate_static_eval_control(
     commands: tuple[_StaticEvalCommand, ...],
+    *,
+    limits: TaintLimits,
 ) -> tuple[_StaticEvalCommand, ...]:
     """Annotate exact eval commands with nested if-branch reachability."""
     controls: list[_StaticEvalControl] = []
@@ -5305,7 +5318,7 @@ def _annotate_static_eval_control(
             controls.append(
                 _StaticEvalControl(
                     parent_status=parent,
-                    current_test_status=_static_eval_literal_status(command),
+                    current_test_status=_static_eval_literal_status(command, limits=limits),
                 )
             )
             annotated.append(replace(command, execution_status=parent))
@@ -5328,7 +5341,7 @@ def _annotate_static_eval_control(
                 frame.prior_branch_status,
                 frame.current_test_status,
             )
-            frame.current_test_status = _static_eval_literal_status(command)
+            frame.current_test_status = _static_eval_literal_status(command, limits=limits)
             frame.phase = "test"
             annotated.append(
                 replace(
@@ -5398,7 +5411,11 @@ def _static_eval_element_assignment(word: str) -> bool:
     return bool(bracket) and subscript.endswith("]") and _static_variable_name(target)
 
 
-def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
+def _static_eval_assignment_content(
+    source_word: str,
+    *,
+    limits: TaintLimits,
+) -> ContentExpr | None:
     """Lower one static eval assignment RHS with its second-pass quote semantics."""
     quote: str | None = None
     index = 0
@@ -5424,7 +5441,7 @@ def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
                 name = name[:-1]
             if not _static_variable_name(name):
                 return None
-            rhs = _eval_reparse_content(LiteralTransfer(source_word[index + 1 :]))
+            rhs = _eval_reparse_content(LiteralTransfer(source_word[index + 1 :]), limits)
             return _lower_eval_assignment_operand(rhs, 0, scoped=False)
         index += 1
     return None
@@ -5432,6 +5449,8 @@ def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
 
 def _static_eval_mutations(  # noqa: PLR0912, PLR0915
     command: _CommandEvidence,
+    *,
+    limits: TaintLimits,
 ) -> tuple[tuple[_StaticEvalAssignment, ...], tuple[str, ...]]:
     """Return exact scalar assignments and unsets from bounded static eval input."""
     assignments: list[_StaticEvalAssignment] = []
@@ -5464,7 +5483,7 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
             return mutation
         return replace(mutation, assignment=replace(assignment, name=target))
 
-    for parsed in _static_eval_commands(command):
+    for parsed in _static_eval_commands(command, limits=limits):
         if parsed.execution_status is False:
             continue
         if parsed.array_compound:
@@ -5474,7 +5493,7 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                     "shell eval array assignment cannot be represented",
                 )
             )
-        nested_eval_executable = _static_eval_executable(parsed)
+        nested_eval_executable = _static_eval_executable(parsed, limits=limits)
         if (
             command.execution_status is not False
             and nested_eval_executable is not None
@@ -5515,7 +5534,9 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
             prefix_assignments.append(
                 _StaticEvalAssignment(
                     assignment,
-                    eval_content=_static_eval_assignment_content(parsed.source_words[index]),
+                    eval_content=_static_eval_assignment_content(
+                        parsed.source_words[index], limits=limits
+                    ),
                 )
             )
             index += 1
@@ -5613,7 +5634,7 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                         local=local,
                         force_global=force_global,
                         eval_content=_static_eval_assignment_content(
-                            parsed.source_words[word_index]
+                            parsed.source_words[word_index], limits=limits
                         ),
                     )
                     assignments.append(route_assignment(mutation))
@@ -5681,11 +5702,15 @@ def _eval_assignment_transfers(
     return tuple(transfers)
 
 
-def _static_eval_command_names(command: _CommandEvidence) -> tuple[str, ...]:
+def _static_eval_command_names(
+    command: _CommandEvidence,
+    *,
+    limits: TaintLimits,
+) -> tuple[str, ...]:
     """Return exact simple-command heads executed by bounded static eval input."""
     names: list[str] = []
-    for parsed in _static_eval_commands(command):
-        executable = _static_eval_executable(parsed)
+    for parsed in _static_eval_commands(command, limits=limits):
+        executable = _static_eval_executable(parsed, limits=limits)
         if executable is not None and not executable.bypasses_functions:
             names.append(executable.name)
     return tuple(dict.fromkeys(names))
@@ -5720,7 +5745,7 @@ def _unset_function_names(command: _CommandEvidence) -> tuple[str, ...]:
 def _contextualize_evidence(  # noqa: PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> _ShellTaintEvidence:
     """Bind command-local first-pass variable reads before solving global flow tables."""
     if not evidence.scopes:
@@ -5893,7 +5918,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             else command.execution_status
         )
         eval_assignments, eval_unsets = (
-            _static_eval_mutations(resolved) if status is not False else ((), ())
+            _static_eval_mutations(resolved, limits=limits) if status is not False else ((), ())
         )
         # issue #117: a recovered eval assignment used to feed only this command's own
         # exact-literal table below, so it reached AD-18's "a later sink observes it" promise
@@ -6075,7 +6100,9 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         if command.executable.name is not None:
             names.append(command.executable.name)
         names.extend(
-            name for name in _static_eval_command_names(command) if name in definitions_by_name
+            name
+            for name in _static_eval_command_names(command, limits=limits)
+            if name in definitions_by_name
         )
         return tuple(dict.fromkeys(names))
 
@@ -6150,7 +6177,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             ]
             if command.unknown_builtin_content is not None:
                 expressions.append(command.unknown_builtin_content)
-            eval_assignments, _eval_unsets = _static_eval_mutations(command)
+            eval_assignments, _eval_unsets = _static_eval_mutations(command, limits=limits)
             expressions.extend(
                 mutation.eval_content
                 for mutation in eval_assignments
@@ -6589,6 +6616,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 content = _substitute_local_contents(
                     assignment.content,
                     contents,
+                    limits,
                 )
                 resolved = replace(assignment, content=content)
                 if conditional:
@@ -6628,7 +6656,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                         for assignment in command.builtin_assignments
                     ),
                 )
-                eval_assignments, eval_unsets = _static_eval_mutations(command)
+                eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
                 eval_assignments = (*eval_assignments, *_eval_assignment_transfers(command))
                 for assignment, local in assignments:
                     resolved_effect_assignment = replace(
@@ -6653,6 +6681,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                             content=_substitute_local_contents(
                                 resolved_effect_assignment.content,
                                 local_contents,
+                                limits,
                             ),
                         )
                         value = exact_literal(resolved_assignment.content, local_values)
@@ -6706,6 +6735,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                             content=_substitute_local_contents(
                                 assignment.content,
                                 local_contents,
+                                limits,
                             ),
                         )
                         value = exact_literal(assignment.content, local_values)
@@ -6753,6 +6783,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                                         effect_shift_offset,
                                     ),
                                     local_contents,
+                                    limits,
                                 ),
                             )
                             apply_exact_assignment(
@@ -6769,6 +6800,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                                     content=_substitute_local_contents(
                                         assignment.content,
                                         local_contents,
+                                        limits,
                                     ),
                                 )
                                 value = exact_literal(assignment.content, callee_values)
@@ -6891,7 +6923,9 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                     if assignment_only
                     else command.builtin_assignments
                 )
-                eval_assignments, eval_unsets = _static_eval_mutations(resolved_variant)
+                eval_assignments, eval_unsets = _static_eval_mutations(
+                    resolved_variant, limits=limits
+                )
                 for assignment in (
                     *assignments,
                     *(mutation.assignment for mutation in eval_assignments),
@@ -7050,7 +7084,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if assignment_only
             else command.builtin_assignments
         )
-        eval_assignments, eval_unsets = _static_eval_mutations(command)
+        eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
         assignments = (
             *assignments,
             *command.assignments,
@@ -7230,7 +7264,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if assignment_only
             else command.builtin_assignments
         )
-        eval_assignments, eval_unsets = _static_eval_mutations(command)
+        eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
         for assignment in (
             *assignments,
             *(mutation.assignment for mutation in eval_assignments),
@@ -7539,7 +7573,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 for assignment in command.builtin_assignments
                 if _scoped_variable_environment(assignment.name) != context
             )
-            eval_assignments, eval_unsets = _static_eval_mutations(original)
+            eval_assignments, eval_unsets = _static_eval_mutations(original, limits=limits)
             for mutation in eval_assignments:
                 assignments.extend(
                     assignment
@@ -7631,7 +7665,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 charge_edges(len(nested))
                 assignment_stack[-1].extend(nested)
                 continue
-            if len(context_stack) - 1 >= _MAX_FUNCTION_EFFECT_DEPTH:
+            if len(context_stack) - 1 >= limits.max_function_effect_depth:
                 raise _TaintLimitExceeded(
                     GuardRefusal(
                         "taint.function-effects.depth-limit",
@@ -7771,7 +7805,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
 def _build_flow_definitions(  # noqa: PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> tuple[_FlowDefinitions, dict[int, ContentExpr]]:
     """Lower typed shell evidence into fixed-point definitions and command stdin."""
     environments, _lexical_parents = _scope_environment_ids(evidence.scopes)
@@ -7965,6 +7999,7 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                 inherited_bindings,
                 guarded_descriptors,
                 scoped=scoped_variables,
+                limits=limits,
             )
         )
 
@@ -8247,7 +8282,7 @@ def _eval_syntax_programs(writes: tuple[_FlowWrite, ...]) -> _EvalSyntaxPrograms
 
 def _eval_reparse_content(
     expression: ContentExpr,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> ContentExpr:
     """Interpret the minimal shell syntax that ``eval`` reparses from literal content."""
     branches = _eval_reparse_branches(expression, quote=None, depth=0, limits=limits)
@@ -8454,7 +8489,7 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
 def _eval_reparse_literal(
     text: str,
     quote: str | None,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> tuple[ContentExpr, str | None]:
     """Reparse quote, escape, parameter, and bounded brace syntax."""
     tokens, resulting_quote = _eval_reparse_tokens(text, quote, limits)
@@ -9712,7 +9747,7 @@ def _builtin_eval_candidates(command: _CommandEvidence) -> tuple[_ExecutableEvid
 
 def _eval_content_dependencies(
     expression: ContentExpr,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> set[str]:
     """Collect variable names that can enter eval syntax from one authored expression."""
     names: set[str] = set()
@@ -10818,7 +10853,7 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
                         definite=False,
                     )
         unset_names, unknown_unset_target = _unset_action(command)
-        _eval_assignments, eval_unsets = _static_eval_mutations(command)
+        _eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
         unset_names = (*unset_names, *eval_unsets)
         if unknown_unset_target:
             persistent_set.clear()
@@ -11153,6 +11188,8 @@ def _eval_sink_marker_capable(
     command: _CommandEvidence,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> bool:
     """Return whether any builtin eval candidate reparses an authored marker flow."""
     for executable in _builtin_eval_candidates(command):
@@ -11191,11 +11228,7 @@ def _eval_sink_marker_capable(
                 )
             ):
                 return True
-        if _static_eval_prefix_sink_marker_capable(
-            command,
-            context,
-            environment,
-        ):
+        if _static_eval_prefix_sink_marker_capable(command, context, environment, limits=limits):
             return True
     return False
 
@@ -11204,20 +11237,22 @@ def _static_eval_prefix_sink_marker_capable(  # noqa: PLR0912
     command: _CommandEvidence,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> bool:
     """Check exact eval sinks under temporary leading assignment environments."""
     outer_variables: Mapping[str | int, _ContentValue] = ChainMap(
         dict(environment.fixed_point_overrides),
         context.raw_variables,
     )
-    for parsed in _static_eval_commands(command):
+    for parsed in _static_eval_commands(command, limits=limits):
         index = 0
         prefix_variables: dict[str | int, _ContentValue] = {}
         while index < len(parsed.words):
             assignment = _static_assignment_word(parsed.words[index])
             if assignment is None:
                 break
-            content = _static_eval_assignment_content(parsed.source_words[index])
+            content = _static_eval_assignment_content(parsed.source_words[index], limits=limits)
             if content is None:
                 raise _TaintLimitExceeded(
                     GuardRefusal(
@@ -11706,7 +11741,8 @@ def _child_shell_payload_assignments(
     if payload is None:
         return ()
     mutations, _unsets = _static_eval_mutations(
-        replace(command, resolved_eval_program=None, resolved_eval_programs=(payload,))
+        replace(command, resolved_eval_program=None, resolved_eval_programs=(payload,)),
+        limits=limits,
     )
     return tuple(
         replace(
@@ -11779,6 +11815,8 @@ def _child_shell_assignment_environment(
     payload_index: int,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> _EvalCommandEnvironment | None:
     """Return the payload environment with the payload's own assignments applied.
 
@@ -11797,7 +11835,7 @@ def _child_shell_assignment_environment(
     Returns:
         The environment the payload's own assignments produce, or None when it assigns nothing.
     """
-    assignments = _child_shell_payload_assignments(command, payload_index, context.limits)
+    assignments = _child_shell_payload_assignments(command, payload_index, limits)
     if not assignments:
         return None
     overrides: dict[str | int, _ContentValue] = dict(environment.fixed_point_overrides)
@@ -11862,6 +11900,8 @@ def _shell_command_payload_marker_capable(
     stdin: ContentExpr,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> bool:
     """Return whether a shell ``-c`` payload composes the marker through its own expansion.
 
@@ -11924,7 +11964,7 @@ def _shell_command_payload_marker_capable(
                 # This is the same recovery the ``-c`` payload gets, and it may raise on state
                 # this analysis cannot represent, so it runs only after the plain parse declined.
                 assigned = _child_shell_assignment_environment(
-                    command, action_index, context, environment
+                    command, action_index, context, environment, limits=limits
                 )
                 if assigned is not None and _payload_second_parse_marker_capable(
                     action, context, assigned
@@ -11951,7 +11991,9 @@ def _shell_command_payload_marker_capable(
             )
             if _payload_second_parse_marker_capable(payload, context, positional):
                 return True
-            assigned = _child_shell_assignment_environment(command, index, context, positional)
+            assigned = _child_shell_assignment_environment(
+                command, index, context, positional, limits=limits
+            )
             if assigned is not None and _payload_second_parse_marker_capable(
                 payload, context, assigned
             ):
@@ -13443,7 +13485,7 @@ def _sink_expressions(
 def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits = TaintLimits(),  # noqa: B008 - immutable limits value object
 ) -> ScanVerdict:
     """Return a discriminated verdict for authored marker flow in one run body.
 
@@ -13587,6 +13629,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 command,
                 ordered_eval_context,
                 command_environments[command.command_id],
+                limits=limits,
             )
             for command in eval_commands
         ):
@@ -13602,9 +13645,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
         }
         for command in evidence.commands:
             if command in eval_commands and _eval_sink_marker_capable(
-                command,
-                eval_context,
-                command_environments[command.command_id],
+                command, eval_context, command_environments[command.command_id], limits=limits
             ):
                 return MarkerDetected()
             stdin = inputs[command.command_id]
@@ -13613,6 +13654,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 stdin,
                 eval_context,
                 command_environments[command.command_id],
+                limits=limits,
             ):
                 return MarkerDetected()
             sink_variables: Mapping[str | int, _ContentValue] = ChainMap(

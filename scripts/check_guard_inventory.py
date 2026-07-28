@@ -341,6 +341,170 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     )
 
 
+LIMITS_CONSTRUCTORS = frozenset({"TaintLimits", "ScannerLimits", "ScanLimits"})
+
+LIMITS_BOUNDARIES = frozenset(
+    {
+        # The taint entry point keeps a default so a direct evidence-level analysis stays usable.
+        ("shell_taint.py", "analyze_marker_taint"),
+        # The public scan boundary constructs the one scan-level limits value.
+        ("shell_scanner.py", "scan_doc_lattice_invocations"),
+        # The budget derives its counters from the limits it owns.
+        ("shell_scanner.py", "_ScanBudget"),
+    }
+)
+"""The only places allowed to construct default limits. Everywhere else must be handed the scan's
+limits, so no layer can silently fall back to production caps under a shrunk budget."""
+
+FIXED_SEMANTIC_BOUNDS = {
+    "_MAX_BRACE_INTEGER_DIGITS": (
+        "A brace-range integer wider than this is directly authorable, so the guard needs no "
+        "shrink witness; the bound is a spelling limit on the literal, not a resource budget."
+    ),
+    "_MAX_SHELL_DESCRIPTOR_DIGITS": (
+        "A file descriptor number is a semantic quantity. A descriptor spelled with more digits "
+        "than this is directly authorable and already far beyond any real descriptor."
+    ),
+    "_MAX_TRACKED_LITERAL_ALTERNATIVES": (
+        "The number of IFS field alternatives a single read projection tracks is a modeling "
+        "arity, reachable by authoring that many separators in one literal."
+    ),
+    "_UNICODE_MAX": "The last Unicode code point. Not a budget; authorable as an escape.",
+    "_SURROGATE_MIN": "The first surrogate code point. Not a budget; authorable as an escape.",
+    "_SURROGATE_MAX": "The last surrogate code point. Not a budget; authorable as an escape.",
+    "_EVAL_UNICODE_MAX": "The last Unicode code point, as the eval reparser spells it.",
+    "_EVAL_SURROGATE_MIN": "The first surrogate code point, as the eval reparser spells it.",
+    "_EVAL_SURROGATE_MAX": "The last surrogate code point, as the eval reparser spells it.",
+}
+"""Guard thresholds that are fixed semantic bounds rather than resource budgets. Each is directly
+authorable, so its guard is witnessed without shrinking anything."""
+
+
+def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
+    """Return every limits construction or optional limits parameter away from a boundary.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Module file name, used to resolve boundaries and in messages.
+
+    Returns:
+        Human-readable violations, empty when limits flow from one scan-level value.
+    """
+    tree = ast.parse(source)
+    names, _ = _annotate(tree)
+    violations: list[str] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in LIMITS_CONSTRUCTORS or node.args or node.keywords:
+            continue
+        qualname = names.get(id(node), "")
+        if (path, qualname.split(".")[0] if qualname else "") in LIMITS_BOUNDARIES:
+            continue
+        if (path, qualname) in LIMITS_BOUNDARIES:
+            continue
+        violations.append(
+            f"{path}:{qualname or '<module>'} constructs default limits; accept the scan's "
+            f"limits instead so a shrunk cap reaches this guard"
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _SCOPES) or isinstance(node, ast.ClassDef):
+            continue
+        qualname = names.get(id(node), node.name)
+        if (path, qualname) in LIMITS_BOUNDARIES:
+            continue
+        arguments = node.args
+        positional = arguments.posonlyargs + arguments.args
+        offset = len(positional) - len(arguments.defaults)
+        defaulted = list(zip(positional[offset:], arguments.defaults, strict=True))
+        defaulted += [
+            (argument, default)
+            for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True)
+            if default is not None
+        ]
+        for argument, default in defaulted:
+            if argument.arg == "limits" and default is not None:
+                violations.append(
+                    f"{path}:{qualname} must require limits; an optional limits parameter lets a "
+                    f"caller silently restore production caps"
+                )
+
+    return tuple(violations)
+
+
+def _threshold_names(statement: ast.stmt, condition: str) -> set[str]:
+    referenced = {
+        node.id
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name) and node.id.startswith("_MAX_")
+    }
+    referenced |= {
+        token
+        for token in condition.replace("(", " ").replace(")", " ").split()
+        if token.startswith("_MAX_") or token.startswith("_EVAL_") or token.startswith("_SURROGATE")
+    }
+    return {name.strip(".,:") for name in referenced}
+
+
+def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
+    """Return every guard threshold that is neither a limits field nor an inventoried bound.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when every guard threshold has declared provenance.
+    """
+    tree = ast.parse(source)
+    _, conditions = _annotate(tree)
+    violations: list[str] = []
+    for statement, _call in _origin_calls_by_statement(tree):
+        condition = conditions.get(id(statement), "")
+        for name in sorted(_threshold_names(statement, condition)):
+            if name in FIXED_SEMANTIC_BOUNDS:
+                continue
+            violations.append(
+                f"{path}: guard threshold {name} is neither a scan-limits field nor an "
+                f"inventoried fixed semantic bound"
+            )
+    return tuple(violations)
+
+
+def repository_limits_violations(root: Path) -> tuple[str, ...]:
+    """Return every limits-provenance violation across the repository's guarded modules.
+
+    Args:
+        root: Repository root to read the guarded modules from.
+
+    Returns:
+        Human-readable violations, empty when limits flow from one scan-level value.
+    """
+    violations: list[str] = []
+    for module in GUARDED_MODULES:
+        source = (root / module).read_text(encoding="utf-8")
+        violations.extend(find_limits_violations(source, Path(module).name))
+    return tuple(violations)
+
+
+def repository_threshold_violations(root: Path) -> tuple[str, ...]:
+    """Return every guard threshold without declared provenance across the guarded modules.
+
+    Args:
+        root: Repository root to read the guarded modules from.
+
+    Returns:
+        Human-readable violations, empty when every guard threshold has declared provenance.
+    """
+    violations: list[str] = []
+    for module in GUARDED_MODULES:
+        source = (root / module).read_text(encoding="utf-8")
+        violations.extend(find_threshold_violations(source, Path(module).name))
+    return tuple(violations)
+
+
 def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
     """Return every guard origin record in the repository's guarded modules.
 

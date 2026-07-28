@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from doc_lattice.github_ci import shell_scanner
+from doc_lattice.github_ci.shell_guards import ScanLimits
 
 _RECORDS: dict[str, str] = {}
 _ORIGINAL_DIRECT = shell_scanner.direct_doc_lattice_invocations
@@ -48,13 +49,21 @@ def _recording(
     return _ORIGINAL_DIRECT(script, context=context)
 
 
-def _recording_scan(script: str) -> shell_scanner.ShellScanResult:
-    """Record ``script``, then run the real scan while the in-public-call flag is raised."""
+def _recording_scan(
+    script: str,
+    *,
+    limits: ScanLimits | None = None,
+) -> shell_scanner.ShellScanResult:
+    """Record ``script``, then run the real scan while the in-public-call flag is raised.
+
+    The signature mirrors the public entry point, so a shrunk-limits scan is recorded like any
+    other rather than failing on an unexpected keyword.
+    """
     global _IN_PUBLIC_CALL  # noqa: PLW0603 (single-threaded suite; module-level flag)
     _record(script)
     _IN_PUBLIC_CALL = True
     try:
-        return _ORIGINAL_SCAN(script)
+        return _ORIGINAL_SCAN(script, limits=limits)
     finally:
         _IN_PUBLIC_CALL = False
 

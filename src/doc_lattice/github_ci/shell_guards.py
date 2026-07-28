@@ -11,8 +11,52 @@ See AD-20 in ARCHITECTURE.md for the durable decision this module implements.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeAlias
+
+
+@dataclass(frozen=True, slots=True)
+class TaintLimits:
+    """Deterministic caps for one taint pass."""
+
+    max_alternatives: int = 256
+    max_expression_nodes: int = 100_000
+    max_table_entries: int = 10_000
+    max_edges: int = 50_000
+    max_fixed_point_updates: int = 100_000
+    max_brace_expansions: int = 4_096
+    max_brace_depth: int = 16
+    max_exact_value_chars: int = 8_192
+    max_eval_reparse_branches: int = 256
+    max_eval_reparse_depth: int = 128
+    max_function_effect_depth: int = 64
+    max_local_substitution_depth: int = 128
+
+
+@dataclass(frozen=True, slots=True)
+class ScannerLimits:
+    """Deterministic caps for one bounded shell scan."""
+
+    max_source_chars: int = 1_048_576
+    max_scan_steps: int = 4_194_304
+    max_recursion_depth: int = 64
+    max_invocations: int = 10_000
+    max_launcher_nesting_depth: int = 64
+    max_case_arms: int = 256
+    max_case_dynamic_branches: int = 32
+
+
+@dataclass(frozen=True, slots=True)
+class ScanLimits:
+    """Every deterministic cap for one scan, constructed once at the public boundary.
+
+    One immutable value is threaded through the scanner, content construction, and the taint
+    pass, so a shrunk cap reaches every guard that enforces it instead of some layer silently
+    falling back to a fresh default.
+    """
+
+    taint: TaintLimits = field(default_factory=TaintLimits)
+    scanner: ScannerLimits = field(default_factory=ScannerLimits)
 
 
 @dataclass(frozen=True, slots=True)

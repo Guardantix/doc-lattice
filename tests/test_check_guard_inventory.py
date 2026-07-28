@@ -154,3 +154,50 @@ def test_every_shipped_origin_id_is_unique() -> None:
     ids = [record.origin_id for record in checker.repository_origin_records(_ROOT)]
 
     assert len(ids) == len(set(ids))
+
+
+def test_default_limits_construction_away_from_a_boundary_is_rejected() -> None:
+    source = "def _helper(expression):\n    return _evaluate(expression, TaintLimits())\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_optional_limits_parameter_away_from_a_boundary_is_rejected() -> None:
+    source = (
+        "def _helper(expression, limits: TaintLimits = TaintLimits()):\n    return expression\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("must require limits" in violation for violation in violations)
+
+
+def test_declared_limits_boundaries_are_accepted() -> None:
+    source = (
+        "def analyze_marker_taint(evidence, *, limits: TaintLimits = TaintLimits()):\n"
+        "    return evidence\n"
+    )
+
+    assert checker.find_limits_violations(source, "shell_taint.py") == ()
+
+
+def test_the_shipped_shell_modules_have_no_limits_violations() -> None:
+    assert checker.repository_limits_violations(_ROOT) == ()
+
+
+def test_guard_thresholds_are_limits_fields_or_inventoried_fixed_bounds() -> None:
+    assert checker.repository_threshold_violations(_ROOT) == ()
+
+
+def test_an_uninventoried_guard_threshold_is_rejected() -> None:
+    source = (
+        "def _guard(value):\n"
+        "    if value > _MAX_UNDECLARED_THING:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("_MAX_UNDECLARED_THING" in violation for violation in violations)

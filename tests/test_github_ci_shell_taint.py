@@ -171,7 +171,7 @@ def test_content_builder_expands_active_braces_into_ordered_argv_ports() -> None
     for character in "doc-{lattice,noop}":
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [(port.literal, port.content) for port in built.argv_ports] == [
@@ -185,14 +185,14 @@ def test_content_builder_elides_wholly_empty_unquoted_brace_alternatives() -> No
     for character in "{,}":
         builder.append_literal(character, brace_active=True)
 
-    assert builder.build().argv_ports == ()
+    assert builder.build(limits=TaintLimits()).argv_ports == ()
 
 
 def test_content_builder_keeps_quoted_and_escaped_braces_literal() -> None:
     builder = ContentBuilder.empty()
     builder.append_literal("{doc-,lattice}")
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [(port.literal, port.content) for port in built.argv_ports] == [
@@ -205,7 +205,7 @@ def test_content_builder_expands_bounded_ranges_without_turning_word_content_int
     for character in "doc-{1..2}-lattice":
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.expression == LiteralTransfer("doc-{1..2}-lattice")
     assert built.argv_ports is not None
@@ -231,7 +231,7 @@ def test_content_builder_preserves_signed_numeric_and_letter_ranges(
     for character in source:
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == expected
@@ -264,7 +264,7 @@ def test_content_builder_preserves_bash_numeric_range_padding(
     for character in source:
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == expected
@@ -297,7 +297,7 @@ def test_content_builder_normalizes_range_step_like_bash(source: str, expected: 
     for character in source:
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == expected
@@ -309,7 +309,7 @@ def test_content_builder_leaves_malformed_brace_ranges_literal(source: str) -> N
     for character in source:
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == [source]
@@ -323,7 +323,7 @@ def test_content_builder_expands_dynamic_recognized_brace_operand() -> None:
     for character in "}lattice":
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == ["doc-lattice", "lattice"]
@@ -338,7 +338,7 @@ def test_content_builder_assignment_rhs_preserves_original_unexpanded_tokens() -
     for character in "{doc-,lattice}":
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build()
+    built = builder.build(limits=TaintLimits())
 
     assert built.assignment_content == LiteralTransfer("{doc-,lattice}")
     assert built.argv_ports is not None
@@ -357,7 +357,7 @@ def test_content_builder_assignment_rhs_retains_deferred_brace_expansion_error()
     for character in "{1..5000}":
         builder.append_literal(character, brace_active=True)
 
-    built = builder.build(defer_brace_errors=True)
+    built = builder.build(defer_brace_errors=True, limits=TaintLimits())
 
     assert built.assignment_content == LiteralTransfer("{1..5000}")
     assert built.argv_ports is not None
@@ -424,10 +424,15 @@ def test_output_process_substitution_binds_writer_scope_to_consumer_stdin() -> N
         process_resources=(_ProcessResourceEvidence(1, 20, "output"),),
     )
 
-    definitions, inputs = _build_flow_definitions(evidence)
+    definitions, inputs = _build_flow_definitions(evidence, limits=TaintLimits())
 
     assert inputs[2] == StreamRef(writer.output_scope_id)
-    assert _marker_capable(_solve_flow_definitions(definitions).evaluate(StreamRef(2))) is True
+    assert (
+        _marker_capable(
+            _solve_flow_definitions(definitions, limits=TaintLimits()).evaluate(StreamRef(2))
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -471,7 +476,8 @@ def test_assignment_environment_materialization_checks_limits_incrementally(
                     ),
                 ),
             ),
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     with pytest.raises(_TaintLimitExceeded, match=reason):
@@ -647,7 +653,7 @@ def test_eval_reparse_keeps_external_only_value_non_evidentiary() -> None:
     ids=("active", "single-quoted", "escaped", "separate-argv"),
 )
 def test_eval_literal_reparse_tracks_active_brace_syntax(text: str, expected: ContentExpr) -> None:
-    expression, quote = _eval_reparse_literal(text, None)
+    expression, quote = _eval_reparse_literal(text, None, limits=TaintLimits())
 
     assert expression == expected
     assert quote is None
@@ -1601,7 +1607,9 @@ def test_scope_content_targets_and_loop_bindings_use_scope_environment() -> None
         loop_bindings=(_AssignmentEvidence("ITEM", VariableRef("PAYLOAD")),),
     )
 
-    contextualized = _contextualize_evidence(_ShellTaintEvidence(scopes=(scope,)))
+    contextualized = _contextualize_evidence(
+        _ShellTaintEvidence(scopes=(scope,)), limits=TaintLimits()
+    )
 
     assert contextualized.scopes[0].redirections == (
         _RedirectionEvent(
@@ -1617,9 +1625,9 @@ def test_scope_content_targets_and_loop_bindings_use_scope_environment() -> None
             VariableRef(_scoped_variable_name(100, "PAYLOAD")),
         ),
     )
-    assert _contextualize_evidence(contextualized).scopes[0].loop_bindings[0].name == (
-        _scoped_variable_name(100, "ITEM")
-    )
+    assert _contextualize_evidence(contextualized, limits=TaintLimits()).scopes[0].loop_bindings[
+        0
+    ].name == (_scoped_variable_name(100, "ITEM"))
 
 
 @pytest.mark.parametrize(
@@ -2213,7 +2221,8 @@ def test_variable_assignment_and_append_compose_in_the_fixed_point() -> None:
                 _FlowWrite("X", LiteralTransfer("doc-")),
                 _FlowWrite("X", LiteralTransfer("lattice"), append=True),
             )
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
@@ -2226,7 +2235,8 @@ def test_append_before_assignment_revisits_its_implicit_destination_dependency()
                 _FlowWrite("X", LiteralTransfer("lattice"), append=True),
                 _FlowWrite("X", LiteralTransfer("doc-")),
             )
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
@@ -2240,7 +2250,8 @@ def test_declared_forward_reference_uses_bottom_regardless_of_write_order() -> N
                 _FlowWrite("X", expression),
                 _FlowWrite("Y", LiteralTransfer("x")),
             )
-        )
+        ),
+        limits=TaintLimits(),
     )
     second = _solve_flow_definitions(
         _FlowDefinitions(
@@ -2248,7 +2259,8 @@ def test_declared_forward_reference_uses_bottom_regardless_of_write_order() -> N
                 _FlowWrite("Y", LiteralTransfer("x")),
                 _FlowWrite("X", expression),
             )
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     assert first.evaluate(VariableRef("X")) == second.evaluate(VariableRef("X"))
@@ -2296,7 +2308,8 @@ def test_competing_variable_definitions_join_without_composing() -> None:
                 _FlowWrite("X", LiteralTransfer("doc-")),
                 _FlowWrite("X", LiteralTransfer("lattice")),
             )
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     assert _marker_capable(solved.evaluate(VariableRef("X"))) is False
@@ -2316,7 +2329,8 @@ def test_resource_append_and_stream_strip_resolve_through_typed_tables() -> None
                     strip_trailing_newlines=True,
                 ),
             ),
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     assert _marker_capable(solved.evaluate(ResourceRef("task.sh"))) is True
@@ -2331,7 +2345,8 @@ def test_mutually_referential_variables_converge_by_least_fixed_point() -> None:
                 _FlowWrite("X", VariableRef("Y")),
                 _FlowWrite("Y", VariableRef("X")),
             )
-        )
+        ),
+        limits=TaintLimits(),
     )
 
     assert (
@@ -2468,7 +2483,7 @@ def test_deep_local_content_substitution_fails_with_stable_bound() -> None:
     local_contents[f"V{depth}"] = LiteralTransfer("doc-")
 
     with pytest.raises(_TaintLimitExceeded, match="local substitution depth limit"):
-        _substitute_local_contents(VariableRef("V0"), local_contents)
+        _substitute_local_contents(VariableRef("V0"), local_contents, limits=TaintLimits())
 
 
 def test_bounded_local_content_substitution_preserves_marker_control() -> None:
@@ -2478,7 +2493,9 @@ def test_bounded_local_content_substitution_preserves_marker_control() -> None:
     }
     local_contents[f"V{depth}"] = LiteralTransfer("doc-")
 
-    assert _substitute_local_contents(VariableRef("V0"), local_contents) == LiteralTransfer("doc-")
+    assert _substitute_local_contents(
+        VariableRef("V0"), local_contents, limits=TaintLimits()
+    ) == LiteralTransfer("doc-")
 
 
 def _eval_command(program: str, *, function_context_id: int | None = None) -> _CommandEvidence:
@@ -2490,12 +2507,12 @@ def _eval_command(program: str, *, function_context_id: int | None = None) -> _C
 
 
 def _mutation_names(command: _CommandEvidence) -> list[str]:
-    assignments, _ = _static_eval_mutations(command)
+    assignments, _ = _static_eval_mutations(command, limits=TaintLimits())
     return [item.assignment.name for item in assignments]
 
 
 def test_static_eval_recovers_a_scalar_assignment_from_an_exact_payload() -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command("X=doc-"))
+    assignments, unsets = _static_eval_mutations(_eval_command("X=doc-"), limits=TaintLimits())
 
     assert unsets == ()
     assert len(assignments) == 1
@@ -2505,7 +2522,9 @@ def test_static_eval_recovers_a_scalar_assignment_from_an_exact_payload() -> Non
 
 
 def test_static_eval_recovers_every_word_of_an_assignment_only_command() -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command("X=doc- Y=lattice"))
+    assignments, unsets = _static_eval_mutations(
+        _eval_command("X=doc- Y=lattice"), limits=TaintLimits()
+    )
 
     assert unsets == ()
     assert [(item.assignment.name, item.assignment.content) for item in assignments] == [
@@ -2515,7 +2534,10 @@ def test_static_eval_recovers_every_word_of_an_assignment_only_command() -> None
 
 
 def test_static_eval_ignores_assignment_prefix_words_of_an_executed_command() -> None:
-    assert _static_eval_mutations(_eval_command("X=doc- printf hi")) == ((), ())
+    assert _static_eval_mutations(_eval_command("X=doc- printf hi"), limits=TaintLimits()) == (
+        (),
+        (),
+    )
 
 
 @pytest.mark.parametrize(
@@ -2537,7 +2559,7 @@ def test_static_eval_ignores_assignment_prefix_words_of_an_executed_command() ->
 def test_static_eval_declaration_builtin_carries_its_scope(
     program: str, expected_local: bool, expected_force_global: bool
 ) -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command(program))
+    assignments, unsets = _static_eval_mutations(_eval_command(program), limits=TaintLimits())
 
     assert unsets == ()
     assert len(assignments) == 1
@@ -2553,7 +2575,9 @@ def test_static_eval_declare_inside_a_function_context_is_scoped_local() -> None
     genuinely local, so it must still carry `local=True` there. Only the no-function-context case
     was mislabeled.
     """
-    assignments, _ = _static_eval_mutations(_eval_command("declare X=v", function_context_id=7))
+    assignments, _ = _static_eval_mutations(
+        _eval_command("declare X=v", function_context_id=7), limits=TaintLimits()
+    )
 
     assert len(assignments) == 1
     assert assignments[0].assignment.name == "X"
@@ -2561,7 +2585,9 @@ def test_static_eval_declare_inside_a_function_context_is_scoped_local() -> None
 
 
 def test_static_eval_local_declaration_inside_a_function_context_is_scoped_local() -> None:
-    assignments, _ = _static_eval_mutations(_eval_command("local X=v", function_context_id=7))
+    assignments, _ = _static_eval_mutations(
+        _eval_command("local X=v", function_context_id=7), limits=TaintLimits()
+    )
 
     assert len(assignments) == 1
     assert assignments[0].assignment.name == "X"
@@ -2569,29 +2595,31 @@ def test_static_eval_local_declaration_inside_a_function_context_is_scoped_local
 
 
 def test_static_eval_skips_a_local_declaration_without_a_function_context() -> None:
-    assert _static_eval_mutations(_eval_command("local X=v")) == ((), ())
+    assert _static_eval_mutations(_eval_command("local X=v"), limits=TaintLimits()) == ((), ())
 
 
 def test_static_eval_unset_collects_names_and_excludes_option_words() -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command("unset -v X Y"))
+    assignments, unsets = _static_eval_mutations(
+        _eval_command("unset -v X Y"), limits=TaintLimits()
+    )
 
     assert assignments == ()
     assert unsets == ("X", "Y")
 
 
 def test_static_eval_function_only_unset_keeps_the_variable_defined() -> None:
-    assert _static_eval_mutations(_eval_command("unset -f X")) == ((), ())
+    assert _static_eval_mutations(_eval_command("unset -f X"), limits=TaintLimits()) == ((), ())
 
 
 def test_static_eval_combined_unset_still_removes_the_variable() -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command("unset -vf X"))
+    assignments, unsets = _static_eval_mutations(_eval_command("unset -vf X"), limits=TaintLimits())
 
     assert assignments == ()
     assert unsets == ("X",)
 
 
 def test_static_eval_unset_after_end_of_options_collects_the_operand() -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command("unset -- X"))
+    assignments, unsets = _static_eval_mutations(_eval_command("unset -- X"), limits=TaintLimits())
 
     assert assignments == ()
     assert unsets == ("X",)
@@ -2599,7 +2627,7 @@ def test_static_eval_unset_after_end_of_options_collects_the_operand() -> None:
 
 def test_static_eval_nameref_unset_fails_closed() -> None:
     with pytest.raises(_TaintLimitExceeded, match="nameref unset"):
-        _static_eval_mutations(_eval_command("unset -n R"))
+        _static_eval_mutations(_eval_command("unset -n R"), limits=TaintLimits())
 
 
 @pytest.mark.parametrize(
@@ -2614,7 +2642,7 @@ def test_static_eval_nameref_unset_fails_closed() -> None:
     ids=("brace-group", "loop-body", "time-prefix", "negation", "command-wrapper-options"),
 )
 def test_static_eval_recovers_an_assignment_behind_a_reserved_word_prefix(program: str) -> None:
-    assignments, _ = _static_eval_mutations(_eval_command(program))
+    assignments, _ = _static_eval_mutations(_eval_command(program), limits=TaintLimits())
 
     assert [item.assignment.name for item in assignments] == ["X"]
     assert assignments[0].assignment.content == LiteralTransfer("doc-")
@@ -2644,7 +2672,9 @@ def test_static_eval_skips_execution_wrappers_before_reading_the_executable(prog
 
 
 def test_static_eval_nameref_routes_a_later_write_to_its_target() -> None:
-    assignments, unsets = _static_eval_mutations(_eval_command("declare -n R=X; R=doc-"))
+    assignments, unsets = _static_eval_mutations(
+        _eval_command("declare -n R=X; R=doc-"), limits=TaintLimits()
+    )
 
     assert unsets == ()
     assert [item.assignment.name for item in assignments] == ["R", "X"]
@@ -2662,7 +2692,7 @@ def test_static_eval_nameref_routes_a_later_write_to_its_target() -> None:
 )
 def test_static_eval_nameref_hazard_fails_closed(program: str, message: str) -> None:
     with pytest.raises(_TaintLimitExceeded, match=message) as raised:
-        _static_eval_mutations(_eval_command(program))
+        _static_eval_mutations(_eval_command(program), limits=TaintLimits())
 
     assert isinstance(raised.value, ProjectError)
     assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
@@ -2684,7 +2714,7 @@ def test_static_eval_nested_eval_fails_closed(program: str) -> None:
     with pytest.raises(
         _TaintLimitExceeded, match="shell nested eval state cannot be represented"
     ) as raised:
-        _static_eval_mutations(_eval_command(program))
+        _static_eval_mutations(_eval_command(program), limits=TaintLimits())
 
     assert isinstance(raised.value, ProjectError)
     assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
@@ -2695,19 +2725,22 @@ def test_static_eval_nested_eval_shadowed_by_a_function_does_not_fail_closed() -
     # the real builtin and never persists state.
     command = replace(_eval_command('eval "X=doc-"'), active_function_names=frozenset({"eval"}))
 
-    assert _static_eval_mutations(command) == ((), ())
+    assert _static_eval_mutations(command, limits=TaintLimits()) == ((), ())
 
 
 def test_static_eval_nested_eval_in_an_unreachable_branch_does_not_fail_closed() -> None:
     # The outer eval invocation itself is statically unreachable, so its payload never runs.
     command = replace(_eval_command('eval "X=doc-"'), execution_status=False)
 
-    assert _static_eval_mutations(command) == ((), ())
+    assert _static_eval_mutations(command, limits=TaintLimits()) == ((), ())
 
 
 def test_static_eval_nested_eval_asynchronous_does_not_persist_state() -> None:
     # An asynchronous nested eval runs in a subshell whose mutations do not reach the caller.
-    assert _static_eval_mutations(_eval_command('eval "X=doc-" &')) == ((), ())
+    assert _static_eval_mutations(_eval_command('eval "X=doc-" &'), limits=TaintLimits()) == (
+        (),
+        (),
+    )
 
 
 @pytest.mark.parametrize(
@@ -2748,7 +2781,7 @@ def test_static_eval_array_assignment_fails_closed(program: str) -> None:
         _TaintLimitExceeded,
         match="shell eval array assignment cannot be represented",
     ) as raised:
-        _static_eval_mutations(_eval_command(program, function_context_id=1))
+        _static_eval_mutations(_eval_command(program, function_context_id=1), limits=TaintLimits())
 
     assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
 
@@ -2763,7 +2796,7 @@ def test_static_eval_array_assignment_fails_closed(program: str) -> None:
 )
 def test_static_eval_keeps_a_quoted_parenthesis_scalar(program: str, content: ContentExpr) -> None:
     # A quoted or escaped ``(`` stays inside its word, where it really is one scalar character.
-    assignments, unsets = _static_eval_mutations(_eval_command(program))
+    assignments, unsets = _static_eval_mutations(_eval_command(program), limits=TaintLimits())
 
     assert unsets == ()
     assert [(item.assignment.name, item.assignment.content) for item in assignments] == [
@@ -2772,15 +2805,17 @@ def test_static_eval_keeps_a_quoted_parenthesis_scalar(program: str, content: Co
 
 
 def test_static_eval_array_assignment_in_an_unreachable_branch_is_pruned() -> None:
-    assert _static_eval_mutations(_eval_command("if false; then A=(doc-); fi")) == ((), ())
+    assert _static_eval_mutations(
+        _eval_command("if false; then A=(doc-); fi"), limits=TaintLimits()
+    ) == ((), ())
 
 
 def test_static_eval_prunes_mutations_of_an_unreachable_branch() -> None:
     program = "if false; then X=doc-; fi"
-    parsed = _static_eval_program_commands(program)
+    parsed = _static_eval_program_commands(program, limits=TaintLimits())
 
     assert [item.execution_status for item in parsed] == [True, False, True]
-    assert _static_eval_mutations(_eval_command(program)) == ((), ())
+    assert _static_eval_mutations(_eval_command(program), limits=TaintLimits()) == ((), ())
 
 
 @pytest.mark.parametrize(
@@ -2799,12 +2834,12 @@ def test_static_eval_unacceptable_payload_fails_closed(program: str) -> None:
     with pytest.raises(
         _TaintLimitExceeded, match="shell eval payload cannot be tokenized"
     ) as raised:
-        _static_eval_program_commands(program)
+        _static_eval_program_commands(program, limits=TaintLimits())
 
     assert raised.value.code == "SHELL_TAINT_LIMIT_EXCEEDED"
 
     with pytest.raises(_TaintLimitExceeded, match="shell eval payload cannot be tokenized"):
-        _static_eval_mutations(_eval_command(program))
+        _static_eval_mutations(_eval_command(program), limits=TaintLimits())
 
 
 def test_static_eval_backslash_newline_continuation_matches_the_unsplit_payload() -> None:
@@ -2812,8 +2847,8 @@ def test_static_eval_backslash_newline_continuation_matches_the_unsplit_payload(
     # removes it before parsing, joining the two lines with no character inserted. The
     # tokenizer now does the same, so a continued and an unsplit payload recover the exact
     # same assignment instead of the continuation silently losing the mutation.
-    continued = _static_eval_mutations(_eval_command("X=doc- \\\n; true"))
-    unsplit = _static_eval_mutations(_eval_command("X=doc-; true"))
+    continued = _static_eval_mutations(_eval_command("X=doc- \\\n; true"), limits=TaintLimits())
+    unsplit = _static_eval_mutations(_eval_command("X=doc-; true"), limits=TaintLimits())
 
     assert continued == unsplit
     assert [item.assignment.content for item in continued[0]] == [LiteralTransfer("doc-")]
@@ -2837,7 +2872,7 @@ def test_eval_payload_line_continuation_false_safe_is_closed() -> None:
 
 
 def test_static_eval_commands_split_an_exact_payload_on_separators() -> None:
-    parsed = _static_eval_commands(_eval_command("printf a; declare -g X=1"))
+    parsed = _static_eval_commands(_eval_command("printf a; declare -g X=1"), limits=TaintLimits())
 
     assert [item.words for item in parsed] == [("printf", "a"), ("declare", "-g", "X=1")]
 
@@ -2870,7 +2905,7 @@ def test_static_eval_commands_retain_payload_redirections(
     the model believed was never written. Retaining the event is the first of the two halves;
     ``test_eval_payload_write_reaches_a_sourced_sink`` pins the flow-graph half.
     """
-    (parsed,) = _static_eval_commands(_eval_command(payload))
+    (parsed,) = _static_eval_commands(_eval_command(payload), limits=TaintLimits())
 
     assert parsed.words == ("printf", "a")
     assert [(item.operator, item.descriptor, item.target) for item in parsed.redirections] == [
@@ -2880,7 +2915,7 @@ def test_static_eval_commands_retain_payload_redirections(
 
 def test_static_eval_commands_retain_a_brace_descriptor_without_a_number() -> None:
     """A ``{fd}>`` names a descriptor Bash chooses at run time, so it binds nothing statically."""
-    (parsed,) = _static_eval_commands(_eval_command("printf a {fd}> out.sh"))
+    (parsed,) = _static_eval_commands(_eval_command("printf a {fd}> out.sh"), limits=TaintLimits())
 
     assert parsed.words == ("printf", "a")
     assert [(item.operator, item.descriptor) for item in parsed.redirections] == [(">", None)]
@@ -2888,7 +2923,9 @@ def test_static_eval_commands_retain_a_brace_descriptor_without_a_number() -> No
 
 def test_static_eval_commands_order_payload_redirections_left_to_right() -> None:
     """Ordinals sequence the replay, so a truncation before an append keeps its side effect."""
-    (parsed,) = _static_eval_commands(_eval_command("printf a > first.sh 2>> second.sh"))
+    (parsed,) = _static_eval_commands(
+        _eval_command("printf a > first.sh 2>> second.sh"), limits=TaintLimits()
+    )
 
     assert [(item.ordinal, item.operator, item.target) for item in parsed.redirections] == [
         (0, ">", StaticResourceTarget("first.sh")),
@@ -2897,7 +2934,9 @@ def test_static_eval_commands_order_payload_redirections_left_to_right() -> None
 
 
 def test_static_eval_commands_separate_redirections_per_payload_command() -> None:
-    parsed = _static_eval_commands(_eval_command("printf a > first.sh; printf b > second.sh"))
+    parsed = _static_eval_commands(
+        _eval_command("printf a > first.sh; printf b > second.sh"), limits=TaintLimits()
+    )
 
     assert [item.words for item in parsed] == [("printf", "a"), ("printf", "b")]
     assert [[event.target for event in item.redirections] for item in parsed] == [
@@ -2914,11 +2953,13 @@ def test_static_eval_commands_fail_closed_on_an_unmodeled_redirection_operator()
     to a payload the tokenizer cannot accept.
     """
     with pytest.raises(_TaintLimitExceeded, match="shell eval payload cannot be tokenized"):
-        _static_eval_commands(_eval_command("printf a >>| out.sh"))
+        _static_eval_commands(_eval_command("printf a >>| out.sh"), limits=TaintLimits())
 
 
 def test_static_eval_command_names_dedupe_in_first_use_order() -> None:
-    names = _static_eval_command_names(_eval_command("printf a; printf b; declare -g X=1"))
+    names = _static_eval_command_names(
+        _eval_command("printf a; printf b; declare -g X=1"), limits=TaintLimits()
+    )
 
     assert names == ("printf", "declare")
 
@@ -3204,27 +3245,29 @@ def test_static_eval_command_stdout_carries_authored_operand_content() -> None:
     Without this the write registered no content the later sink could compose against, which is
     what let ``eval 'printf X=doc- > s.sh'; source s.sh; eval "${X}lattice"`` certify.
     """
-    (parsed,) = _static_eval_commands(_eval_command("printf X=doc- > s.sh"))
+    (parsed,) = _static_eval_commands(_eval_command("printf X=doc- > s.sh"), limits=TaintLimits())
 
-    stdout = _static_eval_command_stdout(parsed, 0, scoped=False)
+    stdout = _static_eval_command_stdout(parsed, 0, scoped=False, limits=TaintLimits())
 
     assert _can_mark_with_tables(concat(stdout, LiteralTransfer("lattice")))
 
 
 def test_static_eval_command_stdout_of_a_marker_free_operand_cannot_mark() -> None:
     """Over-refusal guard: the ordinary generated-env-file idiom carries no fragment."""
-    (parsed,) = _static_eval_commands(_eval_command("printf REGION=us-east-1 > env.sh"))
+    (parsed,) = _static_eval_commands(
+        _eval_command("printf REGION=us-east-1 > env.sh"), limits=TaintLimits()
+    )
 
-    stdout = _static_eval_command_stdout(parsed, 0, scoped=False)
+    stdout = _static_eval_command_stdout(parsed, 0, scoped=False, limits=TaintLimits())
 
     assert not _can_mark_with_tables(concat(stdout, LiteralTransfer("lattice")))
 
 
 def test_static_eval_command_stdout_resolves_an_expanded_operand() -> None:
     """The payload expands its own parameters, so the written content is not its source text."""
-    (parsed,) = _static_eval_commands(_eval_command("printf X=$V > s.sh"))
+    (parsed,) = _static_eval_commands(_eval_command("printf X=$V > s.sh"), limits=TaintLimits())
 
-    stdout = _static_eval_command_stdout(parsed, 0, scoped=False)
+    stdout = _static_eval_command_stdout(parsed, 0, scoped=False, limits=TaintLimits())
 
     assert "V" in _expression_variable_names(stdout)
 

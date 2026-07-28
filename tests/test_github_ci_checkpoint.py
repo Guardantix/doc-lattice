@@ -1,11 +1,15 @@
 """Integrity gates for the issue #100 predeclaration checkpoint artifacts."""
 
 import hashlib
+import inspect
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+from doc_lattice.github_ci import shell_scanner
+from scripts import checkpoint_record_scanner_inputs as plugin
 
 CHECKPOINT = Path("tests/fixtures/github_ci_checkpoint")
 _FROZEN_ACCEPTANCE_AUTHORED_CASE_COUNT = 78
@@ -253,3 +257,15 @@ def test_mutation_sites_reference_real_spans():
         assert (site["fixture_id"], site["span_id"]) in span_ids
         assert site["expected_reason_category"] in REASON_CATEGORIES
         assert site["offset"] >= 0
+
+
+def test_recording_wrappers_mirror_the_public_scanner_signatures():
+    # The recording plugin replaces the public entry points, so a new parameter on either one
+    # silently stops being recordable unless the wrapper grows it too.
+    for wrapper, original in (
+        (plugin._recording_scan, shell_scanner.scan_doc_lattice_invocations),
+        (plugin._recording, shell_scanner.direct_doc_lattice_invocations),
+    ):
+        assert list(inspect.signature(wrapper).parameters) == list(
+            inspect.signature(original).parameters
+        )

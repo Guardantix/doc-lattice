@@ -9,7 +9,9 @@ from doc_lattice.github_ci.shell_guards import (
     Certified,
     GuardRefusal,
     MarkerDetected,
+    ScanLimits,
     ScanVerdict,
+    TaintLimits,
 )
 from doc_lattice.github_ci.shell_taint import (
     _ANSI_C_SIMPLE_ESCAPES,
@@ -55,11 +57,6 @@ from doc_lattice.github_ci.shell_taint import (
 )
 
 _Invocation = tuple[str, bool]
-_MAX_SHELL_SOURCE_CHARS = 1_048_576
-_MAX_SHELL_SCAN_STEPS = 4_194_304
-_MAX_SHELL_RECURSION_DEPTH = 64
-_MAX_SHELL_INVOCATIONS = 10_000
-_MAX_LAUNCHER_NESTING_DEPTH = 64
 _OCTAL_BASE = 8
 _ANSI_C_OCTAL_BYTE_MASK = 0xFF
 _UNICODE_MAX = 0x10FFFF
@@ -71,13 +68,11 @@ _PRINTF_FIELD_LIMIT = 4096
 _LOOP_HEADER_NAME_WORDS = 2
 _CASE_HEADER_PATTERN_WORDS = 4
 _CASE_HEADER_SUBJECT_WORDS = 3
-_MAX_CASE_ARMS = 256
 # Bounds the alternative width the taint solver explores per case statement (how many arms whose
 # match against the subject cannot be resolved statically it will retain), not the total arm
 # count; every exhaustion still fails closed. 32 comfortably covers a real subcommand or
 # job-matrix dispatch table (#124) without materially widening the solver's search space; see
 # scripts/bench_sections.py and the seeded fuzz run in scripts/fuzz_shell_taint.py.
-_MAX_CASE_DYNAMIC_BRANCHES = 32
 
 _COMMAND_PREFIXES = frozenset(
     {
@@ -595,10 +590,18 @@ class _ShellWordBuilder:
             return
         self.assignment_name += character
 
-    def build(self) -> _ShellWord:
-        """Build the immutable decoded word and its expansion provenance."""
+    def build(self, limits: TaintLimits) -> _ShellWord:
+        """Build the immutable decoded word and its expansion provenance.
+
+        Args:
+            limits: The scan's deterministic taint caps, so a shrunk cap reaches the
+                brace-expansion guards this word's content construction can trip.
+
+        Returns:
+            The decoded word.
+        """
         literal = "".join(self.characters)
-        built_content = self.content.build(defer_brace_errors=True)
+        built_content = self.content.build(limits, defer_brace_errors=True)
         return _ShellWord(
             literal=literal,
             content=built_content.expression,
@@ -913,9 +916,24 @@ def _parse_static_descriptor(digits: str) -> int:
         ) from error
 
 
+_DERIVE_STEPS_FROM_LIMITS = -1
+
+
 @dataclass(slots=True)
 class _ScanBudget:
-    remaining_steps: int = _MAX_SHELL_SCAN_STEPS
+    """Mutable per-scan counters derived from one immutable `ScanLimits` value.
+
+    Children share the exact budget instance, so sharing counters also shares limits and the two
+    cannot drift apart.
+    """
+
+    remaining_steps: int = _DERIVE_STEPS_FROM_LIMITS
+    limits: ScanLimits = field(default_factory=ScanLimits)
+
+    def __post_init__(self) -> None:
+        """Derive the step counter from the scan limits unless an explicit budget was given."""
+        if self.remaining_steps == _DERIVE_STEPS_FROM_LIMITS:
+            self.remaining_steps = self.limits.scanner.max_scan_steps
 
     def step(self) -> None:
         """Charge one scan step, raising when the declared step budget is exhausted."""
@@ -1000,7 +1018,10 @@ class _ShellScanner:
             kind="command",
         )
         if self.owns_taint_builder and self.taint_builder is not None:
-            verdict = analyze_marker_taint(self.taint_builder.freeze())
+            verdict = analyze_marker_taint(
+                self.taint_builder.freeze(),
+                limits=self.budget.limits.taint,
+            )
             if isinstance(verdict, GuardRefusal):
                 raise _ShellScanIncomplete(verdict)
             if isinstance(verdict, MarkerDetected):
@@ -1395,7 +1416,7 @@ class _ShellScanner:
     def _finish_case(self, state: _CommandScanState, frame: _ControlFrame) -> None:
         """Close one case compound, preserving arm exclusivity and fallthrough."""
         if frame.phase == "body":
-            if len(frame.case_arms) >= _MAX_CASE_ARMS:
+            if len(frame.case_arms) >= self.budget.limits.scanner.max_case_arms:
                 raise _ShellScanIncomplete(
                     GuardRefusal("scanner.case.arm-limit-at-finish", "case arm limit exceeded")
                 )
@@ -1535,7 +1556,7 @@ class _ShellScanner:
         terminator: str | None,
         depth: int,
     ) -> int:
-        if depth > _MAX_SHELL_RECURSION_DEPTH:
+        if depth > self.budget.limits.scanner.max_recursion_depth:
             raise _ShellScanIncomplete(
                 GuardRefusal("scanner.commands.recursion-depth", "recursion limit exceeded")
             )
@@ -1664,7 +1685,7 @@ class _ShellScanner:
         An element spelled ``[subscript]=value`` leaves literal order no longer equal to index
         order, and a joined read concatenates by index, so that spelling fails closed instead.
         """
-        if depth > _MAX_SHELL_RECURSION_DEPTH:
+        if depth > self.budget.limits.scanner.max_recursion_depth:
             raise _ShellScanIncomplete(
                 GuardRefusal("scanner.array-assignment.recursion-depth", "recursion limit exceeded")
             )
@@ -2301,7 +2322,10 @@ class _ShellScanner:
                 patterns = state.words
             match_status = self._case_match_status(frame.case_word, patterns)
             if match_status is None:
-                if frame.case_dynamic_branches >= _MAX_CASE_DYNAMIC_BRANCHES:
+                if (
+                    frame.case_dynamic_branches
+                    >= self.budget.limits.scanner.max_case_dynamic_branches
+                ):
                     raise _ShellScanIncomplete(
                         GuardRefusal(
                             "scanner.case.dynamic-branch-limit",
@@ -2341,7 +2365,7 @@ class _ShellScanner:
                         "scanner.case.terminator-outside-arm", "ambiguous case control flow"
                     )
                 )
-            if len(frame.case_arms) >= _MAX_CASE_ARMS:
+            if len(frame.case_arms) >= self.budget.limits.scanner.max_case_arms:
                 raise _ShellScanIncomplete(
                     GuardRefusal("scanner.case.arm-limit-at-terminator", "case arm limit exceeded")
                 )
@@ -2588,7 +2612,7 @@ class _ShellScanner:
                 ),
             )
             if invocation is not None:
-                if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
+                if len(self.invocations) >= self.budget.limits.scanner.max_invocations:
                     raise _ShellScanIncomplete(
                         GuardRefusal("scanner.invocations.limit", "invocation limit exceeded")
                     )
@@ -3033,7 +3057,7 @@ class _ShellScanner:
                 continue
             content.append_literal(body[index])
             index += 1
-        built = content.build()
+        built = content.build(self.budget.limits.taint)
         return built.expression, built.conditional_assignments
 
     def _consume_unquoted_heredoc_line(
@@ -3096,7 +3120,7 @@ class _ShellScanner:
 
         def finish() -> _ShellWord:
             try:
-                return builder.build()
+                return builder.build(self.budget.limits.taint)
             except _TaintLimitExceeded as error:
                 raise _ShellScanIncomplete(error.refusal) from error
 
@@ -3249,7 +3273,7 @@ class _ShellScanner:
         *,
         double_quoted: bool = False,
     ) -> _ShellExpansion | None:
-        if depth > _MAX_SHELL_RECURSION_DEPTH:
+        if depth > self.budget.limits.scanner.max_recursion_depth:
             raise _ShellScanIncomplete(
                 GuardRefusal("scanner.active-expansion.recursion-depth", "recursion limit exceeded")
             )
@@ -3487,7 +3511,7 @@ class _ShellScanner:
                 continue
             content.append_literal(character)
             index += 1
-        built = content.build()
+        built = content.build(self.budget.limits.taint)
         self._parameter_content_assignments[(start, closing)] = built.conditional_assignments
         return built.expression
 
@@ -3660,16 +3684,21 @@ def _remove_active_line_continuations(source: str) -> str:
     return re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", source)
 
 
-def scan_doc_lattice_invocations(script: str) -> ShellScanResult:
+def scan_doc_lattice_invocations(
+    script: str,
+    *,
+    limits: ScanLimits | None = None,
+) -> ShellScanResult:
     """Scan literal Bash syntax and explicitly report bounded-scan exhaustion."""
+    scan_limits = limits if limits is not None else ScanLimits()
     normalized = script.replace("\r\n", "\n")
-    if len(normalized) > _MAX_SHELL_SOURCE_CHARS:
+    if len(normalized) > scan_limits.scanner.max_source_chars:
         return ShellScanResult(
             (),
             GuardRefusal("scanner.source.character-limit", "source character limit exceeded"),
         )
 
-    scanner = _ShellScanner(normalized)
+    scanner = _ShellScanner(normalized, budget=_ScanBudget(limits=scan_limits))
     try:
         invocations = scanner.scan()
     except _ShellScanIncomplete as error:
@@ -5452,7 +5481,7 @@ def _nested_launcher_payload_index(
     )
     if is_doc_lattice:
         return _ResolvedIndex(payload_index, payload_resolution.ambiguous)
-    if launcher_depth >= _MAX_LAUNCHER_NESTING_DEPTH:
+    if launcher_depth >= resolution.budget.limits.scanner.max_launcher_nesting_depth:
         raise _ShellScanIncomplete(
             GuardRefusal("scanner.launcher.nesting-limit", "launcher nesting limit exceeded")
         )

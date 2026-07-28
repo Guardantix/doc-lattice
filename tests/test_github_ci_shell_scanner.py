@@ -38,6 +38,7 @@ from doc_lattice.github_ci.shell_taint import (
     LiteralTransfer,
     RepeatOutput,
     SequenceOutput,
+    TaintLimits,
     choice,
     concat,
 )
@@ -6256,7 +6257,7 @@ def test_static_eval_newline_separates_payload_commands(script: str):
 def test_static_eval_program_commands_split_on_unquoted_newlines(
     program: str, expected: tuple[tuple[str, ...], ...]
 ):
-    commands = shell_taint._static_eval_program_commands(program)
+    commands = shell_taint._static_eval_program_commands(program, limits=TaintLimits())
 
     assert tuple(command.words for command in commands) == expected
 
@@ -6277,7 +6278,7 @@ def test_decode_ansi_c_eval_word_uses_the_shared_escape_table(body: str, expecte
 
 
 def test_static_eval_background_newline_still_marks_asynchronous():
-    commands = shell_taint._static_eval_program_commands("false &\ntrue")
+    commands = shell_taint._static_eval_program_commands("false &\ntrue", limits=TaintLimits())
 
     assert commands[0].asynchronous is True
     assert commands[1].asynchronous is False

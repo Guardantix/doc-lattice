@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,14 +24,18 @@ from doc_lattice.github_ci.shell_guards import (
     Certified,
     GuardRefusal,
     MarkerDetected,
+    ScanLimits,
+    ScannerLimits,
 )
 from doc_lattice.github_ci.shell_scanner import (
-    _MAX_SHELL_SOURCE_CHARS,
+    _ScanBudget,
     _ShellScanIncomplete,
+    _ShellScanner,
     direct_doc_lattice_invocations,
     scan_doc_lattice_invocations,
 )
 from doc_lattice.github_ci.shell_taint import (
+    TaintLimits,
     _MalformedTaintEvidence,
     _TaintLimitExceeded,
 )
@@ -101,7 +106,7 @@ def test_certified_script_reports_a_certified_verdict() -> None:
 
 
 def test_source_size_guard_reports_its_origin_id_through_the_public_path() -> None:
-    result = scan_doc_lattice_invocations("a" * (_MAX_SHELL_SOURCE_CHARS + 1))
+    result = scan_doc_lattice_invocations("a" * (ScannerLimits().max_source_chars + 1))
 
     assert result.verdict == GuardRefusal(
         "scanner.source.character-limit", "source character limit exceeded"
@@ -128,7 +133,7 @@ def test_scanner_control_flow_guard_preserves_its_origin_id() -> None:
 
 
 def test_incomplete_reason_projection_keeps_the_config_error_wording() -> None:
-    script = "a" * (_MAX_SHELL_SOURCE_CHARS + 1)
+    script = "a" * (ScannerLimits().max_source_chars + 1)
 
     with pytest.raises(ConfigError, match=r"^shell scan incomplete: source character limit"):
         direct_doc_lattice_invocations(script)
@@ -162,3 +167,47 @@ def test_every_invariant_witness_carries_a_rationale() -> None:
 
 def test_shipped_guard_modules_use_only_canonical_refusal_shapes() -> None:
     assert checker.repository_shape_violations(_ROOT) == ()
+
+
+def test_scan_limits_reach_the_public_boundary() -> None:
+    script = "echo one; echo two; echo three\n"
+    shrunk = ScanLimits(scanner=ScannerLimits(max_scan_steps=4))
+
+    assert scan_doc_lattice_invocations(script).verdict == Certified()
+    assert scan_doc_lattice_invocations(script, limits=shrunk).guard_id == (
+        "scanner.budget.step-limit"
+    )
+
+
+def test_shrunk_source_cap_reaches_the_source_size_guard() -> None:
+    shrunk = ScanLimits(scanner=ScannerLimits(max_source_chars=4))
+
+    result = scan_doc_lattice_invocations("echo hello\n", limits=shrunk)
+
+    assert result.guard_id == "scanner.source.character-limit"
+
+
+def test_shrunk_taint_cap_reaches_a_taint_layer_guard() -> None:
+    script = "X=safe; eval 'if true; then X=doc-; fi'; eval \"$X\"lattice"
+    shrunk = ScanLimits(taint=TaintLimits(max_eval_reparse_branches=0))
+
+    result = scan_doc_lattice_invocations(script, limits=shrunk)
+
+    assert result.guard_id is not None
+    assert result.guard_id.startswith("taint.")
+
+
+def test_scan_limits_are_not_exposed_by_the_operator_entry_point() -> None:
+    signature = inspect.signature(direct_doc_lattice_invocations)
+
+    assert "limits" not in signature.parameters
+
+
+def test_a_child_scanner_shares_the_parent_scan_limits() -> None:
+    shrunk = ScanLimits(scanner=ScannerLimits(max_recursion_depth=1))
+    scanner = _ShellScanner("echo hi", budget=_ScanBudget(limits=shrunk))
+
+    child = scanner._child_scanner("echo child")
+
+    assert child.budget is scanner.budget
+    assert child.budget.limits is shrunk
