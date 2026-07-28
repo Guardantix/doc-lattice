@@ -363,11 +363,16 @@ def _executed_lines(script: str, path: str) -> set[int]:
             executed.add(frame.f_lineno)
         return trace
 
+    # Restore whatever was installed rather than clearing: under Python 3.13 coverage.py measures
+    # through `sys.settrace`, so `sys.settrace(None)` would uninstall it for the rest of the
+    # session and silently drop every line executed after this test. Python 3.14 measures through
+    # `sys.monitoring` and is unaffected, which is why that failure is version-specific.
+    previous = sys.gettrace()
     sys.settrace(trace)
     try:
         scan_doc_lattice_invocations(script)
     finally:
-        sys.settrace(None)
+        sys.settrace(previous)
     return executed
 
 
