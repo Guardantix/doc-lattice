@@ -841,7 +841,10 @@ script rather than a bound that stopped the analysis. The `ConfigError` wording 
 unchanged.
 
 Guard identifiers are semantic and stable. They encode neither line numbers nor user-facing text,
-so rewording a refusal message is not an identity change.
+so rewording a refusal message is not an identity change. One identifier names one origin: a second
+site constructing an identifier that is already classified would inherit evidence it does not have,
+so the inventory rejects it. Every rule that recognizes a construction recognizes it by name
+whether it is spelled bare or through the module that defines it.
 
 One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
 content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
@@ -850,21 +853,29 @@ every internal limit-aware helper. Every threshold a guard references is either 
 value or an inventoried fixed semantic bound with a recorded rationale, the latter reserved for
 quantities that are directly authorable rather than resource budgets. A threshold is recognized
 structurally rather than by naming convention: any module-level numeric constant a guard
-references, and any bare numeric magnitude it compares against. Zero and one are exempt because
-they spell emptiness and arity rather than a magnitude.
+references, and any bare numeric magnitude it compares against, arithmetic in the operand included,
+so `depth - 4096 > 0` is the same uninventoried cap as `depth > 4096`. Zero and one are exempt
+because they spell emptiness and arity rather than a magnitude, and a subscript index is a position
+rather than a magnitude.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
-identifier; an unreachable one carries a written rationale plus a boundary script that drives the
-same validation to its nearest reachable state. A row asserting that a test exists somewhere is not
-classification.
+identifier; an unreachable one carries a written rationale, a boundary script that drives the same
+validation to its nearest reachable state, and a required predicate over the evidence that script
+builds. A row asserting that a test exists somewhere is not classification, and neither is a
+boundary row whose evidence predicate is satisfied by any input at all, which is why that predicate
+has no default.
 
 Anything unclassified is frozen rollout debt that may only shrink. Source origins must partition
 exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
 canonical origin *records* rather than bare identifiers, so an unclassified guard cannot be moved
-or semantically edited while keeping its entry. A record covers the guarding condition and, within
-the enclosing function, the statements that write what that condition reads, because inverting an
-accumulation disables a guard as completely as inverting its test. The scope stops at the function
+or semantically edited while keeping its entry. A record covers the guarding condition, whether it
+is spelled as an `if`, a `while` or a `match` arm, and, within the enclosing function, the
+statements that write what that condition reads, in-place mutation of an accumulator included,
+because inverting or removing an accumulation disables a guard as completely as inverting its test.
+A record also covers the body of any declared transport the origin hands its refusal to, since the
+parameterized cycle detector owns the condition that decides its callers' refusals while minting no
+identifier of its own. The scope stops at the function
 deliberately: an unbounded dataflow closure would churn every frozen record on any edit to either
 module, and a record that churns constantly has to be regenerated, which is the laundering path
 this decision closes. A caller passing a different value into that function is outside the boundary
@@ -875,7 +886,20 @@ protected base runs the base revision's own copy of the checker with the candida
 input, on pushes as well as pull requests. That checker reads only the identifiers the candidate
 freezes and re-derives their records itself, which is both why the candidate's own fingerprints are
 never trusted and how a candidate can migrate the record schema and the fingerprint derivation in
-one change: only the identifier field is fixed across schemas.
+one change: only the identifier field is fixed across schemas. A base whose object cannot be read is
+a failure rather than a base that predates the gate, because a skip there would pass grown debt with
+a green job.
+
+That base-owned run enforces closure and monotonicity only. The refusal-shape, limits and threshold
+rules read allowlists that describe the source they shipped with, so running them from the base
+would reject a candidate that legitimately adds a boundary, a declared transport or an inventoried
+bound, with no fix available inside the same change; the candidate's own copy enforces them in the
+test suite. Closure names no allowlist, so running it from the base is what makes it unweakenable.
+Guard *withdrawal* is covered there too: the base's classified inventory is read alongside its debt
+snapshot, because deleting an origin together with its witness row leaves the partition exact and
+the debt comparison with nothing to inspect. A withdrawal is accepted only when the candidate's
+retirement ledger records the identifier and the reason, so removing a fail-closed guard is a
+declared, reviewable edit rather than a silent one.
 **Consequences:** A refusal observed at the public boundary names the guard that produced it, so a
 test can pin a specific site instead of a shared message. New guards cannot arrive unclassified,
 and an untested guard cannot be quietly reclassified or laundered onto a different site. Shrunk

@@ -602,6 +602,292 @@ def test_closure_rejects_a_guard_that_is_both_classified_and_frozen(tmp_path: Pa
     assert any("both classified and frozen" in violation for violation in violations)
 
 
+_ATTRIBUTE_SPELLED_SOURCE = """
+def _guard(value, limits):
+    if value > limits.max_value:
+        raise shell_guards._TaintLimitExceeded(
+            shell_guards.GuardRefusal("taint.demo.attribute", "too big")
+        )
+"""
+
+
+def test_a_refusal_spelled_through_a_module_is_still_a_guard_origin() -> None:
+    # Recognizing only a bare-name constructor would make the identical guard, spelled through the
+    # module that defines it, invisible to every rule here: no record, no witness, no debt entry.
+    records = checker.extract_origin_records(_ATTRIBUTE_SPELLED_SOURCE, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.attribute"]
+
+
+def test_raw_refusal_text_spelled_through_a_module_is_rejected() -> None:
+    source = 'def f():\n    raise shell_guards._ShellScanIncomplete("step limit exceeded")\n'
+
+    violations = checker.find_shape_violations(source, "shell_scanner.py")
+
+    assert any("raw refusal text" in violation for violation in violations)
+
+
+def test_limits_construction_spelled_through_a_module_is_rejected() -> None:
+    source = "def _helper(e):\n    return _evaluate(e, shell_guards.TaintLimits())\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+_ACCUMULATED_SOURCE = """
+class _Tracker:
+    def visit(self, node):
+        self.active.add(node)
+        if len(self.active) > self.limits.max_active:
+            raise _TaintLimitExceeded(GuardRefusal("taint.demo.accumulated", "too many"))
+"""
+
+
+def test_fingerprint_tracks_an_in_place_mutation_that_feeds_the_guard_condition() -> None:
+    # Accumulation through a mutating method binds no name, so a writer closure built from binding
+    # statements alone would leave the call that feeds this guard outside its record.
+    edited = _ACCUMULATED_SOURCE.replace("self.active.add(node)", "self.active.clear()")
+
+    original = checker.extract_origin_records(_ACCUMULATED_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+_WHILE_SOURCE = """
+def _guard(state, limits):
+    while state.depth > limits.max_depth:
+        raise _TaintLimitExceeded(GuardRefusal("taint.demo.while", "too deep"))
+"""
+
+_MATCH_SOURCE = """
+def _guard(node, limits):
+    match node:
+        case int() if node > limits.max_value:
+            raise _TaintLimitExceeded(GuardRefusal("taint.demo.match", "too big"))
+"""
+
+
+def test_fingerprint_tracks_a_while_condition() -> None:
+    retargeted = _WHILE_SOURCE.replace("state.depth > limits.max_depth", "state.depth < 0")
+
+    original = checker.extract_origin_records(_WHILE_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(retargeted, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_a_match_case_pattern_and_guard() -> None:
+    repatterned = _MATCH_SOURCE.replace("case int()", "case str()")
+    reguarded = _MATCH_SOURCE.replace("node > limits.max_value", "node < limits.max_value")
+
+    original = checker.extract_origin_records(_MATCH_SOURCE, "shell_taint.py")
+
+    assert original[0].fingerprint != (
+        checker.extract_origin_records(repatterned, "shell_taint.py")[0].fingerprint
+    )
+    assert original[0].fingerprint != (
+        checker.extract_origin_records(reguarded, "shell_taint.py")[0].fingerprint
+    )
+
+
+def test_threshold_provenance_sees_a_while_and_a_match_case_guard() -> None:
+    for source in (
+        _WHILE_SOURCE.replace("limits.max_depth", "100"),
+        _MATCH_SOURCE.replace("limits.max_value", "100"),
+    ):
+        violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+        assert any("literal 100" in violation for violation in violations)
+
+
+def test_a_magnitude_hidden_in_arithmetic_is_still_a_threshold() -> None:
+    # `depth - 4096 > 0` caps the scan exactly as `depth > 4096` does, so a rule that only matched
+    # an operand that is itself a literal would fall to a one-line algebraic rewrite.
+    source = (
+        "def _guard(depth):\n"
+        "    if depth - 4096 > 0:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("literal 4096" in violation for violation in violations)
+
+
+def test_a_subscript_index_inside_a_comparison_is_not_a_threshold() -> None:
+    # A position is not a magnitude: `words[2]` names the third word of a fixed grammar.
+    source = (
+        "def _guard(words):\n"
+        '    if words[2].literal != "in":\n'
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
+
+
+_TRANSPORT_SOURCE = '''
+def _validate_acyclic_graph(graph, *, refusal):
+    """Reject directed cycles without recursive graph traversal."""
+    active = set()
+    for node in graph:
+        if node in active:
+            raise _MalformedTaintEvidence(refusal)
+
+
+def _validate(graph):
+    _validate_acyclic_graph(
+        graph,
+        refusal=GuardRefusal("taint.demo.cycle", "cannot be structured"),
+    )
+'''
+
+
+def test_fingerprint_tracks_the_declared_transport_that_decides_the_refusal() -> None:
+    # The parameterized cycle detector is a declared transport, so it mints no identifier and is
+    # not an origin. It nonetheless owns the condition that decides its callers' refusals, and
+    # inverting that condition would otherwise leave every caller's record byte-identical.
+    inverted = _TRANSPORT_SOURCE.replace("if node in active:", "if node not in active:")
+
+    original = checker.extract_origin_records(_TRANSPORT_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(inverted, "shell_taint.py")
+
+    assert original[0].origin_id == "taint.demo.cycle"
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_closure_rejects_a_second_origin_reusing_a_classified_identifier(tmp_path: Path) -> None:
+    # Comparing identifier sets alone lets an unwitnessed guard inherit another guard's evidence:
+    # every set-level relation still holds while a brand new fail-closed site ships unclassified.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    module = root / checker.GUARDED_MODULES[1]
+    module.write_text(
+        module.read_text(encoding="utf-8")
+        + "\n\ndef _injected(count, budget):\n"
+        + "    if count > budget.limits.scanner.max_invocations:\n"
+        + "        raise _ShellScanIncomplete(\n"
+        + '            GuardRefusal("scanner.source.character-limit", "x")\n'
+        + "        )\n",
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_closure_violations(root)
+
+    assert any("is constructed at 2 guard origins" in violation for violation in violations)
+
+
+def _base_inputs(root: Path) -> tuple[str, str]:
+    """Return a base snapshot and base registry that match this candidate tree."""
+    snapshot = json.dumps(
+        {
+            "schema": checker.SCHEMA_VERSION,
+            "records": [record.as_json() for record in checker.load_debt_records(root)],
+        }
+    )
+    return snapshot, (_ROOT / checker.REGISTRY_PATH).read_text(encoding="utf-8")
+
+
+def test_compare_against_base_rejects_a_guard_withdrawn_with_its_witness(tmp_path: Path) -> None:
+    # Deleting an origin together with its witness row leaves the closure partition exact and
+    # leaves the debt comparison nothing to inspect, so removal needs its own gate.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    snapshot, registry = _base_inputs(root)
+    module = root / checker.GUARDED_MODULES[1]
+    module.write_text(
+        module.read_text(encoding="utf-8").replace(
+            '"scanner.marker.non-invocation-command"', '"scanner.marker.renamed"', 1
+        ),
+        encoding="utf-8",
+    )
+
+    failures = checker.compare_against_base(root, snapshot, base_registry=registry)
+
+    assert any("scanner.marker.non-invocation-command" in failure for failure in failures)
+
+
+def test_compare_against_base_accepts_a_withdrawal_the_retirement_ledger_records(
+    tmp_path: Path,
+) -> None:
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    snapshot, registry = _base_inputs(root)
+    module = root / checker.GUARDED_MODULES[1]
+    module.write_text(
+        module.read_text(encoding="utf-8").replace(
+            '"scanner.marker.non-invocation-command"', '"scanner.marker.renamed"', 1
+        ),
+        encoding="utf-8",
+    )
+    (root / checker.RETIREMENT_PATH).write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "records": [
+                    {
+                        "origin_id": "scanner.marker.non-invocation-command",
+                        "reason": "renamed with its witness in the same change",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    failures = checker.compare_against_base(root, snapshot, base_registry=registry)
+
+    assert not [f for f in failures if "scanner.marker.non-invocation-command" in f]
+
+
+def test_a_retirement_without_a_reason_is_rejected(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path, [])
+    (root / checker.RETIREMENT_PATH).write_text(
+        json.dumps({"schema": 1, "records": [{"origin_id": "taint.demo.x", "reason": "  "}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="why it was retired"):
+        checker.load_retired_origin_ids(root)
+
+
+def test_the_shipped_tree_retires_nothing_unexpectedly() -> None:
+    assert checker.load_retired_origin_ids(_ROOT) == frozenset()
+
+
+def test_the_base_owned_run_does_not_apply_its_own_allowlists_to_the_candidate(
+    tmp_path: Path,
+) -> None:
+    # This checker is the base revision's copy under `--compare-base`, so its transport, limits and
+    # threshold allowlists describe the base's source. A candidate that adds a boundary, a declared
+    # transport or an inventoried bound edits those allowlists in its own copy, which the base one
+    # cannot see; enforcing them here would reject the change with no fix available inside it, and
+    # on a push to main it would take the release job down with it.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    snapshot, _registry = _base_inputs(root)
+    base = tmp_path / "base.json"
+    base.write_text(snapshot, encoding="utf-8")
+    module = root / checker.GUARDED_MODULES[0]
+    module.write_text(
+        module.read_text(encoding="utf-8")
+        + "\n\ndef _late_boundary(e):\n    return _evaluate(e, TaintLimits())\n",
+        encoding="utf-8",
+    )
+
+    assert any("constructs default limits" in v for v in checker.repository_limits_violations(root))
+    assert checker.main(["--root", str(root), "--compare-base", str(base)]) == 0
+    assert checker.main(["--root", str(root)]) == 1
+
+
+def test_the_base_owned_run_still_enforces_closure(tmp_path: Path) -> None:
+    # Closure names no allowlist: it derives the whole partition from the candidate tree, so it is
+    # the one tree-local property the base-owned run must keep.
+    root = _fake_root(tmp_path, [])
+    snapshot, _registry = _base_inputs(root)
+    base = tmp_path / "base.json"
+    base.write_text(snapshot, encoding="utf-8")
+
+    assert checker.main(["--root", str(root), "--compare-base", str(base)]) == 1
+
+
 def test_emit_debt_derives_the_unclassified_records(tmp_path: Path) -> None:
     root = _fake_root(tmp_path, [])
 

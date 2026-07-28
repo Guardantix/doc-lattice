@@ -86,12 +86,21 @@ jobs:
             echo "resolved=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # A base whose object is missing is not a base that predates the gate: a force-push or a
+          # re-created branch can leave `github.event.before` unreachable, and skipping there would
+          # wave grown debt through with a green job. Only a readable base may reach the path probe
+          # below, whose failure is the one condition that legitimately skips.
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "base $base is not readable in this clone; refusing to skip the comparison" >&2
+            exit 1
+          fi
           # The commit that introduces this gate, and the first push to main after it merges,
           # both have a base that carries neither the checker nor the debt snapshot. There is no
           # earlier debt to compare against, so skip rather than fail. The tree-local closure
           # check in the test suite still runs on every event.
           if ! git cat-file -e "$base:scripts/check_guard_inventory.py" 2>/dev/null \
-            || ! git cat-file -e "$base:tests/fixtures/shell_guard_debt.json" 2>/dev/null; then
+            || ! git cat-file -e "$base:tests/fixtures/shell_guard_debt.json" 2>/dev/null \
+            || ! git cat-file -e "$base:tests/guard_witnesses.py" 2>/dev/null; then
             echo "base $base predates the guard inventory gate; skipping the comparison"
             echo "resolved=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -108,6 +117,10 @@ jobs:
             > "$RUNNER_TEMP/base/check_guard_inventory.py"
           git show "$BASE_SHA:tests/fixtures/shell_guard_debt.json" \
             > "$RUNNER_TEMP/base/shell_guard_debt.json"
+          # The base's classified inventory, so a guard withdrawn together with its witness row is
+          # visible to the comparison rather than leaving an intact partition behind.
+          git show "$BASE_SHA:tests/guard_witnesses.py" \
+            > "$RUNNER_TEMP/base/guard_witnesses.py"
       - name: Reject fail-closed guard debt the base did not already carry
         if: steps.base.outputs.resolved != ''
         # The checker is the base revision's copy and the candidate tree is only its input, so a
@@ -117,7 +130,8 @@ jobs:
           uv run --python 3.13 --no-project python \
             "$RUNNER_TEMP/base/check_guard_inventory.py" \
             --root . \
-            --compare-base "$RUNNER_TEMP/base/shell_guard_debt.json"
+            --compare-base "$RUNNER_TEMP/base/shell_guard_debt.json" \
+            --base-registry "$RUNNER_TEMP/base/guard_witnesses.py"
 
   release:
     name: Release

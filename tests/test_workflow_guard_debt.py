@@ -72,6 +72,24 @@ def test_guard_debt_runs_the_base_owned_checker_against_the_candidate_tree() -> 
     assert "--root ." in script
 
 
+def test_guard_debt_reads_the_base_classified_inventory_as_well_as_its_debt() -> None:
+    # Without the base's witness registry, a guard deleted together with its witness row leaves an
+    # intact partition and an untouched debt snapshot, so nothing reports the withdrawal.
+    script = _job_text()
+
+    assert "tests/guard_witnesses.py" in script
+    assert "--base-registry" in script
+
+
+def test_guard_debt_fails_rather_than_skips_when_the_base_object_is_unreadable() -> None:
+    # A force-push or a re-created branch can leave `github.event.before` unreachable. Skipping
+    # there would wave grown fail-closed guard debt through with a green job and a cut release.
+    script = _job_text()
+
+    assert 'git cat-file -e "$base^{commit}"' in script
+    assert "refusing to skip the comparison" in script
+
+
 def test_guard_debt_tolerates_a_base_that_predates_the_gate() -> None:
     # The commit that introduces the gate has a base with no checker and no debt snapshot, and so
     # does the first push to main after it merges. `git show` would fail there under

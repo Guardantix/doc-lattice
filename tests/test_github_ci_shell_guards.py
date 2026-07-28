@@ -175,6 +175,13 @@ def test_every_invariant_witness_carries_a_rationale() -> None:
         assert witness.boundary_script.strip(), witness.origin_id
 
 
+def test_an_invariant_witness_cannot_omit_its_boundary_evidence_predicate() -> None:
+    # A permissive default would satisfy the boundary-evidence assertion for any script at all,
+    # which is the vacuous-classification hole that predicate exists to close.
+    with pytest.raises(TypeError):
+        InvariantWitness("taint.demo.x", "rationale", "echo hi")  # ty: ignore[missing-argument]
+
+
 def test_shipped_guard_modules_use_only_canonical_refusal_shapes() -> None:
     assert checker.repository_shape_violations(_ROOT) == ()
 

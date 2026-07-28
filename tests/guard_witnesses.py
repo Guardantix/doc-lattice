@@ -60,19 +60,20 @@ class InvariantWitness:
         rationale: Why no authored input can satisfy the guard's condition. Non-empty.
         boundary_script: Authored input that drives the same validation to its nearest reachable
             state, so a change that makes the origin reachable shows up as a changed outcome.
+        boundary_evidence: Predicate over the evidence the boundary script produces, asserting it
+            actually contains the structure this guard inspects. Required, and deliberately without
+            a default: a permissive default would restore the hole this field closes, because these
+            guards sit in validators that run for every scan, so "the condition was evaluated"
+            holds even for a script that builds nothing for it to inspect.
         boundary_guard_id: Guard origin the boundary script must report, or `None` when it
             certifies.
-        boundary_evidence: Predicate over the evidence the boundary script produces, asserting it
-            actually contains the structure this guard inspects. Without it a boundary row is
-            prose: these guards sit in validators that run for every scan, so "the condition was
-            evaluated" holds even for a script that builds nothing for it to inspect.
     """
 
     origin_id: str
     rationale: str
     boundary_script: str
+    boundary_evidence: Callable[[Any], bool]
     boundary_guard_id: str | None = None
-    boundary_evidence: Callable[[Any], bool] = lambda _evidence: True
 
 
 _EVIDENCE_SELF_CHECK = (
