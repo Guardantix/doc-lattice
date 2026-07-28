@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Extract and gate the CI shell scanner's fail-closed guard origins.
 
-Every fail-closed guard in `shell_taint.py` and `shell_scanner.py` has one *origin*: the site
-that detects the condition and constructs a `GuardRefusal`. This module reads those two modules
-as inert source text, never importing them, and produces one canonical record per origin.
+Every fail-closed guard below the CI scanner's guard package has one *origin*: the site that
+detects the condition and constructs a `GuardRefusal`. This module reads that package as inert
+source text, never importing it, and produces one canonical record per origin.
 
 It enforces three separable properties:
 
 1. **Canonical refusal shapes.** A refusal may only reach an exception, a `ShellScanResult`, or a
-   verdict return as a `GuardRefusal` construction with a literal identifier, or as one of the
-   explicitly declared transports. Raw text, interpolated text, and `(refused, reason)` tuple
-   returns are rejected, so a future change cannot reintroduce a text-only refusal.
+   verdict return as a `GuardRefusal` construction with a literal identifier and literal reason,
+   or as one of the explicitly declared transports. Raw text, executable reason expressions and
+   arbitrary verdict expressions are rejected, so a future change cannot bypass construction of
+   the discriminated value.
 2. **Tree-local closure.** Source origin identifiers must partition exactly into the classified
    inventory and the frozen rollout debt set, with the two disjoint.
 3. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
@@ -40,7 +41,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -62,10 +63,10 @@ GUARDED_MODULES = (
 GUARD_MODULE_ROOT = "src/doc_lattice/github_ci"
 """The package every guarded module lives in.
 
-`GUARDED_MODULES` is hand-maintained, and every rule here iterates it: a guard added in a module
-outside that tuple is invisible to all of them, so nothing would report that a fail-closed guard
-shipped unclassified. `repository_coverage_violations` derives the real set from this package and
-rejects the omission instead."""
+The base-owned closure and comparison discover refusing modules recursively from the candidate
+tree, so a candidate can add a guarded module that the protected base tuple could not have named.
+`GUARDED_MODULES` remains the candidate-owned allowlist for shape, limits and threshold checks;
+`repository_coverage_violations` rejects any discovered module omitted from that tuple."""
 
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 RETIREMENT_PATH = "tests/fixtures/shell_guard_retirements.json"
@@ -84,6 +85,7 @@ CLASSIFICATION_REGISTRIES = {
 }
 
 REFUSAL_CONSTRUCTOR = "GuardRefusal"
+REASON_ARGUMENT_INDEX = 1
 REFUSAL_EXCEPTIONS = frozenset(
     {"_TaintLimitExceeded", "_MalformedTaintEvidence", "_ShellScanIncomplete"}
 )
@@ -96,6 +98,8 @@ DECLARED_TRANSPORTS = frozenset(
         # The parameterized cycle detector refuses on behalf of whichever caller supplied the
         # origin refusal, so the callers are the origins and this site only propagates.
         ("shell_taint.py", "_validate_acyclic_graph", "refusal"),
+        # The taint boundary projects the refusal caught from an internal evidence or limits error.
+        ("shell_taint.py", "analyze_marker_taint", "error.refusal"),
         # The taint verdict crosses into the scanner already discriminated.
         ("shell_scanner.py", "_ShellScanner.scan", "verdict"),
         # Brace-limit refusals are deferred on the word and re-raised once the word's role is
@@ -162,6 +166,20 @@ def _called_name(node: ast.AST) -> str | None:
     return None
 
 
+def _referenced_name(node: ast.AST) -> str | None:
+    """Return the final component of a bare or attribute-qualified reference."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_string_literal(node: ast.AST) -> bool:
+    """Return whether this node is a direct string literal."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
 def _rebinding_targets(node: ast.AST) -> tuple[str | None, list[ast.expr]]:
     """Return the constructor spelling a binding reads and the names it binds it to.
 
@@ -190,27 +208,27 @@ def _rebinding_targets(node: ast.AST) -> tuple[str | None, list[ast.expr]]:
             return None, []
 
 
-def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
-    """Return every local name this module binds to the refusal constructor.
+def _constructor_names(tree: ast.AST, constructors: frozenset[str]) -> frozenset[str]:
+    """Return every local name this module binds to one of these constructors.
 
-    Recognition is by name everywhere in this module, so an import alias or a module-level
-    rebinding would otherwise mint a guard no rule can see. A verdict return is the specific hole
-    that leaves open: the carrier rules reject an unrecognized transport handed to an exception or
-    a result, but `return GR(...)` is a well-formed verdict, so an aliased origin there is absent
-    from the inventory while every partition still looks exact.
+    Recognition is by name everywhere in this module, so import aliases and module-level
+    rebindings must participate in every constructor-specific rule. Otherwise an aliased refusal
+    can disappear from the inventory, an aliased verdict can be rejected despite being canonical,
+    or an aliased limits factory can silently mint a fresh production budget.
 
     Args:
         tree: Parsed module.
+        constructors: Canonical constructor names to follow through imports and rebindings.
 
     Returns:
-        The canonical constructor name together with every alias bound to it.
+        The canonical constructor names together with every alias bound to one of them.
     """
-    names = {REFUSAL_CONSTRUCTOR}
+    names = set(constructors)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Import | ast.ImportFrom):
             continue
         for alias in node.names:
-            if alias.asname is not None and alias.name.rsplit(".", 1)[-1] == REFUSAL_CONSTRUCTOR:
+            if alias.asname is not None and alias.name.rsplit(".", 1)[-1] in constructors:
                 names.add(alias.asname)
     grew = True
     while grew:
@@ -224,6 +242,11 @@ def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
                 names |= rebound
                 grew = True
     return frozenset(names)
+
+
+def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
+    """Return every local name this module binds to the refusal constructor."""
+    return _constructor_names(tree, frozenset({REFUSAL_CONSTRUCTOR}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,8 +278,9 @@ class OriginRecord:
             with operator-facing reason text normalized away, the shapes of the same-scope
             statements that write what the condition and any enclosing loop's iterable read, the
             headers of those enclosing loops, the shape of any declared transport the origin
-            statement hands its refusal to, and, for an origin with no guarding test, the
-            same-scope control flow that decides whether it is reached.
+            statement hands its refusal to, the same-scope control flow that decides whether it is
+            reached and the writers feeding that flow, and any `try` body whose handler contains
+            the origin.
     """
 
     origin_id: str
@@ -419,13 +443,18 @@ def _normalized_shape(statement: ast.stmt) -> str:
     """Return the statement's structure with operator-facing reason text removed.
 
     Rewording a refusal's message is not a semantic change to the guard, so the reason argument is
-    dropped before hashing. Everything else about the origin statement is retained.
+    replaced with an empty literal before hashing. Only literal reason text is normalized;
+    executable expressions and every other part of the origin statement are retained.
     """
     clone = copy.deepcopy(statement)
     for node in ast.walk(clone):
-        if _called_name(node) == REFUSAL_CONSTRUCTOR and isinstance(node, ast.Call):
-            node.args = node.args[:1]
-            node.keywords = []
+        if (
+            _called_name(node) == REFUSAL_CONSTRUCTOR
+            and isinstance(node, ast.Call)
+            and len(node.args) > REASON_ARGUMENT_INDEX
+            and _is_string_literal(node.args[REASON_ARGUMENT_INDEX])
+        ):
+            node.args[REASON_ARGUMENT_INDEX] = ast.Constant(value="")
     return ast.dump(clone, include_attributes=False)
 
 
@@ -914,7 +943,9 @@ def _reachability_shapes(
     forces the regeneration this gate exists to prevent.
 
     The scope is the enclosing function, the same boundary `_condition_writer_shapes` uses and for
-    the same reason.
+    the same reason. The returned controls include the transitive writer closure of every value
+    they read, so replacing a value that a preceding branch or loop tests also moves the
+    fingerprint.
 
     Args:
         origin: The statement that constructs the refusal, hashed separately.
@@ -936,10 +967,19 @@ def _reachability_shapes(
         if (statement.lineno, statement.col_offset) < position or id(statement) in repeated
     ]
     statements.sort(key=lambda statement: (statement.lineno, statement.col_offset))
-    return tuple(
-        shape
+    diverting: list[tuple[ast.stmt, str]] = [
+        (statement, shape)
         for statement in statements
         if (shape := _diverting_shape(statement, cache)) is not None
+    ]
+    read: set[str] = set()
+    values: set[str] = set()
+    for statement, _shape in diverting:
+        read |= _statement_reads(statement)
+        values |= _statement_value_reads(statement)
+    return (
+        *(shape for _statement, shape in diverting),
+        *_writer_closure(origin, scope, read, values, cache),
     )
 
 
@@ -980,14 +1020,14 @@ def _raising_operation_shapes(
     guarded: tuple[ast.stmt, ...],
     cache: _DerivationCache,
 ) -> tuple[str, ...]:
-    """Return the shapes of the operation a test-free handler guards, and what configures it.
+    """Return the shapes of the operation an exception handler guards, and what configures it.
 
-    A guard reached through an `except` handler has no condition of its own. What decides whether
-    it fires is the operation in the `try` body and the object state that operation reads, and the
-    control-flow closure records a `try` only through its handled exception types, so neither was
-    in the record. `taint.eval-payload.lex-error` is the concrete case: reconfiguring the `shlex`
-    lexer so an unterminated quote tokenizes cleanly withdraws the guard, and rewriting the
-    tokenizing call itself withdraws it too, both with every fingerprint in the tree unchanged.
+    Whether or not the guard has a nested condition of its own, what decides whether its handler is
+    entered is the operation in the `try` body and the object state that operation reads. The
+    control-flow closure records a `try` only through its handled exception types, so neither would
+    otherwise be in the record. `taint.eval-payload.lex-error` is the concrete case: reconfiguring
+    the `shlex` lexer so an unterminated quote tokenizes cleanly withdraws the guard, and rewriting
+    the tokenizing call itself withdraws it too.
 
     The writer closure is the same one a guarded origin gets, seeded from what the guarded body
     reads rather than from what a condition reads, and bounded by the same enclosing function.
@@ -1102,6 +1142,10 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         origin_id = call.args[0].value
         if not isinstance(origin_id, str):
             raise ValueError(f"{path}: guard identifier must be a string literal")
+        if len(call.args) <= REASON_ARGUMENT_INDEX or not _is_string_literal(
+            call.args[REASON_ARGUMENT_INDEX]
+        ):
+            raise ValueError(f"{path}: guard reason must be a string literal")
         qualname = annotations.names.get(id(statement), "")
         condition = annotations.conditions.get(id(statement), "")
         scope = annotations.scopes.get(id(statement))
@@ -1120,12 +1164,11 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         # describes only what the guard refuses once control arrives. One reached through a handler
         # records in addition the operation whose failure is the only condition it has.
         flow = _reachability_shapes(statement, scope, cache)
-        raising = (
-            ()
-            if tests
-            else _raising_operation_shapes(
-                statement, scope, guarded_bodies.get(id(statement), ()), cache
-            )
+        raising = _raising_operation_shapes(
+            statement,
+            scope,
+            guarded_bodies.get(id(statement), ()),
+            cache,
         )
         called = {name for node in _own_expressions(statement) if (name := _called_name(node))}
         carried = tuple(shape for name, shape in sorted(transports.items()) if name in called)
@@ -1147,8 +1190,18 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
 
 
-def _is_refusal_shape(node: ast.expr, names: frozenset[str]) -> bool:
-    return _called_name(node) in names | GUARD_FREE_VERDICTS
+def _is_guard_refusal_shape(node: ast.expr, names: frozenset[str]) -> bool:
+    """Return whether this expression directly constructs a guard refusal."""
+    return _called_name(node) in names
+
+
+def _is_verdict_shape(
+    node: ast.expr,
+    names: frozenset[str],
+    guard_free_names: frozenset[str],
+) -> bool:
+    """Return whether this expression directly constructs a discriminated scan verdict."""
+    return _called_name(node) in names | guard_free_names
 
 
 def _is_raw_text(node: ast.expr) -> bool:
@@ -1168,8 +1221,31 @@ def _literal_id_violations(tree: ast.AST, path: str, names: frozenset[str]) -> l
     ]
 
 
+def _literal_reason_violations(tree: ast.AST, path: str, names: frozenset[str]) -> list[str]:
+    """Return a violation for every origin whose operator reason is not literal text."""
+    return [
+        f"{path}: {REFUSAL_CONSTRUCTOR} reason must be a string literal"
+        for call in _guard_refusal_calls(tree, names)
+        if len(call.args) <= REASON_ARGUMENT_INDEX
+        or not _is_string_literal(call.args[REASON_ARGUMENT_INDEX])
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _ShapeConstructors:
+    """Constructor spellings recognized while validating refusal and verdict shapes."""
+
+    refusals: frozenset[str]
+    exceptions: frozenset[str]
+    results: frozenset[str]
+    guard_free_verdicts: frozenset[str]
+
+
 def _refusal_carrier_violations(
-    tree: ast.AST, qualnames: dict[int, str], path: str, names: frozenset[str]
+    tree: ast.AST,
+    qualnames: dict[int, str],
+    path: str,
+    constructors: _ShapeConstructors,
 ) -> list[str]:
     """Return a violation for every refusal carried as text or as an undeclared transport."""
     violations: list[str] = []
@@ -1177,18 +1253,28 @@ def _refusal_carrier_violations(
         called = _called_name(node)
         if called is None or not isinstance(node, ast.Call):
             continue
-        if called in REFUSAL_EXCEPTIONS:
+        if called in constructors.exceptions:
             candidates = [*node.args, *(keyword.value for keyword in node.keywords)]
-        elif called == RESULT_CONSTRUCTOR:
+            refusal_only = True
+        elif called in constructors.results:
             candidates = [
                 *node.args[1:],
                 *(keyword.value for keyword in node.keywords if keyword.arg != "invocations"),
             ]
+            refusal_only = False
         else:
             continue
         qualname = qualnames.get(id(node), "")
         for argument in candidates:
-            if _is_refusal_shape(argument, names):
+            if (
+                _is_guard_refusal_shape(argument, constructors.refusals)
+                if refusal_only
+                else _is_verdict_shape(
+                    argument,
+                    constructors.refusals,
+                    constructors.guard_free_verdicts,
+                )
+            ):
                 continue
             if _is_raw_text(argument):
                 violations.append(
@@ -1205,23 +1291,50 @@ def _refusal_carrier_violations(
     return violations
 
 
-def _verdict_return_violations(tree: ast.AST, path: str) -> list[str]:
-    """Return a violation for every verdict function that still returns a text-only refusal."""
+def _verdict_return_violations(
+    tree: ast.AST,
+    qualnames: dict[int, str],
+    path: str,
+    constructors: _ShapeConstructors,
+) -> list[str]:
+    """Return a violation for every non-discriminated verdict return."""
     violations: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, _SCOPES) or node.name not in VERDICT_FUNCTIONS:
             continue
-        for statement in ast.walk(node):
+        for statement in _scope_statements(node):
             if not isinstance(statement, ast.Return) or statement.value is None:
                 continue
-            if isinstance(statement.value, ast.Tuple):
+            value = statement.value
+            qualname = qualnames.get(id(statement), node.name)
+            if node.name == "analyze_marker_taint":
+                called = _called_name(value)
+                allowed = (
+                    called in constructors.refusals | constructors.guard_free_verdicts
+                    or (
+                        path,
+                        qualname,
+                        ast.unparse(value),
+                    )
+                    in DECLARED_TRANSPORTS
+                )
+            else:
+                allowed = _called_name(value) in constructors.results
+            if allowed:
+                continue
+            if isinstance(value, ast.Tuple):
                 violations.append(
                     f"{path}:{node.name} returns a tuple verdict; return a discriminated "
                     f"verdict so guard identity survives"
                 )
-            elif _is_raw_text(statement.value):
+            elif _is_raw_text(value):
                 violations.append(
                     f"{path}:{node.name} returns raw refusal text; return a discriminated verdict"
+                )
+            else:
+                violations.append(
+                    f"{path}:{node.name} returns an undeclared verdict shape "
+                    f"{ast.unparse(value)!r}; construct the discriminated verdict directly"
                 )
     return violations
 
@@ -1238,11 +1351,27 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     """
     tree = ast.parse(source)
     qualnames = _annotate(tree).names
-    names = _refusal_constructor_names(tree)
+    constructors = _ShapeConstructors(
+        refusals=_refusal_constructor_names(tree),
+        exceptions=_constructor_names(tree, REFUSAL_EXCEPTIONS),
+        results=_constructor_names(tree, frozenset({RESULT_CONSTRUCTOR})),
+        guard_free_verdicts=_constructor_names(tree, GUARD_FREE_VERDICTS),
+    )
     return (
-        *_literal_id_violations(tree, path, names),
-        *_refusal_carrier_violations(tree, qualnames, path, names),
-        *_verdict_return_violations(tree, path),
+        *_literal_id_violations(tree, path, constructors.refusals),
+        *_literal_reason_violations(tree, path, constructors.refusals),
+        *_refusal_carrier_violations(
+            tree,
+            qualnames,
+            path,
+            constructors,
+        ),
+        *_verdict_return_violations(
+            tree,
+            qualnames,
+            path,
+            constructors,
+        ),
     )
 
 
@@ -1298,8 +1427,27 @@ FIXED_SEMANTIC_BOUNDS = {
 authorable, so its guard is witnessed without shrinking anything."""
 
 
+def _defaulted_arguments(scope: ast.AST) -> tuple[tuple[ast.arg, ast.expr], ...]:
+    """Return one function's positional and keyword-only arguments that carry defaults."""
+    if not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+        return ()
+    arguments = scope.args
+    positional = arguments.posonlyargs + arguments.args
+    offset = len(positional) - len(arguments.defaults)
+    defaulted = list(zip(positional[offset:], arguments.defaults, strict=True))
+    defaulted.extend(
+        (argument, default)
+        for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True)
+        if default is not None
+    )
+    return tuple(defaulted)
+
+
 def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every limits construction or optional limits parameter away from a boundary.
+
+    Direct calls, constructor import aliases and rebindings, and dataclass `default_factory`
+    references all construct limits for this purpose.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -1310,10 +1458,23 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
     """
     tree = ast.parse(source)
     names = _annotate(tree).names
+    limit_names = _constructor_names(tree, LIMITS_CONSTRUCTORS)
     violations: list[str] = []
 
     for node in ast.walk(tree):
-        if _called_name(node) not in LIMITS_CONSTRUCTORS or not isinstance(node, ast.Call):
+        if not isinstance(node, ast.Call):
+            continue
+        direct = _called_name(node) in limit_names
+        default_factory = next(
+            (
+                keyword.value
+                for keyword in node.keywords
+                if _called_name(node) == "field" and keyword.arg == "default_factory"
+            ),
+            None,
+        )
+        indirect = default_factory is not None and _referenced_name(default_factory) in limit_names
+        if not direct and not indirect:
             continue
         qualname = names.get(id(node), "")
         if (path, qualname.split(".")[0] if qualname else "") in LIMITS_BOUNDARIES:
@@ -1322,7 +1483,7 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
             continue
         # A configured construction is as dangerous as a default one: it restores production-scale
         # caps under a shrunk scan budget, which is the failure this rule exists to prevent.
-        spelling = "default limits" if not (node.args or node.keywords) else "limits"
+        spelling = "default limits" if indirect or not (node.args or node.keywords) else "limits"
         violations.append(
             f"{path}:{qualname or '<module>'} constructs {spelling}; accept the scan's limits "
             f"instead so a shrunk cap reaches this guard"
@@ -1334,16 +1495,7 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
         qualname = names.get(id(node), node.name)
         if (path, qualname) in LIMITS_BOUNDARIES:
             continue
-        arguments = node.args
-        positional = arguments.posonlyargs + arguments.args
-        offset = len(positional) - len(arguments.defaults)
-        defaulted = list(zip(positional[offset:], arguments.defaults, strict=True))
-        defaulted += [
-            (argument, default)
-            for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True)
-            if default is not None
-        ]
-        for argument, default in defaulted:
+        for argument, default in _defaulted_arguments(node):
             if argument.arg == "limits" and default is not None:
                 violations.append(
                     f"{path}:{qualname} must require limits; an optional limits parameter lets a "
@@ -1394,11 +1546,11 @@ def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
 def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
     """Return the scope's own names bound to a magnitude that is not structural.
 
-    A cap spelled as a local binding has the provenance problem a module-level one has: `limit =
-    100` read by a guard condition is a resource bound with nothing recording where it came from,
-    and it is invisible to both the module-constant set and the naming convention. Zero and one are
-    excluded for the reason `STRUCTURAL_GUARD_LITERALS` gives, so a counter seeded at zero is not
-    mistaken for a threshold.
+    A cap spelled as a local assignment or parameter default has the provenance problem a
+    module-level one has: `limit = 100` and `def scan(limit=100)` both create resource bounds with
+    nothing recording where they came from, and both are invisible to the module-constant set and
+    naming convention. Zero and one are excluded for the reason `STRUCTURAL_GUARD_LITERALS` gives,
+    so a counter seeded at zero is not mistaken for a threshold.
 
     Args:
         scope: Enclosing function, or `None` at class or module level.
@@ -1409,6 +1561,9 @@ def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
     if scope is None:
         return frozenset()
     names: set[str] = set()
+    for argument, default in _defaulted_arguments(scope):
+        if _operand_magnitudes(default) - STRUCTURAL_GUARD_LITERALS:
+            names.add(argument.arg)
     for statement in _scope_statements(scope):
         if isinstance(statement, ast.Assign):
             targets: list[ast.expr] = list(statement.targets)
@@ -1558,8 +1713,23 @@ def repository_threshold_violations(root: Path) -> tuple[str, ...]:
     return tuple(violations)
 
 
+def _repository_refusing_modules(root: Path) -> tuple[str, ...]:
+    """Return every module below the guard package that constructs a refusal.
+
+    This derivation is used by the base-owned closure and comparison. Reading the base checker's
+    `GUARDED_MODULES` there would make a candidate module invisible even after the candidate adds it
+    to its own tuple, because the protected base copy necessarily predates that edit.
+    """
+    modules: list[str] = []
+    for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if _guard_refusal_calls(tree):
+            modules.append(path.relative_to(root).as_posix())
+    return tuple(modules)
+
+
 def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
-    """Return every guard origin record in the repository's guarded modules.
+    """Return every guard origin record discovered recursively in the guard package.
 
     Args:
         root: Repository root to read the guarded modules from.
@@ -1568,7 +1738,7 @@ def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
         Records ordered by identifier across all guarded modules.
     """
     records: list[OriginRecord] = []
-    for module in GUARDED_MODULES:
+    for module in _repository_refusing_modules(root):
         source = (root / module).read_text(encoding="utf-8")
         records.extend(extract_origin_records(source, Path(module).name))
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
@@ -1606,15 +1776,8 @@ def repository_coverage_violations(root: Path) -> tuple[str, ...]:
     """
     guarded = set(GUARDED_MODULES)
     violations: list[str] = []
-    # The walk is recursive: a guard added under a subpackage of this root is exactly as invisible
-    # to `GUARDED_MODULES` as one added beside it, and a rule that only listed the top level would
-    # be satisfied by moving the module one directory down.
-    for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
-        module = path.relative_to(root).as_posix()
+    for module in _repository_refusing_modules(root):
         if module in guarded:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if not _guard_refusal_calls(tree):
             continue
         violations.append(
             f"{module} constructs a {REFUSAL_CONSTRUCTOR} but is not in GUARDED_MODULES; add it "

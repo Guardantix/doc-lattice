@@ -67,14 +67,17 @@ pinned yet.
 
 `scripts/check_guard_inventory.py` gates fail-closed guard identity, described by AD-20 in
 [ARCHITECTURE.md](ARCHITECTURE.md). Every guard origin constructs a `GuardRefusal` with a literal
-identifier, and `tests/guard_witnesses.py` classifies each one by carrying executable evidence: a
-script that reaches it through the public scan path, or a rationale plus a boundary script.
-Anything unclassified is frozen in `tests/fixtures/shell_guard_debt.json`, which may only shrink.
+identifier and literal reason, and `tests/guard_witnesses.py` classifies each one by carrying
+executable evidence: a script that reaches it through the public scan path, or a rationale plus a
+boundary script. Anything unclassified is frozen in `tests/fixtures/shell_guard_debt.json`, which
+may only shrink.
 
-When you add or move a guard, add its classification to `tests/guard_witnesses.py`. Regenerate the
-debt snapshot only when a guard legitimately moves, never to silence a new one: CI runs the base
-revision's copy of the checker against your tree and rejects any record the base did not carry.
-When you remove a guard, record the identifier and the reason in
+When you add or move a guard, add its classification to `tests/guard_witnesses.py`; when adding its
+module, add that module to `GUARDED_MODULES` too. The base-owned comparison discovers guarded
+modules recursively from the candidate tree, so an older base checker can validate the new origin.
+Regenerate the debt snapshot only when a guard legitimately moves, never to silence a new one: CI
+runs the base revision's copy of the checker against your tree and rejects any record the base did
+not carry. When you remove a guard, record the identifier and the reason in
 `tests/fixtures/shell_guard_retirements.json`; that same base-owned run rejects an origin the base
 classified or froze that your tree no longer constructs.
 

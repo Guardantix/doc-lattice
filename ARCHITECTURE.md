@@ -829,16 +829,22 @@ guards that enforce them: default `TaintLimits()` signatures and silent fresh-de
 meant a shrunk full-pipeline budget never reached several bounds, so no cheap test could exercise
 them.
 **Decision:** Every fail-closed guard has one *origin*, the site that detects the condition, and
-that origin constructs an immutable `GuardRefusal(origin_id, reason)`.
+that origin constructs an immutable `GuardRefusal(origin_id, reason)`. Both arguments are direct
+string literals. The reason text is normalized out of a fingerprint so wording can change without
+churn, but an executable expression is rejected rather than normalized: evaluating
+`compute_reason()` can fail before the refusal exists and silently withdraw the guard.
 
-Identity is origin identity, never transport identity. The exceptions accept only a `GuardRefusal`,
-so a refusal cannot be spelled as text; handlers, deferred fields and result projections carry the
-same object through. `analyze_marker_taint` returns a discriminated `Certified | MarkerDetected |
-GuardRefusal`, and `ShellScanResult` stores that verdict as its one authoritative field with
-`incomplete_reason` and `guard_id` derived from it, so operator text and guard identity cannot
-drift. `MarkerDetected` stays guard-identity-free: it reports the analysis's conclusion about the
-script rather than a bound that stopped the analysis. The `ConfigError` wording operators see is
-unchanged.
+Identity is origin identity, never transport identity. Refusal exceptions accept only a direct
+`GuardRefusal` or a declared refusal transport, never a guard-free verdict such as `Certified`;
+handlers, deferred fields and result projections carry the same refusal object through.
+`analyze_marker_taint` returns only a direct discriminated `Certified | MarkerDetected |
+GuardRefusal` construction or a declared transport, and the scan boundary similarly returns a
+`ShellScanResult`. Every return expression is validated, not only tuples and text, so a name,
+concatenation or arbitrary call cannot replace construction of the inventoried verdict.
+`ShellScanResult` stores that verdict as its one authoritative field with `incomplete_reason` and
+`guard_id` derived from it, so operator text and guard identity cannot drift. `MarkerDetected`
+stays guard-identity-free: it reports the analysis's conclusion about the script rather than a
+bound that stopped the analysis. The `ConfigError` wording operators see is unchanged.
 
 Guard identifiers are semantic and stable. They encode neither line numbers nor user-facing text,
 so rewording a refusal message is not an identity change. One identifier names one origin: a second
@@ -847,33 +853,39 @@ so the inventory rejects it. Every rule that recognizes a construction recognize
 whether it is spelled bare or through the module that defines it, and the names it answers to
 include every alias the module binds the constructor to, whether that binding names it bare or
 through the module that defines it, because an aliased construction in a verdict return is a
-well-formed verdict that no carrier rule would reject. The set of modules those rules read is
-derived from the guard package rather than trusted from a hand-maintained list, and derived
-recursively: a guard added in an uninventoried module leaves every partition exact, so nothing else
-would report that a fail-closed guard shipped with no witness, and a module one directory down is
-exactly as uninventoried as one beside it.
+well-formed verdict that no carrier rule would reject. The base-owned closure and comparison derive
+the set of refusing modules recursively from the candidate guard package rather than from the base
+revision's hand-maintained list. A candidate can therefore add a guarded module, classify its
+origins and add it to its own allowlist without being rejected as stale by an older base checker.
+The candidate-owned coverage rule still compares that discovered set with `GUARDED_MODULES`,
+because shape, limits and threshold rules use that allowlist. A guard added in an omitted module
+would otherwise skip those rules, and a module one directory down is exactly as omitted as one
+beside it.
 
 One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
 content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
 the children that already share the budget share exactly one limits value. `limits` is required on
-every internal limit-aware helper. Every threshold a guard references is either a field of that
-value or an inventoried fixed semantic bound with a recorded rationale, the latter reserved for
-quantities that are directly authorable rather than resource budgets. A threshold is recognized
-structurally rather than by naming convention: any numeric constant a guard references, whether the
-module binds it or its own function does, and any bare numeric magnitude it compares against,
-arithmetic in the operand included, so `depth - 4096 > 0` is the same uninventoried cap as
-`depth > 4096`. Arithmetic counts on the binding side too: `_MAX_ITEMS = 50 * 2` caps a guard
-exactly as the bare literal does, and recognizing only bare literals let the computed spelling
-escape both halves at once, since a module-bound name is also exempt from the naming-convention
-check. A local binding is covered for the same reason, having neither a module binding nor a
-convention to fall back on. The search covers the writers feeding a guard's condition as well as
-the condition itself, the same closure the fingerprint records, because a comparison computed one
-statement earlier caps the scan exactly as an inline one does: `too_many = len(items) > 100`
-followed by `if too_many` leaves the magnitude nowhere the condition can see it, so reading the
-condition alone let any new bound ship by taking one hop away from the guard. Zero and one are
-exempt because they spell emptiness and arity rather than a magnitude, which is also what keeps a
-counter seeded at zero from reading as a threshold, and a subscript index is a position rather than
-a magnitude.
+every internal limit-aware helper. A limits construction is recognized through import aliases and
+module rebindings as well as its canonical spelling, including a constructor reference passed to a
+dataclass `field(default_factory=...)`; either form creates fresh production limits at runtime.
+Every threshold a guard references is either a field of that value or an inventoried fixed semantic
+bound with a recorded rationale, the latter reserved for quantities that are directly authorable
+rather than resource budgets. A threshold is recognized structurally rather than by naming
+convention: any numeric constant a guard references, whether the module binds it, its function
+assigns it, or a positional-only, positional or keyword-only parameter defaults to it, and any bare
+numeric magnitude it compares against, arithmetic in the operand included, so
+`depth - 4096 > 0` is the same uninventoried cap as `depth > 4096`. Arithmetic counts on the
+binding side too: `_MAX_ITEMS = 50 * 2` caps a guard exactly as the bare literal does, and
+recognizing only bare literals let the computed spelling escape both halves at once, since a
+module-bound name is also exempt from the naming-convention check. A local assignment or parameter
+default is covered for the same reason, having neither a module binding nor a convention to fall
+back on. The search covers the writers feeding a guard's condition as well as the condition itself,
+the same closure the fingerprint records, because a comparison computed one statement earlier caps
+the scan exactly as an inline one does: `too_many = len(items) > 100` followed by `if too_many`
+leaves the magnitude nowhere the condition can see it, so reading the condition alone let any new
+bound ship by taking one hop away from the guard. Zero and one are exempt because they spell
+emptiness and arity rather than a magnitude, which is also what keeps a counter seeded at zero from
+reading as a threshold, and a subscript index is a position rather than a magnitude.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
@@ -911,10 +923,11 @@ identifier of its own.
 
 A condition says what a guard refuses once control arrives and nothing about whether control
 arrives, so every record covers in addition the control flow deciding the origin is reached at all:
-each branch test, loop header and diverting statement in its function that can execute before it.
-Diverting execution around a guard withdraws it as completely as inverting its condition, and does
-so without touching the test, the writers or the qualified name. The case for a guard that has a
-test is `scanner.env-option.static-split-string`: it sits behind an earlier
+each branch test, loop header and diverting statement in its function that can execute before it,
+plus the transitive writer closure of every value those controls read. Diverting execution around a
+guard withdraws it as completely as inverting its condition, whether the edit changes the control
+syntax itself or a statement that produces a value the control reads. The case for a guard that has
+a test is `scanner.env-option.static-split-string`: it sits behind an earlier
 `if not literal.startswith("--")` that returns, and dropping the `not` sends every long option down
 the short-option path so the guard can never fire. `scanner.descriptor.unparsable` is the case for
 one that has none: it fires only because the `return int(digits)` in its own `try` body can raise,
@@ -931,8 +944,9 @@ body does not churn a record outside it.
 
 A guard reached through an `except` handler needs more than that flow, because the handled
 exception types are all a `try` contributes to it: what decides whether the handler runs is the
-operation in the `try` body and the object state that operation reads. Such a guard therefore
-records that body and the same-scope closure of what writes what the body reads.
+operation in the `try` body and the object state that operation reads. Every handler origin records
+that body and the same-scope closure of what writes what the body reads, even when the refusal is
+nested beneath an additional test inside the handler.
 `taint.eval-payload.lex-error` is the concrete case: reconfiguring the `shlex` lexer so an
 unterminated quote tokenizes cleanly, or rewriting the tokenizing call to one that cannot raise,
 each withdraws the guard, and both left every fingerprint in the tree unchanged. Object

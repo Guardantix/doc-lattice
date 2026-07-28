@@ -8108,7 +8108,6 @@ _EVAL_UNICODE_MAX = 0x10FFFF
 _EVAL_SURROGATE_MIN = 0xD800
 _EVAL_SURROGATE_MAX = 0xDFFF
 _EVAL_SPECIAL_PARAMETERS = frozenset("@*#?-$!0123456789")
-_EVAL_COMMAND_SUBSTITUTION_REASON = "shell taint eval command substitution cannot be bounded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -8439,7 +8438,7 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
             raise _TaintLimitExceeded(
                 GuardRefusal(
                     "taint.eval-reparse.dollar-command-substitution",
-                    _EVAL_COMMAND_SUBSTITUTION_REASON,
+                    "shell taint eval command substitution cannot be bounded",
                 )
             )
         if character == "`":
@@ -8447,7 +8446,8 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
                 return tuple(tokens), quote, text[index:]
             raise _TaintLimitExceeded(
                 GuardRefusal(
-                    "taint.eval-reparse.backquote-substitution", _EVAL_COMMAND_SUBSTITUTION_REASON
+                    "taint.eval-reparse.backquote-substitution",
+                    "shell taint eval command substitution cannot be bounded",
                 )
             )
         if character == "$":
@@ -8508,7 +8508,8 @@ def _eval_command_substitution_closing(
     if depth > limits.max_eval_reparse_depth:
         raise _TaintLimitExceeded(
             GuardRefusal(
-                "taint.eval-reparse.closing-depth-limit", _EVAL_COMMAND_SUBSTITUTION_REASON
+                "taint.eval-reparse.closing-depth-limit",
+                "shell taint eval command substitution cannot be bounded",
             )
         )
     index = start + 2

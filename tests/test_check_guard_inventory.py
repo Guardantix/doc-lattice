@@ -120,6 +120,15 @@ def test_interpolated_text_exception_is_rejected() -> None:
     assert any("raw refusal text" in violation for violation in violations)
 
 
+@pytest.mark.parametrize("verdict", ["Certified()", "MarkerDetected()"])
+def test_guard_free_verdict_is_rejected_as_a_refusal_exception_payload(verdict: str) -> None:
+    source = f"def f():\n    raise _TaintLimitExceeded({verdict})\n"
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any("carries undeclared transport" in violation for violation in violations)
+
+
 def test_non_literal_guard_id_is_rejected() -> None:
     source = 'def f(name):\n    raise _TaintLimitExceeded(GuardRefusal(name, "reason"))\n'
 
@@ -128,12 +137,45 @@ def test_non_literal_guard_id_is_rejected() -> None:
     assert any("literal" in violation for violation in violations)
 
 
+def test_executable_guard_reason_is_rejected() -> None:
+    source = (
+        "def analyze_marker_taint(evidence):\n"
+        '    return GuardRefusal("taint.demo.reason", compute_reason())\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any("reason must be a string literal" in violation for violation in violations)
+
+
+def test_executable_guard_reason_is_rejected_during_base_owned_extraction() -> None:
+    source = (
+        "def analyze_marker_taint(evidence):\n"
+        '    return GuardRefusal("taint.demo.reason", compute_reason())\n'
+    )
+
+    with pytest.raises(ValueError, match="reason must be a string literal"):
+        checker.extract_origin_records(source, "shell_taint.py")
+
+
 def test_tuple_verdict_return_is_rejected() -> None:
     source = 'def analyze_marker_taint(e):\n    return True, "shell taint edge limit exceeded"\n'
 
     violations = checker.find_shape_violations(source, "shell_taint.py")
 
     assert any("analyze_marker_taint" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["TAINT_REFUSAL_REASON", '"refusal " + "reason"', "_shared_refusal()"],
+)
+def test_arbitrary_taint_verdict_return_is_rejected(expression: str) -> None:
+    source = f"def analyze_marker_taint(evidence):\n    return {expression}\n"
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any("returns an undeclared verdict shape" in violation for violation in violations)
 
 
 def test_text_only_scan_result_is_rejected() -> None:
@@ -145,6 +187,18 @@ def test_text_only_scan_result_is_rejected() -> None:
     violations = checker.find_shape_violations(source, "shell_scanner.py")
 
     assert any("raw refusal text" in violation for violation in violations)
+
+
+def test_scan_boundary_return_must_construct_a_shell_scan_result() -> None:
+    source = (
+        "def scan_doc_lattice_invocations(script):\n"
+        "    verdict = GuardRefusal('scanner.demo.indirect', 'x')\n"
+        "    return verdict\n"
+    )
+
+    violations = checker.find_shape_violations(source, "shell_scanner.py")
+
+    assert any("returns an undeclared verdict shape" in violation for violation in violations)
 
 
 def test_undeclared_transport_is_rejected() -> None:
@@ -166,6 +220,26 @@ def test_canonical_refusal_shapes_are_accepted() -> None:
     )
 
     assert checker.find_shape_violations(source, "shell_taint.py") == ()
+
+
+def test_guard_free_verdict_constructor_alias_is_accepted() -> None:
+    source = (
+        "from doc_lattice.github_ci.shell_guards import Certified as Done\n"
+        "def analyze_marker_taint(evidence):\n"
+        "    return Done()\n"
+    )
+
+    assert checker.find_shape_violations(source, "shell_taint.py") == ()
+
+
+def test_scan_result_constructor_alias_is_accepted() -> None:
+    source = (
+        "Result = ShellScanResult\n"
+        "def scan_doc_lattice_invocations(script):\n"
+        "    return Result((), Certified())\n"
+    )
+
+    assert checker.find_shape_violations(source, "shell_scanner.py") == ()
 
 
 def test_the_shipped_shell_modules_have_no_shape_violations() -> None:
@@ -642,6 +716,18 @@ def test_keyword_spelled_exception_text_is_rejected() -> None:
     assert any("raw refusal text" in violation for violation in violations)
 
 
+def test_refusal_exception_alias_still_rejects_raw_text() -> None:
+    source = (
+        "LimitError = _TaintLimitExceeded\n"
+        "def f():\n"
+        '    raise LimitError("shell taint edge limit exceeded")\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any("raw refusal text" in violation for violation in violations)
+
+
 def test_configured_limits_construction_away_from_a_boundary_is_rejected() -> None:
     # Rejecting only the zero-argument spelling lets a helper restore production-scale caps under
     # a shrunk scan budget.
@@ -850,6 +936,31 @@ def test_raw_refusal_text_spelled_through_a_module_is_rejected() -> None:
 
 def test_limits_construction_spelled_through_a_module_is_rejected() -> None:
     source = "def _helper(e):\n    return _evaluate(e, shell_guards.TaintLimits())\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_limits_construction_spelled_through_an_import_alias_is_rejected() -> None:
+    source = (
+        "from doc_lattice.github_ci.shell_guards import TaintLimits as Limits\n"
+        "def _helper(e):\n"
+        "    return _evaluate(e, Limits())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_rebound_limits_constructor_used_as_a_default_factory_is_rejected() -> None:
+    source = (
+        "Limits = shell_guards.TaintLimits\n"
+        "@dataclass\n"
+        "class _Helper:\n"
+        "    limits: object = field(default_factory=Limits)\n"
+    )
 
     violations = checker.find_limits_violations(source, "shell_taint.py")
 
@@ -1121,6 +1232,10 @@ def test_emit_debt_derives_the_unclassified_records(tmp_path: Path) -> None:
     } - checker.classified_origin_ids(root)
 
 
+def test_checked_in_debt_snapshot_matches_current_derivation() -> None:
+    assert (_ROOT / checker.DEBT_PATH).read_text(encoding="utf-8") == checker.emit_records(_ROOT)
+
+
 _FALL_THROUGH_SOURCE = """
 def _classify(node):
     if isinstance(node, Sequence):
@@ -1240,9 +1355,12 @@ def test_fingerprint_tracks_the_early_return_a_test_free_origin_depends_on() -> 
 def test_reachability_closure_ignores_computation_that_diverts_nothing() -> None:
     # Reducing a branch to its test is what keeps an ordinary edit inside a long function from
     # churning a frozen record that only the surrounding control flow describes.
-    edited = _LOOP_EXHAUSTION_SOURCE.replace("index += 1", "index += 2")
+    original_source = _LOOP_EXHAUSTION_SOURCE.replace(
+        "index += 1", "unrelated = 1\n        index += 1"
+    )
+    edited = original_source.replace("unrelated = 1", "unrelated = 2")
 
-    original = checker.extract_origin_records(_LOOP_EXHAUSTION_SOURCE, "shell_taint.py")
+    original = checker.extract_origin_records(original_source, "shell_taint.py")
     updated = checker.extract_origin_records(edited, "shell_taint.py")
 
     assert original[0].fingerprint == updated[0].fingerprint
@@ -1277,6 +1395,23 @@ def test_fingerprint_tracks_the_diversion_that_precedes_a_guarded_origin() -> No
 
     original = checker.extract_origin_records(_PRECEDING_DIVERSION_SOURCE, "shell_taint.py")
     updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_a_writer_feeding_a_preceding_reachability_test() -> None:
+    source = (
+        "def _guard(run, payload):\n"
+        "    dynamic_run = run.dynamic\n"
+        "    if payload.index is not None or not dynamic_run:\n"
+        "        return None\n"
+        "    if payload.active:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.alternate", "x"))\n'
+    )
+    bypassed = source.replace("dynamic_run = run.dynamic", "dynamic_run = False")
+
+    original = checker.extract_origin_records(source, "shell_scanner.py")
+    updated = checker.extract_origin_records(bypassed, "shell_scanner.py")
 
     assert original[0].fingerprint != updated[0].fingerprint
 
@@ -1338,6 +1473,24 @@ def test_compare_against_base_rejects_a_frozen_guard_whose_raising_computation_c
     unreachable = source.replace("        return int(digits)\n", "        return 0\n", 1)
     assert unreachable != source
     module.write_text(unreachable, encoding="utf-8")
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any(origin_id in failure for failure in failures)
+
+
+def test_compare_against_base_rejects_a_frozen_guard_whose_reachability_input_changed(
+    tmp_path: Path,
+) -> None:
+    origin_id = "scanner.uv-tool.alternate-run-argv-expansion"
+    record = next(r for r in checker.repository_origin_records(_ROOT) if r.origin_id == origin_id)
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": [record.as_json()]})
+    root = _fake_root(tmp_path, [record.as_json()])
+    module = root / checker.GUARDED_MODULES[1]
+    source = module.read_text(encoding="utf-8")
+    bypassed = source.replace("    dynamic_run = run.dynamic\n", "    dynamic_run = False\n", 1)
+    assert bypassed != source
+    module.write_text(bypassed, encoding="utf-8")
 
     failures = checker.compare_against_base(root, base)
 
@@ -1497,6 +1650,38 @@ def test_a_refusing_module_in_a_guard_subpackage_is_rejected(tmp_path: Path) -> 
     assert any("guards/eval_bounds.py" in violation for violation in violations)
 
 
+def test_base_owned_closure_discovers_a_classified_guard_in_a_new_candidate_module(
+    tmp_path: Path,
+) -> None:
+    origin_id = "taint.eval.new-bound"
+    root = _fake_root(
+        tmp_path,
+        [record.as_json() for record in checker.load_debt_records(_ROOT)],
+    )
+    nested = root / checker.GUARD_MODULE_ROOT / "guards" / "eval_bounds.py"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_text(
+        "def _bound(depth, limits):\n"
+        "    if depth > limits.taint.max_eval_reparse_depth:\n"
+        f'        raise _TaintLimitExceeded(GuardRefusal("{origin_id}", "too deep"))\n',
+        encoding="utf-8",
+    )
+    registry = root / checker.REGISTRY_PATH
+    declaration = "REACHABLE_WITNESSES: tuple[ReachableWitness, ...] = (\n"
+    registry.write_text(
+        registry.read_text(encoding="utf-8").replace(
+            declaration,
+            declaration + f'    ReachableWitness("{origin_id}", "x"),\n',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_closure_violations(root)
+
+    assert not [violation for violation in violations if origin_id in violation]
+
+
 def test_the_shipped_tree_inventories_every_refusing_module() -> None:
     assert checker.repository_coverage_violations(_ROOT) == ()
 
@@ -1638,6 +1823,26 @@ def test_fingerprint_tracks_the_guarded_operation_itself() -> None:
     assert original[0].fingerprint != updated[0].fingerprint
 
 
+def test_fingerprint_tracks_the_guarded_operation_for_a_tested_handler_origin() -> None:
+    source = (
+        "def _tokenize(lexer, report):\n"
+        "    try:\n"
+        "        tokens = tuple(lexer)\n"
+        "    except ValueError as error:\n"
+        "        if report:\n"
+        "            raise _TaintLimitExceeded(\n"
+        '                GuardRefusal("taint.demo.tested-lex-error", "cannot tokenize")\n'
+        "            ) from error\n"
+        "    return tokens\n"
+    )
+    neutered = source.replace("tokens = tuple(lexer)", "tokens = ()")
+
+    original = checker.extract_origin_records(source, "shell_taint.py")
+    updated = checker.extract_origin_records(neutered, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
 def test_a_handler_guard_record_ignores_an_unrelated_edit_in_the_same_scope() -> None:
     # The negative control for the two above: the closure is bounded by what the guarded body
     # reads, so an unrelated statement in the same function leaves the record alone.
@@ -1672,6 +1877,24 @@ def test_a_local_threshold_binding_is_rejected() -> None:
         "    limit = 100\n"
         "    if len(items) > limit:\n"
         '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.local", "x"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold limit" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "signature",
+    ["items, limit=100", "items, /, limit=100", "items, *, limit=100"],
+)
+def test_a_numeric_parameter_default_used_as_a_guard_threshold_is_rejected(
+    signature: str,
+) -> None:
+    source = (
+        f"def _guard({signature}):\n"
+        "    if len(items) > limit:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.default", "x"))\n'
     )
 
     violations = checker.find_threshold_violations(source, "shell_taint.py")
