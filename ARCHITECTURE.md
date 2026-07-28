@@ -810,3 +810,62 @@ loop terminates. The engine's disclosed boundary can grow deliberately instead o
 channel a reviewer happened to probe. The cost is explicit: pinned certifying bodies are known
 evasions that remain open, so the boundary AD-18 discloses is load bearing and this analysis stays
 defense in depth behind human review of workflow changes, never the sole control.
+
+### AD-20: A fail-closed guard is identified by its origin, and classified by executable evidence
+
+**Date:** 2026-07-27
+**Status:** Accepted
+**Context:** The fail-closed guards in `shell_taint.py` and `shell_scanner.py` are the security
+contract of the CI shell scanner, and most of them never executed in the test suite. The risk is
+inverted: because both layers funnelled every refusal into a bare string, nothing proved a guard's
+*condition* fires. An inverted or shadowed condition routes input down the certify path with the
+whole suite still green. Reason strings could not close the gap either. Measured at `763f43d`, 55
+distinct reasons covered 126 raise sites in the taint layer and 23 reasons were raised from more
+than one site, 15 of those with mixed coverage, so an assertion on refusal text could not say which
+site fired. Identity was discarded independently in four places: the `analyze_marker_taint` catch,
+the scanner's re-wrap of the taint verdict, the brace-error chain through `_BuiltContent` and
+`_ShellWord`, and the `_parse_word` `finish()` re-wrap. Separately, limits stopped short of the
+guards that enforce them: default `TaintLimits()` signatures and silent fresh-default call paths
+meant a shrunk full-pipeline budget never reached several bounds, so no cheap test could exercise
+them.
+**Decision:** Every fail-closed guard has one *origin*, the site that detects the condition, and
+that origin constructs an immutable `GuardRefusal(origin_id, reason)`.
+
+Identity is origin identity, never transport identity. The exceptions accept only a `GuardRefusal`,
+so a refusal cannot be spelled as text; handlers, deferred fields and result projections carry the
+same object through. `analyze_marker_taint` returns a discriminated `Certified | MarkerDetected |
+GuardRefusal`, and `ShellScanResult` stores that verdict as its one authoritative field with
+`incomplete_reason` and `guard_id` derived from it, so operator text and guard identity cannot
+drift. `MarkerDetected` stays guard-identity-free: it reports the analysis's conclusion about the
+script rather than a bound that stopped the analysis. The `ConfigError` wording operators see is
+unchanged.
+
+Guard identifiers are semantic and stable. They encode neither line numbers nor user-facing text,
+so rewording a refusal message is not an identity change.
+
+One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
+content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
+the children that already share the budget share exactly one limits value. `limits` is required on
+every internal limit-aware helper. Every threshold a guard references is either a field of that
+value or an inventoried fixed semantic bound with a recorded rationale, the latter reserved for
+quantities that are directly authorable rather than resource budgets.
+
+Classification is executable data, not prose. A guard is classified only by carrying evidence: a
+reachable guard carries an authored script that drives the public scan path and returns that exact
+identifier; an unreachable one carries a written rationale plus a boundary script that drives the
+same validation to its nearest reachable state. A row asserting that a test exists somewhere is not
+classification.
+
+Anything unclassified is frozen rollout debt that may only shrink. Source origins must partition
+exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
+canonical origin *records* rather than bare identifiers, so an unclassified guard cannot be moved
+or semantically edited while keeping its entry. Because a tree-local check cannot enforce that debt
+only shrinks, the comparison against the protected base runs the base revision's own copy of the
+checker with the candidate tree as inert input, on pushes as well as pull requests.
+**Consequences:** A refusal observed at the public boundary names the guard that produced it, so a
+test can pin a specific site instead of a shared message. New guards cannot arrive unclassified,
+and an untested guard cannot be quietly reclassified or laundered onto a different site. Shrunk
+limits reach the bounds they name, so a resource guard is witnessed by a small script rather than
+an enormous one. The cost is a second gate to maintain and a debt snapshot that must be regenerated
+whenever a guard legitimately moves; the closure target is an empty snapshot, which this decision
+does not by itself reach.

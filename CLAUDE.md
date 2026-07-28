@@ -33,6 +33,8 @@ uv run --group dev python scripts/check_version_sync.py
 uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
 
+uv run --group dev python scripts/check_guard_inventory.py
+
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
   --iterations 1200 --seed 1 --baseline tests/fixtures/shell_taint_fuzz_baseline.tsv
@@ -62,6 +64,16 @@ false certification and its control get confirmed before an issue is filed.
 Changes to the taint analysis or the scanner should be checked against this tool as well as
 pytest, since the suite pins known behavior while the fuzzer searches for behavior nobody has
 pinned yet.
+
+`scripts/check_guard_inventory.py` gates fail-closed guard identity, described by AD-20 in
+[ARCHITECTURE.md](ARCHITECTURE.md). Every guard origin constructs a `GuardRefusal` with a literal
+identifier, and `tests/guard_witnesses.py` classifies each one by carrying executable evidence: a
+script that reaches it through the public scan path, or a rationale plus a boundary script.
+Anything unclassified is frozen in `tests/fixtures/shell_guard_debt.json`, which may only shrink.
+
+When you add or move a guard, add its classification to `tests/guard_witnesses.py`. Regenerate the
+debt snapshot only when a guard legitimately moves, never to silence a new one: CI runs the base
+revision's copy of the checker against your tree and rejects any record the base did not carry.
 
 ## Enforced repository rules
 
