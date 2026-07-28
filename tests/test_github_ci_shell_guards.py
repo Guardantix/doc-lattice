@@ -17,6 +17,9 @@ from guard_witnesses import (
     INVARIANT_IDS,
     INVARIANT_WITNESSES,
     REACHABLE_IDS,
+    REACHABLE_WITNESSES,
+    InvariantWitness,
+    ReachableWitness,
 )
 
 from doc_lattice.error_types import ConfigError
@@ -211,3 +214,55 @@ def test_a_child_scanner_shares_the_parent_scan_limits() -> None:
 
     assert child.budget is scanner.budget
     assert child.budget.limits is shrunk
+
+
+@pytest.mark.parametrize(
+    "witness",
+    REACHABLE_WITNESSES,
+    ids=[witness.origin_id for witness in REACHABLE_WITNESSES],
+)
+def test_reachable_witness_reaches_its_guard_origin(witness: ReachableWitness) -> None:
+    result = scan_doc_lattice_invocations(witness.script, limits=witness.limits)
+
+    assert result.guard_id == witness.origin_id
+
+
+@pytest.mark.parametrize(
+    "witness",
+    [w for w in REACHABLE_WITNESSES if w.control_script is not None],
+    ids=[w.origin_id for w in REACHABLE_WITNESSES if w.control_script is not None],
+)
+def test_reachable_witness_control_isolates_the_guard(witness: ReachableWitness) -> None:
+    assert witness.control_script is not None
+    control = scan_doc_lattice_invocations(witness.control_script)
+
+    assert control.guard_id == witness.control_guard_id
+    assert control.guard_id != witness.origin_id
+
+
+@pytest.mark.parametrize(
+    "witness",
+    INVARIANT_WITNESSES,
+    ids=[witness.origin_id for witness in INVARIANT_WITNESSES],
+)
+def test_invariant_boundary_witness_stops_short_of_its_guard(witness: InvariantWitness) -> None:
+    result = scan_doc_lattice_invocations(witness.boundary_script)
+
+    assert result.guard_id == witness.boundary_guard_id
+    assert result.guard_id != witness.origin_id
+
+
+def test_witnessed_ids_equal_the_reachable_classification() -> None:
+    assert {witness.origin_id for witness in REACHABLE_WITNESSES} == REACHABLE_IDS
+
+
+def test_invariant_boundary_rows_equal_the_invariant_classification() -> None:
+    assert {witness.origin_id for witness in INVARIANT_WITNESSES} == INVARIANT_IDS
+
+
+def test_every_witness_classifies_exactly_one_guard_origin() -> None:
+    witnessed = [witness.origin_id for witness in REACHABLE_WITNESSES]
+    invariant = [witness.origin_id for witness in INVARIANT_WITNESSES]
+
+    assert len(witnessed) == len(set(witnessed))
+    assert len(invariant) == len(set(invariant))

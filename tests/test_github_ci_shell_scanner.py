@@ -9511,3 +9511,27 @@ def test_plain_assignment_in_dynamic_if_body_still_refuses(script: str):
     false-safe to function-definition handling specifically.
     """
     assert_taint_refusal(script)
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
+def test_printf_b_representable_control_executes_the_marker_under_bash(tmp_path: Path):
+    """Direction check for the ``printf %b`` guard cluster (issue #139).
+
+    ``%b`` decodes escapes, so it can compose the marker out of bytes that no content port shows
+    literally. The unrepresentable fixture below refuses at
+    ``taint.printf-b.unrepresentable-output``; refusing is always safe, so the meaningful
+    direction check runs on the matched representable control: the scanner reports marker flow,
+    and real bash genuinely executes the stub. Without it the guard could be pinned against a
+    ``%b`` spelling that never composes anything.
+    """
+    control = 'X=$(printf %b "\\x64oc-"); eval "$X"lattice'
+    unrepresentable = 'X=$(printf %b "\\U0110FFFF"); eval "$X"lattice'
+
+    assert scan_doc_lattice_invocations(control).incomplete_reason == TAINT_REFUSAL_REASON
+    assert (
+        scan_doc_lattice_invocations(unrepresentable).guard_id
+        == "taint.printf-b.unrepresentable-output"
+    )
+    executed, stderr = _marker_executes_under_bash(control, {}, tmp_path)
+
+    assert executed, f"the representable %b control never ran the stub under bash: {stderr}"
