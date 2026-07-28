@@ -7,6 +7,7 @@ import pytest
 
 from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci import shell_taint
+from doc_lattice.github_ci.shell_guards import GuardRefusal, MarkerDetected
 from doc_lattice.github_ci.shell_scanner import (
     _effective_executable_evidence,
     _ScanBudget,
@@ -87,6 +88,23 @@ from doc_lattice.github_ci.shell_taint import (
     normalize_static_resource,
     stream_ref_ids,
 )
+
+
+def marker_taint_tuple(
+    evidence: _ShellTaintEvidence,
+    **kwargs: object,
+) -> tuple[bool, str | None]:
+    """Project a taint verdict onto this suite's historical (refused, reason) pair.
+
+    These cases pin refusal reasons rather than guard-origin identity; guard identity is pinned
+    by the witness registry in `tests/test_github_ci_shell_guards.py`.
+    """
+    verdict = analyze_marker_taint(evidence, **kwargs)  # ty: ignore[invalid-argument-type]
+    if isinstance(verdict, GuardRefusal):
+        return True, verdict.reason
+    if isinstance(verdict, MarkerDetected):
+        return True, TAINT_REFUSAL_REASON
+    return False, None
 
 
 def _can_mark(expression: ContentExpr, *, strip: bool = False) -> bool:
@@ -344,7 +362,10 @@ def test_content_builder_assignment_rhs_retains_deferred_brace_expansion_error()
     assert built.assignment_content == LiteralTransfer("{1..5000}")
     assert built.argv_ports is not None
     assert [port.literal for port in built.argv_ports] == ["X={1..5000}"]
-    assert built.brace_expansion_error == "shell taint brace expansion limit exceeded"
+    assert built.brace_expansion_error == GuardRefusal(
+        "taint.brace.numeric-sequence-limit",
+        "shell taint brace expansion limit exceeded",
+    )
 
 
 @pytest.mark.parametrize(
@@ -515,7 +536,7 @@ def test_eval_joins_dynamic_variable_assignment_and_append() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -524,7 +545,7 @@ def test_eval_joins_dynamic_variable_assignment_and_append() -> None:
 def test_eval_inserts_literal_spaces_between_argument_ports() -> None:
     command = _command(1, _arg("eval"), _arg("doc-"), _arg("lattice"), name="eval")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 @pytest.mark.parametrize(
@@ -546,7 +567,7 @@ def test_eval_reparses_literal_variable_reference_on_second_pass(expression: Con
         assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -561,7 +582,7 @@ def test_eval_reparse_keeps_second_pass_single_quoted_variable_reference_literal
         assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_eval_reparse_interprets_quotes_contributed_by_variable_value() -> None:
@@ -577,7 +598,7 @@ def test_eval_reparse_interprets_quotes_contributed_by_variable_value() -> None:
         assignments=(_AssignmentEvidence("A", LiteralTransfer("doc-'")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -591,7 +612,7 @@ def test_eval_reparse_decodes_ansi_c_literal_escapes() -> None:
         name="eval",
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -600,7 +621,7 @@ def test_eval_reparse_decodes_ansi_c_literal_escapes() -> None:
 def test_eval_reparse_keeps_external_only_value_non_evidentiary() -> None:
     command = _command(1, _arg("eval"), _arg("$EXTERNAL", VariableRef("EXTERNAL")), name="eval")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 @pytest.mark.parametrize(
@@ -641,7 +662,7 @@ def test_eval_variable_syntax_expands_braces_after_assignment_flow() -> None:
         assignments=(_AssignmentEvidence("X", LiteralTransfer("doc-{lattice,noop}")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -659,7 +680,7 @@ def test_eval_variable_syntax_preserves_braces_across_append_writes() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -688,7 +709,7 @@ def test_eval_variable_syntax_distributes_suffixes_across_brace_words(
         assignments=assignments,
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -706,7 +727,7 @@ def test_eval_variable_syntax_keeps_cross_write_brace_words_separate() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_eval_variable_syntax_cartesian_words_obey_alternative_cap() -> None:
@@ -721,7 +742,7 @@ def test_eval_variable_syntax_cartesian_words_obey_alternative_cap() -> None:
         ),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)),
         limits=TaintLimits(max_alternatives=3),
     ) == (True, "shell taint eval syntax alternative limit exceeded")
@@ -1007,7 +1028,7 @@ def test_eval_conditional_assignment_obeys_augmented_edge_cap() -> None:
         name="eval",
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)),
         limits=TaintLimits(max_edges=1),
     ) == (True, "shell taint edge limit exceeded")
@@ -1022,7 +1043,7 @@ def test_eval_base_definition_cap_precedes_side_effect_discovery() -> None:
         assignments=(_AssignmentEvidence("X", _deep_concat(2)),),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)),
         limits=TaintLimits(max_expression_nodes=2),
     ) == (True, "shell taint expression node limit exceeded")
@@ -1039,7 +1060,7 @@ def test_eval_side_effect_discovery_shares_expression_work_cap() -> None:
         for command_id in (1, 2)
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=commands),
         limits=TaintLimits(max_expression_nodes=3),
     ) == (True, "shell taint expression node limit exceeded")
@@ -1055,7 +1076,7 @@ def test_deep_eval_syntax_fails_with_stable_depth_reason() -> None:
         assignments=(assignment,),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "shell taint eval reparse depth limit exceeded",
     )
@@ -1124,7 +1145,7 @@ def test_eval_variable_syntax_composes_open_braces_across_variables(
         assignments=assignments,
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1144,7 +1165,7 @@ def test_eval_variable_syntax_aliases_preserve_append_provenance() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_eval_variable_syntax_distinct_appends_each_apply_once_through_aliases() -> None:
@@ -1162,7 +1183,7 @@ def test_eval_variable_syntax_distinct_appends_each_apply_once_through_aliases()
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 @pytest.mark.parametrize(
@@ -1191,7 +1212,7 @@ def test_eval_variable_syntax_joins_competing_definitions(
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1215,7 +1236,7 @@ def test_eval_variable_syntax_applies_append_to_every_competing_definition() -> 
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1238,7 +1259,7 @@ def test_eval_variable_syntax_competing_definitions_never_concatenate() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_eval_brace_expansion_obeys_taint_cap() -> None:
@@ -1249,7 +1270,7 @@ def test_eval_brace_expansion_obeys_taint_cap() -> None:
         name="eval",
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)),
         limits=TaintLimits(max_brace_expansions=2),
     ) == (True, "shell taint brace expansion limit exceeded")
@@ -1263,7 +1284,7 @@ def test_eval_brace_expansion_honors_custom_higher_cap() -> None:
         name="eval",
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)),
         limits=TaintLimits(max_alternatives=300, max_brace_expansions=257),
     ) == (False, None)
@@ -1306,7 +1327,7 @@ def test_external_wrapper_evidence_does_not_activate_shell_sink(
         executable=executable,
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_non_sink_builtin_target_does_not_activate_shell_sink() -> None:
@@ -1336,7 +1357,7 @@ def test_non_sink_builtin_target_does_not_activate_shell_sink() -> None:
         executable=_ExecutableEvidence(None, None, None),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_executable_alternates_count_against_table_limit() -> None:
@@ -1362,7 +1383,7 @@ def test_executable_alternates_count_against_table_limit() -> None:
         ),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)), limits=TaintLimits(max_table_entries=2)
     ) == (True, "shell taint table entry limit exceeded")
 
@@ -1382,7 +1403,7 @@ def test_external_lookup_eval_is_not_treated_as_eval_sink() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_shell_command_payload_wins_over_heredoc_stdin() -> None:
@@ -1402,7 +1423,7 @@ def test_shell_command_payload_wins_over_heredoc_stdin() -> None:
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_dynamic_shell_selector_fails_closed_over_remaining_arguments() -> None:
@@ -1414,7 +1435,7 @@ def test_dynamic_shell_selector_fails_closed_over_remaining_arguments() -> None:
         name="bash",
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1431,7 +1452,7 @@ def test_static_script_write_is_visible_to_reader_regardless_of_command_order() 
         redirections=(_RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(reader, writer))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(reader, writer))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1450,7 +1471,7 @@ def test_later_descriptor_binding_overrides_earlier_static_stdout_target() -> No
         ),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(reader, writer))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(reader, writer))) == (False, None)
 
 
 def test_explicit_stdin_redirection_overrides_pipe_input() -> None:
@@ -1462,7 +1483,7 @@ def test_explicit_stdin_redirection_overrides_pipe_input() -> None:
         redirections=(_RedirectionEvent(0, "<<<", 0, ContentTarget(LiteralTransfer("true\n"))),),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(producer, consumer), pipes=(_PipeEvidence(1, 2),))
     ) == (False, None)
 
@@ -1486,7 +1507,7 @@ def test_command_substitution_sequence_is_not_a_choice() -> None:
         ChoiceOutput((CommandOutput(1), CommandOutput(2))),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(first, second, sink), scopes=(sequence,))
     ) == (True, "authored marker flow reaches an execution sink")
 
@@ -1496,7 +1517,7 @@ def test_command_substitution_sequence_is_not_a_choice() -> None:
         _arg("$(...)", StreamRef(201), dynamic=True),
         name="eval",
     )
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(first, second, choice_sink), scopes=(choice_scope,))
     ) == (False, None)
 
@@ -1504,7 +1525,7 @@ def test_command_substitution_sequence_is_not_a_choice() -> None:
 def test_evidence_edge_cap_counts_pipe_records() -> None:
     evidence = _ShellTaintEvidence(pipes=(_PipeEvidence(1, 2), _PipeEvidence(2, 3)))
 
-    assert analyze_marker_taint(evidence, limits=TaintLimits(max_edges=1)) == (
+    assert marker_taint_tuple(evidence, limits=TaintLimits(max_edges=1)) == (
         True,
         "shell taint edge limit exceeded",
     )
@@ -1514,7 +1535,7 @@ def test_pipe_without_consumer_fails_closed() -> None:
     producer = _command(1, _arg("printf"), name="printf")
     evidence = _ShellTaintEvidence(commands=(producer,), pipes=(_PipeEvidence(1),))
 
-    assert analyze_marker_taint(evidence) == (
+    assert marker_taint_tuple(evidence) == (
         True,
         "shell taint pipe cannot be structured",
     )
@@ -1536,7 +1557,7 @@ def test_pipe_with_command_and_scope_consumers_fails_closed() -> None:
         pipes=(_PipeEvidence(1, consumer_command_id=2, consumer_scope_id=3),),
     )
 
-    assert analyze_marker_taint(evidence) == (
+    assert marker_taint_tuple(evidence) == (
         True,
         "shell taint pipe cannot be structured",
     )
@@ -1554,7 +1575,7 @@ def test_reverse_ordered_scope_chain_stays_within_declared_limits() -> None:
         for scope_id in range(1_100, 0, -1)
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(scopes=scopes)) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(scopes=scopes)) == (False, None)
 
 
 def test_cyclic_scope_parents_fail_closed() -> None:
@@ -1563,7 +1584,7 @@ def test_cyclic_scope_parents_fail_closed() -> None:
         _StreamScopeEvidence(2, "subshell_group", 1, None, SequenceOutput(())),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(scopes=scopes)) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(scopes=scopes)) == (
         True,
         "shell taint stream scope cannot be structured",
     )
@@ -1628,7 +1649,7 @@ def test_loop_binding_reaches_eval_in_same_non_root_scope(kind: str) -> None:
         loop_bindings=(_AssignmentEvidence("ITEM", LiteralTransfer("doc-")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1662,7 +1683,7 @@ def test_subshell_loop_binding_does_not_leak_to_parent_eval() -> None:
         loop_bindings=(_AssignmentEvidence("ITEM", LiteralTransfer("doc-")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
         False,
         None,
     )
@@ -1696,7 +1717,7 @@ def test_brace_loop_binding_shares_parent_eval_environment() -> None:
         loop_bindings=(_AssignmentEvidence("ITEM", LiteralTransfer("doc-")),),
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(sink,), scopes=(root, nested))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1724,7 +1745,7 @@ def test_root_loop_binding_is_inherited_by_child_subshell_eval() -> None:
     )
     child = _StreamScopeEvidence(100, "subshell_group", 1, None, CommandOutput(10))
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(sink,), scopes=(root, child))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(sink,), scopes=(root, child))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1759,7 +1780,7 @@ def test_shared_loop_binding_is_inherited_by_deeper_descendant_eval() -> None:
         CommandOutput(10),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(sink,), scopes=(root, shared, descendant))
     ) == (True, "authored marker flow reaches an execution sink")
 
@@ -1793,7 +1814,7 @@ def test_subshell_loop_binding_does_not_leak_to_sibling_eval() -> None:
     )
     sibling = _StreamScopeEvidence(200, "subshell_group", 1, None, CommandOutput(10))
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(sink,), scopes=(root, local, sibling))
     ) == (False, None)
 
@@ -1900,7 +1921,7 @@ def test_subshell_loop_binding_does_not_leak_to_sibling_eval() -> None:
 def test_malformed_nested_evidence_references_fail_closed(
     evidence: _ShellTaintEvidence,
 ) -> None:
-    assert analyze_marker_taint(evidence) == (
+    assert marker_taint_tuple(evidence) == (
         True,
         "shell taint evidence cannot be structured",
     )
@@ -1912,7 +1933,7 @@ def test_evidence_count_limit_precedes_nested_reference_validation() -> None:
         _StreamScopeEvidence(1, "subshell_group", None, None, SequenceOutput(())),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(scopes=duplicate_scopes),
         limits=TaintLimits(max_table_entries=1),
     ) == (True, "shell taint table entry limit exceeded")
@@ -1921,7 +1942,7 @@ def test_evidence_count_limit_precedes_nested_reference_validation() -> None:
 def test_uppercase_eval_is_not_a_builtin_execution_sink() -> None:
     command = _command(1, _arg("EVAL"), _arg("doc-lattice"), name="EVAL")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (False, None)
 
 
 def test_uppercase_source_is_not_a_builtin_execution_sink() -> None:
@@ -1934,7 +1955,7 @@ def test_uppercase_source_is_not_a_builtin_execution_sink() -> None:
     )
     command = _command(2, _arg("SOURCE"), _arg("task.sh"), name="SOURCE")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, command))) == (False, None)
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(writer, command))) == (False, None)
 
 
 @pytest.mark.parametrize("builtin", ["eval", "source"])
@@ -1948,7 +1969,7 @@ def test_path_qualified_builtin_name_uses_static_direct_resource(builtin: str) -
     )
     command = _command(2, _arg(f"./{builtin}"), _arg("safe"), name=builtin)
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, command))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(writer, command))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1957,7 +1978,7 @@ def test_path_qualified_builtin_name_uses_static_direct_resource(builtin: str) -
 def test_shell_plus_c_selects_the_command_payload() -> None:
     command = _command(1, _arg("bash"), _arg("+c"), _arg("doc-lattice"), name="bash")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(command,))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(command,))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -1976,7 +1997,7 @@ def test_static_normalization_collapses_double_slash_absolute_resource_keys() ->
     )
     reader = _command(2, _arg("bash"), _arg("//task.sh"), name="bash")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, reader))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(writer, reader))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -2006,7 +2027,7 @@ def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
 
     evidence = _ShellTaintEvidence(commands=(producer, sink), scopes=(scope,))
 
-    assert analyze_marker_taint(evidence) == (
+    assert marker_taint_tuple(evidence) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -2021,7 +2042,7 @@ def test_empty_repeat_preserves_recursive_equation_for_node_limit_accounting() -
         RepeatOutput(SequenceOutput(())),
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(scopes=(scope,)),
         limits=TaintLimits(max_expression_nodes=3),
     ) == (True, "shell taint expression node limit exceeded")
@@ -2043,7 +2064,7 @@ def test_ambiguous_shell_selector_includes_static_script_candidate() -> None:
         name="bash",
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, shell))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(writer, shell))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -2066,7 +2087,7 @@ def test_ambiguous_shell_selector_includes_input_process_script_candidate() -> N
         name="bash",
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(
             commands=(producer, shell),
             scopes=(scope,),
@@ -2085,7 +2106,7 @@ def test_relative_direct_executable_with_slash_reads_static_resource() -> None:
     )
     reader = _command(2, _arg("dir/task.sh"), name="dir/task.sh")
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, reader))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(writer, reader))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -2107,7 +2128,7 @@ def test_direct_path_named_like_shell_remains_a_resource_sink() -> None:
         name="bash",
     )
 
-    assert analyze_marker_taint(_ShellTaintEvidence(commands=(writer, reader))) == (
+    assert marker_taint_tuple(_ShellTaintEvidence(commands=(writer, reader))) == (
         True,
         "authored marker flow reaches an execution sink",
     )
@@ -2121,7 +2142,7 @@ def test_deep_producer_content_hits_node_limit_without_recursion_error() -> None
     concat_producer = _command(1, _arg("printf"), _arg("x", deep_concat), name="printf")
     choice_producer = _command(2, _arg("printf"), _arg("y", deep_choice), name="printf")
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(concat_producer, choice_producer)),
         limits=TaintLimits(max_expression_nodes=3),
     ) == (True, "shell taint expression node limit exceeded")
@@ -2256,11 +2277,16 @@ def test_deep_expression_over_node_cap_raises_limit_error_without_recursion_erro
 
 
 def test_taint_limit_exception_is_a_coded_project_error() -> None:
-    error = _TaintLimitExceeded("shell taint alternative limit exceeded")
+    refusal = GuardRefusal(
+        "taint.values.alternative-limit",
+        "shell taint alternative limit exceeded",
+    )
+    error = _TaintLimitExceeded(refusal)
 
     assert isinstance(error, ProjectError)
     assert error.code == "SHELL_TAINT_LIMIT_EXCEEDED"
     assert str(error) == "shell taint alternative limit exceeded"
+    assert error.refusal is refusal
 
 
 def test_competing_variable_definitions_join_without_composing() -> None:
@@ -2418,7 +2444,7 @@ def test_eval_command_substitution_depth_cap_fails_closed_end_to_end() -> None:
         name="eval",
     )
 
-    assert analyze_marker_taint(
+    assert marker_taint_tuple(
         _ShellTaintEvidence(commands=(command,)),
         limits=TaintLimits(max_eval_reparse_depth=0),
     ) == (True, "shell taint eval command substitution cannot be bounded")

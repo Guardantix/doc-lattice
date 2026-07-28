@@ -13,6 +13,7 @@ from typer.main import get_command
 from doc_lattice.cli.application import create_app
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci import shell_scanner, shell_taint
+from doc_lattice.github_ci.shell_guards import GuardRefusal
 from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS,
     _DOC_LATTICE_ROOT_OPTIONS,
@@ -3320,10 +3321,12 @@ def test_scanner_reconcile_option_grammar_matches_typer_command():
 
 
 def test_shell_scan_incomplete_is_a_coded_project_error():
-    error = _ShellScanIncomplete("step limit exceeded")
+    refusal = GuardRefusal("scanner.budget.step-limit", "step limit exceeded")
+    error = _ShellScanIncomplete(refusal)
 
     assert isinstance(error, ProjectError)
     assert error.code == "SHELL_SCAN_INCOMPLETE"
+    assert error.refusal is refusal
 
 
 def test_nested_dynamic_uv_resolution_charges_shared_scan_budget():
