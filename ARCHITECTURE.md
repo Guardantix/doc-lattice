@@ -844,7 +844,12 @@ Guard identifiers are semantic and stable. They encode neither line numbers nor 
 so rewording a refusal message is not an identity change. One identifier names one origin: a second
 site constructing an identifier that is already classified would inherit evidence it does not have,
 so the inventory rejects it. Every rule that recognizes a construction recognizes it by name
-whether it is spelled bare or through the module that defines it.
+whether it is spelled bare or through the module that defines it, and the names it answers to
+include every alias the module binds the constructor to, because an aliased construction in a
+verdict return is a well-formed verdict that no carrier rule would reject. The set of modules those
+rules read is derived from the guard package rather than trusted from a hand-maintained list: a
+guard added in an uninventoried module leaves every partition exact, so nothing else would report
+that a fail-closed guard shipped with no witness.
 
 One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
 content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
@@ -852,11 +857,16 @@ the children that already share the budget share exactly one limits value. `limi
 every internal limit-aware helper. Every threshold a guard references is either a field of that
 value or an inventoried fixed semantic bound with a recorded rationale, the latter reserved for
 quantities that are directly authorable rather than resource budgets. A threshold is recognized
-structurally rather than by naming convention: any module-level numeric constant a guard
-references, and any bare numeric magnitude it compares against, arithmetic in the operand included,
-so `depth - 4096 > 0` is the same uninventoried cap as `depth > 4096`. Zero and one are exempt
-because they spell emptiness and arity rather than a magnitude, and a subscript index is a position
-rather than a magnitude.
+structurally rather than by naming convention: any numeric constant a guard references, whether the
+module binds it or its own function does, and any bare numeric magnitude it compares against,
+arithmetic in the operand included, so `depth - 4096 > 0` is the same uninventoried cap as
+`depth > 4096`. Arithmetic counts on the binding side too: `_MAX_ITEMS = 50 * 2` caps a guard
+exactly as the bare literal does, and recognizing only bare literals let the computed spelling
+escape both halves at once, since a module-bound name is also exempt from the naming-convention
+check. A local binding is covered for the same reason, having neither a module binding nor a
+convention to fall back on. Zero and one are exempt because they spell emptiness and arity rather
+than a magnitude, which is also what keeps a counter seeded at zero from reading as a threshold,
+and a subscript index is a position rather than a magnitude.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
@@ -873,8 +883,9 @@ Anything unclassified is frozen rollout debt that may only shrink. Source origin
 exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
 canonical origin *records* rather than bare identifiers, so an unclassified guard cannot be moved
 or semantically edited while keeping its entry. A record covers the guarding condition, whether it
-is spelled as an `if`, a `while` or a `match` arm, and, within the enclosing function, the
-statements that write what that condition reads, in-place mutation of an accumulator included,
+is spelled as an `if`, a `while` or a `match` arm, and, within the enclosing function's own
+execution, the statements that write what that condition reads, in-place mutation of an
+accumulator and configuration of an object it reads included,
 because inverting or removing an accumulation disables a guard as completely as inverting its test.
 That selection is transitive: a condition usually reads a name two or more assignments away from
 the input deciding it, and stopping at the direct writer leaves everything behind it uncovered.
@@ -890,11 +901,27 @@ function. That flow is the only description such a guard has, and without it
 `scanner.descriptor.unparsable` survives byte-identically when the `return int(digits)` in its own
 `try` body becomes `return 0` and can no longer raise. A diverting statement is taken whole because
 the value it returns decides reachability, while a branch is reduced to its test so that an edit
-inside one branch's body does not churn a record outside it. The scope stops at the function
-deliberately: an unbounded dataflow closure would churn every frozen record on any edit to either
-module, and a record that churns constantly has to be regenerated, which is the laundering path
-this decision closes. A caller passing a different value into that function is outside the boundary
-and is not covered.
+inside one branch's body does not churn a record outside it.
+
+A guard reached through an `except` handler needs more than that flow, because the handled
+exception types are all a `try` contributes to it: what decides whether the handler runs is the
+operation in the `try` body and the object state that operation reads. Such a guard therefore
+records that body and the same-scope closure of what writes what the body reads.
+`taint.eval-payload.lex-error` is the concrete case: reconfiguring the `shlex` lexer so an
+unterminated quote tokenizes cleanly, or rewriting the tokenizing call to one that cannot raise,
+each withdraws the guard, and both left every fingerprint in the tree unchanged. Object
+configuration is what closes the first: an attribute write is a write of its receiver, exactly as a
+subscript write is, but only where the closure reads that receiver as a value in its own right.
+Matching it against every spelling read instead would fold every unrelated `self.other = ...` into
+the record of any guard whose condition mentions `self.anything`, and churn is what forces the
+regeneration this decision exists to prevent.
+
+The scope stops at the function deliberately, and at any function or class body nested inside it:
+an unbounded dataflow closure would churn every frozen record on any edit to either module, and a
+nested body does not run where it is written, so a write inside one decides nothing about the guard
+around it. A record that churns constantly has to be regenerated, which is the laundering path this
+decision closes. A caller passing a different value into that function is outside the boundary and
+is not covered.
 
 Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
 protected base runs the base revision's own copy of the checker with the candidate tree as inert
@@ -910,6 +937,16 @@ rules read allowlists that describe the source they shipped with, so running the
 would reject a candidate that legitimately adds a boundary, a declared transport or an inventoried
 bound, with no fix available inside the same change; the candidate's own copy enforces them in the
 test suite. Closure names no allowlist, so running it from the base is what makes it unweakenable.
+
+Every candidate artifact that base-owned run touches is read by identity alone, for the same reason
+and on the same contract: the debt snapshot by its identifier field, and the witness registry by
+each entry's `origin_id`. Decoding either against the base copy's own record schema or field lists
+would turn a `SCHEMA_VERSION` bump, or a witness strengthened with a new evidence field, into an
+uncaught failure of the base-owned job that no edit inside that change can fix, and on a push to
+main it would take the release job down with it. Their full canonical shape is the candidate's own
+copy to enforce, alongside the three allowlist-bearing rules. For the same reason each gate in a run
+is scored independently: several of them raise for a condition another reports cleanly, and building
+one failure list eagerly replaced the operator's report with a traceback naming no gate.
 Guard *withdrawal* is covered there too: the base's classified inventory is read alongside its debt
 snapshot, because deleting an origin together with its witness row leaves the partition exact and
 the debt comparison with nothing to inspect. A withdrawal is accepted only when the candidate's

@@ -33,10 +33,14 @@ import hashlib
 import json
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-SCHEMA_VERSION = 3
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+SCHEMA_VERSION = 4
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -54,6 +58,14 @@ GUARDED_MODULES = (
     "src/doc_lattice/github_ci/shell_taint.py",
     "src/doc_lattice/github_ci/shell_scanner.py",
 )
+
+GUARD_MODULE_ROOT = "src/doc_lattice/github_ci"
+"""The package every guarded module lives in.
+
+`GUARDED_MODULES` is hand-maintained, and every rule here iterates it: a guard added in a module
+outside that tuple is invisible to all of them, so nothing would report that a fail-closed guard
+shipped unclassified. `repository_coverage_violations` derives the real set from this package and
+rejects the omission instead."""
 
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 RETIREMENT_PATH = "tests/fixtures/shell_guard_retirements.json"
@@ -148,6 +160,59 @@ def _called_name(node: ast.AST) -> str | None:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return None
+
+
+def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
+    """Return every local name this module binds to the refusal constructor.
+
+    Recognition is by name everywhere in this module, so an import alias or a module-level
+    rebinding would otherwise mint a guard no rule can see. A verdict return is the specific hole
+    that leaves open: the carrier rules reject an unrecognized transport handed to an exception or
+    a result, but `return GR(...)` is a well-formed verdict, so an aliased origin there is absent
+    from the inventory while every partition still looks exact.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        The canonical constructor name together with every alias bound to it.
+    """
+    names = {REFUSAL_CONSTRUCTOR}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import | ast.ImportFrom):
+            continue
+        for alias in node.names:
+            if alias.asname is not None and alias.name.rsplit(".", 1)[-1] == REFUSAL_CONSTRUCTOR:
+                names.add(alias.asname)
+    grew = True
+    while grew:
+        grew = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+                continue
+            if node.value.id not in names:
+                continue
+            rebound = {target.id for target in node.targets if isinstance(target, ast.Name)} - names
+            if rebound:
+                names |= rebound
+                grew = True
+    return frozenset(names)
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivationCache:
+    """Per-parse memo for the derivations repeated across every origin in one module.
+
+    The writer closure re-derives the same statement's written spellings and normalized shape once
+    per fixpoint pass and once per origin sharing the scope, which dominates the gate's runtime.
+    Keying by node identity is sound because one cache lives no longer than the parse it was built
+    for, so an identity cannot be reused by a later node.
+    """
+
+    shapes: dict[int, str] = field(default_factory=dict)
+    written: dict[int, frozenset[str]] = field(default_factory=dict)
+    configured: dict[int, frozenset[str]] = field(default_factory=dict)
+    statements: dict[int, list[ast.stmt]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +363,42 @@ def _normalized_shape(statement: ast.stmt) -> str:
     return ast.dump(clone, include_attributes=False)
 
 
+def _cached_shape(statement: ast.stmt, cache: _DerivationCache) -> str:
+    """Return the statement's normalized shape, deriving it at most once per parse."""
+    shape = cache.shapes.get(id(statement))
+    if shape is None:
+        shape = _normalized_shape(statement)
+        cache.shapes[id(statement)] = shape
+    return shape
+
+
+def _cached_written_spellings(statement: ast.stmt, cache: _DerivationCache) -> frozenset[str]:
+    """Return the statement's written spellings, deriving them at most once per parse."""
+    spellings = cache.written.get(id(statement))
+    if spellings is None:
+        spellings = _written_spellings(statement)
+        cache.written[id(statement)] = spellings
+    return spellings
+
+
+def _cached_configured_receivers(statement: ast.stmt, cache: _DerivationCache) -> frozenset[str]:
+    """Return the statement's configured receivers, deriving them at most once per parse."""
+    receivers = cache.configured.get(id(statement))
+    if receivers is None:
+        receivers = _configured_receivers(statement)
+        cache.configured[id(statement)] = receivers
+    return receivers
+
+
+def _cached_scope_statements(scope: ast.AST, cache: _DerivationCache) -> list[ast.stmt]:
+    """Return the scope's own statements, walking the scope at most once per parse."""
+    statements = cache.statements.get(id(scope))
+    if statements is None:
+        statements = _scope_statements(scope)
+        cache.statements[id(scope)] = statements
+    return statements
+
+
 def _group_digest(digest: str) -> str:
     """Return a truncated digest in hyphen-separated groups.
 
@@ -330,6 +431,46 @@ def _read_spellings(nodes: tuple[ast.expr, ...]) -> frozenset[str]:
         for node in ast.walk(root)
         if isinstance(node, ast.Name | ast.Attribute)
     )
+
+
+def _value_spellings(nodes: list[ast.AST], *, loads_only: bool) -> frozenset[str]:
+    """Return the spellings these nodes read as a value in their own right.
+
+    A name reached only as the base of a longer path is excluded: `self.work > cap` reads
+    `self.work`, and reaches `self` solely to get there, while `tuple(lexer)` reads `lexer` itself.
+    Only the latter is a read that an attribute write on the receiver can feed.
+
+    Args:
+        nodes: Expression roots to inspect.
+        loads_only: Whether to keep only `Load` occurrences, as a statement's reads require.
+
+    Returns:
+        Whole-value spellings, empty when nothing is read that way.
+    """
+    bases: set[int] = set()
+    for root in nodes:
+        for node in ast.walk(root):
+            if isinstance(node, ast.Attribute | ast.Subscript):
+                bases.add(id(node.value))
+    found: set[str] = set()
+    for root in nodes:
+        for node in ast.walk(root):
+            if not isinstance(node, ast.Name | ast.Attribute) or id(node) in bases:
+                continue
+            if loads_only and not isinstance(node.ctx, ast.Load):
+                continue
+            found.add(ast.unparse(node))
+    return frozenset(found)
+
+
+def _read_value_spellings(nodes: tuple[ast.expr, ...]) -> frozenset[str]:
+    """Return the spellings these expressions read as whole values."""
+    return _value_spellings(list(nodes), loads_only=False)
+
+
+def _statement_value_reads(statement: ast.stmt) -> frozenset[str]:
+    """Return the spellings this statement loads as whole values, ignoring nested statements."""
+    return _value_spellings(_own_expressions(statement), loads_only=True)
 
 
 def _statement_reads(statement: ast.stmt) -> frozenset[str]:
@@ -367,8 +508,8 @@ def _mutated_spellings(statement: ast.stmt) -> set[str]:
     return spellings
 
 
-def _written_spellings(statement: ast.stmt) -> frozenset[str]:
-    """Return the spellings this statement binds or mutates, ignoring any nested statement's."""
+def _write_targets(statement: ast.stmt) -> list[ast.expr]:
+    """Return the leaf assignment targets this statement binds, ignoring any nested statement's."""
     targets: list[ast.expr] = []
     match statement:
         case ast.Assign() | ast.Delete():
@@ -385,7 +526,7 @@ def _written_spellings(statement: ast.stmt) -> frozenset[str]:
         node.target for node in _own_expressions(statement) if isinstance(node, ast.NamedExpr)
     )
 
-    spellings: set[str] = _mutated_spellings(statement)
+    leaves: list[ast.expr] = []
     pending = list(targets)
     while pending:
         target = pending.pop()
@@ -393,17 +534,60 @@ def _written_spellings(statement: ast.stmt) -> frozenset[str]:
             pending.extend(target.elts)
         elif isinstance(target, ast.Starred):
             pending.append(target.value)
-        elif isinstance(target, ast.Subscript):
+        elif isinstance(target, ast.Name | ast.Attribute | ast.Subscript):
+            leaves.append(target)
+    return leaves
+
+
+def _written_spellings(statement: ast.stmt) -> frozenset[str]:
+    """Return the spellings this statement binds or mutates, ignoring any nested statement's."""
+    spellings: set[str] = _mutated_spellings(statement)
+    for target in _write_targets(statement):
+        spellings.add(ast.unparse(target))
+        if isinstance(target, ast.Subscript):
             # `state[key] = ...` writes through `state`, which is how the condition reads it.
-            spellings.add(ast.unparse(target))
             spellings.add(ast.unparse(target.value))
-        elif isinstance(target, ast.Name | ast.Attribute):
-            spellings.add(ast.unparse(target))
     return frozenset(spellings)
 
 
+def _configured_receivers(statement: ast.stmt) -> frozenset[str]:
+    """Return the receivers this statement configures without binding them.
+
+    `lexer.commenters = ""` and `lexer.push_token(...)` both change what `lexer` does while
+    binding only `lexer.commenters` or nothing at all, so a statement that reads `lexer` itself
+    reads what they wrote. Recording object configuration nowhere is what let the `shlex` lexer be
+    reconfigured so an unterminated quote tokenizes cleanly, withdrawing
+    `taint.eval-payload.lex-error` with every fingerprint in the tree unchanged.
+
+    These are matched against the spellings a closure reads *as whole values* rather than against
+    every spelling it reads. A guard testing `self.work` reaches `self` only as the base of that
+    path, and treating an unrelated `self.other = ...` as a write it reads would churn the record
+    of every guard in a method on any edit to any attribute of the same object.
+
+    Args:
+        statement: The statement to inspect, ignoring any nested statement's expressions.
+
+    Returns:
+        Receiver spellings, empty when the statement configures nothing.
+    """
+    receivers: set[str] = set()
+    for target in _write_targets(statement):
+        if isinstance(target, ast.Attribute):
+            receivers.add(ast.unparse(target.value))
+    for node in _own_expressions(statement):
+        if _called_name(node) not in _MUTATING_METHODS or not isinstance(node, ast.Call):
+            continue
+        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+        if isinstance(receiver, ast.Attribute):
+            receivers.add(ast.unparse(receiver.value))
+    return frozenset(receivers)
+
+
 def _condition_writer_shapes(
-    origin: ast.stmt, scope: ast.AST | None, guards: tuple[ast.expr, ...]
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    guards: tuple[ast.expr, ...],
+    cache: _DerivationCache | None = None,
 ) -> tuple[str, ...]:
     """Return the normalized shapes of same-scope statements that feed the guard's condition.
 
@@ -424,39 +608,76 @@ def _condition_writer_shapes(
     gate exists to close. A caller passing a different value into this scope is outside that
     boundary and is not covered.
 
+    A nested function or class body is outside the scope for the same reason and by the same rule
+    `_control_flow_shapes` uses: it does not run where it is written, so a write inside it decides
+    nothing about the guard around it, and folding one in would let an edit to an unrelated closure
+    churn the guard's record.
+
     Args:
         origin: The statement that constructs the refusal, hashed separately.
         scope: Enclosing function, or `None` at class or module level.
         guards: The `if` tests governing the origin.
+        cache: Per-parse derivation memo, defaulting to one used for this call alone.
 
     Returns:
         Shapes in source order, empty when the guard is unconditional or scope-free.
     """
-    read = set(_read_spellings(guards))
+    cache = cache if cache is not None else _DerivationCache()
+    return _writer_closure(
+        origin, scope, set(_read_spellings(guards)), set(_read_value_spellings(guards)), cache
+    )
+
+
+def _writer_closure(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    read: set[str],
+    values: set[str],
+    cache: _DerivationCache,
+) -> tuple[str, ...]:
+    """Return the shapes of the same-scope statements that transitively write these spellings.
+
+    A statement qualifies by binding a spelling the closure reads, or by configuring a receiver the
+    closure reads as a whole value. The second is what brings `lexer.commenters = ...` in for an
+    operation that reads `lexer`, while keeping every `self.other = ...` out of a closure that
+    reaches `self` only through `self.work`.
+
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+        read: Seed spellings, extended in place as the fixpoint grows.
+        values: The subset read as whole values, extended in place alongside `read`.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Shapes in source order, empty when nothing is read or the origin is scope-free.
+    """
     if scope is None or not read:
         return ()
     candidates = [
-        statement
-        for statement in ast.walk(scope)
-        if isinstance(statement, ast.stmt)
-        if statement is not origin
+        statement for statement in _cached_scope_statements(scope, cache) if statement is not origin
     ]
     selected: dict[int, ast.stmt] = {}
     grew = True
     while grew:
         grew = False
         for statement in candidates:
-            if id(statement) in selected or not (_written_spellings(statement) & read):
+            if id(statement) in selected:
+                continue
+            if not (_cached_written_spellings(statement, cache) & read) and not (
+                _cached_configured_receivers(statement, cache) & values
+            ):
                 continue
             selected[id(statement)] = statement
-            # What this writer reads becomes part of the condition's dataflow, so the statements
-            # feeding *it* are selected on the next pass. The scope bounds the fixpoint.
+            # What this writer reads becomes part of the dataflow, so the statements feeding *it*
+            # are selected on the next pass. The scope bounds the fixpoint.
             read |= _statement_reads(statement)
+            values |= _statement_value_reads(statement)
             grew = True
     writers = sorted(
         selected.values(), key=lambda statement: (statement.lineno, statement.col_offset)
     )
-    return tuple(_normalized_shape(statement) for statement in writers)
+    return tuple(_cached_shape(statement, cache) for statement in writers)
 
 
 def _scope_statements(scope: ast.AST) -> list[ast.stmt]:
@@ -481,7 +702,7 @@ def _scope_statements(scope: ast.AST) -> list[ast.stmt]:
     return found
 
 
-def _diverting_shape(statement: ast.stmt) -> str | None:
+def _diverting_shape(statement: ast.stmt, cache: _DerivationCache) -> str | None:
     """Return the shape of the control this statement exerts, or `None` when it exerts none.
 
     A branch is reduced to its test and a loop to its target and iterable, so an edit inside one
@@ -491,7 +712,7 @@ def _diverting_shape(statement: ast.stmt) -> str | None:
     """
     match statement:
         case ast.Return() | ast.Raise() | ast.Break() | ast.Continue():
-            return _normalized_shape(statement)
+            return _cached_shape(statement, cache)
         case ast.If() | ast.While():
             return f"test {ast.dump(statement.test)}"
         case ast.For() | ast.AsyncFor():
@@ -516,7 +737,9 @@ def _diverting_shape(statement: ast.stmt) -> str | None:
             return None
 
 
-def _control_flow_shapes(origin: ast.stmt, scope: ast.AST | None) -> tuple[str, ...]:
+def _control_flow_shapes(
+    origin: ast.stmt, scope: ast.AST | None, cache: _DerivationCache | None = None
+) -> tuple[str, ...]:
     """Return the shapes of the control flow that decides whether a test-free origin is reached.
 
     A guard governed by an `if`, a `while` or a `match` arm records that test and the same-scope
@@ -535,25 +758,112 @@ def _control_flow_shapes(origin: ast.stmt, scope: ast.AST | None) -> tuple[str, 
     Args:
         origin: The statement that constructs the refusal, hashed separately.
         scope: Enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo, defaulting to one used for this call alone.
 
     Returns:
         Shapes in source order, empty when the origin has no enclosing function.
     """
     if scope is None:
         return ()
-    statements = [statement for statement in _scope_statements(scope) if statement is not origin]
+    cache = cache if cache is not None else _DerivationCache()
+    statements = [
+        statement for statement in _cached_scope_statements(scope, cache) if statement is not origin
+    ]
     statements.sort(key=lambda statement: (statement.lineno, statement.col_offset))
     return tuple(
-        shape for statement in statements if (shape := _diverting_shape(statement)) is not None
+        shape
+        for statement in statements
+        if (shape := _diverting_shape(statement, cache)) is not None
     )
 
 
-def _is_guard_refusal_call(node: ast.AST) -> bool:
-    return _called_name(node) == REFUSAL_CONSTRUCTOR
+def _guarded_bodies(tree: ast.AST) -> dict[int, tuple[ast.stmt, ...]]:
+    """Map every node inside an `except` handler to the `try` body that handler guards.
+
+    Descent stops at a nested function or class body, which does not run inside the `try`. Trees
+    are visited outermost first, so an inner `try` overwrites its own handlers' entries and the
+    nearest guarded body wins.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        Guarded bodies keyed by node identity, empty for a module with no handler.
+    """
+    bodies: dict[int, tuple[ast.stmt, ...]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try | ast.TryStar):
+            continue
+        body = tuple(node.body)
+        for handler in node.handlers:
+            pending: list[ast.AST] = [handler]
+            while pending:
+                current = pending.pop()
+                bodies[id(current)] = body
+                pending.extend(
+                    child
+                    for child in ast.iter_child_nodes(current)
+                    if not isinstance(child, _SCOPES)
+                )
+    return bodies
 
 
-def _origin_calls_by_statement(tree: ast.AST) -> list[tuple[ast.stmt, ast.Call]]:
+def _raising_operation_shapes(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    guarded: tuple[ast.stmt, ...],
+    cache: _DerivationCache,
+) -> tuple[str, ...]:
+    """Return the shapes of the operation a test-free handler guards, and what configures it.
+
+    A guard reached through an `except` handler has no condition of its own. What decides whether
+    it fires is the operation in the `try` body and the object state that operation reads, and the
+    control-flow closure records a `try` only through its handled exception types, so neither was
+    in the record. `taint.eval-payload.lex-error` is the concrete case: reconfiguring the `shlex`
+    lexer so an unterminated quote tokenizes cleanly withdraws the guard, and rewriting the
+    tokenizing call itself withdraws it too, both with every fingerprint in the tree unchanged.
+
+    The writer closure is the same one a guarded origin gets, seeded from what the guarded body
+    reads rather than from what a condition reads, and bounded by the same enclosing function.
+
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+        guarded: Top-level statements of the `try` body the origin's handler guards.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The guarded body's shapes followed by its writer closure, empty when the origin is not
+        reached through a handler.
+    """
+    if not guarded:
+        return ()
+    body: list[ast.stmt] = []
+    for statement in guarded:
+        body.append(statement)
+        body.extend(_scope_statements(statement))
+    body = [statement for statement in body if statement is not origin]
+    body.sort(key=lambda statement: (statement.lineno, statement.col_offset))
+    read: set[str] = set()
+    values: set[str] = set()
+    for statement in body:
+        read |= _statement_reads(statement)
+        values |= _statement_value_reads(statement)
+    return (
+        *(_cached_shape(statement, cache) for statement in body),
+        *_writer_closure(origin, scope, read, values, cache),
+    )
+
+
+def _is_guard_refusal_call(node: ast.AST, names: frozenset[str]) -> bool:
+    return _called_name(node) in names
+
+
+def _origin_calls_by_statement(
+    tree: ast.AST, names: frozenset[str] | None = None
+) -> list[tuple[ast.stmt, ast.Call]]:
     """Pair every guard-origin construction with the statement that owns it."""
+    names = names if names is not None else _refusal_constructor_names(tree)
     pairs: list[tuple[ast.stmt, ast.Call]] = []
     for statement in ast.walk(tree):
         if not isinstance(statement, ast.stmt):
@@ -561,17 +871,20 @@ def _origin_calls_by_statement(tree: ast.AST) -> list[tuple[ast.stmt, ast.Call]]
         pairs.extend(
             (statement, node)
             for node in _own_expressions(statement)
-            if _is_guard_refusal_call(node)
+            if _is_guard_refusal_call(node, names)
             if isinstance(node, ast.Call)
         )
     return pairs
 
 
-def _guard_refusal_calls(tree: ast.AST) -> list[ast.Call]:
-    return [node for node in ast.walk(tree) if _is_guard_refusal_call(node)]  # ty: ignore[invalid-return-type]
+def _guard_refusal_calls(tree: ast.AST, names: frozenset[str] | None = None) -> list[ast.Call]:
+    names = names if names is not None else _refusal_constructor_names(tree)
+    return [node for node in ast.walk(tree) if _is_guard_refusal_call(node, names)]  # ty: ignore[invalid-return-type]
 
 
-def _declared_transport_shapes(tree: ast.AST, path: str) -> dict[str, str]:
+def _declared_transport_shapes(
+    tree: ast.AST, path: str, qualnames: dict[int, str]
+) -> dict[str, str]:
     """Return the normalized shape of every declared transport this module defines.
 
     A transport does not mint an identifier, so it is never an origin. One of them nonetheless owns
@@ -582,17 +895,18 @@ def _declared_transport_shapes(tree: ast.AST, path: str) -> dict[str, str]:
     Args:
         tree: Parsed module.
         path: Module file name, used to resolve declared transports.
+        qualnames: Enclosing qualified names keyed by node identity, from the module's one
+            annotation pass.
 
     Returns:
         Normalized shapes keyed by the callee name an origin statement would spell.
     """
     declared = {qualname for module, qualname, _ in DECLARED_TRANSPORTS if module == path}
-    names = _annotate(tree).names
     shapes: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        if names.get(id(node), node.name) in declared:
+        if qualnames.get(id(node), node.name) in declared:
             shapes[node.name] = _normalized_shape(node)
     return shapes
 
@@ -612,7 +926,9 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
     """
     tree = ast.parse(source)
     annotations = _annotate(tree)
-    transports = _declared_transport_shapes(tree, path)
+    transports = _declared_transport_shapes(tree, path, annotations.names)
+    guarded_bodies = _guarded_bodies(tree)
+    cache = _DerivationCache()
     records: list[OriginRecord] = []
     for statement, call in _origin_calls_by_statement(tree):
         if not call.args or not isinstance(call.args[0], ast.Constant):
@@ -624,23 +940,39 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         condition = annotations.conditions.get(id(statement), "")
         scope = annotations.scopes.get(id(statement))
         tests = annotations.tests.get(id(statement), ())
-        writers = _condition_writer_shapes(statement, scope, tests)
+        writers = _condition_writer_shapes(statement, scope, tests, cache)
         # A guard with a test records that test and what writes it; one without records the control
-        # flow that decides it is reached at all, which is the only description that guard has.
-        flow = () if tests else _control_flow_shapes(statement, scope)
+        # flow that decides it is reached at all, and, when it is reached through a handler, the
+        # operation whose failure is the only condition it has.
+        flow = () if tests else _control_flow_shapes(statement, scope, cache)
+        raising = (
+            ()
+            if tests
+            else _raising_operation_shapes(
+                statement, scope, guarded_bodies.get(id(statement), ()), cache
+            )
+        )
         called = {name for node in _own_expressions(statement) if (name := _called_name(node))}
         carried = tuple(shape for name, shape in sorted(transports.items()) if name in called)
         digest = hashlib.sha256(
             "\n".join(
-                (qualname, condition, _normalized_shape(statement), *writers, *carried, *flow)
+                (
+                    qualname,
+                    condition,
+                    _cached_shape(statement, cache),
+                    *writers,
+                    *carried,
+                    *flow,
+                    *raising,
+                )
             ).encode("utf-8")
         ).hexdigest()
         records.append(OriginRecord(origin_id, path, qualname, _group_digest(digest)))
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
 
 
-def _is_refusal_shape(node: ast.expr) -> bool:
-    return _called_name(node) in {REFUSAL_CONSTRUCTOR, *GUARD_FREE_VERDICTS}
+def _is_refusal_shape(node: ast.expr, names: frozenset[str]) -> bool:
+    return _called_name(node) in names | GUARD_FREE_VERDICTS
 
 
 def _is_raw_text(node: ast.expr) -> bool:
@@ -649,18 +981,20 @@ def _is_raw_text(node: ast.expr) -> bool:
     )
 
 
-def _literal_id_violations(tree: ast.AST, path: str) -> list[str]:
+def _literal_id_violations(tree: ast.AST, path: str, names: frozenset[str]) -> list[str]:
     """Return a violation for every origin whose identifier is not a string literal."""
     return [
         f"{path}: {REFUSAL_CONSTRUCTOR} identifier must be a string literal"
-        for call in _guard_refusal_calls(tree)
+        for call in _guard_refusal_calls(tree, names)
         if not call.args
         or not isinstance(call.args[0], ast.Constant)
         or not isinstance(call.args[0].value, str)
     ]
 
 
-def _refusal_carrier_violations(tree: ast.AST, names: dict[int, str], path: str) -> list[str]:
+def _refusal_carrier_violations(
+    tree: ast.AST, qualnames: dict[int, str], path: str, names: frozenset[str]
+) -> list[str]:
     """Return a violation for every refusal carried as text or as an undeclared transport."""
     violations: list[str] = []
     for node in ast.walk(tree):
@@ -676,9 +1010,9 @@ def _refusal_carrier_violations(tree: ast.AST, names: dict[int, str], path: str)
             ]
         else:
             continue
-        qualname = names.get(id(node), "")
+        qualname = qualnames.get(id(node), "")
         for argument in candidates:
-            if _is_refusal_shape(argument):
+            if _is_refusal_shape(argument, names):
                 continue
             if _is_raw_text(argument):
                 violations.append(
@@ -727,10 +1061,11 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
         Human-readable violations, empty when every refusal shape is canonical.
     """
     tree = ast.parse(source)
-    names = _annotate(tree).names
+    qualnames = _annotate(tree).names
+    names = _refusal_constructor_names(tree)
     return (
-        *_literal_id_violations(tree, path),
-        *_refusal_carrier_violations(tree, names, path),
+        *_literal_id_violations(tree, path, names),
+        *_refusal_carrier_violations(tree, qualnames, path, names),
         *_verdict_return_violations(tree, path),
     )
 
@@ -849,7 +1184,13 @@ so it must be named and inventoried instead.
 
 
 def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
-    """Return the module-level bound names, and the subset bound to a numeric literal."""
+    """Return the module-level bound names, and the subset bound to a numeric magnitude.
+
+    A magnitude is recognized through arithmetic, not only as a bare literal: `_MAX_ITEMS = 50 * 2`
+    caps a guard exactly as `_MAX_ITEMS = 100` does, and requiring a bare literal let the computed
+    spelling escape both halves of the rule at once, since a module-bound name is also exempt from
+    the naming-convention check.
+    """
     bound: set[str] = set()
     numeric: set[str] = set()
     for node in getattr(tree, "body", ()):
@@ -861,14 +1202,41 @@ def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
             continue
         names = {target.id for target in targets if isinstance(target, ast.Name)}
         bound |= names
-        value = node.value
-        if (
-            isinstance(value, ast.Constant)
-            and isinstance(value.value, int | float)
-            and not isinstance(value.value, bool)
-        ):
+        if node.value is not None and _operand_magnitudes(node.value):
             numeric |= names
     return frozenset(bound), frozenset(numeric)
+
+
+def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
+    """Return the scope's own names bound to a magnitude that is not structural.
+
+    A cap spelled as a local binding has the provenance problem a module-level one has: `limit =
+    100` read by a guard condition is a resource bound with nothing recording where it came from,
+    and it is invisible to both the module-constant set and the naming convention. Zero and one are
+    excluded for the reason `STRUCTURAL_GUARD_LITERALS` gives, so a counter seeded at zero is not
+    mistaken for a threshold.
+
+    Args:
+        scope: Enclosing function, or `None` at class or module level.
+
+    Returns:
+        Local names bound to a magnitude, empty when the origin is scope-free.
+    """
+    if scope is None:
+        return frozenset()
+    names: set[str] = set()
+    for statement in _scope_statements(scope):
+        if isinstance(statement, ast.Assign):
+            targets: list[ast.expr] = list(statement.targets)
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+        else:
+            continue
+        if statement.value is None:
+            continue
+        if _operand_magnitudes(statement.value) - STRUCTURAL_GUARD_LITERALS:
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return frozenset(names)
 
 
 def _threshold_names(
@@ -927,10 +1295,11 @@ def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
 def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every guard threshold that is neither a limits field nor an inventoried bound.
 
-    A threshold is recognized structurally rather than by naming convention: any module-level
-    numeric constant the guard references, and any bare numeric magnitude it compares against.
-    Recognizing only conventionally named constants would let both a generically named bound and a
-    raw literal introduce a resource cap with no provenance.
+    A threshold is recognized structurally rather than by naming convention: any module-level or
+    same-scope numeric constant the guard references, computed as well as literal, and any bare
+    numeric magnitude it compares against. Recognizing only conventionally named module literals
+    would let a generically named bound, a computed one, a local one, and a raw literal each
+    introduce a resource cap with no provenance.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -945,7 +1314,8 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     violations: list[str] = []
     for statement, _call in _origin_calls_by_statement(tree):
         nodes: tuple[ast.AST, ...] = (statement, *annotations.tests.get(id(statement), ()))
-        for name in sorted(_threshold_names(nodes, bound, numeric)):
+        local = _local_numeric_names(annotations.scopes.get(id(statement)))
+        for name in sorted(_threshold_names(nodes, bound, numeric | local)):
             if name in FIXED_SEMANTIC_BOUNDS:
                 continue
             violations.append(
@@ -1021,6 +1391,62 @@ def repository_shape_violations(root: Path) -> tuple[str, ...]:
     for module in GUARDED_MODULES:
         source = (root / module).read_text(encoding="utf-8")
         violations.extend(find_shape_violations(source, Path(module).name))
+    return tuple(violations)
+
+
+def repository_coverage_violations(root: Path) -> tuple[str, ...]:
+    """Return every module that mints guard refusals without being an inventoried module.
+
+    `GUARDED_MODULES` is the surface every other rule reads. A guard added in a module outside it
+    is not merely unchecked: closure derives no origin for it, so the partition stays exact and the
+    gate reports success while a fail-closed guard ships with no witness and no debt record. This
+    rule derives the real surface from the package instead of trusting the tuple.
+
+    Args:
+        root: Repository root to read the guard package from.
+
+    Returns:
+        Human-readable violations, empty when the tuple covers every refusing module.
+    """
+    guarded = set(GUARDED_MODULES)
+    violations: list[str] = []
+    for path in sorted((root / GUARD_MODULE_ROOT).glob("*.py")):
+        module = path.relative_to(root).as_posix()
+        if module in guarded:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if not _guard_refusal_calls(tree):
+            continue
+        violations.append(
+            f"{module} constructs a {REFUSAL_CONSTRUCTOR} but is not in GUARDED_MODULES; add it "
+            f"so its guards are shape-checked, inventoried and held to the closure partition"
+        )
+    return tuple(violations)
+
+
+def repository_artifact_violations(root: Path) -> tuple[str, ...]:
+    """Return a violation when this tree's own inventory artifacts are not canonical.
+
+    The base-owned closure run reads the candidate's debt snapshot and witness registry by identity
+    alone, so that a candidate can migrate the record schema or strengthen a witness in one change
+    without the base revision's copy failing to decode what it is handed. The full canonical shape
+    of both artifacts is therefore this tree's own copy to enforce, which is what this rule does.
+
+    Args:
+        root: Repository root holding the artifacts.
+
+    Returns:
+        Human-readable violations, empty when both artifacts are canonical.
+    """
+    violations: list[str] = []
+    try:
+        load_debt_records(root)
+    except ValueError as error:
+        violations.append(str(error))
+    try:
+        classified_origin_ids(root)
+    except ValueError as error:
+        violations.append(str(error))
     return tuple(violations)
 
 
@@ -1152,6 +1578,48 @@ def classified_ids_in_registry(source: str) -> frozenset[str]:
     return frozenset(identifiers)
 
 
+def registry_origin_ids(source: str) -> frozenset[str]:
+    """Return the guard identifiers a registry claims, tolerating a foreign witness shape.
+
+    This is the registry's counterpart to `_decode_identifiers`, and it exists for the same reason:
+    the base revision's copy of this checker reads the candidate's registry, so validating each
+    entry against this copy's field lists would reject a witness the candidate strengthened with a
+    new evidence field, hard-failing the base-owned job with no fix available inside that change.
+
+    Identity is still taken structurally: an entry must name its identifier with the `origin_id`
+    keyword or supply it first, and it must be a string literal either way. Everything else about
+    the entry is the candidate's own copy to check, in `classified_ids_in_registry`.
+
+    Args:
+        source: Registry source text.
+
+    Returns:
+        Identifiers carried by a reachable or invariant witness.
+
+    Raises:
+        ValueError: If either executable registry is missing, or an entry carries no literal
+            identifier.
+    """
+    tree = ast.parse(source)
+    identifiers: set[str] = set()
+    for registry_name, registry in _classification_registry_tuples(tree).items():
+        for entry in registry.elts:
+            if not isinstance(entry, ast.Call):
+                raise ValueError(f"{REGISTRY_PATH}: {registry_name} entries must be constructions")
+            by_keyword = next(
+                (keyword.value for keyword in entry.keywords if keyword.arg == IDENTITY_FIELD),
+                None,
+            )
+            supplied = by_keyword if by_keyword is not None else next(iter(entry.args), None)
+            if not isinstance(supplied, ast.Constant) or not isinstance(supplied.value, str):
+                raise ValueError(
+                    f"{REGISTRY_PATH}: {registry_name} entries must carry a literal "
+                    f"{IDENTITY_FIELD}"
+                )
+            identifiers.add(supplied.value)
+    return frozenset(identifiers)
+
+
 def unclassified_origin_records(root: Path) -> tuple[OriginRecord, ...]:
     """Return the canonical records of every guard origin the registry does not classify.
 
@@ -1188,8 +1656,16 @@ def repository_closure_violations(root: Path) -> tuple[str, ...]:
     """
     records = repository_origin_records(root)
     source = {record.origin_id for record in records}
-    classified = classified_origin_ids(root)
-    debt = {record.origin_id for record in load_debt_records(root)}
+    # Closure is the one gate the base revision's copy runs against a candidate tree, so both
+    # artifacts are read by identity alone. Decoding the candidate's snapshot strictly would make a
+    # `SCHEMA_VERSION` bump, and validating its registry entries against this copy's field lists
+    # would make a strengthened witness, fail here with no fix available inside the change that
+    # introduces it. The candidate's own copy holds both to their full canonical shape in
+    # `repository_artifact_violations`.
+    classified = registry_origin_ids((root / REGISTRY_PATH).read_text(encoding="utf-8"))
+    debt = set(
+        _decode_identifiers(json.loads((root / DEBT_PATH).read_text(encoding="utf-8")), DEBT_PATH)
+    )
     retired = load_retired_origin_ids(root)
     sites = Counter(record.origin_id for record in records)
     return (
@@ -1405,6 +1881,29 @@ def compare_against_base(
     return (*grew, *laundered, *withdrawn)
 
 
+def _run_gates(gates: tuple[tuple[str, Callable[[], tuple[str, ...]]], ...]) -> list[str]:
+    """Run each gate independently and return every violation the run produced.
+
+    A gate that cannot derive its answer raises, and several of them raise for the same conditions
+    another gate reports cleanly. Building the failure list eagerly therefore threw away every
+    violation already computed and replaced the operator's report with a traceback naming no gate.
+    Each gate's own failure is reported as one more violation instead.
+
+    Args:
+        gates: Named gates to run, in report order.
+
+    Returns:
+        Human-readable violations across every gate.
+    """
+    failures: list[str] = []
+    for name, gate in gates:
+        try:
+            failures.extend(gate())
+        except ValueError as error:
+            failures.append(f"{name}: {error}")
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the requested guard-inventory gate.
 
@@ -1438,28 +1937,39 @@ def main(argv: list[str] | None = None) -> int:
         # allowlists describe the base's source rather than the candidate's. Running them here
         # would reject a legitimate rename, a newly declared transport or a newly inventoried
         # fixed bound with no fix available inside the same change, and on a push to main it would
-        # take the release job down with it. Those three gates run from the candidate's own copy in
-        # the test suite. Closure names no allowlist: it derives the whole partition from the
-        # candidate tree, so running it from the base is what makes it unweakenable.
-        failures = [
-            *repository_closure_violations(arguments.root),
-            *compare_against_base(
-                arguments.root,
-                arguments.compare_base.read_text(encoding="utf-8"),
-                base_registry=(
-                    None
-                    if arguments.base_registry is None
-                    else arguments.base_registry.read_text(encoding="utf-8")
+        # take the release job down with it. The same holds for the canonical shape of the debt
+        # snapshot and the witness registry, which this copy reads by identity alone. Every one of
+        # those gates runs from the candidate's own copy in the test suite. Closure names no
+        # allowlist: it derives the whole partition from the candidate tree, so running it from the
+        # base is what makes it unweakenable.
+        base_snapshot = arguments.compare_base.read_text(encoding="utf-8")
+        base_registry = (
+            None
+            if arguments.base_registry is None
+            else arguments.base_registry.read_text(encoding="utf-8")
+        )
+        failures = _run_gates(
+            (
+                ("closure", lambda: repository_closure_violations(arguments.root)),
+                (
+                    "base comparison",
+                    lambda: compare_against_base(
+                        arguments.root, base_snapshot, base_registry=base_registry
+                    ),
                 ),
-            ),
-        ]
+            )
+        )
     else:
-        failures = [
-            *repository_shape_violations(arguments.root),
-            *repository_limits_violations(arguments.root),
-            *repository_threshold_violations(arguments.root),
-            *repository_closure_violations(arguments.root),
-        ]
+        failures = _run_gates(
+            (
+                ("guarded module coverage", lambda: repository_coverage_violations(arguments.root)),
+                ("inventory artifacts", lambda: repository_artifact_violations(arguments.root)),
+                ("refusal shapes", lambda: repository_shape_violations(arguments.root)),
+                ("limits provenance", lambda: repository_limits_violations(arguments.root)),
+                ("guard thresholds", lambda: repository_threshold_violations(arguments.root)),
+                ("closure", lambda: repository_closure_violations(arguments.root)),
+            )
+        )
     for failure in failures:
         sys.stderr.write(f"{failure}\n")
     return 1 if failures else 0

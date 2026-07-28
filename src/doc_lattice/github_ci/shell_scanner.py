@@ -1035,7 +1035,10 @@ class _ShellScanner:
             )
             if isinstance(verdict, GuardRefusal):
                 raise _ShellScanIncomplete(verdict)
-            if isinstance(verdict, MarkerDetected):
+            if not isinstance(verdict, Certified):
+                # Only a positive certification may return normally. Matching `MarkerDetected`
+                # positively instead would let a verdict variant added to `ScanVerdict` later fall
+                # through to the public boundary, which projects a normal return as `Certified()`.
                 raise _ShellMarkerDetected
         return tuple(self.invocations)
 

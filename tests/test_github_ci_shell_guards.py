@@ -25,6 +25,7 @@ from guard_witnesses import (
 )
 
 from doc_lattice.error_types import ConfigError
+from doc_lattice.github_ci import shell_scanner
 from doc_lattice.github_ci.shell_guards import (
     Certified,
     GuardRefusal,
@@ -297,6 +298,27 @@ def test_a_negative_step_budget_is_rejected_rather_than_treated_as_unset() -> No
         _ScanBudget(-2)
 
 
+def test_an_unrecognized_verdict_does_not_certify_at_the_public_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `ShellScanResult` fails closed on a verdict it does not recognize, but the scan boundary
+    # decides what verdict the result carries: matching `MarkerDetected` positively and returning
+    # normally otherwise lets a `ScanVerdict` member added later reach a boundary that mints
+    # `Certified()`, certifying a run body the taint analysis did not certify.
+
+    class _Unrecognized:
+        pass
+
+    monkeypatch.setattr(shell_scanner, "analyze_marker_taint", lambda *_, **__: _Unrecognized())
+
+    result = scan_doc_lattice_invocations('X=doc-; eval "$X"lattice')
+
+    assert not isinstance(result.verdict, Certified)
+    assert result.incomplete_reason is not None
+    with pytest.raises(ConfigError, match="shell scan incomplete"):
+        direct_doc_lattice_invocations('X=doc-; eval "$X"lattice')
+
+
 def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
     """Map each guard identifier to its module, its condition line, and its refusal line.
 
@@ -314,7 +336,9 @@ def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
-            if node.func.id != "GuardRefusal" or not isinstance(node.args[0], ast.Constant):
+            if node.func.id != "GuardRefusal" or not node.args:
+                continue
+            if not isinstance(node.args[0], ast.Constant):
                 continue
             origin_id = node.args[0].value
             if not isinstance(origin_id, str):

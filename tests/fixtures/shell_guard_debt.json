@@ -1,25 +1,25 @@
 {
   "records": [
     {
-      "fingerprint": "2327-1011-80ae-0f7f-4704-7711",
+      "fingerprint": "4eb1-017e-c055-a036-8e48-12da",
       "origin_id": "scanner.case.terminator-outside-arm",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._advance_case_body"
     },
     {
-      "fingerprint": "ff0d-bb77-dcd6-3189-4bb1-1259",
+      "fingerprint": "e42a-6aa8-d60f-03f5-9e26-db06",
       "origin_id": "scanner.case.unbalanced-pattern-parenthesis",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._consume_case_pattern_close"
     },
     {
-      "fingerprint": "0b87-3934-643e-08de-d783-ea49",
+      "fingerprint": "3bee-00c0-812d-9431-146c-8155",
       "origin_id": "scanner.control-flow.frame-stack-mismatch",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
     },
     {
-      "fingerprint": "d9f1-0e32-f7dd-023b-4e6f-d957",
+      "fingerprint": "8815-4c7e-5071-d6bb-1dc1-4950",
       "origin_id": "scanner.control-flow.freeze-without-taint-builder",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
@@ -43,7 +43,7 @@
       "qualname": "_ShellScanner._finish_case"
     },
     {
-      "fingerprint": "5141-83d7-d7ba-14de-ea05-5fa7",
+      "fingerprint": "f238-ffbb-177d-726d-03f8-fc94",
       "origin_id": "scanner.descriptor.unparsable",
       "path": "shell_scanner.py",
       "qualname": "_parse_static_descriptor"
@@ -73,13 +73,13 @@
       "qualname": "_brace_integer"
     },
     {
-      "fingerprint": "098f-c001-6749-83db-e336-b452",
+      "fingerprint": "2bab-0346-17ff-625d-620e-fe73",
       "origin_id": "taint.contextualization.effect-edge-limit",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence"
     },
     {
-      "fingerprint": "154a-d80f-35be-2ef6-83e8-b350",
+      "fingerprint": "57e6-3e8d-439c-b813-61c0-9090",
       "origin_id": "taint.contextualization.state-alternative-limit",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence"
@@ -109,7 +109,7 @@
       "qualname": "_append_eval_conditional_writes"
     },
     {
-      "fingerprint": "664d-ae6d-e4bb-3cb3-6ff5-c88c",
+      "fingerprint": "27af-6c13-5a87-f60b-febf-ed5d",
       "origin_id": "taint.eval-descriptor.unparsable",
       "path": "shell_taint.py",
       "qualname": "_static_eval_descriptor"
@@ -133,7 +133,7 @@
       "qualname": "_static_eval_mutations.route_assignment"
     },
     {
-      "fingerprint": "775b-0ad9-4bdc-f052-914c-c928",
+      "fingerprint": "2d7a-6b74-156b-751d-2125-b699",
       "origin_id": "taint.eval-payload.lex-error",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
@@ -151,7 +151,7 @@
       "qualname": "_static_eval_program_commands"
     },
     {
-      "fingerprint": "ed61-7198-4973-eca3-1d32-48c0",
+      "fingerprint": "b092-563e-a9ab-222d-f5cb-881e",
       "origin_id": "taint.eval-payload.redirection-lexeme",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
@@ -229,7 +229,7 @@
       "qualname": "_eval_syntax_variable_transition"
     },
     {
-      "fingerprint": "d6ff-852a-85ef-575e-2161-877e",
+      "fingerprint": "92f3-a58b-5f0c-7a8b-f826-e8ff",
       "origin_id": "taint.eval-syntax.transition-table-limit",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_variable_transition"
@@ -391,5 +391,5 @@
       "qualname": "_project_read_value"
     }
   ],
-  "schema": 3
+  "schema": 4
 }

@@ -1231,3 +1231,255 @@ def test_closure_keeps_a_retirement_for_a_guard_that_is_gone(tmp_path: Path) -> 
     )
 
     assert checker.repository_closure_violations(root) == ()
+
+
+def test_a_refusal_spelled_through_an_import_alias_is_still_a_guard_origin() -> None:
+    # Every rule here recognizes a construction by name, and a verdict return is the one position
+    # where an aliased construction is a well-formed verdict no carrier rule rejects. An origin
+    # invisible to the extractor leaves the closure partition exact while an unwitnessed
+    # fail-closed guard ships.
+    source = (
+        "from doc_lattice.github_ci.shell_guards import GuardRefusal as GR\n"
+        "def analyze_marker_taint(evidence, *, limits):\n"
+        "    if evidence.edges:\n"
+        '        return GR("taint.demo.aliased", "nope")\n'
+        "    return Certified()\n"
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.aliased"]
+
+
+def test_a_refusal_spelled_through_a_module_level_rebinding_is_still_a_guard_origin() -> None:
+    source = (
+        "from doc_lattice.github_ci.shell_guards import GuardRefusal\n"
+        "_REFUSE = GuardRefusal\n"
+        "def analyze_marker_taint(evidence, *, limits):\n"
+        "    if evidence.edges:\n"
+        '        return _REFUSE("taint.demo.rebound", "nope")\n'
+        "    return Certified()\n"
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.rebound"]
+
+
+def test_a_refusing_module_outside_the_guarded_tuple_is_rejected(tmp_path: Path) -> None:
+    # GUARDED_MODULES is hand-maintained and drives every other rule, so a guard added in a module
+    # missing from it leaves every partition exact with nothing reporting the omission.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "shell_taint_eval.py").write_text(
+        "def _bound(depth, limits):\n"
+        "    if depth > limits.taint.max_eval_reparse_depth:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.eval.new-bound", "too deep"))\n',
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_coverage_violations(root)
+
+    assert any("shell_taint_eval.py" in violation for violation in violations)
+    assert any("not in GUARDED_MODULES" in violation for violation in violations)
+
+
+def test_the_shipped_tree_inventories_every_refusing_module() -> None:
+    assert checker.repository_coverage_violations(_ROOT) == ()
+
+
+def test_the_base_owned_run_reads_a_candidate_snapshot_under_a_newer_schema(
+    tmp_path: Path,
+) -> None:
+    # Closure runs from the base revision's copy against the candidate tree, so decoding the
+    # candidate's snapshot against this copy's record schema would make a SCHEMA_VERSION bump fail
+    # the base-owned job with no fix available inside the change that makes it.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    debt = root / checker.DEBT_PATH
+    payload = json.loads(debt.read_text(encoding="utf-8"))
+    payload["schema"] = checker.SCHEMA_VERSION + 1
+    debt.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert checker.repository_closure_violations(root) == ()
+    assert checker.repository_artifact_violations(root) != ()
+
+
+def test_the_base_owned_run_reads_a_witness_strengthened_with_a_new_field(tmp_path: Path) -> None:
+    # Same contract for the registry: validating the candidate's entries against this copy's field
+    # lists would reject a witness the candidate strengthened, in the base's copy where the
+    # candidate cannot fix it.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    registry = root / checker.REGISTRY_PATH
+    registry.write_text(
+        'REACHABLE_WITNESSES = (ReachableWitness("scanner.demo.only", "x", severity="high"),)\n'
+        "INVARIANT_WITNESSES = ()\n",
+        encoding="utf-8",
+    )
+
+    assert checker.registry_origin_ids(registry.read_text(encoding="utf-8")) == frozenset(
+        {"scanner.demo.only"}
+    )
+    assert any(
+        "unexpected field 'severity'" in violation
+        for violation in checker.repository_artifact_violations(root)
+    )
+
+
+def test_the_base_owned_run_still_requires_a_literal_identifier(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path, [])
+    (root / checker.REGISTRY_PATH).write_text(
+        "REACHABLE_WITNESSES = (ReachableWitness(_COMPUTED, 'x'),)\nINVARIANT_WITNESSES = ()\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="literal origin_id"):
+        checker.repository_closure_violations(root)
+
+
+def test_an_earlier_gate_still_reports_when_a_later_one_cannot_derive_its_answer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A non-literal identifier is both a clean shape violation and a condition the extractor
+    # raises on. Building the failure list eagerly replaced the operator's report with a traceback
+    # naming no gate and discarding every violation already computed.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    module = root / checker.GUARDED_MODULES[1]
+    module.write_text(
+        module.read_text(encoding="utf-8").replace(
+            'GuardRefusal("scanner.budget.step-limit", "step limit exceeded")',
+            'GuardRefusal(_STEP_ID, "step limit exceeded")',
+        ),
+        encoding="utf-8",
+    )
+
+    assert checker.main(["--root", str(root)]) == 1
+
+    reported = capsys.readouterr().err
+    assert "identifier must be a string literal" in reported
+    assert "closure: " in reported
+
+
+_NESTED_CLOSURE_SOURCE = """
+def _contextualize(evidence, limits):
+    edges = evidence.edges
+
+    def _unrelated(state):
+        edges = state.rebuild()
+        return edges
+
+    if len(edges) > limits.taint.max_edges:
+        raise _TaintLimitExceeded(GuardRefusal("taint.demo.edge-limit", "too many"))
+"""
+
+
+def test_writer_closure_ignores_a_write_inside_a_nested_function() -> None:
+    # A nested body does not run where it is written, so a write inside it decides nothing about
+    # the guard around it. Folding one in lets an edit to an unrelated closure churn a frozen
+    # record, which is the regeneration path this gate exists to close.
+    edited = _NESTED_CLOSURE_SOURCE.replace("state.rebuild()", "state.rebuild(limits)")
+
+    original = checker.extract_origin_records(_NESTED_CLOSURE_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].origin_id == "taint.demo.edge-limit"
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+_HANDLER_SOURCE = """
+def _tokenize(program):
+    lexer = shlex.shlex(program, posix=True)
+    lexer.commenters = ""
+    lexer.whitespace_split = True
+    try:
+        tokens = tuple(lexer)
+    except ValueError as error:
+        raise _TaintLimitExceeded(
+            GuardRefusal("taint.demo.lex-error", "payload cannot be tokenized")
+        ) from error
+    return tokens
+"""
+
+
+def test_fingerprint_tracks_the_object_state_that_configures_a_guarded_operation() -> None:
+    # A guard reached through an `except` handler has no condition of its own, and the control-flow
+    # closure records a `try` only through its handled exception types. Reconfiguring the lexer so
+    # the operation stops raising withdraws the guard while leaving the record byte-identical.
+    reconfigured = _HANDLER_SOURCE.replace('lexer.commenters = ""', 'lexer.quotes = ""').replace(
+        "lexer.whitespace_split = True", 'lexer.escape = ""'
+    )
+
+    original = checker.extract_origin_records(_HANDLER_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(reconfigured, "shell_taint.py")
+
+    assert original[0].origin_id == "taint.demo.lex-error"
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_fingerprint_tracks_the_guarded_operation_itself() -> None:
+    # Rewriting the raising call to one that cannot raise withdraws the guard just as completely.
+    neutered = _HANDLER_SOURCE.replace("tokens = tuple(lexer)", "tokens = ()")
+
+    original = checker.extract_origin_records(_HANDLER_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(neutered, "shell_taint.py")
+
+    assert original[0].fingerprint != updated[0].fingerprint
+
+
+def test_a_handler_guard_record_ignores_an_unrelated_edit_in_the_same_scope() -> None:
+    # The negative control for the two above: the closure is bounded by what the guarded body
+    # reads, so an unrelated statement in the same function leaves the record alone.
+    unrelated = _HANDLER_SOURCE.replace(
+        "    return tokens\n", "    unrelated = _describe(program)\n    return tokens\n"
+    )
+
+    original = checker.extract_origin_records(_HANDLER_SOURCE, "shell_taint.py")
+    updated = checker.extract_origin_records(unrelated, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_a_computed_module_threshold_is_rejected() -> None:
+    # Requiring a bare literal let a computed spelling escape both halves of the rule: the name is
+    # absent from the numeric set, and being module-bound also exempts it from the prefix check.
+    source = (
+        "_MAX_ITEMS = 50 * 2\n"
+        "def _guard(items):\n"
+        "    if len(items) > _MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.computed", "x"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold _MAX_ITEMS" in violation for violation in violations)
+
+
+def test_a_local_threshold_binding_is_rejected() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    limit = 100\n"
+        "    if len(items) > limit:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.local", "x"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold limit" in violation for violation in violations)
+
+
+def test_a_local_counter_and_a_local_limits_field_are_not_thresholds() -> None:
+    # The negative controls for the rule above: a counter seeded at a structural literal is not a
+    # magnitude, and a local bound to a limits field already has its provenance.
+    counter = (
+        "def _guard(limits):\n"
+        "    depth = 0\n"
+        "    if depth > limits.taint.max_edges:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.counter", "x"))\n'
+    )
+    threaded = (
+        "def _guard(items, limits):\n"
+        "    cap = limits.taint.max_edges\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.threaded", "x"))\n'
+    )
+
+    assert checker.find_threshold_violations(counter, "shell_taint.py") == ()
+    assert checker.find_threshold_violations(threaded, "shell_taint.py") == ()
