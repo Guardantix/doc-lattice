@@ -63,10 +63,11 @@ GUARDED_MODULES = (
 GUARD_MODULE_ROOT = "src/doc_lattice/github_ci"
 """The package every guarded module lives in.
 
-The base-owned closure and comparison discover refusing modules recursively from the candidate
-tree, so a candidate can add a guarded module that the protected base tuple could not have named.
-`GUARDED_MODULES` remains the candidate-owned allowlist for shape, limits and threshold checks;
-`repository_coverage_violations` rejects any discovered module omitted from that tuple."""
+The base-owned closure and comparison discover guard-protocol modules recursively from the
+candidate tree, so a candidate can add a guarded module that the protected base tuple could not
+have named. Shape validation reads the discovered surface directly. `GUARDED_MODULES` remains the
+candidate-owned allowlist for limits and threshold checks; `repository_coverage_violations`
+rejects any discovered module omitted from that tuple."""
 
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 RETIREMENT_PATH = "tests/fixtures/shell_guard_retirements.json"
@@ -917,6 +918,50 @@ def _diverting_shape(statement: ast.stmt, cache: _DerivationCache) -> str | None
             return None
 
 
+def _reachability_inputs(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    cache: _DerivationCache,
+) -> tuple[tuple[ast.stmt, ...], tuple[ast.stmt, ...]]:
+    """Return the controls deciding whether an origin is reached and their writer closure.
+
+    Keeping this derivation as AST nodes lets both the fingerprint and threshold-provenance gate
+    consume the same reachability boundary. A fixed magnitude in an earlier branch decides the
+    guard exactly as it would in a lexically enclosing test, and a writer feeding that branch is
+    equally part of the decision.
+
+    Args:
+        origin: The statement that constructs the refusal.
+        scope: Enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Diverting statements followed separately by the statements in their transitive writer
+        closure, both in source order.
+    """
+    if scope is None:
+        return (), ()
+    repeated = _repeated_statements(origin, scope, cache)
+    position = (origin.lineno, origin.col_offset)
+    statements = [
+        statement
+        for statement in _cached_scope_statements(scope, cache)
+        if statement is not origin
+        if (statement.lineno, statement.col_offset) < position or id(statement) in repeated
+    ]
+    statements.sort(key=lambda statement: (statement.lineno, statement.col_offset))
+    controls = tuple(
+        statement for statement in statements if _diverting_shape(statement, cache) is not None
+    )
+    read: set[str] = set()
+    values: set[str] = set()
+    for statement in controls:
+        read |= _statement_reads(statement)
+        values |= _statement_value_reads(statement)
+    writers = _writer_statements(origin, scope, read, values, cache)
+    return controls, writers
+
+
 def _reachability_shapes(
     origin: ast.stmt, scope: ast.AST | None, cache: _DerivationCache | None = None
 ) -> tuple[str, ...]:
@@ -955,31 +1000,15 @@ def _reachability_shapes(
     Returns:
         Shapes in source order, empty when the origin has no enclosing function.
     """
-    if scope is None:
-        return ()
     cache = cache if cache is not None else _DerivationCache()
-    repeated = _repeated_statements(origin, scope, cache)
-    position = (origin.lineno, origin.col_offset)
-    statements = [
-        statement
-        for statement in _cached_scope_statements(scope, cache)
-        if statement is not origin
-        if (statement.lineno, statement.col_offset) < position or id(statement) in repeated
-    ]
-    statements.sort(key=lambda statement: (statement.lineno, statement.col_offset))
-    diverting: list[tuple[ast.stmt, str]] = [
-        (statement, shape)
-        for statement in statements
-        if (shape := _diverting_shape(statement, cache)) is not None
-    ]
-    read: set[str] = set()
-    values: set[str] = set()
-    for statement, _shape in diverting:
-        read |= _statement_reads(statement)
-        values |= _statement_value_reads(statement)
+    controls, writers = _reachability_inputs(origin, scope, cache)
     return (
-        *(shape for _statement, shape in diverting),
-        *_writer_closure(origin, scope, read, values, cache),
+        *(
+            shape
+            for statement in controls
+            if (shape := _diverting_shape(statement, cache)) is not None
+        ),
+        *(_cached_shape(statement, cache) for statement in writers),
     )
 
 
@@ -1241,6 +1270,16 @@ class _ShapeConstructors:
     guard_free_verdicts: frozenset[str]
 
 
+def _shape_constructors(tree: ast.AST) -> _ShapeConstructors:
+    """Resolve every constructor family used by refusal-shape rules and module discovery."""
+    return _ShapeConstructors(
+        refusals=_refusal_constructor_names(tree),
+        exceptions=_constructor_names(tree, REFUSAL_EXCEPTIONS),
+        results=_constructor_names(tree, frozenset({RESULT_CONSTRUCTOR})),
+        guard_free_verdicts=_constructor_names(tree, GUARD_FREE_VERDICTS),
+    )
+
+
 def _refusal_carrier_violations(
     tree: ast.AST,
     qualnames: dict[int, str],
@@ -1351,12 +1390,7 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     """
     tree = ast.parse(source)
     qualnames = _annotate(tree).names
-    constructors = _ShapeConstructors(
-        refusals=_refusal_constructor_names(tree),
-        exceptions=_constructor_names(tree, REFUSAL_EXCEPTIONS),
-        results=_constructor_names(tree, frozenset({RESULT_CONSTRUCTOR})),
-        guard_free_verdicts=_constructor_names(tree, GUARD_FREE_VERDICTS),
-    )
+    constructors = _shape_constructors(tree)
     return (
         *_literal_id_violations(tree, path, constructors.refusals),
         *_literal_reason_violations(tree, path, constructors.refusals),
@@ -1387,8 +1421,9 @@ LIMITS_BOUNDARIES = frozenset(
         ("shell_scanner.py", "_ScanBudget"),
     }
 )
-"""The only places allowed to construct default limits. Everywhere else must be handed the scan's
-limits, so no layer can silently fall back to production caps under a shrunk budget."""
+"""The exact sites allowed to construct default limits. Descendant scopes are not boundaries;
+everywhere else must be handed the scan's limits, so no layer can silently fall back to production
+caps under a shrunk budget."""
 
 FIXED_SEMANTIC_BOUNDS = {
     "_MAX_BRACE_INTEGER_DIGITS": (
@@ -1402,6 +1437,10 @@ FIXED_SEMANTIC_BOUNDS = {
     "_MAX_TRACKED_LITERAL_ALTERNATIVES": (
         "The number of IFS field alternatives a single read projection tracks is a modeling "
         "arity, reachable by authoring that many separators in one literal."
+    ),
+    "_CASE_HEADER_SUBJECT_WORDS": (
+        "The number of words needed to identify the subject in a `case` header: the reserved word, "
+        "the subject and `in`. A grammatical arity, not a resource budget."
     ),
     "_CASE_HEADER_PATTERN_WORDS": (
         "The number of words a complete `case` header spells before its first pattern: the "
@@ -1477,8 +1516,6 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
         if not direct and not indirect:
             continue
         qualname = names.get(id(node), "")
-        if (path, qualname.split(".")[0] if qualname else "") in LIMITS_BOUNDARIES:
-            continue
         if (path, qualname) in LIMITS_BOUNDARIES:
             continue
         # A configured construction is as dangerous as a default one: it restores production-scale
@@ -1543,14 +1580,28 @@ def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(bound), frozenset(numeric)
 
 
+def _is_numeric_constant_expression(expression: ast.expr) -> bool:
+    """Return whether an expression is composed entirely of numeric literals and arithmetic."""
+    if isinstance(expression, ast.Constant):
+        return isinstance(expression.value, int | float) and not isinstance(expression.value, bool)
+    if isinstance(expression, ast.UnaryOp):
+        return _is_numeric_constant_expression(expression.operand)
+    if isinstance(expression, ast.BinOp):
+        return _is_numeric_constant_expression(expression.left) and _is_numeric_constant_expression(
+            expression.right
+        )
+    return False
+
+
 def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
     """Return the scope's own names bound to a magnitude that is not structural.
 
     A cap spelled as a local assignment or parameter default has the provenance problem a
     module-level one has: `limit = 100` and `def scan(limit=100)` both create resource bounds with
     nothing recording where they came from, and both are invisible to the module-constant set and
-    naming convention. Zero and one are excluded for the reason `STRUCTURAL_GUARD_LITERALS` gives,
-    so a counter seeded at zero is not mistaken for a threshold.
+    naming convention. The binding must consist entirely of numeric arithmetic: `index = start + 2`
+    is a dynamic cursor offset, not a fixed cap. Zero and one are excluded for the reason
+    `STRUCTURAL_GUARD_LITERALS` gives, so a counter seeded at zero is not mistaken for a threshold.
 
     Args:
         scope: Enclosing function, or `None` at class or module level.
@@ -1562,7 +1613,10 @@ def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
         return frozenset()
     names: set[str] = set()
     for argument, default in _defaulted_arguments(scope):
-        if _operand_magnitudes(default) - STRUCTURAL_GUARD_LITERALS:
+        if (
+            _is_numeric_constant_expression(default)
+            and _operand_magnitudes(default) - STRUCTURAL_GUARD_LITERALS
+        ):
             names.add(argument.arg)
     for statement in _scope_statements(scope):
         if isinstance(statement, ast.Assign):
@@ -1573,7 +1627,10 @@ def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
             continue
         if statement.value is None:
             continue
-        if _operand_magnitudes(statement.value) - STRUCTURAL_GUARD_LITERALS:
+        if (
+            _is_numeric_constant_expression(statement.value)
+            and _operand_magnitudes(statement.value) - STRUCTURAL_GUARD_LITERALS
+        ):
             names.update(target.id for target in targets if isinstance(target, ast.Name))
     return frozenset(names)
 
@@ -1640,11 +1697,12 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     would let a generically named bound, a computed one, a local one, and a raw literal each
     introduce a resource cap with no provenance.
 
-    The search covers the writers feeding the condition as well as the condition itself, the same
-    closure the fingerprint records. A comparison computed one statement earlier caps the scan
-    exactly as an inline one does: `too_many = len(items) > 100` followed by `if too_many` leaves
-    the magnitude nowhere the condition can see it, so reading the condition alone let any new
-    resource bound ship by taking one hop away from the guard.
+    The search covers the writers feeding the condition as well as the condition itself, plus the
+    preceding controls that decide whether the origin is reached and their writers. These are the
+    same closures the fingerprint records. A comparison computed one statement earlier caps the
+    scan exactly as an inline one does: `too_many = len(items) > 100` followed by `if too_many`
+    leaves the magnitude nowhere the condition can see it, so reading the condition alone let any
+    new resource bound ship by taking one hop away from the guard.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -1661,10 +1719,20 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     for statement, _call in _origin_calls_by_statement(tree):
         scope = annotations.scopes.get(id(statement))
         tests = annotations.tests.get(id(statement), ())
-        writers = _writer_statements(
+        condition_writers = _writer_statements(
             statement, scope, set(_read_spellings(tests)), set(_read_value_spellings(tests)), cache
         )
-        nodes: tuple[ast.AST, ...] = (statement, *tests, *writers)
+        controls, reachability_writers = _reachability_inputs(statement, scope, cache)
+        control_expressions = tuple(
+            expression for control in controls for expression in _own_expressions(control)
+        )
+        nodes: tuple[ast.AST, ...] = (
+            statement,
+            *tests,
+            *condition_writers,
+            *control_expressions,
+            *reachability_writers,
+        )
         local = _local_numeric_names(annotations.scopes.get(id(statement)))
         for name in sorted(_threshold_names(nodes, bound, numeric | local)):
             if name in FIXED_SEMANTIC_BOUNDS:
@@ -1713,17 +1781,42 @@ def repository_threshold_violations(root: Path) -> tuple[str, ...]:
     return tuple(violations)
 
 
-def _repository_refusing_modules(root: Path) -> tuple[str, ...]:
-    """Return every module below the guard package that constructs a refusal.
+def _uses_guard_protocol(tree: ast.AST) -> bool:
+    """Return whether a module constructs or transports refusal/verdict values.
+
+    Discovery cannot depend only on recognizing a canonical refusal construction: malformed
+    payloads are exactly what the shape gate must see. Calls to refusal carriers and result
+    constructors, including their aliases and rebindings, and definitions of verdict-producing
+    functions therefore mark a module as part of the guarded surface too.
+    """
+    constructors = _shape_constructors(tree)
+    carriers = constructors.exceptions | constructors.results
+    return bool(
+        _guard_refusal_calls(tree, constructors.refusals)
+        or any(
+            isinstance(node, ast.Call) and _called_name(node) in carriers for node in ast.walk(tree)
+        )
+        or any(
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name in VERDICT_FUNCTIONS
+            for node in ast.walk(tree)
+        )
+    )
+
+
+def _repository_guard_modules(root: Path) -> tuple[str, ...]:
+    """Return every module below the guard package that participates in the guard protocol.
 
     This derivation is used by the base-owned closure and comparison. Reading the base checker's
     `GUARDED_MODULES` there would make a candidate module invisible even after the candidate adds it
-    to its own tuple, because the protected base copy necessarily predates that edit.
+    to its own tuple, because the protected base copy necessarily predates that edit. Discovering
+    carriers and verdict boundaries as well as canonical origins ensures malformed refusal shapes
+    reach the candidate-owned shape gate before they can be added to the allowlist.
     """
     modules: list[str] = []
     for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        if _guard_refusal_calls(tree):
+        if _uses_guard_protocol(tree):
             modules.append(path.relative_to(root).as_posix())
     return tuple(modules)
 
@@ -1738,7 +1831,7 @@ def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
         Records ordered by identifier across all guarded modules.
     """
     records: list[OriginRecord] = []
-    for module in _repository_refusing_modules(root):
+    for module in _repository_guard_modules(root):
         source = (root / module).read_text(encoding="utf-8")
         records.extend(extract_origin_records(source, Path(module).name))
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
@@ -1754,19 +1847,20 @@ def repository_shape_violations(root: Path) -> tuple[str, ...]:
         Human-readable violations, empty when every refusal shape is canonical.
     """
     violations: list[str] = []
-    for module in GUARDED_MODULES:
+    modules = sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root)))
+    for module in modules:
         source = (root / module).read_text(encoding="utf-8")
         violations.extend(find_shape_violations(source, Path(module).name))
     return tuple(violations)
 
 
 def repository_coverage_violations(root: Path) -> tuple[str, ...]:
-    """Return every module that mints guard refusals without being an inventoried module.
+    """Return every guard-protocol module omitted from the guarded-module allowlist.
 
-    `GUARDED_MODULES` is the surface every other rule reads. A guard added in a module outside it
-    is not merely unchecked: closure derives no origin for it, so the partition stays exact and the
-    gate reports success while a fail-closed guard ships with no witness and no debt record. This
-    rule derives the real surface from the package instead of trusting the tuple.
+    `GUARDED_MODULES` is the surface the limits and threshold rules read. A module using a refusal
+    carrier or producing verdicts belongs to that surface even when its refusal construction is
+    malformed and cannot be inventoried. This rule derives the real surface from the package
+    instead of trusting the tuple; shape validation consumes that discovered surface directly.
 
     Args:
         root: Repository root to read the guard package from.
@@ -1776,12 +1870,13 @@ def repository_coverage_violations(root: Path) -> tuple[str, ...]:
     """
     guarded = set(GUARDED_MODULES)
     violations: list[str] = []
-    for module in _repository_refusing_modules(root):
+    for module in _repository_guard_modules(root):
         if module in guarded:
             continue
         violations.append(
-            f"{module} constructs a {REFUSAL_CONSTRUCTOR} but is not in GUARDED_MODULES; add it "
-            f"so its guards are shape-checked, inventoried and held to the closure partition"
+            f"{module} uses the guard refusal or verdict protocol but is not in GUARDED_MODULES; "
+            "add it so its guards are limits-checked, inventoried and held to the closure "
+            "partition"
         )
     return tuple(violations)
 

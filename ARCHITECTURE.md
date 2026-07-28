@@ -854,13 +854,15 @@ whether it is spelled bare or through the module that defines it, and the names 
 include every alias the module binds the constructor to, whether that binding names it bare or
 through the module that defines it, because an aliased construction in a verdict return is a
 well-formed verdict that no carrier rule would reject. The base-owned closure and comparison derive
-the set of refusing modules recursively from the candidate guard package rather than from the base
-revision's hand-maintained list. A candidate can therefore add a guarded module, classify its
-origins and add it to its own allowlist without being rejected as stale by an older base checker.
-The candidate-owned coverage rule still compares that discovered set with `GUARDED_MODULES`,
-because shape, limits and threshold rules use that allowlist. A guard added in an omitted module
-would otherwise skip those rules, and a module one directory down is exactly as omitted as one
-beside it.
+the set of guard-protocol modules recursively from the candidate guard package rather than from the
+base revision's hand-maintained list. Discovery recognizes canonical refusal origins, refusal
+carriers and result constructors (including aliases and rebindings), and verdict-producing
+functions. A malformed origin hidden behind an indirect call therefore still brings its module into
+shape validation. A candidate can add a guarded module, classify its origins and add it to its own
+allowlist without being rejected as stale by an older base checker. The candidate-owned coverage
+rule still compares that discovered set with `GUARDED_MODULES`, because limits and threshold rules
+use that allowlist. Shape validation reads the union of the discovered surface and the allowlist
+directly, and recursive discovery treats a module one directory down exactly like one beside it.
 
 One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
 content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
@@ -868,6 +870,8 @@ the children that already share the budget share exactly one limits value. `limi
 every internal limit-aware helper. A limits construction is recognized through import aliases and
 module rebindings as well as its canonical spelling, including a constructor reference passed to a
 dataclass `field(default_factory=...)`; either form creates fresh production limits at runtime.
+Boundary exemptions name exact scopes. A nested helper inside `analyze_marker_taint` and a method of
+`_ScanBudget` are internal consumers, not descendants that inherit authority to mint fresh limits.
 Every threshold a guard references is either a field of that value or an inventoried fixed semantic
 bound with a recorded rationale, the latter reserved for quantities that are directly authorable
 rather than resource budgets. A threshold is recognized structurally rather than by naming
@@ -878,14 +882,17 @@ numeric magnitude it compares against, arithmetic in the operand included, so
 binding side too: `_MAX_ITEMS = 50 * 2` caps a guard exactly as the bare literal does, and
 recognizing only bare literals let the computed spelling escape both halves at once, since a
 module-bound name is also exempt from the naming-convention check. A local assignment or parameter
-default is covered for the same reason, having neither a module binding nor a convention to fall
-back on. The search covers the writers feeding a guard's condition as well as the condition itself,
-the same closure the fingerprint records, because a comparison computed one statement earlier caps
-the scan exactly as an inline one does: `too_many = len(items) > 100` followed by `if too_many`
-leaves the magnitude nowhere the condition can see it, so reading the condition alone let any new
-bound ship by taking one hop away from the guard. Zero and one are exempt because they spell
-emptiness and arity rather than a magnitude, which is also what keeps a counter seeded at zero from
-reading as a threshold, and a subscript index is a position rather than a magnitude.
+default made entirely from numeric arithmetic is covered for the same reason, having neither a
+module binding nor a convention to fall back on; a dynamic cursor such as `index = start + 2` is not
+a fixed local cap. The search covers the writers feeding a guard's condition as well as the
+condition itself, and the preceding controls that decide whether the origin is reached plus their
+writers—the same closures the fingerprint records. A comparison computed one statement
+earlier caps the scan exactly as an inline one does: `too_many = len(items) > 100` followed by
+`if too_many` leaves
+the magnitude nowhere the condition can see it; likewise, `if len(items) <= 100: return` makes that
+fixed cap decide whether an unconditional origin is reached. Zero and one are exempt because they
+spell emptiness and arity rather than a magnitude, which is also what keeps a counter seeded at zero
+from reading as a threshold, and a subscript index is a position rather than a magnitude.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact

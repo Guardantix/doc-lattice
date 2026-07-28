@@ -263,6 +263,34 @@ def test_default_limits_construction_away_from_a_boundary_is_rejected() -> None:
     assert any("constructs default limits" in violation for violation in violations)
 
 
+@pytest.mark.parametrize(
+    ("source", "path", "qualname"),
+    [
+        (
+            "def analyze_marker_taint(evidence):\n"
+            "    def _reset_limits():\n"
+            "        return TaintLimits()\n"
+            "    return _reset_limits()\n",
+            "shell_taint.py",
+            "analyze_marker_taint._reset_limits",
+        ),
+        (
+            "class _ScanBudget:\n    def reset(self):\n        self.limits = ScanLimits()\n",
+            "shell_scanner.py",
+            "_ScanBudget.reset",
+        ),
+    ],
+)
+def test_limits_boundaries_do_not_exempt_descendant_scopes(
+    source: str, path: str, qualname: str
+) -> None:
+    violations = checker.find_limits_violations(source, path)
+
+    assert any(
+        f"{path}:{qualname} constructs default limits" in violation for violation in violations
+    )
+
+
 def test_optional_limits_parameter_away_from_a_boundary_is_rejected() -> None:
     source = (
         "def _helper(expression, limits: TaintLimits = TaintLimits()):\n    return expression\n"
@@ -648,6 +676,70 @@ def test_a_named_threshold_reached_through_the_writer_closure_is_rejected() -> N
     violations = checker.find_threshold_violations(source, "shell_taint.py")
 
     assert any("_BUDGET" in violation for violation in violations)
+
+
+def test_threshold_provenance_sees_a_preceding_reachability_test() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    if len(items) <= 100:\n"
+        "        return\n"
+        '    raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("literal 100" in violation for violation in violations)
+
+
+def test_threshold_provenance_sees_a_preceding_reachability_writer() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    within_bound = len(items) <= 100\n"
+        "    if within_bound:\n"
+        "        return\n"
+        '    raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("literal 100" in violation for violation in violations)
+
+
+def test_a_limits_field_in_a_preceding_reachability_test_is_accepted() -> None:
+    source = (
+        "def _guard(items, limits):\n"
+        "    if len(items) <= limits.max_items:\n"
+        "        return\n"
+        '    raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_a_dynamic_offset_in_a_preceding_loop_is_not_a_threshold() -> None:
+    source = (
+        "def _guard(text, start):\n"
+        "    index = start + 2\n"
+        "    while index < len(text):\n"
+        "        index += 1\n"
+        '    raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_a_computed_local_threshold_in_a_preceding_control_is_rejected() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    limit = 50 * 2\n"
+        "    if len(items) <= limit:\n"
+        "        return\n"
+        '    raise _TaintLimitExceeded(GuardRefusal("taint.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold limit" in violation for violation in violations)
 
 
 def test_a_writer_the_guard_condition_does_not_read_is_not_a_threshold() -> None:
@@ -1615,9 +1707,60 @@ def test_an_unrelated_attribute_binding_is_not_read_as_the_refusal_constructor()
     assert checker.extract_origin_records(source, "shell_taint.py") == ()
 
 
+def test_a_refusal_carrier_module_with_an_indirect_payload_is_discovered(
+    tmp_path: Path,
+) -> None:
+    root = _fake_root(tmp_path, [])
+    module = root / checker.GUARD_MODULE_ROOT / "indirect_refusal.py"
+    module.write_text(
+        "def _guard():\n"
+        '    raise _ShellScanIncomplete(_REFUSALS[0]("scanner.demo.indirect", "nope"))\n',
+        encoding="utf-8",
+    )
+
+    coverage = checker.repository_coverage_violations(root)
+    shapes = checker.repository_shape_violations(root)
+
+    assert any("indirect_refusal.py" in violation for violation in coverage)
+    assert any("indirect_refusal.py" in violation for violation in shapes)
+    assert any("undeclared transport" in violation for violation in shapes)
+
+
+def test_a_discovered_refusal_carrier_alias_is_shape_checked(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path, [])
+    module = root / checker.GUARD_MODULE_ROOT / "raw_refusal.py"
+    module.write_text(
+        "from somewhere import _ShellScanIncomplete as StopScan\n"
+        "def _guard():\n"
+        '    raise StopScan("raw refusal")\n',
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_shape_violations(root)
+
+    assert any("raw_refusal.py" in violation for violation in violations)
+    assert any("raw refusal text" in violation for violation in violations)
+
+
+def test_a_verdict_producer_module_is_discovered_and_shape_checked(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path, [])
+    module = root / checker.GUARD_MODULE_ROOT / "verdict_boundary.py"
+    module.write_text(
+        'def analyze_marker_taint(evidence):\n    return "raw refusal"\n',
+        encoding="utf-8",
+    )
+
+    coverage = checker.repository_coverage_violations(root)
+    shapes = checker.repository_shape_violations(root)
+
+    assert any("verdict_boundary.py" in violation for violation in coverage)
+    assert any("verdict_boundary.py" in violation for violation in shapes)
+    assert any("returns raw refusal text" in violation for violation in shapes)
+
+
 def test_a_refusing_module_outside_the_guarded_tuple_is_rejected(tmp_path: Path) -> None:
-    # GUARDED_MODULES is hand-maintained and drives every other rule, so a guard added in a module
-    # missing from it leaves every partition exact with nothing reporting the omission.
+    # GUARDED_MODULES is hand-maintained and drives limits and threshold checks, so discovery must
+    # reject an omitted module even though origin derivation and shape validation already see it.
     root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
     (root / checker.GUARD_MODULE_ROOT / "shell_taint_eval.py").write_text(
         "def _bound(depth, limits):\n"
