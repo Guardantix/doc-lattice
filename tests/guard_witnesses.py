@@ -29,6 +29,7 @@ from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits, TaintL
 from doc_lattice.github_ci.shell_taint import (
     ChoiceOutput,
     CommandOutput,
+    ProcessResourceTarget,
     RepeatOutput,
     ScopeOutput,
     SequenceOutput,
@@ -647,28 +648,36 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         "stream-scope kinds.",
         "if true; then :; fi",
         # A root scope exists for every script including the empty one, so the boundary has to
-        # build a scope the builder allocated for authored structure.
-        boundary_evidence=lambda evidence: len(evidence.scopes) > 1,
+        # build a scope the builder allocated for authored structure. The kind is what this guard
+        # decides on, so the predicate reads it rather than the collection holding it.
+        boundary_evidence=lambda evidence: len({scope.kind for scope in evidence.scopes}) > 1,
     ),
     InvariantWitness(
         "taint.evidence.pipe-consumer-arity",
         f"{_EVIDENCE_SELF_CHECK} The builder records a pipe with exactly one of a consuming "
         "command and a consuming scope, never both and never neither.",
         "echo a | cat",
-        boundary_evidence=lambda evidence: bool(evidence.pipes),
+        boundary_evidence=lambda evidence: any(
+            pipe.consumer_command_id is not None or pipe.consumer_scope_id is not None
+            for pipe in evidence.pipes
+        ),
     ),
     InvariantWitness(
         "taint.evidence.process-resource-direction",
         f"{_EVIDENCE_SELF_CHECK} Process resources are recorded with a declared direction.",
         "cat <(echo a)",
-        boundary_evidence=lambda evidence: bool(evidence.process_resources),
+        boundary_evidence=lambda evidence: bool(
+            {resource.direction for resource in evidence.process_resources}
+        ),
     ),
     InvariantWitness(
         "taint.evidence.duplicate-identifier",
         f"{_EVIDENCE_SELF_CHECK} Command, scope, resource and stream identifiers come from "
         "monotonic allocators, so two records cannot share one identifier.",
         "echo a; echo b",
-        boundary_evidence=lambda evidence: len(evidence.commands) > 1,
+        boundary_evidence=lambda evidence: (
+            len({command.command_id for command in evidence.commands}) > 1
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-parent-scope",
@@ -692,7 +701,9 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         "taint.evidence.unknown-pipe-producer",
         f"{_EVIDENCE_SELF_CHECK} A pipe's producing stream is a stream the builder allocated.",
         "echo a | cat",
-        boundary_evidence=lambda evidence: bool(evidence.pipes),
+        boundary_evidence=lambda evidence: bool(
+            {pipe.producer_scope_id for pipe in evidence.pipes}
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-pipe-consumer-command",
@@ -714,14 +725,31 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         "taint.evidence.unknown-resource-scope",
         f"{_EVIDENCE_SELF_CHECK} A process resource names the scope it was allocated in.",
         "cat <(echo a)",
-        boundary_evidence=lambda evidence: bool(evidence.process_resources),
+        boundary_evidence=lambda evidence: bool(
+            {resource.scope_id for resource in evidence.process_resources}
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-redirection-resource",
         f"{_EVIDENCE_SELF_CHECK} A redirection to a process-resource target names a resource the "
         "builder allocated for the same body.",
         "cat <(echo a)",
-        boundary_evidence=lambda evidence: bool(evidence.process_resources),
+        # The boundary allocates the process resource the guard's condition looks a redirection
+        # target up in, and no authored redirection targets one, so the walk over targets holds
+        # over the same allocation the empty control has none of.
+        boundary_evidence=lambda evidence: (
+            bool(evidence.process_resources)
+            and all(
+                event.target.resource_id
+                in {resource.resource_id for resource in evidence.process_resources}
+                for events in (
+                    *(command.redirections for command in evidence.commands),
+                    *(scope.redirections for scope in evidence.scopes),
+                )
+                for event in events
+                if isinstance(event.target, ProcessResourceTarget)
+            )
+        ),
     ),
     InvariantWitness(
         "taint.evidence.unknown-argv-resource",

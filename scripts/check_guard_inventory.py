@@ -4144,8 +4144,8 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     return tuple(violations)
 
 
-def _attribute_reads(nodes: tuple[ast.AST, ...]) -> frozenset[str]:
-    """Return the attribute names these nodes read off a value, method names excluded.
+def _attribute_nodes(nodes: tuple[ast.AST, ...]) -> tuple[ast.Attribute, ...]:
+    """Return the attribute accesses these nodes read off a value, method names excluded.
 
     A call target names an operation rather than data, exactly as it does for a threshold: reading
     `.get` or `.startswith` as inspected state would let any predicate spelling a common method
@@ -4155,7 +4155,7 @@ def _attribute_reads(nodes: tuple[ast.AST, ...]) -> frozenset[str]:
         nodes: Roots to search.
 
     Returns:
-        Attribute names read, empty when the nodes read none.
+        The attribute accesses, in walk order and with a node repeated when the roots overlap.
     """
     targets = {
         id(target)
@@ -4164,8 +4164,8 @@ def _attribute_reads(nodes: tuple[ast.AST, ...]) -> frozenset[str]:
         if isinstance(call, ast.Call)
         for target in ast.walk(call.func)
     }
-    return frozenset(
-        node.attr
+    return tuple(
+        node
         for root in nodes
         for node in ast.walk(root)
         if isinstance(node, ast.Attribute)
@@ -4173,13 +4173,205 @@ def _attribute_reads(nodes: tuple[ast.AST, ...]) -> frozenset[str]:
     )
 
 
+def _attribute_reads(nodes: tuple[ast.AST, ...]) -> frozenset[str]:
+    """Return the attribute names these nodes read off a value, method names excluded.
+
+    Args:
+        nodes: Roots to search.
+
+    Returns:
+        Attribute names read, empty when the nodes read none.
+    """
+    return frozenset(node.attr for node in _attribute_nodes(nodes))
+
+
+def _leaf_reads(
+    nodes: tuple[ast.AST, ...],
+    iterations: tuple[tuple[ast.expr, ast.expr], ...] = (),
+) -> frozenset[str]:
+    """Return this derivation's attribute reads without the containers it only iterates through.
+
+    A guard that walks `for scope in evidence.scopes` and refuses on `scope.parent_scope_id` reads
+    both names, but only the second is what it decides on. Leaving the container in the relevant
+    set is what let a predicate claim relevance to that guard by reading `evidence.scopes` and
+    inspecting no parent edge at all, which is exactly the borrowing this rule exists to stop.
+
+    An attribute is intermediate when it is the iteration source of a `for` statement or a
+    comprehension generator in this derivation and the iteration variable itself has attribute
+    reads here. Requiring the second condition keeps a container the derivation reads for its own
+    sake, such as a membership test over an iterated set of identifiers, in the relevant set.
+
+    Args:
+        nodes: The derivation's roots, whose attribute reads form the layer.
+        iterations: Target and iterable pairs from loops enclosing the derivation, whose headers
+            are not themselves among the roots.
+
+    Returns:
+        The layer without its intermediate containers, or the whole layer when removing them
+        would leave nothing to intersect against.
+    """
+    accesses = _attribute_nodes(nodes)
+    names = frozenset(node.attr for node in accesses)
+    pairs = [
+        *iterations,
+        *(
+            (node.target, node.iter)
+            for root in nodes
+            for node in ast.walk(root)
+            if isinstance(node, ast.For | ast.AsyncFor | ast.comprehension)
+        ),
+    ]
+    read_variables = {node.value.id for node in accesses if isinstance(node.value, ast.Name)}
+    intermediate = {
+        name
+        for target, source in pairs
+        if _target_names(target) & read_variables
+        for name in _attribute_reads((source,))
+    }
+    return frozenset(names - intermediate) or names
+
+
+def _transport_parameters(tree: ast.AST, path: str) -> dict[str, tuple[_Function, str]]:
+    """Return each declared transport this module defines as a receiving function, by its name.
+
+    A declared transport is a site that propagates a refusal it did not mint. Most of them raise
+    one they were handed by a caller further out, but `_validate_acyclic_graph` is handed one as an
+    argument and owns the condition that decides it, which is what makes its callers the origins.
+    Only that form is resolvable from the origin's side, so a transport qualifies here when it
+    takes a parameter of the declared argument name.
+
+    Args:
+        tree: Parsed guarded module.
+        path: Its file name, used to select the declarations that describe it.
+
+    Returns:
+        The transport definition and its refusal parameter name, keyed by the callee name an origin
+        statement spells.
+    """
+    declared = {
+        qualname.rsplit(".", 1)[-1]: argument
+        for module, qualname, argument in DECLARED_TRANSPORTS
+        if module == path
+    }
+    found: dict[str, tuple[_Function, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        argument = declared.get(node.name)
+        if argument is None:
+            continue
+        parameters = {
+            parameter.arg
+            for group in (node.args.posonlyargs, node.args.args, node.args.kwonlyargs)
+            for parameter in group
+        }
+        if argument in parameters:
+            found[node.name] = (node, argument)
+    return found
+
+
+def _receiving_transport_call(
+    call: ast.Call,
+    parents: dict[int, ast.AST],
+    transports: dict[str, tuple[_Function, str]],
+) -> tuple[_Function, str, ast.Call] | None:
+    """Return the declared transport this refusal is constructed as an argument to.
+
+    Args:
+        call: The refusal construction.
+        parents: Module-wide parent map.
+        transports: Receiving transports the module defines, by callee name.
+
+    Returns:
+        The transport definition, its refusal parameter name and the call handing the refusal to
+        it, or `None` when this refusal is not transported that way.
+    """
+    current: ast.AST | None = call
+    while current is not None:
+        holder = parents.get(id(current))
+        if isinstance(holder, ast.Call):
+            name = holder.func.id if isinstance(holder.func, ast.Name) else None
+            resolved = transports.get(name) if name is not None else None
+            return None if resolved is None else (*resolved, holder)
+        if isinstance(holder, ast.stmt) or holder is None:
+            return None
+        current = holder
+    return None
+
+
+def _transport_argument_reads(
+    statement: ast.stmt,
+    call: ast.Call,
+    transports: dict[str, tuple[_Function, str]],
+    annotations: _Annotations,
+    cache: _DerivationCache,
+) -> frozenset[str]:
+    """Return the leaf reads of the layer that decides a transported refusal.
+
+    The origin statement of a transported refusal spells the identifier and the value it hands
+    down, and nothing else. What decides the refusal is split in two: the tests governing the
+    transport's `raise` of that parameter, and the structure the caller built into the other
+    arguments it passes. `_validate_acyclic_graph` is the whole of the second case, where the
+    caller's `parent_graph` is what carries the parent edges the cycle detector walks.
+
+    The caller-side closure is seeded from those other arguments rather than from the governing
+    tests, and each selected writer contributes only its own expressions. A loop selected because
+    it binds the name a writer reads would otherwise contribute every attribute its body touches,
+    which is how an unrelated sibling assignment in the same loop reaches the relevant set.
+
+    Args:
+        statement: The statement that constructs the refusal.
+        call: The refusal construction itself.
+        transports: Receiving transports the module defines, by callee name.
+        annotations: The module's one annotation pass, which also carries the origin's scope.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Leaf attribute names, empty when the refusal is not handed to a resolvable transport or
+        when neither side reads an attribute.
+    """
+    resolved = _receiving_transport_call(call, _cached_module_parents(cache), transports)
+    if resolved is None:
+        return frozenset()
+    scope = annotations.scopes.get(id(statement))
+    transport, argument, transport_call = resolved
+    tests: tuple[ast.expr, ...] = ()
+    for raised in ast.walk(transport):
+        if not isinstance(raised, ast.Raise) or raised.exc is None:
+            continue
+        if argument not in {
+            reference.id for reference in ast.walk(raised.exc) if isinstance(reference, ast.Name)
+        }:
+            continue
+        tests = annotations.tests.get(id(raised), ())
+        break
+    carried = tuple(
+        expression
+        for expression in (
+            *transport_call.args,
+            *(keyword.value for keyword in transport_call.keywords),
+        )
+        if all(node is not call for node in ast.walk(expression))
+    )
+    read = set(_read_spellings(carried))
+    values = set(_read_value_spellings(carried))
+    writers = _writer_statements(statement, scope, read, values, cache)
+    nodes = (*tests, *(node for writer in writers for node in _own_expressions(writer)))
+    iterations = tuple(
+        (writer.target, writer.iter)
+        for writer in writers
+        if isinstance(writer, ast.For | ast.AsyncFor)
+    )
+    return _leaf_reads(nodes, iterations)
+
+
 # Each of these is a pure function of the module source it is handed, and the repository-level
 # rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
 # gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
 # re-fingerprinting both guarded modules for every call.
 @cache
-def guard_condition_reads(source: str, path: str) -> dict[str, frozenset[str]]:
-    """Return the attribute names each guard's own condition inspects, by origin identifier.
+def guard_condition_reads(source: str, path: str) -> dict[str, tuple[frozenset[str], ...]]:
+    """Return the layers of attribute names each guard's condition inspects, by origin identifier.
 
     An invariant classification claims a guard's condition is false for every constructible input,
     and its evidence is a boundary script that drives that condition over the structure the guard
@@ -4187,32 +4379,38 @@ def guard_condition_reads(source: str, path: str) -> dict[str, frozenset[str]]:
     a predicate reading `evidence.commands` satisfies every assertion a hand-written row can be held
     to while saying nothing about a guard that inspects `scope.parent_scope_id`.
 
-    The narrow set is what decides the refusal: the origin statement, the tests and enclosing loop
-    iterables governing it, the transitive writer closure of what those read, and the `try` body
-    whose failure is a handler guard's only condition. A refusal handed to a declared transport
-    reads only the value it passes down, so the closure over the origin statement's own reads is
-    what recovers the structure behind it.
+    Up to three layers are derived, ordered by how directly each decides the refusal, and only the
+    non-empty ones are kept:
 
-    Only when that set is empty, which is the case for a guard reached purely by falling through
-    earlier arms, do the preceding controls stand in for it. They are a much wider set, including
+    - The transported layer, for a refusal handed to a declared transport, which is the transport's
+      own governing tests plus the caller-side closure of the structure it was handed.
+    - The condition layer: the origin statement, the tests and enclosing loop iterables governing
+      it, and the `try` body whose failure is a handler guard's only condition.
+    - The closure layer, which adds the transitive writer closure of what those read, recovering
+      the structure behind a value the condition reads under a local name.
+
+    Only when all three are empty, which is the case for a guard reached purely by falling through
+    earlier arms, do the preceding controls stand in for them. They are a much wider set, including
     everything every earlier guard in the same function inspected, so using them first would let a
-    predicate borrow relevance from an unrelated neighbour.
+    predicate borrow relevance from an unrelated neighbour. Every layer is reported with the
+    containers it only iterates through already removed, so a caller intersecting against the first
+    one is held to what the guard decides on rather than to what holds it.
 
     Args:
         source: Module source text, parsed but never executed.
-        path: Module file name. Unused in the result, present so two modules defining the same
-            identifier do not share a memo entry.
+        path: Module file name, used to resolve declared transports and to keep two modules
+            defining the same identifier out of one memo entry.
 
     Returns:
-        Attribute names by origin identifier, empty for a guard whose condition reads no attribute
-        at all.
+        Ordered non-empty layers by origin identifier, empty for a guard whose condition reads no
+        attribute at all.
     """
-    del path
     tree = ast.parse(source)
     annotations = _annotate(tree)
     guarded_bodies = _guarded_bodies(tree)
     cache = _DerivationCache(module=tree)
-    reads: dict[str, frozenset[str]] = {}
+    transports = _transport_parameters(tree, path)
+    reads: dict[str, tuple[frozenset[str], ...]] = {}
     for statement, call in _origin_calls_by_statement(tree):
         if not call.args or not isinstance(call.args[0], ast.Constant):
             continue
@@ -4222,18 +4420,23 @@ def guard_condition_reads(source: str, path: str) -> dict[str, frozenset[str]]:
         scope = annotations.scopes.get(id(statement))
         loops = annotations.loops.get(id(statement), ())
         governing = (*annotations.tests.get(id(statement), ()), *(loop.iter for loop in loops))
+        iterations = tuple((loop.target, loop.iter) for loop in loops)
         body = guarded_bodies.get(id(statement), ())
+        transported = _transport_argument_reads(statement, call, transports, annotations, cache)
+        condition = _leaf_reads((statement, *governing, *body), iterations)
         read = set(_read_spellings(governing)) | set(_cached_statement_reads(statement, cache))
         values = set(_read_value_spellings(governing)) | set(
             _cached_statement_value_reads(statement, cache)
         )
         writers = _writer_statements(statement, scope, read, values, cache)
-        narrow = _attribute_reads((statement, *governing, *writers, *body))
-        if narrow:
-            reads[origin_id] = narrow
+        closure = _leaf_reads((statement, *governing, *writers, *body), iterations)
+        layers = tuple(layer for layer in (transported, condition, closure) if layer)
+        if layers:
+            reads[origin_id] = layers
             continue
         controls, flow_writers, _flow_read = _reachability_inputs(statement, scope, cache)
-        reads[origin_id] = _attribute_reads((*controls, *flow_writers))
+        fallback = _leaf_reads((*controls, *flow_writers))
+        reads[origin_id] = (fallback,) if fallback else ()
     return reads
 
 
@@ -4309,6 +4512,11 @@ def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
     without executing either. It is a floor rather than a proof: a predicate can still be weak about
     the right data. What it rules out is a predicate about the wrong data.
 
+    The predicate is held to the layer that actually decides the guard, and to the leaf attributes
+    of it. Intersecting a flat union of every layer would let a row for the parent-cycle detector
+    pass on `bool(evidence.commands) and bool(evidence.scopes)`, which reads no parent edge and
+    borrows its relevance from the container the guard walks through.
+
     Args:
         root: Repository root holding the guarded modules and the witness registry.
 
@@ -4316,15 +4524,16 @@ def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
         Human-readable violations, empty when every invariant row inspects its guard's own data.
     """
     predicates = invariant_predicate_reads((root / REGISTRY_PATH).read_text(encoding="utf-8"))
-    conditions: dict[str, frozenset[str]] = {}
+    conditions: dict[str, tuple[frozenset[str], ...]] = {}
     for module in _repository_guard_modules(root):
         source = (root / module).read_text(encoding="utf-8")
         conditions.update(guard_condition_reads(source, Path(module).name))
     violations: list[str] = []
     for origin_id, names in sorted(predicates.items()):
-        inspected = conditions.get(origin_id)
-        if inspected is None:
+        layers = conditions.get(origin_id)
+        if layers is None:
             continue
+        inspected = layers[0] if layers else frozenset()
         if not inspected:
             violations.append(
                 f"{origin_id}: this guard's condition reads no attribute of the evidence, so a "

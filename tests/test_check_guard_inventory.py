@@ -60,6 +60,26 @@ def _fake_root(tmp_path: Path, debt_records: list[dict[str, str]]) -> Path:
     return root
 
 
+def _invariant_row_root(tmp_path: Path, *, origin_id: str, predicate: str) -> Path:
+    """Copy the guarded modules and registry, adding one invariant row for this origin."""
+    marker = "INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = ("
+    row = (
+        f'{marker}\n    InvariantWitness(\n        "{origin_id}",\n'
+        f'        "structural rationale for the relevance rule tests",\n'
+        f'        "echo hi",\n        boundary_evidence={predicate},\n    ),'
+    )
+    for module in checker.GUARDED_MODULES:
+        destination = tmp_path / module
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text((_ROOT / module).read_text(encoding="utf-8"), encoding="utf-8")
+    registry = _ROOT / checker.REGISTRY_PATH
+    destination = tmp_path / checker.REGISTRY_PATH
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source = registry.read_text(encoding="utf-8")
+    destination.write_text(source.replace(marker, row), encoding="utf-8")
+    return tmp_path
+
+
 _ORIGIN_SOURCE = """
 def _guard(value):
     if value > 3:
@@ -2445,14 +2465,15 @@ def test_condition_reads_are_empty_when_a_guard_inspects_no_attribute() -> None:
     )
 
     assert checker.guard_condition_reads(source, "shell_scanner.py") == {
-        "scanner.demo.unparsable": frozenset()
+        "scanner.demo.unparsable": ()
     }
 
 
 def test_condition_reads_exclude_an_earlier_guards_data() -> None:
     # The preceding controls include everything every earlier guard in the function inspected, so
     # taking them for a guard that has a condition of its own would let a predicate borrow
-    # relevance from an unrelated neighbour.
+    # relevance from an unrelated neighbour. The container the parent guard walks through is
+    # dropped from its deciding layer for the same reason.
     source = (
         "def _validate(evidence):\n"
         "    if len(evidence.commands) != len(set(evidence.commands)):\n"
@@ -2464,8 +2485,22 @@ def test_condition_reads_exclude_an_earlier_guards_data() -> None:
 
     reads = checker.guard_condition_reads(source, "shell_taint.py")
 
-    assert reads["taint.demo.parent"] == frozenset({"parent_scope_id", "scopes"})
-    assert reads["taint.demo.duplicate"] == frozenset({"commands"})
+    assert reads["taint.demo.parent"][0] == frozenset({"parent_scope_id"})
+    assert reads["taint.demo.duplicate"][0] == frozenset({"commands"})
+
+
+def test_condition_reads_keep_a_container_the_guard_reads_for_itself() -> None:
+    # The subtraction is about containers a guard only walks through. This one tests the collection
+    # itself and binds no member of it, so dropping `scopes` would leave nothing to intersect.
+    source = (
+        "def _validate(evidence):\n"
+        "    if not evidence.scopes:\n"
+        '        raise _MalformedTaintEvidence(GuardRefusal("taint.demo.no-scope", "no"))\n'
+    )
+
+    reads = checker.guard_condition_reads(source, "shell_taint.py")
+
+    assert reads["taint.demo.no-scope"][0] == frozenset({"scopes"})
 
 
 def test_condition_reads_fall_back_to_the_arms_a_walk_declined() -> None:
@@ -2478,19 +2513,53 @@ def test_condition_reads_fall_back_to_the_arms_a_walk_declined() -> None:
 
     reads = checker.guard_condition_reads(source, "shell_taint.py")
 
-    assert reads["taint.demo.unknown-node"] == frozenset({"parts"})
+    assert reads["taint.demo.unknown-node"] == (frozenset({"parts"}),)
 
 
 def test_condition_reads_recover_the_structure_behind_a_transported_refusal() -> None:
     # The origin statement of a transported refusal reads only the value it hands down, so the
-    # closure over that value is what names the structure the transport's condition walks.
+    # closure over that value is what names the structure the transport's condition walks. Each
+    # writer in that closure contributes its own expressions alone: taking the loop whole would
+    # bring the output graph its body also builds into the layer that decides the parent cycle.
     reads = checker.guard_condition_reads(
         (_ROOT / "src/doc_lattice/github_ci/shell_taint.py").read_text(encoding="utf-8"),
         "shell_taint.py",
     )
 
-    assert "parent_scope_id" in reads["taint.evidence.scope-parent-cycle"]
-    assert "commands" not in reads["taint.evidence.scope-parent-cycle"]
+    assert reads["taint.evidence.scope-parent-cycle"][0] == frozenset(
+        {"parent_scope_id", "scope_id"}
+    )
+
+
+def test_a_container_borrowing_predicate_is_rejected_for_a_transported_guard(
+    tmp_path: Path,
+) -> None:
+    # Codex round-4 P1: bool(evidence.commands) and bool(evidence.scopes) rejects the empty
+    # control and intersects the flat derived set through the container attribute alone, while
+    # inspecting no parent edge. The leaf rule must reject it.
+    root = _invariant_row_root(
+        tmp_path,
+        origin_id="taint.evidence.scope-parent-cycle",
+        predicate="lambda evidence: bool(evidence.commands) and bool(evidence.scopes)",
+    )
+
+    violations = checker.repository_invariant_relevance_violations(root)
+
+    assert any("scope-parent-cycle" in violation for violation in violations)
+
+
+def test_a_leaf_reading_predicate_is_accepted_for_a_transported_guard(tmp_path: Path) -> None:
+    root = _invariant_row_root(
+        tmp_path,
+        origin_id="taint.evidence.scope-parent-cycle",
+        predicate=(
+            "lambda evidence: any(scope.parent_scope_id is not None for scope in evidence.scopes)"
+        ),
+    )
+
+    violations = checker.repository_invariant_relevance_violations(root)
+
+    assert not any("scope-parent-cycle" in violation for violation in violations)
 
 
 def test_repository_gate_fails_on_a_limits_violation(tmp_path: Path, capsys) -> None:
