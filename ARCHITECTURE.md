@@ -1196,6 +1196,44 @@ declared, reviewable edit rather than a silent one. Closure holds that ledger di
 tree's guard origins, because a row naming a guard that is still live changes no comparison and so
 would be rejected by nothing when written, leaving a later change free to delete that guard and
 have the removal absorbed by a row it did not add.
+
+The magnitude rule, the constructor-reference rule and the relevance floor share one polarity,
+worth recording as a decision rather than leaving implicit across three separate commits.
+`_is_magnitude_binding`, `_unanalyzable_constructor_references` and the derivation-layer relevance
+rule each enumerate what the inventory can follow and reject the rest, rather than enumerating
+known bypasses and accepting whatever such a list does not name. An unrecognized spelling is
+therefore a loud false positive: the gate refuses to classify it and spells the refusal out
+plainly in its report, never a silent bypass that certifies as though the gate had never seen it.
+Extending any of the three to cover another benign grammar is done by pinning the new spelling to
+its in-tree position, the way displacement, subscript and slice reads, positional-pinned integer
+and ANSI-reader base arguments, all-literal arity membership, modulo parity and dict-value escape
+tables are each pinned today, never by loosening a shape match to admit a family of spellings at
+once.
+
+The relevance floor carries the same polarity one level down. A boundary-evidence predicate must
+read a leaf attribute of the first non-empty layer `guard_condition_reads` derives for its origin,
+the transported, condition or closure layer in that order, falling back to the reachability
+controls only when all three are empty, and a predicate over anything else is rejected however
+plausible it reads. What stays out of that floor's mechanical reach is a predicate that reads the
+right leaf and is still weak about it: a predicate over `scope_id` reads a leaf of the
+parent-cycle guard's deciding layer while asserting nothing about whether the parent edges it
+names actually cycle. That residual is not something the source can close; it is owned by human
+review of the invariant row's rationale, per AD-19.
+
+Codex review round 4 on PR #179 is the motivating evidence for recording the polarity here rather
+than leaving it as an unstated pattern across commits. Rounds 1 through 3 had each closed a batch
+of individual spellings, 8, 2 and 7 findings in turn, each admitted into the existing rules one
+spelling at a time. Round 4 found three bypasses that were, each one, a new spelling of a class the
+gate already policed rather than a new class: a `BoolOp`-bound threshold, `(strict and 100) or
+200`, that the magnitude rule's shape match did not reach; a conditional constructor alias,
+`TaintLimits if use_default else injected`, that the constructor-reference rule's shape match did
+not reach; and a container-attribute predicate, `bool(e.commands) and bool(e.scopes)`, that read
+the scope-parent-cycle guard's iterated container instead of its deciding layer. A round-per-spelling
+series has no terminating condition; enumerating what the inventory can follow, and rejecting
+everything else, closes the series instead of extending it by one more name each round. Measured
+across the three commits that carried this decision, `a7c1c72`, `f1e7e51` and `77c10df`, the
+shipped inventory did not move: zero fingerprint churn, `SCHEMA_VERSION` unchanged at 12, and the
+frozen debt snapshot byte-identical.
 **Consequences:** A refusal observed at the public boundary names the guard that produced it, so a
 test can pin a specific site instead of a shared message. New guards cannot arrive unclassified,
 and an untested guard cannot be quietly reclassified or laundered onto a different site. Shrunk
