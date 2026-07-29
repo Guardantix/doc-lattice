@@ -4510,7 +4510,10 @@ def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
 
     Requiring the predicate to read something the guard's condition reads ties the two together
     without executing either. It is a floor rather than a proof: a predicate can still be weak about
-    the right data. What it rules out is a predicate about the wrong data.
+    the right data. What it rules out is a predicate about the wrong data. The residual is concrete:
+    a predicate reading `scope_id` for the parent-cycle guard reads a leaf of the deciding layer and
+    still says nothing about whether the parent edges form a cycle. Nothing derivable from the
+    source closes that gap, so it stays with human review of the row's rationale under AD-20.
 
     The predicate is held to the layer that actually decides the guard, and to the leaf attributes
     of it. Intersecting a flat union of every layer would let a row for the parent-cycle detector

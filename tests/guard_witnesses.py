@@ -733,22 +733,20 @@ INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
         "taint.evidence.unknown-redirection-resource",
         f"{_EVIDENCE_SELF_CHECK} A redirection to a process-resource target names a resource the "
         "builder allocated for the same body.",
-        "cat <(echo a)",
-        # The boundary allocates the process resource the guard's condition looks a redirection
-        # target up in, and no authored redirection targets one, so the walk over targets holds
-        # over the same allocation the empty control has none of.
-        boundary_evidence=lambda evidence: (
-            bool(evidence.process_resources)
-            and all(
-                event.target.resource_id
-                in {resource.resource_id for resource in evidence.process_resources}
-                for events in (
-                    *(command.redirections for command in evidence.commands),
-                    *(scope.redirections for scope in evidence.scopes),
-                )
-                for event in events
-                if isinstance(event.target, ProcessResourceTarget)
+        "cat < <(echo a)",
+        # The guard resolves a redirection target's resource against the allocated ones, so the
+        # boundary redirects from the process substitution rather than passing it as an argument:
+        # `cat <(echo a)` allocates the resource but authors no redirection, and a universal claim
+        # over the redirections would then hold vacuously over nothing.
+        boundary_evidence=lambda evidence: any(
+            isinstance(event.target, ProcessResourceTarget)
+            and event.target.resource_id
+            in {resource.resource_id for resource in evidence.process_resources}
+            for events in (
+                *(command.redirections for command in evidence.commands),
+                *(scope.redirections for scope in evidence.scopes),
             )
+            for event in events
         ),
     ),
     InvariantWitness(

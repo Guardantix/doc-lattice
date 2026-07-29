@@ -61,7 +61,12 @@ def _fake_root(tmp_path: Path, debt_records: list[dict[str, str]]) -> Path:
 
 
 def _invariant_row_root(tmp_path: Path, *, origin_id: str, predicate: str) -> Path:
-    """Copy the guarded modules and registry, adding one invariant row for this origin."""
+    """Copy the guarded modules and registry, adding one invariant row for this origin.
+
+    Point this only at an origin with no shipped invariant row. `invariant_predicate_reads` is keyed
+    by origin identifier, so a shipped row for the same guard silently wins and the test then
+    measures that row's predicate instead of the one it supplied.
+    """
     marker = "INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = ("
     row = (
         f'{marker}\n    InvariantWitness(\n        "{origin_id}",\n'
