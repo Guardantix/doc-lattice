@@ -931,6 +931,15 @@ builds. Having no default only stops the predicate being omitted; a predicate th
 builder's floor of one root scope and nothing else reports nothing the boundary script constructed,
 and is vacuous whether it is spelled as a constant or as a test the floor happens to satisfy.
 
+A boundary row is additionally held to executing the guard's own governing construct while not
+reaching its refusal, and that construct is whichever one actually decides the guard: an `if` or
+`while` test, a `for` header, a `match` arm, or, for a guard in an `except` handler, the operation
+in the `try` body whose failure is the only condition it has. Recognizing only `if` and otherwise
+falling back to the enclosing function's first executable line would name a line that runs for any
+script entering the function, so the trace assertion would hold without the guard's own condition
+ever being evaluated. Three frozen origins sit in `except` handlers today, where the handler's own
+line is unsatisfiable as a witness because entering the handler is what runs the refusal.
+
 Anything unclassified is frozen rollout debt that may only shrink. Source origins must partition
 exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
 canonical origin *records* rather than bare identifiers, so an unclassified guard cannot be moved
@@ -1048,6 +1057,52 @@ closure actually reads, not the whole statement, so adding an unrelated name to 
 frozen record on unrelated edits; a record that churns constantly has to be regenerated, which is
 the laundering path this decision closes. A caller passing a different value into that function is
 outside the boundary and is not covered.
+
+Every closure above describes the guard's own function, and none of it moves when the call that
+reaches that function is withdrawn. `scanner.control-flow.unfinished-case` is the concrete case:
+`_finish_case` holds it and has exactly one call site, and replacing that call with `return`
+withdraws the guard with its fingerprint byte-identical and the base-owned comparison green. A
+record therefore also covers the controls at every resolvable call site of its own function: the
+caller's qualified name, the condition the call sits under, the call statement's shape, and the
+flow diverting around it, which is the same treatment the origin statement gets one level down.
+Inverting `if frame is not None` at the call site, deleting the call, or returning ahead of it all
+move the record. A function with no resolvable call site records that fact rather than nothing, so
+acquiring one moves the record too.
+
+That closure is one level deep by construction. Following callers transitively would pull the
+reachability closure of the public entry point into every record in both modules, since all paths
+converge there, and a record that churns on an unrelated edit has to be regenerated, which is the
+laundering path this decision closes. Withdrawal further up the chain is covered instead as a
+separate property that needs no digest and so costs a frozen record no churn at all: every origin
+must sit in a function some public entry point of its own module can reach. Orphaning a function
+at any depth is reported there.
+
+The two resolutions differ deliberately, because a wrong edge costs opposite things on each side.
+The reachability graph resolves an edge by callee name alone, across every definition carrying that
+name, and reads a construction as an edge to the `__init__` and `__post_init__` it runs, which is
+how the `__post_init__` holding
+`taint.eval-syntax.cleared-projection-without-widening` is reached at all. Over-approximating there
+only ever withholds a report. A fingerprint cannot afford that, so a call site resolves only when
+the definition is unambiguous: a bare name to a module-level or lexically enclosing function, and an
+attribute to a method either through `self` inside its own class or through any receiver when
+exactly one function in the module carries the name. That last form is what ties
+`taint.eval-discovery.work-limit` to the `budget.charge_work(...)` that reaches it. A receiver this
+parse cannot resolve, spelling a name two definitions share, stays unresolved rather than guessed.
+
+Entry points are derived from the candidate tree, as the public module-level functions of a guarded
+module, rather than read from an allowlist. An allowlist in the base revision's copy would describe
+the base's source and would reject a legitimate rename with no fix available inside the same change,
+which is the same reason closure names none. Making a withdrawn guard's function public to satisfy
+the rule is not a way through, because the rename moves the record's qualified name and the
+base-relative comparison reports that as new debt.
+
+Two withdrawals remain outside both rules, and are recorded rather than implied: inverting a
+condition two or more levels above the guard's own function, and inverting one at a call site
+spelled through a receiver whose type this parse cannot resolve. Both leave the function statically
+reachable and every recorded shape unchanged. Closing them needs either the transitive caller
+hashing this decision rejects on churn grounds or type resolution the parse does not have, so what
+stands against them is classification: a reachable witness proves dynamic reachability by executing
+the guard.
 
 Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
 protected base runs the base revision's own copy of the checker with the candidate tree as inert

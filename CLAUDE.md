@@ -72,6 +72,10 @@ executable evidence: a script that reaches it through the public scan path, or a
 boundary script. Anything unclassified is frozen in `tests/fixtures/shell_guard_debt.json`, which
 may only shrink.
 
+A guard must also sit in a function some public entry point of its own module reaches, and its
+record covers the controls at its function's call sites, so withdrawing a guard by orphaning or
+diverting around its function fails the gate rather than passing silently.
+
 When you add or move a guard, add its classification to `tests/guard_witnesses.py`; when adding its
 module, add that module to `GUARDED_MODULES` too. The base-owned comparison discovers guarded
 modules recursively from the candidate tree, so an older base checker can validate the new origin.

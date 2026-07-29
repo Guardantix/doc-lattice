@@ -5,7 +5,7 @@ Every fail-closed guard below the CI scanner's guard package has one *origin*: t
 detects the condition and constructs a `GuardRefusal`. This module reads that package as inert
 source text, never importing it, and produces one canonical record per origin.
 
-It enforces three separable properties:
+It enforces four separable properties:
 
 1. **Canonical refusal shapes.** A refusal may only reach an exception, a `ShellScanResult`, or a
    verdict return as a `GuardRefusal` construction with a literal identifier and literal reason,
@@ -14,15 +14,19 @@ It enforces three separable properties:
    the discriminated value.
 2. **Tree-local closure.** Source origin identifiers must partition exactly into the classified
    inventory and the frozen rollout debt set, with the two disjoint.
-3. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
+3. **Guard reachability.** Every origin must sit in a function some public entry point of its own
+   module can reach. Orphaning the function holding a guard withdraws it as completely as
+   inverting its condition, and leaves every shape in its record untouched.
+4. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
    re-derive to a record the base already carried. Freezing *records* rather than bare identifiers
    means an unclassified guard cannot be moved or semantically edited while keeping its debt entry.
 
 Because the monotonicity check runs from the base revision's copy of this script against the
 candidate's source, the candidate is only ever parsed as data. `--compare-base` therefore runs the
-closure and monotonicity checks alone: those derive everything from the candidate tree, while the
-refusal-shape, limits and threshold rules read allowlists that describe the source they shipped
-with. The candidate's own copy enforces those three, without `--compare-base`, in the test suite.
+closure, reachability and monotonicity checks alone: those derive everything from the candidate
+tree, while the refusal-shape, limits and threshold rules read allowlists that describe the source
+they shipped with. The candidate's own copy enforces those three, without `--compare-base`, in the
+test suite.
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -119,6 +123,13 @@ not guard origins and never appear in the inventory."""
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 _Function = ast.FunctionDef | ast.AsyncFunctionDef
+
+_CONSTRUCTION_HOOKS = frozenset({"__init__", "__post_init__"})
+"""Methods a construction of the class runs without any call naming them.
+
+`taint.eval-syntax.cleared-projection-without-widening` lives in a dataclass `__post_init__`, which
+no call in either module spells. Reading a construction as an edge to these is what keeps the
+reachability rule from reporting it as orphaned."""
 """A function definition, whichever way it is spelled."""
 
 _MUTATING_METHODS = frozenset(
@@ -288,6 +299,9 @@ class _DerivationCache:
     functions: dict[int, dict[str, _Function]] = field(default_factory=dict)
     callee_shapes: dict[int, tuple[str, ...]] = field(default_factory=dict)
     callee_callees: dict[int, frozenset[str]] = field(default_factory=dict)
+    module_parents: dict[int, dict[int, ast.AST]] = field(default_factory=dict)
+    definitions: dict[int, dict[str, tuple[_Function, ...]]] = field(default_factory=dict)
+    calls: dict[int, dict[str, tuple[tuple[ast.stmt, ast.Call], ...]]] = field(default_factory=dict)
     module: ast.Module | None = None
 
 
@@ -307,7 +321,7 @@ class OriginRecord:
             its refusal to, the control flow that decides whether it is reached and the writers
             feeding that flow, any `try` body whose handler contains the origin, and the
             return-deciding statements of every module-level callee whose value that dataflow
-            reads.
+            reads, and the controls at every resolvable call site of the guard's own function.
     """
 
     origin_id: str
@@ -1858,6 +1872,383 @@ def _callee_shapes(
     )
 
 
+def _cached_module_parents(cache: _DerivationCache) -> dict[int, ast.AST]:
+    """Return every node in the module mapped to the node holding it, memoized for this parse.
+
+    `_cached_scope_parents` deliberately stops at a nested scope, which is what the writer and
+    reachability closures need. Resolving a call site needs the opposite: the class or function a
+    definition is written in, across the whole module.
+
+    Args:
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Holding nodes keyed by node identity, empty when the cache carries no module.
+    """
+    module = cache.module
+    if module is None:
+        return {}
+    memo = cache.module_parents.get(id(module))
+    if memo is None:
+        memo = {
+            id(child): node for node in ast.walk(module) for child in ast.iter_child_nodes(node)
+        }
+        cache.module_parents[id(module)] = memo
+    return memo
+
+
+def _enclosing_node(
+    node: ast.AST, kinds: tuple[type[ast.AST], ...], parents: dict[int, ast.AST]
+) -> ast.AST | None:
+    """Return the nearest node of one of these kinds holding this node, or `None` if there is none.
+
+    Args:
+        node: Node to walk outwards from.
+        kinds: Node types to stop at.
+        parents: Module-wide parent map.
+
+    Returns:
+        The nearest holding node of one of these kinds, or `None`.
+    """
+    current = parents.get(id(node))
+    while current is not None:
+        if isinstance(current, kinds):
+            return current
+        current = parents.get(id(current))
+    return None
+
+
+def _cached_definitions_by_name(cache: _DerivationCache) -> dict[str, tuple[_Function, ...]]:
+    """Return every function the module defines at any depth, keyed by the name it binds.
+
+    `_cached_module_functions` answers a different question: which module-level binding a bare-name
+    call reaches. Call-site resolution and the reachability graph both need every definition,
+    including methods and nested functions, and both need to know when a name is ambiguous.
+
+    Args:
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Definitions in source order keyed by name, empty when the cache carries no module.
+    """
+    module = cache.module
+    if module is None:
+        return {}
+    memo = cache.definitions.get(id(module))
+    if memo is None:
+        collected: dict[str, list[_Function]] = {}
+        for node in ast.walk(module):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                collected.setdefault(node.name, []).append(node)
+        memo = {
+            name: tuple(sorted(defs, key=lambda node: (node.lineno, node.col_offset)))
+            for name, defs in collected.items()
+        }
+        cache.definitions[id(module)] = memo
+    return memo
+
+
+def _cached_calls_by_name(
+    cache: _DerivationCache,
+) -> dict[str, tuple[tuple[ast.stmt, ast.Call], ...]]:
+    """Return every call in the module keyed by the callee name it spells, memoized for this parse.
+
+    Resolving one function's call sites is a question about the whole module, and there are as many
+    origins as there are guards. Grouping the module's calls once keeps that from being a walk per
+    origin.
+
+    Args:
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Statement and call pairs keyed by spelled callee name, empty when the cache carries no
+        module.
+    """
+    module = cache.module
+    if module is None:
+        return {}
+    memo = cache.calls.get(id(module))
+    if memo is None:
+        collected: dict[str, list[tuple[ast.stmt, ast.Call]]] = {}
+        for statement in ast.walk(module):
+            if not isinstance(statement, ast.stmt):
+                continue
+            for node in _own_expressions(statement):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = _resolved_callee_name(node)
+                if name is not None:
+                    collected.setdefault(name, []).append((statement, node))
+        memo = {name: tuple(pairs) for name, pairs in collected.items()}
+        cache.calls[id(module)] = memo
+    return memo
+
+
+def _resolved_callee_name(call: ast.Call) -> str | None:
+    """Return the name a call spells for its callee, whether bare or through an attribute."""
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _is_call_site_of(call: ast.Call, function: _Function, cache: _DerivationCache) -> bool:
+    """Return whether this call resolves, unambiguously, to that function definition.
+
+    Three spellings resolve, and nothing else does. A module-level function is reached by a bare
+    name. A function nested in another is reached by a bare name too, and only from inside the
+    scope that binds it. A method is reached by `self.name` from inside its own class, and by any
+    receiver at all when exactly one function in the module carries that name, because there is
+    then no other definition the attribute could denote.
+
+    A receiver this parse cannot resolve, spelling a name two definitions share, stays unresolved.
+    Guessing there would hash an unrelated call into a guard's record, and the reachability graph
+    covers those spellings separately by name alone, where over-approximating is the safe
+    direction.
+
+    Args:
+        call: The call to classify.
+        function: The definition the call may reach.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Whether the call reaches that definition.
+    """
+    name = _resolved_callee_name(call)
+    if name != function.name:
+        return False
+    parents = _cached_module_parents(cache)
+    owner = _enclosing_node(
+        function, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef), parents
+    )
+    if isinstance(call.func, ast.Name):
+        return _bare_name_reaches(call, function, owner, parents)
+    if not isinstance(owner, ast.ClassDef):
+        return False
+    # With exactly one definition of the name in the module, there is no other one the attribute
+    # could denote whatever the receiver is. Otherwise only `self` inside the class resolves.
+    if len(_cached_definitions_by_name(cache).get(name, ())) == 1:
+        return True
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    return (
+        isinstance(receiver, ast.Name)
+        and receiver.id == "self"
+        and _enclosing_node(call, (ast.ClassDef,), parents) is owner
+    )
+
+
+def _bare_name_reaches(
+    call: ast.Call, function: _Function, owner: ast.AST | None, parents: dict[int, ast.AST]
+) -> bool:
+    """Return whether a bare-name call reaches this definition.
+
+    A bare name reaches a method only through a binding this parse does not model, and a nested
+    definition only from inside the scope that binds it or from the definition itself.
+
+    Args:
+        call: The bare-name call to classify.
+        function: The definition the call may reach.
+        owner: The class or function the definition is written in, or `None` at module level.
+        parents: Module-wide parent map.
+
+    Returns:
+        Whether the call reaches that definition.
+    """
+    if isinstance(owner, ast.ClassDef):
+        return False
+    if owner is None:
+        return True
+    spelled_in = _enclosing_node(call, (ast.FunctionDef, ast.AsyncFunctionDef), parents)
+    return spelled_in is owner or spelled_in is function
+
+
+def _call_site_shapes(
+    scope: ast.AST | None,
+    annotations: _Annotations,
+    cache: _DerivationCache,
+) -> tuple[str, ...]:
+    """Return the shapes of the controls deciding that the guard's own function is called.
+
+    A record covers what a guard refuses once control arrives in its function, and the flow inside
+    that function deciding it is reached. Neither says anything about whether the function itself
+    is called. `_finish_case` holds `scanner.control-flow.unfinished-case` and has exactly one call
+    site; replacing that call with `return` withdraws the guard completely while every shape in the
+    record stays byte-identical.
+
+    Each resolvable call site contributes the caller's qualified name, the condition the call sits
+    under, the call statement's own shape and the flow diverting around it, which is the same
+    treatment the origin statement gets one level down. Inverting `if frame is not None` at the call
+    site, deleting the call, or returning ahead of it therefore all move the record.
+
+    The closure is one level deep by construction. Following callers transitively would pull the
+    reachability closure of the public entry point into every record in both modules, since all
+    paths converge there, and a record that churns on an unrelated edit has to be regenerated,
+    which is the laundering path this gate exists to close. Withdrawal further up is covered
+    instead by `find_reachability_violations`, which needs no digest.
+
+    A function with no resolvable call site records that fact rather than nothing, so acquiring one
+    moves the record too.
+
+    Args:
+        scope: The origin's enclosing function, or `None` at class or module level.
+        annotations: The module's one annotation pass.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        One block per call site, in source order, headed by the resolution outcome.
+    """
+    module = cache.module
+    if module is None or not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+        return ("call sites: no enclosing function",)
+    sites = [
+        statement
+        for statement, call in _cached_calls_by_name(cache).get(scope.name, ())
+        if _is_call_site_of(call, scope, cache)
+    ]
+    ordered = sorted(
+        dict.fromkeys(sites), key=lambda statement: (statement.lineno, statement.col_offset)
+    )
+    if not ordered:
+        return (f"call sites: none resolvable for {scope.name}",)
+    shapes: list[str] = [f"call sites: {len(ordered)} for {scope.name}"]
+    for statement in ordered:
+        caller = annotations.scopes.get(id(statement))
+        shapes.append(annotations.names.get(id(statement), ""))
+        shapes.append(annotations.conditions.get(id(statement), ""))
+        shapes.append(_cached_shape(statement, cache))
+        shapes.extend(_reachability_shapes(statement, caller, cache))
+    return tuple(shapes)
+
+
+def _module_entry_points(module: ast.Module) -> tuple[_Function, ...]:
+    """Return the module-level functions a caller outside the module can name.
+
+    This is derived from the candidate tree rather than read from an allowlist, which is what lets
+    the reachability gate run from the base revision's copy of this checker: an allowlist there
+    would describe the base's source and reject a legitimate rename with no fix available inside
+    the same change.
+
+    Making a withdrawn guard's function public would satisfy this rule, and is not a way through:
+    the rename moves the record's qualified name, which the base-relative comparison reports as new
+    debt.
+
+    Args:
+        module: Parsed module.
+
+    Returns:
+        Public module-level functions, in source order.
+    """
+    return tuple(
+        statement
+        for statement in module.body
+        if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef)
+        if not statement.name.startswith("_")
+    )
+
+
+def _reachable_functions(module: ast.Module, cache: _DerivationCache) -> set[int]:
+    """Return the identities of the functions reachable from the module's entry points.
+
+    Edges are resolved by callee name alone, across every definition carrying that name, and a
+    construction of a class is an edge to the hooks that construction runs. Over-approximating is
+    the safe direction here: this rule reports a guard that nothing can reach, so counting an edge
+    that a more precise analysis would drop only ever withholds a report. The precise resolution
+    `_is_call_site_of` performs is the one that feeds a fingerprint, where a wrong edge would
+    instead couple a record to unrelated code.
+
+    A function that is only ever referenced, never called, is not an edge. That direction is
+    deliberate too: it can raise a report for a callback-dispatched guard, which is visible and
+    answerable, rather than certifying one silently.
+
+    Args:
+        module: Parsed module.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Identities of reachable function definitions.
+    """
+    definitions = _cached_definitions_by_name(cache)
+    classes = {node.name: node for node in ast.walk(module) if isinstance(node, ast.ClassDef)}
+    owners: dict[int, ast.AST | None] = {}
+
+    def assign(node: ast.AST, current: ast.AST | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            owners[id(child)] = current
+            assign(
+                child,
+                child if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) else current,
+            )
+
+    assign(module, None)
+    edges: dict[int, set[int]] = {}
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _resolved_callee_name(node)
+        if name is None:
+            continue
+        owner = owners.get(id(node))
+        targets = edges.setdefault(id(owner) if owner is not None else 0, set())
+        targets.update(id(definition) for definition in definitions.get(name, ()))
+        constructed = classes.get(name)
+        if constructed is not None:
+            targets.update(
+                id(hook)
+                for hook in constructed.body
+                if isinstance(hook, ast.FunctionDef | ast.AsyncFunctionDef)
+                if hook.name in _CONSTRUCTION_HOOKS
+            )
+    # The module body runs on import, so a function it calls is entered exactly as one an entry
+    # point calls is.
+    pending = [0, *(id(function) for function in _module_entry_points(module))]
+    reached: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current in reached:
+            continue
+        reached.add(current)
+        pending.extend(edges.get(current, ()))
+    return reached
+
+
+def find_reachability_violations(source: str, path: str) -> tuple[str, ...]:
+    """Return every guard origin whose own function nothing in the module can reach.
+
+    A guard is withdrawn as completely by orphaning the function holding it as by inverting its
+    condition, and orphaning it leaves every shape in its record untouched. `_call_site_shapes`
+    covers the immediate call site; this rule covers the rest of the chain, at any depth, and needs
+    no digest to do it, so it costs a frozen record nothing in churn.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Name reported with each violation.
+
+    Returns:
+        Human-readable violations, empty when every origin's function is reachable.
+    """
+    tree = ast.parse(source)
+    annotations = _annotate(tree)
+    cache = _DerivationCache(module=tree)
+    reachable = _reachable_functions(tree, cache)
+    violations: list[str] = []
+    for statement, call in _origin_calls_by_statement(tree):
+        if not call.args or not isinstance(call.args[0], ast.Constant):
+            continue
+        origin_id = call.args[0].value
+        if not isinstance(origin_id, str):
+            continue
+        scope = annotations.scopes.get(id(statement))
+        if scope is None or id(scope) in reachable:
+            continue
+        violations.append(
+            f"{path}: {origin_id} ({annotations.names.get(id(statement), '')}) sits in a function "
+            f"no public entry point of this module reaches, so the guard cannot fire; restore the "
+            f"call that reaches it or retire the guard"
+        )
+    return tuple(violations)
+
+
 def _is_guard_refusal_call(node: ast.AST, names: frozenset[str]) -> bool:
     return _called_name(node) in names
 
@@ -1972,6 +2363,10 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
         callees = _callee_shapes(
             statement, scope, guarded_bodies.get(id(statement), ()), governing, cache
         )
+        # Everything above describes the guard's own function. None of it moves when the call that
+        # reaches that function is withdrawn, so the controls at the immediate call site are part
+        # of the record too.
+        callers = _call_site_shapes(scope, annotations, cache)
         called = {name for node in _own_expressions(statement) if (name := _called_name(node))}
         carried = tuple(shape for name, shape in sorted(transports.items()) if name in called)
         digest = hashlib.sha256(
@@ -1986,6 +2381,7 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
                     *flow,
                     *raising,
                     *callees,
+                    *callers,
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -3178,6 +3574,26 @@ def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
 
 
+def repository_reachability_violations(root: Path) -> tuple[str, ...]:
+    """Return every guard origin that no public entry point of its own module can reach.
+
+    The guarded surface is discovered from the candidate tree, and the entry points within each
+    module are derived from it as well, so this rule names no allowlist and runs from the base
+    revision's copy of the checker for the same reason closure does.
+
+    Args:
+        root: Repository root to read the guarded modules from.
+
+    Returns:
+        Human-readable violations, empty when every origin's function is reachable.
+    """
+    violations: list[str] = []
+    for module in _repository_guard_modules(root):
+        source = (root / module).read_text(encoding="utf-8")
+        violations.extend(find_reachability_violations(source, Path(module).name))
+    return tuple(violations)
+
+
 def repository_shape_violations(root: Path) -> tuple[str, ...]:
     """Return every non-canonical refusal shape across the repository's guarded modules.
 
@@ -3739,7 +4155,8 @@ def main(argv: list[str] | None = None) -> int:
         # snapshot and the witness registry, which this copy reads by identity alone. Every one of
         # those gates runs from the candidate's own copy in the test suite. Closure names no
         # allowlist: it derives the whole partition from the candidate tree, so running it from the
-        # base is what makes it unweakenable.
+        # base is what makes it unweakenable. Reachability derives its entry points from the
+        # candidate tree for that same reason, and so belongs here too.
         base_snapshot = arguments.compare_base.read_text(encoding="utf-8")
         base_registry = (
             None
@@ -3749,6 +4166,7 @@ def main(argv: list[str] | None = None) -> int:
         failures = _run_gates(
             (
                 ("closure", lambda: repository_closure_violations(arguments.root)),
+                ("guard reachability", lambda: repository_reachability_violations(arguments.root)),
                 (
                     "base comparison",
                     lambda: compare_against_base(
@@ -3765,6 +4183,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("refusal shapes", lambda: repository_shape_violations(arguments.root)),
                 ("limits provenance", lambda: repository_limits_violations(arguments.root)),
                 ("guard thresholds", lambda: repository_threshold_violations(arguments.root)),
+                ("guard reachability", lambda: repository_reachability_violations(arguments.root)),
                 ("closure", lambda: repository_closure_violations(arguments.root)),
             )
         )

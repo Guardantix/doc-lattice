@@ -325,6 +325,15 @@ def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
     Line numbers are deliberately absent from the canonical origin record, which must stay stable
     across edits. They are re-derived here, from the current source, purely so a boundary witness
     can be held to executing the guard's own condition.
+
+    Every construct the checker treats as deciding a refusal is a stopping point here, for the same
+    reason the checker gives: a `while` test governs the guard exactly as an `if` test does, a
+    `for` header decides whether the body runs at all, a `match` arm selects it, and an `except`
+    clause is reached only by the `try` body raising. Walking past any of them to the enclosing
+    function's first line would attribute a line that runs for any script entering the function, so
+    a boundary script could satisfy the trace assertion without the guard's own condition ever
+    being evaluated. Three frozen origins sit in `except` handlers today, so this is the difference
+    between a real witness and a vacuous one the moment one of them is classified.
     """
     located: dict[str, tuple[str, int, int]] = {}
     for module in checker.GUARDED_MODULES:
@@ -343,32 +352,195 @@ def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
             origin_id = node.args[0].value
             if not isinstance(origin_id, str):
                 continue
-            refusal_line = node.lineno
-            current: ast.AST | None = node
-            condition_line = 0
-            while current is not None:
-                current = parents.get(id(current))
-                if isinstance(current, ast.If):
-                    condition_line = current.test.lineno
-                    break
-                if isinstance(current, ast.FunctionDef):
-                    # A fall-through refusal has no branch of its own: reaching it means every
-                    # earlier arm declined. Its enclosing function's first executable statement,
-                    # skipping the docstring, is the nearest line whose execution shows the walk
-                    # ran over real evidence.
-                    body = [
-                        statement
-                        for statement in current.body
-                        if not (
-                            isinstance(statement, ast.Expr)
-                            and isinstance(statement.value, ast.Constant)
-                            and isinstance(statement.value.value, str)
-                        )
-                    ]
-                    condition_line = body[0].lineno
-                    break
-            located[origin_id] = (path, condition_line, refusal_line)
+            located[origin_id] = (path, _governing_line(node, parents), node.lineno)
     return located
+
+
+def _first_executable_line(function: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    """Return the line of the function's first statement that is not its docstring."""
+    body = [
+        statement
+        for statement in function.body
+        if not (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        )
+    ]
+    return body[0].lineno
+
+
+def _handled_operation_line(handler: ast.ExceptHandler, parents: dict[int, ast.AST]) -> int:
+    """Return the line of the operation whose failure is the only condition a handler guard has.
+
+    A handler has no condition of its own: it is reached only by the `try` body raising, which is
+    the same thing the checker records as this guard's raising operation. The boundary runs that
+    operation and it does not raise, so the guarded body is the line to witness. Taking the
+    handler's own line instead would be unsatisfiable, because entering the handler is what runs
+    the refusal.
+
+    Args:
+        handler: The `except` clause holding the origin.
+        parents: Parent map over the module holding it.
+
+    Returns:
+        The first line of the guarded `try` body.
+    """
+    guarded = parents.get(id(handler))
+    if isinstance(guarded, ast.Try | ast.TryStar):
+        return guarded.body[0].lineno
+    return handler.lineno
+
+
+def _governing_line(node: ast.AST, parents: dict[int, ast.AST]) -> int:
+    """Return the line whose execution shows this guard's own condition was evaluated.
+
+    Args:
+        node: The refusal construction to walk outwards from.
+        parents: Parent map over the module holding it.
+
+    Returns:
+        The governing line, or 0 when the walk leaves the module without finding one.
+    """
+    current: ast.AST | None = node
+    while current is not None:
+        holder = parents.get(id(current))
+        if isinstance(holder, ast.If | ast.While):
+            return holder.test.lineno
+        if isinstance(holder, ast.For | ast.AsyncFor):
+            # The header decides whether the body runs at all, and an empty iterable is exactly how
+            # a boundary script enters the function without reaching a guard in the body.
+            return holder.iter.lineno
+        if isinstance(holder, ast.match_case):
+            return (holder.guard or holder.pattern).lineno
+        if isinstance(holder, ast.ExceptHandler):
+            return _handled_operation_line(holder, parents)
+        if isinstance(holder, ast.FunctionDef | ast.AsyncFunctionDef):
+            # A fall-through refusal has no branch of its own: reaching it means every earlier arm
+            # declined. Its enclosing function's first executable statement, skipping the
+            # docstring, is the nearest line whose execution shows the walk ran over real evidence.
+            return _first_executable_line(holder)
+        current = holder
+    return 0
+
+
+def _governing_line_of(source: str) -> int:
+    """Return the governing line of the one guard origin in this source."""
+    tree = ast.parse(source)
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    origin = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        if isinstance(node.func, ast.Name) and node.func.id == "GuardRefusal"
+    )
+    return _governing_line(origin, parents)
+
+
+def test_governing_line_of_a_guard_under_an_if_is_its_test() -> None:
+    source = 'def _guard(value):\n    if value > 3:\n        raise E(GuardRefusal("a", "b"))\n'
+
+    assert _governing_line_of(source) == 2
+
+
+def test_governing_line_of_a_guard_under_a_while_is_the_loop_test() -> None:
+    # Walking past the loop to the function head would name a line that runs for any script
+    # entering the function, so a boundary could satisfy the trace without the loop test ever
+    # being evaluated.
+    source = (
+        "def _guard(state):\n"
+        "    setup(state)\n"
+        "    while state.depth > 3:\n"
+        '        raise E(GuardRefusal("a", "b"))\n'
+    )
+
+    assert _governing_line_of(source) == 3
+
+
+def test_governing_line_of_a_guard_in_a_loop_body_is_the_header() -> None:
+    source = (
+        "def _guard(state):\n"
+        "    setup(state)\n"
+        "    for item in state.items:\n"
+        '        raise E(GuardRefusal("a", "b"))\n'
+    )
+
+    assert _governing_line_of(source) == 3
+
+
+def test_governing_line_of_a_guard_in_a_handler_is_the_guarded_operation() -> None:
+    # Three frozen origins sit in `except` handlers. The handler's own line is unsatisfiable as a
+    # witness, because entering the handler is what runs the refusal.
+    source = (
+        "def _guard(digits):\n"
+        "    try:\n"
+        "        return int(digits)\n"
+        "    except ValueError:\n"
+        '        raise E(GuardRefusal("a", "b")) from None\n'
+    )
+
+    assert _governing_line_of(source) == 3
+
+
+def test_governing_line_of_a_guard_in_a_match_arm_is_the_arm() -> None:
+    source = (
+        "def _guard(node):\n"
+        "    match node.kind:\n"
+        '        case "unknown":\n'
+        '            raise E(GuardRefusal("a", "b"))\n'
+    )
+
+    assert _governing_line_of(source) == 3
+
+
+def test_governing_line_of_a_fall_through_guard_skips_the_docstring() -> None:
+    source = (
+        "def _guard(node):\n"
+        '    """Doc."""\n'
+        '    if node.kind == "a":\n'
+        "        return 1\n"
+        '    raise E(GuardRefusal("a", "b"))\n'
+    )
+
+    assert _governing_line_of(source) == 3
+
+
+@pytest.mark.parametrize(
+    "origin_id",
+    [
+        "taint.eval-descriptor.unparsable",
+        "taint.eval-payload.lex-error",
+        "scanner.descriptor.unparsable",
+    ],
+)
+def test_a_shipped_handler_guard_witnesses_its_guarded_operation(origin_id: str) -> None:
+    # Re-derived from the other direction: find the handler holding this origin and take the `try`
+    # it belongs to. These three are frozen debt today, so the line they would resolve to is what
+    # decides whether classifying one of them later produces a real witness or a vacuous one.
+    path, condition_line, _refusal_line = _GUARD_LINES[origin_id]
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    origin = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        if isinstance(node.func, ast.Name) and node.func.id == "GuardRefusal"
+        if node.args and getattr(node.args[0], "value", None) == origin_id
+    )
+    handler = _enclosing_of(origin, ast.ExceptHandler, parents)
+    guarded = parents[id(handler)]
+    assert isinstance(guarded, ast.Try)
+
+    assert condition_line == guarded.body[0].lineno
+
+
+def _enclosing_of(node: ast.AST, kind: type[ast.AST], parents: dict[int, ast.AST]) -> ast.AST:
+    """Return the nearest node of this kind holding the given node."""
+    current = parents.get(id(node))
+    while current is not None and not isinstance(current, kind):
+        current = parents.get(id(current))
+    assert current is not None
+    return current
 
 
 _GUARD_LINES = _guard_condition_lines()

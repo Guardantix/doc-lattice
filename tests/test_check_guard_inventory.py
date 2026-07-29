@@ -780,6 +780,260 @@ def test_callee_closure_ignores_a_callee_name_a_local_binding_shadows() -> None:
     )
 
 
+_CALL_SITE_SOURCE = (
+    "def _guard(frame):\n"
+    "    if frame.phase != 'body':\n"
+    '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.unfinished", "unscannable"))\n'
+    "def scan(frames, literal):\n"
+    "    frame = frames.get(literal)\n"
+    "    if frame is not None:\n"
+    "        _guard(frame)\n"
+)
+
+
+def test_fingerprint_tracks_the_condition_the_call_site_sits_under() -> None:
+    # Everything else in the record describes the guard's own function, and none of it moves when
+    # the caller stops reaching that function. This is the case the reachability rule cannot see,
+    # because the call is still there.
+    edited = _CALL_SITE_SOURCE.replace("if frame is not None:", "if frame is None:")
+
+    assert _fingerprint_for(_CALL_SITE_SOURCE, "shell_scanner.py", "scanner.demo.unfinished") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.unfinished")
+    )
+
+
+def test_fingerprint_tracks_the_removal_of_the_only_call_site() -> None:
+    edited = _CALL_SITE_SOURCE.replace("        _guard(frame)\n", "        return None\n")
+
+    assert _fingerprint_for(_CALL_SITE_SOURCE, "shell_scanner.py", "scanner.demo.unfinished") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.unfinished")
+    )
+
+
+def test_fingerprint_tracks_a_return_inserted_ahead_of_the_call_site() -> None:
+    # Diverting around the call withdraws the guard without touching the call or its condition.
+    edited = _CALL_SITE_SOURCE.replace(
+        "    frame = frames.get(literal)\n",
+        "    if literal:\n        return None\n    frame = frames.get(literal)\n",
+    )
+
+    assert _fingerprint_for(_CALL_SITE_SOURCE, "shell_scanner.py", "scanner.demo.unfinished") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.unfinished")
+    )
+
+
+def test_call_site_closure_ignores_a_statement_that_decides_nothing() -> None:
+    # The bound matters as much as the coverage: a record that churns on an unrelated edit in the
+    # caller has to be regenerated, which is the laundering path this gate exists to close.
+    edited = _CALL_SITE_SOURCE.replace(
+        "    frame = frames.get(literal)\n",
+        "    noise = literal.upper()\n    frame = frames.get(literal)\n",
+    )
+
+    assert _fingerprint_for(_CALL_SITE_SOURCE, "shell_scanner.py", "scanner.demo.unfinished") == (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.unfinished")
+    )
+
+
+def test_call_site_closure_stops_at_one_level() -> None:
+    # Following callers transitively would pull the entry point's reachability closure into every
+    # record in the module, since all paths converge there. Withdrawal further up is the
+    # reachability rule's job, which costs a frozen record no churn at all.
+    source = _CALL_SITE_SOURCE + "def outer(frames, literal):\n    scan(frames, literal)\n"
+    edited = source.replace(
+        "def outer(frames, literal):\n    scan(frames, literal)\n",
+        "def outer(frames, literal):\n    if literal:\n        scan(frames, literal)\n",
+    )
+
+    assert _fingerprint_for(source, "shell_scanner.py", "scanner.demo.unfinished") == (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.unfinished")
+    )
+
+
+def test_call_site_closure_resolves_a_uniquely_named_method_through_any_receiver() -> None:
+    # `budget.charge(n)` is how the real `taint.eval-discovery.work-limit` guard is reached. Only
+    # one function in the module carries the name, so there is no other definition the attribute
+    # could denote.
+    source = (
+        "class _Budget:\n"
+        "    def charge(self, n):\n"
+        "        if n > 3:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.charge", "too big"))\n'
+        "def analyze(budget, n):\n"
+        "    if n:\n"
+        "        budget.charge(n)\n"
+    )
+    edited = source.replace("    if n:\n", "    if not n:\n")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.charge") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.charge")
+    )
+
+
+def test_call_site_closure_declines_an_attribute_call_two_definitions_share() -> None:
+    # With the name ambiguous, the receiver decides which definition runs and this parse cannot
+    # resolve it. Guessing would hash an unrelated call into the record.
+    source = (
+        "class _Budget:\n"
+        "    def step(self, n):\n"
+        "        if n > 3:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.step", "too big"))\n'
+        "class _Cursor:\n"
+        "    def step(self, n):\n"
+        "        return n\n"
+        "def analyze(budget, n):\n"
+        "    budget.step(n)\n"
+    )
+    edited = source + "def other(cursor, n):\n    if n:\n        cursor.step(n)\n"
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.step") == (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.step")
+    )
+
+
+def test_call_site_closure_resolves_a_method_through_self_when_the_name_is_shared() -> None:
+    # `self` names the class the method is written in, which is what disambiguates a shared name.
+    source = (
+        "class _Budget:\n"
+        "    def step(self, n):\n"
+        "        if n > 3:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.step", "too big"))\n'
+        "    def run(self, n):\n"
+        "        if n:\n"
+        "            self.step(n)\n"
+        "class _Cursor:\n"
+        "    def step(self, n):\n"
+        "        return n\n"
+    )
+    edited = source.replace("        if n:\n", "        if not n:\n")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.step") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.step")
+    )
+
+
+_FINISH_CASE_ORIGINS = (
+    "scanner.control-flow.unfinished-case",
+    "scanner.case.arm-limit-at-finish",
+)
+
+_WITHDRAWN_FINISH_CASE = (
+    '            frame = self._matching_control({"case"})\n'
+    "            if frame is not None:\n"
+    "                self._finish_case(state, frame)",
+    '            frame = self._matching_control({"case"})\n'
+    "            if frame is not None:\n"
+    "                return",
+)
+"""The reported withdrawal: `_finish_case` has exactly one call site in the shipped scanner."""
+
+
+def _shipped_scanner_source() -> str:
+    return (_ROOT / "src/doc_lattice/github_ci/shell_scanner.py").read_text(encoding="utf-8")
+
+
+def test_reachability_reports_the_shipped_guard_whose_only_call_site_is_withdrawn() -> None:
+    source = _shipped_scanner_source()
+    edited = source.replace(*_WITHDRAWN_FINISH_CASE)
+    assert edited != source
+
+    reported = {
+        origin_id
+        for origin_id in _FINISH_CASE_ORIGINS
+        for violation in checker.find_reachability_violations(edited, "shell_scanner.py")
+        if origin_id in violation
+    }
+
+    assert checker.find_reachability_violations(source, "shell_scanner.py") == ()
+    assert reported == set(_FINISH_CASE_ORIGINS)
+
+
+def test_fingerprint_tracks_the_shipped_call_site_condition_of_a_frozen_guard() -> None:
+    # `scanner.control-flow.unfinished-case` is frozen debt, so its record is the only thing
+    # standing between an edit to it and a green gate.
+    source = _shipped_scanner_source()
+    edited = source.replace(
+        '            frame = self._matching_control({"case"})\n            if frame is not None:',
+        '            frame = self._matching_control({"case"})\n            if frame is None:',
+    )
+    assert edited != source
+
+    assert _fingerprint_for(source, "shell_scanner.py", "scanner.control-flow.unfinished-case") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.control-flow.unfinished-case")
+    )
+
+
+def test_reachability_reports_a_guard_no_entry_point_can_reach() -> None:
+    edited = _CALL_SITE_SOURCE.replace("        _guard(frame)\n", "        return None\n")
+
+    violations = checker.find_reachability_violations(edited, "shell_scanner.py")
+
+    assert len(violations) == 1
+    assert "scanner.demo.unfinished" in violations[0]
+
+
+def test_reachability_accepts_a_guard_an_entry_point_reaches() -> None:
+    assert checker.find_reachability_violations(_CALL_SITE_SOURCE, "shell_scanner.py") == ()
+
+
+def test_reachability_follows_a_chain_of_private_callees() -> None:
+    # The withdrawal the fingerprint cannot see is the one further up: the call reaching the guard
+    # is untouched, and the function making that call is what stops being reached.
+    source = (
+        "def _guard(frame):\n"
+        "    if frame.phase != 'body':\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.unfinished", "no"))\n'
+        "def _dispatch(frame):\n"
+        "    _guard(frame)\n"
+        "def scan(frame):\n"
+        "    _dispatch(frame)\n"
+    )
+    edited = source.replace(
+        "def scan(frame):\n    _dispatch(frame)\n", "def scan(frame):\n    return None\n"
+    )
+
+    assert checker.find_reachability_violations(source, "shell_scanner.py") == ()
+    assert len(checker.find_reachability_violations(edited, "shell_scanner.py")) == 1
+
+
+def test_reachability_reads_a_construction_as_reaching_the_hooks_it_runs() -> None:
+    # `taint.eval-syntax.cleared-projection-without-widening` lives in a dataclass `__post_init__`,
+    # which no call in either module spells.
+    source = (
+        "class _State:\n"
+        "    def __post_init__(self):\n"
+        "        if self.cleared and not self.widened:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.cleared", "bad"))\n'
+        "def analyze(cleared):\n"
+        "    return _State(cleared)\n"
+    )
+
+    assert checker.find_reachability_violations(source, "shell_taint.py") == ()
+
+
+def test_reachability_counts_the_module_body_as_running() -> None:
+    source = (
+        "def _guard(value):\n"
+        "    if value > 3:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.over-three", "too big"))\n'
+        "_guard(1)\n"
+    )
+
+    assert checker.find_reachability_violations(source, "shell_taint.py") == ()
+
+
+def test_reachability_does_not_treat_a_private_function_as_an_entry_point() -> None:
+    # Only a name a caller outside the module can reach is a root. Were every module-level
+    # definition a root, orphaning a private helper would report nothing.
+    source = (
+        "def _guard(value):\n"
+        "    if value > 3:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.over-three", "too big"))\n'
+    )
+
+    assert len(checker.find_reachability_violations(source, "shell_taint.py")) == 1
+
+
 def test_callee_closure_terminates_on_mutual_recursion() -> None:
     source = (
         "def _left(value):\n"
