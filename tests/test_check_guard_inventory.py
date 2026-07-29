@@ -31,6 +31,14 @@ def _load_checker() -> ModuleType:
 checker = _load_checker()
 
 
+def _fingerprint_for(source: str, path: str, origin_id: str) -> str:
+    return next(
+        record.fingerprint
+        for record in checker.extract_origin_records(source, path)
+        if record.origin_id == origin_id
+    )
+
+
 def _fake_root(tmp_path: Path, debt_records: list[dict[str, str]]) -> Path:
     """Build a candidate tree that shares this repository's guarded modules."""
     root = tmp_path / "candidate"
@@ -607,6 +615,292 @@ def test_fingerprint_ignores_a_write_in_another_function() -> None:
     assert original[0].fingerprint == updated[0].fingerprint
 
 
+def test_fingerprint_tracks_the_real_brace_digit_module_bound() -> None:
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_taint.py").read_text(encoding="utf-8")
+    edited = source.replace(
+        "_MAX_BRACE_INTEGER_DIGITS = 256",
+        "_MAX_BRACE_INTEGER_DIGITS = 1000",
+        1,
+    )
+    assert edited != source
+
+    assert _fingerprint_for(
+        source,
+        "shell_taint.py",
+        "taint.function-positional.index-digit-limit",
+    ) != _fingerprint_for(
+        edited,
+        "shell_taint.py",
+        "taint.function-positional.index-digit-limit",
+    )
+
+
+def test_fingerprint_tracks_a_transitive_module_binding() -> None:
+    source = (
+        "_BASE = 50\n"
+        "_CAP = _BASE * 2\n"
+        "def _guard(items):\n"
+        "    if len(items) > _CAP:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.module", "nope"))\n'
+    )
+    edited = source.replace("_BASE = 50", "_BASE = 75")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.module") != _fingerprint_for(
+        edited, "shell_taint.py", "taint.demo.module"
+    )
+
+
+def test_fingerprint_tracks_a_relevant_import_binding() -> None:
+    source = (
+        "from constants import CAP\n"
+        "def _guard(items):\n"
+        "    if len(items) > CAP:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.import", "nope"))\n'
+    )
+    edited = source.replace("from constants import CAP", "from revised_constants import CAP")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.import") != _fingerprint_for(
+        edited, "shell_taint.py", "taint.demo.import"
+    )
+
+
+def test_module_writer_closure_keeps_lexical_negative_controls() -> None:
+    source = (
+        "_CAP = 100\n"
+        "_UNRELATED = 1\n"
+        "def _elsewhere():\n"
+        "    other = _CAP\n"
+        "    return other\n"
+        "def _guard(items):\n"
+        "    _CAP = 10\n"
+        "    if len(items) > _CAP:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.shadowed", "nope"))\n'
+    )
+    unrelated = source.replace("_UNRELATED = 1", "_UNRELATED = 2")
+    module_shadowed = source.replace("_CAP = 100", "_CAP = 200")
+    another_function = source.replace("other = _CAP", "other = _CAP + 1")
+    original = _fingerprint_for(source, "shell_taint.py", "taint.demo.shadowed")
+
+    assert _fingerprint_for(unrelated, "shell_taint.py", "taint.demo.shadowed") == original
+    assert _fingerprint_for(module_shadowed, "shell_taint.py", "taint.demo.shadowed") == original
+    assert _fingerprint_for(another_function, "shell_taint.py", "taint.demo.shadowed") == original
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "    try:\n"
+            "        parse(items)\n"
+            "    except Exception as _CAP:\n"
+            "        if _CAP:\n"
+            '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.except", "nope"))\n'
+        ),
+        (
+            "    match items:\n"
+            "        case [*_CAP]:\n"
+            "            if _CAP:\n"
+            '                raise _TaintLimitExceeded(GuardRefusal("taint.demo.match", "nope"))\n'
+        ),
+        (
+            "    captured = [_CAP for _CAP in items if _CAP]\n"
+            "    if captured:\n"
+            '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.comprehension", "nope"))\n'
+        ),
+        (
+            "    predicate = lambda _CAP: _CAP > 0\n"
+            "    if any(predicate(item) for item in items):\n"
+            '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.lambda", "nope"))\n'
+        ),
+    ],
+)
+def test_fingerprint_ignores_module_bindings_shadowed_in_expression_scopes(body: str) -> None:
+    source = "_CAP = 100\ndef _guard(items):\n" + body
+    edited = source.replace("_CAP = 100", "_CAP = 200")
+
+    original = checker.extract_origin_records(source, "shell_taint.py")
+    updated = checker.extract_origin_records(edited, "shell_taint.py")
+
+    assert original[0].fingerprint == updated[0].fingerprint
+
+
+def test_fingerprint_tracks_a_free_module_read_inside_a_comprehension() -> None:
+    source = (
+        "_CAP = 100\n"
+        "def _guard(items):\n"
+        "    if any(item > _CAP for item in items):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.free-comprehension", "nope"))\n'
+    )
+    edited = source.replace("_CAP = 100", "_CAP = 200")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.free-comprehension"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.free-comprehension")
+
+
+def test_fingerprint_tracks_a_module_name_bound_only_inside_a_lambda() -> None:
+    source = (
+        "_CAP = 100\n"
+        "def _guard(items):\n"
+        "    predicate = lambda: (_CAP := 1)\n"
+        "    if len(items) > _CAP:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.lambda-walrus", "nope"))\n'
+    )
+    edited = source.replace("_CAP = 100", "_CAP = 200")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.lambda-walrus") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.lambda-walrus")
+    )
+
+
+def test_a_comprehension_walrus_still_binds_the_containing_function() -> None:
+    source = (
+        "_CAP = 100\n"
+        "def _guard(items):\n"
+        "    captured = [(_CAP := item) for item in items]\n"
+        "    if captured and _CAP:\n"
+        "        raise _TaintLimitExceeded("
+        'GuardRefusal("taint.demo.comprehension-walrus", "nope"))\n'
+    )
+    edited = source.replace("_CAP = 100", "_CAP = 200")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.comprehension-walrus") == (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.comprehension-walrus")
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_binding", "callback", "condition"),
+    [
+        ("_STATE = []", "_STATE.append(1)", "_STATE"),
+        ("_CONFIG = Config()", "_CONFIG.values.append(1)", "check(_CONFIG)"),
+    ],
+)
+def test_fingerprint_ignores_mutations_deferred_inside_an_unused_lambda(
+    module_binding: str,
+    callback: str,
+    condition: str,
+) -> None:
+    source = (
+        f"{module_binding}\n"
+        "def _guard(items):\n"
+        f"    callback = lambda: {callback}\n"
+        f"    if {condition}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.deferred-mutation", "nope"))\n'
+    )
+    edited = source.replace("append(1)", "append(2)")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.deferred-mutation"
+    ) == _fingerprint_for(edited, "shell_taint.py", "taint.demo.deferred-mutation")
+
+
+@pytest.mark.parametrize(
+    ("module_binding", "statement", "edited_statement", "condition"),
+    [
+        (
+            "_STATE = []",
+            "callback = lambda seeded=_STATE.append(1): None",
+            "callback = lambda seeded=_STATE.append(2): None",
+            "_STATE",
+        ),
+        (
+            "_CONFIG = Config()",
+            "configured = [_CONFIG.values.append(item) for item in items]",
+            "configured = [_CONFIG.values.append(item + 1) for item in items]",
+            "check(_CONFIG)",
+        ),
+    ],
+)
+def test_fingerprint_tracks_mutations_in_lambda_defaults_and_comprehensions(
+    module_binding: str,
+    statement: str,
+    edited_statement: str,
+    condition: str,
+) -> None:
+    source = (
+        f"{module_binding}\n"
+        "def _guard(items):\n"
+        f"    {statement}\n"
+        f"    if {condition}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.executed-mutation", "nope"))\n'
+    )
+    edited = source.replace(statement, edited_statement)
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.executed-mutation"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.executed-mutation")
+
+
+def test_fingerprint_ignores_mutations_deferred_inside_an_unused_generator() -> None:
+    source = (
+        "_STATE = []\n"
+        "def _guard(items):\n"
+        "    pending = (_STATE.append(item) for item in items)\n"
+        "    if _STATE:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.generator-mutation", "nope"))\n'
+    )
+    edited = source.replace("append(item)", "append(item + 1)")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.generator-mutation"
+    ) == _fingerprint_for(edited, "shell_taint.py", "taint.demo.generator-mutation")
+
+
+def test_fingerprint_tracks_mutation_in_a_generators_first_iterable() -> None:
+    source = (
+        "_STATE = []\n"
+        "def _guard(items):\n"
+        "    pending = (item for item in (_STATE.append(1),))\n"
+        "    if _STATE:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.generator-iterable", "nope"))\n'
+    )
+    edited = source.replace("append(1)", "append(2)")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.generator-iterable"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.generator-iterable")
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[_STATE.append(item) for item in items]",
+        "{_STATE.append(item) for item in items}",
+        "{item: _STATE.append(item) for item in items}",
+    ],
+)
+def test_fingerprint_tracks_mutations_in_eager_comprehensions(expression: str) -> None:
+    source = (
+        "_STATE = []\n"
+        "def _guard(items):\n"
+        f"    consumed = {expression}\n"
+        "    if _STATE:\n"
+        "        raise _TaintLimitExceeded("
+        'GuardRefusal("taint.demo.eager-comprehension", "nope"))\n'
+    )
+    edited = source.replace("append(item)", "append(item + 1)")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.eager-comprehension"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.eager-comprehension")
+
+
+def test_a_generator_walrus_still_binds_the_containing_function_lexically() -> None:
+    source = (
+        "_CAP = 100\n"
+        "def _guard(items):\n"
+        "    pending = ((_CAP := item) for item in items)\n"
+        "    if _CAP:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.generator-walrus", "nope"))\n'
+    )
+    edited = source.replace("_CAP = 100", "_CAP = 200")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.generator-walrus") == (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.generator-walrus")
+    )
+
+
 def test_threshold_provenance_sees_a_nested_guard_condition() -> None:
     source = (
         "def _guard(a, b):\n"
@@ -618,6 +912,17 @@ def test_threshold_provenance_sees_a_nested_guard_condition() -> None:
     violations = checker.find_threshold_violations(source, "shell_taint.py")
 
     assert any("_MAX_UNDECLARED_THING" in violation for violation in violations)
+
+
+def test_a_prefixed_import_used_only_as_a_call_target_is_not_a_threshold() -> None:
+    source = (
+        "from helpers import _MAX_MEASURE\n"
+        "def _guard(items, limits):\n"
+        "    if _MAX_MEASURE(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.prefixed-call", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
 
 
 def test_a_generically_named_module_threshold_is_rejected() -> None:
@@ -787,6 +1092,253 @@ def test_an_inventoried_fixed_semantic_bound_is_accepted() -> None:
     )
 
     assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_a_generically_named_from_import_threshold_is_rejected() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(items):\n"
+        "    if len(items) > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.imported", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    ("binding", "setup", "compared", "threshold"),
+    [
+        ("from constants import MAX_ITEMS as CAP", "", "CAP", "CAP"),
+        ("import constants", "", "constants.MAX_ITEMS", "constants.MAX_ITEMS"),
+        ("from constants import MAX_ITEMS", "    cap = MAX_ITEMS\n", "cap", "MAX_ITEMS"),
+    ],
+)
+def test_imported_threshold_spellings_are_rejected(
+    binding: str,
+    setup: str,
+    compared: str,
+    threshold: str,
+) -> None:
+    source = (
+        f"{binding}\n"
+        "def _guard(items):\n"
+        f"{setup}"
+        f"    if len(items) > {compared}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.imported", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any(f"guard threshold {threshold}" in violation for violation in violations)
+
+
+def test_an_imported_inventoried_fixed_semantic_bound_is_accepted() -> None:
+    source = (
+        "from .shell_taint import _MAX_SHELL_DESCRIPTOR_DIGITS\n"
+        "def _guard(digits):\n"
+        "    if len(digits) > _MAX_SHELL_DESCRIPTOR_DIGITS:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.descriptor", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
+
+
+def test_unrelated_imports_and_imported_measurement_callables_are_not_thresholds() -> None:
+    direct = (
+        "from helpers import measure, UNUSED\n"
+        "def _guard(items, limits):\n"
+        "    if measure(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.measured", "nope"))\n'
+    )
+    forwarded = (
+        "from helpers import measure, UNUSED\n"
+        "def _guard(items, limits):\n"
+        "    metric = measure\n"
+        "    if metric(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.forwarded", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(direct, "shell_taint.py") == ()
+    assert checker.find_threshold_violations(forwarded, "shell_taint.py") == ()
+
+
+def test_a_function_local_imported_threshold_is_rejected() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    from constants import MAX_ITEMS\n"
+        "    if len(items) > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.local-import", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_a_function_local_imported_measurement_callable_is_not_a_threshold() -> None:
+    source = (
+        "def _guard(items, limits):\n"
+        "    from helpers import measure\n"
+        "    if measure(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.local-measure", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_an_imported_callback_in_measured_dataflow_is_not_a_threshold() -> None:
+    source = (
+        "from helpers import measure\n"
+        "def _guard(items, limits):\n"
+        "    metric = map(measure, items)\n"
+        "    if len(metric) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.callback", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_a_direct_imported_callback_in_measured_dataflow_is_not_a_threshold() -> None:
+    source = (
+        "from helpers import measure\n"
+        "def _guard(items, limits):\n"
+        "    if len(list(map(measure, items))) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.direct-callback", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_nested_limits_access_does_not_suppress_an_imported_threshold() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(items, limits):\n"
+        "    if len(items[:limits.max_items]) > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.nested-limits", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_a_limits_operand_in_a_comparison_chain_does_not_suppress_another_pair() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(items, limits):\n"
+        "    if len(items) > MAX_ITEMS > limits.min_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.chained-limits", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_an_imported_callback_is_not_a_threshold_when_paired_with_an_imported_cap() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "from helpers import measure\n"
+        "def _guard(items):\n"
+        "    if len(list(map(measure, items))) > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.imported-pair", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+    assert not any("guard threshold measure" in violation for violation in violations)
+
+
+def test_a_call_wrapped_forwarded_imported_threshold_is_rejected() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(items):\n"
+        "    cap = max(MAX_ITEMS, 1)\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.wrapped-cap", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_a_direct_call_wrapped_imported_threshold_is_rejected() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(count):\n"
+        "    if count > max(MAX_ITEMS, 1):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.direct-wrapped-cap", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_a_forwarded_measured_callback_loses_to_a_direct_imported_cap() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "from helpers import measure\n"
+        "def _guard(items):\n"
+        "    count = len(list(map(measure, items)))\n"
+        "    if count > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.forwarded-pair", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+    assert not any("guard threshold measure" in violation for violation in violations)
+
+
+def test_a_forwarded_direct_cap_beats_an_unknown_callees_imported_argument() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "from helpers import measure\n"
+        "def _guard(items):\n"
+        "    cap = MAX_ITEMS\n"
+        "    if reduce(measure, items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.forwarded-cap", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_equal_unknown_callee_argument_evidence_remains_conservative() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "from helpers import measure\n"
+        "def _guard(items):\n"
+        "    if aggregate(measure, items) > max(MAX_ITEMS, 1):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.equal-evidence", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+    assert any("guard threshold measure" in violation for violation in violations)
+
+
+def test_transitive_writer_scores_include_the_comparison_operand_path() -> None:
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "from helpers import measure\n"
+        "callback = measure\n"
+        "cap = max(MAX_ITEMS, 1)\n"
+        "def _guard(items):\n"
+        "    if aggregate(callback, items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.transitive-score", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
 
 
 def test_keyword_spelled_text_refusal_is_rejected() -> None:

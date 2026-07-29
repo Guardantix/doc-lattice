@@ -893,6 +893,12 @@ the magnitude nowhere the condition can see it; likewise, `if len(items) <= 100:
 fixed cap decide whether an unconditional origin is reached. Zero and one are exempt because they
 spell emptiness and arity rather than a magnitude, which is also what keeps a counter seeded at zero
 from reading as a threshold, and a subscript index is a position rather than a magnitude.
+Module and function-local imports participate structurally too. A guard-visible imported value on
+the value side of a comparison is a named threshold whether imported directly, aliased,
+module-qualified or forwarded through an assignment. Its guard-visible spelling must be inventoried
+as a fixed semantic bound or it is rejected. Imports outside the relevant comparison dataflow do
+not count. An import used solely as a callable, callback or other machinery in the measured-side
+dependency graph is not a threshold.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
@@ -952,8 +958,8 @@ body does not churn a record outside it.
 A guard reached through an `except` handler needs more than that flow, because the handled
 exception types are all a `try` contributes to it: what decides whether the handler runs is the
 operation in the `try` body and the object state that operation reads. Every handler origin records
-that body and the same-scope closure of what writes what the body reads, even when the refusal is
-nested beneath an additional test inside the handler.
+that body and the function-local and referenced-module closure of what writes what the body reads,
+even when the refusal is nested beneath an additional test inside the handler.
 `taint.eval-payload.lex-error` is the concrete case: reconfiguring the `shlex` lexer so an
 unterminated quote tokenizes cleanly, or rewriting the tokenizing call to one that cannot raise,
 each withdraws the guard, and both left every fingerprint in the tree unchanged. Object
@@ -963,12 +969,20 @@ Matching it against every spelling read instead would fold every unrelated `self
 the record of any guard whose condition mentions `self.anything`, and churn is what forces the
 regeneration this decision exists to prevent.
 
-The scope stops at the function deliberately, and at any function or class body nested inside it:
-an unbounded dataflow closure would churn every frozen record on any edit to either module, and a
-nested body does not run where it is written, so a write inside one decides nothing about the guard
-around it. A record that churns constantly has to be regenerated, which is the laundering path this
-decision closes. A caller passing a different value into that function is outside the boundary and
-is not covered.
+The executable scope stops at the function deliberately, and at any function or class body nested
+inside it, but the writer fixpoint also follows the specific module-scope assignments, rebindings
+and imports that the condition, reachability controls or guarded operation actually read. Their
+transitive module dependencies are part of the record because changing a referenced cap or imported
+binding changes the guard without changing its function. Python lexical binding rules remain the
+boundary: a parameter, assignment, import, exception-handler name or match capture shadows a module
+spelling throughout its function, so an unrelated module binding with the same name is not
+selected. Lambda parameters and comprehension targets shadow only within their expression scopes;
+free names in those expressions still reach the referenced module binding. Unrelated module
+bindings, bodies of other functions, nested function and class bodies, and called implementations
+remain outside the record. An unbounded closure over those would churn every frozen record on
+unrelated edits; a record that churns constantly has to be regenerated, which is the laundering
+path this decision closes. A caller passing a different value into that function is outside the
+boundary and is not covered.
 
 Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
 protected base runs the base revision's own copy of the checker with the candidate tree as inert
