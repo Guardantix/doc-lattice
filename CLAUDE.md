@@ -76,6 +76,10 @@ A guard must also sit in a function some public entry point of its own module re
 record covers the controls at its function's call sites, so withdrawing a guard by orphaning or
 diverting around its function fails the gate rather than passing silently.
 
+A boundary witness carries a predicate over the evidence its script builds, and that predicate must
+read something the guard's own condition reads. The gate derives which attributes those are from the
+guarded module, so a predicate over unrelated evidence is rejected however plausible it reads.
+
 When you add or move a guard, add its classification to `tests/guard_witnesses.py`; when adding its
 module, add that module to `GUARDED_MODULES` too. The base-owned comparison discovers guarded
 modules recursively from the candidate tree, so an older base checker can validate the new origin.

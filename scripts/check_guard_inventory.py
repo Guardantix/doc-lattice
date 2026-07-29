@@ -5,7 +5,7 @@ Every fail-closed guard below the CI scanner's guard package has one *origin*: t
 detects the condition and constructs a `GuardRefusal`. This module reads that package as inert
 source text, never importing it, and produces one canonical record per origin.
 
-It enforces four separable properties:
+It enforces five separable properties:
 
 1. **Canonical refusal shapes.** A refusal may only reach an exception, a `ShellScanResult`, or a
    verdict return as a `GuardRefusal` construction with a literal identifier and literal reason,
@@ -17,7 +17,10 @@ It enforces four separable properties:
 3. **Guard reachability.** Every origin must sit in a function some public entry point of its own
    module can reach. Orphaning the function holding a guard withdraws it as completely as
    inverting its condition, and leaves every shape in its record untouched.
-4. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
+4. **Invariant evidence relevance.** A guard classified as unreachable by an invariant witness must
+   carry a boundary-evidence predicate that reads something the guard's own condition reads. Every
+   other assertion about such a row holds for a predicate about unrelated data.
+5. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
    re-derive to a record the base already carried. Freezing *records* rather than bare identifiers
    means an unclassified guard cannot be moved or semantically edited while keeping its debt entry.
 
@@ -47,7 +50,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -197,19 +200,51 @@ def _is_string_literal(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
 
-def _rebinding_targets(node: ast.AST) -> tuple[str | None, list[ast.expr]]:
-    """Return the constructor spelling a binding reads and the names it binds it to.
+def _paired_bindings(target: ast.expr, value: ast.expr) -> list[tuple[str, ast.expr]]:
+    """Return the spellings this one binding form binds, paired with the targets they bind to.
 
-    A call is recognized by its final name component everywhere here, so a binding must be read the
-    same way: `GR = shell_guards.GuardRefusal` names the constructor exactly as `GR = GuardRefusal`
-    does, and reading only the bare-name form is what let the first spelling escape every rule.
+    A binding names a constructor by its final component, the same way a call does:
+    `GR = shell_guards.GuardRefusal` names it exactly as `GR = GuardRefusal` does. Destructuring
+    binds several at once, and `GR, E = GuardRefusal, _TaintLimitExceeded` is one statement that
+    names both the refusal constructor and its transport. Reading only the single-value form let
+    that spelling escape every rule at once: no origin record, no shape violation, and no discovery
+    of the module holding it.
+
+    A starred target collects a list rather than one of the values, so it names no constructor and
+    is paired with nothing.
+
+    Args:
+        target: The binding's target expression.
+        value: The expression bound to it.
+
+    Returns:
+        Spelling and target pairs, empty when the form binds no name this module can follow.
+    """
+    match target, value:
+        case (ast.Tuple() | ast.List(), ast.Tuple() | ast.List()):
+            if len(target.elts) != len(value.elts):
+                return []
+            if any(isinstance(element, ast.Starred) for element in target.elts):
+                return []
+            return [
+                pair
+                for element, bound in zip(target.elts, value.elts, strict=True)
+                for pair in _paired_bindings(element, bound)
+            ]
+        case (_, ast.Name(id=spelling) | ast.Attribute(attr=spelling)):
+            return [(spelling, target)]
+        case _:
+            return []
+
+
+def _rebinding_targets(node: ast.AST) -> list[tuple[str, ast.expr]]:
+    """Return every constructor spelling a binding statement reads, paired with its target.
 
     Args:
         node: Any AST node.
 
     Returns:
-        The name the right-hand side spells, or `None` when the node is not a value binding, paired
-        with the binding's targets.
+        Spelling and target pairs, empty when the node is not a value binding.
     """
     match node:
         case ast.Assign(value=value, targets=targets):
@@ -217,25 +252,27 @@ def _rebinding_targets(node: ast.AST) -> tuple[str | None, list[ast.expr]]:
         case ast.AnnAssign(value=ast.expr() as value, target=target):
             targets = [target]
         case _:
-            return None, []
-    match value:
-        case ast.Name(id=spelling) | ast.Attribute(attr=spelling):
-            return spelling, targets
-        case _:
-            return None, []
+            return []
+    return [pair for target in targets for pair in _paired_bindings(target, value)]
 
 
 def _constructor_names(tree: ast.AST, constructors: frozenset[str]) -> frozenset[str]:
     """Return every local name this module binds to one of these constructors.
 
-    Recognition is by name everywhere in this module, so import aliases and module-level
-    rebindings must participate in every constructor-specific rule. Otherwise an aliased refusal
+    Recognition is by name everywhere in this module, so import aliases, rebindings and parameter
+    defaults must participate in every constructor-specific rule. Otherwise an aliased refusal
     can disappear from the inventory, an aliased verdict can be rejected despite being canonical,
     or an aliased limits factory can silently mint a fresh production budget.
 
+    A parameter default is a rebinding the caller may leave in place: `def helper(factory=
+    TaintLimits)` binds the constructor to `factory` for every call that omits the argument, so
+    `factory()` below the public boundary constructs production-scale limits exactly as a direct
+    call would.
+
     Args:
         tree: Parsed module.
-        constructors: Canonical constructor names to follow through imports and rebindings.
+        constructors: Canonical constructor names to follow through imports, rebindings and
+            parameter defaults.
 
     Returns:
         The canonical constructor names together with every alias bound to one of them.
@@ -251,11 +288,18 @@ def _constructor_names(tree: ast.AST, constructors: frozenset[str]) -> frozenset
     while grew:
         grew = False
         for node in ast.walk(tree):
-            spelling, targets = _rebinding_targets(node)
-            if spelling is None or spelling not in names:
-                continue
-            rebound = {target.id for target in targets if isinstance(target, ast.Name)} - names
-            if rebound:
+            rebound = {
+                target.id
+                for spelling, target in _rebinding_targets(node)
+                if spelling in names
+                if isinstance(target, ast.Name)
+            }
+            rebound |= {
+                argument.arg
+                for argument, default in _defaulted_arguments(node)
+                if _referenced_name(default) in names
+            }
+            if rebound - names:
                 names |= rebound
                 grew = True
     return frozenset(names)
@@ -298,8 +342,10 @@ class _DerivationCache:
         default_factory=dict
     )
     functions: dict[int, dict[str, _Function]] = field(default_factory=dict)
+    scope_definitions: dict[int, dict[str, _Function]] = field(default_factory=dict)
+    qualnames: dict[int, str] = field(default_factory=dict)
     callee_shapes: dict[int, tuple[str, ...]] = field(default_factory=dict)
-    callee_callees: dict[int, frozenset[str]] = field(default_factory=dict)
+    callee_callees: dict[int, tuple[_Function, ...]] = field(default_factory=dict)
     module_parents: dict[int, dict[int, ast.AST]] = field(default_factory=dict)
     definitions: dict[int, dict[str, tuple[_Function, ...]]] = field(default_factory=dict)
     calls: dict[int, dict[str, tuple[tuple[ast.stmt, ast.Call], ...]]] = field(default_factory=dict)
@@ -1628,9 +1674,10 @@ def _cached_module_functions(cache: _DerivationCache) -> dict[str, _Function]:
     """Return the module's top-level functions by name, memoized for this parse.
 
     A later definition rebinds an earlier one exactly as any other assignment would, so the last
-    `def` of a name is the one a call reaches. Nested definitions are absent: they are not module
-    bindings, and a call spelled inside the function that defines one resolves to a local name that
-    `_called_module_function_names` already refuses to follow.
+    `def` of a name is the one a call reaches. Nested definitions are absent because they are not
+    module bindings; `_resolve_called_definition` reaches them through the lexical chain of the
+    scope a call is spelled in, and consults this map only when no enclosing function binds the
+    name.
 
     Args:
         cache: Per-parse derivation memo carrying the module.
@@ -1652,46 +1699,109 @@ def _cached_module_functions(cache: _DerivationCache) -> dict[str, _Function]:
     return memo
 
 
-def _called_module_function_names(
+def _cached_scope_definitions(scope: ast.AST, cache: _DerivationCache) -> dict[str, _Function]:
+    """Return the functions this scope binds by a `def`, keyed by the name each binds.
+
+    A nested definition binds a name in the scope holding it, at whatever statement depth it is
+    written, and a later `def` of the same name rebinds it exactly as an assignment would.
+
+    Args:
+        scope: The function or module whose own bindings to collect.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Definitions by bound name, empty when the scope defines no function.
+    """
+    memo = cache.scope_definitions.get(id(scope))
+    if memo is not None:
+        return memo
+    found: dict[str, _Function] = {}
+    pending: list[ast.AST] = [scope]
+    while pending:
+        node = pending.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, _SCOPES):
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                    previous = found.get(child.name)
+                    if previous is None or previous.lineno < child.lineno:
+                        found[child.name] = child
+                continue
+            pending.append(child)
+    cache.scope_definitions[id(scope)] = found
+    return found
+
+
+def _resolve_called_definition(
+    name: str, scope: ast.AST | None, cache: _DerivationCache
+) -> _Function | None:
+    """Return the definition a bare-name call spelled in this scope reaches, if this parse can tell.
+
+    Resolution follows Python's lexical chain. The nearest enclosing scope that binds the name
+    decides: a `def` of it resolves, and any other binding, such as a parameter, assignment, import
+    alias, handler name or match capture, shadows the name with a value this parse cannot follow.
+    Only when no enclosing function binds it at all does the module-level function apply.
+
+    A class body binds nothing for a method written inside it, so the chain skips one.
+
+    Args:
+        name: The callee name spelled bare.
+        scope: The function the call is spelled in, or `None` for a module-scope expression.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        The definition reached, or `None` when the name resolves to a value instead or to nothing.
+    """
+    parents = _cached_module_parents(cache) if scope is not None else {}
+    current = scope
+    while isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef):
+        definition = _cached_scope_definitions(current, cache).get(name)
+        if definition is not None:
+            return definition
+        if name in _cached_local_binding_names(current, cache):
+            return None
+        current = _enclosing_node(current, (ast.FunctionDef, ast.AsyncFunctionDef), parents)
+    return _cached_module_functions(cache).get(name)
+
+
+def _called_definitions(
     scoped: tuple[ast.AST, ...],
     free: tuple[ast.AST, ...],
     scope: ast.AST | None,
     cache: _DerivationCache,
-) -> frozenset[str]:
-    """Return the module-level functions this dataflow calls by a name that reaches the module.
+) -> tuple[_Function, ...]:
+    """Return the function definitions this dataflow calls by a name this parse can resolve.
 
     Only a bare `Name` callee is followed. An attribute call names a member of a value this parse
     cannot resolve, and reading `obj.run()` as the module's `run` would hash an unrelated function
     into the record.
 
-    Python lexical binding is the boundary here exactly as it is for a read spelling. A call
-    spelled inside the enclosing function resolves to a parameter, assignment, import alias,
-    handler name or match capture of that name when the function binds one, so a same-named module
-    function is not followed. A call spelled in a module-scope writer, or in a parameter default
-    evaluated in the defining scope, is not subject to those local bindings.
+    A nested definition is followed on the same footing as a module-level one.
+    `_contextualize_evidence` reaches its guards through fifty lexically nested helpers, and frozen
+    origins read what `positional_call_arguments` returns; excluding nested definitions let that
+    return be pinned to an empty tuple with every fingerprint in the module byte-identical.
 
     Args:
-        scoped: Nodes spelled inside the enclosing function, whose names its bindings shadow.
+        scoped: Nodes spelled inside the enclosing function, whose lexical chain resolves the names
+            they spell.
         free: Nodes evaluated in module scope, which no local binding shadows.
         scope: Enclosing function, or `None` at class or module level.
         cache: Per-parse derivation memo.
 
     Returns:
-        Callee names, empty when this dataflow reaches no module-level function.
+        Definitions in source order, empty when this dataflow reaches none.
     """
-    functions = _cached_module_functions(cache)
-    if not functions:
-        return frozenset()
-    shadowed = _cached_local_binding_names(scope, cache)
-    names: set[str] = set()
-    for roots, blocked in ((scoped, shadowed), (free, frozenset())):
+    reached: dict[int, _Function] = {}
+    for roots, spelled_in in ((scoped, scope), (free, None)):
         for root in roots:
             for node in ast.walk(root):
                 if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                     continue
-                if node.func.id in functions and node.func.id not in blocked:
-                    names.add(node.func.id)
-    return frozenset(names)
+                definition = _resolve_called_definition(node.func.id, spelled_in, cache)
+                if definition is not None:
+                    reached[id(definition)] = definition
+    return tuple(
+        sorted(reached.values(), key=lambda function: (function.lineno, function.col_offset))
+    )
 
 
 def _callee_return_statements(
@@ -1737,12 +1847,12 @@ def _cached_callee_shapes(function: _Function, cache: _DerivationCache) -> tuple
         cache: Per-parse derivation memo.
 
     Returns:
-        The callee's name followed by its return-deciding shapes.
+        The callee's qualified name followed by its return-deciding shapes.
     """
     memo = cache.callee_shapes.get(id(function))
     if memo is not None:
         return memo
-    shapes: list[str] = [f"callee {function.name}"]
+    shapes: list[str] = [f"callee {_definition_qualname(function, cache)}"]
     for statement in _callee_return_statements(function, cache):
         read, values = _statement_dataflow((statement,), cache)
         shapes.append(_cached_shape(statement, cache))
@@ -1753,8 +1863,37 @@ def _cached_callee_shapes(function: _Function, cache: _DerivationCache) -> tuple
     return result
 
 
-def _cached_callee_callees(function: _Function, cache: _DerivationCache) -> frozenset[str]:
-    """Return the module-level functions this callee's own return dataflow reads the value of.
+def _definition_qualname(function: _Function, cache: _DerivationCache) -> str:
+    """Return the dotted name of the scopes this definition is written in, ending in its own.
+
+    Callee blocks are ordered by this name, and two nested helpers can share a bare name, so the
+    bare name would make the order depend on which the walk happened to reach first. It is derived
+    from the enclosing definitions rather than from a line number, so moving a helper within its
+    scope moves no record.
+
+    Args:
+        function: The definition to name.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        The qualified name, which is the bare name for a module-level definition.
+    """
+    memo = cache.qualnames.get(id(function))
+    if memo is not None:
+        return memo
+    parents = _cached_module_parents(cache)
+    parts = [function.name]
+    current = _enclosing_node(function, _SCOPES, parents)
+    while isinstance(current, _SCOPES):
+        parts.append(current.name)
+        current = _enclosing_node(current, _SCOPES, parents)
+    qualname = ".".join(reversed(parts))
+    cache.qualnames[id(function)] = qualname
+    return qualname
+
+
+def _cached_callee_callees(function: _Function, cache: _DerivationCache) -> tuple[_Function, ...]:
+    """Return the functions this callee's own return dataflow reads the value of.
 
     The nodes searched are exactly the ones `_cached_callee_shapes` hashes, so the closure follows
     a call only where an edit to what it returns would move a shape already in the record.
@@ -1764,7 +1903,7 @@ def _cached_callee_callees(function: _Function, cache: _DerivationCache) -> froz
         cache: Per-parse derivation memo.
 
     Returns:
-        Callee names, empty when this callee's returns read no module-level function's value.
+        Definitions, empty when this callee's returns read no resolvable function's value.
     """
     memo = cache.callee_callees.get(id(function))
     if memo is not None:
@@ -1785,7 +1924,7 @@ def _cached_callee_callees(function: _Function, cache: _DerivationCache) -> froz
         controls, writers, _flow_read = _reachability_inputs(statement, function, cache)
         scoped.extend(controls)
         _split_by_scope(writers, function, cache, scoped, free)
-    result = _called_module_function_names(tuple(scoped), tuple(free), function, cache)
+    result = _called_definitions(tuple(scoped), tuple(free), function, cache)
     cache.callee_callees[id(function)] = result
     return result
 
@@ -1887,17 +2026,18 @@ def _callee_shapes(
         )
         free.extend(default for _name, default in _read_parameter_defaults(scope, raised_read))
 
-    functions = _cached_module_functions(cache)
-    reached: set[str] = set()
-    pending = list(_called_module_function_names(tuple(scoped), tuple(free), scope, cache))
+    reached: dict[int, _Function] = {}
+    pending = list(_called_definitions(tuple(scoped), tuple(free), scope, cache))
     while pending:
-        name = pending.pop()
-        if name in reached:
+        function = pending.pop()
+        if id(function) in reached:
             continue
-        reached.add(name)
-        pending.extend(_cached_callee_callees(functions[name], cache))
+        reached[id(function)] = function
+        pending.extend(_cached_callee_callees(function, cache))
     return tuple(
-        shape for name in sorted(reached) for shape in _cached_callee_shapes(functions[name], cache)
+        shape
+        for function in sorted(reached.values(), key=lambda node: _definition_qualname(node, cache))
+        for shape in _cached_callee_shapes(function, cache)
     )
 
 
@@ -2067,6 +2207,42 @@ def _is_call_site_of(call: ast.Call, function: _Function, cache: _DerivationCach
     )
 
 
+def _is_unresolved_call_site_of(
+    call: ast.Call, function: _Function, cache: _DerivationCache
+) -> bool:
+    """Return whether this call may reach that definition without the parse being able to tell.
+
+    An attribute call whose name two or more definitions in the module share is the one spelling
+    `_is_call_site_of` has to decline: the receiver decides which definition runs, and resolving it
+    would need type information this parse does not have. Recording nothing about those calls
+    certified a withdrawal. With a frozen guard `A.check`, a benign `B.check` and an entry point
+    calling both, deleting only `a.check()` left the guard's record byte-identical, while the
+    remaining `b.check()` kept the reachability graph, which resolves by name alone, reporting
+    `A.check` as reached.
+
+    So a call that might reach the definition is recorded as one that might, in its own block. The
+    cost is real and bounded: an edit to a same-named call that does not reach this guard moves its
+    record. It applies only where the module gives one name to more than one definition, and
+    renaming either definition removes the coupling entirely, which is why over-approximating here
+    is preferred to certifying a withdrawal.
+
+    Args:
+        call: The call to classify.
+        function: The definition the call may reach.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Whether the call is an unresolvable candidate for that definition.
+    """
+    if not isinstance(call.func, ast.Attribute) or call.func.attr != function.name:
+        return False
+    # The name always resolves to at least this definition, so one carrier means no ambiguity and
+    # `_is_call_site_of` has already resolved the call through any receiver.
+    if len(_cached_definitions_by_name(cache).get(function.name, ())) == 1:
+        return False
+    return not _is_call_site_of(call, function, cache)
+
+
 def _bare_name_reaches(
     call: ast.Call, function: _Function, owner: ast.AST | None, parents: dict[int, ast.AST]
 ) -> bool:
@@ -2119,35 +2295,54 @@ def _call_site_shapes(
     A function with no resolvable call site records that fact rather than nothing, so acquiring one
     moves the record too.
 
+    An attribute call to a name more than one definition in the module carries resolves to none of
+    them, and `_is_unresolved_call_site_of` gives the reason those are recorded as candidates rather
+    than dropped.
+
     Args:
         scope: The origin's enclosing function, or `None` at class or module level.
         annotations: The module's one annotation pass.
         cache: Per-parse derivation memo carrying the module.
 
     Returns:
-        One block per call site, in source order, headed by the resolution outcome.
+        The resolvable call sites' blocks, in source order, followed by the unresolvable
+        candidates', each headed by its resolution outcome.
     """
     module = cache.module
     if module is None or not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
         return ("call sites: no enclosing function",)
-    sites = [
-        statement
-        for statement, call in _cached_calls_by_name(cache).get(scope.name, ())
-        if _is_call_site_of(call, scope, cache)
-    ]
-    ordered = sorted(
-        dict.fromkeys(sites), key=lambda statement: (statement.lineno, statement.col_offset)
+    sites: list[ast.stmt] = []
+    candidates: list[ast.stmt] = []
+    for statement, call in _cached_calls_by_name(cache).get(scope.name, ()):
+        if _is_call_site_of(call, scope, cache):
+            sites.append(statement)
+        elif _is_unresolved_call_site_of(call, scope, cache):
+            candidates.append(statement)
+
+    def controls(statements: list[ast.stmt], heading: str) -> list[str]:
+        ordered = sorted(dict.fromkeys(statements), key=lambda node: (node.lineno, node.col_offset))
+        shapes = [heading.format(count=len(ordered))]
+        for statement in ordered:
+            caller = annotations.scopes.get(id(statement))
+            shapes.append(annotations.names.get(id(statement), ""))
+            shapes.append(annotations.conditions.get(id(statement), ""))
+            shapes.append(_cached_shape(statement, cache))
+            shapes.extend(_reachability_shapes(statement, caller, cache))
+        return shapes
+
+    resolved = (
+        controls(sites, f"call sites: {{count}} for {scope.name}")
+        if sites
+        else [f"call sites: none resolvable for {scope.name}"]
     )
-    if not ordered:
-        return (f"call sites: none resolvable for {scope.name}",)
-    shapes: list[str] = [f"call sites: {len(ordered)} for {scope.name}"]
-    for statement in ordered:
-        caller = annotations.scopes.get(id(statement))
-        shapes.append(annotations.names.get(id(statement), ""))
-        shapes.append(annotations.conditions.get(id(statement), ""))
-        shapes.append(_cached_shape(statement, cache))
-        shapes.extend(_reachability_shapes(statement, caller, cache))
-    return tuple(shapes)
+    # A function with no ambiguous candidate records nothing about them, so the many records with
+    # no name collision at all are unaffected, and acquiring a collision moves the record.
+    unresolved = (
+        controls(candidates, f"unresolved call sites: {{count}} for {scope.name}")
+        if candidates
+        else []
+    )
+    return (*resolved, *unresolved)
 
 
 def _module_entry_points(module: ast.Module) -> tuple[_Function, ...]:
@@ -2681,8 +2876,13 @@ authorable, so its guard is witnessed without shrinking anything."""
 
 
 def _defaulted_arguments(scope: ast.AST) -> tuple[tuple[ast.arg, ast.expr], ...]:
-    """Return one function's positional and keyword-only arguments that carry defaults."""
-    if not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+    """Return one callable's positional and keyword-only arguments that carry defaults.
+
+    A lambda binds a default exactly as a `def` does, so a constructor alias handed to one is
+    followed the same way. Only a `def` is a scope for the rules that ask which names a function
+    binds, and those hand this one a `def` or nothing.
+    """
+    if not isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
         return ()
     arguments = scope.args
     positional = arguments.posonlyargs + arguments.args
@@ -2794,7 +2994,7 @@ def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
             continue
         names = {target.id for target in targets if isinstance(target, ast.Name)}
         bound |= names
-        if node.value is not None and _operand_magnitudes(node.value):
+        if node.value is not None and _binding_magnitudes(node.value):
             numeric |= names
     return frozenset(bound), frozenset(numeric)
 
@@ -2836,7 +3036,20 @@ def _is_magnitude_binding(expression: ast.expr) -> bool:
     `index = start + 2` is a cursor offset, but scaling by a literal is: `cap = 512 * factor` fixes
     a 512-fold bound however `factor` is derived, and requiring the whole expression to be constant
     let that cap ship with no recorded provenance.
+
+    A binding that holds its magnitude somewhere other than the whole expression is followed
+    branch by branch and element by element, and one such part is enough. Each arm of
+    `cap = 100 if strict else budget` decides the bound whenever it is the arm taken, and
+    `caps = (1, 100)` caps the scan at 100 whichever element a later subscript reads. Requiring the
+    magnitude to be the value of the whole expression let both forms ship uninventoried, since the
+    later comparison spells only the name.
     """
+    if isinstance(expression, ast.IfExp):
+        return any(_is_magnitude_binding(arm) for arm in (expression.body, expression.orelse))
+    if isinstance(expression, ast.Tuple | ast.List | ast.Set):
+        return any(_is_magnitude_binding(element) for element in expression.elts)
+    if isinstance(expression, ast.Dict):
+        return any(_is_magnitude_binding(value) for value in expression.values if value is not None)
     magnitudes = (
         _operand_magnitudes(expression)
         if _is_numeric_constant_expression(expression)
@@ -3413,26 +3626,54 @@ def _imported_thresholds(
     return thresholds
 
 
-def _operand_magnitudes(operand: ast.expr) -> set[int | float]:
-    """Return the numeric magnitudes one comparison operand carries.
+def _operand_magnitudes(operand: ast.expr, *, containers: bool = False) -> set[int | float]:
+    """Return the numeric magnitudes one comparison operand or binding carries.
 
-    Descent follows arithmetic only. `depth - 4096 > 0` caps the scan at the same magnitude as
-    `depth > 4096`, so an operand that merely wraps its literal in arithmetic must not escape the
-    rule. A subscript index or a keyword argument nested in an operand is a position rather than a
-    magnitude, and is not descended into.
+    Descent follows the forms that leave a magnitude compared while spelling it somewhere other
+    than the operand itself. Arithmetic, because `depth - 4096 > 0` caps the scan at the same
+    magnitude as `depth > 4096`. Both arms of a conditional expression, because each is a cap the
+    guard can be compared against. The value of a subscript but never its slice, because
+    `(100, 200)[flag]` compares a magnitude while `words[2]` names a position in a fixed grammar.
+    A keyword argument nested in an operand is a position rather than a magnitude, and is not
+    descended into.
+
+    Args:
+        operand: The expression to read.
+        containers: Whether to read the elements of a literal container as well. A binding is
+            followed that way, because `CAPS = (100,)` fixes a bound that `CAPS[0]` then compares,
+            while a container spelled directly in a comparison is a membership test over a semantic
+            set rather than a resource budget.
+
+    Returns:
+        The magnitudes the expression carries, empty when it carries none.
     """
     found: set[int | float] = set()
-    pending = [operand]
+    pending = [(operand, containers)]
     while pending:
-        current = pending.pop()
+        current, inside = pending.pop()
         if isinstance(current, ast.Constant):
             if isinstance(current.value, int | float) and not isinstance(current.value, bool):
                 found.add(current.value)
         elif isinstance(current, ast.BinOp):
-            pending.extend((current.left, current.right))
+            pending.extend(((current.left, inside), (current.right, inside)))
         elif isinstance(current, ast.UnaryOp):
-            pending.append(current.operand)
+            pending.append((current.operand, inside))
+        elif isinstance(current, ast.IfExp):
+            pending.extend(((current.body, inside), (current.orelse, inside)))
+        elif isinstance(current, ast.Subscript):
+            # Selecting one element of a container compares whatever magnitude it holds, so the
+            # container is read from here down even when the operand itself is not a binding.
+            pending.append((current.value, True))
+        elif inside and isinstance(current, ast.Tuple | ast.List | ast.Set):
+            pending.extend((element, inside) for element in current.elts)
+        elif inside and isinstance(current, ast.Dict):
+            pending.extend((value, inside) for value in current.values if value is not None)
     return found
+
+
+def _binding_magnitudes(expression: ast.expr) -> set[int | float]:
+    """Return the numeric magnitudes a binding fixes, including those held in a container."""
+    return _operand_magnitudes(expression, containers=True)
 
 
 def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
@@ -3537,6 +3778,203 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
             f"scan's limits, or name it and inventory it as a fixed semantic bound"
             for literal in sorted(_threshold_literals(nodes))
         )
+    return tuple(violations)
+
+
+def _attribute_reads(nodes: tuple[ast.AST, ...]) -> frozenset[str]:
+    """Return the attribute names these nodes read off a value, method names excluded.
+
+    A call target names an operation rather than data, exactly as it does for a threshold: reading
+    `.get` or `.startswith` as inspected state would let any predicate spelling a common method
+    claim relevance to any guard.
+
+    Args:
+        nodes: Roots to search.
+
+    Returns:
+        Attribute names read, empty when the nodes read none.
+    """
+    targets = {
+        id(target)
+        for root in nodes
+        for call in ast.walk(root)
+        if isinstance(call, ast.Call)
+        for target in ast.walk(call.func)
+    }
+    return frozenset(
+        node.attr
+        for root in nodes
+        for node in ast.walk(root)
+        if isinstance(node, ast.Attribute)
+        if id(node) not in targets
+    )
+
+
+# Each of these is a pure function of the module source it is handed, and the repository-level
+# rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
+# gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
+# re-fingerprinting both guarded modules for every call.
+@cache
+def guard_condition_reads(source: str, path: str) -> dict[str, frozenset[str]]:
+    """Return the attribute names each guard's own condition inspects, by origin identifier.
+
+    An invariant classification claims a guard's condition is false for every constructible input,
+    and its evidence is a boundary script that drives that condition over the structure the guard
+    inspects. Which structure that is has to be derived from the guard, not asserted by the witness:
+    a predicate reading `evidence.commands` satisfies every assertion a hand-written row can be held
+    to while saying nothing about a guard that inspects `scope.parent_scope_id`.
+
+    The narrow set is what decides the refusal: the origin statement, the tests and enclosing loop
+    iterables governing it, the transitive writer closure of what those read, and the `try` body
+    whose failure is a handler guard's only condition. A refusal handed to a declared transport
+    reads only the value it passes down, so the closure over the origin statement's own reads is
+    what recovers the structure behind it.
+
+    Only when that set is empty, which is the case for a guard reached purely by falling through
+    earlier arms, do the preceding controls stand in for it. They are a much wider set, including
+    everything every earlier guard in the same function inspected, so using them first would let a
+    predicate borrow relevance from an unrelated neighbour.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Module file name. Unused in the result, present so two modules defining the same
+            identifier do not share a memo entry.
+
+    Returns:
+        Attribute names by origin identifier, empty for a guard whose condition reads no attribute
+        at all.
+    """
+    del path
+    tree = ast.parse(source)
+    annotations = _annotate(tree)
+    guarded_bodies = _guarded_bodies(tree)
+    cache = _DerivationCache(module=tree)
+    reads: dict[str, frozenset[str]] = {}
+    for statement, call in _origin_calls_by_statement(tree):
+        if not call.args or not isinstance(call.args[0], ast.Constant):
+            continue
+        origin_id = call.args[0].value
+        if not isinstance(origin_id, str):
+            continue
+        scope = annotations.scopes.get(id(statement))
+        loops = annotations.loops.get(id(statement), ())
+        governing = (*annotations.tests.get(id(statement), ()), *(loop.iter for loop in loops))
+        body = guarded_bodies.get(id(statement), ())
+        read = set(_read_spellings(governing)) | set(_cached_statement_reads(statement, cache))
+        values = set(_read_value_spellings(governing)) | set(
+            _cached_statement_value_reads(statement, cache)
+        )
+        writers = _writer_statements(statement, scope, read, values, cache)
+        narrow = _attribute_reads((statement, *governing, *writers, *body))
+        if narrow:
+            reads[origin_id] = narrow
+            continue
+        controls, flow_writers, _flow_read = _reachability_inputs(statement, scope, cache)
+        reads[origin_id] = _attribute_reads((*controls, *flow_writers))
+    return reads
+
+
+@cache
+def invariant_predicate_reads(source: str) -> dict[str, frozenset[str]]:
+    """Return the attribute names each invariant row's boundary predicate reads, by identifier.
+
+    The registry is parsed, never imported, like every other read of it here. A predicate spelled as
+    a call to a helper the registry defines is followed into that helper, transitively, since
+    `_scope_output_nodes` is where the shipped output-walk rows do their reading.
+
+    Args:
+        source: Registry source text.
+
+    Returns:
+        Attribute names by origin identifier, for every invariant row carrying a predicate.
+
+    Raises:
+        ValueError: If the invariant registry is not a single canonical tuple binding.
+    """
+    tree = ast.parse(source)
+    helpers = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    constructor, fields, _required = CLASSIFICATION_REGISTRIES["INVARIANT_WITNESSES"]
+    predicate_field = "boundary_evidence"
+    reads: dict[str, frozenset[str]] = {}
+    for entry in _classification_registry_tuples(tree)["INVARIANT_WITNESSES"].elts:
+        if not isinstance(entry, ast.Call) or _called_name(entry) != constructor:
+            continue
+        supplied = dict(zip(fields, entry.args, strict=False))
+        supplied.update(
+            {keyword.arg: keyword.value for keyword in entry.keywords if keyword.arg is not None}
+        )
+        identifier = supplied.get(IDENTITY_FIELD)
+        predicate = supplied.get(predicate_field)
+        if not isinstance(identifier, ast.Constant) or not isinstance(identifier.value, str):
+            continue
+        if predicate is None:
+            continue
+        found: set[str] = set()
+        followed: set[str] = set()
+        pending: list[ast.AST] = [predicate]
+        while pending:
+            node = pending.pop()
+            found |= _attribute_reads((node,))
+            for called in ast.walk(node):
+                if not isinstance(called, ast.Call) or not isinstance(called.func, ast.Name):
+                    continue
+                name = called.func.id
+                helper = helpers.get(name)
+                if helper is not None and name not in followed:
+                    followed.add(name)
+                    pending.append(helper)
+        reads[identifier.value] = frozenset(found)
+    return reads
+
+
+def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
+    """Return every invariant row whose boundary predicate inspects nothing its guard does.
+
+    The row's other assertions live in the test suite, where the boundary script can be executed:
+    that it stops short of the guard, that its predicate rejects the evidence an empty script
+    builds, and that it drives the guard's own condition line without reaching the refusal. None of
+    them constrains what the predicate *means*. A row for a guard that inspects
+    `scope.parent_scope_id` can pass all three with `boundary_script="echo hi"` and
+    `boundary_evidence=lambda evidence: bool(evidence.commands)`, classifying the guard out of
+    frozen debt with no executable support for the invariant it claims.
+
+    Requiring the predicate to read something the guard's condition reads ties the two together
+    without executing either. It is a floor rather than a proof: a predicate can still be weak about
+    the right data. What it rules out is a predicate about the wrong data.
+
+    Args:
+        root: Repository root holding the guarded modules and the witness registry.
+
+    Returns:
+        Human-readable violations, empty when every invariant row inspects its guard's own data.
+    """
+    predicates = invariant_predicate_reads((root / REGISTRY_PATH).read_text(encoding="utf-8"))
+    conditions: dict[str, frozenset[str]] = {}
+    for module in _repository_guard_modules(root):
+        source = (root / module).read_text(encoding="utf-8")
+        conditions.update(guard_condition_reads(source, Path(module).name))
+    violations: list[str] = []
+    for origin_id, names in sorted(predicates.items()):
+        inspected = conditions.get(origin_id)
+        if inspected is None:
+            continue
+        if not inspected:
+            violations.append(
+                f"{origin_id}: this guard's condition reads no attribute of the evidence, so a "
+                f"boundary-evidence predicate cannot witness it; classify it with a reachable "
+                f"witness instead, under shrunk limits if it is a resource bound"
+            )
+            continue
+        if not names & inspected:
+            violations.append(
+                f"{origin_id}: boundary evidence reads {sorted(names) or 'nothing'} while the "
+                f"guard's condition reads {sorted(inspected)}; a predicate over data this guard "
+                f"does not inspect supports no claim about it"
+            )
     return tuple(violations)
 
 
@@ -4254,6 +4692,10 @@ def main(argv: list[str] | None = None) -> int:
                 ("limits provenance", lambda: repository_limits_violations(arguments.root)),
                 ("guard thresholds", lambda: repository_threshold_violations(arguments.root)),
                 ("guard reachability", lambda: repository_reachability_violations(arguments.root)),
+                (
+                    "invariant evidence relevance",
+                    lambda: repository_invariant_relevance_violations(arguments.root),
+                ),
                 ("closure", lambda: repository_closure_violations(arguments.root)),
             )
         )

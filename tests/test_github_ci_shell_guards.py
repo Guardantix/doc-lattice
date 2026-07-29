@@ -342,6 +342,7 @@ def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
         parents = {
             id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
         }
+        transports = _declared_transport_parameters(tree, Path(module).name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
@@ -352,8 +353,110 @@ def _guard_condition_lines() -> dict[str, tuple[str, int, int]]:
             origin_id = node.args[0].value
             if not isinstance(origin_id, str):
                 continue
-            located[origin_id] = (path, _governing_line(node, parents), node.lineno)
+            transported = _transported_refusal_lines(node, parents, transports)
+            lines = transported or (_governing_line(node, parents), node.lineno)
+            located[origin_id] = (path, *lines)
     return located
+
+
+def _declared_transport_parameters(
+    tree: ast.Module, module: str
+) -> dict[str, tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]]:
+    """Return each declared transport this module defines as a receiving function, by its name.
+
+    A declared transport is a site that propagates a refusal it did not mint. Most of them raise one
+    they were handed by a caller further out, but `_validate_acyclic_graph` is handed one as an
+    argument and owns the condition that decides it, which is what makes its callers the origins.
+    Only that form is resolvable from the origin's side, so a transport qualifies here when it takes
+    a parameter of the declared argument name.
+
+    Args:
+        tree: Parsed guarded module.
+        module: Its file name, used to select the declarations that describe it.
+
+    Returns:
+        The transport definition and its refusal parameter name, keyed by the callee name an origin
+        statement spells.
+    """
+    declared = {
+        qualname.rsplit(".", 1)[-1]: argument
+        for declared_module, qualname, argument in checker.DECLARED_TRANSPORTS
+        if declared_module == module
+    }
+    found: dict[str, tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        argument = declared.get(node.name)
+        if argument is None:
+            continue
+        parameters = {
+            parameter.arg
+            for group in (node.args.posonlyargs, node.args.args, node.args.kwonlyargs)
+            for parameter in group
+        }
+        if argument in parameters:
+            found[node.name] = (node, argument)
+    return found
+
+
+def _transported_refusal_lines(
+    node: ast.Call,
+    parents: dict[int, ast.AST],
+    transports: dict[str, tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]],
+) -> tuple[int, int] | None:
+    """Return the condition and refusal lines inside the transport this refusal is handed to.
+
+    A refusal constructed as an argument to a transport is built unconditionally: reaching the call
+    runs the construction whether or not the transport goes on to raise it. Taking that line as the
+    refusal line makes the assertion that a boundary script does not reach it unsatisfiable, and the
+    condition line walked from it names the caller's first statement rather than anything about the
+    guard. Both lines belong to the transport, which is where this guard's condition is evaluated
+    and where its refusal is raised.
+
+    Args:
+        node: The refusal construction.
+        parents: Parent map over the module holding it.
+        transports: Receiving transports the module defines, by callee name.
+
+    Returns:
+        The transport's condition and refusal lines, or `None` when this refusal is not transported.
+    """
+    current: ast.AST | None = node
+    while current is not None:
+        holder = parents.get(id(current))
+        if isinstance(holder, ast.Call):
+            name = holder.func.id if isinstance(holder.func, ast.Name) else None
+            resolved = transports.get(name) if name is not None else None
+            if resolved is not None:
+                transport, argument = resolved
+                inner = {
+                    id(child): parent
+                    for parent in ast.walk(transport)
+                    for child in ast.iter_child_nodes(parent)
+                }
+                raised = next(
+                    (
+                        statement
+                        for statement in ast.walk(transport)
+                        if isinstance(statement, ast.Raise)
+                        if statement.exc is not None
+                        if argument
+                        in {
+                            reference.id
+                            for reference in ast.walk(statement.exc)
+                            if isinstance(reference, ast.Name)
+                        }
+                    ),
+                    None,
+                )
+                if raised is not None:
+                    return _governing_line(raised, inner), raised.lineno
+            return None
+        if isinstance(holder, ast.stmt) or holder is None:
+            return None
+        current = holder
+    return None
 
 
 def _first_executable_line(function: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
@@ -534,6 +637,40 @@ def test_a_shipped_handler_guard_witnesses_its_guarded_operation(origin_id: str)
     assert condition_line == guarded.body[0].lineno
 
 
+@pytest.mark.parametrize(
+    "origin_id",
+    ["taint.evidence.scope-parent-cycle", "taint.evidence.output-graph-cycle"],
+)
+def test_a_transported_refusal_witnesses_the_transports_own_condition(origin_id: str) -> None:
+    # Both of these hand their refusal to `_validate_acyclic_graph`, which owns the condition that
+    # decides it. Read from the caller, the refusal line is the construction, which runs for every
+    # script that reaches the call, so the assertion that a boundary does not reach it could never
+    # hold and neither guard could be classified as an invariant at all.
+    path, condition_line, refusal_line = _GUARD_LINES[origin_id]
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    transport = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        if node.name == "_validate_acyclic_graph"
+    )
+    raised = next(node for node in ast.walk(transport) if isinstance(node, ast.Raise))
+    executed = _executed_lines("echo hi", path)
+
+    assert refusal_line == raised.lineno
+    assert condition_line < refusal_line
+    assert condition_line in executed
+    assert refusal_line not in executed
+
+
+def test_an_untransported_refusal_keeps_its_own_lines() -> None:
+    path, condition_line, refusal_line = _GUARD_LINES["taint.evidence.unknown-parent-scope"]
+    source = Path(path).read_text(encoding="utf-8").splitlines()
+
+    assert "if scope.parent_scope_id is not None" in source[condition_line - 1]
+    assert "GuardRefusal(" in source[refusal_line - 1]
+
+
 def _enclosing_of(node: ast.AST, kind: type[ast.AST], parents: dict[int, ast.AST]) -> ast.AST:
     """Return the nearest node of this kind holding the given node."""
     current = parents.get(id(node))
@@ -637,3 +774,26 @@ def test_invariant_boundary_witness_evaluates_the_condition_it_claims_is_never_t
     assert refusal_line not in executed, (
         f"{witness.origin_id}: boundary script reached the refusal at {path}:{refusal_line}"
     )
+
+
+def test_the_executable_assertions_alone_accept_a_misdirected_predicate() -> None:
+    # Why the gate derives relevance from the guarded source instead of trusting the row. This is
+    # the predicate a vacuous row for `taint.evidence.unknown-output-node` would carry, and every
+    # assertion above holds for it: the boundary certifies, the predicate rejects the empty control,
+    # the guard's condition line runs and its refusal line does not. It says nothing about an
+    # unhandled output node. `checker.repository_invariant_relevance_violations` is what rejects it,
+    # because `commands` is not among the attributes that walk inspects.
+    misdirected = InvariantWitness(
+        "taint.evidence.unknown-output-node",
+        "a rationale nothing supports",
+        "echo hi",
+        boundary_evidence=lambda evidence: bool(evidence.commands),
+    )
+    path, condition_line, refusal_line = _GUARD_LINES[misdirected.origin_id]
+    executed = _executed_lines(misdirected.boundary_script, path)
+
+    assert scan_doc_lattice_invocations(misdirected.boundary_script).guard_id is None
+    assert not misdirected.boundary_evidence(_boundary_evidence(_VACUOUS_CONTROL_SCRIPT))
+    assert misdirected.boundary_evidence(_boundary_evidence(misdirected.boundary_script))
+    assert condition_line in executed
+    assert refusal_line not in executed

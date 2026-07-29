@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import shutil
@@ -780,6 +781,140 @@ def test_callee_closure_ignores_a_callee_name_a_local_binding_shadows() -> None:
     )
 
 
+_NESTED_CALLEE_SOURCE = (
+    "def _analyze(command, table):\n"
+    "    def arguments(index):\n"
+    "        if index is None:\n"
+    "            return None\n"
+    "        return command.argv[index + 1 :]\n"
+    "    def _guard(index):\n"
+    "        found = arguments(index)\n"
+    "        if found is None:\n"
+    "            raise _TaintLimitExceeded(GuardRefusal('taint.demo.unsupported', 'unsupported'))\n"
+    "        if any(item.dynamic for item in found):\n"
+    "            raise _TaintLimitExceeded(GuardRefusal('taint.demo.dynamic', 'dynamic'))\n"
+    "        return found\n"
+    "    return _guard(table.get(command))\n"
+)
+
+
+def test_fingerprint_tracks_the_return_of_a_nested_callee_the_guard_reads() -> None:
+    # A lexically nested helper is reached by a bare name exactly as a module-level one is, and
+    # frozen guards read what it returns. Excluding nested definitions let its return be pinned
+    # while every fingerprint in the module stayed byte-identical.
+    edited = _NESTED_CALLEE_SOURCE.replace(
+        "        return command.argv[index + 1 :]\n", "        return ()\n"
+    )
+
+    assert _fingerprint_for(_NESTED_CALLEE_SOURCE, "shell_taint.py", "taint.demo.dynamic") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.dynamic")
+    )
+
+
+def test_fingerprint_tracks_the_control_flow_deciding_a_nested_callees_return() -> None:
+    edited = _NESTED_CALLEE_SOURCE.replace(
+        "        if index is None:\n", "        if index == 0:\n"
+    )
+
+    assert _fingerprint_for(_NESTED_CALLEE_SOURCE, "shell_taint.py", "taint.demo.unsupported") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.unsupported")
+    )
+
+
+def test_nested_callee_closure_ignores_a_statement_no_return_reads() -> None:
+    edited = _NESTED_CALLEE_SOURCE.replace(
+        "    def arguments(index):\n", "    def arguments(index):\n        noise = table.copy()\n"
+    )
+
+    assert _fingerprint_for(_NESTED_CALLEE_SOURCE, "shell_taint.py", "taint.demo.dynamic") == (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.dynamic")
+    )
+
+
+def test_nested_callee_closure_prefers_the_lexically_nearest_definition() -> None:
+    # The nested definition is the binding the call reaches, so the module-level function of the
+    # same name decides nothing about this guard and must stay out of its record.
+    source = (
+        "def arguments(index):\n"
+        "    return 'module'\n"
+        "def _analyze(command):\n"
+        "    def arguments(index):\n"
+        "        return command.argv[index]\n"
+        "    def _guard(index):\n"
+        "        if arguments(index) is None:\n"
+        "            raise _TaintLimitExceeded(GuardRefusal('taint.demo.nested', 'unsupported'))\n"
+        "    return _guard(0)\n"
+    )
+    nested_pinned = source.replace("        return command.argv[index]\n", "        return None\n")
+    module_pinned = source.replace("    return 'module'\n", "    return None\n")
+
+    original = _fingerprint_for(source, "shell_taint.py", "taint.demo.nested")
+
+    assert original != _fingerprint_for(nested_pinned, "shell_taint.py", "taint.demo.nested")
+    assert original == _fingerprint_for(module_pinned, "shell_taint.py", "taint.demo.nested")
+
+
+def test_nested_callee_closure_ignores_a_same_named_definition_in_another_function() -> None:
+    source = (
+        "def _other(command):\n"
+        "    def arguments(index):\n"
+        "        return 'other'\n"
+        "    return arguments(0)\n"
+        "def _analyze(command):\n"
+        "    def arguments(index):\n"
+        "        return command.argv[index]\n"
+        "    def _guard(index):\n"
+        "        if arguments(index) is None:\n"
+        "            raise _TaintLimitExceeded(GuardRefusal('taint.demo.nested', 'unsupported'))\n"
+        "    return _guard(0)\n"
+    )
+    edited = source.replace("        return 'other'\n", "        return None\n")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.nested") == (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.nested")
+    )
+
+
+def test_nested_callee_closure_terminates_on_recursion() -> None:
+    source = (
+        "def _analyze(command):\n"
+        "    def walk(node):\n"
+        "        return walk(node.parent) if node.parent else node\n"
+        "    def _guard(node):\n"
+        "        if walk(node) is None:\n"
+        "            raise _TaintLimitExceeded(GuardRefusal('taint.demo.nested', 'unsupported'))\n"
+        "    return _guard(command)\n"
+    )
+    edited = source.replace("if node.parent else node", "if node.parent else None")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.nested") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.nested")
+    )
+
+
+_REAL_NESTED_CALLEE = "        return command.argv[executable_index + 1 :]"
+
+_REAL_NESTED_CALLEE_ORIGINS = (
+    "taint.function-positional.dynamic-call-argument",
+    "taint.function-positional.dynamic-bind-argument",
+    "taint.function-positional.unresolved-bind-value",
+)
+
+
+@pytest.mark.parametrize("origin_id", _REAL_NESTED_CALLEE_ORIGINS)
+def test_fingerprint_tracks_the_real_nested_positional_callees_return(origin_id: str) -> None:
+    # `positional_call_arguments` is nested in `_contextualize_evidence`, and returning an empty
+    # tuple from it withdraws every guard that inspects the arguments it yields: the two dynamic
+    # checks see nothing to reject and the value loop never runs. All three are frozen debt.
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_taint.py").read_text(encoding="utf-8")
+    assert source.count(_REAL_NESTED_CALLEE) == 1
+    edited = source.replace(_REAL_NESTED_CALLEE, "        return ()")
+
+    assert _fingerprint_for(source, "shell_taint.py", origin_id) != (
+        _fingerprint_for(edited, "shell_taint.py", origin_id)
+    )
+
+
 _CALL_SITE_SOURCE = (
     "def _guard(frame):\n"
     "    if frame.phase != 'body':\n"
@@ -870,24 +1005,83 @@ def test_call_site_closure_resolves_a_uniquely_named_method_through_any_receiver
     )
 
 
-def test_call_site_closure_declines_an_attribute_call_two_definitions_share() -> None:
-    # With the name ambiguous, the receiver decides which definition runs and this parse cannot
-    # resolve it. Guessing would hash an unrelated call into the record.
+_AMBIGUOUS_METHOD_SOURCE = (
+    "class _Budget:\n"
+    "    def step(self, n):\n"
+    "        if n > 3:\n"
+    '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.step", "too big"))\n'
+    "class _Cursor:\n"
+    "    def step(self, n):\n"
+    "        return n\n"
+    "def analyze(budget, cursor, n):\n"
+    "    budget.step(n)\n"
+    "    return cursor.step(n)\n"
+)
+
+
+def test_fingerprint_tracks_the_withdrawal_of_an_ambiguous_attribute_call_site() -> None:
+    # Neither base-owned check saw this withdrawal. The record described only the guard's own
+    # function, and the reachability graph resolves by name alone, so the surviving `cursor.step(n)`
+    # kept `_Budget.step` marked reachable.
+    edited = _AMBIGUOUS_METHOD_SOURCE.replace("    budget.step(n)\n", "")
+
+    assert _fingerprint_for(
+        _AMBIGUOUS_METHOD_SOURCE, "shell_taint.py", "taint.demo.step"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.step")
+
+
+def test_fingerprint_tracks_a_condition_added_over_an_ambiguous_attribute_call_site() -> None:
+    edited = _AMBIGUOUS_METHOD_SOURCE.replace(
+        "    budget.step(n)\n", "    if n:\n        budget.step(n)\n"
+    )
+
+    assert _fingerprint_for(
+        _AMBIGUOUS_METHOD_SOURCE, "shell_taint.py", "taint.demo.step"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.step")
+
+
+def test_an_ambiguous_call_site_couples_the_record_to_the_other_definitions_calls() -> None:
+    # The cost of not certifying that withdrawal: with the name shared, a call this guard does not
+    # reach is still recorded as one that might. The coupling exists only while the collision does,
+    # and renaming either definition removes it.
+    edited = _AMBIGUOUS_METHOD_SOURCE.replace(
+        "    return cursor.step(n)\n", "    if n:\n        return cursor.step(n)\n"
+    )
+    renamed = _AMBIGUOUS_METHOD_SOURCE.replace(
+        "    def step(self, n):\n        return n\n",
+        "    def advance(self, n):\n        return n\n",
+    ).replace("cursor.step(n)", "cursor.advance(n)")
+
+    assert _fingerprint_for(
+        _AMBIGUOUS_METHOD_SOURCE, "shell_taint.py", "taint.demo.step"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.step")
+    assert _fingerprint_for(renamed, "shell_taint.py", "taint.demo.step") == _fingerprint_for(
+        renamed.replace(
+            "    return cursor.advance(n)\n", "    if n:\n        return cursor.advance(n)\n"
+        ),
+        "shell_taint.py",
+        "taint.demo.step",
+    )
+
+
+def test_a_unique_name_records_no_unresolved_candidates() -> None:
+    # The many guards in functions with no name collision keep the record they had, which is what
+    # keeps this coverage from costing a frozen record any churn.
     source = (
         "class _Budget:\n"
-        "    def step(self, n):\n"
+        "    def charge(self, n):\n"
         "        if n > 3:\n"
-        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.step", "too big"))\n'
-        "class _Cursor:\n"
-        "    def step(self, n):\n"
-        "        return n\n"
-        "def analyze(budget, n):\n"
-        "    budget.step(n)\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.charge", "too big"))\n'
+        "def analyze(budget, other, n):\n"
+        "    budget.charge(n)\n"
+        "    return other.unrelated(n)\n"
     )
-    edited = source + "def other(cursor, n):\n    if n:\n        cursor.step(n)\n"
+    edited = source.replace(
+        "    return other.unrelated(n)\n", "    if n:\n        return other.unrelated(n)\n"
+    )
 
-    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.step") == (
-        _fingerprint_for(edited, "shell_taint.py", "taint.demo.step")
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.charge") == (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.charge")
     )
 
 
@@ -1877,6 +2071,166 @@ def test_repository_gate_reports_every_implemented_property() -> None:
     assert checker.main(["--root", str(_ROOT)]) == 0
 
 
+_VACUOUS_OUTPUT_NODE_ROW = """        boundary_evidence=lambda evidence: bool(evidence.commands),
+"""
+
+_RELEVANT_OUTPUT_NODE_ROW = """        boundary_evidence=lambda evidence: (
+            len(_scope_output_nodes(evidence)) > 1
+            and any(isinstance(node, CommandOutput) for node in _scope_output_nodes(evidence))
+            and any(isinstance(node, ScopeOutput) for node in _scope_output_nodes(evidence))
+        ),
+"""
+
+
+def _registry_with_vacuous_output_node_predicate() -> str:
+    source = (_ROOT / checker.REGISTRY_PATH).read_text(encoding="utf-8")
+    assert source.count(_RELEVANT_OUTPUT_NODE_ROW) == 1
+    return source.replace(_RELEVANT_OUTPUT_NODE_ROW, _VACUOUS_OUTPUT_NODE_ROW)
+
+
+def test_invariant_relevance_holds_for_the_shipped_registry() -> None:
+    assert checker.repository_invariant_relevance_violations(_ROOT) == ()
+
+
+def test_invariant_relevance_rejects_a_predicate_over_unrelated_data(tmp_path: Path) -> None:
+    # Reproduced on a shipped row rather than a hypothetical one. `taint.evidence.unknown-output-
+    # node` falls through the arms of an exhaustive walk, so its condition line is its function's
+    # first, which any script entering the walk executes. With this predicate the row satisfies
+    # every executable assertion it can be held to: `echo hi` stops short of the guard, builds a
+    # command where the empty control builds none, evaluates the condition and does not reach the
+    # refusal. It says nothing about an unhandled output node.
+    root = _fake_root(tmp_path, [])
+    (root / checker.REGISTRY_PATH).write_text(
+        _registry_with_vacuous_output_node_predicate(), encoding="utf-8"
+    )
+
+    violations = checker.repository_invariant_relevance_violations(root)
+
+    assert any("taint.evidence.unknown-output-node" in violation for violation in violations)
+    assert all("output-input-node" not in violation for violation in violations)
+
+
+def test_invariant_relevance_follows_a_helper_the_registry_defines() -> None:
+    # The shipped output-walk rows read their evidence inside `_scope_output_nodes`, so a rule that
+    # looked only at the lambda body would reject both of them.
+    reads = checker.invariant_predicate_reads(
+        (_ROOT / checker.REGISTRY_PATH).read_text(encoding="utf-8")
+    )
+
+    assert "parts" in reads["taint.evidence.unknown-output-node"]
+
+
+def _registry_claiming(origin_id: str, predicate: str) -> str:
+    return (
+        "REACHABLE_WITNESSES = ()\n"
+        "INVARIANT_WITNESSES = (\n"
+        "    InvariantWitness(\n"
+        f'        "{origin_id}",\n'
+        '        "rationale",\n'
+        '        "echo hi",\n'
+        f"        boundary_evidence={predicate},\n"
+        "    ),\n"
+        ")\n"
+    )
+
+
+def test_invariant_relevance_rejects_a_row_for_a_limits_bounded_guard(tmp_path: Path) -> None:
+    # `taint.function-effects.unstructured-segment` falls through to a depth bound, so its condition
+    # reads a limits field and no evidence at all. A reachable witness under shrunk limits can drive
+    # that; an evidence predicate cannot say anything about it.
+    root = _fake_root(tmp_path, [])
+    (root / checker.REGISTRY_PATH).write_text(
+        _registry_claiming(
+            "taint.function-effects.unstructured-segment",
+            "lambda evidence: bool(evidence.commands)",
+        ),
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_invariant_relevance_violations(root)
+
+    assert any("max_function_effect_depth" in violation for violation in violations)
+
+
+def test_invariant_relevance_reports_a_guard_that_inspects_no_attribute_at_all(
+    tmp_path: Path,
+) -> None:
+    # `scanner.descriptor.unparsable` fires because `int(digits)` raised, and neither its condition
+    # nor the controls reaching it read an attribute of anything. There is no predicate that can
+    # witness it, which the rule has to say rather than accept the first one offered.
+    root = _fake_root(tmp_path, [])
+    (root / checker.REGISTRY_PATH).write_text(
+        _registry_claiming(
+            "scanner.descriptor.unparsable", "lambda evidence: bool(evidence.scopes)"
+        ),
+        encoding="utf-8",
+    )
+
+    violations = checker.repository_invariant_relevance_violations(root)
+
+    assert any("reads no attribute of the evidence" in violation for violation in violations)
+
+
+def test_condition_reads_are_empty_when_a_guard_inspects_no_attribute() -> None:
+    source = (
+        "def _digits(text):\n"
+        "    try:\n"
+        "        return int(text)\n"
+        "    except ValueError:\n"
+        "        raise _ShellScanIncomplete(\n"
+        '            GuardRefusal("scanner.demo.unparsable", "no")\n'
+        "        ) from None\n"
+    )
+
+    assert checker.guard_condition_reads(source, "shell_scanner.py") == {
+        "scanner.demo.unparsable": frozenset()
+    }
+
+
+def test_condition_reads_exclude_an_earlier_guards_data() -> None:
+    # The preceding controls include everything every earlier guard in the function inspected, so
+    # taking them for a guard that has a condition of its own would let a predicate borrow
+    # relevance from an unrelated neighbour.
+    source = (
+        "def _validate(evidence):\n"
+        "    if len(evidence.commands) != len(set(evidence.commands)):\n"
+        '        raise _MalformedTaintEvidence(GuardRefusal("taint.demo.duplicate", "no"))\n'
+        "    for scope in evidence.scopes:\n"
+        "        if scope.parent_scope_id is None:\n"
+        '            raise _MalformedTaintEvidence(GuardRefusal("taint.demo.parent", "no"))\n'
+    )
+
+    reads = checker.guard_condition_reads(source, "shell_taint.py")
+
+    assert reads["taint.demo.parent"] == frozenset({"parent_scope_id", "scopes"})
+    assert reads["taint.demo.duplicate"] == frozenset({"commands"})
+
+
+def test_condition_reads_fall_back_to_the_arms_a_walk_declined() -> None:
+    source = (
+        "def _children(output):\n"
+        "    if isinstance(output, SequenceOutput):\n"
+        "        return output.parts\n"
+        '    raise _MalformedTaintEvidence(GuardRefusal("taint.demo.unknown-node", "no"))\n'
+    )
+
+    reads = checker.guard_condition_reads(source, "shell_taint.py")
+
+    assert reads["taint.demo.unknown-node"] == frozenset({"parts"})
+
+
+def test_condition_reads_recover_the_structure_behind_a_transported_refusal() -> None:
+    # The origin statement of a transported refusal reads only the value it hands down, so the
+    # closure over that value is what names the structure the transport's condition walks.
+    reads = checker.guard_condition_reads(
+        (_ROOT / "src/doc_lattice/github_ci/shell_taint.py").read_text(encoding="utf-8"),
+        "shell_taint.py",
+    )
+
+    assert "parent_scope_id" in reads["taint.evidence.scope-parent-cycle"]
+    assert "commands" not in reads["taint.evidence.scope-parent-cycle"]
+
+
 def test_repository_gate_fails_on_a_limits_violation(tmp_path: Path, capsys) -> None:
     root = _fake_root(tmp_path, [])
     module = root / checker.GUARDED_MODULES[0]
@@ -2077,6 +2431,106 @@ def test_limits_construction_spelled_through_a_module_is_rejected() -> None:
     assert any("constructs default limits" in violation for violation in violations)
 
 
+_DESTRUCTURED_ALIAS_SOURCE = """
+GR, E = GuardRefusal, _TaintLimitExceeded
+def _guard(value):
+    if value > 3:
+        raise E(GR("taint.demo.destructured", "too big"))
+"""
+
+
+def test_a_refusal_spelled_through_a_destructured_alias_is_still_a_guard_origin() -> None:
+    # One tuple binding names both the refusal constructor and its transport. Reading only a
+    # single-value binding left this origin outside every rule at once: no record to freeze, no
+    # shape violation, and, in a module not already guarded, no discovery of the module either.
+    records = checker.extract_origin_records(_DESTRUCTURED_ALIAS_SOURCE, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.destructured"]
+
+
+def test_raw_refusal_text_spelled_through_a_destructured_alias_is_rejected() -> None:
+    source = 'GR, E = GuardRefusal, _ShellScanIncomplete\ndef f():\n    raise E("step limit")\n'
+
+    violations = checker.find_shape_violations(source, "shell_scanner.py")
+
+    assert any("raw refusal text" in violation for violation in violations)
+
+
+def test_a_module_using_a_destructured_refusal_alias_is_discovered_as_guarded() -> None:
+    # Module discovery reads the same constructor names, so a destructured alias hid the module
+    # itself from the base-owned closure, not only the origin inside it.
+    tree = ast.parse(_DESTRUCTURED_ALIAS_SOURCE)
+
+    assert checker._uses_guard_protocol(tree)
+
+
+def test_limits_construction_spelled_through_a_destructured_alias_is_rejected() -> None:
+    source = (
+        "Limits, Other = TaintLimits, object\ndef _helper(e):\n    return _evaluate(e, Limits())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_a_nested_destructured_alias_is_followed() -> None:
+    source = (
+        "(Limits, (Other, Also)) = (TaintLimits, (object, ScannerLimits))\n"
+        "def _helper(e):\n"
+        "    return _evaluate(e, Also())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_a_starred_destructuring_binds_no_constructor_alias() -> None:
+    # A starred target collects a list rather than one constructor, so calling it constructs
+    # nothing; pairing it positionally with the constructor would report a violation that is not
+    # there.
+    source = (
+        "First, *Rest = TaintLimits, ScannerLimits\n"
+        "def _helper(e):\n"
+        "    return _evaluate(e, Rest())\n"
+    )
+
+    assert checker.find_limits_violations(source, "shell_taint.py") == ()
+
+
+def test_limits_constructor_supplied_as_a_parameter_default_is_rejected() -> None:
+    # An optional factory restores production-scale caps below the public boundary whenever the
+    # argument is omitted, which is the failure the limits rule exists to prevent.
+    source = (
+        "def _helper(evidence, factory=TaintLimits):\n    return _evaluate(evidence, factory())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_a_lambda_parameter_default_constructor_alias_is_rejected() -> None:
+    source = "_build = lambda factory=TaintLimits: _evaluate(factory())\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("constructs default limits" in violation for violation in violations)
+
+
+def test_a_refusal_constructor_supplied_as_a_parameter_default_is_still_an_origin() -> None:
+    source = (
+        "def _guard(value, make=GuardRefusal):\n"
+        "    if value > 3:\n"
+        '        raise _TaintLimitExceeded(make("taint.demo.default-factory", "too big"))\n'
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.default-factory"]
+
+
 def test_limits_construction_spelled_through_an_import_alias_is_rejected() -> None:
     source = (
         "from doc_lattice.github_ci.shell_guards import TaintLimits as Limits\n"
@@ -2181,6 +2635,117 @@ def test_a_magnitude_hidden_in_arithmetic_is_still_a_threshold() -> None:
     violations = checker.find_threshold_violations(source, "shell_scanner.py")
 
     assert any("literal 4096" in violation for violation in violations)
+
+
+def test_a_conditionally_bound_magnitude_is_still_a_threshold() -> None:
+    # Both arms fix a cap, so the binding is a resource bound however the choice is spelled. A
+    # conditional expression is neither a constant arithmetic expression nor a scaling operator, so
+    # requiring one of those let two fixed magnitudes ship with no provenance at all.
+    source = (
+        "def _guard(items, strict):\n"
+        "    cap = 100 if strict else 200\n"
+        "    if len(items) > cap:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("threshold cap" in violation for violation in violations)
+
+
+def test_a_conditional_magnitude_in_one_arm_alone_is_a_threshold() -> None:
+    # The runtime arm decides nothing about the fixed one: whenever `strict` holds, the scan is
+    # capped at 100 with nothing recording where that came from.
+    source = (
+        "def _guard(items, strict, budget):\n"
+        "    cap = 100 if strict else budget\n"
+        "    if len(items) > cap:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("threshold cap" in violation for violation in violations)
+
+
+def test_a_conditional_structural_binding_is_not_a_threshold() -> None:
+    # Zero and one are the emptiness and singleton cases wherever they are spelled.
+    source = (
+        "def _guard(items, strict):\n"
+        "    floor = 0 if strict else 1\n"
+        "    if len(items) > floor:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
+
+
+def test_a_conditional_magnitude_compared_inline_is_a_threshold() -> None:
+    source = (
+        "def _guard(items, strict):\n"
+        "    if len(items) > (100 if strict else 200):\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("literal 100" in violation for violation in violations)
+
+
+def test_a_module_threshold_held_in_a_container_is_rejected() -> None:
+    # A cap does not stop being one by being stored in a tuple, and a subscript of it reads the
+    # same bound the bare name would.
+    source = (
+        "CAPS = (100,)\n"
+        "def _guard(items):\n"
+        "    if len(items) > CAPS[0]:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("threshold CAPS" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["caps = [100]", "caps = {'max': 100}", "caps = (1, 100)"],
+    ids=["list", "dict", "tuple-with-structural"],
+)
+def test_a_local_threshold_held_in_a_container_is_rejected(binding: str) -> None:
+    source = (
+        "def _guard(items):\n"
+        f"    {binding}\n"
+        "    if len(items) > caps[0]:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("threshold caps" in violation for violation in violations)
+
+
+def test_a_container_of_structural_literals_is_not_a_threshold() -> None:
+    source = (
+        "def _guard(items):\n"
+        "    bounds = (0, 1)\n"
+        "    if len(items) > bounds[1]:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
+
+
+def test_a_magnitude_in_an_inline_container_subscript_is_a_threshold() -> None:
+    source = (
+        "def _guard(items, flag):\n"
+        "    if len(items) > (100, 200)[flag]:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.x", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert any("literal 100" in violation for violation in violations)
 
 
 def test_a_subscript_index_inside_a_comparison_is_not_a_threshold() -> None:

@@ -853,7 +853,14 @@ so the inventory rejects it. Every rule that recognizes a construction recognize
 whether it is spelled bare or through the module that defines it, and the names it answers to
 include every alias the module binds the constructor to, whether that binding names it bare or
 through the module that defines it, because an aliased construction in a verdict return is a
-well-formed verdict that no carrier rule would reject. The base-owned closure and comparison derive
+well-formed verdict that no carrier rule would reject. A binding is followed whichever form it
+takes: `GR, E = GuardRefusal, _TaintLimitExceeded` is one statement naming both the refusal
+constructor and its transport, and `def helper(factory=TaintLimits)` binds a constructor for every
+call that omits the argument. Reading only the single-value assignment form let the destructured
+spelling escape every rule at once, taking with it the record, the shape violation and the discovery
+of the module holding it, while the defaulted form silently minted production-scale limits below the
+public boundary. A starred target collects a list rather than one of the values and names no
+constructor. The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
 base revision's hand-maintained list. Discovery recognizes canonical refusal origins, refusal
 carriers and result constructors (including aliases and rebindings), and verdict-producing
@@ -886,7 +893,12 @@ default is covered for the same reason, having neither a module binding nor a co
 back on: one made entirely from numeric arithmetic fixes a magnitude, and so does one that scales a
 runtime value by a literal, since `cap = 512 * factor` bounds the scan 512-fold however `factor` is
 derived. A dynamic cursor such as `index = start + 2` displaces a position rather than fixing a
-magnitude and is not a local cap. A name already resolved to a magnitude stays a threshold wherever
+magnitude and is not a local cap. A binding that holds its magnitude somewhere other than the whole
+expression is read branch by branch and element by element, since the later comparison spells only
+the name: each arm of `cap = 100 if strict else 200` fixes the bound whenever it is the arm taken,
+and `CAPS = (1, 100)` caps the scan at 100 whichever element a subscript reads. On the comparison
+side the same two forms are descended, along with the value of a subscript but never its slice, so
+`(100, 200)[flag]` is the cap it is while `words[2]` stays a position in a fixed grammar. A name already resolved to a magnitude stays a threshold wherever
 it is spelled, including as the receiver of an accessor, while a callee itself is machinery.
 The search covers the writers feeding a guard's condition as well as the
 condition itself, and the preceding controls that decide whether the origin is reached plus their
@@ -931,6 +943,26 @@ builds. Having no default only stops the predicate being omitted; a predicate th
 builder's floor of one root scope and nothing else reports nothing the boundary script constructed,
 and is vacuous whether it is spelled as a constant or as a test the floor happens to satisfy.
 
+Discriminating against that floor is still not enough, because it says nothing about *which* data the
+predicate discriminates on. A predicate must additionally read something the guard's own condition
+reads, and which attributes those are is derived from the guard rather than asserted by the row.
+`taint.evidence.unknown-output-node` is the measured case: it falls through the arms of an exhaustive
+walk, so `boundary_script="echo hi"` with `boundary_evidence=lambda evidence: bool(evidence.commands)`
+satisfies every other assertion the row can be held to, stopping short of the guard, building a
+command where the empty control builds none, evaluating the condition line and not reaching the
+refusal, while saying nothing whatever about an unhandled output node. The derived set is what decides
+the refusal: the origin statement, the tests and enclosing loop iterables governing it, the writer
+closure of what those read, and a handler guard's own `try` body. Reading the value a transported
+refusal hands down is what recovers the structure behind it, which is how the parent-cycle guard
+resolves to `parent_scope_id` rather than to nothing. Only for a guard reached purely by falling
+through earlier arms do the preceding controls stand in, because they include everything every earlier
+guard in the same function inspected, and using them first would let a predicate borrow relevance from
+an unrelated neighbour. This is a floor and not a proof: a predicate can still be weak about the right
+data. What it rules out is a predicate about the wrong data. A guard whose condition reads no
+attribute at all, or only a limits field, cannot be witnessed this way and the rule says so rather
+than accepting the first predicate offered; a resource bound belongs to a reachable witness under
+shrunk limits.
+
 A boundary row is additionally held to executing the guard's own governing construct while not
 reaching its refusal, and that construct is whichever one actually decides the guard: an `if` or
 `while` test, a `for` header, a `match` arm, or, for a guard in an `except` handler, the operation
@@ -939,6 +971,14 @@ falling back to the enclosing function's first executable line would name a line
 script entering the function, so the trace assertion would hold without the guard's own condition
 ever being evaluated. Three frozen origins sit in `except` handlers today, where the handler's own
 line is unsatisfiable as a witness because entering the handler is what runs the refusal.
+
+A refusal handed to a declared transport is witnessed in the transport, on both lines. Its
+construction is an argument, so reaching the call runs it whether or not the transport goes on to
+raise: taking that line as the refusal line makes the assertion that a boundary does not reach it
+unsatisfiable, which would have left the two cycle guards unclassifiable as invariants while looking
+like an ordinary failure to find a boundary script. The transport's own test is the condition, and its
+`raise` is the refusal, which is the same code the record already folds in for the reason given
+above.
 
 Anything unclassified is frozen rollout debt that may only shrink. Source origins must partition
 exactly into the classification registry and the frozen debt snapshot, and debt is frozen as
@@ -1036,10 +1076,17 @@ gate owes its reader rather than a defect in it. Measured across both guarded mo
 are reached and 89 percent of their statements are return-deciding, so the exclusion is narrow by
 volume and precise by kind: it buys correctness against unrelated edits, not a smaller surface.
 
-Only a bare-name call to a module-level function is followed: an attribute call names a member of a
-value the parse cannot resolve, and a local binding of that name shadows the module function
-exactly as it shadows a read spelling. A value the caller passes down rather than reads back stays
-outside for want of a resolvable target, as it does for the writer fixpoint.
+Only a bare-name call is followed: an attribute call names a member of a value the parse cannot
+resolve. Which definition a bare name reaches is decided by Python's lexical chain, so a lexically
+nested helper is followed on the same footing as a module-level one, and any other binding of the
+name, such as a parameter or an assignment, shadows both exactly as it shadows a read spelling.
+`_contextualize_evidence` is why this matters: it reaches its guards through fifty nested helpers,
+and returning an empty tuple from the nested `positional_call_arguments` withdraws every guard that
+inspects the arguments it yields, three of them frozen, while leaving every fingerprint in the module
+byte-identical. Callee blocks are ordered by qualified name rather than bare name, since two nested
+helpers can share one, and by name rather than position so moving a helper within its scope moves no
+record. A value the caller passes down rather than reads back stays outside for want of a resolvable
+target, as it does for the writer fixpoint.
 
 A statement is not the only thing that binds a name a guard reads. A parameter default binds one
 too, for every call that omits the argument, and the signature carrying it sits outside the body
@@ -1086,8 +1133,19 @@ only ever withholds a report. A fingerprint cannot afford that, so a call site r
 the definition is unambiguous: a bare name to a module-level or lexically enclosing function, and an
 attribute to a method either through `self` inside its own class or through any receiver when
 exactly one function in the module carries the name. That last form is what ties
-`taint.eval-discovery.work-limit` to the `budget.charge_work(...)` that reaches it. A receiver this
-parse cannot resolve, spelling a name two definitions share, stays unresolved rather than guessed.
+`taint.eval-discovery.work-limit` to the `budget.charge_work(...)` that reaches it.
+
+A receiver this parse cannot resolve, spelling a name two definitions share, is not guessed at, but
+neither is it dropped: it is recorded as a call that might reach the definition, in its own block.
+Dropping it certified a withdrawal. With a frozen guard `A.check`, a benign `B.check` and an entry
+point calling both, deleting only `a.check()` left the record byte-identical while the surviving
+`b.check()` kept the name-resolved reachability graph reporting `A.check` as reached, so both
+base-owned checks accepted the removal. The cost is coupling to a call the guard does not reach, and
+it is bounded by the collision: it applies only where a module gives one name to more than one
+definition, and renaming either removes it. `_ScanBudget.step` is the only origin-holding function in
+the tree with such a collision, and it is classified rather than frozen, so this coverage costs the
+frozen set no churn at all. Over-approximating in the record is the fail-closed direction here, where
+under-approximating certified a withdrawn guard.
 
 Entry points are derived from the candidate tree, as the public module-level functions of a guarded
 module, rather than read from an allowlist. An allowlist in the base revision's copy would describe
@@ -1097,12 +1155,14 @@ the rule is not a way through, because the rename moves the record's qualified n
 base-relative comparison reports that as new debt.
 
 Two withdrawals remain outside both rules, and are recorded rather than implied: inverting a
-condition two or more levels above the guard's own function, and inverting one at a call site
-spelled through a receiver whose type this parse cannot resolve. Both leave the function statically
-reachable and every recorded shape unchanged. Closing them needs either the transitive caller
-hashing this decision rejects on churn grounds or type resolution the parse does not have, so what
-stands against them is classification: a reachable witness proves dynamic reachability by executing
-the guard.
+condition two or more levels above the guard's own function, and, for a function whose name another
+definition in the module shares, orphaning the chain that reaches it while a call to that other
+definition keeps the name-resolved graph satisfied. Both leave the function statically reachable and
+every recorded shape unchanged, the second because the call sites themselves are untouched. Closing
+the first needs the transitive caller hashing this decision rejects on churn grounds; closing the
+second needs receiver type resolution the parse does not have, and tightening the graph instead would
+trade a withheld report for a false one against callback dispatch. What stands against both is
+classification: a reachable witness proves dynamic reachability by executing the guard.
 
 Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
 protected base runs the base revision's own copy of the checker with the candidate tree as inert
