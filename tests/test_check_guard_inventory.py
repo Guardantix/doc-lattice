@@ -615,6 +615,243 @@ def test_fingerprint_ignores_a_write_in_another_function() -> None:
     assert original[0].fingerprint == updated[0].fingerprint
 
 
+_CALLEE_SOURCE = (
+    "def _resolve(literal):\n"
+    "    option, separator, _value = literal.partition('=')\n"
+    "    candidates = tuple(c for c in _KINDS if c.startswith(option))\n"
+    "    if len(candidates) != 1:\n"
+    '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.ambiguous", "unscannable"))\n'
+    "    return candidates[0], bool(separator)\n"
+    "def _guard(literal):\n"
+    "    option, attached = _resolve(literal)\n"
+    "    kind = _KINDS[option]\n"
+    "    if kind == 'split':\n"
+    '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.split", "unscannable"))\n'
+    "    return kind\n"
+)
+
+
+def test_fingerprint_tracks_the_return_of_a_callee_the_guard_reads() -> None:
+    # A writer hashes the spelling of its call and nothing the call computes, so pinning the
+    # callee's return withdraws the guard with the whole writer closure byte-identical.
+    edited = _CALLEE_SOURCE.replace(
+        "    return candidates[0], bool(separator)\n",
+        "    return 'debug', bool(separator)\n",
+    )
+
+    assert _fingerprint_for(_CALLEE_SOURCE, "shell_scanner.py", "scanner.demo.split") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_fingerprint_tracks_a_write_feeding_a_callees_return() -> None:
+    edited = _CALLEE_SOURCE.replace("c.startswith(option)", "c == option")
+
+    assert _fingerprint_for(_CALLEE_SOURCE, "shell_scanner.py", "scanner.demo.split") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_fingerprint_tracks_the_control_flow_deciding_a_callees_return() -> None:
+    # Widening the callee's own refusal lets a value reach the return that could not before, which
+    # changes what the caller reads without touching any statement the return reads.
+    edited = _CALLEE_SOURCE.replace("if len(candidates) != 1:", "if len(candidates) > 99:")
+
+    assert _fingerprint_for(_CALLEE_SOURCE, "shell_scanner.py", "scanner.demo.split") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_callee_closure_ignores_a_statement_no_return_of_the_callee_reads() -> None:
+    # Following return values must not degrade into hashing the callee's whole body, or one helper
+    # couples every guard that calls it to its every unrelated edit and the debt has to be
+    # regenerated, which is the laundering path the gate exists to close.
+    edited = _CALLEE_SOURCE.replace(
+        "    candidates = tuple(c for c in _KINDS if c.startswith(option))\n",
+        "    candidates = tuple(c for c in _KINDS if c.startswith(option))\n"
+        "    noise = literal.upper()\n",
+    )
+
+    assert _fingerprint_for(_CALLEE_SOURCE, "shell_scanner.py", "scanner.demo.split") == (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_callee_closure_leaves_the_callees_own_guard_alone() -> None:
+    # `scanner.demo.ambiguous` lives in the callee and does not read its return, so pinning that
+    # return moves the caller's record and not its own.
+    edited = _CALLEE_SOURCE.replace(
+        "    return candidates[0], bool(separator)\n",
+        "    return 'debug', bool(separator)\n",
+    )
+
+    assert _fingerprint_for(_CALLEE_SOURCE, "shell_scanner.py", "scanner.demo.ambiguous") == (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.ambiguous")
+    )
+
+
+def test_callee_closure_follows_a_callee_two_hops_from_the_guard() -> None:
+    source = (
+        "def _inner(literal):\n"
+        "    return literal.partition('=')[0]\n"
+        "def _outer(literal):\n"
+        "    return _inner(literal)\n"
+        "def _guard(literal):\n"
+        "    kind = _KINDS[_outer(literal)]\n"
+        "    if kind == 'split':\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.split", "unscannable"))\n'
+    )
+    edited = source.replace("return literal.partition('=')[0]", "return 'debug'")
+
+    assert _fingerprint_for(source, "shell_scanner.py", "scanner.demo.split") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_callee_closure_follows_a_callee_a_reachability_control_reads() -> None:
+    # A control deciding the origin is reached withdraws the guard as completely as its condition,
+    # so a callee whose value that control reads is covered on the same footing.
+    source = (
+        "def _is_long(literal):\n"
+        "    return literal.startswith('--')\n"
+        "def _guard(literal, kind):\n"
+        "    if not _is_long(literal):\n"
+        "        return 0\n"
+        "    if kind == 'split':\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.split", "unscannable"))\n'
+    )
+    edited = source.replace("return literal.startswith('--')", "return False")
+
+    assert _fingerprint_for(source, "shell_scanner.py", "scanner.demo.split") != (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_callee_closure_follows_a_callee_a_parameter_default_reads() -> None:
+    # A default binds a value for every caller that omits the argument, and it is evaluated in the
+    # defining scope, so the module function it calls is reached there too.
+    source = (
+        "def _ceiling():\n"
+        "    return 4096\n"
+        "def _guard(depth, cap=_ceiling()):\n"
+        "    if depth > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.depth", "too deep"))\n'
+    )
+    edited = source.replace("    return 4096\n", "    return 1 << 40\n")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.depth") != (
+        _fingerprint_for(edited, "shell_taint.py", "taint.demo.depth")
+    )
+
+
+def test_callee_closure_ignores_an_attribute_call_sharing_a_module_function_name() -> None:
+    # `helper.resolve(...)` names a member of a value this parse cannot resolve. Reading it as the
+    # module's `resolve` would hash an unrelated function into the record.
+    source = (
+        "def resolve(literal):\n"
+        "    return 'split'\n"
+        "def _guard(helper, literal):\n"
+        "    kind = helper.resolve(literal)\n"
+        "    if kind == 'split':\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.split", "unscannable"))\n'
+    )
+    edited = source.replace("    return 'split'\n", "    return 'flag'\n")
+
+    assert _fingerprint_for(source, "shell_scanner.py", "scanner.demo.split") == (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_callee_closure_ignores_a_callee_name_a_local_binding_shadows() -> None:
+    # Python lexical binding is the boundary here exactly as it is for a read spelling.
+    source = (
+        "def _resolve(literal):\n"
+        "    return 'split'\n"
+        "def _guard(table, literal):\n"
+        "    _resolve = table[literal]\n"
+        "    kind = _resolve(literal)\n"
+        "    if kind == 'split':\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.split", "unscannable"))\n'
+    )
+    edited = source.replace("    return 'split'\n", "    return 'flag'\n")
+
+    assert _fingerprint_for(source, "shell_scanner.py", "scanner.demo.split") == (
+        _fingerprint_for(edited, "shell_scanner.py", "scanner.demo.split")
+    )
+
+
+def test_callee_closure_terminates_on_mutual_recursion() -> None:
+    source = (
+        "def _left(value):\n"
+        "    return _right(value)\n"
+        "def _right(value):\n"
+        "    return _left(value)\n"
+        "def _guard(value):\n"
+        "    if _left(value) > 3:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.cyclic-callee", "too big"))\n'
+    )
+
+    records = checker.extract_origin_records(source, "shell_taint.py")
+
+    assert [record.origin_id for record in records] == ["taint.demo.cyclic-callee"]
+
+
+def test_fingerprint_tracks_the_real_env_option_callees_return() -> None:
+    # The shipped case the boundary was widened for: `scanner.env-option.static-split-string` tests
+    # a `kind` resolved from an `option` that `_resolve_env_long_option` returns, and pinning that
+    # return left every fingerprint in the tree unchanged.
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_scanner.py").read_text(encoding="utf-8")
+    edited = source.replace(
+        "    return candidates[0], bool(separator)\n",
+        '    return "--debug", bool(separator)\n',
+    )
+    assert edited != source
+
+    origin_id = "scanner.env-option.static-split-string"
+    assert _fingerprint_for(source, "shell_scanner.py", origin_id) != (
+        _fingerprint_for(edited, "shell_scanner.py", origin_id)
+    )
+
+
+def test_the_real_env_option_callee_ignores_a_reworded_refusal_inside_it() -> None:
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_scanner.py").read_text(encoding="utf-8")
+    edited = source.replace(
+        '                "scanner.env-option.ambiguous-long-option",\n'
+        '                "unsupported env option cannot be scanned safely",\n',
+        '                "scanner.env-option.ambiguous-long-option",\n'
+        '                "env option is unsupported and cannot be scanned",\n',
+    )
+    assert edited != source
+
+    origin_id = "scanner.env-option.static-split-string"
+    assert _fingerprint_for(source, "shell_scanner.py", origin_id) == (
+        _fingerprint_for(edited, "shell_scanner.py", origin_id)
+    )
+
+
+def test_compare_against_base_rejects_a_frozen_guard_whose_callee_return_changed(
+    tmp_path: Path,
+) -> None:
+    # The end-to-end form: the base-owned comparison accepted this withdrawal before the callee's
+    # return value entered the record.
+    origin_id = "scanner.env-option.static-split-string"
+    record = next(r for r in checker.repository_origin_records(_ROOT) if r.origin_id == origin_id)
+    base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": [record.as_json()]})
+    root = _fake_root(tmp_path, [record.as_json()])
+    module = root / "src/doc_lattice/github_ci/shell_scanner.py"
+    source = module.read_text(encoding="utf-8")
+    pinned = source.replace(
+        "    return candidates[0], bool(separator)\n",
+        '    return "--debug", bool(separator)\n',
+    )
+    assert pinned != source
+    module.write_text(pinned, encoding="utf-8")
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any(origin_id in failure for failure in failures)
+
+
 def test_fingerprint_tracks_the_real_brace_digit_module_bound() -> None:
     source = (_ROOT / "src/doc_lattice/github_ci/shell_taint.py").read_text(encoding="utf-8")
     edited = source.replace(

@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -117,6 +117,9 @@ DECLARED_TRANSPORTS = frozenset(
 not guard origins and never appear in the inventory."""
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+_Function = ast.FunctionDef | ast.AsyncFunctionDef
+"""A function definition, whichever way it is spelled."""
 
 _MUTATING_METHODS = frozenset(
     {
@@ -282,6 +285,9 @@ class _DerivationCache:
     closures: dict[tuple[int, int, frozenset[str], frozenset[str]], _WriterDerivation] = field(
         default_factory=dict
     )
+    functions: dict[int, dict[str, _Function]] = field(default_factory=dict)
+    callee_shapes: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    callee_callees: dict[int, frozenset[str]] = field(default_factory=dict)
     module: ast.Module | None = None
 
 
@@ -299,7 +305,9 @@ class OriginRecord:
             iterable read, the defaults bound to the parameters that dataflow reads, the headers of
             those enclosing loops, the shape of any declared transport the origin statement hands
             its refusal to, the control flow that decides whether it is reached and the writers
-            feeding that flow, and any `try` body whose handler contains the origin.
+            feeding that flow, any `try` body whose handler contains the origin, and the
+            return-deciding statements of every module-level callee whose value that dataflow
+            reads.
     """
 
     origin_id: str
@@ -995,11 +1003,14 @@ def _condition_writer_shapes(
     `option, attached_value = _resolve_env_long_option(literal)`. Rewriting that call to a constant
     withdraws the guard, and with a one-hop rule the fingerprint does not move.
 
-    The executable scope is deliberately the enclosing function, plus only the module bindings its
-    dataflow actually reads. A closure that crossed call boundaries or absorbed unrelated module
-    statements would churn frozen records on unrelated edits, and a debt record that churns
-    constantly has to be regenerated, which is the laundering path this gate exists to close. A
-    caller passing a different value into this scope is outside that boundary and is not covered.
+    The executable scope of this fixpoint is deliberately the enclosing function, plus only the
+    module bindings its dataflow actually reads. A closure that absorbed unrelated module
+    statements, or a callee's whole body, would churn frozen records on unrelated edits, and a debt
+    record that churns constantly has to be regenerated, which is the laundering path this gate
+    exists to close. What a selected writer's call *computes* is covered separately and narrowly by
+    `_callee_shapes`, which follows a module-level callee's return value into its own returns. A
+    caller passing a different value down into this scope is outside the boundary and is not
+    covered.
 
     A nested function or class body is outside the scope for the same reason and by the same rule
     `_reachability_shapes` uses: it does not run where it is written, so a write inside it decides
@@ -1101,8 +1112,9 @@ def _writer_statements(
     module bindings throughout that function and cannot select an unrelated module statement with
     the same spelling. Lambda and comprehension locals are removed from reads only inside their
     expression scope. The remaining free reads seed a second fixpoint over module-scope
-    assignments, mutations and imports. Function and class bodies remain boundaries, so following
-    a referenced binding never hashes a callee's implementation.
+    assignments, mutations and imports. Function and class bodies remain boundaries of this
+    fixpoint, so following a referenced binding never hashes a callee's implementation here;
+    `_callee_shapes` covers what a selected call returns.
 
     Args:
         origin: The statement that constructs the refusal, hashed separately.
@@ -1523,22 +1535,326 @@ def _raising_operation_shapes(
         The guarded body's shapes followed by its writer closure, empty when the origin is not
         reached through a handler.
     """
+    body = _guarded_body_statements(origin, guarded)
+    if not body:
+        return ()
+    read, values = _statement_dataflow(body)
+    return (
+        *(_cached_shape(statement, cache) for statement in body),
+        *_writer_closure(origin, scope, read, values, cache),
+    )
+
+
+def _guarded_body_statements(
+    origin: ast.stmt, guarded: tuple[ast.stmt, ...]
+) -> tuple[ast.stmt, ...]:
+    """Return every statement of the `try` body an origin's handler guards, in source order.
+
+    Args:
+        origin: The statement that constructs the refusal, excluded from its own guarded body.
+        guarded: Top-level statements of that body.
+
+    Returns:
+        The body's statements, empty when the origin is not reached through a handler.
+    """
     if not guarded:
         return ()
     body: list[ast.stmt] = []
     for statement in guarded:
         body.append(statement)
         body.extend(_scope_statements(statement))
-    body = [statement for statement in body if statement is not origin]
-    body.sort(key=lambda statement: (statement.lineno, statement.col_offset))
+    return tuple(
+        sorted(
+            (statement for statement in body if statement is not origin),
+            key=lambda statement: (statement.lineno, statement.col_offset),
+        )
+    )
+
+
+def _statement_dataflow(statements: tuple[ast.stmt, ...]) -> tuple[set[str], set[str]]:
+    """Return the spellings these statements read, and the subset they read as whole values."""
     read: set[str] = set()
     values: set[str] = set()
-    for statement in body:
+    for statement in statements:
         read |= _statement_reads(statement)
         values |= _statement_value_reads(statement)
-    return (
-        *(_cached_shape(statement, cache) for statement in body),
-        *_writer_closure(origin, scope, read, values, cache),
+    return read, values
+
+
+def _cached_module_functions(cache: _DerivationCache) -> dict[str, _Function]:
+    """Return the module's top-level functions by name, memoized for this parse.
+
+    A later definition rebinds an earlier one exactly as any other assignment would, so the last
+    `def` of a name is the one a call reaches. Nested definitions are absent: they are not module
+    bindings, and a call spelled inside the function that defines one resolves to a local name that
+    `_called_module_function_names` already refuses to follow.
+
+    Args:
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        Module-level functions by bound name, empty when the cache carries no module.
+    """
+    module = cache.module
+    if module is None:
+        return {}
+    memo = cache.functions.get(id(module))
+    if memo is None:
+        memo = {
+            statement.name: statement
+            for statement in module.body
+            if isinstance(statement, _SCOPES) and not isinstance(statement, ast.ClassDef)
+        }
+        cache.functions[id(module)] = memo
+    return memo
+
+
+def _called_module_function_names(
+    scoped: tuple[ast.AST, ...],
+    free: tuple[ast.AST, ...],
+    scope: ast.AST | None,
+    cache: _DerivationCache,
+) -> frozenset[str]:
+    """Return the module-level functions this dataflow calls by a name that reaches the module.
+
+    Only a bare `Name` callee is followed. An attribute call names a member of a value this parse
+    cannot resolve, and reading `obj.run()` as the module's `run` would hash an unrelated function
+    into the record.
+
+    Python lexical binding is the boundary here exactly as it is for a read spelling. A call
+    spelled inside the enclosing function resolves to a parameter, assignment, import alias,
+    handler name or match capture of that name when the function binds one, so a same-named module
+    function is not followed. A call spelled in a module-scope writer, or in a parameter default
+    evaluated in the defining scope, is not subject to those local bindings.
+
+    Args:
+        scoped: Nodes spelled inside the enclosing function, whose names its bindings shadow.
+        free: Nodes evaluated in module scope, which no local binding shadows.
+        scope: Enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Callee names, empty when this dataflow reaches no module-level function.
+    """
+    functions = _cached_module_functions(cache)
+    if not functions:
+        return frozenset()
+    shadowed = _cached_local_binding_names(scope, cache)
+    names: set[str] = set()
+    for roots, blocked in ((scoped, shadowed), (free, frozenset())):
+        for root in roots:
+            for node in ast.walk(root):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                if node.func.id in functions and node.func.id not in blocked:
+                    names.add(node.func.id)
+    return frozenset(names)
+
+
+def _callee_return_statements(
+    function: _Function, cache: _DerivationCache
+) -> tuple[ast.Return, ...]:
+    """Return the value-bearing `return` statements this function executes itself, in source order.
+
+    A bare `return` yields nothing the caller can read. It still decides which of the other returns
+    runs, and it reaches the record that way, as a diverting statement in their reachability
+    closure.
+
+    Args:
+        function: The callee to inspect, excluding any function or class body nested in it.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Returns in source order, empty when the function has none carrying a value.
+    """
+    return tuple(
+        sorted(
+            (
+                statement
+                for statement in _cached_scope_statements(function, cache)
+                if isinstance(statement, ast.Return) and statement.value is not None
+            ),
+            key=lambda statement: (statement.lineno, statement.col_offset),
+        )
+    )
+
+
+def _cached_callee_shapes(function: _Function, cache: _DerivationCache) -> tuple[str, ...]:
+    """Return the shapes recording what decides this callee's return value, memoized per parse.
+
+    Each of the callee's returns is recorded the way a guard origin is: the return statement's own
+    shape, the transitive closure of the function-local and referenced-module statements that write
+    what it reads, the defaults bound to the parameters that dataflow reads, and the control flow
+    deciding that this return is the one reached. Everything else in the callee is machinery. A
+    branch whose body writes nothing a return reads changes no caller's value, and folding the
+    whole body in would couple a frozen record to edits that cannot withdraw its guard.
+
+    Args:
+        function: The callee whose return value the guard's dataflow reads.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The callee's name followed by its return-deciding shapes.
+    """
+    memo = cache.callee_shapes.get(id(function))
+    if memo is not None:
+        return memo
+    shapes: list[str] = [f"callee {function.name}"]
+    for statement in _callee_return_statements(function, cache):
+        read, values = _statement_dataflow((statement,))
+        shapes.append(_cached_shape(statement, cache))
+        shapes.extend(_writer_closure(statement, function, read, values, cache))
+        shapes.extend(_reachability_shapes(statement, function, cache))
+    result = tuple(shapes)
+    cache.callee_shapes[id(function)] = result
+    return result
+
+
+def _cached_callee_callees(function: _Function, cache: _DerivationCache) -> frozenset[str]:
+    """Return the module-level functions this callee's own return dataflow reads the value of.
+
+    The nodes searched are exactly the ones `_cached_callee_shapes` hashes, so the closure follows
+    a call only where an edit to what it returns would move a shape already in the record.
+
+    Args:
+        function: The callee to expand.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Callee names, empty when this callee's returns read no module-level function's value.
+    """
+    memo = cache.callee_callees.get(id(function))
+    if memo is not None:
+        return memo
+    scoped: list[ast.AST] = []
+    free: list[ast.AST] = []
+    for statement in _callee_return_statements(function, cache):
+        scoped.append(statement)
+        read, values = _statement_dataflow((statement,))
+        _split_by_scope(
+            _writer_statements(statement, function, read, values, cache),
+            function,
+            cache,
+            scoped,
+            free,
+        )
+        free.extend(default for _name, default in _read_parameter_defaults(function, read))
+        controls, writers, _flow_read = _reachability_inputs(statement, function, cache)
+        scoped.extend(controls)
+        _split_by_scope(writers, function, cache, scoped, free)
+    result = _called_module_function_names(tuple(scoped), tuple(free), function, cache)
+    cache.callee_callees[id(function)] = result
+    return result
+
+
+def _split_by_scope(
+    statements: tuple[ast.stmt, ...],
+    scope: ast.AST | None,
+    cache: _DerivationCache,
+    scoped: list[ast.AST],
+    free: list[ast.AST],
+) -> None:
+    """Sort selected writers into the ones spelled inside the scope and the module-scope ones.
+
+    The writer closure returns both in one sequence, and which lexical scope a statement was
+    spelled in is what decides whether the scope's bindings shadow a callee name it spells.
+
+    Args:
+        statements: Statements the writer closure selected.
+        scope: Enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo.
+        scoped: Collector for the statements spelled inside the scope, extended in place.
+        free: Collector for the module-scope statements, extended in place.
+    """
+    inside = (
+        {id(statement) for statement in _cached_scope_statements(scope, cache)}
+        if scope is not None
+        else set()
+    )
+    for statement in statements:
+        (scoped if id(statement) in inside else free).append(statement)
+
+
+def _callee_shapes(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    guarded: tuple[ast.stmt, ...],
+    governing: tuple[ast.expr, ...],
+    cache: _DerivationCache,
+) -> tuple[str, ...]:
+    """Return the shapes of the module-level callees whose return values decide this guard.
+
+    A record covers the statements that write what a guard reads, but a writer such as
+    `option, attached_value = _resolve_env_long_option(literal)` hashes the call spelling and
+    nothing the call computes. Rewriting that callee's return to a constant withdraws
+    `scanner.env-option.static-split-string` while leaving every fingerprint in the tree unchanged,
+    and the base-owned comparison accepts it. A callee whose value the guard's condition, its
+    reachability controls, its guarded operation or the parameter defaults feeding any of them read
+    is therefore part of the record.
+
+    The closure follows return values only, transitively, and takes each callee's return-deciding
+    statements rather than its body. A helper is coupled to a guard because the guard reads what
+    the helper computes, not because the guard's function happens to call it, and what is hashed of
+    that helper is only what can change the value the guard reads. The bound is on which edits
+    churn a record rather than on how many records a helper is tied to: fifty origins read what
+    `choice` returns, so an edit to what it returns moves seventeen frozen records and should, while
+    a statement no return reads moves none. A record that churns on an unrelated edit has to be
+    regenerated, which is the laundering path this gate exists to close.
+
+    Two boundaries remain, both for want of a resolvable target rather than by preference: a call
+    through an attribute, and a value the caller passes down rather than reads back.
+
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+        guarded: Top-level statements of the `try` body the origin's handler guards, if any.
+        governing: The expressions governing the origin: the tests it sits under, and the iterable
+            of every enclosing loop.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        One block per reached callee, ordered by name, empty when the guard reads no callee's
+        return value.
+    """
+    scoped: list[ast.AST] = list(governing)
+    free: list[ast.AST] = []
+
+    read = set(_read_spellings(governing))
+    values = set(_read_value_spellings(governing))
+    _split_by_scope(
+        _writer_statements(origin, scope, read, values, cache), scope, cache, scoped, free
+    )
+    free.extend(default for _name, default in _read_parameter_defaults(scope, read))
+
+    controls, writers, flow_read = _reachability_inputs(origin, scope, cache)
+    scoped.extend(controls)
+    _split_by_scope(writers, scope, cache, scoped, free)
+    free.extend(default for _name, default in _read_parameter_defaults(scope, flow_read))
+
+    body = _guarded_body_statements(origin, guarded)
+    if body:
+        scoped.extend(body)
+        raised_read, raised_values = _statement_dataflow(body)
+        _split_by_scope(
+            _writer_statements(origin, scope, raised_read, raised_values, cache),
+            scope,
+            cache,
+            scoped,
+            free,
+        )
+        free.extend(default for _name, default in _read_parameter_defaults(scope, raised_read))
+
+    functions = _cached_module_functions(cache)
+    reached: set[str] = set()
+    pending = list(_called_module_function_names(tuple(scoped), tuple(free), scope, cache))
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        pending.extend(_cached_callee_callees(functions[name], cache))
+    return tuple(
+        shape for name in sorted(reached) for shape in _cached_callee_shapes(functions[name], cache)
     )
 
 
@@ -1651,6 +1967,11 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
             guarded_bodies.get(id(statement), ()),
             cache,
         )
+        # A writer hashes the spelling of a call, never what the call computes, so a callee whose
+        # return value this guard reads is followed into its own returns.
+        callees = _callee_shapes(
+            statement, scope, guarded_bodies.get(id(statement), ()), governing, cache
+        )
         called = {name for node in _own_expressions(statement) if (name := _called_name(node))}
         carried = tuple(shape for name, shape in sorted(transports.items()) if name in called)
         digest = hashlib.sha256(
@@ -1664,6 +1985,7 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
                     *carried,
                     *flow,
                     *raising,
+                    *callees,
                 )
             ).encode("utf-8")
         ).hexdigest()

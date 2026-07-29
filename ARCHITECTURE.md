@@ -1001,8 +1001,36 @@ boundary: a parameter, assignment, import, exception-handler name or match captu
 spelling throughout its function, so an unrelated module binding with the same name is not
 selected. Lambda parameters and comprehension targets shadow only within their expression scopes;
 free names in those expressions still reach the referenced module binding. Unrelated module
-bindings, bodies of other functions, nested function and class bodies, and called implementations
-remain outside the record.
+bindings, whole bodies of other functions, and nested function and class bodies remain outside the
+record.
+
+A writer hashes the spelling of a call and nothing the call computes, so a guard whose dataflow
+reads a callee's return value is withdrawn by editing that callee with the whole closure left
+byte-identical. `scanner.env-option.static-split-string` is the concrete case: the `kind` it tests
+comes from an `option` that `_resolve_env_long_option` returns, and rewriting that return to a
+constant leaves every fingerprint in the tree unchanged and the base-owned comparison green. A
+record therefore also covers every module-level function whose return value the condition, the
+reachability controls, the guarded operation, or the parameter defaults feeding any of them read,
+followed transitively through those callees' own returns.
+
+What it covers of a callee is what decides its return value, not its body: each value-bearing
+`return`, the closure of what writes what that return reads, the defaults that dataflow reads, and
+the control flow deciding that return is the one reached. Everything else in the callee is
+machinery, because a statement no return reads changes no caller's value. Rewording a refusal
+inside a callee therefore moves no record, while editing what a return reads, or the flow selecting
+which return runs, moves one.
+
+That bound is on which edits churn a record, not on how many records a helper is tied to, and this
+decision raises the coupling deliberately. Fifty origins read what `choice` returns, so editing what
+it returns now moves seventeen of the sixty-five frozen records at once, which is the signal the
+gate owes its reader rather than a defect in it. Measured across both guarded modules, 299 callees
+are reached and 89 percent of their statements are return-deciding, so the exclusion is narrow by
+volume and precise by kind: it buys correctness against unrelated edits, not a smaller surface.
+
+Only a bare-name call to a module-level function is followed: an attribute call names a member of a
+value the parse cannot resolve, and a local binding of that name shadows the module function
+exactly as it shadows a read spelling. A value the caller passes down rather than reads back stays
+outside for want of a resolvable target, as it does for the writer fixpoint.
 
 A statement is not the only thing that binds a name a guard reads. A parameter default binds one
 too, for every call that omits the argument, and the signature carrying it sits outside the body
