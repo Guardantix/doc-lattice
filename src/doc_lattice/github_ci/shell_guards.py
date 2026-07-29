@@ -93,4 +93,9 @@ class MarkerDetected:
 # annotation is unenforced, so the same spelling could hold a callable. A `type` statement binds a
 # lazily evaluated `TypeAliasType` that is not callable, which is why the rule reads it as the type
 # declaration it is. See AD-20.
+#
+# This spelling is therefore gate-required, not style: reverting it to `TypeAlias` fails
+# `scripts/check_guard_inventory.py`. The nine `TypeAlias` aliases in `shell_taint.py` predate the
+# rule and name no tracked constructor, so they are untouched by it; a future ruff UP040 cleanup
+# must carry that awareness rather than normalizing all ten in either direction.
 type ScanVerdict = Certified | MarkerDetected | GuardRefusal

@@ -395,6 +395,38 @@ def _call_reference_contexts(call: ast.Call) -> Iterator[ast.AST]:
         yield from ast.walk(call.args[1])
 
 
+_CONSTRUCTOR_HIDING_NODES = (
+    ast.Call,
+    ast.Dict,
+    ast.Set,
+    ast.List,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+"""Expression forms that hide a constructor wherever they are spelled, type position included.
+
+A container subscripted for its element, `{"g": GuardRefusal}["g"]`, names the constructor where no
+rule reads it and hands it back on demand, and a call or lambda computes the reference instead of
+naming it. A `type` statement's value is exempt from the reference rule only while its subtree holds
+none of these, so the exemption covers a chain of type references and not everything the grammar
+allows in that position."""
+
+
+def _hides_constructor(declared: ast.expr) -> bool:
+    """Return whether this type expression spells a form that hides a constructor reference.
+
+    Args:
+        declared: The declared type expression.
+
+    Returns:
+        Whether any node in it is a container, call, lambda or comprehension.
+    """
+    return any(isinstance(node, _CONSTRUCTOR_HIDING_NODES) for node in ast.walk(declared))
+
+
 def _declaration_contexts(declared: ast.expr) -> Iterator[ast.AST]:
     """Yield every node of one type declaration except the references an inline assignment binds.
 
@@ -429,8 +461,11 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     annotation. The interpreter evaluates its value lazily inside its own scope and binds a
     `TypeAliasType`, which is not callable, so a constructor named there is reachable as a
     constructor only through the same dunder indirection an ordinary registered alias already
-    permits (`Alias.__call__(...)` reads no tracked spelling either). A `TypeAlias`-annotated
-    assignment is deliberately *not* a type position: the annotation is unenforced, so
+    permits (`Alias.__call__(...)` reads no tracked spelling either). Only a value spelling no
+    constructor-hiding form is exempt, per `_hides_constructor`: `type X = {"g": GuardRefusal}["g"]`
+    hides the constructor in a type position exactly as it does outside one, and `X.__value__` hands
+    the element straight back. A `TypeAlias`-annotated assignment is deliberately *not* a type
+    position at all: the annotation is unenforced, so
     `factory: TypeAlias = GuardRefusal if use_default else injected` really does bind a callable.
 
     A raise is not a type position, so only the bare name or attribute it raises is allowed here.
@@ -447,7 +482,7 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     """
     if isinstance(node, ast.ExceptHandler) and node.type is not None:
         yield from _declaration_contexts(node.type)
-    if isinstance(node, ast.TypeAlias):
+    if isinstance(node, ast.TypeAlias) and not _hides_constructor(node.value):
         yield from _declaration_contexts(node.value)
     if isinstance(node, ast.Raise):
         for part in (node.exc, node.cause):
@@ -3078,7 +3113,10 @@ LIMITS_BOUNDARIES = frozenset(
         # `ScanLimits` is the scan-level value itself, and its two fields are where the per-layer
         # defaults are declared. They are constructed only when `ScanLimits` is, which the entries
         # above confine to the boundaries; a shrunk cap reaches every layer by passing the value
-        # those boundaries built rather than by editing this declaration.
+        # those boundaries built rather than by editing this declaration. Like every entry here the
+        # pin is name-shaped rather than node-shaped, so it exempts anything else in that module
+        # whose qualified name is `ScanLimits` as well: a second definition shadowing this one is
+        # caught by review of the declaration, not by the gate.
         ("shell_guards.py", "ScanLimits"),
     }
 )
@@ -4640,10 +4678,17 @@ def _uses_guard_protocol(tree: ast.AST) -> bool:
     anywhere, in any position, resolvable or not, is therefore enough, together with a definition of
     a verdict-producing function.
 
-    Over-approximating here is safe because the strict gates decide inside whatever it sweeps in. A
-    module swept in by an incidental mention must pass shape validation, coverage, reachability and
-    the closure partition, which a non-participant passes trivially, since none of those rules
-    asserts anything about a module that constructs no refusal.
+    A mention includes the name as *text*, since `getattr(sg, "GuardRefusal")(...)` is the same
+    construction one obfuscation deeper and spells no `Name` or `Attribute` node at all. Matching a
+    whole string literal against the name keeps that cheap: a docstring or message mentioning the
+    protocol in prose is not equal to a bare protocol name, so only a string that could be handed to
+    an attribute lookup matches.
+
+    Over-approximating here is safe in the direction it errs. It decides only which modules the
+    strict gates run over, and a module swept in by an incidental mention then has to satisfy those
+    gates: shape validation and reachability have nothing to say about a module that constructs no
+    refusal, while coverage and the limits rules can require candidate-owned allowlist entries, as
+    the protocol-defining module's `GUARDED_MODULES` and `LIMITS_BOUNDARIES` entries record.
 
     Args:
         tree: Parsed module.
@@ -4655,6 +4700,8 @@ def _uses_guard_protocol(tree: ast.AST) -> bool:
         if isinstance(node, ast.Name) and node.id in GUARD_PROTOCOL_NAMES:
             return True
         if isinstance(node, ast.Attribute) and node.attr in GUARD_PROTOCOL_NAMES:
+            return True
+        if isinstance(node, ast.Constant) and node.value in GUARD_PROTOCOL_NAMES:
             return True
         if isinstance(node, ast.Import | ast.ImportFrom) and any(
             alias.name.rsplit(".", 1)[-1] in GUARD_PROTOCOL_NAMES for alias in node.names

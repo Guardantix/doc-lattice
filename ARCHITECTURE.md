@@ -864,7 +864,9 @@ constructor. The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
 base revision's hand-maintained list. Discovery over-approximates: a module belongs to the guarded
 surface when it *mentions* a refusal, transport or result constructor anywhere, in any position,
-resolvable or not, or imports one, or defines a verdict-producing function. A malformed origin
+resolvable or not, or imports one, or defines a verdict-producing function. A whole string literal
+equal to one of those names is a mention too, because `getattr(sg, "GuardRefusal")(...)` is the same
+construction one obfuscation deeper and spells no name node at all. A malformed origin
 hidden behind an indirect call therefore still brings its module into shape validation. A candidate
 can add a guarded module, classify its origins and add it to its own allowlist without being
 rejected as stale by an older base checker. The candidate-owned coverage rule still compares that
@@ -1219,10 +1221,11 @@ which modules the other three run over, so while it recognized participation by 
 deny-by-default gate sat behind an accept-by-default gate: a module whose only construction was
 spelled through a form no rule can follow was never discovered, and the constructor-reference rule
 that rejects exactly that spelling never ran over it. Discovery now over-approximates by mention and
-by import instead, and the strict gates decide inside whatever it sweeps in. That is safe in the
-direction over-approximation errs: a module swept in by an incidental mention has to pass shape
-validation, coverage, reachability and the closure partition, none of which asserts anything about a
-module that constructs no refusal.
+by import instead, and the strict gates decide inside whatever it sweeps in. A module swept in by an
+incidental mention is not thereby exempt: it must then satisfy those gates, and that can require
+candidate-owned allowlist entries rather than nothing at all. Shape validation and reachability have
+nothing to say about a module that constructs no refusal, but coverage and the limits rules are why
+the protocol-defining module carries a `GUARDED_MODULES` entry and a `LIMITS_BOUNDARIES` entry today.
 
 The relevance floor carries the same polarity one level down. A boundary-evidence predicate must
 read a leaf attribute of the first non-empty layer `guard_condition_reads` derives for its origin,

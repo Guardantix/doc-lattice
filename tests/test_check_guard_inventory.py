@@ -509,6 +509,17 @@ def test_a_type_statement_naming_the_refusal_constructor_is_followable() -> None
     )
 
 
+def test_a_container_held_constructor_in_a_type_statement_is_rejected() -> None:
+    # The exemption covers a chain of type references, not everything a `type` statement can spell.
+    # A container subscripted for its element hides the constructor inside a type position exactly
+    # as it does outside one, and `X.__value__` hands the element back.
+    source = 'type Verdict = {"g": GuardRefusal}["g"]\n'
+
+    violations = checker.find_shape_violations(source, "shell_guards.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
 def test_a_type_alias_annotated_conditional_binding_is_still_rejected() -> None:
     # `TypeAlias` is an unenforced annotation, so this binding really does hold a callable and the
     # `type` statement's exemption must not extend to it.
@@ -3864,6 +3875,20 @@ def test_an_attribute_qualified_mention_marks_a_module_as_guarded() -> None:
         "def _guard(value):\n"
         "    if value:\n"
         '        raise ValueError(shell_guards.GuardRefusal("taint.demo.hidden", "nope"))\n'
+    )
+
+    assert checker._source_uses_guard_protocol(source)
+
+
+def test_a_getattr_spelled_constructor_marks_a_module_as_guarded() -> None:
+    # One obfuscation past the container factory: the name reaches `getattr` as text, so no `Name`
+    # or `Attribute` node spells it. Over-approximation reads the string too, and the shape gate
+    # then rejects the call it cannot follow.
+    source = (
+        "from doc_lattice.github_ci import shell_guards as sg\n"
+        "def _guard(value):\n"
+        "    if value:\n"
+        '        raise ValueError(getattr(sg, "GuardRefusal")("taint.demo.hidden", "nope"))\n'
     )
 
     assert checker._source_uses_guard_protocol(source)
