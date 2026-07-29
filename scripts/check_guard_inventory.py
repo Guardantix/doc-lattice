@@ -304,6 +304,8 @@ class _DerivationCache:
     definitions: dict[int, dict[str, tuple[_Function, ...]]] = field(default_factory=dict)
     calls: dict[int, dict[str, tuple[tuple[ast.stmt, ast.Call], ...]]] = field(default_factory=dict)
     reachability: dict[tuple[int, int], tuple[str, ...]] = field(default_factory=dict)
+    reads: dict[int, frozenset[str]] = field(default_factory=dict)
+    value_reads: dict[int, frozenset[str]] = field(default_factory=dict)
     module: ast.Module | None = None
 
 
@@ -861,6 +863,24 @@ def _statement_reads(statement: ast.stmt) -> frozenset[str]:
     )
 
 
+def _cached_statement_reads(statement: ast.stmt, cache: _DerivationCache) -> frozenset[str]:
+    """Return the statement's loaded spellings, walking the statement at most once per parse."""
+    memo = cache.reads.get(id(statement))
+    if memo is None:
+        memo = _statement_reads(statement)
+        cache.reads[id(statement)] = memo
+    return memo
+
+
+def _cached_statement_value_reads(statement: ast.stmt, cache: _DerivationCache) -> frozenset[str]:
+    """Return the statement's whole-value reads, walking the statement at most once per parse."""
+    memo = cache.value_reads.get(id(statement))
+    if memo is None:
+        memo = _statement_value_reads(statement)
+        cache.value_reads[id(statement)] = memo
+    return memo
+
+
 def _mutated_spellings(statement: ast.stmt) -> set[str]:
     """Return the receivers this statement mutates in place, ignoring any nested statement's.
 
@@ -1295,8 +1315,8 @@ def _select_writer_statements(
             selected[id(statement)] = statement
             # What this writer reads becomes part of the dataflow, so the statements feeding *it*
             # are selected on the next pass. The scope bounds the fixpoint.
-            read |= _statement_reads(statement)
-            values |= _statement_value_reads(statement)
+            read |= _cached_statement_reads(statement, cache)
+            values |= _cached_statement_value_reads(statement, cache)
             grew = True
     return tuple(
         sorted(selected.values(), key=lambda statement: (statement.lineno, statement.col_offset))
@@ -1435,8 +1455,8 @@ def _reachability_inputs(
     read: set[str] = set()
     values: set[str] = set()
     for statement in controls:
-        read |= _statement_reads(statement)
-        values |= _statement_value_reads(statement)
+        read |= _cached_statement_reads(statement, cache)
+        values |= _cached_statement_value_reads(statement, cache)
     writers = _writer_statements(origin, scope, read, values, cache)
     return controls, writers, read
 
@@ -1559,7 +1579,7 @@ def _raising_operation_shapes(
     body = _guarded_body_statements(origin, guarded)
     if not body:
         return ()
-    read, values = _statement_dataflow(body)
+    read, values = _statement_dataflow(body, cache)
     return (
         *(_cached_shape(statement, cache) for statement in body),
         *_writer_closure(origin, scope, read, values, cache),
@@ -1592,13 +1612,15 @@ def _guarded_body_statements(
     )
 
 
-def _statement_dataflow(statements: tuple[ast.stmt, ...]) -> tuple[set[str], set[str]]:
+def _statement_dataflow(
+    statements: tuple[ast.stmt, ...], cache: _DerivationCache
+) -> tuple[set[str], set[str]]:
     """Return the spellings these statements read, and the subset they read as whole values."""
     read: set[str] = set()
     values: set[str] = set()
     for statement in statements:
-        read |= _statement_reads(statement)
-        values |= _statement_value_reads(statement)
+        read |= _cached_statement_reads(statement, cache)
+        values |= _cached_statement_value_reads(statement, cache)
     return read, values
 
 
@@ -1722,7 +1744,7 @@ def _cached_callee_shapes(function: _Function, cache: _DerivationCache) -> tuple
         return memo
     shapes: list[str] = [f"callee {function.name}"]
     for statement in _callee_return_statements(function, cache):
-        read, values = _statement_dataflow((statement,))
+        read, values = _statement_dataflow((statement,), cache)
         shapes.append(_cached_shape(statement, cache))
         shapes.extend(_writer_closure(statement, function, read, values, cache))
         shapes.extend(_reachability_shapes(statement, function, cache))
@@ -1751,7 +1773,7 @@ def _cached_callee_callees(function: _Function, cache: _DerivationCache) -> froz
     free: list[ast.AST] = []
     for statement in _callee_return_statements(function, cache):
         scoped.append(statement)
-        read, values = _statement_dataflow((statement,))
+        read, values = _statement_dataflow((statement,), cache)
         _split_by_scope(
             _writer_statements(statement, function, read, values, cache),
             function,
@@ -1855,7 +1877,7 @@ def _callee_shapes(
     body = _guarded_body_statements(origin, guarded)
     if body:
         scoped.extend(body)
-        raised_read, raised_values = _statement_dataflow(body)
+        raised_read, raised_values = _statement_dataflow(body, cache)
         _split_by_scope(
             _writer_statements(origin, scope, raised_read, raised_values, cache),
             scope,
