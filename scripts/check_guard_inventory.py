@@ -2974,13 +2974,18 @@ budget. Any other bare literal in a guard comparison is a magnitude with no reco
 so it must be named and inventoried instead.
 """
 
-_LITERAL_BENIGN_CALLEES = frozenset({"int", "_read_ansi_c_digits", "_read_ansi_c_prefixed_escape"})
-"""Callees whose direct numeric arguments state a base or a digit width, not a resource budget.
+_LITERAL_BENIGN_CALLEES: dict[str, frozenset[int]] = {
+    "int": frozenset({1}),
+    "_read_ansi_c_digits": frozenset({4}),
+    "_read_ansi_c_prefixed_escape": frozenset({3, 4}),
+}
+"""Positional argument indexes that state a numeric base or digit width, not a resource budget.
 
 `int(text, 16)` names the radix the escape is spelled in, and the ANSI-C escape readers take that
-radix and the digit count the shell grammar fixes. Every other callee is excluded deliberately:
-`max(100, floor)` floors a value at 100 and `range(1000)` bounds an iteration, so a literal handed
-to one of those is a magnitude that must be named and inventoried.
+radix and the digit count the shell grammar fixes. Each index is pinned by a guarded-module call
+site, so `int` is benign only at the base and never at the value it converts: `int(100)` is the
+same cap as `100`. Every other callee is excluded deliberately, because `max(100, floor)` floors a
+value at 100 and `range(1000)` bounds an iteration.
 """
 
 
@@ -3048,8 +3053,19 @@ def _expression_parents(expression: ast.expr) -> dict[int, ast.AST]:
     }
 
 
-def _is_arity_membership(container: ast.expr, parents: dict[int, ast.AST]) -> bool:
-    """Return whether a literal container is the right side of an `in` or `not in` test."""
+def _is_arity_membership(container: ast.Set | ast.Tuple, parents: dict[int, ast.AST]) -> bool:
+    """Return whether a container of literals alone is the right side of an `in` test.
+
+    Args:
+        container: The set or tuple holding the literal being classified.
+        parents: Child-to-parent map over the enclosing binding.
+
+    Returns:
+        Whether the container is an arity or grammar membership test. A container that also holds
+        a runtime value is not one, so `count in {500, budget}` keeps 500 a magnitude.
+    """
+    if not all(_is_numeric_constant_expression(element) for element in container.elts):
+        return False
     compare = parents.get(id(container))
     if not isinstance(compare, ast.Compare):
         return False
@@ -3059,10 +3075,42 @@ def _is_arity_membership(container: ast.expr, parents: dict[int, ast.AST]) -> bo
     )
 
 
-def _is_subscripted_table(mapping: ast.expr, parents: dict[int, ast.AST]) -> bool:
-    """Return whether a literal mapping is read by a subscript spelled on it directly."""
-    subscript = parents.get(id(mapping))
-    return isinstance(subscript, ast.Subscript) and subscript.value is mapping
+def _is_subscripted_table_value(
+    entry: ast.AST, table: ast.Dict, parents: dict[int, ast.AST]
+) -> bool:
+    """Return whether a literal is a value in a mapping a subscript reads directly.
+
+    Args:
+        entry: The literal, or the sign wrapper standing in for it.
+        table: The mapping the literal belongs to.
+        parents: Child-to-parent map over the enclosing binding.
+
+    Returns:
+        Whether the literal is a width the mapping yields. A key is not: `{100: 'x'}[escape]`
+        selects by a magnitude nothing records, so the pinned spelling holds its literals in value
+        position only.
+    """
+    if not any(value is entry for value in table.values):
+        return False
+    subscript = parents.get(id(table))
+    return isinstance(subscript, ast.Subscript) and subscript.value is table
+
+
+def _is_numeric_base_argument(argument: ast.AST, call: ast.Call) -> bool:
+    """Return whether a literal argument states a numeric base or digit width.
+
+    Args:
+        argument: The literal argument, or the sign wrapper standing in for it.
+        call: The call the argument belongs to.
+
+    Returns:
+        Whether the argument sits in one of the positions `_LITERAL_BENIGN_CALLEES` pins for this
+        callee. A star argument makes every position unknowable, so such a call is never benign.
+    """
+    positions = _LITERAL_BENIGN_CALLEES.get(_called_name(call) or "")
+    if positions is None or any(isinstance(item, ast.Starred) for item in call.args):
+        return False
+    return any(index in positions and item is argument for index, item in enumerate(call.args))
 
 
 def _is_displacing_arithmetic(operand: ast.AST, arithmetic: ast.BinOp) -> bool:
@@ -3103,7 +3151,7 @@ def _is_benign_literal_role(literal: ast.expr, parents: dict[int, ast.AST]) -> b
     parent = parents.get(id(child))
     # A sign or a slice bound carries no role of its own, so the role is the one its own parent
     # gives: `basename[:-4]` is a slice position however the negative bound is spelled.
-    while isinstance(parent, ast.UnaryOp | ast.Slice | ast.keyword):
+    while isinstance(parent, ast.UnaryOp | ast.Slice):
         child, parent = parent, parents.get(id(parent))
     if isinstance(parent, ast.BinOp):
         return _is_displacing_arithmetic(child, parent)
@@ -3111,11 +3159,11 @@ def _is_benign_literal_role(literal: ast.expr, parents: dict[int, ast.AST]) -> b
         # A position in a fixed grammar: `range_parts[:2]`, `words[3:]`.
         return child is parent.slice
     if isinstance(parent, ast.Call):
-        return _called_name(parent) in _LITERAL_BENIGN_CALLEES
+        return _is_numeric_base_argument(child, parent)
     if isinstance(parent, ast.Set | ast.Tuple):
         return _is_arity_membership(parent, parents)
     if isinstance(parent, ast.Dict):
-        return _is_subscripted_table(parent, parents)
+        return _is_subscripted_table_value(child, parent, parents)
     return False
 
 

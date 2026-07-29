@@ -365,6 +365,49 @@ def test_an_unrecognized_literal_spelling_defaults_to_a_magnitude() -> None:
     assert any("cap" in violation for violation in violations)
 
 
+def test_a_literal_outside_the_base_argument_position_is_rejected() -> None:
+    # `int` is benign for the radix it is handed, not for the value it converts: a bound spelled
+    # `int(100)` is the same cap as `100`, and a callee-wide exemption certified it.
+    source = (
+        "def _guard(items):\n"
+        "    cap = int(100)\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.converted", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("cap" in violation for violation in violations)
+
+
+def test_a_literal_mapping_key_is_rejected() -> None:
+    source = (
+        "def _guard(items, escape):\n"
+        "    cap = {100: 'x', 200: 'u'}[escape]\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.keyed", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("cap" in violation for violation in violations)
+
+
+def test_a_mixed_membership_container_is_rejected() -> None:
+    # Arity membership is pinned by a container of literals alone. A container that also holds a
+    # runtime value is not an arity test, so the literal in it keeps its magnitude.
+    source = (
+        "def _guard(items, count, budget):\n"
+        "    reached = count in {500, budget}\n"
+        "    if reached:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.mixed", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("reached" in violation for violation in violations)
+
+
 @pytest.mark.parametrize(
     "binding",
     [
@@ -373,6 +416,9 @@ def test_an_unrecognized_literal_spelling_defaults_to_a_magnitude() -> None:
         "value = int(text, 16)",
         "wide = length % 2",
         "step = {'x': 2, 'u': 4}[escape]",
+        "count = text in {2, 3}",
+        "digits = _read_ansi_c_digits(text, index, length, escape, 3)",
+        "width = _read_ansi_c_prefixed_escape(text, index, length, 16, 4)",
     ],
 )
 def test_benign_literal_roles_are_not_magnitudes(binding: str) -> None:
