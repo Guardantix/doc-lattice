@@ -599,6 +599,21 @@ def test_a_mixed_membership_container_is_rejected() -> None:
     assert any("reached" in violation for violation in violations)
 
 
+def test_a_modulo_bound_magnitude_is_rejected() -> None:
+    # The modulo role is pinned to divisor 2 exactly, the only spelling the guarded modules carry.
+    # `count % 500` bounds a value at 499, not a residue, so it stays a magnitude.
+    source = (
+        "def _guard(items, count):\n"
+        "    cap = count % 500\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.modulo", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("cap" in violation for violation in violations)
+
+
 @pytest.mark.parametrize(
     "binding",
     [
@@ -2822,7 +2837,7 @@ def test_a_nested_destructured_alias_is_followed() -> None:
     assert any("constructs default limits" in violation for violation in violations)
 
 
-def test_a_starred_destructuring_binds_no_constructor_alias() -> None:
+def test_a_starred_destructuring_registers_no_alias_and_is_unfollowable() -> None:
     # A starred target collects a list rather than one constructor, so calling it constructs
     # nothing; pairing it positionally with the constructor would report a violation that is not
     # there. The form is still rejected as one the inventory cannot follow, because `First` is a

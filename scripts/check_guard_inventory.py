@@ -363,7 +363,7 @@ def _call_reference_contexts(call: ast.Call) -> Iterator[ast.AST]:
     Args:
         call: The call to read.
 
-    Returns:
+    Yields:
         The nodes of that call's followable contexts.
     """
     if isinstance(call.func, ast.Name | ast.Attribute):
@@ -391,7 +391,7 @@ def _declaration_contexts(declared: ast.expr) -> Iterator[ast.AST]:
     Args:
         declared: The declared type expression.
 
-    Returns:
+    Yields:
         The nodes of that declaration that hide no constructor.
     """
     bound = {
@@ -419,7 +419,7 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     Args:
         node: Any AST node.
 
-    Returns:
+    Yields:
         The nodes of that node's followable declaration contexts.
     """
     if isinstance(node, ast.ExceptHandler) and node.type is not None:
@@ -446,7 +446,7 @@ def _binding_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     Args:
         node: Any AST node.
 
-    Returns:
+    Yields:
         The value-side reference nodes this binding registers.
     """
     if isinstance(node, ast.Assign):
@@ -3338,6 +3338,11 @@ def _is_numeric_base_argument(argument: ast.AST, call: ast.Call) -> bool:
     return any(index in positions and item is argument for index, item in enumerate(call.args))
 
 
+_PARITY_MODULUS = 2
+"""The only modulo divisor pinned as a benign role, matching `shell_scanner.py`'s `% 2`. A wider
+divisor such as `% 500` bounds a magnitude and is not exempted."""
+
+
 def _is_displacing_arithmetic(operand: ast.AST, arithmetic: ast.BinOp) -> bool:
     """Return whether a literal operand moves a position instead of fixing a bound.
 
@@ -3349,8 +3354,13 @@ def _is_displacing_arithmetic(operand: ast.AST, arithmetic: ast.BinOp) -> bool:
         Whether the arithmetic displaces rather than bounds.
     """
     if isinstance(arithmetic.op, ast.Mod):
-        # Parity and wrapping: `... % 2` selects a residue rather than budgeting anything.
-        return operand is arithmetic.right
+        # Parity: `... % 2` selects a residue rather than budgeting anything. Pinned to divisor 2
+        # exactly, the only spelling the guarded modules carry; `n % 500` bounds a magnitude.
+        return (
+            operand is arithmetic.right
+            and isinstance(operand, ast.Constant)
+            and operand.value == _PARITY_MODULUS
+        )
     if not isinstance(arithmetic.op, ast.Add | ast.Sub):
         # Scaling by a literal fixes a bound however the other operand is derived.
         return False
@@ -4499,6 +4509,10 @@ def invariant_predicate_reads(source: str) -> dict[str, frozenset[str]]:
 
 def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
     """Return every invariant row whose boundary predicate inspects nothing its guard does.
+
+    The rule is deny-by-default. The derivation enumerates the layers the gate can follow and
+    holds the predicate to the first non-empty one, so an unreadable predicate or an empty
+    derivation rejects rather than passes.
 
     The row's other assertions live in the test suite, where the boundary script can be executed:
     that it stops short of the guard, that its predicate rejects the evidence an empty script
