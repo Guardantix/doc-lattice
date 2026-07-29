@@ -67,6 +67,11 @@ migration the gate cannot absorb.
 GUARDED_MODULES = (
     "src/doc_lattice/github_ci/shell_taint.py",
     "src/doc_lattice/github_ci/shell_scanner.py",
+    # The module that defines the protocol mentions its own constructor in the verdict alias, so
+    # mention-based discovery sweeps it in and coverage requires it here. It constructs no refusal,
+    # so it contributes no origin record; what it does need is the `ScanLimits` boundary
+    # declaration below, since the limits classes are defined here too.
+    "src/doc_lattice/github_ci/shell_guards.py",
 )
 
 GUARD_MODULE_ROOT = "src/doc_lattice/github_ci"
@@ -102,6 +107,16 @@ REFUSAL_EXCEPTIONS = frozenset(
 GUARD_FREE_VERDICTS = frozenset({"Certified", "MarkerDetected"})
 RESULT_CONSTRUCTOR = "ShellScanResult"
 VERDICT_FUNCTIONS = frozenset({"analyze_marker_taint", "scan_doc_lattice_invocations"})
+
+GUARD_PROTOCOL_NAMES = frozenset({REFUSAL_CONSTRUCTOR, RESULT_CONSTRUCTOR}) | REFUSAL_EXCEPTIONS
+"""The canonical names whose mention makes a module part of the guarded surface.
+
+These are the constructor families `_shape_constructors` resolves and the shape gate tracks, named
+canonically. Module discovery reads them as bare spellings rather than resolving per-module aliases:
+an alias is introduced either by an import statement, which names the canonical target, or by a
+binding whose value mentions the canonical name, so a mention scan sees both without following
+either. The guard-free verdicts are deliberately absent, since a module producing only `Certified`
+or `MarkerDetected` transports no guard identity."""
 
 DECLARED_TRANSPORTS = frozenset(
     {
@@ -410,6 +425,14 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     An exception type, an annotation and a match pattern's class name a constructor as a type
     rather than binding it to a name that could later be called.
 
+    A `type` statement is a type position too, and the only one that is a statement rather than an
+    annotation. The interpreter evaluates its value lazily inside its own scope and binds a
+    `TypeAliasType`, which is not callable, so a constructor named there is reachable as a
+    constructor only through the same dunder indirection an ordinary registered alias already
+    permits (`Alias.__call__(...)` reads no tracked spelling either). A `TypeAlias`-annotated
+    assignment is deliberately *not* a type position: the annotation is unenforced, so
+    `factory: TypeAlias = GuardRefusal if use_default else injected` really does bind a callable.
+
     A raise is not a type position, so only the bare name or attribute it raises is allowed here.
     Everything else inside `exc` and `cause` is left to the ordinary per-node rules, which is what
     makes an unresolvable callee unfollowable in a raise exactly as it is in an expression:
@@ -424,6 +447,8 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     """
     if isinstance(node, ast.ExceptHandler) and node.type is not None:
         yield from _declaration_contexts(node.type)
+    if isinstance(node, ast.TypeAlias):
+        yield from _declaration_contexts(node.value)
     if isinstance(node, ast.Raise):
         for part in (node.exc, node.cause):
             if isinstance(part, ast.Name | ast.Attribute):
@@ -3050,6 +3075,11 @@ LIMITS_BOUNDARIES = frozenset(
         ("shell_scanner.py", "scan_doc_lattice_invocations"),
         # The budget derives its counters from the limits it owns.
         ("shell_scanner.py", "_ScanBudget"),
+        # `ScanLimits` is the scan-level value itself, and its two fields are where the per-layer
+        # defaults are declared. They are constructed only when `ScanLimits` is, which the entries
+        # above confine to the boundaries; a shrunk cap reaches every layer by passing the value
+        # those boundaries built rather than by editing this declaration.
+        ("shell_guards.py", "ScanLimits"),
     }
 )
 """The exact sites allowed to construct default limits. Descendant scopes are not boundaries;
@@ -4600,26 +4630,42 @@ def repository_threshold_violations(root: Path) -> tuple[str, ...]:
 
 
 def _uses_guard_protocol(tree: ast.AST) -> bool:
-    """Return whether a module constructs or transports refusal/verdict values.
+    """Return whether a module mentions the refusal or verdict protocol at all.
 
-    Discovery cannot depend only on recognizing a canonical refusal construction: malformed
-    payloads are exactly what the shape gate must see. Calls to refusal carriers and result
-    constructors, including their aliases and rebindings, and definitions of verdict-producing
-    functions therefore mark a module as part of the guarded surface too.
+    Discovery over-approximates. Recognizing participation by *call* made discovery the last
+    accept-by-default recognizer in the pipeline, and every deny-by-default gate sits behind it: a
+    module whose only construction is spelled through a form no rule can follow, such as
+    `FACTORIES = {"guard": GuardRefusal}` called as `FACTORIES["guard"](...)`, was never discovered,
+    so the shape gate that rejects exactly that binding never ran over it. A protocol name mentioned
+    anywhere, in any position, resolvable or not, is therefore enough, together with a definition of
+    a verdict-producing function.
+
+    Over-approximating here is safe because the strict gates decide inside whatever it sweeps in. A
+    module swept in by an incidental mention must pass shape validation, coverage, reachability and
+    the closure partition, which a non-participant passes trivially, since none of those rules
+    asserts anything about a module that constructs no refusal.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        Whether the module belongs to the guarded surface.
     """
-    constructors = _shape_constructors(tree)
-    carriers = constructors.exceptions | constructors.results
-    return bool(
-        _guard_refusal_calls(tree, constructors.refusals)
-        or any(
-            isinstance(node, ast.Call) and _called_name(node) in carriers for node in ast.walk(tree)
-        )
-        or any(
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in GUARD_PROTOCOL_NAMES:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in GUARD_PROTOCOL_NAMES:
+            return True
+        if isinstance(node, ast.Import | ast.ImportFrom) and any(
+            alias.name.rsplit(".", 1)[-1] in GUARD_PROTOCOL_NAMES for alias in node.names
+        ):
+            return True
+        if (
             isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
             and node.name in VERDICT_FUNCTIONS
-            for node in ast.walk(tree)
-        )
-    )
+        ):
+            return True
+    return False
 
 
 def _repository_guard_modules(root: Path) -> tuple[str, ...]:
@@ -4627,9 +4673,9 @@ def _repository_guard_modules(root: Path) -> tuple[str, ...]:
 
     This derivation is used by the base-owned closure and comparison. Reading the base checker's
     `GUARDED_MODULES` there would make a candidate module invisible even after the candidate adds it
-    to its own tuple, because the protected base copy necessarily predates that edit. Discovering
-    carriers and verdict boundaries as well as canonical origins ensures malformed refusal shapes
-    reach the candidate-owned shape gate before they can be added to the allowlist.
+    to its own tuple, because the protected base copy necessarily predates that edit. Discovery
+    over-approximates by mention, so a malformed refusal shape reaches the candidate-owned shape
+    gate before it can be added to the allowlist however it is spelled.
     """
     modules: list[str] = []
     for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
@@ -4640,17 +4686,20 @@ def _repository_guard_modules(root: Path) -> tuple[str, ...]:
 
 @cache
 def _source_uses_guard_protocol(source: str) -> bool:
-    """Return whether this module source participates in the guard protocol.
+    """Return whether this module source mentions the guard protocol.
 
     Discovery re-reads every module below the guard package on each repository-level rule, and the
     answer is a pure function of the source. Keying on the text rather than the path is what keeps
     a candidate tree written during a test from ever reading a stale answer.
 
+    The answer over-approximates, as `_uses_guard_protocol` describes: a mention sweeps the module
+    in and the strict gates decide inside it.
+
     Args:
         source: Module source text, parsed but never executed.
 
     Returns:
-        Whether the module constructs or transports refusal or verdict values.
+        Whether the module belongs to the guarded surface.
     """
     return _uses_guard_protocol(ast.parse(source))
 

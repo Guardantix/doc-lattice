@@ -862,14 +862,18 @@ of the module holding it, while the defaulted form silently minted production-sc
 public boundary. A starred target collects a list rather than one of the values and names no
 constructor. The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
-base revision's hand-maintained list. Discovery recognizes canonical refusal origins, refusal
-carriers and result constructors (including aliases and rebindings), and verdict-producing
-functions. A malformed origin hidden behind an indirect call therefore still brings its module into
-shape validation. A candidate can add a guarded module, classify its origins and add it to its own
-allowlist without being rejected as stale by an older base checker. The candidate-owned coverage
-rule still compares that discovered set with `GUARDED_MODULES`, because limits and threshold rules
-use that allowlist. Shape validation reads the union of the discovered surface and the allowlist
-directly, and recursive discovery treats a module one directory down exactly like one beside it.
+base revision's hand-maintained list. Discovery over-approximates: a module belongs to the guarded
+surface when it *mentions* a refusal, transport or result constructor anywhere, in any position,
+resolvable or not, or imports one, or defines a verdict-producing function. A malformed origin
+hidden behind an indirect call therefore still brings its module into shape validation. A candidate
+can add a guarded module, classify its origins and add it to its own allowlist without being
+rejected as stale by an older base checker. The candidate-owned coverage rule still compares that
+discovered set with `GUARDED_MODULES`, because limits and threshold rules use that allowlist. Shape
+validation reads the union of the discovered surface and the allowlist directly, and recursive
+discovery treats a module one directory down exactly like one beside it. Over-approximating sweeps
+in the module that defines the protocol, which names its own refusal constructor in the verdict
+alias: it sits in the allowlist, contributes no origin record, and declares its `ScanLimits` field
+defaults as a boundary, since the layer defaults are declared where the limits classes are.
 
 One immutable `ScanLimits` is constructed at the public boundary and threaded through the scanner,
 content construction and the taint pass. `_ScanBudget` owns it and derives its counters from it, so
@@ -1206,9 +1210,19 @@ therefore a loud false positive: the gate refuses to classify it and spells the 
 plainly in its report, never a silent bypass that certifies as though the gate had never seen it.
 Extending any of the three to cover another benign grammar is done by pinning the new spelling to
 its in-tree position, the way displacement, subscript and slice reads, positional-pinned integer
-and ANSI-reader base arguments, all-literal arity membership, modulo parity and dict-value escape
-tables are each pinned today, never by loosening a shape match to admit a family of spellings at
-once.
+and ANSI-reader base arguments, all-literal arity membership, modulo parity, dict-value escape
+tables and a `type` statement's lazily evaluated value are each pinned today, never by loosening a
+shape match to admit a family of spellings at once.
+
+Module discovery is the fourth rule under that polarity and the last one to reach it. It decides
+which modules the other three run over, so while it recognized participation by *call* every
+deny-by-default gate sat behind an accept-by-default gate: a module whose only construction was
+spelled through a form no rule can follow was never discovered, and the constructor-reference rule
+that rejects exactly that spelling never ran over it. Discovery now over-approximates by mention and
+by import instead, and the strict gates decide inside whatever it sweeps in. That is safe in the
+direction over-approximation errs: a module swept in by an incidental mention has to pass shape
+validation, coverage, reachability and the closure partition, none of which asserts anything about a
+module that constructs no refusal.
 
 The relevance floor carries the same polarity one level down. A boundary-evidence predicate must
 read a leaf attribute of the first non-empty layer `guard_condition_reads` derives for its origin,

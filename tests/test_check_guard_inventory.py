@@ -498,6 +498,31 @@ def test_declared_constructor_contexts_are_accepted(source: str) -> None:
     )
 
 
+def test_a_type_statement_naming_the_refusal_constructor_is_followable() -> None:
+    # A `type` statement is the one type position that is a statement. The interpreter binds a
+    # `TypeAliasType`, which is not callable, so the union hides no constructor.
+    source = "type Verdict = Certified | MarkerDetected | GuardRefusal\n"
+
+    assert not any(
+        "cannot follow" in violation
+        for violation in checker.find_shape_violations(source, "shell_guards.py")
+    )
+
+
+def test_a_type_alias_annotated_conditional_binding_is_still_rejected() -> None:
+    # `TypeAlias` is an unenforced annotation, so this binding really does hold a callable and the
+    # `type` statement's exemption must not extend to it.
+    source = (
+        "def _helper(use_default, injected):\n"
+        "    factory: TypeAlias = GuardRefusal if use_default else injected\n"
+        '    return factory("taint.demo.hidden", "nope")\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
 def test_an_unanalyzable_refusal_reference_is_rejected() -> None:
     source = (
         "def _helper(use_default, injected):\n"
@@ -3790,6 +3815,77 @@ def test_base_owned_closure_discovers_a_classified_guard_in_a_new_candidate_modu
 
 def test_the_shipped_tree_inventories_every_refusing_module() -> None:
     assert checker.repository_coverage_violations(_ROOT) == ()
+
+
+_HIDDEN_CONSTRUCTOR_SOURCE = (
+    "from doc_lattice.github_ci.shell_guards import GuardRefusal\n"
+    'FACTORIES = {"guard": GuardRefusal}\n'
+    "def _guard(value):\n"
+    "    if value:\n"
+    '        raise ValueError(FACTORIES["guard"]("taint.demo.hidden", "nope"))\n'
+)
+"""A module whose only refusal construction is spelled through a container the gate cannot follow.
+
+Recognizing participation by call left this source undiscovered, so the shape gate that rejects the
+container binding never ran over it.
+"""
+
+
+def test_a_container_held_constructor_marks_a_module_as_guarded() -> None:
+    assert checker._source_uses_guard_protocol(_HIDDEN_CONSTRUCTOR_SOURCE)
+
+
+def test_an_evasively_spelled_module_reaches_the_shape_gate(tmp_path: Path) -> None:
+    # Discovery over-approximates so the strict gates decide: the module is swept in by the mention
+    # of the constructor, and its unfollowable container binding is then rejected.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "hidden_factory.py").write_text(
+        _HIDDEN_CONSTRUCTOR_SOURCE, encoding="utf-8"
+    )
+
+    violations = checker.repository_shape_violations(root)
+
+    assert any(
+        violation.startswith("hidden_factory.py:")
+        and _UNFOLLOWABLE.format(name="GuardRefusal") in violation
+        for violation in violations
+    )
+
+
+def test_an_import_only_mention_marks_a_module_as_guarded() -> None:
+    source = "from doc_lattice.github_ci.shell_guards import GuardRefusal as GR\n"
+
+    assert checker._source_uses_guard_protocol(source)
+
+
+def test_an_attribute_qualified_mention_marks_a_module_as_guarded() -> None:
+    source = (
+        "from doc_lattice.github_ci import shell_guards\n"
+        "def _guard(value):\n"
+        "    if value:\n"
+        '        raise ValueError(shell_guards.GuardRefusal("taint.demo.hidden", "nope"))\n'
+    )
+
+    assert checker._source_uses_guard_protocol(source)
+
+
+def test_the_protocol_defining_module_is_part_of_the_discovered_surface() -> None:
+    # Discovery over-approximates by mention, and the module defining the protocol names its own
+    # refusal constructor in the verdict alias. It constructs no refusal, so every discovered-module
+    # rule passes over it with nothing to say; what this pins is that narrowing discovery back to a
+    # call would drop the module the protocol itself lives in.
+    assert "src/doc_lattice/github_ci/shell_guards.py" in checker._repository_guard_modules(_ROOT)
+    assert not [
+        record
+        for record in checker.repository_origin_records(_ROOT)
+        if record.path == "shell_guards.py"
+    ]
+
+
+def test_a_module_without_protocol_mentions_is_not_guarded() -> None:
+    source = "def helper(x):\n    return x + 1\n"
+
+    assert not checker._source_uses_guard_protocol(source)
 
 
 def test_the_base_owned_run_reads_a_candidate_snapshot_under_a_newer_schema(

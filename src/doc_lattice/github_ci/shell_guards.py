@@ -12,7 +12,6 @@ See AD-20 in ARCHITECTURE.md for the durable decision this module implements.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,4 +87,10 @@ class MarkerDetected:
     """
 
 
-ScanVerdict: TypeAlias = Certified | MarkerDetected | GuardRefusal  # noqa: UP040
+# Spelled as a `type` statement rather than the `TypeAlias` assignment used elsewhere in this
+# package. The guard inventory's constructor-reference rule rejects a tracked constructor named
+# anywhere it cannot follow, and the value of a `TypeAlias` assignment is such a position: the
+# annotation is unenforced, so the same spelling could hold a callable. A `type` statement binds a
+# lazily evaluated `TypeAliasType` that is not callable, which is why the rule reads it as the type
+# declaration it is. See AD-20.
+type ScanVerdict = Certified | MarkerDetected | GuardRefusal
