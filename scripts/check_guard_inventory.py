@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 SCHEMA_VERSION = 12
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
@@ -308,6 +308,220 @@ def _constructor_names(tree: ast.AST, constructors: frozenset[str]) -> frozenset
 def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
     """Return every local name this module binds to the refusal constructor."""
     return _constructor_names(tree, frozenset({REFUSAL_CONSTRUCTOR}))
+
+
+_CLASSINFO_PREDICATES = frozenset({"isinstance", "issubclass"})
+"""Builtins whose second argument names a class rather than constructing one."""
+
+_CLASSINFO_ARITY = 2
+"""The argument count those predicates are spelled with, so the class argument is the second."""
+
+
+def _bound_value_references(target: ast.expr, value: ast.expr) -> list[ast.expr]:
+    """Return the value-side references one binding form registers as constructor aliases.
+
+    `_paired_bindings` owns which forms bind a spelling at all. This mirrors the pairing it
+    performs to recover the value nodes it read, so a destructuring statement registers only the
+    elements it paired and not everything else the right-hand side happens to hold. Only a bare
+    name target registers an alias, exactly as `_constructor_names` records one, so a binding into
+    a subscript or an attribute is not a followable context either.
+
+    Args:
+        target: The binding's target expression.
+        value: The expression bound to it.
+
+    Returns:
+        The value-side reference nodes that register an alias, empty when none do.
+    """
+    if not _paired_bindings(target, value):
+        return []
+    match target, value:
+        case (ast.Tuple() | ast.List(), ast.Tuple() | ast.List()):
+            return [
+                node
+                for element, bound in zip(target.elts, value.elts, strict=True)
+                for node in _bound_value_references(element, bound)
+            ]
+        case (ast.Name(), _):
+            return [value]
+        case _:
+            return []
+
+
+def _call_reference_contexts(call: ast.Call) -> Iterator[ast.AST]:
+    """Yield every node one call names a constructor in without hiding it.
+
+    A callee is the direct construction every constructor rule already reads, but only while
+    `_called_name` resolves it: a bare name or an attribute-qualified one. Any other callee
+    expression hides the constructor in call position exactly as a binding would,
+    so `(TaintLimits if use_default else injected)()` constructs production limits that no
+    construction rule reports, and its references are left for this module's rule to reject.
+
+    A `field` default factory is the indirect construction the limits rule reads, and the class
+    argument of a membership predicate names a type without constructing anything.
+
+    Args:
+        call: The call to read.
+
+    Returns:
+        The nodes of that call's followable contexts.
+    """
+    if isinstance(call.func, ast.Name | ast.Attribute):
+        yield from ast.walk(call.func)
+    if _called_name(call) == "field":
+        for keyword in call.keywords:
+            if keyword.arg == "default_factory":
+                yield keyword.value
+    if (
+        isinstance(call.func, ast.Name)
+        and call.func.id in _CLASSINFO_PREDICATES
+        and len(call.args) == _CLASSINFO_ARITY
+    ):
+        yield from ast.walk(call.args[1])
+
+
+def _declaration_contexts(declared: ast.expr) -> Iterator[ast.AST]:
+    """Yield every node of one type declaration except the references an inline assignment binds.
+
+    A declaration names a constructor as a type, which binds nothing a later call can reach. An
+    assignment expression inside one does bind it, and the alias follower never reads a walrus, so
+    `def _helper(x: (factory := TaintLimits) = None)` would register `factory` where no rule looks
+    and `factory()` would then mint production limits invisibly.
+
+    Args:
+        declared: The declared type expression.
+
+    Returns:
+        The nodes of that declaration that hide no constructor.
+    """
+    bound = {
+        id(inner)
+        for node in ast.walk(declared)
+        if isinstance(node, ast.NamedExpr)
+        for part in (node.target, node.value)
+        for inner in ast.walk(part)
+    }
+    yield from (node for node in ast.walk(declared) if id(node) not in bound)
+
+
+def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
+    """Yield every node one statement or declaration names a constructor in without hiding it.
+
+    An exception type, an annotation and a match pattern's class name a constructor as a type
+    rather than binding it to a name that could later be called.
+
+    A raise is not a type position, so only the bare name or attribute it raises is allowed here.
+    Everything else inside `exc` and `cause` is left to the ordinary per-node rules, which is what
+    makes an unresolvable callee unfollowable in a raise exactly as it is in an expression:
+    `raise (GuardRefusal if use_default else injected)("taint.demo.hidden", "nope")` constructs the
+    refusal through a spelling no rule reads, and walking the raise subtree certified it.
+
+    Args:
+        node: Any AST node.
+
+    Returns:
+        The nodes of that node's followable declaration contexts.
+    """
+    if isinstance(node, ast.ExceptHandler) and node.type is not None:
+        yield from _declaration_contexts(node.type)
+    if isinstance(node, ast.Raise):
+        for part in (node.exc, node.cause):
+            if isinstance(part, ast.Name | ast.Attribute):
+                yield part
+    if isinstance(node, ast.MatchClass):
+        yield from _declaration_contexts(node.cls)
+    for attribute in ("annotation", "returns"):
+        declared = getattr(node, attribute, None)
+        if isinstance(declared, ast.expr):
+            yield from _declaration_contexts(declared)
+
+
+def _binding_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
+    """Yield every node one binding registers as a constructor alias.
+
+    These are the references the alias follower already reads, so they are followed rather than
+    rejected: `_constructor_names` grows the bound name and every constructor rule then applies to
+    it. A binding form it does not read registers nothing and yields nothing.
+
+    Args:
+        node: Any AST node.
+
+    Returns:
+        The value-side reference nodes this binding registers.
+    """
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            yield from _bound_value_references(target, node.value)
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        yield from _bound_value_references(node.target, node.value)
+    for _argument, default in _defaulted_arguments(node):
+        if _referenced_name(default) is not None:
+            yield default
+
+
+def _followable_reference_contexts(tree: ast.AST) -> set[int]:
+    """Return the node identities a constructor reference may occupy without hiding a constructor.
+
+    Every context is pinned by a spelling the guarded modules already carry, and each is enumerated
+    by one of `_call_reference_contexts`, `_declared_reference_contexts` and
+    `_binding_reference_contexts`.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        The `id` of every node inside a followable context.
+    """
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            allowed.update(id(inner) for inner in _call_reference_contexts(node))
+        allowed.update(id(inner) for inner in _declared_reference_contexts(node))
+        allowed.update(id(inner) for inner in _binding_reference_contexts(node))
+    return allowed
+
+
+def _unanalyzable_constructor_references(
+    tree: ast.Module, constructors: frozenset[str], path: str
+) -> tuple[str, ...]:
+    """Return a violation for every tracked constructor reference the inventory cannot follow.
+
+    The rule is deny-by-default. `_followable_reference_contexts` enumerates the contexts a
+    constructor may be named in, and a reference outside them is rejected rather than ignored, so a
+    spelling nobody enumerated fails loudly instead of hiding a constructor. Teaching the alias
+    follower one new spelling at a time let every other one through:
+    `factory = TaintLimits if use_default else injected` binds the constructor where no rule looks,
+    and `factory()` then mints production limits invisibly.
+
+    Constructors are tracked by the transitively aliased name set, so a reference to an already
+    registered alias in an unfollowable position is caught the same way the canonical name is. Only
+    a load reads the constructor; the store side of a binding is the registration itself.
+
+    A rejection is resolved by binding the constructor plainly, calling it directly, or spelling it
+    in one of the enumerated contexts, never by widening those contexts for a spelling being
+    introduced.
+
+    Args:
+        tree: Parsed module.
+        constructors: Constructor spellings to track, including the aliases already followed.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when every reference sits in a followable context.
+    """
+    allowed = _followable_reference_contexts(tree)
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name | ast.Attribute) or not isinstance(node.ctx, ast.Load):
+            continue
+        name = _referenced_name(node)
+        if name not in constructors or id(node) in allowed:
+            continue
+        violations.append(
+            f"{path}:{node.lineno}: {name} is referenced in a form the inventory cannot follow; "
+            f"bind it plainly, call it directly, or use a declared context"
+        )
+    return tuple(violations)
 
 
 _WriterDerivation = tuple[tuple[ast.stmt, ...], tuple[str, ...], frozenset[str], frozenset[str]]
@@ -2790,6 +3004,9 @@ def _verdict_return_violations(
 def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every non-canonical refusal shape in this module source.
 
+    A refusal, transport or result constructor named in a form the alias follower cannot read is
+    reported here too: see `_unanalyzable_constructor_references`.
+
     Args:
         source: Module source text, parsed but never executed.
         path: Module file name, used to resolve declared transports and in messages.
@@ -2814,6 +3031,11 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
             qualnames,
             path,
             constructors,
+        ),
+        *_unanalyzable_constructor_references(
+            tree,
+            constructors.refusals | constructors.exceptions | constructors.results,
+            path,
         ),
     )
 
@@ -2905,7 +3127,8 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every limits construction or optional limits parameter away from a boundary.
 
     Direct calls, constructor import aliases and rebindings, and dataclass `default_factory`
-    references all construct limits for this purpose.
+    references all construct limits for this purpose. A limits constructor named in a form the
+    alias follower cannot read is reported here too: see `_unanalyzable_constructor_references`.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -2957,6 +3180,8 @@ def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
                     f"{path}:{qualname} must require limits; an optional limits parameter lets a "
                     f"caller silently restore production caps"
                 )
+
+    violations.extend(_unanalyzable_constructor_references(tree, limit_names, path))
 
     return tuple(violations)
 

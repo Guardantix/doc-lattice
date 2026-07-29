@@ -319,6 +319,172 @@ def test_declared_limits_boundaries_are_accepted() -> None:
     assert checker.find_limits_violations(source, "shell_taint.py") == ()
 
 
+_UNFOLLOWABLE = "{name} is referenced in a form the inventory cannot follow"
+"""The reference rule's own message, so a test cannot pass on another rule that names the same
+constructor in its advice."""
+
+
+def test_a_conditional_constructor_alias_is_rejected() -> None:
+    source = (
+        "def _helper(expression, use_default, injected):\n"
+        "    factory = TaintLimits if use_default else injected\n"
+        "    return _evaluate(expression, factory())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("TaintLimits" in violation for violation in violations)
+
+
+def test_a_boolop_constructor_alias_is_rejected() -> None:
+    source = (
+        "def _helper(expression, injected):\n"
+        "    factory = injected or TaintLimits\n"
+        "    return _evaluate(expression, factory())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("TaintLimits" in violation for violation in violations)
+
+
+def test_a_container_held_constructor_is_rejected() -> None:
+    source = "def _helper(expression):\n    factories = [TaintLimits]\n    return factories\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("TaintLimits" in violation for violation in violations)
+
+
+def test_a_conditional_callee_construction_is_rejected() -> None:
+    source = (
+        "def _helper(expression, use_default, injected):\n"
+        "    return _evaluate(expression, (TaintLimits if use_default else injected)())\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("TaintLimits" in violation for violation in violations)
+
+
+def test_a_plain_direct_construction_is_reported_once_by_the_construction_rule() -> None:
+    # A callee the inventory resolves is followed, not rejected: the construction rule owns it and
+    # the reference rule must stay silent so one call is not reported twice.
+    source = "def _helper(expression):\n    return _evaluate(expression, TaintLimits())\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert violations == (
+        "shell_taint.py:_helper constructs default limits; accept the scan's limits instead so a "
+        "shrunk cap reaches this guard",
+    )
+
+
+def test_a_conditional_callee_raise_is_rejected() -> None:
+    source = (
+        "def _helper(use_default, injected):\n"
+        "    raise (GuardRefusal if use_default else injected)"
+        '("taint.demo.hidden", "nope")\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
+def test_a_conditional_callee_raise_is_rejected_for_limits() -> None:
+    source = (
+        "def _helper(use_default, injected):\n"
+        "    raise (TaintLimits if use_default else injected)()\n"
+    )
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="TaintLimits") in violation for violation in violations)
+
+
+def test_a_conditional_callee_raise_cause_is_rejected() -> None:
+    # The carrier rule already reports the `error` transport and names `GuardRefusal` in its advice,
+    # so this asserts the reference message itself rather than the constructor name alone.
+    source = (
+        "def _helper(error, use_default, injected):\n"
+        "    raise _TaintLimitExceeded(error) from "
+        '(injected if use_default else GuardRefusal)("taint.demo.hidden", "nope")\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def _helper(e):\n    raise _TaintLimitExceeded(GuardRefusal("taint.demo.a", "nope"))\n',
+        "def _helper(refusal):\n    raise _TaintLimitExceeded(refusal)\n",
+        "def _helper(x, err):\n    raise _ShellScanIncomplete(x) from err\n",
+        "def _helper(x):\n    try:\n        return x\n"
+        "    except _TaintLimitExceeded as error:\n        raise\n",
+    ],
+)
+def test_in_tree_raise_spellings_stay_followable(source: str) -> None:
+    assert not any(
+        "cannot follow" in violation
+        for violation in checker.find_shape_violations(source, "shell_taint.py")
+    )
+
+
+def test_a_walrus_bound_constructor_in_an_annotation_is_rejected() -> None:
+    source = "def _helper(x: (factory := TaintLimits) = None):\n    return factory()\n"
+
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert any("TaintLimits" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def _helper(x: TaintLimits):\n    return x\n",
+        "def _helper(x) -> TaintLimits:\n    return x\n",
+        "def _helper(x: dict[str, TaintLimits]):\n    return x\n",
+    ],
+)
+def test_ordinary_annotations_stay_followable(source: str) -> None:
+    assert not any(
+        "cannot follow" in violation
+        for violation in checker.find_limits_violations(source, "shell_taint.py")
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def _helper(x):\n    return isinstance(x, TaintLimits)\n",
+        "def _helper(x):\n    if isinstance(x, TaintLimits):\n        raise ValueError(x)\n",
+        "def _helper(x: TaintLimits) -> TaintLimits:\n    return x\n",
+        "factory = TaintLimits\n",
+    ],
+)
+def test_declared_constructor_contexts_are_accepted(source: str) -> None:
+    assert not any(
+        "cannot follow" in violation
+        for violation in checker.find_limits_violations(source, "shell_taint.py")
+    )
+
+
+def test_an_unanalyzable_refusal_reference_is_rejected() -> None:
+    source = (
+        "def _helper(use_default, injected):\n"
+        "    make = GuardRefusal if use_default else injected\n"
+        '    return make("taint.demo.hidden", "nope")\n'
+    )
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any("GuardRefusal" in violation for violation in violations)
+
+
 def test_the_shipped_shell_modules_have_no_limits_violations() -> None:
     assert checker.repository_limits_violations(_ROOT) == ()
 
@@ -2585,14 +2751,18 @@ def test_a_nested_destructured_alias_is_followed() -> None:
 def test_a_starred_destructuring_binds_no_constructor_alias() -> None:
     # A starred target collects a list rather than one constructor, so calling it constructs
     # nothing; pairing it positionally with the constructor would report a violation that is not
-    # there.
+    # there. The form is still rejected as one the inventory cannot follow, because `First` is a
+    # constructor alias no rule registers.
     source = (
         "First, *Rest = TaintLimits, ScannerLimits\n"
         "def _helper(e):\n"
         "    return _evaluate(e, Rest())\n"
     )
 
-    assert checker.find_limits_violations(source, "shell_taint.py") == ()
+    violations = checker.find_limits_violations(source, "shell_taint.py")
+
+    assert violations
+    assert not any("constructs default limits" in violation for violation in violations)
 
 
 def test_limits_constructor_supplied_as_a_parameter_default_is_rejected() -> None:
