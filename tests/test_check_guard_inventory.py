@@ -2615,3 +2615,181 @@ def test_a_local_counter_and_a_local_limits_field_are_not_thresholds() -> None:
 
     assert checker.find_threshold_violations(counter, "shell_taint.py") == ()
     assert checker.find_threshold_violations(threaded, "shell_taint.py") == ()
+
+
+def test_fingerprint_tracks_a_mutation_in_a_generator_the_statement_consumes() -> None:
+    # A generator handed to a call is exhausted by that call, so the accumulation in its body runs
+    # and is what the guard's condition reads. Treating it as deferred let it be edited away with
+    # the frozen record unchanged.
+    source = (
+        "_STATE = []\n"
+        "def _guard(items):\n"
+        "    any(_STATE.append(item) for item in items)\n"
+        "    if _STATE:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.consumed-generator", "nope"))\n'
+    )
+    edited = source.replace("_STATE.append(item)", "_STATE.append(item + 1)")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.consumed-generator"
+    ) != _fingerprint_for(edited, "shell_taint.py", "taint.demo.consumed-generator")
+
+
+def test_fingerprint_tracks_a_writer_read_through_a_shadowed_attribute_subscript() -> None:
+    # `word` is a comprehension target, but `index` still resolves in the enclosing scope, so the
+    # statement writing it is part of the closure.
+    source = (
+        "def _guard(words, marker):\n"
+        "    index = _first_slot()\n"
+        "    if any(word.parts[index].text == marker for word in words):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.slot", "nope"))\n'
+    )
+    edited = source.replace("_first_slot()", "_always_safe_slot()")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.slot") != _fingerprint_for(
+        edited, "shell_taint.py", "taint.demo.slot"
+    )
+
+
+def test_an_unrelated_alias_on_a_read_import_does_not_move_a_fingerprint() -> None:
+    # The guard reads one name off a shared import line. Hashing the whole line would churn the
+    # record of every guard reading any other name on it, forcing the mass regeneration this gate
+    # exists to prevent.
+    source = (
+        "from constants import MARKER, OTHER\n"
+        "def _guard(word):\n"
+        "    if word == MARKER:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.import-shape", "nope"))\n'
+    )
+    widened = source.replace("MARKER, OTHER", "MARKER, OTHER, EXTRA")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.import-shape"
+    ) == _fingerprint_for(widened, "shell_taint.py", "taint.demo.import-shape")
+
+
+def test_the_source_of_a_read_import_moves_a_fingerprint() -> None:
+    # The control for the rule above: what the guard actually reads is still recorded, so
+    # resolving the same spelling from another module moves the record.
+    source = (
+        "from constants import MARKER, OTHER\n"
+        "def _guard(word):\n"
+        "    if word == MARKER:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.import-source", "nope"))\n'
+    )
+    rerouted = source.replace("from constants import", "from decoys import")
+    renamed = source.replace("MARKER, OTHER", "MARKER as OTHER, OTHER as MARKER")
+
+    original = _fingerprint_for(source, "shell_taint.py", "taint.demo.import-source")
+    assert original != _fingerprint_for(rerouted, "shell_taint.py", "taint.demo.import-source")
+    assert original != _fingerprint_for(renamed, "shell_taint.py", "taint.demo.import-source")
+
+
+def test_a_local_cap_scaled_by_a_runtime_value_is_a_threshold() -> None:
+    # `512 * factor` fixes a 512-fold resource bound however `factor` is derived. Requiring the
+    # whole binding to be constant let that cap ship with no recorded provenance.
+    source = (
+        "def _guard(items, factor):\n"
+        "    cap = 512 * factor\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.scaled", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold cap" in violation for violation in violations)
+
+
+def test_a_threshold_reached_through_an_accessor_is_still_a_threshold() -> None:
+    # A callee is machinery, but a name already resolved to a magnitude stays one wherever it is
+    # spelled: excluding the whole `call.func` subtree let a bound ship behind an accessor.
+    source = (
+        "def _guard(items, cap=4096):\n"
+        "    if len(items) > cap.__index__():\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.accessor", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold cap" in violation for violation in violations)
+
+
+def test_a_limits_attribute_on_an_unrelated_object_does_not_suppress_a_threshold() -> None:
+    # `parsed` is any object that happens to carry a `limits` attribute, not the scan's limits, so
+    # it is no evidence that the opposite operand is measured data.
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(items, parsed):\n"
+        "    if parsed.limits.max_depth > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.fake-limits", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold MAX_ITEMS" in violation for violation in violations)
+
+
+def test_limits_carried_under_another_spelling_is_still_a_limits_field() -> None:
+    # The other direction: the scan's limits reached through a differently named binding is
+    # approved evidence, so a legitimate guard is not rejected until its field is renamed.
+    source = (
+        "from constants import MAX_ITEMS\n"
+        "def _guard(items, limits):\n"
+        "    budget = limits\n"
+        "    if budget.max_depth > MAX_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.aliased-limits", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_an_imported_value_compared_for_membership_is_not_a_threshold() -> None:
+    # Equality and membership ask which value something is, not how much of it there is. An
+    # imported frozenset or sentinel is not a magnitude, and inventorying one as a fixed semantic
+    # bound would be a fiction.
+    membership = (
+        "from constants import ALLOWED_KINDS\n"
+        "def _guard(node):\n"
+        "    if node.kind not in ALLOWED_KINDS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.membership", "nope"))\n'
+    )
+    equality = (
+        "from constants import SENTINEL\n"
+        "def _guard(node):\n"
+        "    if node.kind == SENTINEL:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.equality", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(membership, "shell_taint.py") == ()
+    assert checker.find_threshold_violations(equality, "shell_taint.py") == ()
+
+
+def test_an_imported_value_compared_for_ordering_is_still_a_threshold() -> None:
+    # The control for the rule above: an ordering comparison can bound a resource, so the same
+    # imported value is still caught there.
+    source = (
+        "from constants import CEILING\n"
+        "def _guard(items):\n"
+        "    if len(items) > CEILING:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.ordering", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold CEILING" in violation for violation in violations)
+
+
+def test_a_comparison_a_writer_does_not_forward_is_not_an_imported_threshold() -> None:
+    # A writer is in the closure because the guard reads what it binds, not because every
+    # comparison it spells decides the guard. Scoring those reported an import that never reaches
+    # the condition.
+    source = (
+        "from constants import CEILING, FLOOR\n"
+        "def _guard(items, limits):\n"
+        "    state = {}\n"
+        "    state[CEILING > FLOOR] = _measure(items)\n"
+        "    if state and _measure(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.unforwarded", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()

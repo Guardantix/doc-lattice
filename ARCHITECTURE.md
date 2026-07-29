@@ -882,9 +882,13 @@ numeric magnitude it compares against, arithmetic in the operand included, so
 binding side too: `_MAX_ITEMS = 50 * 2` caps a guard exactly as the bare literal does, and
 recognizing only bare literals let the computed spelling escape both halves at once, since a
 module-bound name is also exempt from the naming-convention check. A local assignment or parameter
-default made entirely from numeric arithmetic is covered for the same reason, having neither a
-module binding nor a convention to fall back on; a dynamic cursor such as `index = start + 2` is not
-a fixed local cap. The search covers the writers feeding a guard's condition as well as the
+default is covered for the same reason, having neither a module binding nor a convention to fall
+back on: one made entirely from numeric arithmetic fixes a magnitude, and so does one that scales a
+runtime value by a literal, since `cap = 512 * factor` bounds the scan 512-fold however `factor` is
+derived. A dynamic cursor such as `index = start + 2` displaces a position rather than fixing a
+magnitude and is not a local cap. A name already resolved to a magnitude stays a threshold wherever
+it is spelled, including as the receiver of an accessor, while a callee itself is machinery.
+The search covers the writers feeding a guard's condition as well as the
 condition itself, and the preceding controls that decide whether the origin is reached plus their
 writers—the same closures the fingerprint records. A comparison computed one statement
 earlier caps the scan exactly as an inline one does: `too_many = len(items) > 100` followed by
@@ -894,11 +898,19 @@ fixed cap decide whether an unconditional origin is reached. Zero and one are ex
 spell emptiness and arity rather than a magnitude, which is also what keeps a counter seeded at zero
 from reading as a threshold, and a subscript index is a position rather than a magnitude.
 Module and function-local imports participate structurally too. A guard-visible imported value on
-the value side of a comparison is a named threshold whether imported directly, aliased,
+the value side of an *ordering* comparison is a named threshold whether imported directly, aliased,
 module-qualified or forwarded through an assignment. Its guard-visible spelling must be inventoried
-as a fixed semantic bound or it is rejected. Imports outside the relevant comparison dataflow do
-not count. An import used solely as a callable, callback or other machinery in the measured-side
-dependency graph is not a threshold.
+as a fixed semantic bound or it is rejected. Equality and membership ask which value something is
+rather than how much of it there is, so an imported sentinel, enum member or frozenset compared
+that way is not a threshold and no fixed-bound rationale is invented for it. The comparisons read
+are the condition, the reachability controls and the values their writers forward into them: a
+writer is in the closure because the guard reads what it binds, not because every comparison it
+spells decides the guard. Imports outside the relevant comparison dataflow do not count. An import
+used solely as a callable, callback or other machinery in the measured-side dependency graph is not
+a threshold. The opposite operand is treated as measured data only when the approved operand
+resolves to the scan's limits by binding, through a limits-annotated or required `limits` parameter,
+a limits construction, or a binding of one of those; an unrelated object that happens to carry a
+`limits` attribute approves nothing.
 
 Classification is executable data, not prose. A guard is classified only by carrying evidence: a
 reachable guard carries an authored script that drives the public scan path and returns that exact
@@ -919,6 +931,9 @@ is spelled as an `if`, a `while` or a `match` arm, and, within the enclosing fun
 execution, the statements that write what that condition reads, in-place mutation of an
 accumulator and configuration of an object it reads included,
 because inverting or removing an accumulation disables a guard as completely as inverting its test.
+An accumulation the statement itself drives counts wherever it is spelled, including in the body of
+a generator that statement consumes; only a genuinely deferred body, such as a generator merely
+bound to a name or an uncalled lambda's, stays outside.
 That selection is transitive: a condition usually reads a name two or more assignments away from
 the input deciding it, and stopping at the direct writer leaves everything behind it uncovered.
 `scanner.env-option.static-split-string` tests a `kind` written from an `option` resolved one call
@@ -979,10 +994,12 @@ spelling throughout its function, so an unrelated module binding with the same n
 selected. Lambda parameters and comprehension targets shadow only within their expression scopes;
 free names in those expressions still reach the referenced module binding. Unrelated module
 bindings, bodies of other functions, nested function and class bodies, and called implementations
-remain outside the record. An unbounded closure over those would churn every frozen record on
-unrelated edits; a record that churns constantly has to be regenerated, which is the laundering
-path this decision closes. A caller passing a different value into that function is outside the
-boundary and is not covered.
+remain outside the record. A selected import contributes its source module and the aliases that
+closure actually reads, not the whole statement, so adding an unrelated name to a shared
+`from ... import (...)` line moves no record. An unbounded closure over those would churn every
+frozen record on unrelated edits; a record that churns constantly has to be regenerated, which is
+the laundering path this decision closes. A caller passing a different value into that function is
+outside the boundary and is not covered.
 
 Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
 protected base runs the base revision's own copy of the checker with the candidate tree as inert

@@ -13,19 +13,19 @@
       "qualname": "_ShellScanner._consume_case_pattern_close"
     },
     {
-      "fingerprint": "18ac-d522-2c72-2676-1dfc-3227",
+      "fingerprint": "6b7c-82d4-6863-8b70-1dcc-e2b7",
       "origin_id": "scanner.control-flow.frame-stack-mismatch",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
     },
     {
-      "fingerprint": "9095-5705-2374-8816-dc55-844a",
+      "fingerprint": "044f-9a47-cd96-464d-2320-4766",
       "origin_id": "scanner.control-flow.freeze-without-taint-builder",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
     },
     {
-      "fingerprint": "ca4e-b713-3b8d-f259-b911-5288",
+      "fingerprint": "d507-6e54-e6ba-adaa-e79b-9abc",
       "origin_id": "scanner.control-flow.if-branch-arity-mismatch",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._finish_if"
@@ -37,19 +37,19 @@
       "qualname": "_ShellScanner._open_control"
     },
     {
-      "fingerprint": "1003-f609-801f-500e-220b-fa15",
+      "fingerprint": "0b45-6ede-17bd-e752-8dd2-5aba",
       "origin_id": "scanner.control-flow.unfinished-case",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._finish_case"
     },
     {
-      "fingerprint": "9b6c-e7e8-d1aa-c0bf-acb1-e7d2",
+      "fingerprint": "b9e9-935b-21c9-a34d-f6f0-64ad",
       "origin_id": "scanner.descriptor.unparsable",
       "path": "shell_scanner.py",
       "qualname": "_parse_static_descriptor"
     },
     {
-      "fingerprint": "50c9-5d71-69be-2b68-afe9-6181",
+      "fingerprint": "5732-807c-cd5b-6a5b-f6ad-6b02",
       "origin_id": "scanner.env-option.static-flag-with-value",
       "path": "shell_scanner.py",
       "qualname": "_skip_static_env_option"
@@ -61,7 +61,7 @@
       "qualname": "_skip_static_env_option"
     },
     {
-      "fingerprint": "0c38-e1e1-5856-97f3-1e5c-6766",
+      "fingerprint": "1c03-f322-1149-8996-e4fb-0ab4",
       "origin_id": "scanner.uv-tool.alternate-run-argv-expansion",
       "path": "shell_scanner.py",
       "qualname": "_uv_tool_payload_index"
@@ -73,25 +73,25 @@
       "qualname": "_brace_integer"
     },
     {
-      "fingerprint": "0a0f-cc19-252d-193d-d494-afbd",
+      "fingerprint": "a439-c178-e3eb-f545-be54-020e",
       "origin_id": "taint.contextualization.effect-edge-limit",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence"
     },
     {
-      "fingerprint": "19a2-3d08-7b43-e0ef-0415-a93a",
+      "fingerprint": "7bd8-1760-144f-de30-c7dc-476f",
       "origin_id": "taint.contextualization.state-alternative-limit",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence"
     },
     {
-      "fingerprint": "c14c-2110-46ad-d818-7ab6-4fd8",
+      "fingerprint": "850c-376a-1fae-3971-d5f3-c8ec",
       "origin_id": "taint.descriptor.input-alias-cycle",
       "path": "shell_taint.py",
       "qualname": "_resolve_input_descriptor_source"
     },
     {
-      "fingerprint": "38c7-6836-cc07-29e9-cf7e-135c",
+      "fingerprint": "5125-8f85-7c2a-ee12-7981-0a44",
       "origin_id": "taint.descriptor.output-alias-cycle",
       "path": "shell_taint.py",
       "qualname": "_resolve_output_descriptor_source"
@@ -109,7 +109,7 @@
       "qualname": "_append_eval_conditional_writes"
     },
     {
-      "fingerprint": "f822-3d71-3dce-8d7c-70b9-0b5b",
+      "fingerprint": "13c0-f02a-478c-5f2b-c1c7-c94c",
       "origin_id": "taint.eval-descriptor.unparsable",
       "path": "shell_taint.py",
       "qualname": "_static_eval_descriptor"
@@ -133,49 +133,49 @@
       "qualname": "_static_eval_mutations.route_assignment"
     },
     {
-      "fingerprint": "c740-7d55-60bf-0801-e159-1898",
+      "fingerprint": "ac9a-52a3-3db0-5ca0-2882-6e7d",
       "origin_id": "taint.eval-payload.lex-error",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
     },
     {
-      "fingerprint": "fdd7-2012-9a9b-0521-1054-7465",
+      "fingerprint": "bf57-1273-3e59-b909-7825-62e4",
       "origin_id": "taint.eval-payload.metadata-exhausted",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
     },
     {
-      "fingerprint": "9c37-2cc2-2221-dc3f-0b8a-0283",
+      "fingerprint": "d1e7-52f3-391d-a346-5606-9670",
       "origin_id": "taint.eval-payload.metadata-residue",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
     },
     {
-      "fingerprint": "b6a6-36a8-0020-fe65-7c5f-8d11",
+      "fingerprint": "8c65-b738-a450-0de3-86f6-8d05",
       "origin_id": "taint.eval-payload.redirection-lexeme",
       "path": "shell_taint.py",
       "qualname": "_static_eval_program_commands"
     },
     {
-      "fingerprint": "5572-d5e7-a22c-e208-499b-8204",
+      "fingerprint": "8af4-ce82-bb00-8f87-0b89-263b",
       "origin_id": "taint.eval-prefix.unrepresentable-content",
       "path": "shell_taint.py",
       "qualname": "_static_eval_prefix_sink_marker_capable"
     },
     {
-      "fingerprint": "439e-148f-7830-f1f0-74ef-33d4",
+      "fingerprint": "ccce-4676-764a-b7f7-6859-28bc",
       "origin_id": "taint.eval-syntax.append-non-concat",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_append"
     },
     {
-      "fingerprint": "9333-fa01-810a-0916-eb1f-98bd",
+      "fingerprint": "715f-64f6-79ed-ecbc-2984-9d1f",
       "origin_id": "taint.eval-syntax.append-unbounded-expansion",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_append"
     },
     {
-      "fingerprint": "399c-5ccb-fb1a-4e65-7f79-6b88",
+      "fingerprint": "5f35-343b-9b89-51de-82b0-7139",
       "origin_id": "taint.eval-syntax.brace-token-node-limit",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_token"
@@ -211,7 +211,7 @@
       "qualname": "_eval_syntax_record_decision"
     },
     {
-      "fingerprint": "f34a-558d-69f8-054c-5469-449b",
+      "fingerprint": "e831-ab5b-96da-a400-0dea-0476",
       "origin_id": "taint.eval-syntax.replay-fixed-point-limit",
       "path": "shell_taint.py",
       "qualname": "_replay_eval_syntax_program"
@@ -223,43 +223,43 @@
       "qualname": "_solve_eval_syntax_variables"
     },
     {
-      "fingerprint": "6f78-b4dd-5218-e4d5-f511-3036",
+      "fingerprint": "c6ff-3e71-5eef-7c3d-d298-dd3b",
       "origin_id": "taint.eval-syntax.transition-reentry",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_variable_transition"
     },
     {
-      "fingerprint": "47c7-feee-94de-2408-fd4d-d7a3",
+      "fingerprint": "8821-2cf5-8bec-562f-f69d-53d6",
       "origin_id": "taint.eval-syntax.transition-table-limit",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_variable_transition"
     },
     {
-      "fingerprint": "4f15-6330-91e5-8ed8-688b-8219",
+      "fingerprint": "6fbc-9082-eb58-1dca-fb7c-a923",
       "origin_id": "taint.eval-syntax.unbounded-parameter-program",
       "path": "shell_taint.py",
       "qualname": "_eval_syntax_variable_transition"
     },
     {
-      "fingerprint": "337c-347f-63a1-ad3f-3033-f40a",
+      "fingerprint": "f208-4fb5-8c1b-7853-760d-1b46",
       "origin_id": "taint.evidence.nested-scope-output",
       "path": "shell_taint.py",
       "qualname": "_validated_output_scope_refs"
     },
     {
-      "fingerprint": "e1a9-d5bd-6e12-ecfc-f6e8-603a",
+      "fingerprint": "795e-9048-e332-85ab-1eb2-f00f",
       "origin_id": "taint.evidence.output-command-ref",
       "path": "shell_taint.py",
       "qualname": "_validated_output_scope_refs"
     },
     {
-      "fingerprint": "0d16-adfa-a76b-e6c8-0117-cd4b",
+      "fingerprint": "672d-3eb0-1b75-59a9-6b2c-3c94",
       "origin_id": "taint.evidence.output-graph-cycle",
       "path": "shell_taint.py",
       "qualname": "_validate_nested_evidence"
     },
     {
-      "fingerprint": "215d-6cb0-0c5e-6816-2bfa-6f29",
+      "fingerprint": "da1a-6475-8523-708a-cadf-1906",
       "origin_id": "taint.evidence.output-scope-cycle",
       "path": "shell_taint.py",
       "qualname": "_validated_output_scope_refs"
@@ -277,49 +277,49 @@
       "qualname": "_scope_input_commands"
     },
     {
-      "fingerprint": "4eb6-67e1-5683-2eab-3b64-1a22",
+      "fingerprint": "ca41-1cec-ad31-e1d8-96e0-04bd",
       "origin_id": "taint.evidence.scope-input-resolution-cycle",
       "path": "shell_taint.py",
       "qualname": "_resolved_scope_inputs"
     },
     {
-      "fingerprint": "91f9-4cfb-e3c6-b13b-4ad3-e1c9",
+      "fingerprint": "7c68-749f-1b96-c2a0-0c39-6008",
       "origin_id": "taint.evidence.scope-parent-cycle",
       "path": "shell_taint.py",
       "qualname": "_validate_nested_evidence"
     },
     {
-      "fingerprint": "8124-0edb-dd7a-9263-05d9-02ec",
+      "fingerprint": "44bb-237f-768b-6d17-65a8-4d00",
       "origin_id": "taint.function-effects.unstructured-segment",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.ordered_effects"
     },
     {
-      "fingerprint": "4ccd-7656-6b97-0078-9f15-0879",
+      "fingerprint": "164a-0ef2-6c8e-6537-277a-87fb",
       "origin_id": "taint.function-positional.dynamic-call-argument",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.positional_call_contents"
     },
     {
-      "fingerprint": "a69b-d17b-4fc5-de4b-f645-ba33",
+      "fingerprint": "523a-4fbd-b14c-3d68-6ca7-3ea0",
       "origin_id": "taint.function-positional.effect-shift-underflow",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_effect_positional_mutation"
     },
     {
-      "fingerprint": "780c-71fa-7847-c2a1-5e97-4aae",
+      "fingerprint": "cefb-6e48-7ae1-65e9-8eda-3d79",
       "origin_id": "taint.function-positional.effect-shift-unknown-arguments",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_effect_positional_mutation"
     },
     {
-      "fingerprint": "9fc5-a926-11ff-72be-8058-6531",
+      "fingerprint": "527d-00a8-ecdf-2881-6504-6669",
       "origin_id": "taint.function-positional.exact-set-unknown-operands",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_exact_positional_mutation"
     },
     {
-      "fingerprint": "7999-903a-33b9-b2e7-f94f-91e3",
+      "fingerprint": "8557-ceae-9953-67f8-c2a7-b678",
       "origin_id": "taint.function-positional.exact-set-unresolved-value",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_exact_positional_mutation"
@@ -331,19 +331,19 @@
       "qualname": "_contextualize_evidence.apply_exact_positional_mutation"
     },
     {
-      "fingerprint": "f76c-7d45-a0fd-9428-44d6-b160",
+      "fingerprint": "0859-d4d9-6b47-f215-3285-b36c",
       "origin_id": "taint.function-positional.exact-shift-non-numeric",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_exact_positional_mutation"
     },
     {
-      "fingerprint": "3294-9455-440f-a12e-2e9c-155e",
+      "fingerprint": "a4b5-5e4e-2197-9306-6ac2-e3e0",
       "origin_id": "taint.function-positional.index-digit-limit",
       "path": "shell_taint.py",
       "qualname": "_substitute_function_positionals"
     },
     {
-      "fingerprint": "e063-5921-04fc-9c84-57e8-ea5b",
+      "fingerprint": "bf55-bef0-0c82-24f3-56d6-8927",
       "origin_id": "taint.function-positional.unresolved-bind-value",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.bind_exact_positionals"
@@ -367,25 +367,25 @@
       "qualname": "_substitute_function_positionals"
     },
     {
-      "fingerprint": "872f-e463-508b-2a67-7657-7a75",
+      "fingerprint": "d6f2-0e37-72f8-a0a7-0841-d5ba",
       "origin_id": "taint.local-substitution.multiple-results",
       "path": "shell_taint.py",
       "qualname": "_substitute_local_contents"
     },
     {
-      "fingerprint": "203f-b3e4-3b5b-9ec6-1e4e-a346",
+      "fingerprint": "4ec4-c89a-9ea1-b89d-fac4-cbca",
       "origin_id": "taint.local-substitution.unassembled-result",
       "path": "shell_taint.py",
       "qualname": "_substitute_local_contents"
     },
     {
-      "fingerprint": "950e-ee31-14ec-fba8-c60e-f969",
+      "fingerprint": "79d6-b13f-da9f-2ce3-a271-453d",
       "origin_id": "taint.read.field-relocation",
       "path": "shell_taint.py",
       "qualname": "_project_read_value"
     },
     {
-      "fingerprint": "6836-7042-e800-eac2-b68f-b671",
+      "fingerprint": "479d-98da-e24c-82e2-ee70-9e31",
       "origin_id": "taint.read.ifs-field-alternatives",
       "path": "shell_taint.py",
       "qualname": "_project_read_value"

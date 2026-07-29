@@ -259,6 +259,10 @@ class _DerivationCache:
     per fixpoint pass and once per origin sharing the scope, which dominates the gate's runtime.
     Keying by node identity is sound because one cache lives no longer than the parse it was built
     for, so an identity cannot be reused by a later node.
+
+    The threshold gate runs the whole writer fixpoint once per comparison operand, so the closure
+    itself and the two scope-wide traversals it depends on are memoized as well. Every one is a
+    pure function of nodes this parse owns.
     """
 
     shapes: dict[int, str] = field(default_factory=dict)
@@ -266,6 +270,14 @@ class _DerivationCache:
     configured: dict[int, frozenset[str]] = field(default_factory=dict)
     statements: dict[int, list[ast.stmt]] = field(default_factory=dict)
     parents: dict[int, dict[int, ast.AST]] = field(default_factory=dict)
+    bindings: dict[int, frozenset[str]] = field(default_factory=dict)
+    paths: dict[tuple[int, bool], tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]] = (
+        field(default_factory=dict)
+    )
+    closures: dict[
+        tuple[int, int, frozenset[str], frozenset[str]],
+        tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]],
+    ] = field(default_factory=dict)
     module: ast.Module | None = None
 
 
@@ -497,6 +509,17 @@ def _cached_scope_statements(scope: ast.AST, cache: _DerivationCache) -> list[as
     return statements
 
 
+def _cached_local_binding_names(scope: ast.AST | None, cache: _DerivationCache) -> frozenset[str]:
+    """Return the scope's lexically bound names, walking the scope at most once per parse."""
+    if scope is None:
+        return frozenset()
+    names = cache.bindings.get(id(scope))
+    if names is None:
+        names = _local_binding_names(scope)
+        cache.bindings[id(scope)] = names
+    return names
+
+
 def _cached_scope_parents(scope: ast.AST, cache: _DerivationCache) -> dict[int, ast.AST]:
     """Return each of the scope's own statements mapped to the node holding it.
 
@@ -579,16 +602,43 @@ def _own_expressions(statement: ast.stmt) -> list[ast.AST]:
     return owned
 
 
+def _consumed_generators(statement: ast.stmt) -> set[int]:
+    """Return the identities of generator expressions this statement iterates as it builds them.
+
+    A generator handed straight to a call, to a `for` header or to a comprehension is driven to
+    exhaustion by that same statement, so its body runs there. One merely bound to a name is not.
+    """
+    consumed: set[int] = set()
+    for node in (statement, *_own_expressions(statement)):
+        match node:
+            case ast.Call(args=iterables):
+                pass
+            case (
+                ast.For(iter=iterable)
+                | ast.AsyncFor(iter=iterable)
+                | ast.comprehension(iter=iterable)
+            ):
+                iterables = [iterable]
+            case _:
+                continue
+        consumed.update(id(item) for item in iterables if isinstance(item, ast.GeneratorExp))
+    return consumed
+
+
 def _executed_expressions(statement: ast.stmt) -> list[ast.AST]:
     """Return expressions executed by this statement in its surrounding scope.
 
     Constructing a lambda executes its defaults but defers its body to a different execution
     scope. List, set and dictionary comprehensions execute immediately. Constructing a generator
-    expression evaluates only its first iterable; its body, filters and later iterables are
-    deferred until iteration. This traversal follows runtime side effects only. Compile-time
-    bindings such as a walrus in a deferred generator body use a separate lexical traversal.
+    expression evaluates only its first iterable, unless the same statement consumes it: the body
+    of `any(seen.add(word) for word in words)` runs there, and skipping it let the accumulation
+    feeding a guard be deleted with every fingerprint unchanged. A generator that is only bound
+    stays deferred, with its body, filters and later iterables outside this traversal. This
+    traversal follows runtime side effects only. Compile-time bindings such as a walrus in a
+    deferred generator body use a separate lexical traversal.
     """
     executed: list[ast.AST] = []
+    consumed = _consumed_generators(statement)
     pending: list[ast.AST] = [
         child for child in ast.iter_child_nodes(statement) if not isinstance(child, ast.stmt)
     ]
@@ -599,7 +649,7 @@ def _executed_expressions(statement: ast.stmt) -> list[ast.AST]:
             pending.extend(node.args.defaults)
             pending.extend(default for default in node.args.kw_defaults if default is not None)
             continue
-        if isinstance(node, ast.GeneratorExp):
+        if isinstance(node, ast.GeneratorExp) and id(node) not in consumed:
             pending.append(node.generators[0].iter)
             continue
         pending.extend(
@@ -678,7 +728,7 @@ def _free_reference_nodes(
     """
     found: list[ast.Name | ast.Attribute] = []
 
-    def visit(  # noqa: PLR0911, PLR0912 - lexical AST scopes require distinct traversal rules
+    def visit(  # noqa: PLR0912 - lexical AST scopes require distinct traversal rules
         node: ast.AST, shadowed: frozenset[str], *, initial: bool = False
     ) -> None:
         if skip_nested_statements and isinstance(node, ast.stmt) and not initial:
@@ -688,9 +738,11 @@ def _free_reference_nodes(
                 found.append(node)
             return
         if isinstance(node, ast.Attribute):
-            if _reference_root_name(node) in shadowed:
-                return
-            if isinstance(node.ctx, ast.Load):
+            # A shadowed lexical root disqualifies the path itself, not what a subscript on that
+            # path reads: `word.parts[index].text` resolves `index` in the enclosing scope even
+            # when `word` is a comprehension target, and dropping it would let the statement that
+            # writes `index` fall out of the guard's closure.
+            if _reference_root_name(node) not in shadowed and isinstance(node.ctx, ast.Load):
                 found.append(node)
             visit(node.value, shadowed)
             return
@@ -787,6 +839,10 @@ def _mutated_spellings(statement: ast.stmt) -> set[str]:
     `active.add(node)` and `effects.append(edge)` write what a guard's condition later reads, and
     neither binds a name, so a rule that recognized only binding statements would leave the
     accumulation that feeds a guard outside its record.
+
+    A mutation the statement drives counts wherever it is spelled. `any(seen.add(word) for word
+    in words)` runs the accumulation as the statement exhausts the generator, so
+    `_executed_expressions` follows a consumed generator's body.
     """
     spellings: set[str] = set()
     for node in _executed_expressions(statement):
@@ -918,7 +974,7 @@ def _condition_writer_shapes(
     origin: ast.stmt,
     scope: ast.AST | None,
     guards: tuple[ast.expr, ...],
-    cache: _DerivationCache | None = None,
+    cache: _DerivationCache,
 ) -> tuple[str, ...]:
     """Return normalized local and referenced module shapes feeding what governs the guard.
 
@@ -951,12 +1007,13 @@ def _condition_writer_shapes(
         scope: Enclosing function, or `None` at class or module level.
         guards: The expressions governing the origin: the tests it sits under, and the iterable of
             every enclosing loop.
-        cache: Per-parse derivation memo, defaulting to one used for this call alone.
+        cache: Per-parse derivation memo. Required, because the module it carries is what makes
+            the referenced module bindings part of the closure: a cache without one derives a
+            different fingerprint from the one the snapshot froze.
 
     Returns:
         Shapes in source order, empty when the guard is unconditional or scope-free.
     """
-    cache = cache if cache is not None else _DerivationCache()
     return _writer_closure(
         origin, scope, set(_read_spellings(guards)), set(_read_value_spellings(guards)), cache
     )
@@ -981,10 +1038,39 @@ def _writer_closure(
     Returns:
         Module shapes followed by function-local shapes, empty when nothing is read.
     """
-    return tuple(
-        _cached_shape(statement, cache)
-        for statement in _writer_statements(origin, scope, read, values, cache)
+    statements = _writer_statements(origin, scope, read, values, cache)
+    return tuple(_writer_shape(statement, read, cache) for statement in statements)
+
+
+def _writer_shape(statement: ast.stmt, read: set[str], cache: _DerivationCache) -> str:
+    """Return the shape recording what one selected writer contributes to this closure.
+
+    An import statement binds every alias it names, but a guard reads only some of them. Hashing
+    the whole statement would make a guard's record depend on the shape of a shared
+    `from ... import (...)` line, so adding one unrelated alias to it churns the frozen record of
+    every guard reading any other name on that line. Mass regeneration is the laundering path this
+    gate exists to close, so an import contributes only its source module and the aliases this
+    closure actually reads.
+
+    Args:
+        statement: A statement the writer fixpoint selected.
+        read: The spellings the closure reads, after the fixpoint has grown them.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The normalized shape to hash for this writer.
+    """
+    if not isinstance(statement, ast.Import | ast.ImportFrom):
+        return _cached_shape(statement, cache)
+    bound = _imported_spellings(statement) & read
+    plain = isinstance(statement, ast.Import)
+    source = "import" if plain else f"from {'.' * statement.level}{statement.module or ''} import"
+    entries = sorted(
+        f"{alias.name} as {alias.asname}" if alias.asname else alias.name
+        for alias in statement.names
+        if (alias.asname or (alias.name.split(".", 1)[0] if plain else alias.name)) in bound
     )
+    return f"{source} {entries}"
 
 
 def _writer_statements(
@@ -1019,9 +1105,51 @@ def _writer_statements(
     Returns:
         Referenced module statements followed by local statements, each in source order.
     """
-    if not read:
-        return ()
+    statements, grown_read, grown_values = _writer_derivation(origin, scope, read, values, cache)
+    read |= grown_read
+    values |= grown_values
+    return statements
 
+
+def _writer_derivation(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    read: set[str],
+    values: set[str],
+    cache: _DerivationCache,
+) -> tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]]:
+    """Return the writer closure and the spellings it grew to, memoized per seed.
+
+    The threshold gate asks for this closure once per comparison operand and once per writer
+    reached from one, so the same seed reaches the same scope repeatedly. The result depends on
+    nothing but the origin, the scope, the module the cache carries and the seed spellings, all of
+    which this parse owns.
+
+    Args:
+        origin: The statement that constructs the refusal, hashed separately.
+        scope: Enclosing function, or `None` at class or module level.
+        read: Seed spellings, left unmodified.
+        values: The subset read as whole values, left unmodified.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The selected statements, the grown read spellings and the grown whole-value spellings.
+    """
+    key = (id(origin), id(scope), frozenset(read), frozenset(values))
+    memo = cache.closures.get(key)
+    if memo is not None:
+        return memo
+    if not read:
+        result: tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]] = (
+            (),
+            frozenset(read),
+            frozenset(values),
+        )
+        cache.closures[key] = result
+        return result
+
+    grown_read = set(read)
+    grown_values = set(values)
     local = (
         _select_writer_statements(
             [
@@ -1029,16 +1157,18 @@ def _writer_statements(
                 for statement in _cached_scope_statements(scope, cache)
                 if statement is not origin
             ],
-            read,
-            values,
+            grown_read,
+            grown_values,
             cache,
         )
         if scope is not None
         else ()
     )
-    shadowed = _local_binding_names(scope)
-    module_read = {spelling for spelling in read if _spelling_root(spelling) not in shadowed}
-    module_values = {spelling for spelling in values if _spelling_root(spelling) not in shadowed}
+    shadowed = _cached_local_binding_names(scope, cache)
+    module_read = {spelling for spelling in grown_read if _spelling_root(spelling) not in shadowed}
+    module_values = {
+        spelling for spelling in grown_values if _spelling_root(spelling) not in shadowed
+    }
     module = cache.module
     module_writers = (
         _select_writer_statements(
@@ -1054,7 +1184,11 @@ def _writer_statements(
         if module is not None
         else ()
     )
-    return (*module_writers, *local)
+    grown_read |= module_read
+    grown_values |= module_values
+    result = ((*module_writers, *local), frozenset(grown_read), frozenset(grown_values))
+    cache.closures[key] = result
+    return result
 
 
 def _select_writer_statements(
@@ -1184,7 +1318,7 @@ def _reachability_inputs(
     origin: ast.stmt,
     scope: ast.AST | None,
     cache: _DerivationCache,
-) -> tuple[tuple[ast.stmt, ...], tuple[ast.stmt, ...]]:
+) -> tuple[tuple[ast.stmt, ...], tuple[ast.stmt, ...], set[str]]:
     """Return the controls deciding whether an origin is reached and their writer closure.
 
     Keeping this derivation as AST nodes lets both the fingerprint and threshold-provenance gate
@@ -1199,10 +1333,10 @@ def _reachability_inputs(
 
     Returns:
         Diverting statements followed separately by the statements in their transitive writer
-        closure, both in source order.
+        closure, both in source order, and the spellings that closure reads.
     """
     if scope is None:
-        return (), ()
+        return (), (), set()
     repeated = _repeated_statements(origin, scope, cache)
     position = (origin.lineno, origin.col_offset)
     statements = [
@@ -1221,11 +1355,11 @@ def _reachability_inputs(
         read |= _statement_reads(statement)
         values |= _statement_value_reads(statement)
     writers = _writer_statements(origin, scope, read, values, cache)
-    return controls, writers
+    return controls, writers, read
 
 
 def _reachability_shapes(
-    origin: ast.stmt, scope: ast.AST | None, cache: _DerivationCache | None = None
+    origin: ast.stmt, scope: ast.AST | None, cache: _DerivationCache
 ) -> tuple[str, ...]:
     """Return the shapes of the control flow that decides whether the origin is reached at all.
 
@@ -1257,20 +1391,20 @@ def _reachability_shapes(
     Args:
         origin: The statement that constructs the refusal, hashed separately.
         scope: Enclosing function, or `None` at class or module level.
-        cache: Per-parse derivation memo, defaulting to one used for this call alone.
+        cache: Per-parse derivation memo. Required for the reason
+            `_condition_writer_shapes` gives: the module it carries is part of the closure.
 
     Returns:
         Shapes in source order, empty when the origin has no enclosing function.
     """
-    cache = cache if cache is not None else _DerivationCache()
-    controls, writers = _reachability_inputs(origin, scope, cache)
+    controls, writers, read = _reachability_inputs(origin, scope, cache)
     return (
         *(
             shape
             for statement in controls
             if (shape := _diverting_shape(statement, cache)) is not None
         ),
-        *(_cached_shape(statement, cache) for statement in writers),
+        *(_writer_shape(statement, read, cache) for statement in writers),
     )
 
 
@@ -1868,15 +2002,43 @@ def _is_numeric_constant_expression(expression: ast.expr) -> bool:
     return False
 
 
+_SCALING_OPERATORS = (ast.Mult, ast.Div, ast.FloorDiv, ast.Pow, ast.LShift)
+"""Arithmetic that scales a magnitude rather than displacing a position."""
+
+
+def _is_magnitude_binding(expression: ast.expr) -> bool:
+    """Return whether a binding fixes a resource magnitude rather than a dynamic position.
+
+    Arithmetic over numeric literals alone is a magnitude: `limit = 50 * 2` caps a scan exactly as
+    `limit = 100` does. Mixing a literal with a runtime value is not automatically one, because
+    `index = start + 2` is a cursor offset, but scaling by a literal is: `cap = 512 * factor` fixes
+    a 512-fold bound however `factor` is derived, and requiring the whole expression to be constant
+    let that cap ship with no recorded provenance.
+    """
+    magnitudes = (
+        _operand_magnitudes(expression)
+        if _is_numeric_constant_expression(expression)
+        else {
+            magnitude
+            for node in ast.walk(expression)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, _SCALING_OPERATORS)
+            for operand in (node.left, node.right)
+            for magnitude in _operand_magnitudes(operand)
+        }
+    )
+    return bool(magnitudes - STRUCTURAL_GUARD_LITERALS)
+
+
 def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
     """Return the scope's own names bound to a magnitude that is not structural.
 
     A cap spelled as a local assignment or parameter default has the provenance problem a
     module-level one has: `limit = 100` and `def scan(limit=100)` both create resource bounds with
     nothing recording where they came from, and both are invisible to the module-constant set and
-    naming convention. The binding must consist entirely of numeric arithmetic: `index = start + 2`
-    is a dynamic cursor offset, not a fixed cap. Zero and one are excluded for the reason
-    `STRUCTURAL_GUARD_LITERALS` gives, so a counter seeded at zero is not mistaken for a threshold.
+    naming convention. `_is_magnitude_binding` decides which bindings fix a magnitude, so
+    `index = start + 2` stays a dynamic cursor offset while `cap = 512 * factor` is a cap. Zero and
+    one are excluded for the reason `STRUCTURAL_GUARD_LITERALS` gives, so a counter seeded at zero
+    is not mistaken for a threshold.
 
     Args:
         scope: Enclosing function, or `None` at class or module level.
@@ -1888,10 +2050,7 @@ def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
         return frozenset()
     names: set[str] = set()
     for argument, default in _defaulted_arguments(scope):
-        if (
-            _is_numeric_constant_expression(default)
-            and _operand_magnitudes(default) - STRUCTURAL_GUARD_LITERALS
-        ):
+        if _is_magnitude_binding(default):
             names.add(argument.arg)
     for statement in _scope_statements(scope):
         if isinstance(statement, ast.Assign):
@@ -1902,10 +2061,7 @@ def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
             continue
         if statement.value is None:
             continue
-        if (
-            _is_numeric_constant_expression(statement.value)
-            and _operand_magnitudes(statement.value) - STRUCTURAL_GUARD_LITERALS
-        ):
+        if _is_magnitude_binding(statement.value):
             names.update(target.id for target in targets if isinstance(target, ast.Name))
     return frozenset(names)
 
@@ -1918,6 +2074,11 @@ def _threshold_names(
     A module-level numeric constant is a threshold whatever it is called. A conventionally named
     one the module does not define cannot be resolved here, so it is treated as a threshold too;
     a name the module binds to something other than a number is not one.
+
+    A callee is calculation machinery rather than a compared value, but a name already resolved to
+    a magnitude stays one wherever it is spelled: `cap.__index__()` reads the same bound `cap`
+    does, and excluding the whole `call.func` subtree let a threshold ship uninventoried by being
+    reached through an accessor.
     """
     call_targets = {
         id(target)
@@ -1931,9 +2092,29 @@ def _threshold_names(
         for root in nodes
         for node in ast.walk(root)
         if isinstance(node, ast.Name)
-        if id(node) not in call_targets
+        if id(node) not in call_targets or node.id in numeric
         if node.id in numeric or (node.id.startswith(_THRESHOLD_PREFIXES) and node.id not in bound)
     }
+
+
+def _cached_reference_path_scores(
+    root: ast.AST,
+    cache: _DerivationCache,
+    *,
+    loads_only: bool = False,
+) -> tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]:
+    """Return the scored spellings of one root, traversing it at most once per parse.
+
+    Callers extend the returned mappings while following writers, so each hit hands back its own
+    copy rather than the memo.
+    """
+    key = (id(root), loads_only)
+    scores = cache.paths.get(key)
+    if scores is None:
+        scores = _reference_path_scores(root, loads_only=loads_only)
+        cache.paths[key] = scores
+    read, values = scores
+    return dict(read), dict(values)
 
 
 def _reference_path_scores(
@@ -1994,6 +2175,7 @@ def _combined_path_score(
 def _import_reference_evidence(
     root: ast.expr,
     imported: frozenset[str],
+    cache: _DerivationCache,
     prefix: tuple[int, int] = (0, 0),
 ) -> dict[str, tuple[int, int, int]]:
     """Return imported value references and their provenance distance from one operand.
@@ -2004,7 +2186,7 @@ def _import_reference_evidence(
     ``call.func`` nodes and attribute bases are machinery or incomplete spellings rather than
     compared values.
     """
-    _, values = _reference_path_scores(root)
+    _, values = _cached_reference_path_scores(root, cache)
     evidence: dict[str, tuple[int, int, int]] = {}
     for spelling, local_score in values.items():
         if _spelling_root(spelling) not in imported:
@@ -2075,9 +2257,102 @@ def _attribute_path(node: ast.Attribute) -> tuple[str, ...]:
     return tuple(reversed(parts))
 
 
-def _is_limits_field_operand(operand: ast.expr) -> bool:
-    """Return whether this operand itself is an explicit scan-limits field."""
-    return isinstance(operand, ast.Attribute) and "limits" in _attribute_path(operand)[:-1]
+def _annotation_names(annotation: ast.expr | None) -> frozenset[str]:
+    """Return the type names one annotation spells, including a stringized one."""
+    if annotation is None:
+        return frozenset()
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return frozenset()
+    names: set[str] = set()
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return frozenset(names)
+
+
+def _limits_parameter_names(tree: ast.Module, constructors: frozenset[str]) -> frozenset[str]:
+    """Return the parameter names this module resolves to the scan's limits.
+
+    A parameter annotated with a limits type holds one. So does one spelled `limits`, because
+    `find_limits_violations` enforces that spelling: a scope taking limits must take it as a
+    required parameter under that name, so the name is a contract this gate already checks rather
+    than a convention it is guessing at. No other spelling qualifies, which is what keeps an
+    arbitrary object's `.limits` attribute from approving itself.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        arguments = node.args
+        names.update(
+            argument.arg
+            for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+            if argument.arg == "limits" or _annotation_names(argument.annotation) & constructors
+        )
+    return frozenset(names)
+
+
+def _limits_valued_spellings(tree: ast.Module) -> frozenset[str]:
+    """Return the spellings this module resolves to a scan-limits value.
+
+    Resolution follows the binding: the limits parameters `_limits_parameter_names` recognizes
+    hold one, a binding of a limits construction holds one, and a binding of a spelling already
+    resolved to one holds one too. Matching any attribute path with a component spelled `limits`
+    instead would approve `parsed.limits.max_depth` on a config object that is not the scan's
+    limits, and reject the same value carried as `self._scan_limits` until someone renamed it.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        Bare and dotted spellings holding a limits value, empty when the module carries none.
+    """
+    constructors = _constructor_names(tree, LIMITS_CONSTRUCTORS)
+    spellings = set(_limits_parameter_names(tree, constructors))
+
+    def holds_limits(annotation: ast.expr | None, value: ast.expr | None) -> bool:
+        if _annotation_names(annotation) & constructors:
+            return True
+        if value is None:
+            return False
+        if isinstance(value, ast.Call) and _called_name(value) in constructors:
+            return True
+        return ast.unparse(value) in spellings
+
+    grew = True
+    while grew:
+        grew = False
+        for node in ast.walk(tree):
+            match node:
+                case ast.AnnAssign(target=target, annotation=annotation, value=value):
+                    targets: list[ast.expr] = [target]
+                case ast.Assign(targets=assigned, value=value):
+                    targets, annotation = list(assigned), None
+                case _:
+                    continue
+            if not holds_limits(annotation, value):
+                continue
+            for target in targets:
+                if not isinstance(target, ast.Name | ast.Attribute):
+                    continue
+                spelling = ast.unparse(target)
+                if spelling not in spellings:
+                    spellings.add(spelling)
+                    grew = True
+    return frozenset(spellings)
+
+
+def _is_limits_field_operand(operand: ast.expr, limits_values: frozenset[str]) -> bool:
+    """Return whether this operand reads a field of a resolved scan-limits value."""
+    if not isinstance(operand, ast.Attribute):
+        return False
+    path = _attribute_path(operand)
+    return any(".".join(path[:index]) in limits_values for index in range(1, len(path)))
 
 
 def _operand_import_evidence(
@@ -2088,8 +2363,8 @@ def _operand_import_evidence(
     cache: _DerivationCache,
 ) -> dict[str, tuple[int, int, int]]:
     """Return imported evidence feeding one operand, scored by its shortest dependency path."""
-    evidence = _import_reference_evidence(operand, imported)
-    read_paths, value_paths = _reference_path_scores(operand)
+    evidence = _import_reference_evidence(operand, imported, cache)
+    read_paths, value_paths = _cached_reference_path_scores(operand, cache)
     writers = _writer_statements(origin, scope, set(read_paths), set(value_paths), cache)
     writer_paths: dict[int, tuple[int, int]] = {}
     grew = True
@@ -2115,12 +2390,14 @@ def _operand_import_evidence(
             writer_path = (path[0], path[1] + 1)
             for root in _forwarded_value_roots((statement,)):
                 for spelling, score in _import_reference_evidence(
-                    root, imported, writer_path
+                    root, imported, cache, writer_path
                 ).items():
                     previous = evidence.get(spelling)
                     if previous is None or score < previous:
                         evidence[spelling] = score
-            statement_reads, statement_values = _reference_path_scores(statement, loads_only=True)
+            statement_reads, statement_values = _cached_reference_path_scores(
+                statement, cache, loads_only=True
+            )
             for paths, additions in (
                 (read_paths, statement_reads),
                 (value_paths, statement_values),
@@ -2133,11 +2410,24 @@ def _operand_import_evidence(
     return evidence
 
 
+@dataclass(frozen=True, slots=True)
+class _ImportedScope:
+    """The spellings one origin's scope resolves to an import or to a scan-limits value.
+
+    Attributes:
+        imported: Spellings bound by an import the origin's scope can see.
+        limits_values: Spellings the module resolves to a scan-limits value.
+    """
+
+    imported: frozenset[str]
+    limits_values: frozenset[str]
+
+
 def _pair_imported_thresholds(
     origin: ast.stmt,
     scope: ast.AST | None,
     operands: tuple[ast.expr, ast.expr],
-    imported: frozenset[str],
+    names: _ImportedScope,
     cache: _DerivationCache,
 ) -> set[str]:
     """Return the strongest imported threshold evidence for one adjacent operand pair.
@@ -2147,8 +2437,10 @@ def _pair_imported_thresholds(
     remain conservative and are all returned.
     """
     left, right = operands
-    if _is_limits_field_operand(left) or _is_limits_field_operand(right):
+    limits = names.limits_values
+    if _is_limits_field_operand(left, limits) or _is_limits_field_operand(right, limits):
         return set()
+    imported = names.imported
     evidence = _operand_import_evidence(origin, scope, left, imported, cache)
     for spelling, score in _operand_import_evidence(origin, scope, right, imported, cache).items():
         previous = evidence.get(spelling)
@@ -2160,21 +2452,27 @@ def _pair_imported_thresholds(
     return {spelling for spelling, score in evidence.items() if score == strongest}
 
 
+_ORDERING_OPERATORS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+"""The comparisons that can bound a resource. Equality and membership ask which value something
+is, not how much of it there is, so an imported sentinel, enum member or frozenset compared that
+way is not a threshold and inventorying it as a fixed semantic bound would be a fiction."""
+
+
 def _imported_thresholds(
     origin: ast.stmt,
     scope: ast.AST | None,
     comparisons: tuple[ast.Compare, ...],
-    imported: frozenset[str],
+    names: _ImportedScope,
     cache: _DerivationCache,
 ) -> set[str]:
-    """Return strongest imported threshold paths, classifying each adjacent pair independently."""
+    """Return strongest imported threshold paths, classifying each ordering pair independently."""
     thresholds: set[str] = set()
     for comparison in comparisons:
         operands = (comparison.left, *comparison.comparators)
-        for left, right in pairwise(operands):
-            thresholds.update(
-                _pair_imported_thresholds(origin, scope, (left, right), imported, cache)
-            )
+        for operator, pair in zip(comparison.ops, pairwise(operands), strict=True):
+            if not isinstance(operator, _ORDERING_OPERATORS):
+                continue
+            thresholds.update(_pair_imported_thresholds(origin, scope, pair, names, cache))
     return thresholds
 
 
@@ -2230,6 +2528,12 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     leaves the magnitude nowhere the condition can see it, so reading the condition alone let any
     new resource bound ship by taking one hop away from the guard.
 
+    The imported-value rule reads a narrower set: the condition, the controls, and the values those
+    writers forward into them. A writer is in the closure because the guard reads what it binds,
+    not because every comparison it happens to spell decides the guard, and scoring those too
+    reported an import that never reaches the condition while multiplying the work by the size of
+    the closure.
+
     Args:
         source: Module source text, parsed but never executed.
         path: Module file name, used in messages.
@@ -2242,17 +2546,20 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     bound, numeric = _module_constants(tree)
     cache = _DerivationCache(module=tree)
     module_imported = _scope_import_names(tree, cache)
+    limits_values = _limits_valued_spellings(tree)
     violations: list[str] = []
     for statement, _call in _origin_calls_by_statement(tree):
         scope = annotations.scopes.get(id(statement))
-        local_bindings = _local_binding_names(scope)
+        local_bindings = _cached_local_binding_names(scope, cache)
         local_imported = _scope_import_names(scope, cache)
         imported = local_imported | (module_imported - local_bindings)
         tests = annotations.tests.get(id(statement), ())
         condition_writers = _writer_statements(
             statement, scope, set(_read_spellings(tests)), set(_read_value_spellings(tests)), cache
         )
-        controls, reachability_writers = _reachability_inputs(statement, scope, cache)
+        controls, reachability_writers, _reachability_reads = _reachability_inputs(
+            statement, scope, cache
+        )
         control_expressions = tuple(
             expression for control in controls for expression in _own_expressions(control)
         )
@@ -2264,10 +2571,16 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
             *reachability_writers,
         )
         local = _local_numeric_names(annotations.scopes.get(id(statement)))
+        compared: tuple[ast.AST, ...] = (
+            statement,
+            *tests,
+            *control_expressions,
+            *_forwarded_value_roots((*condition_writers, *reachability_writers)),
+        )
         comparisons = tuple(
             {
                 id(node): node
-                for root in nodes
+                for root in compared
                 for node in ast.walk(root)
                 if isinstance(node, ast.Compare)
             }.values()
@@ -2276,7 +2589,7 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
             statement,
             scope,
             comparisons,
-            imported,
+            _ImportedScope(imported, limits_values),
             cache,
         )
         for name in sorted(_threshold_names(nodes, bound, numeric | local) | imported_thresholds):
