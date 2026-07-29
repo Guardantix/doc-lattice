@@ -2793,3 +2793,202 @@ def test_a_comparison_a_writer_does_not_forward_is_not_an_imported_threshold() -
     )
 
     assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_fingerprint_tracks_the_default_bound_to_a_parameter_the_guard_reads() -> None:
+    # The signature is not in the body the local fixpoint walks, so a default that feeds the
+    # guard's accumulator was invisible. Charging zero per call withdraws the guard from every
+    # caller that omits the argument, and the record did not move.
+    source = (
+        "class _Budget:\n"
+        "    def charge(self, amount: int = 1) -> None:\n"
+        "        self.work += amount\n"
+        "        if self.work > self.limits.max_work:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.charge", "nope"))\n'
+    )
+    withdrawn = source.replace("amount: int = 1", "amount: int = 0")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.charge") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.charge"
+    )
+
+
+def test_fingerprint_tracks_a_keyword_only_default_the_guard_condition_reads() -> None:
+    # The same hole is reachable through a keyword-only parameter, where flipping the default
+    # switches the guard off for every caller that does not pass it.
+    source = (
+        "def _guard(depth, limits, *, enabled: bool = True):\n"
+        "    if enabled and depth > limits.max_depth:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.enabled", "nope"))\n'
+    )
+    withdrawn = source.replace("enabled: bool = True", "enabled: bool = False")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.enabled") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.enabled"
+    )
+
+
+def test_fingerprint_tracks_the_module_binding_a_read_parameter_default_resolves() -> None:
+    # A default is evaluated in the defining scope, so the module constant behind it is part of
+    # the closure and editing that constant moves the record.
+    source = (
+        "_CHARGE = 1\n"
+        "def _guard(limits, amount: int = _CHARGE):\n"
+        "    work = amount\n"
+        "    if work > limits.max_work:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.module-default", "nope"))\n'
+    )
+    withdrawn = source.replace("_CHARGE = 1", "_CHARGE = 0")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.module-default"
+    ) != _fingerprint_for(withdrawn, "shell_taint.py", "taint.demo.module-default")
+
+
+def test_a_parameter_default_the_guard_does_not_read_leaves_the_fingerprint_alone() -> None:
+    # The control for the rule above. Recording every default in the signature would churn a
+    # frozen record on an edit that decides nothing about the guard.
+    source = (
+        "def _guard(depth, limits, unrelated: int = 1):\n"
+        "    if depth > limits.max_depth:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.unread-default", "nope"))\n'
+    )
+    edited = source.replace("unrelated: int = 1", "unrelated: int = 99")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.unread-default"
+    ) == _fingerprint_for(edited, "shell_taint.py", "taint.demo.unread-default")
+
+
+def test_a_local_binding_does_not_shadow_the_module_name_a_default_resolves() -> None:
+    # A default is evaluated where the function is defined, so a same-named local inside the body
+    # does not shadow it and the module binding stays in the closure.
+    source = (
+        "_CHARGE = 1\n"
+        "def _guard(limits, amount: int = _CHARGE):\n"
+        "    _CHARGE = _unrelated()\n"
+        "    work = amount + _CHARGE\n"
+        "    if work > limits.max_work:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.shadowed-default", "nope"))\n'
+    )
+    withdrawn = source.replace("_CHARGE = 1", "_CHARGE = 0")
+
+    assert _fingerprint_for(
+        source, "shell_taint.py", "taint.demo.shadowed-default"
+    ) != _fingerprint_for(withdrawn, "shell_taint.py", "taint.demo.shadowed-default")
+
+
+def test_compare_against_base_rejects_a_frozen_guard_whose_parameter_default_changed(
+    tmp_path: Path,
+) -> None:
+    # The end-to-end form of the reported hole: the base-owned comparison must reject a candidate
+    # that weakens a frozen guard's default while claiming the base's record.
+    root = _fake_root(tmp_path, [{"origin_id": "taint.eval-discovery.work-limit"}])
+    module = root / "src/doc_lattice/github_ci/shell_taint.py"
+    source = module.read_text(encoding="utf-8")
+    assert source.count("def charge_work(self, amount: int = 1) -> None:") == 1
+    base = json.dumps(
+        {
+            "schema": checker.SCHEMA_VERSION,
+            "records": [
+                record.as_json()
+                for record in checker.repository_origin_records(root)
+                if record.origin_id == "taint.eval-discovery.work-limit"
+            ],
+        }
+    )
+    module.write_text(
+        source.replace(
+            "def charge_work(self, amount: int = 1) -> None:",
+            "def charge_work(self, amount: int = 0) -> None:",
+        ),
+        encoding="utf-8",
+    )
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any("taint.eval-discovery.work-limit" in failure for failure in failures)
+
+
+def test_a_threshold_literal_compared_through_a_call_is_rejected() -> None:
+    # `operator.gt(count, 100)` bounds a resource exactly as `count > 100` does. Reading only
+    # comparison syntax left the literal reachable from no `ast.Compare` node at all.
+    source = (
+        "import operator\n"
+        "def _guard(items):\n"
+        "    if operator.gt(_measure(items), 100):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.call-literal", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold literal 100" in violation for violation in violations)
+
+
+def test_a_threshold_literal_compared_through_a_dunder_call_is_rejected() -> None:
+    # The receiver form of the same spelling, where the left operand is the attribute's own base.
+    source = (
+        "def _guard(items):\n"
+        "    if _measure(items).__gt__(100):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.dunder-literal", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold literal 100" in violation for violation in violations)
+
+
+def test_an_imported_threshold_compared_through_a_call_is_rejected() -> None:
+    # The imported-bound rule reads the same comparisons, so a call spelling must not hide the
+    # provenance of an imported cap either.
+    source = (
+        "from operator import gt\n"
+        "from constants import CEILING\n"
+        "def _guard(items):\n"
+        "    if gt(_measure(items), CEILING):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.call-import", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold CEILING" in violation for violation in violations)
+
+
+def test_a_limits_field_compared_through_a_call_is_still_approved_provenance() -> None:
+    # The control: recognizing the call form must not turn a properly sourced bound into a
+    # violation, whichever operand the limits field is.
+    source = (
+        "import operator\n"
+        "def _guard(items, limits):\n"
+        "    if operator.gt(_measure(items), limits.max_items):\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.call-limits", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_a_call_that_is_not_a_comparison_contributes_no_threshold() -> None:
+    # Arity and keyword arguments decide whether a call spells a comparison. A same-named call
+    # that does not must not manufacture operands out of unrelated arguments.
+    source = (
+        "def _guard(items, limits):\n"
+        "    if gt(_measure(items), 100, strict=True) and _measure(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.not-a-comparison", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_taint.py") == ()
+
+
+def test_an_imported_threshold_forwarded_by_a_parameter_default_is_rejected() -> None:
+    # A default forwards a value into the guard exactly as an assignment writer does, and no
+    # statement in the scope writes it, so the import was invisible to the provenance rule.
+    source = (
+        "from constants import CEILING\n"
+        "def _guard(items, cap=CEILING):\n"
+        "    if _measure(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.default-import", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold CEILING" in violation for violation in violations)

@@ -897,9 +897,17 @@ the magnitude nowhere the condition can see it; likewise, `if len(items) <= 100:
 fixed cap decide whether an unconditional origin is reached. Zero and one are exempt because they
 spell emptiness and arity rather than a magnitude, which is also what keeps a counter seeded at zero
 from reading as a threshold, and a subscript index is a position rather than a magnitude.
+A comparison is recognized by what it does rather than by its syntax. `operator.gt(count, 100)` and
+`count.__gt__(100)` bound a resource exactly as `count > 100` does, and reading only `ast.Compare`
+nodes left both the literal and any imported bound in them reachable from no comparison at all. A
+call to any of the six comparison names is read as the comparison it spells, whichever module it is
+imported from, with the receiver supplying the left operand in the method form. A call whose
+arguments cannot be resolved to that pair, because it is starred, keyword-bearing or of another
+arity, is not read as one.
 Module and function-local imports participate structurally too. A guard-visible imported value on
 the value side of an *ordering* comparison is a named threshold whether imported directly, aliased,
-module-qualified or forwarded through an assignment. Its guard-visible spelling must be inventoried
+module-qualified, forwarded through an assignment, or bound as the default of a parameter the
+comparison reads, since a default forwards a value into the guard exactly as an assignment does. Its guard-visible spelling must be inventoried
 as a fixed semantic bound or it is rejected. Equality and membership ask which value something is
 rather than how much of it there is, so an imported sentinel, enum member or frozenset compared
 that way is not a threshold and no fixed-bound rationale is invented for it. The comparisons read
@@ -994,7 +1002,19 @@ spelling throughout its function, so an unrelated module binding with the same n
 selected. Lambda parameters and comprehension targets shadow only within their expression scopes;
 free names in those expressions still reach the referenced module binding. Unrelated module
 bindings, bodies of other functions, nested function and class bodies, and called implementations
-remain outside the record. A selected import contributes its source module and the aliases that
+remain outside the record.
+
+A statement is not the only thing that binds a name a guard reads. A parameter default binds one
+too, for every call that omits the argument, and the signature carrying it sits outside the body
+that fixpoint walks, so a record also covers the defaults bound to the parameters its dataflow
+reads. `taint.eval-discovery.work-limit` is the concrete case: `charge_work(self, amount: int = 1)`
+accumulates `amount` into the work its condition tests, and defaulting it to `0` stops every
+zero-argument caller charging anything, withdrawing the guard with the whole closure unchanged. The
+same edit to `analyze_marker_taint`'s default `TaintLimits()` widens the budget behind thirteen
+origins at once. Only the defaults the dataflow reads are taken, so an unrelated one in the same
+signature churns nothing. What a default reads seeds the module fixpoint rather than the local one,
+because a default is evaluated in the defining scope: a same-named local inside the body shadows it
+nowhere, and the module binding behind it stays in the record. A selected import contributes its source module and the aliases that
 closure actually reads, not the whole statement, so adding an unrelated name to a shared
 `from ... import (...)` line moves no record. An unbounded closure over those would churn every
 frozen record on unrelated edits; a record that churns constantly has to be regenerated, which is

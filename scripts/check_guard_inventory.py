@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -251,6 +251,11 @@ def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
     return _constructor_names(tree, frozenset({REFUSAL_CONSTRUCTOR}))
 
 
+_WriterDerivation = tuple[tuple[ast.stmt, ...], tuple[str, ...], frozenset[str], frozenset[str]]
+"""One writer closure: the statements it selected, the shapes of the parameter defaults it reads,
+and the read and whole-value spellings the fixpoint grew to."""
+
+
 @dataclass(frozen=True, slots=True)
 class _DerivationCache:
     """Per-parse memo for the derivations repeated across every origin in one module.
@@ -274,10 +279,9 @@ class _DerivationCache:
     paths: dict[tuple[int, bool], tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]] = (
         field(default_factory=dict)
     )
-    closures: dict[
-        tuple[int, int, frozenset[str], frozenset[str]],
-        tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]],
-    ] = field(default_factory=dict)
+    closures: dict[tuple[int, int, frozenset[str], frozenset[str]], _WriterDerivation] = field(
+        default_factory=dict
+    )
     module: ast.Module | None = None
 
 
@@ -292,10 +296,10 @@ class OriginRecord:
         fingerprint: Digest over the qualname, the guarding condition, the origin statement shape
             with operator-facing reason text normalized away, the shapes of the function-local and
             referenced module statements that write what the condition and any enclosing loop's
-            iterable read, the headers of those enclosing loops, the shape of any declared
-            transport the origin statement hands its refusal to, the control flow that decides
-            whether it is reached and the writers feeding that flow, and any `try` body whose
-            handler contains the origin.
+            iterable read, the defaults bound to the parameters that dataflow reads, the headers of
+            those enclosing loops, the shape of any declared transport the origin statement hands
+            its refusal to, the control flow that decides whether it is reached and the writers
+            feeding that flow, and any `try` body whose handler contains the origin.
     """
 
     origin_id: str
@@ -1036,10 +1040,15 @@ def _writer_closure(
         cache: Per-parse derivation memo.
 
     Returns:
-        Module shapes followed by function-local shapes, empty when nothing is read.
+        Module shapes, then function-local shapes, then parameter-default shapes; empty when
+        nothing is read.
     """
-    statements = _writer_statements(origin, scope, read, values, cache)
-    return tuple(_writer_shape(statement, read, cache) for statement in statements)
+    statements, defaults, grown_read, grown_values = _writer_derivation(
+        origin, scope, read, values, cache
+    )
+    read |= grown_read
+    values |= grown_values
+    return (*(_writer_shape(statement, read, cache) for statement in statements), *defaults)
 
 
 def _writer_shape(statement: ast.stmt, read: set[str], cache: _DerivationCache) -> str:
@@ -1105,7 +1114,9 @@ def _writer_statements(
     Returns:
         Referenced module statements followed by local statements, each in source order.
     """
-    statements, grown_read, grown_values = _writer_derivation(origin, scope, read, values, cache)
+    statements, _defaults, grown_read, grown_values = _writer_derivation(
+        origin, scope, read, values, cache
+    )
     read |= grown_read
     values |= grown_values
     return statements
@@ -1117,13 +1128,22 @@ def _writer_derivation(
     read: set[str],
     values: set[str],
     cache: _DerivationCache,
-) -> tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]]:
+) -> _WriterDerivation:
     """Return the writer closure and the spellings it grew to, memoized per seed.
 
     The threshold gate asks for this closure once per comparison operand and once per writer
     reached from one, so the same seed reaches the same scope repeatedly. The result depends on
     nothing but the origin, the scope, the module the cache carries and the seed spellings, all of
     which this parse owns.
+
+    A statement is not the only thing that binds a name the guard reads. A parameter default binds
+    one too, for every call that omits the argument, and no statement in the scope records it: the
+    signature sits outside the body the local fixpoint walks. `charge_work(self, amount: int = 1)`
+    is the concrete case, where `amount: int = 0` stops the zero-argument callers charging anything
+    and withdraws `taint.eval-discovery.work-limit` with the closure unchanged. The defaults the
+    dataflow reads are therefore recorded alongside the writers, and what they read seeds the
+    module fixpoint: a default is evaluated in the defining scope, so it resolves module bindings
+    rather than the function locals that shadow them inside the body.
 
     Args:
         origin: The statement that constructs the refusal, hashed separately.
@@ -1133,18 +1153,15 @@ def _writer_derivation(
         cache: Per-parse derivation memo.
 
     Returns:
-        The selected statements, the grown read spellings and the grown whole-value spellings.
+        The selected statements, the parameter-default shapes, the grown read spellings and the
+        grown whole-value spellings.
     """
     key = (id(origin), id(scope), frozenset(read), frozenset(values))
     memo = cache.closures.get(key)
     if memo is not None:
         return memo
     if not read:
-        result: tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]] = (
-            (),
-            frozenset(read),
-            frozenset(values),
-        )
+        result: _WriterDerivation = ((), (), frozenset(read), frozenset(values))
         cache.closures[key] = result
         return result
 
@@ -1164,11 +1181,19 @@ def _writer_derivation(
         if scope is not None
         else ()
     )
+    defaults = _read_parameter_defaults(scope, grown_read)
+    default_shapes = tuple(
+        f"default {name}={ast.dump(default, include_attributes=False)}"
+        for name, default in defaults
+    )
+    default_expressions = tuple(default for _name, default in defaults)
     shadowed = _cached_local_binding_names(scope, cache)
-    module_read = {spelling for spelling in grown_read if _spelling_root(spelling) not in shadowed}
+    module_read = {
+        spelling for spelling in grown_read if _spelling_root(spelling) not in shadowed
+    } | set(_read_spellings(default_expressions))
     module_values = {
         spelling for spelling in grown_values if _spelling_root(spelling) not in shadowed
-    }
+    } | set(_read_value_spellings(default_expressions))
     module = cache.module
     module_writers = (
         _select_writer_statements(
@@ -1186,9 +1211,39 @@ def _writer_derivation(
     )
     grown_read |= module_read
     grown_values |= module_values
-    result = ((*module_writers, *local), frozenset(grown_read), frozenset(grown_values))
+    result = (
+        (*module_writers, *local),
+        default_shapes,
+        frozenset(grown_read),
+        frozenset(grown_values),
+    )
     cache.closures[key] = result
     return result
+
+
+def _read_parameter_defaults(
+    scope: ast.AST | None, read: set[str]
+) -> tuple[tuple[str, ast.expr], ...]:
+    """Return the scope's defaulted parameters this dataflow reads, in signature order.
+
+    A parameter is matched by the lexical root of a read spelling, so a guard reaching
+    `context.frames` records the default bound to `context`.
+
+    Args:
+        scope: Enclosing function, or `None` at class or module level.
+        read: The spellings the dataflow reads.
+
+    Returns:
+        Parameter name and default expression pairs, empty when none is read.
+    """
+    if scope is None:
+        return ()
+    roots = {_spelling_root(spelling) for spelling in read}
+    return tuple(
+        (argument.arg, default)
+        for argument, default in _defaulted_arguments(scope)
+        if argument.arg in roots
+    )
 
 
 def _select_writer_statements(
@@ -2362,7 +2417,12 @@ def _operand_import_evidence(
     imported: frozenset[str],
     cache: _DerivationCache,
 ) -> dict[str, tuple[int, int, int]]:
-    """Return imported evidence feeding one operand, scored by its shortest dependency path."""
+    """Return imported evidence feeding one operand, scored by its shortest dependency path.
+
+    A parameter default forwards a value into the guard exactly as an assignment writer does, and
+    is one hop away for the same reason, so `def scan(items, cap=MAX_ITEMS)` sources the compared
+    `cap` from the import even though no statement in the scope writes it.
+    """
     evidence = _import_reference_evidence(operand, imported, cache)
     read_paths, value_paths = _cached_reference_path_scores(operand, cache)
     writers = _writer_statements(origin, scope, set(read_paths), set(value_paths), cache)
@@ -2407,6 +2467,44 @@ def _operand_import_evidence(
                     previous = paths.get(spelling)
                     if previous is None or score < previous:
                         paths[spelling] = score
+    for spelling, score in _default_import_evidence(scope, read_paths, imported, cache).items():
+        previous = evidence.get(spelling)
+        if previous is None or score < previous:
+            evidence[spelling] = score
+    return evidence
+
+
+def _default_import_evidence(
+    scope: ast.AST | None,
+    read_paths: dict[str, tuple[int, int]],
+    imported: frozenset[str],
+    cache: _DerivationCache,
+) -> dict[str, tuple[int, int, int]]:
+    """Return imported evidence the read parameters' defaults forward, one hop past the parameter.
+
+    Args:
+        scope: Enclosing function, or `None` at class or module level.
+        read_paths: Scored spellings the operand's dependency graph reaches.
+        imported: Spellings bound by an import the origin's scope can see.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Scored imported spellings, empty when no read parameter carries a default.
+    """
+    evidence: dict[str, tuple[int, int, int]] = {}
+    for name, default in _read_parameter_defaults(scope, set(read_paths)):
+        reaching = [
+            path for spelling, path in read_paths.items() if _spelling_root(spelling) == name
+        ]
+        if not reaching:
+            continue
+        shortest = min(reaching)
+        for spelling, score in _import_reference_evidence(
+            default, imported, cache, (shortest[0], shortest[1] + 1)
+        ).items():
+            previous = evidence.get(spelling)
+            if previous is None or score < previous:
+                evidence[spelling] = score
     return evidence
 
 
@@ -2457,6 +2555,78 @@ _ORDERING_OPERATORS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 is, not how much of it there is, so an imported sentinel, enum member or frozenset compared that
 way is not a threshold and inventorying it as a fixed semantic bound would be a fiction."""
 
+_COMPARISON_CALLS: dict[str, type[ast.cmpop]] = {
+    "lt": ast.Lt,
+    "le": ast.LtE,
+    "gt": ast.Gt,
+    "ge": ast.GtE,
+    "eq": ast.Eq,
+    "ne": ast.NotEq,
+    "__lt__": ast.Lt,
+    "__le__": ast.LtE,
+    "__gt__": ast.Gt,
+    "__ge__": ast.GtE,
+    "__eq__": ast.Eq,
+    "__ne__": ast.NotEq,
+}
+"""Callable spellings of a comparison, keyed by the callee name an operand would spell.
+
+`operator.gt(len(items), 100)` and `len(items).__gt__(100)` bound a resource exactly as
+`len(items) > 100` does. A rule that recognizes only comparison *syntax* therefore lets a new
+resource cap ship with no provenance, since neither the literal nor an imported bound is reachable
+from any `ast.Compare` node. The name is matched however it is imported, because the module it came
+from is not what makes the call a comparison."""
+
+
+def _call_comparison(node: ast.Call) -> ast.Compare | None:
+    """Return the comparison a call spells, or `None` when it is not one.
+
+    The synthesized node carries the call's own operand expressions, so the identity-keyed scoring
+    and memoization downstream see exactly the nodes the source compares. Only the comparison
+    wrapper is new. A starred or keyword argument leaves the operands unresolvable, so such a call
+    is not read as a comparison.
+
+    Args:
+        node: A call the guard's closure contains.
+
+    Returns:
+        The equivalent comparison, or `None` when the call does not spell one.
+    """
+    operator = _COMPARISON_CALLS.get(_called_name(node) or "")
+    if operator is None or node.keywords:
+        return None
+    match node.args:
+        case [ast.Starred(), *_] | [_, ast.Starred(), *_]:
+            return None
+        case [left, right]:
+            pass
+        case [right] if isinstance(node.func, ast.Attribute):
+            left = node.func.value
+        case _:
+            return None
+    return ast.Compare(left=left, ops=[operator()], comparators=[right])
+
+
+def _comparison_nodes(roots: tuple[ast.AST, ...]) -> tuple[ast.Compare, ...]:
+    """Return every comparison these roots contain, in comparison and call spelling alike.
+
+    Args:
+        roots: Expression or statement roots to search.
+
+    Returns:
+        One comparison per comparing node, deduplicated by that node's identity.
+    """
+    found: dict[int, ast.Compare] = {}
+    for root in roots:
+        for node in ast.walk(root):
+            if id(node) in found:
+                continue
+            if isinstance(node, ast.Compare):
+                found[id(node)] = node
+            elif isinstance(node, ast.Call) and (spelled := _call_comparison(node)) is not None:
+                found[id(node)] = spelled
+    return tuple(found.values())
+
 
 def _imported_thresholds(
     origin: ast.stmt,
@@ -2502,9 +2672,7 @@ def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
     """Return every bare numeric magnitude the guard compares against."""
     return {
         literal
-        for root in nodes
-        for node in ast.walk(root)
-        if isinstance(node, ast.Compare)
+        for node in _comparison_nodes(nodes)
         for operand in (node.left, *node.comparators)
         for literal in _operand_magnitudes(operand)
         if literal not in STRUCTURAL_GUARD_LITERALS
@@ -2577,14 +2745,7 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
             *control_expressions,
             *_forwarded_value_roots((*condition_writers, *reachability_writers)),
         )
-        comparisons = tuple(
-            {
-                id(node): node
-                for root in compared
-                for node in ast.walk(root)
-                if isinstance(node, ast.Compare)
-            }.values()
-        )
+        comparisons = _comparison_nodes(compared)
         imported_thresholds = _imported_thresholds(
             statement,
             scope,

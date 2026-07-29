@@ -19,7 +19,7 @@
       "qualname": "_ShellScanner._freeze_control"
     },
     {
-      "fingerprint": "044f-9a47-cd96-464d-2320-4766",
+      "fingerprint": "4e07-f7b9-7066-f2a8-c042-a685",
       "origin_id": "scanner.control-flow.freeze-without-taint-builder",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
@@ -115,13 +115,13 @@
       "qualname": "_static_eval_descriptor"
     },
     {
-      "fingerprint": "06bd-1e0a-adda-283d-e419-6116",
+      "fingerprint": "a959-400a-6253-0b2b-cbb7-a8c2",
       "origin_id": "taint.eval-discovery.update-limit",
       "path": "shell_taint.py",
       "qualname": "_EvalDiscoveryBudget.charge_update"
     },
     {
-      "fingerprint": "7af0-d15c-3edc-7a8f-ceb2-855f",
+      "fingerprint": "9767-a725-f1b2-d8aa-f572-8834",
       "origin_id": "taint.eval-discovery.work-limit",
       "path": "shell_taint.py",
       "qualname": "_EvalDiscoveryBudget.charge_work"
@@ -301,13 +301,13 @@
       "qualname": "_contextualize_evidence.positional_call_contents"
     },
     {
-      "fingerprint": "523a-4fbd-b14c-3d68-6ca7-3ea0",
+      "fingerprint": "dc28-bcbe-c076-f259-8e25-9dbc",
       "origin_id": "taint.function-positional.effect-shift-underflow",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_effect_positional_mutation"
     },
     {
-      "fingerprint": "cefb-6e48-7ae1-65e9-8eda-3d79",
+      "fingerprint": "45a3-ea5b-3156-809d-0496-6787",
       "origin_id": "taint.function-positional.effect-shift-unknown-arguments",
       "path": "shell_taint.py",
       "qualname": "_contextualize_evidence.apply_effect_positional_mutation"
@@ -367,13 +367,13 @@
       "qualname": "_substitute_function_positionals"
     },
     {
-      "fingerprint": "d6f2-0e37-72f8-a0a7-0841-d5ba",
+      "fingerprint": "790a-5a9d-b6ed-87cd-d59e-6269",
       "origin_id": "taint.local-substitution.multiple-results",
       "path": "shell_taint.py",
       "qualname": "_substitute_local_contents"
     },
     {
-      "fingerprint": "4ec4-c89a-9ea1-b89d-fac4-cbca",
+      "fingerprint": "3fb8-bb3f-f6ff-6fcd-03a9-3bb8",
       "origin_id": "taint.local-substitution.unassembled-result",
       "path": "shell_taint.py",
       "qualname": "_substitute_local_contents"
@@ -391,5 +391,5 @@
       "qualname": "_project_read_value"
     }
   ],
-  "schema": 8
+  "schema": 9
 }
