@@ -2974,6 +2974,15 @@ budget. Any other bare literal in a guard comparison is a magnitude with no reco
 so it must be named and inventoried instead.
 """
 
+_LITERAL_BENIGN_CALLEES = frozenset({"int", "_read_ansi_c_digits", "_read_ansi_c_prefixed_escape"})
+"""Callees whose direct numeric arguments state a base or a digit width, not a resource budget.
+
+`int(text, 16)` names the radix the escape is spelled in, and the ANSI-C escape readers take that
+radix and the digit count the shell grammar fixes. Every other callee is excluded deliberately:
+`max(100, floor)` floors a value at 100 and `range(1000)` bounds an iteration, so a literal handed
+to one of those is a magnitude that must be named and inventoried.
+"""
+
 
 def _module_constants(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     """Return the module-level bound names, and the subset bound to a numeric magnitude.
@@ -3024,44 +3033,125 @@ def _is_numeric_constant_expression(expression: ast.expr) -> bool:
     return False
 
 
-_SCALING_OPERATORS = (ast.Mult, ast.Div, ast.FloorDiv, ast.Pow, ast.LShift)
-"""Arithmetic that scales a magnitude rather than displacing a position."""
+def _expression_parents(expression: ast.expr) -> dict[int, ast.AST]:
+    """Return a child-to-parent map over one expression tree.
+
+    Args:
+        expression: The bound expression to map. It stays referenced for the map's lifetime, so
+            the node identities the keys record cannot be reused by another object.
+
+    Returns:
+        Parent node keyed by `id()` of each descendant, empty for a leaf expression.
+    """
+    return {
+        id(child): node for node in ast.walk(expression) for child in ast.iter_child_nodes(node)
+    }
+
+
+def _is_arity_membership(container: ast.expr, parents: dict[int, ast.AST]) -> bool:
+    """Return whether a literal container is the right side of an `in` or `not in` test."""
+    compare = parents.get(id(container))
+    if not isinstance(compare, ast.Compare):
+        return False
+    return any(
+        comparator is container and isinstance(operator, ast.In | ast.NotIn)
+        for operator, comparator in zip(compare.ops, compare.comparators, strict=True)
+    )
+
+
+def _is_subscripted_table(mapping: ast.expr, parents: dict[int, ast.AST]) -> bool:
+    """Return whether a literal mapping is read by a subscript spelled on it directly."""
+    subscript = parents.get(id(mapping))
+    return isinstance(subscript, ast.Subscript) and subscript.value is mapping
+
+
+def _is_displacing_arithmetic(operand: ast.AST, arithmetic: ast.BinOp) -> bool:
+    """Return whether a literal operand moves a position instead of fixing a bound.
+
+    Args:
+        operand: The literal operand, or the sign or slice wrapper standing in for it.
+        arithmetic: The arithmetic node the operand belongs to.
+
+    Returns:
+        Whether the arithmetic displaces rather than bounds.
+    """
+    if isinstance(arithmetic.op, ast.Mod):
+        # Parity and wrapping: `... % 2` selects a residue rather than budgeting anything.
+        return operand is arithmetic.right
+    if not isinstance(arithmetic.op, ast.Add | ast.Sub):
+        # Scaling by a literal fixes a bound however the other operand is derived.
+        return False
+    # Displacement: `index + 2` moves a cursor, while `50 + 50` is arithmetic on a bound.
+    other = arithmetic.left if operand is arithmetic.right else arithmetic.right
+    return not _is_numeric_constant_expression(other)
+
+
+def _is_benign_literal_role(literal: ast.expr, parents: dict[int, ast.AST]) -> bool:
+    """Return whether one numeric literal occurrence sits in a role that fixes no magnitude.
+
+    Each role below is pinned by a spelling the guarded modules already carry. Anything else,
+    including a role that reads as harmless, is a magnitude: see `_is_magnitude_binding`.
+
+    Args:
+        literal: The numeric literal occurrence to classify.
+        parents: Child-to-parent map over the enclosing binding, from `_expression_parents`.
+
+    Returns:
+        Whether the occurrence is benign.
+    """
+    child: ast.AST = literal
+    parent = parents.get(id(child))
+    # A sign or a slice bound carries no role of its own, so the role is the one its own parent
+    # gives: `basename[:-4]` is a slice position however the negative bound is spelled.
+    while isinstance(parent, ast.UnaryOp | ast.Slice | ast.keyword):
+        child, parent = parent, parents.get(id(parent))
+    if isinstance(parent, ast.BinOp):
+        return _is_displacing_arithmetic(child, parent)
+    if isinstance(parent, ast.Subscript):
+        # A position in a fixed grammar: `range_parts[:2]`, `words[3:]`.
+        return child is parent.slice
+    if isinstance(parent, ast.Call):
+        return _called_name(parent) in _LITERAL_BENIGN_CALLEES
+    if isinstance(parent, ast.Set | ast.Tuple):
+        return _is_arity_membership(parent, parents)
+    if isinstance(parent, ast.Dict):
+        return _is_subscripted_table(parent, parents)
+    return False
 
 
 def _is_magnitude_binding(expression: ast.expr) -> bool:
     """Return whether a binding fixes a resource magnitude rather than a dynamic position.
 
-    Arithmetic over numeric literals alone is a magnitude: `limit = 50 * 2` caps a scan exactly as
-    `limit = 100` does. Mixing a literal with a runtime value is not automatically one, because
-    `index = start + 2` is a cursor offset, but scaling by a literal is: `cap = 512 * factor` fixes
-    a 512-fold bound however `factor` is derived, and requiring the whole expression to be constant
-    let that cap ship with no recorded provenance.
+    The rule is deny-by-default. Every numeric literal occurrence in the binding that is not
+    structural fixes a magnitude unless it sits in one of the benign roles
+    `_is_benign_literal_role` enumerates, and one such occurrence makes the whole binding a
+    magnitude. Enumerating the magnitude shapes instead let any spelling nobody had thought of
+    through: `cap = (strict and 100) or 200` is a cap in either branch, and a rule that listed
+    conditional expressions but not boolean ones certified it silently.
 
-    A binding that holds its magnitude somewhere other than the whole expression is followed
-    branch by branch and element by element, and one such part is enough. Each arm of
-    `cap = 100 if strict else budget` decides the bound whenever it is the arm taken, and
-    `caps = (1, 100)` caps the scan at 100 whichever element a later subscript reads. Requiring the
-    magnitude to be the value of the whole expression let both forms ship uninventoried, since the
-    later comparison spells only the name.
+    So `limit = 50 * 2`, `cap = 512 * factor`, `cap = 100 if strict else budget` and
+    `caps = (1, 100)` are all magnitudes, and so is any other value-position literal, while
+    `index = start + 2` stays a cursor offset because displacement is a pinned benign role.
+
+    A false positive here is resolved by spelling the binding plainly or by inventorying the bound
+    name, never by widening the benign roles. A role is added only when a spelling already in the
+    guarded modules needs it, and never to accommodate a spelling being introduced.
+
+    Args:
+        expression: The bound expression to classify.
+
+    Returns:
+        Whether the binding fixes a magnitude.
     """
-    if isinstance(expression, ast.IfExp):
-        return any(_is_magnitude_binding(arm) for arm in (expression.body, expression.orelse))
-    if isinstance(expression, ast.Tuple | ast.List | ast.Set):
-        return any(_is_magnitude_binding(element) for element in expression.elts)
-    if isinstance(expression, ast.Dict):
-        return any(_is_magnitude_binding(value) for value in expression.values if value is not None)
-    magnitudes = (
-        _operand_magnitudes(expression)
-        if _is_numeric_constant_expression(expression)
-        else {
-            magnitude
-            for node in ast.walk(expression)
-            if isinstance(node, ast.BinOp) and isinstance(node.op, _SCALING_OPERATORS)
-            for operand in (node.left, node.right)
-            for magnitude in _operand_magnitudes(operand)
-        }
+    parents = _expression_parents(expression)
+    return any(
+        not _is_benign_literal_role(node, parents)
+        for node in ast.walk(expression)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, int | float)
+        and not isinstance(node.value, bool)
+        and abs(node.value) not in STRUCTURAL_GUARD_LITERALS
     )
-    return bool(magnitudes - STRUCTURAL_GUARD_LITERALS)
 
 
 def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:

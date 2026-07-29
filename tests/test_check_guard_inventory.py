@@ -339,6 +339,56 @@ def test_an_uninventoried_guard_threshold_is_rejected() -> None:
     assert any("_MAX_UNDECLARED_THING" in violation for violation in violations)
 
 
+def test_a_boolop_bound_threshold_is_rejected() -> None:
+    source = (
+        "def _guard(items, strict):\n"
+        "    cap = (strict and 100) or 200\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.boolop", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("cap" in violation for violation in violations)
+
+
+def test_an_unrecognized_literal_spelling_defaults_to_a_magnitude() -> None:
+    source = (
+        "def _guard(items, floor):\n"
+        "    cap = max(100, floor)\n"
+        "    if len(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.floored", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("cap" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "stop = index + 2",
+        "head = parts[:2]",
+        "value = int(text, 16)",
+        "wide = length % 2",
+        "step = {'x': 2, 'u': 4}[escape]",
+    ],
+)
+def test_benign_literal_roles_are_not_magnitudes(binding: str) -> None:
+    source = (
+        "def _guard(items, index, parts, text, length, escape):\n"
+        f"    {binding}\n"
+        "    if len(items) > _MAX_DEMO_ITEMS:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.benign", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    flagged = binding.split(" ", 1)[0]
+    assert not any(flagged in violation for violation in violations)
+
+
 def test_compare_against_base_rejects_debt_the_base_did_not_carry(tmp_path: Path) -> None:
     base = json.dumps({"schema": checker.SCHEMA_VERSION, "records": []})
     record = checker.repository_origin_records(_ROOT)[0]
