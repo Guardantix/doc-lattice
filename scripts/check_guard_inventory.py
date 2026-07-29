@@ -39,6 +39,7 @@ import json
 import sys
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from functools import cache
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -302,6 +303,7 @@ class _DerivationCache:
     module_parents: dict[int, dict[int, ast.AST]] = field(default_factory=dict)
     definitions: dict[int, dict[str, tuple[_Function, ...]]] = field(default_factory=dict)
     calls: dict[int, dict[str, tuple[tuple[ast.stmt, ast.Call], ...]]] = field(default_factory=dict)
+    reachability: dict[tuple[int, int], tuple[str, ...]] = field(default_factory=dict)
     module: ast.Module | None = None
 
 
@@ -1478,8 +1480,11 @@ def _reachability_shapes(
     Returns:
         Shapes in source order, empty when the origin has no enclosing function.
     """
+    memo = cache.reachability.get((id(origin), id(scope)))
+    if memo is not None:
+        return memo
     controls, writers, read = _reachability_inputs(origin, scope, cache)
-    return (
+    shapes = (
         *(
             shape
             for statement in controls
@@ -1487,6 +1492,8 @@ def _reachability_shapes(
         ),
         *(_writer_shape(statement, read, cache) for statement in writers),
     )
+    cache.reachability[(id(origin), id(scope))] = shapes
+    return shapes
 
 
 def _guarded_bodies(tree: ast.AST) -> dict[int, tuple[ast.stmt, ...]]:
@@ -2212,6 +2219,11 @@ def _reachable_functions(module: ast.Module, cache: _DerivationCache) -> set[int
     return reached
 
 
+# Each of these is a pure function of the module source it is handed, and the repository-level
+# rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
+# gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
+# re-fingerprinting both guarded modules for every call.
+@cache
 def find_reachability_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every guard origin whose own function nothing in the module can reach.
 
@@ -2305,6 +2317,11 @@ def _declared_transport_shapes(
     return shapes
 
 
+# Each of these is a pure function of the module source it is handed, and the repository-level
+# rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
+# gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
+# re-fingerprinting both guarded modules for every call.
+@cache
 def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
     """Return one canonical record per guard origin in this module source.
 
@@ -2548,6 +2565,11 @@ def _verdict_return_violations(
     return violations
 
 
+# Each of these is a pure function of the module source it is handed, and the repository-level
+# rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
+# gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
+# re-fingerprinting both guarded modules for every call.
+@cache
 def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every non-canonical refusal shape in this module source.
 
@@ -2652,6 +2674,11 @@ def _defaulted_arguments(scope: ast.AST) -> tuple[tuple[ast.arg, ast.expr], ...]
     return tuple(defaulted)
 
 
+# Each of these is a pure function of the module source it is handed, and the repository-level
+# rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
+# gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
+# re-fingerprinting both guarded modules for every call.
+@cache
 def find_limits_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every limits construction or optional limits parameter away from a boundary.
 
@@ -3397,6 +3424,11 @@ def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
     }
 
 
+# Each of these is a pure function of the module source it is handed, and the repository-level
+# rules derive the same unchanged sources many times over in one process. Memoizing them keeps a
+# gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
+# re-fingerprinting both guarded modules for every call.
+@cache
 def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every guard threshold that is neither a limits field nor an inventoried bound.
 
@@ -3552,10 +3584,26 @@ def _repository_guard_modules(root: Path) -> tuple[str, ...]:
     """
     modules: list[str] = []
     for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if _uses_guard_protocol(tree):
+        if _source_uses_guard_protocol(path.read_text(encoding="utf-8")):
             modules.append(path.relative_to(root).as_posix())
     return tuple(modules)
+
+
+@cache
+def _source_uses_guard_protocol(source: str) -> bool:
+    """Return whether this module source participates in the guard protocol.
+
+    Discovery re-reads every module below the guard package on each repository-level rule, and the
+    answer is a pure function of the source. Keying on the text rather than the path is what keeps
+    a candidate tree written during a test from ever reading a stale answer.
+
+    Args:
+        source: Module source text, parsed but never executed.
+
+    Returns:
+        Whether the module constructs or transports refusal or verdict values.
+    """
+    return _uses_guard_protocol(ast.parse(source))
 
 
 def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
