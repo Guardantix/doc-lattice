@@ -64,6 +64,15 @@ def test_sweep_prefers_the_shortest_reaching_script() -> None:
     assert found["scanner.source.character-limit"][1] == "a" * 8
 
 
+def test_sweep_prefers_the_least_shrunk_reaching_configuration() -> None:
+    # A witness should say as little about the caps as it can get away with, so among shrink
+    # values that all reach the guard, the largest one wins.
+    found = tool.sweep(["echo one; echo two"], tool.limits_grid((0, 1, 2, 3)))
+
+    label, _script = found["scanner.budget.step-limit"]
+    assert label == "ScannerLimits(max_scan_steps=3)"
+
+
 def test_sweep_can_restrict_itself_to_still_unclassified_guards() -> None:
     found = tool.sweep(
         ["echo one; echo two"],

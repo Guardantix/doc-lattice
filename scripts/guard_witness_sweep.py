@@ -75,6 +75,8 @@ def limits_grid(values: Sequence[int] = (0, 1, 2, 3)) -> list[tuple[str, ScanLim
     """Return one configuration per cap per shrink value, plus the unshrunk one.
 
     Only one cap is shrunk at a time, so whichever guard refuses is the guard that cap governs.
+    Earlier entries shrink less: production comes first and each cap's values descend, which is
+    the preference order `sweep` resolves ties with.
 
     Args:
         values: Shrink values to try for each cap.
@@ -82,9 +84,10 @@ def limits_grid(values: Sequence[int] = (0, 1, 2, 3)) -> list[tuple[str, ScanLim
     Returns:
         Labelled scan-limits configurations.
     """
+    ordered = sorted(values, reverse=True)
     grid: list[tuple[str, ScanLimits]] = [(PRODUCTION, ScanLimits())]
     for field in dataclasses.fields(TaintLimits):
-        for value in values:
+        for value in ordered:
             grid.append(
                 (
                     f"TaintLimits({field.name}={value})",
@@ -92,7 +95,7 @@ def limits_grid(values: Sequence[int] = (0, 1, 2, 3)) -> list[tuple[str, ScanLim
                 )
             )
     for field in dataclasses.fields(ScannerLimits):
-        for value in values:
+        for value in ordered:
             grid.append(
                 (
                     f"ScannerLimits({field.name}={value})",
@@ -169,7 +172,8 @@ def sweep(
     """
     scripts = list(corpus)
     found: Reach = {}
-    for label, limits in grid:
+    best: dict[str, tuple[int, int]] = {}
+    for rank, (label, limits) in enumerate(grid):
         for script in scripts:
             try:
                 result = scan_doc_lattice_invocations(script, limits=limits)
@@ -180,13 +184,12 @@ def sweep(
                 continue
             if wanted is not None and verdict.origin_id not in wanted:
                 continue
-            previous = found.get(verdict.origin_id)
-            # Prefer the shortest script, then the least-shrunk configuration, so a witness stays
-            # readable and says as little about the caps as it can get away with.
-            if previous is None or (len(script), len(label)) < (
-                len(previous[1]),
-                len(previous[0]),
-            ):
+            # Prefer the shortest script, then the earliest grid entry, so a witness stays
+            # readable and says as little about the caps as it can get away with: the grid puts
+            # production first and orders each cap's values least-shrunk first.
+            key = (len(script), rank)
+            if verdict.origin_id not in best or key < best[verdict.origin_id]:
+                best[verdict.origin_id] = key
                 found[verdict.origin_id] = (label, script)
     return found
 
