@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -429,9 +429,14 @@ _REFLECTIVE_LOOKUPS = frozenset(
         "__base__",
         "__mro__",
         "__subclasses__",
-        # Builtins that redirect what an otherwise canonical spelling resolves to.
+        # Builtins that redirect what an otherwise canonical spelling resolves to, together with
+        # the descriptor calls performing the same write without spelling the builtin:
+        # `type.__setattr__(_EvalDiscoveryBudget, "charge_work", stub)` replaces the method holding
+        # a frozen guard exactly as `setattr` does.
         "setattr",
         "delattr",
+        "__setattr__",
+        "__delattr__",
     }
 )
 """Names whose whole purpose is to resolve another name at runtime, which the inventory reads none
@@ -477,6 +482,75 @@ def _reflective_lookup_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
         for node in ast.walk(tree)
         if isinstance(node, ast.Name | ast.Attribute)
         if _referenced_name(node) in names
+    )
+
+
+def _definition_names(tree: ast.AST) -> frozenset[str]:
+    """Return every name this module binds by a `def` or a `class`, at any depth.
+
+    Args:
+        tree: Parsed guarded module.
+
+    Returns:
+        The bound names, empty for a module that defines nothing.
+    """
+    return frozenset(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+    )
+
+
+def _attribute_base(node: ast.expr) -> ast.expr:
+    """Return the expression a chain of attribute accesses ultimately reads from."""
+    current = node
+    while isinstance(current, ast.Attribute):
+        current = current.value
+    return current
+
+
+def _definition_rebinding_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
+    """Return a violation for every write to an attribute of a definition this module binds.
+
+    Rejecting the reflective spellings closes `setattr(_EvalDiscoveryBudget, "charge_work", stub)`
+    and the descriptor call behind it, and leaves the plainest spelling of the same withdrawal
+    untouched: `_EvalDiscoveryBudget.charge_work = stub` replaces the method holding a frozen guard
+    while resolving every name statically. Measured against the shipped tree, all three spellings
+    passed every gate with all 194 fingerprints byte-identical, because a record describes the
+    source of the definition it was extracted from rather than what that definition's name holds
+    when a caller reaches it.
+
+    So the write is rejected rather than followed. Following it would mean deciding what the
+    replacement computes, which is the value-provenance problem the computed-callee boundary
+    already declines, and a replacement is free to be built anywhere.
+
+    The base is resolved through the alias closure, so `alias = _EvalDiscoveryBudget` followed by
+    `alias.charge_work = stub` is the same violation, and a chain such as
+    `Budget.charge_work.__func__` is read at its root for the same reason. Only a definition's own
+    attribute is read: `self.work += amount` writes an attribute of a parameter, which is ordinary
+    state rather than a replacement of what a call reaches, and the guarded modules spell 165 such
+    writes and no write to a definition at all. A bare-name rebinding of a module-level function
+    needs no rule of its own, since the assignment is a module statement that the writer closure
+    already hashes into the records reading what that function returns.
+
+    Args:
+        tree: Parsed guarded module.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when the module replaces no definition.
+    """
+    names = _constructor_names(tree, _definition_names(tree))
+    return tuple(
+        f"{path}:{statement.lineno}: {ast.unparse(target)!r} writes an attribute of a definition "
+        f"this module binds, replacing what a call reaches while its record still describes the "
+        f"definition; edit the definition instead"
+        for statement in ast.walk(tree)
+        if isinstance(statement, ast.stmt)
+        for target in _write_targets(statement)
+        if isinstance(target, ast.Attribute)
+        if isinstance(base := _attribute_base(target), ast.Name)
+        if base.id in names
     )
 
 
@@ -2039,14 +2113,24 @@ def _diverting_shape(statement: ast.stmt, cache: _DerivationCache) -> str | None
     branch's body does not churn the record of a guard outside it. Statements that transfer control
     are taken whole, because a `return` decides reachability through the value it returns:
     `return int(digits)` can raise where `return 0` cannot.
+
+    A `with` is reduced to its items for the same reason a `try` is reduced to its handlers: the
+    context manager decides what happens to an exception raised in the body, so
+    `with suppress(Exception):` around a guard swallows the refusal it raises exactly as a bare
+    handler would. Recognizing every compound statement but this one left that spelling withdrawing
+    `taint.eval-discovery.work-limit` with all 194 fingerprints in the tree byte-identical. The item
+    is taken whole rather than only its context expression, so rebinding what the body reads through
+    `as` moves the record too.
     """
     match statement:
         case ast.Return() | ast.Raise() | ast.Break() | ast.Continue():
-            return _cached_shape(statement, cache)
+            shape = _cached_shape(statement, cache)
         case ast.If() | ast.While():
-            return f"test {ast.dump(statement.test)}"
+            shape = f"test {ast.dump(statement.test)}"
         case ast.For() | ast.AsyncFor():
-            return f"for {ast.dump(statement.target)} in {ast.dump(statement.iter)}"
+            shape = f"for {ast.dump(statement.target)} in {ast.dump(statement.iter)}"
+        case ast.With() | ast.AsyncWith():
+            shape = " ".join(("with", *(ast.dump(item) for item in statement.items)))
         case ast.Match():
             arms = [
                 part
@@ -2056,15 +2140,16 @@ def _diverting_shape(statement: ast.stmt, cache: _DerivationCache) -> str | None
                     "" if case.guard is None else ast.dump(case.guard),
                 )
             ]
-            return " ".join(("match", ast.dump(statement.subject), *arms))
+            shape = " ".join(("match", ast.dump(statement.subject), *arms))
         case ast.Try() | ast.TryStar():
             handled = (
                 "bare" if handler.type is None else ast.dump(handler.type)
                 for handler in statement.handlers
             )
-            return " ".join(("try", *handled))
+            shape = " ".join(("try", *handled))
         case _:
-            return None
+            shape = None
+    return shape
 
 
 def _reachability_inputs(
@@ -3683,7 +3768,9 @@ def find_shape_violations(
     A refusal, transport or result constructor named in a form the alias follower cannot read is
     reported here too: see `_unanalyzable_constructor_references`. So is a call target computed in
     call position, and a reflective lookup that would resolve a constructor from a string: see
-    `_dynamically_resolved_call_violations` and `_reflective_lookup_violations`.
+    `_dynamically_resolved_call_violations` and `_reflective_lookup_violations`. So is a write that
+    replaces a definition this module binds, whether or not it resolves a name at runtime: see
+    `_definition_rebinding_violations`.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -3715,6 +3802,7 @@ def find_shape_violations(
         ),
         *_dynamically_resolved_call_violations(tree, path),
         *_reflective_lookup_violations(tree, path),
+        *_definition_rebinding_violations(tree, path),
         *_unanalyzable_constructor_references(
             tree,
             constructors.refusals | constructors.exceptions | constructors.results,

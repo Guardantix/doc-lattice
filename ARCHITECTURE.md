@@ -897,7 +897,23 @@ refusal transports call their base initializer. No shipped guarded module names 
 the rule carries no allowance; a future need for one must be modeled rather than allowed. The
 boundary is again syntactic: it rejects the reflective spellings a guarded module could carry, and
 does not claim to enumerate every route to a namespace that a deserializer or a foreign-function
-call could take.
+call could take. The family covers the descriptor spelling of a redirection as well as the builtin,
+since `type.__setattr__(_EvalDiscoveryBudget, "charge_work", stub)` replaces the method holding a
+frozen guard exactly as `setattr` does while spelling neither builtin.
+
+Rejecting those spellings left the plainest one open, so a write that replaces a definition is
+rejected whether or not it resolves a name at runtime. `_EvalDiscoveryBudget.charge_work = stub`
+withdraws the same guard while resolving every name statically, and all three spellings passed every
+gate with the shipped tree's 194 fingerprints byte-identical, because a record describes the source
+of the definition it was extracted from rather than what that definition's name holds when a caller
+reaches it. Following the write instead would mean deciding what the replacement computes, which is
+the value-provenance problem the computed-callee boundary already declines. The base is resolved
+through the alias closure, so a definition renamed by an assignment is the same target, and an
+attribute chain is read at its root. Only a definition's own attribute counts: `self.work += amount`
+writes state on a parameter, and the guarded modules spell 165 such writes and no write to a
+definition at all, so the rule carries no allowance and moves no record. A bare-name rebinding of a
+module-level function needs no rule of its own, since the assignment is a module statement the
+writer closure already hashes into every record reading what that function returns.
 
 The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
@@ -1138,6 +1154,16 @@ origin was reached, and excluding it is what keeps a subsequent edit in the same
 churning the record. For the same reason a diverting statement is taken whole, because the value it
 returns decides reachability, while a branch is reduced to its test so an edit inside one branch's
 body does not churn a record outside it.
+
+A `with` is one of those controls, reduced to its items on the same terms a `try` is reduced to its
+handlers. The context manager decides what becomes of an exception raised in the body, so
+`with suppress(Exception):` wrapped around an origin swallows the refusal it raises exactly as a
+bare handler would. Recognizing every compound statement except this one left that spelling
+withdrawing `taint.eval-discovery.work-limit` with all 194 fingerprints in the tree byte-identical
+and every other gate silent. The item is taken whole rather than only its context expression, so a
+name rebound through `as` moves the record too, and the statement reaches the callee closure like
+any other control, so `with quiet():` is not withdrawable by editing what `quiet` returns while its
+header stands. The guarded modules spell no `with` statement, so the rule moves no record.
 
 A guard reached through an `except` handler needs more than that flow, because the handled
 exception types are all a `try` contributes to it: what decides whether the handler runs is the

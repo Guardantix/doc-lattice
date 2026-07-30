@@ -4630,6 +4630,150 @@ def test_an_undecorated_guard_records_no_decorator_shape() -> None:
     assert checker._decorator_shapes(scope, checker._DerivationCache(module=tree)) == ()
 
 
+_MANAGED_GUARD = (
+    "def quiet():\n"
+    "    return contextlib.suppress(Exception)\n"
+    "def _guard(items, limits):\n"
+    "{header}"
+    "{indent}if len(items) > limits.max_items:\n"
+    '{indent}    raise _TaintLimitExceeded(GuardRefusal("taint.demo.managed", "nope"))\n'
+)
+"""A guard a context manager can swallow the refusal of without touching anything else."""
+
+
+def _managed(header: str = "") -> str:
+    return _MANAGED_GUARD.format(header=header, indent="        " if header else "    ")
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        # A resolvable manager, whose own returns the callee closure follows.
+        "    with quiet():\n",
+        # An attribute-spelled one, recorded by its spelling alone.
+        "    with contextlib.suppress(Exception):\n",
+        # Several items on one header, and one binding a name the body could read.
+        "    with quiet(), contextlib.suppress(Exception) as unused:\n",
+    ],
+)
+def test_a_context_manager_enclosing_a_guard_moves_its_fingerprint(header: str) -> None:
+    # A context manager decides what happens to the exception the guard raises, so
+    # `with suppress(Exception):` around an origin withdraws it as completely as a bare handler.
+    # Every other compound statement was recognized, which left this one spelling withdrawing
+    # `taint.eval-discovery.work-limit` with all 194 shipped fingerprints byte-identical.
+    assert _fingerprint_for(_managed(), "shell_taint.py", "taint.demo.managed") != _fingerprint_for(
+        _managed(header), "shell_taint.py", "taint.demo.managed"
+    )
+
+
+def test_rewriting_what_an_enclosing_context_manager_returns_moves_the_fingerprint() -> None:
+    # The control for the rule above, and the reason the whole statement rather than its shape
+    # alone reaches the callee closure: hashing `with quiet():` and nothing else would leave the
+    # guard withdrawable by editing what `quiet` returns, with the header untouched.
+    wrapped = _managed("    with quiet():\n")
+    withdrawn = wrapped.replace(
+        "    return contextlib.suppress(Exception)\n", "    return contextlib.nullcontext()\n"
+    )
+
+    assert _fingerprint_for(wrapped, "shell_taint.py", "taint.demo.managed") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.managed"
+    )
+
+
+def test_an_async_context_manager_enclosing_a_guard_moves_its_fingerprint() -> None:
+    # `async with` suppresses an exception on exactly the same terms, so recognizing only the
+    # synchronous spelling would leave the rule covering one of the two forms.
+    plain = (
+        "async def _guard(items, limits):\n"
+        "    if len(items) > limits.max_items:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.async", "nope"))\n'
+    )
+    wrapped = (
+        "async def _guard(items, limits):\n"
+        "    async with quiet():\n"
+        "        if len(items) > limits.max_items:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.async", "nope"))\n'
+    )
+
+    assert _fingerprint_for(plain, "shell_taint.py", "taint.demo.async") != _fingerprint_for(
+        wrapped, "shell_taint.py", "taint.demo.async"
+    )
+
+
+_REBINDABLE_GUARD = (
+    "class _Budget:\n"
+    "    def charge(self, items, limits):\n"
+    "        self.work += 1\n"
+    "        if len(items) > limits.max_items:\n"
+    '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.rebound", "nope"))\n'
+)
+"""A guard whose method a later statement can replace outright."""
+
+
+@pytest.mark.parametrize(
+    ("name", "statement"),
+    [
+        # The descriptor call performs the write `setattr` was rejected for, unspelled.
+        ("__setattr__", 'type.__setattr__(_Budget, "charge", None)'),
+        ("__setattr__", 'object.__setattr__(_Budget, "charge", None)'),
+        ("__delattr__", 'type.__delattr__(_Budget, "charge")'),
+    ],
+)
+def test_a_dunder_attribute_write_is_rejected_like_its_builtin(name: str, statement: str) -> None:
+    violations = checker.find_shape_violations(
+        _REBINDABLE_GUARD + statement + "\n", "shell_taint.py"
+    )
+
+    assert any(_REFLECTIVE.format(name=name) in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # The plainest spelling of the withdrawal, resolving every name statically.
+        "_Budget.charge = lambda self, items, limits: None",
+        # Deleting the method withdraws it just as completely.
+        "del _Budget.charge",
+        # An alias of the definition is the same target under another name.
+        "_Alias = _Budget\n_Alias.charge = None",
+        # A chain is read at its root, so reaching through the method changes nothing.
+        "_Budget.charge.__func__ = None",
+    ],
+)
+def test_replacing_a_definitions_attribute_is_rejected(statement: str) -> None:
+    # Rejecting the reflective spellings closes `setattr(_Budget, "charge", stub)` and the
+    # descriptor call behind it while leaving the plain assignment, which withdraws the guard with
+    # every record in the module byte-identical because a record describes the definition's source
+    # rather than what its name holds when a caller reaches it.
+    violations = checker.find_shape_violations(
+        _REBINDABLE_GUARD + statement + "\n", "shell_taint.py"
+    )
+
+    assert any("writes an attribute of a definition this module binds" in v for v in violations)
+
+
+def test_replacing_a_definitions_attribute_leaves_every_fingerprint_unmoved() -> None:
+    # The measurement the rule exists for: the record cannot be asked to carry this, so the shape
+    # gate has to.
+    withdrawn = _REBINDABLE_GUARD + "_Budget.charge = None\n"
+
+    assert _fingerprint_for(
+        _REBINDABLE_GUARD, "shell_taint.py", "taint.demo.rebound"
+    ) == _fingerprint_for(withdrawn, "shell_taint.py", "taint.demo.rebound")
+
+
+def test_writing_an_attribute_of_a_value_is_not_a_definition_rebinding() -> None:
+    # The guard's own `self.work += 1` writes an attribute of a parameter, which is ordinary state.
+    # The shipped guarded modules spell 165 such writes and no write to a definition at all, so a
+    # rule reading the base as a value rather than as a definition would report all of them.
+    source = _REBINDABLE_GUARD + "def scan(budget, items, limits):\n    budget.charge = None\n"
+
+    assert not any(
+        "writes an attribute of a definition this module binds" in violation
+        for violation in checker.find_shape_violations(source, "shell_taint.py")
+    )
+
+
 def test_an_unrelated_alias_on_a_read_import_does_not_move_a_fingerprint() -> None:
     # The guard reads one name off a shared import line. Hashing the whole line would churn the
     # record of every guard reading any other name on it, forcing the mass regeneration this gate
