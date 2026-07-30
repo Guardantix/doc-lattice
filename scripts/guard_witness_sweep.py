@@ -143,7 +143,12 @@ def load_corpus(
             corpus.add(case.script)
     if extra is not None:
         corpus.update(json.loads(extra.read_text(encoding="utf-8")))
-    return sorted((script for script in corpus if len(script) <= max_length), key=len)
+    # The text tie-break keeps equal-length scripts in a deterministic order, so a sweep prints
+    # the same witness rows under every PYTHONHASHSEED.
+    return sorted(
+        (script for script in corpus if len(script) <= max_length),
+        key=lambda script: (len(script), script),
+    )
 
 
 def sweep(
@@ -228,10 +233,11 @@ def render_rows(found: Reach) -> str:
     for origin_id in sorted(found):
         label, script = found[origin_id]
         # json.dumps escapes exactly what a double-quoted Python literal needs escaped, so the
-        # row stays valid for a script that itself contains quotes.
+        # row stays valid for a script that itself contains quotes. ensure_ascii must stay off:
+        # a \uXXXX surrogate pair is one character in JSON but two in a Python literal.
         lines.append("    ReachableWitness(")
-        lines.append(f"        {json.dumps(origin_id)},")
-        lines.append(f"        {json.dumps(script)},")
+        lines.append(f"        {json.dumps(origin_id, ensure_ascii=False)},")
+        lines.append(f"        {json.dumps(script, ensure_ascii=False)},")
         if label != PRODUCTION:
             kind = label.split("(", 1)[0]
             field = "taint" if kind == "TaintLimits" else "scanner"

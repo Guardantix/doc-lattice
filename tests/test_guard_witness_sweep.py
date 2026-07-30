@@ -127,10 +127,32 @@ def test_rendered_rows_preserve_a_script_containing_quotes() -> None:
     assert ast.literal_eval(call.args[1]) == script
 
 
+def test_rendered_rows_preserve_a_script_containing_astral_characters() -> None:
+    # A surrogate-pair escape like 😀 is one character in JSON but two lone surrogates
+    # in a Python literal, so the pasted row would scan a different script than the sweep did.
+    script = "doc-lattice '😀'"
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
 def test_rendered_rows_omit_limits_for_a_production_reach() -> None:
     rendered = tool.render_rows({"scanner.source.character-limit": ("production", "x")})
 
     assert "limits=" not in rendered
+
+
+def test_corpus_order_does_not_depend_on_set_iteration_order() -> None:
+    # Equal-length scripts must sort deterministically, or the same sweep prints different
+    # witness rows under different PYTHONHASHSEED values.
+    corpus = tool.load_corpus(_ROOT, seeds=1, iterations=50)
+
+    assert corpus == sorted(corpus, key=lambda script: (len(script), script))
 
 
 def test_unclassified_ids_match_the_frozen_debt_snapshot() -> None:
