@@ -869,6 +869,23 @@ This is deliberately a syntactic boundary, not a claim to prove arbitrary callab
 does not trace a computed value first assigned to a plain alias. A future need for a computed
 callee must be modeled explicitly, and no guarded module carries one today.
 
+Closing the computed callee left the same construction spelled across two named calls, which is why
+a guarded module resolves no name at runtime at all. `factory = getattr(shell_guards,
+"GuardRefusal")` followed by `factory(...)` names both callees plainly, so the call boundary accepts
+it, and it names the constructor only by a string, so no alias is registered and the refusal it
+mints is classified by nothing. Following the lookup's result would mean tracking a value the module
+never names, since the string is free to be computed exactly as `"Guard" + "Refusal"` is. So the
+lookup itself is rejected: every reference to a name whose purpose is resolving another name is a
+violation, whether it is called, aliased or passed on. The family covers attribute and namespace
+lookup, source evaluation, import by name and the attributes that hand back a namespace or walk the
+class graph to one. It excludes `compile`, which constructs nothing without `eval` or `exec`,
+`hasattr`, which yields a bool, and `super`, which resolves along declared bases and is how the
+refusal transports call their base initializer. No shipped guarded module names any of the family, so
+the rule carries no allowance; a future need for one must be modeled rather than allowed. The
+boundary is again syntactic: it rejects the reflective spellings a guarded module could carry, and
+does not claim to enumerate every route to a namespace that a deserializer or a foreign-function
+call could take.
+
 The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
 base revision's hand-maintained list. Discovery over-approximates: a module belongs to the guarded

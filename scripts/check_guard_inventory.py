@@ -353,6 +353,83 @@ def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
     return _constructor_names(tree, frozenset({REFUSAL_CONSTRUCTOR}))
 
 
+_REFLECTIVE_LOOKUPS = frozenset(
+    {
+        # Builtins that hand back an object chosen by a name computed at runtime.
+        "getattr",
+        "globals",
+        "locals",
+        "vars",
+        # Builtins that evaluate source text, so every name in it is chosen at runtime.
+        "eval",
+        "exec",
+        # Resolution of a module or an attribute from a name rather than a reference.
+        "__import__",
+        "import_module",
+        "attrgetter",
+        "methodcaller",
+        # Attributes that hand back a namespace, or walk the class graph to reach one.
+        "__getattribute__",
+        "__getattr__",
+        "__dict__",
+        "__builtins__",
+        "__globals__",
+        "__class__",
+        "__bases__",
+        "__base__",
+        "__mro__",
+        "__subclasses__",
+        # Builtins that redirect what an otherwise canonical spelling resolves to.
+        "setattr",
+        "delattr",
+    }
+)
+"""Names whose whole purpose is to resolve another name at runtime, which the inventory reads none
+of.
+
+`compile` is absent because a code object constructs nothing on its own; reaching a constructor
+through one requires `eval` or `exec`, which are rejected here. `hasattr` is absent because it
+yields a bool, which can neither carry a constructor nor redirect a spelling to one. `super` is
+absent because it resolves along a class's own declared bases, and the guarded modules spell
+`super().__init__(...)` in their refusal transports."""
+
+
+def _reflective_lookup_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
+    """Return a violation for every reflective name lookup a guarded module spells.
+
+    Rejecting a computed callee closed the one-expression form, `globals()["Guard" +
+    "Refusal"](...)`, and left the same construction spelled across two named calls:
+    `factory = getattr(shell_guards, "GuardRefusal")` followed by `factory(...)`. Both callees are
+    plain names, so the shape boundary accepts them, and the constructor is named only by a string
+    the alias follower never reads, so `factory` is never registered and the call it makes mints a
+    refusal that no origin record classifies.
+
+    Following the result instead would mean tracking a value the module never names: the string is
+    free to be computed, as `"Guard" + "Refusal"` already is. So the lookup itself is rejected.
+    Every reference is a violation rather than only a call, because a lookup handed anywhere,
+    aliased or passed on, resolves the same name for whoever calls it later.
+
+    The rule reads references, not definitions: a class here that defined `__getattr__` would still
+    have to name or reflectively resolve a constructor inside that body, and both are rejected
+    already.
+
+    Args:
+        tree: Parsed guarded module.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when the module resolves every name statically.
+    """
+    names = _constructor_names(tree, _REFLECTIVE_LOOKUPS)
+    return tuple(
+        f"{path}:{node.lineno}: reflective name lookup {_referenced_name(node)!r} cannot be "
+        f"followed to the constructor it resolves; name the constructor directly"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+        if _referenced_name(node) in names
+    )
+
+
 _CLASSINFO_PREDICATES = frozenset({"isinstance", "issubclass"})
 """Builtins whose second argument names a class rather than constructing one."""
 
@@ -3166,7 +3243,9 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     """Return every non-canonical refusal shape in this module source.
 
     A refusal, transport or result constructor named in a form the alias follower cannot read is
-    reported here too: see `_unanalyzable_constructor_references`.
+    reported here too: see `_unanalyzable_constructor_references`. So is a call target computed in
+    call position, and a reflective lookup that would resolve a constructor from a string: see
+    `_dynamically_resolved_call_violations` and `_reflective_lookup_violations`.
 
     Args:
         source: Module source text, parsed but never executed.
@@ -3194,6 +3273,7 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
             constructors,
         ),
         *_dynamically_resolved_call_violations(tree, path),
+        *_reflective_lookup_violations(tree, path),
         *_unanalyzable_constructor_references(
             tree,
             constructors.refusals | constructors.exceptions | constructors.results,

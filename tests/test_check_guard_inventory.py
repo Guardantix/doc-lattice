@@ -565,6 +565,85 @@ def test_a_dynamically_resolved_refusal_constructor_is_rejected() -> None:
     )
 
 
+_REFLECTIVE = "reflective name lookup {name!r} cannot be followed"
+
+
+def _reflective_scanner_source(lookup: str, preamble: str = "") -> str:
+    # The same construction the computed-callee rule closed, spelled across two named calls. Both
+    # callees are plain names, and the constructor is named only by the string the lookup reads.
+    return (
+        f"{preamble}"
+        "def scan_doc_lattice_invocations(script):\n"
+        "    try:\n"
+        "        scanner.scan()\n"
+        "    except _ShellScanIncomplete as error:\n"
+        f"        factory = {lookup}\n"
+        '        error.refusal = factory("scanner.new", "replacement")\n'
+        "        return ShellScanResult((), error.refusal)\n"
+        "    return ShellScanResult((), Certified())\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "lookup", "preamble"),
+    [
+        ("getattr", 'getattr(shell_guards, "GuardRefusal")', ""),
+        ("__dict__", 'shell_guards.__dict__["GuardRefusal"]', ""),
+        ("vars", 'vars(shell_guards)["GuardRefusal"]', ""),
+        (
+            "im",
+            'im("doc_lattice.github_ci.shell_guards").GuardRefusal',
+            "from importlib import import_module as im\n",
+        ),
+    ],
+)
+def test_a_reflectively_resolved_refusal_constructor_is_rejected(
+    name: str, lookup: str, preamble: str
+) -> None:
+    violations = checker.find_shape_violations(
+        _reflective_scanner_source(lookup, preamble), "shell_scanner.py"
+    )
+
+    assert any(_REFLECTIVE.format(name=name) in violation for violation in violations)
+
+
+def test_a_reflective_lookup_bound_to_an_alias_is_rejected() -> None:
+    # The alias follower registers the rebinding, so the lookup is rejected where it is bound and
+    # again wherever the alias resolves a name.
+    source = (
+        "def scan_doc_lattice_invocations(script):\n"
+        "    look = getattr\n"
+        "    try:\n"
+        "        scanner.scan()\n"
+        "    except _ShellScanIncomplete as error:\n"
+        '        error.refusal = look(shell_guards, "GuardRefusal")("scanner.new", "x")\n'
+        "        return ShellScanResult((), error.refusal)\n"
+        "    return ShellScanResult((), Certified())\n"
+    )
+
+    violations = checker.find_shape_violations(source, "shell_scanner.py")
+
+    assert any(_REFLECTIVE.format(name="getattr") in violation for violation in violations)
+    assert any(_REFLECTIVE.format(name="look") in violation for violation in violations)
+
+
+def test_statically_resolved_module_members_are_not_reflective_lookups() -> None:
+    # `compile` builds a code object rather than resolving a name, and a refusal transport spells
+    # `super().__init__`. Neither is a reflective lookup, so the family must not reject them.
+    source = (
+        "import re\n"
+        "_NAME_RE = re.compile('[a-z]+')\n"
+        "class _ShellScanIncomplete(ProjectError):\n"
+        "    def __init__(self, refusal: GuardRefusal) -> None:\n"
+        "        super().__init__(refusal.reason, code='SHELL_SCAN_INCOMPLETE')\n"
+    )
+
+    assert not any(
+        "reflective name lookup" in violation
+        for violation in checker.find_shape_violations(source, "shell_scanner.py")
+    )
+
+
 def test_the_shipped_shell_modules_have_no_limits_violations() -> None:
     assert checker.repository_limits_violations(_ROOT) == ()
 
