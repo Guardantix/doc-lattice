@@ -860,7 +860,16 @@ call that omits the argument. Reading only the single-value assignment form let 
 spelling escape every rule at once, taking with it the record, the shape violation and the discovery
 of the module holding it, while the defaulted form silently minted production-scale limits below the
 public boundary. A starred target collects a list rather than one of the values and names no
-constructor. The base-owned closure and comparison derive
+constructor.
+
+A call in a guarded module must name its target as a bare name or attribute. A target computed in
+call position, such as `globals()["Guard" + "Refusal"](...)`, can invoke the refusal constructor
+without spelling a constructor reference any rule can inspect and is rejected by the shape gate.
+This is deliberately a syntactic boundary, not a claim to prove arbitrary callable provenance: it
+does not trace a computed value first assigned to a plain alias. A future need for a computed
+callee must be modeled explicitly, and no guarded module carries one today.
+
+The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
 base revision's hand-maintained list. Discovery over-approximates: a module belongs to the guarded
 surface when it *mentions* a refusal, transport or result constructor anywhere, in any position,

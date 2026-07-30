@@ -10,8 +10,8 @@ It enforces six separable properties:
 1. **Canonical refusal shapes.** A refusal may only reach an exception, a `ShellScanResult`, or a
    verdict return as a `GuardRefusal` construction with a literal identifier and literal reason,
    or as one of the explicitly declared transports. Raw text, executable reason expressions and
-   arbitrary verdict expressions are rejected, so a future change cannot bypass construction of
-   the discriminated value.
+   arbitrary verdict expressions are rejected, and every call must name its target directly, so a
+   future change cannot bypass construction of the discriminated value.
 2. **Tree-local closure.** Source origin identifiers must partition exactly into the classified
    inventory and the frozen rollout debt set, with the two disjoint.
 3. **Guard reachability.** Every origin must sit in a function some public entry point of its own
@@ -202,6 +202,31 @@ def _called_name(node: ast.AST) -> str | None:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return None
+
+
+def _dynamically_resolved_call_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
+    """Return violations for calls whose target the guard inventory cannot name.
+
+    Every constructor rule resolves a call through a bare name or an attribute. A computed target
+    can invoke a constructor without spelling any reference those rules inspect, as in
+    `globals()["Guard" + "Refusal"](...)`. Guarded modules have no shipped need for that form, so
+    reject it at the shape boundary rather than treating it as a call to an unrelated function.
+
+    Args:
+        tree: Parsed guarded module.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when every call names its target directly.
+    """
+    return tuple(
+        f"{path}:{node.lineno}: dynamically resolved call target "
+        f"{ast.unparse(node.func)!r} cannot be inspected for guard constructors; "
+        f"call a named function or attribute directly"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        if not isinstance(node.func, ast.Name | ast.Attribute)
+    )
 
 
 def _referenced_name(node: ast.AST) -> str | None:
@@ -3168,6 +3193,7 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
             path,
             constructors,
         ),
+        *_dynamically_resolved_call_violations(tree, path),
         *_unanalyzable_constructor_references(
             tree,
             constructors.refusals | constructors.exceptions | constructors.results,

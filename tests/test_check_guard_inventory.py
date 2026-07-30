@@ -546,6 +546,25 @@ def test_an_unanalyzable_refusal_reference_is_rejected() -> None:
     assert any("GuardRefusal" in violation for violation in violations)
 
 
+def test_a_dynamically_resolved_refusal_constructor_is_rejected() -> None:
+    source = (
+        "def scan_doc_lattice_invocations(script):\n"
+        "    try:\n"
+        "        scanner.scan()\n"
+        "    except _ShellScanIncomplete as error:\n"
+        '        error.refusal = globals()["Guard" + "Refusal"]("scanner.new", "replacement")\n'
+        "        return ShellScanResult((), error.refusal)\n"
+        "    return ShellScanResult((), Certified())\n"
+    )
+
+    violations = checker.find_shape_violations(source, "shell_scanner.py")
+
+    assert any(
+        "dynamically resolved call target" in violation and "globals()" in violation
+        for violation in violations
+    )
+
+
 def test_the_shipped_shell_modules_have_no_limits_violations() -> None:
     assert checker.repository_limits_violations(_ROOT) == ()
 
