@@ -121,6 +121,22 @@ binding whose value mentions the canonical name, so a mention scan sees both wit
 either. The guard-free verdicts are deliberately absent, since a module producing only `Certified`
 or `MarkerDetected` transports no guard identity."""
 
+GUARD_PROTOCOL_MODULE = "shell_guards"
+"""The module that defines the protocol, recognized as an import target.
+
+A name mention is evidence a module participates, but it is evidence the author controls the
+spelling of: `getattr(shell_guards, "Guard" + "Refusal")` resolves the constructor while spelling no
+node that holds the whole name, so mention-based discovery skipped the module and the reflective
+lookup was never put to `_reflective_lookup_violations`, which rejects it on sight. Importing this
+module is the one step such a spelling cannot avoid, since the constructor has to be reached through
+something, and unlike a name it cannot be computed: an import statement names its target as source
+text. Sweeping in every importer therefore closes the computed-name family as a whole rather than
+one obfuscation at a time.
+
+It over-approximates as the name rules do, and in the same safe direction. Importing the protocol
+module for its `ScanLimits` alone is enough to be swept in, which costs that module nothing beyond
+gates it already satisfies."""
+
 DECLARED_TRANSPORTS = frozenset(
     {
         # The parameterized cycle detector refuses on behalf of whichever caller supplied the
@@ -4513,7 +4529,79 @@ _AUTHORING_FIXED_NODES = (
 
 An `ast.Name` and an `ast.Attribute` are absent: each reads a value from outside the expression, so
 nothing about the expression fixes what it evaluates to. A call is handled separately, because its
-callee is a name while its arguments are not."""
+callee is a name while its arguments are not. So are the forms that bind names of their own, which
+put a name in reach of the expression that no scope outside it supplies."""
+
+_BINDING_EXPRESSIONS = ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp | ast.Lambda
+"""Expression forms that bind names their own body then reads.
+
+A comprehension's iteration targets and a lambda's parameters are `ast.Name` leaves that name
+nothing outside the expression, so reading them as free reads made every such form unfixable:
+`len([None for _ in "abcd"])` fixes a cap of 4 at authoring time and was classified as runtime
+data on the strength of the `_` it binds itself."""
+
+
+def _bound_names(node: _BINDING_EXPRESSIONS) -> frozenset[str]:
+    """Return the names a comprehension or lambda binds for its own body.
+
+    Args:
+        node: A node drawn from `_BINDING_EXPRESSIONS`.
+
+    Returns:
+        The bound spellings, empty for a lambda taking no parameters.
+    """
+    if isinstance(node, ast.Lambda):
+        arguments = node.args
+        optional = (arguments.vararg, arguments.kwarg)
+        return frozenset(
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *(one for one in optional if one is not None),
+            )
+        )
+    return frozenset(
+        target.id
+        for generator in node.generators
+        for target in ast.walk(generator.target)
+        if isinstance(target, ast.Name)
+    )
+
+
+def _binding_expression_children(
+    node: _BINDING_EXPRESSIONS, bound: frozenset[str]
+) -> Iterator[tuple[ast.expr, frozenset[str]]]:
+    """Return each child of a comprehension or lambda paired with the names in scope for it.
+
+    The distinction is which side of the binding a child is evaluated on. A lambda's parameter
+    defaults and a comprehension's outermost iterable are evaluated where the expression is written,
+    so they see only the enclosing names; everything else is the body the binding exists to serve.
+    Keeping the two apart is what stops a bound name from vouching for a free one that happens to
+    share its spelling, so `[x for x in "ab"]` is fixed while `[x for x in x]` reads the enclosing
+    `x` and is not.
+
+    Args:
+        node: A node drawn from `_BINDING_EXPRESSIONS`.
+        bound: Names already in scope where this expression is written.
+
+    Returns:
+        Child expressions, each with the names in scope at that child.
+    """
+    inner = bound | _bound_names(node)
+    if isinstance(node, ast.Lambda):
+        yield from ((default, bound) for default in node.args.defaults)
+        yield from ((default, bound) for default in node.args.kw_defaults if default is not None)
+        yield (node.body, inner)
+        return
+    for index, generator in enumerate(node.generators):
+        yield (generator.iter, bound if index == 0 else inner)
+        yield from ((condition, inner) for condition in generator.ifs)
+    if isinstance(node, ast.DictComp):
+        yield from ((node.key, inner), (node.value, inner))
+    else:
+        yield (node.elt, inner)
 
 
 def _is_authoring_fixed(expression: ast.expr) -> bool:
@@ -4523,26 +4611,41 @@ def _is_authoring_fixed(expression: ast.expr) -> bool:
     `int("100")` and `"abcdef".index("f")` each evaluate to the same number on every run. What the
     callee itself computes is not read, which is the point: the value is fixed but unreadable.
 
+    A comprehension or lambda qualifies on the same terms once the names it binds itself are held in
+    scope for its body. Every leaf still has to be a literal; the binding only says which leaves are
+    already accounted for.
+
     Args:
         expression: The expression to classify.
 
     Returns:
         Whether the expression's value is fixed at authoring time.
     """
-    pending: list[ast.AST] = [expression]
+    pending: list[tuple[ast.AST, frozenset[str]]] = [(expression, frozenset())]
     while pending:
-        node = pending.pop()
+        node, bound = pending.pop()
+        if isinstance(node, ast.Name):
+            if node.id in bound:
+                continue
+            return False
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
-                pending.append(node.func.value)
+                pending.append((node.func.value, bound))
             elif not isinstance(node.func, ast.Name):
-                return False
-            pending.extend(node.args)
-            pending.extend(keyword.value for keyword in node.keywords)
+                # A callee that is neither a bare name nor an attribute is spelled inline rather
+                # than named, as `(lambda s: len(s))("abcd")` spells one, so it is classified like
+                # any other operand instead of ending the walk. A callee holding a free name still
+                # fails there, which is what keeps `handlers[key]()` runtime data.
+                pending.append((node.func, bound))
+            pending.extend((argument, bound) for argument in node.args)
+            pending.extend((keyword.value, bound) for keyword in node.keywords)
+            continue
+        if isinstance(node, _BINDING_EXPRESSIONS):
+            pending.extend(_binding_expression_children(node, bound))
             continue
         if not isinstance(node, _AUTHORING_FIXED_NODES):
             return False
-        pending.extend(ast.iter_child_nodes(node))
+        pending.extend((child, bound) for child in ast.iter_child_nodes(node))
     return True
 
 
@@ -5234,6 +5337,33 @@ def repository_threshold_violations(root: Path) -> tuple[str, ...]:
     return tuple(violations)
 
 
+def _imports_protocol_module(node: ast.Import | ast.ImportFrom) -> bool:
+    """Return whether an import statement names the protocol-defining module.
+
+    Both halves of the import grammar reach it. `import a.b.shell_guards` and
+    `from a.b import shell_guards` bind the module through an alias, so the imported name's last
+    segment is read; `from a.b.shell_guards import GuardRefusal` and its relative spellings name it
+    as the source instead, so the module path's last segment is read too. A relative
+    `from . import shell_guards` leaves that path empty and is caught by the first reading.
+
+    The last segment alone is compared, which is what makes the answer independent of how deep the
+    importer sits or whether it spells the package absolutely.
+
+    Args:
+        node: The import statement to classify.
+
+    Returns:
+        Whether this statement imports the protocol module or a name out of it.
+    """
+    if any(alias.name.rsplit(".", 1)[-1] == GUARD_PROTOCOL_MODULE for alias in node.names):
+        return True
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module.rsplit(".", 1)[-1] == GUARD_PROTOCOL_MODULE
+    )
+
+
 def _uses_guard_protocol(tree: ast.AST) -> bool:
     """Return whether a module mentions the refusal or verdict protocol at all.
 
@@ -5250,6 +5380,11 @@ def _uses_guard_protocol(tree: ast.AST) -> bool:
     whole string literal against the name keeps that cheap: a docstring or message mentioning the
     protocol in prose is not equal to a bare protocol name, so only a string that could be handed to
     an attribute lookup matches.
+
+    Matching text is still matching a spelling the author chooses, and one more obfuscation escapes
+    it: `getattr(sg, "Guard" + "Refusal")` holds the name in no single node, so nothing above
+    recognizes it. Importing the protocol module is the step that construction cannot compute away,
+    so `GUARD_PROTOCOL_MODULE` is recognized as an import target and carries that family.
 
     Over-approximating here is safe in the direction it errs. It decides only which modules the
     strict gates run over, and a module swept in by an incidental mention then has to satisfy those
@@ -5270,8 +5405,9 @@ def _uses_guard_protocol(tree: ast.AST) -> bool:
             return True
         if isinstance(node, ast.Constant) and node.value in GUARD_PROTOCOL_NAMES:
             return True
-        if isinstance(node, ast.Import | ast.ImportFrom) and any(
-            alias.name.rsplit(".", 1)[-1] in GUARD_PROTOCOL_NAMES for alias in node.names
+        if isinstance(node, ast.Import | ast.ImportFrom) and (
+            any(alias.name.rsplit(".", 1)[-1] in GUARD_PROTOCOL_NAMES for alias in node.names)
+            or _imports_protocol_module(node)
         ):
             return True
         if (

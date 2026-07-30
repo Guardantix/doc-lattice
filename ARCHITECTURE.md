@@ -893,7 +893,14 @@ surface when it *mentions* a refusal, transport or result constructor anywhere, 
 resolvable or not, or imports one, or defines a verdict-producing function. A whole string literal
 equal to one of those names is a mention too, because `getattr(sg, "GuardRefusal")(...)` is the same
 construction one obfuscation deeper and spells no name node at all. A malformed origin
-hidden behind an indirect call therefore still brings its module into shape validation. A candidate
+hidden behind an indirect call therefore still brings its module into shape validation.
+Matching text is still matching a spelling the author controls, and `getattr(sg, "Guard" +
+"Refusal")` holds the name in no single node, so a module is also swept in when it *imports the
+module defining the protocol*, by either half of the import grammar and by relative spellings.
+Reaching the constructor requires importing what holds it, and unlike a name an import target
+cannot be computed, so recognizing it carries the whole computed-name family rather than one
+obfuscation at a time. This import is the one route that must be recognized; sweeping in every
+importer of a sibling module would put the entire package on the guarded surface. A candidate
 can add a guarded module, classify its origins and add it to its own allowlist without being
 rejected as stale by an older base checker. The candidate-owned coverage rule still compares that
 discovered set with `GUARDED_MODULES`, because limits and threshold rules use that allowlist. Shape
@@ -940,7 +947,16 @@ operand is therefore rejected when its value is fixed when written but cannot be
 whether the operand spells it directly, a module or local binding does, a parameter default does, a
 chain of plain aliases does, or a class field the receiver closure reaches does. A value is fixed
 when written if every leaf of the expression is a literal, a call included, since `int("100")` and
-`"abcdef".index("f")` evaluate to the same number on every run. Such an operand is rejected rather
+`"abcdef".index("f")` evaluate to the same number on every run. A comprehension and a lambda are
+each fixed on those same terms once the names they bind themselves are counted as accounted for:
+reading a comprehension's iteration target or a lambda's parameter as a free name made every such
+form unfixable, so `cap = len([None for _ in "abcd"])` fixed a cap of 4 and was classified as
+runtime data on the strength of the `_` it binds itself. The binding is scoped to the body it
+serves, never to the whole expression, since a comprehension's outermost iterable and a lambda's
+parameter defaults are evaluated where the expression is written: `[x for x in "ab"]` is fixed while
+`[x for x in x]` reads the enclosing `x`, and a name bound by one comprehension does not vouch for a
+free name beside it. A callee spelled inline rather than named, as an immediately-invoked lambda is,
+is classified like any other operand instead of ending the search. Such an operand is rejected rather
 than resolved: resolving it would mean folding an open set of conversions, and every conversion left
 out is another spelling that ships uninventoried, so a cap is spelled plainly or taken from the
 scan's limits. Only ordering comparisons are read, for the reason given below for imported bounds,

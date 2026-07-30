@@ -3992,6 +3992,91 @@ def test_a_getattr_spelled_constructor_marks_a_module_as_guarded() -> None:
     assert checker._source_uses_guard_protocol(source)
 
 
+_COMPUTED_CONSTRUCTOR_SOURCE = (
+    "from doc_lattice.github_ci import shell_guards\n"
+    "def _guard(value):\n"
+    "    if value:\n"
+    '        factory = getattr(shell_guards, "Guard" + "Refusal")\n'
+    '        return factory("taint.demo.computed", "nope")\n'
+    "    return None\n"
+)
+"""A module holding the constructor's name in no single node.
+
+One obfuscation past the `getattr` spelling: matching a whole string literal reads the name as text,
+and concatenating it leaves no text to read. Discovery skipped this module entirely, so the
+reflective-lookup rule that rejects the lookup on sight never ran over it.
+"""
+
+
+def test_a_computed_constructor_name_marks_a_module_as_guarded() -> None:
+    assert checker._source_uses_guard_protocol(_COMPUTED_CONSTRUCTOR_SOURCE)
+
+
+def test_a_computed_constructor_name_reaches_the_shape_gate(tmp_path: Path) -> None:
+    # What the module cannot compute away is the import that puts the constructor in reach, so
+    # discovery reads that instead and the strict gates decide as they do for every other spelling.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "computed_factory.py").write_text(
+        _COMPUTED_CONSTRUCTOR_SOURCE, encoding="utf-8"
+    )
+
+    violations = checker.repository_shape_violations(root)
+
+    assert any(
+        violation.startswith("computed_factory.py:")
+        and _REFLECTIVE.format(name="getattr") in violation
+        for violation in violations
+    )
+
+
+def test_a_computed_constructor_name_is_held_to_the_coverage_allowlist(tmp_path: Path) -> None:
+    # Discovery decides which modules the gates run over, so a swept-in module that never reaches
+    # `GUARDED_MODULES` would still escape the limits and inventory rules.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "computed_factory.py").write_text(
+        _COMPUTED_CONSTRUCTOR_SOURCE, encoding="utf-8"
+    )
+
+    violations = checker.repository_coverage_violations(root)
+
+    assert any("computed_factory.py" in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from doc_lattice.github_ci import shell_guards",
+        "from doc_lattice.github_ci import shell_guards as sg",
+        "import doc_lattice.github_ci.shell_guards",
+        "import doc_lattice.github_ci.shell_guards as sg",
+        "from doc_lattice.github_ci.shell_guards import ScanLimits",
+        "from . import shell_guards",
+        "from .shell_guards import ScanLimits",
+        "from ..github_ci.shell_guards import ScanLimits",
+    ],
+)
+def test_every_import_spelling_of_the_protocol_module_marks_a_module_as_guarded(
+    statement: str,
+) -> None:
+    # The import grammar names the module either as the bound alias or as the source it draws from,
+    # and a relative spelling drops the package from both. All of them are the same participation.
+    assert checker._source_uses_guard_protocol(f"{statement}\n")
+
+
+def test_importing_an_unrelated_module_does_not_mark_a_module_as_guarded() -> None:
+    # The import rule is what keeps discovery ahead of a computed name, so it has to stay narrower
+    # than "imports a sibling": every module in the package would otherwise be swept in.
+    source = "from doc_lattice.github_ci import workflow_parser\n"
+
+    assert not checker._source_uses_guard_protocol(source)
+
+
+def test_the_shipped_discovered_surface_is_unchanged_by_the_import_rule() -> None:
+    # Recognizing an import widens discovery, and a module swept in without a `GUARDED_MODULES`
+    # entry fails the coverage gate. No shipped module reaches the protocol module that way.
+    assert checker._repository_guard_modules(_ROOT) == tuple(sorted(checker.GUARDED_MODULES))
+
+
 def test_the_protocol_defining_module_is_part_of_the_discovered_surface() -> None:
     # Discovery over-approximates by mention, and the module defining the protocol names its own
     # refusal constructor in the verdict alias. It constructs no refusal, so every discovered-module
@@ -4885,6 +4970,17 @@ def test_compare_against_base_rejects_a_frozen_guard_whose_class_field_changed(
         '"abcdefghij".index("j")',
         'len(("a", "b", "c"))',
         'int("64", 16)',
+        # A comprehension and a lambda bind names of their own, which read as free names unless the
+        # binding is tracked. Every one of these fixes its magnitude when it is written.
+        'len([None for _ in "abcd"])',
+        'len({c for c in "abcd"})',
+        'len({c: 1 for c in "abcd"})',
+        'sum(1 for _ in "abcd")',
+        'len([x for x in "abcd" if x > "a"])',
+        'len([x + y for x in "ab" for y in "cd"])',
+        'len([x for x in [y for y in "abcd"]])',
+        '(lambda s: len(s))("abcd")',
+        'len(sorted("abcd", key=lambda c: c))',
     ],
 )
 def test_a_cap_converted_from_a_nonnumeric_literal_is_rejected(binding: str) -> None:
@@ -4978,6 +5074,40 @@ def test_a_converted_cap_on_a_class_field_the_guard_reads_is_rejected() -> None:
 )
 def test_a_fixed_value_that_bounds_nothing_is_not_an_opaque_magnitude(source: str) -> None:
     violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert not [v for v in violations if "fixes a magnitude no numeric literal records" in v]
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        # The outermost iterable is evaluated where the comprehension is written, so it reads the
+        # enclosing name even when the comprehension binds that same spelling itself.
+        "len([x for x in other])",
+        "len([x for x in x])",
+        "len([other for x in 'ab'])",
+        "len([x for x in 'ab' for y in other])",
+        "len([x for x in 'ab' if x > other])",
+        "len({c: other for c in 'ab'})",
+        # A lambda's defaults are evaluated in the enclosing scope for the same reason.
+        "(lambda s=other: len(s))()",
+        "(lambda s: len(s) + other)('ab')",
+        # A name bound by one comprehension does not vouch for a free name beside it.
+        "[len([x for x in 'ab']), other][1]",
+    ],
+)
+def test_a_comprehension_reading_runtime_data_is_not_an_opaque_magnitude(binding: str) -> None:
+    # The rule rejects a cap whose value is fixed when it is written. A comprehension over data the
+    # scan supplies fixes nothing, so reading its bound names as evidence of fixity would report
+    # every ordinary measurement as an unprovenanced bound.
+    source = (
+        "def _guard(items, other):\n"
+        f"    cap = {binding}\n"
+        "    if _measure(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.runtime", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
 
     assert not [v for v in violations if "fixes a magnitude no numeric literal records" in v]
 
