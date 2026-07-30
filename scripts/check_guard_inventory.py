@@ -4413,25 +4413,132 @@ def _call_comparison(node: ast.Call) -> ast.Compare | None:
     return ast.Compare(left=left, ops=[operator()], comparators=[right])
 
 
+_EXTREMUM_CALLS = frozenset({"max", "min", "sorted"})
+"""Callees that order their operands against one another and return one of them.
+
+`max(len(items), cap)` decides which of the two is larger exactly as `len(items) > cap` does, so a
+guard can spell the ordering here and then ask only an equality question of the result:
+`max(len(items), cap) != cap` refuses above `cap` while `_ORDERING_OPERATORS` sees nothing but
+`!=`. The comparison is the call, not the operator that reads its result."""
+
+_SEQUENCE_WRAPPER_CALLS = frozenset({"set", "frozenset", "tuple", "list", "sorted", "reversed"})
+"""Callees that rebuild a sequence without changing which values it holds.
+
+A membership test reaches the same bound through any of them, so `n in set(range(cap))` has to be
+read as `n in range(cap)` is. None of these introduces a bound of its own; they are unwrapped only
+to find the one underneath."""
+
+
+def _literal_elements(node: ast.expr) -> tuple[ast.expr, ...]:
+    """Return a literal container's elements, empty when the expression is not one."""
+    if isinstance(node, ast.Tuple | ast.List | ast.Set):
+        return tuple(node.elts)
+    return ()
+
+
+def _unwrapped_sequence(node: ast.expr) -> ast.expr:
+    """Return the expression a chain of sequence rebuilds is wrapped around."""
+    while (
+        isinstance(node, ast.Call)
+        and _called_name(node) in _SEQUENCE_WRAPPER_CALLS
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        node = node.args[0]
+    return node
+
+
+def _extremum_comparison(node: ast.Call) -> ast.Compare | None:
+    """Return the ordering an extremum call spells, or `None` when it spells none.
+
+    The operands are the call's own argument expressions, so the identity-keyed scoring downstream
+    sees exactly the nodes the source orders. A single argument is read only when it is a literal
+    container, since `max(items)` orders runtime data while `max((limit, cap))` orders the two
+    values written beside each other. A keyword argument leaves the operands unresolvable, for the
+    reason `_call_comparison` gives.
+
+    Args:
+        node: A call the guard's closure contains.
+
+    Returns:
+        The ordering over its operands, or `None` when fewer than two are resolvable.
+    """
+    if _called_name(node) not in _EXTREMUM_CALLS or node.keywords:
+        return None
+    match node.args:
+        case [ast.Starred(), *_] | [_, ast.Starred(), *_]:
+            operands: tuple[ast.expr, ...] = ()
+        case [single]:
+            operands = _literal_elements(single)
+        case [*several]:
+            operands = tuple(several)
+    match operands:
+        case (left, *rest) if rest:
+            return ast.Compare(left=left, ops=[ast.Gt() for _ in rest], comparators=rest)
+        case _:
+            return None
+
+
+def _membership_range_comparisons(comparison: ast.Compare) -> tuple[ast.Compare, ...]:
+    """Return the orderings a membership test against a range spells.
+
+    `n in range(cap)` refuses above `cap` while spelling no ordering operator, so a resource bound
+    reached this way was invisible to every rule that reads one. The range's own arguments are the
+    bound: a one-argument range caps the tested value, and a two-argument one brackets it.
+
+    Args:
+        comparison: A comparison the guard's closure contains.
+
+    Returns:
+        One ordering per membership operand pair whose container is a range.
+    """
+    spelled: list[ast.Compare] = []
+    operands = (comparison.left, *comparison.comparators)
+    for operator, (value, container) in zip(comparison.ops, pairwise(operands), strict=True):
+        if not isinstance(operator, ast.In | ast.NotIn):
+            continue
+        target = _unwrapped_sequence(container)
+        if not isinstance(target, ast.Call) or _called_name(target) != "range" or target.keywords:
+            continue
+        match target.args:
+            case [stop]:
+                spelled.append(ast.Compare(left=value, ops=[ast.Lt()], comparators=[stop]))
+            case [start, stop, *_]:
+                spelled.append(
+                    ast.Compare(left=start, ops=[ast.LtE(), ast.Lt()], comparators=[value, stop])
+                )
+    return tuple(spelled)
+
+
 def _comparison_nodes(roots: tuple[ast.AST, ...]) -> tuple[ast.Compare, ...]:
     """Return every comparison these roots contain, in comparison and call spelling alike.
+
+    An ordering spelled by a call is included too. A guard that hands its operands to `max`, `min`
+    or `sorted`, or tests membership in a `range`, bounds a resource exactly as an ordering operator
+    does, and reading only the operators let such a bound ship with no provenance at all whatever
+    its own provenance rules would have said about it.
 
     Args:
         roots: Expression or statement roots to search.
 
     Returns:
-        One comparison per comparing node, deduplicated by that node's identity.
+        One comparison per comparing node, plus the orderings its calls spell, deduplicated by the
+        comparing node's identity.
     """
     found: dict[int, ast.Compare] = {}
+    derived: list[ast.Compare] = []
     for root in roots:
         for node in ast.walk(root):
             if id(node) in found:
                 continue
             if isinstance(node, ast.Compare):
                 found[id(node)] = node
+                derived.extend(_membership_range_comparisons(node))
             elif isinstance(node, ast.Call) and (spelled := _call_comparison(node)) is not None:
                 found[id(node)] = spelled
-    return tuple(found.values())
+            elif isinstance(node, ast.Call) and (ordered := _extremum_comparison(node)) is not None:
+                found[id(node)] = ordered
+    return (*found.values(), *derived)
 
 
 def _imported_thresholds(

@@ -980,6 +980,25 @@ call to any of the six comparison names is read as the comparison it spells, whi
 imported from, with the receiver supplying the left operand in the method form. A call whose
 arguments cannot be resolved to that pair, because it is starred, keyword-bearing or of another
 arity, is not read as one.
+The same holds for a call that performs the ordering and leaves only an identity question behind.
+`max(len(items), cap) != cap` refuses above `cap`, and so do `min(len(items), cap) == cap` and
+`len(items) not in range(cap)`, while the operator each one ends in is an equality or a membership
+test. Reading operators alone therefore let a cap ship past every threshold rule at once: the
+literal rule reads comparison operands and `range(100)` is a call rather than an operand, and the
+imported-bound and opaque-magnitude rules read ordering operators that these spellings never write.
+An extremum call over two or more operands, or over a literal container of them, is read as the
+ordering it performs, and a membership test whose container is a range is read as the bound that
+range spells, through any sequence rebuild wrapped around it since none of those changes which
+values it holds. The unresolvable forms are excluded exactly as they are for a spelled comparison,
+and a call ordering runtime data spells no bound, so `len(items) in range(len(other))` and
+`len(items) > max(limits.max_items, limits.max_words)` stay clean. No shipped guard encodes a bound
+this way, so the widening carries no allowance.
+The line stops at comparison. A guard that caps by *truncating* its data rather than by ordering a
+magnitude, as `list(items[:100]) != list(items)` does, is not read as a threshold, because a slice
+bound is a grammar offset far more often than a budget: the shipped guarded modules spell 61
+authoring-fixed slice bounds, every one of them a lookahead of three characters or fewer. Reading
+them as caps would report the scanner's own grammar as unprovenanced bounds, so that family needs
+evidence separating the two before it can be gated rather than a widening of this rule.
 Module and function-local imports participate structurally too. A guard-visible imported value on
 the value side of an *ordering* comparison is a named threshold whether imported directly, aliased,
 module-qualified, forwarded through an assignment, or bound as the default of a parameter the

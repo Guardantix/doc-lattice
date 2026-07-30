@@ -5114,3 +5114,130 @@ def test_a_comprehension_reading_runtime_data_is_not_an_opaque_magnitude(binding
 
 def test_the_shipped_guarded_modules_carry_no_opaque_magnitude() -> None:
     assert checker.repository_threshold_violations(_ROOT) == ()
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        # Membership in a range bounds the tested value without spelling an ordering operator.
+        "_measure(items) not in range(cap)",
+        "_measure(items) in range(cap)",
+        "_measure(items) not in range(0, cap)",
+        # Rebuilding the range changes which values it holds not at all.
+        "_measure(items) in set(range(cap))",
+        "_measure(items) in tuple(range(cap))",
+        "_measure(items) in sorted(range(cap))",
+        # An extremum call orders its operands and leaves only an equality question behind.
+        "max(_measure(items), cap) != cap",
+        "min(_measure(items), cap) == cap",
+        "max(_measure(items), cap) is not cap",
+        "sorted((_measure(items), cap))[-1] != cap",
+    ],
+)
+def test_a_cap_reached_without_an_ordering_operator_is_rejected(condition: str) -> None:
+    # A guard can hand its operands to a call that orders them and then ask only whether the result
+    # is the cap. The ordering is the call, so reading operators alone let a converted cap ship.
+    source = (
+        "def _guard(items):\n"
+        '    cap = ord("d")\n'
+        f"    if {condition}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.encoded", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("fixes a magnitude no numeric literal records" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "_measure(items) not in range(100)",
+        "_measure(items) in set(range(100))",
+        "max(_measure(items), 100) != 100",
+        "sorted((_measure(items), 100))[-1] != 100",
+    ],
+)
+def test_a_bare_literal_bound_reached_by_a_call_is_rejected(condition: str) -> None:
+    # The literal rule reads comparison operands, so wrapping the magnitude in the call that does
+    # the ordering hid a plainly spelled cap from it as well.
+    source = (
+        "def _guard(items):\n"
+        f"    if {condition}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.encoded-literal", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold literal 100 has no provenance" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "_measure(items) not in range(CAP)",
+        "max(_measure(items), CAP) != CAP",
+    ],
+)
+def test_an_imported_bound_reached_by_a_call_is_rejected(condition: str) -> None:
+    source = (
+        "from doc_lattice.github_ci.other import CAP\n"
+        "def _guard(items):\n"
+        f"    if {condition}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.encoded-import", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("guard threshold CAP is neither" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        # A range over runtime data bounds nothing that was fixed when it was written.
+        "_measure(items) in range(len(other))",
+        # An extremum over a limits field is the provenance the rule asks for, not a bare cap.
+        "_measure(items) > max(limits.max_items, limits.max_words)",
+        # One operand leaves nothing to order against.
+        "_measure(items) in range(len(other), len(other) + _measure(other))",
+        "max(other) != _measure(items)",
+        # Ordering runtime data against itself.
+        "max(_measure(items), _measure(other)) != _measure(other)",
+        # A membership test over a semantic set is an identity question, range or no range.
+        'word in frozenset({"if", "then"})',
+    ],
+)
+def test_a_call_that_orders_runtime_data_is_not_a_threshold(condition: str) -> None:
+    # The widening reads the operands a call orders. It must not turn every ordinary use of these
+    # builtins into a bound, or the rule would report the scanner's own measurements.
+    source = (
+        "def _guard(items, other, limits, word):\n"
+        f"    if {condition}:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.runtime", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        # A keyword argument leaves the operands unresolvable, as it does for a spelled comparison.
+        "sorted(pair, key=lambda value: value)[-1] != cap",
+        # Starred arguments do the same.
+        "max(*pair) != cap",
+        # A single non-literal argument orders runtime data, not the two values beside each other.
+        "max(pair) != cap",
+    ],
+)
+def test_an_unresolvable_extremum_call_spells_no_ordering(condition: str) -> None:
+    # These are the same boundaries `_call_comparison` draws. The operands cannot be read, so no
+    # ordering is synthesized and the cap is left to the rules that read the operators.
+    source = (
+        "def _guard(pair, cap):\n"
+        f"    if {condition}:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.unresolvable", "nope"))\n'
+    )
+
+    assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
