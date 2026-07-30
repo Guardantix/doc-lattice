@@ -996,9 +996,11 @@ this way, so the widening carries no allowance.
 The line stops at comparison. A guard that caps by *truncating* its data rather than by ordering a
 magnitude, as `list(items[:100]) != list(items)` does, is not read as a threshold, because a slice
 bound is a grammar offset far more often than a budget: the shipped guarded modules spell 61
-authoring-fixed slice bounds, every one of them a lookahead of three characters or fewer. Reading
-them as caps would report the scanner's own grammar as unprovenanced bounds, so that family needs
-evidence separating the two before it can be gated rather than a widening of this rule.
+authoring-fixed slice bounds, every one of them a lookahead of three characters or fewer, and seven
+of those sit outside the zero-and-one exemption. Reading slice bounds as caps would therefore report
+seven of the scanner's own grammar offsets as unprovenanced bounds while the same rule caught no
+budget, so that family needs evidence separating an offset from a budget before it can be gated
+rather than a widening of this rule.
 Module and function-local imports participate structurally too. A guard-visible imported value on
 the value side of an *ordering* comparison is a named threshold whether imported directly, aliased,
 module-qualified, forwarded through an assignment, or bound as the default of a parameter the
