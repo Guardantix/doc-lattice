@@ -115,11 +115,12 @@ GUARD_PROTOCOL_NAMES = frozenset({REFUSAL_CONSTRUCTOR, RESULT_CONSTRUCTOR}) | RE
 """The canonical names whose mention makes a module part of the guarded surface.
 
 These are the constructor families `_shape_constructors` resolves and the shape gate tracks, named
-canonically. Module discovery reads them as bare spellings rather than resolving per-module aliases:
-an alias is introduced either by an import statement, which names the canonical target, or by a
-binding whose value mentions the canonical name, so a mention scan sees both without following
-either. The guard-free verdicts are deliberately absent, since a module producing only `Certified`
-or `MarkerDetected` transports no guard identity."""
+canonically. They seed discovery rather than bounding it: an alias is introduced by an import
+statement or by a binding, both of which name the canonical target, so the module that introduces
+one is swept in by the mention it necessarily spells. Its *consumers* are not, which is why
+`_protocol_name_closure` widens this set across the package before discovery reads it. The
+guard-free verdicts are deliberately absent, since a module producing only `Certified` or
+`MarkerDetected` transports no guard identity."""
 
 GUARD_PROTOCOL_MODULE = "shell_guards"
 """The module that defines the protocol, recognized as an import target.
@@ -373,6 +374,30 @@ def _constructor_names(tree: ast.AST, constructors: frozenset[str]) -> frozenset
 def _refusal_constructor_names(tree: ast.AST) -> frozenset[str]:
     """Return every local name this module binds to the refusal constructor."""
     return _constructor_names(tree, frozenset({REFUSAL_CONSTRUCTOR}))
+
+
+@dataclass(frozen=True, slots=True)
+class _ShapeConstructors:
+    """Constructor spellings recognized while validating refusal and verdict shapes."""
+
+    refusals: frozenset[str]
+    exceptions: frozenset[str]
+    results: frozenset[str]
+    guard_free_verdicts: frozenset[str]
+
+
+CANONICAL_CONSTRUCTORS = _ShapeConstructors(
+    refusals=frozenset({REFUSAL_CONSTRUCTOR}),
+    exceptions=REFUSAL_EXCEPTIONS,
+    results=frozenset({RESULT_CONSTRUCTOR}),
+    guard_free_verdicts=GUARD_FREE_VERDICTS,
+)
+"""The seed each constructor family resolves from when no package closure is supplied.
+
+Resolution follows a binding whose value spells a name it already holds, so what it finds depends
+on what it starts from. Seeded canonically it reads one module's own aliases; seeded with
+`_package_constructors` it reads the package's re-exports as well, which is the difference between
+inventorying an origin built through an imported alias and never seeing it."""
 
 
 _REFLECTIVE_LOOKUPS = frozenset(
@@ -3188,12 +3213,17 @@ def _declared_transport_shapes(
 # gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
 # re-fingerprinting both guarded modules for every call.
 @cache
-def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
+def extract_origin_records(
+    source: str, path: str, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> tuple[OriginRecord, ...]:
     """Return one canonical record per guard origin in this module source.
 
     Args:
         source: Module source text, parsed but never executed.
         path: Name recorded on each produced record.
+        seeds: Names the refusal constructor resolves from, defaulting to its canonical spelling.
+            Repository-level extraction passes the package closure so that an origin built through
+            an imported re-export is inventoried like any other.
 
     Returns:
         Records ordered by identifier.
@@ -3207,7 +3237,8 @@ def extract_origin_records(source: str, path: str) -> tuple[OriginRecord, ...]:
     guarded_bodies = _guarded_bodies(tree)
     cache = _DerivationCache(module=tree)
     records: list[OriginRecord] = []
-    for statement, call in _origin_calls_by_statement(tree):
+    refusals = _constructor_names(tree, seeds.refusals)
+    for statement, call in _origin_calls_by_statement(tree, refusals):
         if not call.args or not isinstance(call.args[0], ast.Constant):
             raise ValueError(f"{path}: guard identifier must be a string literal")
         origin_id = call.args[0].value
@@ -3313,24 +3344,106 @@ def _literal_reason_violations(tree: ast.AST, path: str, names: frozenset[str]) 
     ]
 
 
-@dataclass(frozen=True, slots=True)
-class _ShapeConstructors:
-    """Constructor spellings recognized while validating refusal and verdict shapes."""
+def _shape_constructors(
+    tree: ast.AST, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> _ShapeConstructors:
+    """Resolve every constructor family used by refusal-shape rules and module discovery.
 
-    refusals: frozenset[str]
-    exceptions: frozenset[str]
-    results: frozenset[str]
-    guard_free_verdicts: frozenset[str]
+    Args:
+        tree: Parsed module.
+        seeds: Names each family resolves from, defaulting to the canonical spellings.
 
-
-def _shape_constructors(tree: ast.AST) -> _ShapeConstructors:
-    """Resolve every constructor family used by refusal-shape rules and module discovery."""
+    Returns:
+        Each family widened by this module's own aliases.
+    """
     return _ShapeConstructors(
-        refusals=_refusal_constructor_names(tree),
-        exceptions=_constructor_names(tree, REFUSAL_EXCEPTIONS),
-        results=_constructor_names(tree, frozenset({RESULT_CONSTRUCTOR})),
-        guard_free_verdicts=_constructor_names(tree, GUARD_FREE_VERDICTS),
+        refusals=_constructor_names(tree, seeds.refusals),
+        exceptions=_constructor_names(tree, seeds.exceptions),
+        results=_constructor_names(tree, seeds.results),
+        guard_free_verdicts=_constructor_names(tree, seeds.guard_free_verdicts),
     )
+
+
+@cache
+def _source_constructor_names(source: str, seed: frozenset[str]) -> frozenset[str]:
+    """Return every name this module source binds to one of these constructors.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        seed: Constructor names to resolve from.
+
+    Returns:
+        The seed together with every alias this module binds to one of it.
+    """
+    return _constructor_names(ast.parse(source), seed)
+
+
+def _package_constructor_names(sources: tuple[str, ...], seed: frozenset[str]) -> frozenset[str]:
+    """Return every name the package binds to one of these constructors.
+
+    Per-module resolution is closed under one module's aliases, not the package's. A guarded module
+    may bind `GuardFactory = GuardRefusal` and a consumer import only `GuardFactory`, which spells
+    no canonical name and imports no protocol module either: the consumer was discovered by nothing,
+    and a fail-closed origin it constructed through the alias was inventoried by nothing.
+
+    Closing the seed rather than adding a rule is what fixes both halves at once. Every rule keeps
+    reading names the way it already did, so an alias reached by import, by attribute or as text is
+    recognized exactly as its canonical spelling is, and an alias of an alias needs no case of its
+    own because this iterates to a fixed point. The set only grows and the package spells finitely
+    many names, so it terminates.
+
+    Widening errs in the safe direction: a coincidental collision sweeps a module onto the guarded
+    surface, and the strict gates then decide inside it.
+
+    Args:
+        sources: Every module source below the guard package.
+        seed: Constructor names to resolve from.
+
+    Returns:
+        The seed together with every alias the package binds to one of it.
+    """
+    names = seed
+    while True:
+        widened = names.union(*(_source_constructor_names(source, names) for source in sources))
+        if widened == names:
+            return names
+        names = widened
+
+
+def _package_constructors(sources: tuple[str, ...]) -> _ShapeConstructors:
+    """Return each constructor family closed over the package's own re-exports.
+
+    Args:
+        sources: Every module source below the guard package.
+
+    Returns:
+        Seeds for `_shape_constructors`, and for the names discovery reads.
+    """
+    return _ShapeConstructors(
+        refusals=_package_constructor_names(sources, CANONICAL_CONSTRUCTORS.refusals),
+        exceptions=_package_constructor_names(sources, CANONICAL_CONSTRUCTORS.exceptions),
+        results=_package_constructor_names(sources, CANONICAL_CONSTRUCTORS.results),
+        guard_free_verdicts=_package_constructor_names(
+            sources, CANONICAL_CONSTRUCTORS.guard_free_verdicts
+        ),
+    )
+
+
+def _protocol_name_closure(sources: tuple[str, ...]) -> frozenset[str]:
+    """Return the names whose mention makes a module part of the guarded surface.
+
+    This is `GUARD_PROTOCOL_NAMES` widened by the package's re-exports, for the reason
+    `_package_constructor_names` records. The guard-free verdicts stay out of it, as they do of the
+    canonical set.
+
+    Args:
+        sources: Every module source below the guard package.
+
+    Returns:
+        The canonical protocol names together with every alias of one.
+    """
+    constructors = _package_constructors(sources)
+    return constructors.refusals | constructors.exceptions | constructors.results
 
 
 def _refusal_carrier_violations(
@@ -3436,7 +3549,9 @@ def _verdict_return_violations(
 # gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
 # re-fingerprinting both guarded modules for every call.
 @cache
-def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
+def find_shape_violations(
+    source: str, path: str, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> tuple[str, ...]:
     """Return every non-canonical refusal shape in this module source.
 
     A refusal, transport or result constructor named in a form the alias follower cannot read is
@@ -3447,13 +3562,16 @@ def find_shape_violations(source: str, path: str) -> tuple[str, ...]:
     Args:
         source: Module source text, parsed but never executed.
         path: Module file name, used to resolve declared transports and in messages.
+        seeds: Names each constructor family resolves from, defaulting to the canonical spellings.
+            Repository-level validation passes the package closure so that a refusal built through
+            an imported re-export is held to the same shape as a canonically spelled one.
 
     Returns:
         Human-readable violations, empty when every refusal shape is canonical.
     """
     tree = ast.parse(source)
     qualnames = _annotate(tree).names
-    constructors = _shape_constructors(tree)
+    constructors = _shape_constructors(tree, seeds)
     return (
         *_literal_id_violations(tree, path, constructors.refusals),
         *_literal_reason_violations(tree, path, constructors.refusals),
@@ -4419,14 +4537,20 @@ _EXTREMUM_CALLS = frozenset({"max", "min", "sorted"})
 `max(len(items), cap)` decides which of the two is larger exactly as `len(items) > cap` does, so a
 guard can spell the ordering here and then ask only an equality question of the result:
 `max(len(items), cap) != cap` refuses above `cap` while `_ORDERING_OPERATORS` sees nothing but
-`!=`. The comparison is the call, not the operator that reads its result."""
+`!=`. The comparison is the call, not the operator that reads its result.
+
+Only positional arguments name the values these callees order. `key`, `default` and `reverse`
+change how the ordering is performed or which end of it is returned, never which operands it is
+over, and a keyword cannot introduce a positional argument at all, so a keyword leaves the operands
+exactly as resolvable as they were."""
 
 _SEQUENCE_WRAPPER_CALLS = frozenset({"set", "frozenset", "tuple", "list", "sorted", "reversed"})
 """Callees that rebuild a sequence without changing which values it holds.
 
 A membership test reaches the same bound through any of them, so `n in set(range(cap))` has to be
 read as `n in range(cap)` is. None of these introduces a bound of its own; they are unwrapped only
-to find the one underneath."""
+to find the one underneath. `sorted`'s keywords reorder the rebuild and change its membership not
+at all, and the rest accept no keywords, so a keyword hides no bound here either."""
 
 
 def _literal_elements(node: ast.expr) -> tuple[ast.expr, ...]:
@@ -4442,7 +4566,6 @@ def _unwrapped_sequence(node: ast.expr) -> ast.expr:
         isinstance(node, ast.Call)
         and _called_name(node) in _SEQUENCE_WRAPPER_CALLS
         and len(node.args) == 1
-        and not node.keywords
     ):
         node = node.args[0]
     return node
@@ -4454,8 +4577,13 @@ def _extremum_comparison(node: ast.Call) -> ast.Compare | None:
     The operands are the call's own argument expressions, so the identity-keyed scoring downstream
     sees exactly the nodes the source orders. A single argument is read only when it is a literal
     container, since `max(items)` orders runtime data while `max((limit, cap))` orders the two
-    values written beside each other. A keyword argument leaves the operands unresolvable, for the
-    reason `_call_comparison` gives.
+    values written beside each other.
+
+    Only positional arguments are read, so a keyword is no reason to stop reading them, as
+    `_EXTREMUM_CALLS` records. Bailing on one let `max(len(items), cap, key=lambda v: v) != cap`
+    spell a cap that the same call without the keyword was rejected for. This is where the rule
+    parts from `_call_comparison`, whose callees accept no keyword at all, so declining to read a
+    call carrying one costs that rule nothing.
 
     Args:
         node: A call the guard's closure contains.
@@ -4463,7 +4591,7 @@ def _extremum_comparison(node: ast.Call) -> ast.Compare | None:
     Returns:
         The ordering over its operands, or `None` when fewer than two are resolvable.
     """
-    if _called_name(node) not in _EXTREMUM_CALLS or node.keywords:
+    if _called_name(node) not in _EXTREMUM_CALLS:
         return None
     match node.args:
         case [ast.Starred(), *_] | [_, ast.Starred(), *_]:
@@ -5471,7 +5599,7 @@ def _imports_protocol_module(node: ast.Import | ast.ImportFrom) -> bool:
     )
 
 
-def _uses_guard_protocol(tree: ast.AST) -> bool:
+def _uses_guard_protocol(tree: ast.AST, names: frozenset[str] = GUARD_PROTOCOL_NAMES) -> bool:
     """Return whether a module mentions the refusal or verdict protocol at all.
 
     Discovery over-approximates. Recognizing participation by *call* made discovery the last
@@ -5499,21 +5627,26 @@ def _uses_guard_protocol(tree: ast.AST) -> bool:
     refusal, while coverage and the limits rules can require candidate-owned allowlist entries, as
     the protocol-defining module's `GUARDED_MODULES` and `LIMITS_BOUNDARIES` entries record.
 
+    The names read are the package's own closure, not the canonical set alone, for the reason
+    `_protocol_name_closure` records: a re-exported constructor is the protocol under another
+    spelling, and every family above recognizes it once the name is in the set.
+
     Args:
         tree: Parsed module.
+        names: The protocol names to recognize, defaulting to the canonical set.
 
     Returns:
         Whether the module belongs to the guarded surface.
     """
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in GUARD_PROTOCOL_NAMES:
+        if isinstance(node, ast.Name) and node.id in names:
             return True
-        if isinstance(node, ast.Attribute) and node.attr in GUARD_PROTOCOL_NAMES:
+        if isinstance(node, ast.Attribute) and node.attr in names:
             return True
-        if isinstance(node, ast.Constant) and node.value in GUARD_PROTOCOL_NAMES:
+        if isinstance(node, ast.Constant) and node.value in names:
             return True
         if isinstance(node, ast.Import | ast.ImportFrom) and (
-            any(alias.name.rsplit(".", 1)[-1] in GUARD_PROTOCOL_NAMES for alias in node.names)
+            any(alias.name.rsplit(".", 1)[-1] in names for alias in node.names)
             or _imports_protocol_module(node)
         ):
             return True
@@ -5533,16 +5666,35 @@ def _repository_guard_modules(root: Path) -> tuple[str, ...]:
     to its own tuple, because the protected base copy necessarily predates that edit. Discovery
     over-approximates by mention, so a malformed refusal shape reaches the candidate-owned shape
     gate before it can be added to the allowlist however it is spelled.
+
+    The names a mention is read against are derived from the package first, since a re-export gives
+    the protocol a spelling the canonical set does not hold. `_protocol_name_closure` records why
+    that derivation is package-wide rather than per module.
     """
-    modules: list[str] = []
-    for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py")):
-        if _source_uses_guard_protocol(path.read_text(encoding="utf-8")):
-            modules.append(path.relative_to(root).as_posix())
-    return tuple(modules)
+    sources = _guard_package_sources(root)
+    names = _protocol_name_closure(tuple(sources.values()))
+    return tuple(
+        module for module, source in sources.items() if _source_uses_guard_protocol(source, names)
+    )
+
+
+def _guard_package_sources(root: Path) -> dict[str, str]:
+    """Return the source of every module below the guard package, keyed by repository-relative path.
+
+    Args:
+        root: Repository root to read the guard package from.
+
+    Returns:
+        Sources in path order, parsed by the callers but never executed.
+    """
+    return {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted((root / GUARD_MODULE_ROOT).rglob("*.py"))
+    }
 
 
 @cache
-def _source_uses_guard_protocol(source: str) -> bool:
+def _source_uses_guard_protocol(source: str, names: frozenset[str] = GUARD_PROTOCOL_NAMES) -> bool:
     """Return whether this module source mentions the guard protocol.
 
     Discovery re-reads every module below the guard package on each repository-level rule, and the
@@ -5554,11 +5706,12 @@ def _source_uses_guard_protocol(source: str) -> bool:
 
     Args:
         source: Module source text, parsed but never executed.
+        names: The protocol names to recognize, defaulting to the canonical set.
 
     Returns:
         Whether the module belongs to the guarded surface.
     """
-    return _uses_guard_protocol(ast.parse(source))
+    return _uses_guard_protocol(ast.parse(source), names)
 
 
 def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
@@ -5570,10 +5723,11 @@ def repository_origin_records(root: Path) -> tuple[OriginRecord, ...]:
     Returns:
         Records ordered by identifier across all guarded modules.
     """
+    seeds = _package_constructors(tuple(_guard_package_sources(root).values()))
     records: list[OriginRecord] = []
     for module in _repository_guard_modules(root):
         source = (root / module).read_text(encoding="utf-8")
-        records.extend(extract_origin_records(source, Path(module).name))
+        records.extend(extract_origin_records(source, Path(module).name, seeds))
     return tuple(sorted(records, key=lambda record: (record.origin_id, record.fingerprint)))
 
 
@@ -5606,11 +5760,12 @@ def repository_shape_violations(root: Path) -> tuple[str, ...]:
     Returns:
         Human-readable violations, empty when every refusal shape is canonical.
     """
+    seeds = _package_constructors(tuple(_guard_package_sources(root).values()))
     violations: list[str] = []
     modules = sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root)))
     for module in modules:
         source = (root / module).read_text(encoding="utf-8")
-        violations.extend(find_shape_violations(source, Path(module).name))
+        violations.extend(find_shape_violations(source, Path(module).name, seeds))
     return tuple(violations)
 
 

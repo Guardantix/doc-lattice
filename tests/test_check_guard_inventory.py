@@ -4042,6 +4042,152 @@ def test_a_computed_constructor_name_is_held_to_the_coverage_allowlist(tmp_path:
     assert any("computed_factory.py" in violation for violation in violations)
 
 
+_REEXPORT_SOURCE = (
+    "from doc_lattice.github_ci.shell_guards import GuardRefusal\nGuardFactory = GuardRefusal\n"
+)
+"""A guarded module publishing the refusal constructor under a neutral name."""
+
+_ALIAS_CONSUMER_SOURCE = (
+    "from doc_lattice.github_ci.reexport import GuardFactory\n"
+    "def _guard(value):\n"
+    "    if value:\n"
+    '        return GuardFactory("taint.new.hidden", "reason")\n'
+    "    return None\n"
+)
+"""A module constructing a fail-closed refusal through the re-export alone.
+
+It names no canonical constructor and imports no protocol module, so reading only the canonical
+names left it undiscovered and its origin shipped outside the inventory entirely.
+"""
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        # The alias reaches the consumer by import, by attribute and as text, exactly as a canonical
+        # name does, so closing the name set closes every spelling family at once.
+        "from doc_lattice.github_ci.reexport import GuardFactory\n",
+        "from doc_lattice.github_ci import reexport\nx = reexport.GuardFactory\n",
+        'from doc_lattice.github_ci import reexport\nx = getattr(reexport, "GuardFactory")\n',
+        "from doc_lattice.github_ci.reexport import GuardFactory as GF\n",
+    ],
+)
+def test_a_module_importing_a_re_exported_constructor_is_discovered(
+    tmp_path: Path, consumer: str
+) -> None:
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "reexport.py").write_text(
+        _REEXPORT_SOURCE, encoding="utf-8"
+    )
+    (root / checker.GUARD_MODULE_ROOT / "consumer.py").write_text(consumer, encoding="utf-8")
+
+    modules = checker._repository_guard_modules(root)
+
+    assert f"{checker.GUARD_MODULE_ROOT}/consumer.py" in modules
+
+
+def test_a_re_exported_constructor_is_held_to_the_coverage_allowlist(tmp_path: Path) -> None:
+    # A module the canonical names never reached passed coverage, shape, reachability and the base
+    # comparison alike, so its fail-closed origin shipped with no inventory record at all.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "reexport.py").write_text(
+        _REEXPORT_SOURCE, encoding="utf-8"
+    )
+    (root / checker.GUARD_MODULE_ROOT / "consumer.py").write_text(
+        _ALIAS_CONSUMER_SOURCE, encoding="utf-8"
+    )
+
+    violations = checker.repository_coverage_violations(root)
+
+    assert any("consumer.py" in violation for violation in violations)
+
+
+def test_a_re_exported_constructor_carries_its_origin_into_the_inventory(tmp_path: Path) -> None:
+    # Discovery alone leaves this origin invisible: adding the consumer to `GUARDED_MODULES` clears
+    # the coverage violation, and an uninventoried guard then ships. Closing the constructor seed
+    # over the package is what makes the record exist for the debt and witness rules to demand.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "reexport.py").write_text(
+        _REEXPORT_SOURCE, encoding="utf-8"
+    )
+    (root / checker.GUARD_MODULE_ROOT / "consumer.py").write_text(
+        _ALIAS_CONSUMER_SOURCE, encoding="utf-8"
+    )
+
+    records = checker.repository_origin_records(root)
+
+    assert any(record.origin_id == "taint.new.hidden" for record in records)
+
+
+def test_an_alias_of_an_alias_is_discovered(tmp_path: Path) -> None:
+    # The closure iterates, so a chain needs no rule of its own however many hops it spans.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "reexport.py").write_text(
+        _REEXPORT_SOURCE, encoding="utf-8"
+    )
+    (root / checker.GUARD_MODULE_ROOT / "chained.py").write_text(
+        "from doc_lattice.github_ci.reexport import GuardFactory\nSecond = GuardFactory\n",
+        encoding="utf-8",
+    )
+    (root / checker.GUARD_MODULE_ROOT / "consumer.py").write_text(
+        "from doc_lattice.github_ci.chained import Second\n", encoding="utf-8"
+    )
+
+    modules = checker._repository_guard_modules(root)
+
+    assert f"{checker.GUARD_MODULE_ROOT}/consumer.py" in modules
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        # Unpacking aliases each side elementwise, as two statements would.
+        "GuardFactory, Other = GuardRefusal, int",
+        # An annotated binding is a binding.
+        "GuardFactory: type = GuardRefusal",
+        # A qualified value names the constructor as plainly as a bare one.
+        "GuardFactory = shell_guards.GuardRefusal",
+        # An import alias is the re-export spelled in one statement.
+        "from doc_lattice.github_ci.shell_guards import GuardRefusal as GuardFactory",
+    ],
+)
+def test_every_binding_spelling_of_a_re_export_publishes_its_alias(binding: str) -> None:
+    # The closure iterates the per-module resolver, so every binding form that resolver already
+    # follows becomes a re-export the package publishes, with no second reader to keep in step.
+    source = f"from doc_lattice.github_ci import shell_guards\n{binding}\n"
+
+    assert "GuardFactory" in checker._protocol_name_closure((source,))
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        # A value the module computes names no constructor to follow. The lookup that computes it is
+        # rejected on sight where it is spelled, so no alias of one ships.
+        'GuardFactory = getattr(shell_guards, "Guard" + "Refusal")',
+        # A container is not the constructor. Calling through one is what the shape gate rejects.
+        "GuardFactory = [GuardRefusal]",
+        # A guard-free verdict transports no guard identity, so no alias of one joins the surface.
+        "GuardFactory = Certified",
+    ],
+)
+def test_a_binding_that_names_no_constructor_publishes_no_alias(binding: str) -> None:
+    source = f"from doc_lattice.github_ci import shell_guards\n{binding}\n"
+
+    assert "GuardFactory" not in checker._protocol_name_closure((source,))
+
+
+def test_the_shipped_guard_package_publishes_no_re_export() -> None:
+    # The widening reads names the package chooses. If it ever swept one in, every module mentioning
+    # that name would be pulled onto the guarded surface, so this pins the shipped closure.
+    sources = tuple(
+        path.read_text(encoding="utf-8")
+        for path in sorted((_ROOT / checker.GUARD_MODULE_ROOT).rglob("*.py"))
+    )
+
+    assert checker._protocol_name_closure(sources) == checker.GUARD_PROTOCOL_NAMES
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -5223,17 +5369,18 @@ def test_a_call_that_orders_runtime_data_is_not_a_threshold(condition: str) -> N
 @pytest.mark.parametrize(
     "condition",
     [
-        # A keyword argument leaves the operands unresolvable, as it does for a spelled comparison.
-        "sorted(pair, key=lambda value: value)[-1] != cap",
-        # Starred arguments do the same.
+        # Starred arguments leave the operands unresolvable, as they do for a spelled comparison.
         "max(*pair) != cap",
         # A single non-literal argument orders runtime data, not the two values beside each other.
         "max(pair) != cap",
+        # A keyword changes neither of those, so it rescues neither.
+        "sorted(pair, key=lambda value: value)[-1] != cap",
+        "max(*pair, key=abs) != cap",
     ],
 )
 def test_an_unresolvable_extremum_call_spells_no_ordering(condition: str) -> None:
-    # These are the same boundaries `_call_comparison` draws. The operands cannot be read, so no
-    # ordering is synthesized and the cap is left to the rules that read the operators.
+    # The operands cannot be read, so no ordering is synthesized and the cap is left to the rules
+    # that read the operators. Only the positional arguments decide this.
     source = (
         "def _guard(pair, cap):\n"
         f"    if {condition}:\n"
@@ -5241,3 +5388,34 @@ def test_an_unresolvable_extremum_call_spells_no_ordering(condition: str) -> Non
     )
 
     assert checker.find_threshold_violations(source, "shell_scanner.py") == ()
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        # `key` changes how the operands are ordered, never which ones are ordered.
+        "max(_measure(items), cap, key=lambda value: value) != cap",
+        "min(_measure(items), cap, key=abs) == cap",
+        # `reverse` changes which end of the ordering is read, and `default` applies to no operand
+        # a literal container already holds.
+        "sorted((_measure(items), cap), reverse=True)[0] != cap",
+        "max((_measure(items), cap), default=0) != cap",
+        # A rebuild carrying a keyword holds the same values, so the range under it is the bound.
+        "_measure(items) in sorted(range(cap), reverse=True)",
+        "_measure(items) in sorted(range(cap), key=abs)",
+    ],
+)
+def test_a_keyword_does_not_hide_the_operands_a_call_orders(condition: str) -> None:
+    # Declining to read a call carrying any keyword let the same cap ship that the call without the
+    # keyword was rejected for. A keyword cannot introduce a positional argument, so it cannot
+    # change which values these callees order.
+    source = (
+        "def _guard(items):\n"
+        '    cap = ord("d")\n'
+        f"    if {condition}:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.keyword", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("fixes a magnitude no numeric literal records" in v for v in violations)

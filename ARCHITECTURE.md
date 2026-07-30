@@ -851,9 +851,22 @@ so rewording a refusal message is not an identity change. One identifier names o
 site constructing an identifier that is already classified would inherit evidence it does not have,
 so the inventory rejects it. Every rule that recognizes a construction recognizes it by name
 whether it is spelled bare or through the module that defines it, and the names it answers to
-include every alias the module binds the constructor to, whether that binding names it bare or
+include every alias bound to the constructor, whether that binding names it bare or
 through the module that defines it, because an aliased construction in a verdict return is a
-well-formed verdict that no carrier rule would reject. A binding is followed whichever form it
+well-formed verdict that no carrier rule would reject. Those names are resolved across the guard
+package rather than within one module. Resolution follows a binding whose value spells a name it
+already holds, so what it finds depends on what it starts from, and starting from the canonical
+spelling alone stopped at the module boundary: a guarded module binding `GuardFactory =
+GuardRefusal` publishes a spelling that a consumer importing only `GuardFactory` names in no other
+way, so the consumer was discovered by nothing and the fail-closed origin it constructed through
+the alias was inventoried by nothing either. Each constructor family is therefore resolved to a
+fixed point over every module in the package before any rule reads it. Closing the seed rather than
+adding a rule is what closes both halves at once: every rule keeps reading names as it already did,
+so a re-export reached by import, by attribute or as text is recognized exactly as its canonical
+spelling is, and an alias of an alias needs no case of its own. A binding whose value the module
+computes publishes no alias, and needs to publish none, since the reflective lookup that computes
+it is rejected on sight where it is spelled. The shipped package publishes no re-export, so the
+closure equals the canonical set and the widening moves no record. A binding is followed whichever form it
 takes: `GR, E = GuardRefusal, _TaintLimitExceeded` is one statement naming both the refusal
 constructor and its transport, and `def helper(factory=TaintLimits)` binds a constructor for every
 call that omits the argument. Reading only the single-value assignment form let the destructured
@@ -989,8 +1002,14 @@ imported-bound and opaque-magnitude rules read ordering operators that these spe
 An extremum call over two or more operands, or over a literal container of them, is read as the
 ordering it performs, and a membership test whose container is a range is read as the bound that
 range spells, through any sequence rebuild wrapped around it since none of those changes which
-values it holds. The unresolvable forms are excluded exactly as they are for a spelled comparison,
-and a call ordering runtime data spells no bound, so `len(items) in range(len(other))` and
+values it holds. Only the positional arguments name the values these callees order, so a starred
+argument and a lone non-literal argument leave them unresolvable while a keyword does not: `key`,
+`default` and `reverse` change how the ordering runs or which end of it is returned, never which
+operands it is over, and a keyword can introduce no positional argument at all. This is where the
+rule parts from the spelled comparison above, whose callees accept no keyword, so declining to read
+one there costs nothing. Declining to read one here let `max(len(items), cap, key=lambda v: v) !=
+cap` ship the same cap the call without the keyword was rejected for.
+A call ordering runtime data spells no bound, so `len(items) in range(len(other))` and
 `len(items) > max(limits.max_items, limits.max_words)` stay clean. No shipped guard encodes a bound
 this way, so the widening carries no allowance.
 The line stops at comparison. A guard that caps by *truncating* its data rather than by ordering a
