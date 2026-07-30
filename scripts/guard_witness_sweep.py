@@ -224,15 +224,17 @@ def render_rows(found: Reach) -> str:
     lines: list[str] = []
     for origin_id in sorted(found):
         label, script = found[origin_id]
+        # json.dumps escapes exactly what a double-quoted Python literal needs escaped, so the
+        # row stays valid for a script that itself contains quotes.
         lines.append("    ReachableWitness(")
-        lines.append(f"        {origin_id!r},")
-        lines.append(f"        {script!r},")
+        lines.append(f"        {json.dumps(origin_id)},")
+        lines.append(f"        {json.dumps(script)},")
         if label != PRODUCTION:
             kind = label.split("(", 1)[0]
             field = "taint" if kind == "TaintLimits" else "scanner"
             lines.append(f"        limits=ScanLimits({field}={label}),")
         lines.append("    ),")
-    return "\n".join(lines).replace("'", '"') + "\n" if lines else ""
+    return "\n".join(lines) + "\n" if lines else ""
 
 
 def main(argv: list[str] | None = None) -> int:

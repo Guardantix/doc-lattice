@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -94,6 +95,20 @@ def test_rendered_rows_are_paste_ready_registry_entries() -> None:
     assert "ReachableWitness(" in rendered
     assert '"scanner.budget.step-limit"' in rendered
     assert "limits=ScanLimits(taint=TaintLimits(max_edges=0))" in rendered
+
+
+def test_rendered_rows_preserve_a_script_containing_quotes() -> None:
+    # Replay-corpus scripts can contain either quote character. The rendered row must stay a
+    # valid registry entry whose script literal round-trips exactly, or it is not paste-ready.
+    script = "env FOO=\"$@\" 'harmless'"
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
 
 
 def test_rendered_rows_omit_limits_for_a_production_reach() -> None:
