@@ -4765,12 +4765,126 @@ def test_replacing_a_definitions_attribute_leaves_every_fingerprint_unmoved() ->
 def test_writing_an_attribute_of_a_value_is_not_a_definition_rebinding() -> None:
     # The guard's own `self.work += 1` writes an attribute of a parameter, which is ordinary state.
     # The shipped guarded modules spell 165 such writes and no write to a definition at all, so a
-    # rule reading the base as a value rather than as a definition would report all of them.
-    source = _REBINDABLE_GUARD + "def scan(budget, items, limits):\n    budget.charge = None\n"
+    # rule reading the base as a value rather than as a definition would report all of them. None
+    # of the 165 names a definition either, which is what lets the sibling arm below read the
+    # attribute name.
+    source = _REBINDABLE_GUARD + "def scan(budget, items, limits):\n    budget.work = None\n"
 
     assert not any(
-        "writes an attribute of a definition this module binds" in violation
-        for violation in checker.find_shape_violations(source, "shell_taint.py")
+        "definition this module binds" in violation for violation in _shape_violations(source)
+    )
+
+
+_REBINDABLE_FUNCTION_GUARD = (
+    "def _charge(items, limits):\n"
+    "    if len(items) > limits.max_items:\n"
+    '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.name-rebound", "nope"))\n'
+)
+"""A module-level guard whose whole definition a later binding of its name can replace."""
+
+
+def _shape_violations(source: str) -> tuple[str, ...]:
+    """Return the shape violations this source produces as a guarded taint module."""
+    return checker.find_shape_violations(source, "shell_taint.py")
+
+
+def test_an_attribute_named_after_a_definition_is_rejected_whatever_its_receiver() -> None:
+    # `sys.modules[__name__]` is the module itself reached through a receiver no parse resolves, so
+    # the arm reading the base cannot see it. Measured against the shipped tree, this withdrew a
+    # frozen guard with every record byte-identical and the base-owned comparison exiting 0.
+    source = (
+        _REBINDABLE_FUNCTION_GUARD
+        + "import sys as _sys\n"
+        + "_sys.modules[__name__]._charge = lambda items, limits: None\n"
+    )
+
+    assert any(
+        "writes an attribute named after a definition this module binds" in violation
+        for violation in _shape_violations(source)
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # The spelling the review reported, which resolves every name statically.
+        "_charge = lambda items, limits: None",
+        # A deletion orphans the name just as completely.
+        "del _charge",
+        # A second definition leaves the first, which the record was extracted from, untouched.
+        'def _charge(items, limits):\n    """Stub."""\n    return None',
+        # An import alias binds the name to something this module cannot follow.
+        "from stubs import _charge",
+        # An `except` clause and a match capture bind the name like any assignment.
+        "try:\n    pass\nexcept ValueError as _charge:\n    pass",
+        "match ():\n    case _charge:\n        pass",
+    ],
+)
+def test_rebinding_a_definitions_name_is_rejected(statement: str) -> None:
+    # Rejecting the attribute spellings left the plainest withdrawal of all untouched: replacing
+    # the whole definition rather than one of its attributes. Measured against the shipped tree, 9
+    # of the 29 module-level functions holding frozen guards, holding 13 of them, rebind this way
+    # with every record in both guarded modules byte-identical and both gates green.
+    source = _REBINDABLE_FUNCTION_GUARD + statement + "\n"
+
+    assert any(
+        "in the scope that defines it" in violation for violation in _shape_violations(source)
+    ), f"{statement!r} was accepted"
+
+
+def test_a_parameter_rebinding_a_nested_definitions_name_is_rejected() -> None:
+    # A parameter cannot in fact win against a definition in the same body, since the body rebinds
+    # the name every time it runs. It is reported anyway: the guarded modules spell no such
+    # collision, so the strictness costs nothing and leaves no spelling to argue about.
+    source = (
+        "def _scan(_charge, items, limits):\n"
+        "    def _charge(items, limits):\n"
+        "        if len(items) > limits.max_items:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.nested", "nope"))\n'
+        "    return _charge(items, limits)\n"
+    )
+
+    assert any(
+        "in the scope that defines it" in violation for violation in _shape_violations(source)
+    )
+
+
+def test_rebinding_a_definitions_name_leaves_every_fingerprint_unmoved() -> None:
+    # The measurement the rule exists for: the guard's own record describes the definition's source
+    # and nothing in it says what the name holds when a caller reaches it, so the shape gate has to
+    # carry this.
+    withdrawn = _REBINDABLE_FUNCTION_GUARD + "_charge = lambda items, limits: None\n"
+
+    assert _fingerprint_for(
+        _REBINDABLE_FUNCTION_GUARD, "shell_taint.py", "taint.demo.name-rebound"
+    ) == _fingerprint_for(withdrawn, "shell_taint.py", "taint.demo.name-rebound")
+
+
+def test_a_local_shadowing_an_unrelated_helper_is_not_a_rebinding() -> None:
+    # Python decides a bare name's binding scope statically, so the collision is read per scope.
+    # Read across the module instead, this would report 73 ordinary locals in `shell_taint.py` that
+    # shadow the name of some unrelated nested helper, and rejecting those buys nothing.
+    source = "def _outer():\n    def parts():\n        return ()\n    return parts()\n" + (
+        _REBINDABLE_FUNCTION_GUARD.replace(
+            "def _charge(items, limits):\n", "def _charge(items, limits):\n    parts = ()\n"
+        )
+    )
+
+    assert not any(
+        "in the scope that defines it" in violation for violation in _shape_violations(source)
+    )
+
+
+def test_declaring_a_definitions_name_global_is_rejected() -> None:
+    # A `global` declaration is what carries a bare-name rebinding out of the scope that would
+    # otherwise contain it, so it is rejected on sight rather than paired with an assignment.
+    source = (
+        _REBINDABLE_FUNCTION_GUARD + "def _install():\n    global _charge\n    _charge = None\n"
+    )
+
+    assert any(
+        "where it names a definition this module makes" in violation
+        for violation in _shape_violations(source)
     )
 
 

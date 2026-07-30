@@ -909,11 +909,32 @@ of the definition it was extracted from rather than what that definition's name 
 reaches it. Following the write instead would mean deciding what the replacement computes, which is
 the value-provenance problem the computed-callee boundary already declines. The base is resolved
 through the alias closure, so a definition renamed by an assignment is the same target, and an
-attribute chain is read at its root. Only a definition's own attribute counts: `self.work += amount`
-writes state on a parameter, and the guarded modules spell 165 such writes and no write to a
-definition at all, so the rule carries no allowance and moves no record. A bare-name rebinding of a
-module-level function needs no rule of its own, since the assignment is a module statement the
-writer closure already hashes into every record reading what that function returns.
+attribute chain is read at its root.
+
+That rule read the base and so reached only a replacement spelled through a name, which left the
+whole class open one level up: rather than replace a definition's attribute, replace the definition.
+`_static_eval_descriptor = lambda digits: 0` withdraws a module-level guard outright, and 9 of the
+29 module-level functions holding frozen guards, holding 13 of them, rebind this way with every
+record in both guarded modules byte-identical and both gates green. A second `def` of the name does
+the same while the first definition, which the record was extracted from, stays exactly as it was.
+And `sys.modules[__name__].f = stub` is the attribute write again with the base unresolvable by
+construction. All three were measured against the shipped tree, and the second and third passed the
+base-owned comparison at exit 0.
+
+So a name a definition binds is written nowhere else. The bare-name half is read per scope, and that
+resolution is exact rather than an approximation, because Python decides a bare name's binding scope
+statically: an assignment inside a function makes the name local and leaves an enclosing definition
+alone. Read across the module it would instead report 73 ordinary locals in `shell_taint.py` that
+shadow the name of some unrelated nested helper. Every binding form counts, since each replaces what
+a later call reaches: an assignment or deletion, an import alias, an `except` clause, a match
+capture, a parameter, and a second `def` or `class` of a name already defined. A `global` or
+`nonlocal` declaration naming a definition is rejected on sight, since it is what would carry a
+rebinding out of the scope that otherwise contains it; the five the guarded modules declare name
+ordinary closure variables. The attribute half now reads the attribute name as well as the base,
+which is the only thing left when a receiver is unresolvable by construction. Every one of these
+carries no allowance: the guarded modules spell no collision in any scope, no declaration naming a
+definition, and 165 attribute writes of which none names a definition. `self.work += amount` remains
+ordinary state on a parameter, and stays outside the rule because `work` is not a definition's name.
 
 The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the

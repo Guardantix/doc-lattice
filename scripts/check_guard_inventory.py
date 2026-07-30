@@ -509,8 +509,97 @@ def _attribute_base(node: ast.expr) -> ast.expr:
     return current
 
 
+_Positioned = ast.stmt | ast.excepthandler | ast.pattern
+"""The nodes a rebinding is reported at, each of which carries a source position."""
+
+_REBINDING_REMEDY = (
+    "replacing what a call reaches while its record still describes the definition; "
+    "edit the definition instead"
+)
+"""The one remedy every rebinding spelling has, since none of them can be followed."""
+
+
+def _scope_own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Yield the nodes this scope holds itself, stopping at a nested definition's body.
+
+    The nested definition is yielded, because it binds a name here. What it holds belongs to its
+    own scope and is walked when that scope's turn comes.
+
+    Args:
+        scope: The module, function or class body to walk.
+
+    Yields:
+        The nodes written directly in that scope, in no particular order.
+    """
+    pending: list[ast.AST] = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        yield node
+        if isinstance(node, _SCOPES):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _scope_rebinding_violations(scope: ast.AST, path: str) -> list[str]:
+    """Return a violation for every name this scope binds both by a definition and otherwise.
+
+    Python decides a bare name's binding scope statically, so this resolution is exact rather than
+    an approximation: an assignment inside a function makes the name local and leaves an enclosing
+    definition alone, which is why the collision is read per scope instead of across the module.
+    Read across the module it would report 73 ordinary locals in `shell_taint.py` that shadow the
+    name of some unrelated nested helper, and rejecting those buys nothing.
+
+    Every binding form is read, because each of them replaces what a later call reaches: an
+    assignment or deletion, an import alias, an `except` clause, a match capture, a parameter, and
+    a second `def` or `class` of a name already defined. A parameter cannot in fact win against a
+    definition written in the same body, since the body rebinds the name every time it runs, but it
+    is reported anyway: the guarded modules spell no such collision, so the strictness costs
+    nothing and leaves no spelling to argue about.
+
+    Args:
+        scope: The module, function or class body to read.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when the scope rebinds none of its definitions.
+    """
+    definitions: list[_Definition] = []
+    bindings: list[tuple[str, _Positioned, str]] = []
+    for node in _scope_own_nodes(scope):
+        if isinstance(node, _SCOPES):
+            definitions.append(node)
+        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+            bindings.append((node.name, node, "an except clause"))
+        elif isinstance(node, ast.match_case):
+            bindings.extend(
+                (name, node.pattern, "a match capture") for name in _target_names(node.pattern)
+            )
+        elif isinstance(node, ast.stmt):
+            bindings.extend((name, node, "an import") for name in _imported_spellings(node))
+            bindings.extend(
+                (target.id, node, "an assignment or deletion")
+                for target in _write_targets(node)
+                if isinstance(target, ast.Name)
+            )
+    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+        bindings.extend((name, scope, "a parameter") for name in _argument_names(scope.args))
+    # Every definition after the first of a name rebinds it, and it is the later one the report
+    # names, since the earlier one is what a record was extracted from and is not what to edit.
+    defined: set[str] = set()
+    for definition in sorted(definitions, key=lambda node: node.lineno):
+        if definition.name in defined:
+            bindings.append((definition.name, definition, "a second definition"))
+        defined.add(definition.name)
+    return [
+        f"{path}:{node.lineno}: {name!r} is bound by {kind} in the scope that defines it, "
+        f"{_REBINDING_REMEDY}"
+        for name, node, kind in sorted(bindings, key=lambda found: (found[1].lineno, found[0]))
+        if name in defined
+    ]
+
+
 def _definition_rebinding_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
-    """Return a violation for every write to an attribute of a definition this module binds.
+    """Return a violation for every write that replaces a definition this module binds.
 
     Rejecting the reflective spellings closes `setattr(_EvalDiscoveryBudget, "charge_work", stub)`
     and the descriptor call behind it, and leaves the plainest spelling of the same withdrawal
@@ -524,14 +613,26 @@ def _definition_rebinding_violations(tree: ast.AST, path: str) -> tuple[str, ...
     replacement computes, which is the value-provenance problem the computed-callee boundary
     already declines, and a replacement is free to be built anywhere.
 
+    Three spellings write the same replacement without writing an attribute of a resolvable name.
+    A bare-name rebinding, `_static_eval_descriptor = lambda digits: 0`, withdraws a module-level
+    guard outright; measured against the shipped tree, 9 of the 29 module-level functions holding
+    frozen guards, holding 13 of them, rebind with every record in both modules byte-identical and
+    both gates green. A second `def` of the same name does the same thing while the first
+    definition, which the record was extracted from, stays exactly as it was. And an attribute
+    write reaching the module through a computed receiver, `sys.modules[__name__].f = stub`, is the
+    first spelling again with the base unresolvable by construction. `_scope_rebinding_violations`
+    owns the first two. The third is why an attribute write is read by the name it writes as well
+    as by its base: a receiver cannot be resolved here, so the attribute name is what is left, and
+    the guarded modules spell 165 attribute writes, none of them naming a definition.
+
     The base is resolved through the alias closure, so `alias = _EvalDiscoveryBudget` followed by
     `alias.charge_work = stub` is the same violation, and a chain such as
-    `Budget.charge_work.__func__` is read at its root for the same reason. Only a definition's own
-    attribute is read: `self.work += amount` writes an attribute of a parameter, which is ordinary
-    state rather than a replacement of what a call reaches, and the guarded modules spell 165 such
-    writes and no write to a definition at all. A bare-name rebinding of a module-level function
-    needs no rule of its own, since the assignment is a module statement that the writer closure
-    already hashes into the records reading what that function returns.
+    `Budget.charge_work.__func__` is read at its root for the same reason.
+
+    A `global` or `nonlocal` declaration is rejected on sight when it names a definition, since it
+    is what carries a bare-name rebinding out of the scope that would otherwise contain it. Neither
+    guarded module declares one naming a definition; the five they do declare name ordinary closure
+    variables.
 
     Args:
         tree: Parsed guarded module.
@@ -540,18 +641,38 @@ def _definition_rebinding_violations(tree: ast.AST, path: str) -> tuple[str, ...
     Returns:
         Human-readable violations, empty when the module replaces no definition.
     """
-    names = _constructor_names(tree, _definition_names(tree))
-    return tuple(
+    definitions = _definition_names(tree)
+    names = _constructor_names(tree, definitions)
+    violations = [
         f"{path}:{statement.lineno}: {ast.unparse(target)!r} writes an attribute of a definition "
-        f"this module binds, replacing what a call reaches while its record still describes the "
-        f"definition; edit the definition instead"
+        f"this module binds, {_REBINDING_REMEDY}"
         for statement in ast.walk(tree)
         if isinstance(statement, ast.stmt)
         for target in _write_targets(statement)
         if isinstance(target, ast.Attribute)
         if isinstance(base := _attribute_base(target), ast.Name)
         if base.id in names
+    ]
+    violations.extend(
+        f"{path}:{statement.lineno}: {ast.unparse(target)!r} writes an attribute named after a "
+        f"definition this module binds, and no receiver is resolved here, {_REBINDING_REMEDY}"
+        for statement in ast.walk(tree)
+        if isinstance(statement, ast.stmt)
+        for target in _write_targets(statement)
+        if isinstance(target, ast.Attribute)
+        if target.attr in definitions
     )
+    violations.extend(
+        f"{path}:{statement.lineno}: declares {name!r} to bind in an enclosing scope, where it "
+        f"names a definition this module makes, {_REBINDING_REMEDY}"
+        for statement in ast.walk(tree)
+        if isinstance(statement, ast.Global | ast.Nonlocal)
+        for name in statement.names
+        if name in definitions
+    )
+    for scope in (tree, *(node for node in ast.walk(tree) if isinstance(node, _SCOPES))):
+        violations.extend(_scope_rebinding_violations(scope, path))
+    return tuple(violations)
 
 
 _CLASSINFO_PREDICATES = frozenset({"isinstance", "issubclass"})
