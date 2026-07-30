@@ -3042,7 +3042,9 @@ def _reachable_functions(module: ast.Module, cache: _DerivationCache) -> set[int
 # gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
 # re-fingerprinting both guarded modules for every call.
 @cache
-def find_reachability_violations(source: str, path: str) -> tuple[str, ...]:
+def find_reachability_violations(
+    source: str, path: str, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> tuple[str, ...]:
     """Return every guard origin whose own function nothing in the module can reach.
 
     A guard is withdrawn as completely by orphaning the function holding it as by inverting its
@@ -3053,6 +3055,7 @@ def find_reachability_violations(source: str, path: str) -> tuple[str, ...]:
     Args:
         source: Module source text, parsed but never executed.
         path: Name reported with each violation.
+        seeds: Names the refusal constructor resolves from, defaulting to its canonical spelling.
 
     Returns:
         Human-readable violations, empty when every origin's function is reachable.
@@ -3062,7 +3065,9 @@ def find_reachability_violations(source: str, path: str) -> tuple[str, ...]:
     cache = _DerivationCache(module=tree)
     reachable = _reachable_functions(tree, cache)
     violations: list[str] = []
-    for statement, call in _origin_calls_by_statement(tree):
+    for statement, call in _origin_calls_by_statement(
+        tree, _constructor_names(tree, seeds.refusals)
+    ):
         if not call.args or not isinstance(call.args[0], ast.Constant):
             continue
         origin_id = call.args[0].value
@@ -5000,7 +5005,9 @@ def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
 # gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
 # re-fingerprinting both guarded modules for every call.
 @cache
-def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
+def find_threshold_violations(
+    source: str, path: str, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> tuple[str, ...]:
     """Return every guard threshold that is neither a limits field nor an inventoried bound.
 
     A threshold is recognized structurally rather than by naming convention: any module-level or
@@ -5037,7 +5044,9 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
     module_imported = _scope_import_names(tree, cache)
     limits_values = _limits_valued_spellings(tree)
     violations: list[str] = []
-    for statement, _call in _origin_calls_by_statement(tree):
+    for statement, _call in _origin_calls_by_statement(
+        tree, _constructor_names(tree, seeds.refusals)
+    ):
         scope = annotations.scopes.get(id(statement))
         local_bindings = _cached_local_binding_names(scope, cache)
         local_imported = _scope_import_names(scope, cache)
@@ -5320,7 +5329,9 @@ def _transport_argument_reads(
 # gate run, and a test suite that exercises these rules repeatedly, from re-parsing and
 # re-fingerprinting both guarded modules for every call.
 @cache
-def guard_condition_reads(source: str, path: str) -> dict[str, tuple[frozenset[str], ...]]:
+def guard_condition_reads(
+    source: str, path: str, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> dict[str, tuple[frozenset[str], ...]]:
     """Return the layers of attribute names each guard's condition inspects, by origin identifier.
 
     An invariant classification claims a guard's condition is false for every constructible input,
@@ -5350,6 +5361,7 @@ def guard_condition_reads(source: str, path: str) -> dict[str, tuple[frozenset[s
         source: Module source text, parsed but never executed.
         path: Module file name, used to resolve declared transports and to keep two modules
             defining the same identifier out of one memo entry.
+        seeds: Names the refusal constructor resolves from, defaulting to its canonical spelling.
 
     Returns:
         Ordered non-empty layers by origin identifier, empty for a guard whose condition reads no
@@ -5361,7 +5373,9 @@ def guard_condition_reads(source: str, path: str) -> dict[str, tuple[frozenset[s
     cache = _DerivationCache(module=tree)
     transports = _transport_parameters(tree, path)
     reads: dict[str, tuple[frozenset[str], ...]] = {}
-    for statement, call in _origin_calls_by_statement(tree):
+    for statement, call in _origin_calls_by_statement(
+        tree, _constructor_names(tree, seeds.refusals)
+    ):
         if not call.args or not isinstance(call.args[0], ast.Constant):
             continue
         origin_id = call.args[0].value
@@ -5391,7 +5405,9 @@ def guard_condition_reads(source: str, path: str) -> dict[str, tuple[frozenset[s
 
 
 @cache
-def guard_relevant_reads(source: str, path: str) -> dict[str, frozenset[str]]:
+def guard_relevant_reads(
+    source: str, path: str, seeds: _ShapeConstructors = CANONICAL_CONSTRUCTORS
+) -> dict[str, frozenset[str]]:
     """Return the leaf reads of the one layer that decides each guard, by origin identifier.
 
     This is the set a boundary-evidence predicate is held to: the first non-empty layer
@@ -5407,6 +5423,7 @@ def guard_relevant_reads(source: str, path: str) -> dict[str, frozenset[str]]:
         source: Module source text, parsed but never executed.
         path: Module file name, used to resolve declared transports and to keep two modules
             defining the same identifier out of one memo entry.
+        seeds: Names the refusal constructor resolves from, defaulting to its canonical spelling.
 
     Returns:
         Leaf attribute names by origin identifier, empty for a guard whose condition reads no
@@ -5414,7 +5431,7 @@ def guard_relevant_reads(source: str, path: str) -> dict[str, frozenset[str]]:
     """
     return {
         origin_id: layers[0] if layers else frozenset()
-        for origin_id, layers in guard_condition_reads(source, path).items()
+        for origin_id, layers in guard_condition_reads(source, path, seeds).items()
     }
 
 
@@ -5515,10 +5532,11 @@ def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
         Human-readable violations, empty when every invariant row inspects its guard's own data.
     """
     predicates = invariant_predicate_reads((root / REGISTRY_PATH).read_text(encoding="utf-8"))
+    seeds = _package_constructors(tuple(_guard_package_sources(root).values()))
     conditions: dict[str, frozenset[str]] = {}
     for module in _repository_guard_modules(root):
         source = (root / module).read_text(encoding="utf-8")
-        conditions.update(guard_relevant_reads(source, Path(module).name))
+        conditions.update(guard_relevant_reads(source, Path(module).name, seeds))
     violations: list[str] = []
     for origin_id, names in sorted(predicates.items()):
         inspected = conditions.get(origin_id)
@@ -5565,10 +5583,11 @@ def repository_threshold_violations(root: Path) -> tuple[str, ...]:
     Returns:
         Human-readable violations, empty when every guard threshold has declared provenance.
     """
+    seeds = _package_constructors(tuple(_guard_package_sources(root).values()))
     violations: list[str] = []
     for module in GUARDED_MODULES:
         source = (root / module).read_text(encoding="utf-8")
-        violations.extend(find_threshold_violations(source, Path(module).name))
+        violations.extend(find_threshold_violations(source, Path(module).name, seeds))
     return tuple(violations)
 
 
@@ -5744,10 +5763,11 @@ def repository_reachability_violations(root: Path) -> tuple[str, ...]:
     Returns:
         Human-readable violations, empty when every origin's function is reachable.
     """
+    seeds = _package_constructors(tuple(_guard_package_sources(root).values()))
     violations: list[str] = []
     for module in _repository_guard_modules(root):
         source = (root / module).read_text(encoding="utf-8")
-        violations.extend(find_reachability_violations(source, Path(module).name))
+        violations.extend(find_reachability_violations(source, Path(module).name, seeds))
     return tuple(violations)
 
 

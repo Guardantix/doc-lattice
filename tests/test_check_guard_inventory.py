@@ -4119,6 +4119,38 @@ def test_a_re_exported_constructor_carries_its_origin_into_the_inventory(tmp_pat
     assert any(record.origin_id == "taint.new.hidden" for record in records)
 
 
+def test_every_origin_rule_reads_a_re_exported_construction(tmp_path: Path) -> None:
+    # Four rules pair origins with their statements, and each resolves the constructor for itself.
+    # Widening only the ones that report a missing record would leave an alias-built guard
+    # inventoried but never held to reachability, to threshold provenance, or to the relevance set
+    # its witness must read.
+    root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
+    (root / checker.GUARD_MODULE_ROOT / "reexport.py").write_text(
+        _REEXPORT_SOURCE, encoding="utf-8"
+    )
+    consumer = (
+        "from doc_lattice.github_ci.reexport import GuardFactory\n"
+        "def _guard(items):\n"
+        '    cap = ord("d")\n'
+        "    if max(len(items), cap) != cap:\n"
+        '        return GuardFactory("taint.new.hidden", "reason")\n'
+        "    return None\n"
+        "def scan(items):\n"
+        "    return None\n"
+    )
+    (root / checker.GUARD_MODULE_ROOT / "consumer.py").write_text(consumer, encoding="utf-8")
+    seeds = checker._package_constructors((_REEXPORT_SOURCE, consumer))
+
+    assert any(
+        "taint.new.hidden" in violation
+        for violation in checker.find_reachability_violations(consumer, "consumer.py", seeds)
+    )
+    assert checker.find_threshold_violations(consumer, "consumer.py", seeds) != ()
+    assert "taint.new.hidden" in checker.guard_relevant_reads(consumer, "consumer.py", seeds)
+    # The canonical seed is the unchanged default, so a caller that names no package sees nothing.
+    assert checker.find_reachability_violations(consumer, "consumer.py") == ()
+
+
 def test_an_alias_of_an_alias_is_discovered(tmp_path: Path) -> None:
     # The closure iterates, so a chain needs no rule of its own however many hops it spans.
     root = _fake_root(tmp_path, [record.as_json() for record in checker.load_debt_records(_ROOT)])
