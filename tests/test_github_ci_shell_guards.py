@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import dataclasses
 import importlib.util
 import inspect
 import sys
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
 
 import pytest
@@ -42,6 +44,8 @@ from doc_lattice.github_ci.shell_scanner import (
     scan_doc_lattice_invocations,
 )
 from doc_lattice.github_ci.shell_taint import (
+    CommandOutput,
+    SequenceOutput,
     TaintLimits,
     _MalformedTaintEvidence,
     _TaintLimitExceeded,
@@ -797,3 +801,191 @@ def test_the_executable_assertions_alone_accept_a_misdirected_predicate() -> Non
     assert misdirected.boundary_evidence(_boundary_evidence(misdirected.boundary_script))
     assert condition_line in executed
     assert refusal_line not in executed
+
+
+class _RecordingEvidence:
+    """Delegating wrapper that records every attribute a predicate reads off one evidence tree.
+
+    The gate's relevance rule derives a predicate's reads from inert source, so a read spelled in a
+    branch that never runs counts exactly as one that does. Pruning such branches statically is a
+    recognizer treadmill, and unnecessary here: the harness already executes every predicate against
+    real boundary evidence, so the reads of the accepting run can be measured instead. Dead code
+    contributes nothing at runtime however it is spelled.
+
+    Reads go into a set shared by every wrapper in the tree. Dataclass instances are wrapped
+    recursively, and list and tuple values have their elements wrapped, so a read a helper the
+    registry defines performs on the way down is recorded too. Anything else is returned as it is,
+    including a container this wrapper does not descend: under-recording can only shrink the
+    observed set, which makes the assertion stricter rather than letting a row through it.
+
+    `__class__` reports the wrapped object's type, the mechanism `mock.Mock(spec=...)` uses, because
+    the two output-walk predicates dispatch on `isinstance` over the output union and would
+    otherwise see nothing they recognize.
+    """
+
+    __slots__ = ("_recorded", "_wrapped")
+
+    def __init__(self, wrapped: Any, recorded: set[str]) -> None:
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "_recorded", recorded)
+
+    @property
+    def __class__(self) -> Any:
+        return type(object.__getattribute__(self, "_wrapped"))
+
+    def __getattr__(self, name: str) -> Any:
+        recorded: set[str] = object.__getattribute__(self, "_recorded")
+        recorded.add(name)
+        wrapped = object.__getattribute__(self, "_wrapped")
+        return _recorded_value(getattr(wrapped, name), recorded)
+
+
+def _recorded_value(value: Any, recorded: set[str]) -> Any:
+    """Return this value with any attribute read through it recorded into the shared set.
+
+    Args:
+        value: A value a predicate just read off the evidence tree.
+        recorded: The set every wrapper in this tree records into.
+
+    Returns:
+        A wrapper for a dataclass instance, a fresh list of wrapped elements for a list or tuple,
+        and the value itself for anything else. Predicates only read, so rebuilding the sequence is
+        safe.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _RecordingEvidence(value, recorded)
+    if isinstance(value, list | tuple):
+        return [_recorded_value(item, recorded) for item in value]
+    return value
+
+
+def _recorded_reads(predicate: Callable[[Any], bool], script: str) -> tuple[bool, frozenset[str]]:
+    """Run a boundary predicate over one script's evidence and report what it read.
+
+    Args:
+        predicate: The row's boundary-evidence predicate.
+        script: The boundary script whose evidence it is evaluated against.
+
+    Returns:
+        Whether the predicate accepted the evidence, and the attribute names it read doing so.
+    """
+    recorded: set[str] = set()
+    accepted = bool(predicate(_RecordingEvidence(_boundary_evidence(script), recorded)))
+    return accepted, frozenset(recorded)
+
+
+def _relevant_reads() -> dict[str, frozenset[str]]:
+    """Map each guard origin to the leaf reads of the layer that decides its refusal.
+
+    Derived from the real guarded modules through the same checker function the gate's source-side
+    relevance rule consumes, so the executed reads are held to the same set the gate holds the
+    predicate's spelling to.
+    """
+    relevant: dict[str, frozenset[str]] = {}
+    for module in checker.GUARDED_MODULES:
+        source = (_ROOT / module).read_text(encoding="utf-8")
+        relevant.update(checker.guard_relevant_reads(source, Path(module).name))
+    return relevant
+
+
+_RELEVANT_READS = _relevant_reads()
+
+_DEAD_BRANCH_PREDICATE = (
+    "lambda e: bool(e.commands) if True else any(s.parent_scope_id for s in e.scopes)"
+)
+"""The Codex round-7 predicate: its whole relevance to the parent-scope guard is dead code.
+
+The executed half is `bool(e.commands)`, which is false for the empty control and true for
+`echo hi`, so every executable assertion an invariant row can be held to passes. The `else` branch
+never runs and donates `parent_scope_id` to the gate's source derivation regardless.
+"""
+
+
+@pytest.mark.parametrize(
+    "witness",
+    INVARIANT_WITNESSES,
+    ids=[witness.origin_id for witness in INVARIANT_WITNESSES],
+)
+def test_invariant_boundary_predicate_reads_a_guard_leaf_while_it_runs(
+    witness: InvariantWitness,
+) -> None:
+    # The gate can only see what the predicate mentions. This is the half that cannot be derived
+    # from source: the accepting run itself is measured, and the reads it performed are held to the
+    # same deciding layer, so a row whose relevance lives in an unexecuted branch fails here.
+    relevant = _RELEVANT_READS[witness.origin_id]
+    assert relevant, f"{witness.origin_id}: no deciding layer for a predicate to read"
+
+    accepted, accessed = _recorded_reads(witness.boundary_evidence, witness.boundary_script)
+
+    assert accepted, (
+        f"{witness.origin_id}: boundary evidence rejected while recording, so there is no "
+        f"accepting run to measure"
+    )
+    assert accessed & relevant, (
+        f"{witness.origin_id}: the accepting run read {sorted(accessed) or 'nothing'} while this "
+        f"guard decides on {sorted(relevant)}; a read reached only in unexecuted code supports no "
+        f"claim about it"
+    )
+
+
+def test_a_dead_branch_read_satisfies_the_source_rule_and_fails_the_runtime_one() -> None:
+    # Codex round-7 P1, pinned on the shipped origin it would have carried. The gate's derivation
+    # walks the whole predicate, so the dead `else` is enough to pass it; the recorded run never
+    # touches `parent_scope_id`, so the runtime rule rejects the same row.
+    origin_id = "taint.evidence.unknown-parent-scope"
+    registry = (
+        "REACHABLE_WITNESSES = ()\n"
+        "INVARIANT_WITNESSES = (\n"
+        "    InvariantWitness(\n"
+        f'        "{origin_id}",\n'
+        '        "a rationale nothing supports",\n'
+        '        "echo hi",\n'
+        f"        boundary_evidence={_DEAD_BRANCH_PREDICATE},\n"
+        "    ),\n"
+        ")\n"
+    )
+    # Both halves have to read the one spelling Codex reported, so the predicate is compiled from
+    # the same text the registry under test carries rather than restated as a second literal.
+    predicate = eval(_DEAD_BRANCH_PREDICATE)  # noqa: S307
+    relevant = _RELEVANT_READS[origin_id]
+
+    mentioned = checker.invariant_predicate_reads(registry)[origin_id]
+    accepted, accessed = _recorded_reads(predicate, "echo hi")
+
+    assert mentioned & relevant, "the source rule already rejects this row, so it pins nothing"
+    assert accepted
+    assert "parent_scope_id" not in accessed
+    assert not accessed & relevant
+
+
+def test_a_genuine_parent_edge_predicate_records_the_leaf_it_reads() -> None:
+    # The control for the pin above: the same claim spelled so that it runs reads the leaf, which
+    # is what keeps the runtime rule from being unsatisfiable rather than strict.
+    accepted, accessed = _recorded_reads(
+        lambda evidence: any(scope.parent_scope_id is not None for scope in evidence.scopes),
+        "if true; then (:); fi",
+    )
+
+    assert accepted
+    assert "parent_scope_id" in accessed
+    assert accessed & _RELEVANT_READS["taint.evidence.unknown-parent-scope"]
+
+
+def test_the_recording_wrapper_keeps_isinstance_working_over_the_output_union() -> None:
+    # The two output-walk predicates dispatch on `isinstance` over that union. A wrapper reporting
+    # its own type would make every arm decline, and both rows would then report nothing while the
+    # recorded set stayed silently small. A recursing member and a leaf one are both checked,
+    # because the walk descends through the first to reach the second.
+    recorded: set[str] = set()
+    evidence = _RecordingEvidence(_boundary_evidence("if true; then echo a; fi"), recorded)
+
+    roots = [scope.output for scope in evidence.scopes if scope.output is not None]
+    leaves = [part for root in roots for part in root.parts]
+
+    assert roots
+    assert leaves
+    assert all(type(node) is _RecordingEvidence for node in (*roots, *leaves)), (
+        "the walk was handed unwrapped values, so this proves nothing about the wrapper"
+    )
+    assert all(isinstance(root, SequenceOutput) for root in roots)
+    assert any(isinstance(leaf, CommandOutput) for leaf in leaves)

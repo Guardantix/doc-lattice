@@ -4595,6 +4595,34 @@ def guard_condition_reads(source: str, path: str) -> dict[str, tuple[frozenset[s
 
 
 @cache
+def guard_relevant_reads(source: str, path: str) -> dict[str, frozenset[str]]:
+    """Return the leaf reads of the one layer that decides each guard, by origin identifier.
+
+    This is the set a boundary-evidence predicate is held to: the first non-empty layer
+    `guard_condition_reads` derives, with the containers it only iterates through already removed.
+    It is exported because the relevance rule is enforced twice over the same set. The gate
+    intersects it against what the registry's predicate mentions in inert source, and the test
+    suite intersects it against what that predicate actually reads while executing against its
+    boundary evidence, which is the half no source derivation can supply. Both halves have to name
+    the same set for the second to be a real strengthening of the first rather than a parallel rule
+    with its own notion of relevance.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Module file name, used to resolve declared transports and to keep two modules
+            defining the same identifier out of one memo entry.
+
+    Returns:
+        Leaf attribute names by origin identifier, empty for a guard whose condition reads no
+        attribute at all.
+    """
+    return {
+        origin_id: layers[0] if layers else frozenset()
+        for origin_id, layers in guard_condition_reads(source, path).items()
+    }
+
+
+@cache
 def invariant_predicate_reads(source: str) -> dict[str, frozenset[str]]:
     """Return the attribute names each invariant row's boundary predicate reads, by identifier.
 
@@ -4673,6 +4701,12 @@ def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
     still says nothing about whether the parent edges form a cycle. Nothing derivable from the
     source closes that gap, so it stays with human review of the row's rationale under AD-20.
 
+    Being a rule over inert source, this half also counts a read the predicate never performs, since
+    a mention in a branch that never runs is still a mention. The suite closes that by executing
+    every predicate against its boundary evidence under a recording wrapper and intersecting the
+    reads it observes against the same `guard_relevant_reads` set, so an unexecuted read cannot
+    carry a row however it is spelled.
+
     The predicate is held to the layer that actually decides the guard, and to the leaf attributes
     of it. Intersecting a flat union of every layer would let a row for the parent-cycle detector
     pass on `bool(evidence.commands) and bool(evidence.scopes)`, which reads no parent edge and
@@ -4685,16 +4719,15 @@ def repository_invariant_relevance_violations(root: Path) -> tuple[str, ...]:
         Human-readable violations, empty when every invariant row inspects its guard's own data.
     """
     predicates = invariant_predicate_reads((root / REGISTRY_PATH).read_text(encoding="utf-8"))
-    conditions: dict[str, tuple[frozenset[str], ...]] = {}
+    conditions: dict[str, frozenset[str]] = {}
     for module in _repository_guard_modules(root):
         source = (root / module).read_text(encoding="utf-8")
-        conditions.update(guard_condition_reads(source, Path(module).name))
+        conditions.update(guard_relevant_reads(source, Path(module).name))
     violations: list[str] = []
     for origin_id, names in sorted(predicates.items()):
-        layers = conditions.get(origin_id)
-        if layers is None:
+        inspected = conditions.get(origin_id)
+        if inspected is None:
             continue
-        inspected = layers[0] if layers else frozenset()
         if not inspected:
             violations.append(
                 f"{origin_id}: this guard's condition reads no attribute of the evidence, so a "

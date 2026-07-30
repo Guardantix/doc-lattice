@@ -969,6 +969,14 @@ attribute at all, or only a limits field, cannot be witnessed this way and the r
 than accepting the first predicate offered; a resource bound belongs to a reachable witness under
 shrunk limits.
 
+Being a rule over inert source, that floor also counts a read the predicate never performs:
+`bool(e.commands) if True else any(s.parent_scope_id for s in e.scopes)` mentions the parent-scope
+guard's leaf in a branch that never runs, while the half that executes only tests commands. Pruning
+dead branches statically would be another round-per-spelling series, so the suite executes every
+predicate against its own boundary evidence under a recording wrapper and holds the reads that
+actually ran to the same derived set, because dead code contributes nothing at runtime however it is
+spelled.
+
 A boundary row is additionally held to executing the guard's own governing construct while not
 reaching its refusal, and that construct is whichever one actually decides the guard: an `if` or
 `while` test, a `for` header, a `match` arm, or, for a guard in an `except` handler, the operation
