@@ -440,6 +440,18 @@ _REFLECTIVE_LOOKUPS = frozenset(
         "__base__",
         "__mro__",
         "__subclasses__",
+        # Evaluators that turn a declaration's stored annotation text back into the object it
+        # names. A type position is exempt from the reference rule because naming a constructor
+        # there binds nothing a call can reach, and that holds only while nothing evaluates what
+        # was stored: `get_type_hints(_helper)["value"]` hands back the constructor an ordinary
+        # `value: GuardRefusal` parameter names, exactly as `Alias.__value__` unwraps a `type`
+        # alias. Deferred annotations leave `__annotations__` and `__annotate__` handing back text
+        # rather than the object, but both are rejected here too, so no rule depends on which
+        # module the reference was spelled in.
+        "__annotations__",
+        "__annotate__",
+        "get_type_hints",
+        "get_annotations",
         # Builtins that redirect what an otherwise canonical spelling resolves to, together with
         # the descriptor calls performing the same write without spelling the builtin:
         # `type.__setattr__(_EvalDiscoveryBudget, "charge_work", stub)` replaces the method holding
@@ -457,7 +469,11 @@ of.
 through one requires `eval` or `exec`, which are rejected here. `hasattr` is absent because it
 yields a bool, which can neither carry a constructor nor redirect a spelling to one. `super` is
 absent because it resolves along a class's own declared bases, and the guarded modules spell
-`super().__init__(...)` in their refusal transports."""
+`super().__init__(...)` in their refusal transports. `fields` and `signature` are absent because
+their subject is a definition rather than its annotations, and `fields` is a name `shell_taint.py`
+already binds for an unrelated local; under the deferred annotations
+`find_deferred_annotation_violations` requires, the annotation each of them reaches is text, and
+turning text into the object it names is what the evaluators above are rejected for."""
 
 
 def _reflective_lookup_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
@@ -493,6 +509,53 @@ def _reflective_lookup_violations(tree: ast.AST, path: str) -> tuple[str, ...]:
         for node in ast.walk(tree)
         if isinstance(node, ast.Name | ast.Attribute)
         if _referenced_name(node) in names
+    )
+
+
+def find_deferred_annotation_violations(source: str, path: str) -> tuple[str, ...]:
+    """Return a violation when a guarded module does not defer its annotations.
+
+    A type position is exempt from the reference rule, so a guarded module names the refusal
+    constructor in annotations freely and must: `refusal: GuardRefusal` is the parameter the cycle
+    detector refuses through. The exemption is sound only while what the declaration leaves behind
+    cannot be handed back as the constructor, and an eagerly evaluated annotation stores the class
+    object itself. Enumerating the surfaces that read one back does not close that:
+    `__annotations__` is rejected here, but `dataclasses.fields(_ShellWord)[0].type` and
+    `inspect.signature(_helper).parameters["refusal"].annotation` reach the same object through
+    names whose subject is the definition rather than its annotations, and one of them is a name
+    this package already binds for an unrelated local.
+
+    Deferring the annotations closes the class instead of enumerating it. Under
+    `from __future__ import annotations` every one of those surfaces hands back the annotation's
+    source text, and turning text into the object it names requires `eval`, `exec` or the
+    `get_type_hints` family, each of which `_REFLECTIVE_LOOKUPS` already rejects. So the rule is
+    about what the module stores, not about who reads it, and it needs no list of readers to stay
+    closed as the standard library grows new ones.
+
+    This reads a whole module rather than a fragment, so unlike the shape rules it runs from
+    `repository_deferred_annotation_violations` alone. A snippet carries whichever imports the
+    example needs, and its annotations are evaluated by nobody.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Module file name, used in messages.
+
+    Returns:
+        Human-readable violations, empty when the module defers its annotations.
+    """
+    tree = ast.parse(source)
+    deferred = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    if deferred:
+        return ()
+    return (
+        f"{path}:1: guarded module evaluates its annotations; add "
+        "'from __future__ import annotations' so a constructor named as a type is stored as text "
+        "rather than handed back as the class",
     )
 
 
@@ -786,9 +849,9 @@ _CONSTRUCTOR_HIDING_NODES = (
 
 A container subscripted for its element, `{"g": GuardRefusal}["g"]`, names the constructor where no
 rule reads it and hands it back on demand, and a call or lambda computes the reference instead of
-naming it. A `type` statement's value is exempt from the reference rule only while its subtree holds
-none of these, so the exemption covers a chain of type references and not everything the grammar
-allows in that position."""
+naming it. A declaration is exempt from the reference rule only while its subtree holds none of
+these, so the exemption covers a chain of type references and not everything the grammar allows in
+that position."""
 
 
 def _hides_constructor(declared: ast.expr) -> bool:
@@ -804,19 +867,31 @@ def _hides_constructor(declared: ast.expr) -> bool:
 
 
 def _declaration_contexts(declared: ast.expr) -> Iterator[ast.AST]:
-    """Yield every node of one type declaration except the references an inline assignment binds.
+    """Yield every node of one type declaration except the references it binds or hides.
 
-    A declaration names a constructor as a type, which binds nothing a later call can reach. An
-    assignment expression inside one does bind it, and the alias follower never reads a walrus, so
-    `def _helper(x: (factory := TaintLimits) = None)` would register `factory` where no rule looks
-    and `factory()` would then mint production limits invisibly.
+    A declaration names a constructor as a type, which binds nothing a later call can reach. That
+    is a claim about a declaration spelling types, not about the position it occupies, and every
+    declaration position accepts the whole expression grammar. So a declaration holding a
+    constructor-hiding form is exempt from nothing: `def _helper(x: _stash(GuardRefusal))` hands
+    the constructor to `_stash` when the annotation is evaluated, exactly as `type X =
+    {"g": GuardRefusal}["g"]` hands it to a subscript, and `except _stash(GuardRefusal):` runs the
+    same call every time the handler is tested. The whole declaration is disqualified rather than
+    the hiding subtree alone, which is the same deny-by-default reading `_hides_constructor`
+    already carries: a constructor spelled beside a hiding form fails loudly and is resolved by
+    spelling the declaration without one, never by narrowing this rule to the spelling at hand.
+
+    An assignment expression inside a declaration does bind the constructor, and the alias follower
+    never reads a walrus, so `def _helper(x: (factory := TaintLimits) = None)` would register
+    `factory` where no rule looks and `factory()` would then mint production limits invisibly.
 
     Args:
         declared: The declared type expression.
 
     Yields:
-        The nodes of that declaration that hide no constructor.
+        The nodes of that declaration that hide no constructor, and none at all when it does.
     """
+    if _hides_constructor(declared):
+        return
     bound = {
         id(inner)
         for node in ast.walk(declared)
@@ -831,17 +906,17 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     """Yield every node one statement or declaration names a constructor in without hiding it.
 
     An exception type, an annotation and a match pattern's class name a constructor as a type
-    rather than binding it to a name that could later be called.
+    rather than binding it to a name that could later be called. Every one of them is reduced by
+    `_declaration_contexts`, so none is exempt while it spells a constructor-hiding form, and the
+    stored annotation an exempt one leaves behind is reachable only through the evaluators
+    `_REFLECTIVE_LOOKUPS` rejects.
 
     A `type` statement is a type position too, and the only one that is a statement rather than an
     annotation. The interpreter evaluates its value lazily inside its own scope and binds a
     `TypeAliasType`, which is not callable, so a constructor named there is reachable as a
     constructor only through the same dunder indirection an ordinary registered alias already
-    permits (`Alias.__call__(...)` reads no tracked spelling either). Only a value spelling no
-    constructor-hiding form is exempt, per `_hides_constructor`: `type X = {"g": GuardRefusal}["g"]`
-    hides the constructor in a type position exactly as it does outside one, and `X.__value__` hands
-    the element straight back. A `TypeAlias`-annotated assignment is deliberately *not* a type
-    position at all: the annotation is unenforced, so
+    permits (`Alias.__call__(...)` reads no tracked spelling either). A `TypeAlias`-annotated
+    assignment is deliberately *not* a type position at all: the annotation is unenforced, so
     `factory: TypeAlias = GuardRefusal if use_default else injected` really does bind a callable.
 
     A raise is not a type position, so only the bare name or attribute it raises is allowed here.
@@ -858,7 +933,7 @@ def _declared_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
     """
     if isinstance(node, ast.ExceptHandler) and node.type is not None:
         yield from _declaration_contexts(node.type)
-    if isinstance(node, ast.TypeAlias) and not _hides_constructor(node.value):
+    if isinstance(node, ast.TypeAlias):
         yield from _declaration_contexts(node.value)
     if isinstance(node, ast.Raise):
         for part in (node.exc, node.cause):
@@ -6167,6 +6242,26 @@ def repository_dead_statement_violations(root: Path) -> tuple[str, ...]:
     return tuple(violations)
 
 
+def repository_deferred_annotation_violations(root: Path) -> tuple[str, ...]:
+    """Return every guarded module that evaluates its annotations.
+
+    The surface is the one shape validation uses, the discovered modules together with the
+    allowlist, because a module that stops being discovered is exactly where an eagerly evaluated
+    annotation would be cheapest to hide.
+
+    Args:
+        root: Repository root to read the guarded modules from.
+
+    Returns:
+        Human-readable violations, empty when every guarded module defers its annotations.
+    """
+    violations: list[str] = []
+    for module in sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root))):
+        source = (root / module).read_text(encoding="utf-8")
+        violations.extend(find_deferred_annotation_violations(source, Path(module).name))
+    return tuple(violations)
+
+
 def repository_coverage_violations(root: Path) -> tuple[str, ...]:
     """Return every guard-protocol module omitted from the guarded-module allowlist.
 
@@ -6737,6 +6832,10 @@ def main(argv: list[str] | None = None) -> int:
                 ("guarded module coverage", lambda: repository_coverage_violations(arguments.root)),
                 ("inventory artifacts", lambda: repository_artifact_violations(arguments.root)),
                 ("refusal shapes", lambda: repository_shape_violations(arguments.root)),
+                (
+                    "deferred annotations",
+                    lambda: repository_deferred_annotation_violations(arguments.root),
+                ),
                 ("limits provenance", lambda: repository_limits_violations(arguments.root)),
                 ("guard thresholds", lambda: repository_threshold_violations(arguments.root)),
                 ("guard reachability", lambda: repository_reachability_violations(arguments.root)),

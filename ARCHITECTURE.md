@@ -960,6 +960,34 @@ carries no allowance: the guarded modules spell no collision in any scope, no de
 definition, and 165 attribute writes of which none names a definition. `self.work += amount` remains
 ordinary state on a parameter, and stays outside the rule because `work` is not a definition's name.
 
+Every one of those rules governs where a constructor may be *named*, and the exemption for naming
+one as a type was reasoned about as a property of the position rather than of the spelling. A type
+position accepts the whole expression grammar, so `def _helper(value: _stash(GuardRefusal))` hands
+the constructor to `_stash` and `except _stash(GuardRefusal):` runs the same call every time the
+handler is tested, exactly as `type X = {"g": GuardRefusal}["g"]` hands it to a subscript. Only the
+`type` statement was reduced that way, so the constructor could be captured at a site no rule read,
+minted through the plain alias the computed-callee boundary declines to trace, and delivered at a
+declared transport: hosted in `_validate_acyclic_graph`, that added a fail-closed guard no record
+describes with the candidate gate at exit 0 and the base-owned comparison reporting only two
+unrelated fingerprints the edit incidentally moved. So every declaration is reduced by the same
+rule, and a constructor spelled beside a hiding form is rejected rather than the hiding subtree
+alone, on the deny-by-default reading the provenance rules already carry.
+
+What an exempt declaration leaves behind is then the second half, because a module that evaluates
+its annotations stores the class itself: `_ShellWord.__annotations__["brace_expansion_error"]` hands
+back `GuardRefusal | None` off an annotation the scanner has every reason to spell. Enumerating the
+surfaces that read one back does not close that. `__annotations__`, `__annotate__`, `get_type_hints`
+and `get_annotations` join the reflective family, but `dataclasses.fields(_ShellWord)[0].type` and
+`inspect.signature(_helper).parameters["refusal"].annotation` reach the same object through names
+whose subject is a definition rather than its annotations, and `fields` is a name `shell_taint.py`
+already binds for an unrelated local. So the rule is about what a guarded module stores rather than
+about who reads it: every guarded module defers its annotations, which leaves all of those surfaces
+handing back the annotation's source text, and turning text into the object it names requires
+`eval`, `exec` or the evaluators above, each already rejected. The one module that evaluated them,
+`shell_scanner.py`, now defers them with no record moved. Neither half carries an allowance: across
+the three guarded modules no declaration names a tracked constructor inside a hiding form, and none
+names an annotation reader.
+
 The base-owned closure and comparison derive
 the set of guard-protocol modules recursively from the candidate guard package rather than from the
 base revision's hand-maintained list. Discovery over-approximates: a module belongs to the guarded

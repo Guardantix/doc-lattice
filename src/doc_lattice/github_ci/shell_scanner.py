@@ -1,5 +1,7 @@
 """Bounded scanner for direct doc-lattice invocations and authored marker flow."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
@@ -438,7 +440,7 @@ class _LauncherOptions:
         options_with_arguments: frozenset[str],
         flags: frozenset[str],
         non_command_options: frozenset[str] = frozenset(),
-    ) -> "_LauncherOptions":
+    ) -> _LauncherOptions:
         """Bundle option data with its short-option subsets computed once at import."""
         return cls(
             options_with_arguments=options_with_arguments,
@@ -765,7 +767,7 @@ class _ScopeFrame:
     outputs: list[OutputExpr]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
     loop_bindings: list[_AssignmentEvidence] = field(default_factory=list)
-    controls: list["_ControlFrame"] = field(default_factory=list)
+    controls: list[_ControlFrame] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -810,7 +812,7 @@ class _PipelineFrame:
 class _CommandScanState:
     words: list[_ShellWord]
     heredocs: list[_Heredoc]
-    cases: list["_CaseScanState"]
+    cases: list[_CaseScanState]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
     redirection_assignments: list[_AssignmentEvidence] = field(default_factory=list)
     owned_heredoc_count: int = 0
@@ -1048,7 +1050,7 @@ class _ShellScanner:
         *,
         invocations: list[_Invocation] | None = None,
         classify_commands: bool = True,
-    ) -> "_ShellScanner":
+    ) -> _ShellScanner:
         """Construct a non-taint child without extending private subclass constructors."""
         child = _ShellScanner(
             source,

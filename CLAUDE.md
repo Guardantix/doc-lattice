@@ -82,7 +82,8 @@ attributes those are from the guarded module, so a predicate over unrelated evid
 however plausible it reads.
 
 When you add or move a guard, add its classification to `tests/guard_witnesses.py`; when adding its
-module, add that module to `GUARDED_MODULES` too. The base-owned comparison discovers guarded
+module, add that module to `GUARDED_MODULES` too and give it `from __future__ import annotations`,
+which is what keeps a constructor named as a type from being handed back as the class. The base-owned comparison discovers guarded
 modules recursively from the candidate tree, so an older base checker can validate the new origin.
 Regenerate the debt snapshot only when a guard legitimately moves, never to silence a new one: CI
 runs the base revision's copy of the checker against your tree and rejects any record the base did

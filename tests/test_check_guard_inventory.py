@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from doc_lattice.github_ci import shell_scanner
+
 if TYPE_CHECKING:
     from types import ModuleType
 
@@ -534,6 +536,73 @@ def test_a_type_alias_annotated_conditional_binding_is_still_rejected() -> None:
     assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "def _helper(value: _stash(GuardRefusal)) -> None: ...\n", id="parameter-annotation"
+        ),
+        pytest.param("def _helper() -> _stash(GuardRefusal): ...\n", id="return-annotation"),
+        pytest.param(
+            "def _helper() -> None:\n    value: _stash(GuardRefusal) = 1\n",
+            id="variable-annotation",
+        ),
+        pytest.param(
+            'def _helper(value: {"g": GuardRefusal}["g"]) -> None: ...\n',
+            id="annotation-container",
+        ),
+        pytest.param(
+            "def _helper(value: (lambda: GuardRefusal)) -> None: ...\n", id="annotation-lambda"
+        ),
+        pytest.param(
+            "def _helper() -> None:\n"
+            "    try:\n"
+            "        _scan()\n"
+            "    except _stash(GuardRefusal):\n"
+            "        pass\n",
+            id="except-handler-type",
+        ),
+    ],
+)
+def test_a_declaration_that_hides_the_refusal_constructor_is_rejected(source: str) -> None:
+    # A type position is exempt because naming a constructor as a type binds nothing a call can
+    # reach, which is a claim about spelling types rather than about the position. Every one of
+    # these positions accepts the whole expression grammar, so the call runs and is handed the
+    # constructor: an annotation at definition time on a module that evaluates them and at
+    # `get_type_hints` on one that does not, a handler type every time the handler is tested.
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("def _helper(refusal: GuardRefusal) -> None: ...\n", id="bare-name"),
+        pytest.param("def _helper(refusal: GuardRefusal | None) -> None: ...\n", id="union"),
+        pytest.param("def _helper(seen: dict[str, GuardRefusal]) -> None: ...\n", id="subscripted"),
+        pytest.param(
+            "def _helper() -> None:\n"
+            "    try:\n"
+            "        _scan()\n"
+            "    except _MalformedTaintEvidence:\n"
+            "        pass\n",
+            id="handler-type",
+        ),
+    ],
+)
+def test_a_declaration_naming_the_refusal_constructor_as_a_type_stays_followable(
+    source: str,
+) -> None:
+    # These are the spellings the guarded modules carry, `refusal: GuardRefusal` among them, so
+    # disqualifying a declaration that hides a constructor must not reach a declaration that names
+    # one as the type it is.
+    assert not any(
+        "cannot follow" in violation
+        for violation in checker.find_shape_violations(source, "shell_taint.py")
+    )
+
+
 def test_a_dunder_call_on_the_refusal_constructor_is_rejected() -> None:
     # The callee's last component names the dunder rather than the constructor, so every
     # construction rule reads an unrelated call while the interpreter mints a real refusal.
@@ -645,6 +714,13 @@ def _reflective_scanner_source(lookup: str, preamble: str = "") -> str:
             'im("doc_lattice.github_ci.shell_guards").GuardRefusal',
             "from importlib import import_module as im\n",
         ),
+        # An annotation is the one place a guarded module names the refusal constructor freely, so
+        # every surface that hands a stored annotation back as the object it names belongs to the
+        # family: `refusal: GuardRefusal` is a parameter the cycle detector really carries.
+        ("__annotations__", '_validate_acyclic_graph.__annotations__["refusal"]', ""),
+        ("get_type_hints", 'get_type_hints(_validate_acyclic_graph)["refusal"]', ""),
+        ("get_annotations", 'inspect.get_annotations(_validate_acyclic_graph)["refusal"]', ""),
+        ("__annotate__", "_validate_acyclic_graph.__annotate__(1)['refusal']", ""),
     ],
 )
 def test_a_reflectively_resolved_refusal_constructor_is_rejected(
@@ -675,6 +751,40 @@ def test_a_reflective_lookup_bound_to_an_alias_is_rejected() -> None:
 
     assert any(_REFLECTIVE.format(name="getattr") in violation for violation in violations)
     assert any(_REFLECTIVE.format(name="look") in violation for violation in violations)
+
+
+_EAGER_ANNOTATIONS = "guarded module evaluates its annotations"
+
+
+def test_a_guarded_module_that_evaluates_its_annotations_is_rejected() -> None:
+    # Rejecting the readers one name at a time does not close the class:
+    # `fields(_ShellWord)[0].type` and
+    # `signature(_helper).parameters["refusal"].annotation` reach the same stored object through
+    # names whose subject is the definition, and `fields` is a name `shell_taint.py` already binds
+    # for an unrelated local. Deferring the annotations makes every one of them hand back text.
+    source = '"""A guarded module."""\n\nimport re\n'
+
+    violations = checker.find_deferred_annotation_violations(source, "shell_scanner.py")
+
+    assert any(_EAGER_ANNOTATIONS in violation for violation in violations)
+
+
+def test_a_guarded_module_that_defers_its_annotations_is_accepted() -> None:
+    source = '"""A guarded module."""\n\nfrom __future__ import annotations\n\nimport re\n'
+
+    assert checker.find_deferred_annotation_violations(source, "shell_scanner.py") == ()
+
+
+def test_a_deferred_annotation_stores_the_constructor_as_text() -> None:
+    # The rule's whole argument: what an exempt declaration leaves behind is source text, and
+    # turning text into the object it names needs an evaluator the reflective family rejects.
+    stored = shell_scanner._ShellWord.__annotations__["brace_expansion_error"]
+
+    assert stored == "GuardRefusal | None"
+
+
+def test_every_guarded_module_defers_its_annotations() -> None:
+    assert checker.repository_deferred_annotation_violations(_ROOT) == ()
 
 
 def test_statically_resolved_module_members_are_not_reflective_lookups() -> None:
