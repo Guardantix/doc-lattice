@@ -203,11 +203,14 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
         if event == "call" and frame.f_code.co_filename in guarded:
             reached.add(frame.f_code.co_qualname.replace(".<locals>", ""))
 
+    # Restore whatever hook was active, not None: coverage collection and debuggers also use
+    # settrace, and clearing it would silently disable them for the rest of the process.
+    previous = sys.gettrace()
     sys.settrace(trace)
     try:
         scan_doc_lattice_invocations(script, limits=limits)
     finally:
-        sys.settrace(None)
+        sys.settrace(previous)
     return reached
 
 

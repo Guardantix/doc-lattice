@@ -83,6 +83,22 @@ def test_trace_reports_the_guarded_functions_a_script_executes() -> None:
     assert "_eval_syntax_record_decision" in reached
 
 
+def test_trace_restores_the_previously_installed_tracer() -> None:
+    # Coverage collection and debuggers install their own settrace hook; clearing it instead of
+    # restoring it would silently disable them for the rest of the process.
+    ambient = sys.gettrace()
+
+    def previous(_frame: object, _event: str, _argument: object) -> None:
+        return None
+
+    sys.settrace(previous)
+    try:
+        tool.trace_guard_functions("echo hello")
+        assert sys.gettrace() is previous
+    finally:
+        sys.settrace(ambient)
+
+
 def test_trace_distinguishes_a_shape_that_never_reaches_that_machinery() -> None:
     reached = tool.trace_guard_functions("echo hello")
 
