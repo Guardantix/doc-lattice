@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 """Version of the canonical origin-record shape. Bump when the record fields or the fingerprint
 derivation change, so a base-relative comparison never silently compares incompatible records."""
 
@@ -162,6 +162,9 @@ not guard origins and never appear in the inventory."""
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 _Function = ast.FunctionDef | ast.AsyncFunctionDef
+
+_Definition = _Function | ast.ClassDef
+"""Any definition `_SCOPES` matches, which is what a qualified name is built from."""
 
 _CONSTRUCTION_HOOKS = frozenset({"__init__", "__post_init__"})
 """Methods a construction of the class runs without any call naming them.
@@ -2464,13 +2467,16 @@ def _cached_callee_shapes(function: _Function, cache: _DerivationCache) -> tuple
     return result
 
 
-def _definition_qualname(function: _Function, cache: _DerivationCache) -> str:
+def _definition_qualname(function: _Definition, cache: _DerivationCache) -> str:
     """Return the dotted name of the scopes this definition is written in, ending in its own.
 
     Callee blocks are ordered by this name, and two nested helpers can share a bare name, so the
     bare name would make the order depend on which the walk happened to reach first. It is derived
     from the enclosing definitions rather than from a line number, so moving a helper within its
     scope moves no record.
+
+    A class is named the same way, since the decorator closure records the definitions holding a
+    guard and any of them can be one.
 
     Args:
         function: The definition to name.
@@ -2640,6 +2646,117 @@ def _callee_shapes(
         for function in sorted(reached.values(), key=lambda node: _definition_qualname(node, cache))
         for shape in _cached_callee_shapes(function, cache)
     )
+
+
+def _decorated_scopes(scope: ast.AST | None, cache: _DerivationCache) -> tuple[_Definition, ...]:
+    """Return the guard's own definition and every definition holding it, innermost first.
+
+    A decorator on any of them runs before the guard does. The chain stops at the module, which
+    carries no decorator of its own.
+
+    Args:
+        scope: The guard's enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Definitions from the guard outwards, empty when the guard sits at module level.
+    """
+    parents = _cached_module_parents(cache)
+    chain: list[_Definition] = []
+    current: ast.AST | None = scope
+    while current is not None:
+        if isinstance(current, _SCOPES):
+            chain.append(current)
+        current = parents.get(id(current))
+    return tuple(chain)
+
+
+def _decorator_definitions(
+    decorator: ast.expr, spelled_in: ast.AST | None, cache: _DerivationCache
+) -> tuple[_Function, ...]:
+    """Return the definitions a decorator expression names that this parse can resolve.
+
+    Every bare name in the expression is resolved, not only a callee in call position, because both
+    decorator forms have to be followed and they spell the name differently: `@noop` names the
+    wrapper directly while `@noop(1)` names a factory whose *return* is the wrapper. Resolving names
+    rather than call positions covers both with one rule, at the cost of following a name that
+    merely appears as an argument. That errs toward coupling a record to more source, which is the
+    safe direction here, and no shipped guard carries a decorator for it to couple.
+
+    An attribute-spelled decorator resolves to nothing, the same boundary `_called_definitions`
+    draws and for the same reason: reading `mod.wrap` as the module's `wrap` would hash an
+    unrelated function into the record.
+
+    Args:
+        decorator: One decorator expression.
+        spelled_in: The scope the decorator is written in, whose lexical chain resolves its names.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        Definitions in source order, empty when the expression resolves to none.
+    """
+    reached: dict[int, _Function] = {}
+    for node in ast.walk(decorator):
+        if not isinstance(node, ast.Name):
+            continue
+        definition = _resolve_called_definition(node.id, spelled_in, cache)
+        if definition is not None:
+            reached[id(definition)] = definition
+    return tuple(
+        sorted(reached.values(), key=lambda function: (function.lineno, function.col_offset))
+    )
+
+
+def _decorator_shapes(scope: ast.AST | None, cache: _DerivationCache) -> tuple[str, ...]:
+    """Return the shapes of the decorators that can replace the guard before it runs.
+
+    Everything else in a record describes what the guard's function does once it is entered. A
+    decorator decides whether that function is what a caller reaches at all: `@noop` returning a
+    stub withdraws every guard in the function it wraps while the origin, its condition, its
+    writers, its callee closure and its caller graph stay byte-identical, and the base-owned
+    comparison accepts the withdrawal. The decorators of the guard's own definition and of every
+    definition holding it are therefore part of the record.
+
+    Both halves of a decorator are recorded, for the reason `_callee_shapes` gives about calls. The
+    spelling alone leaves `@noop` withdrawable by editing what `noop` returns, so a resolvable
+    decorator is followed into its return-deciding statements exactly as a callee is, transitively.
+
+    The bound is the same one that governs the rest of the record: only what can change the wrapper
+    a caller reaches is hashed. A decorator's body that no return reads moves nothing, and a
+    decorator this parse cannot resolve contributes its spelling and no more.
+
+    Args:
+        scope: The guard's enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        One block per decorated definition, innermost first, empty when nothing wrapping the guard
+        is decorated.
+    """
+    shapes: list[str] = []
+    reached: dict[int, _Function] = {}
+    for definition in _decorated_scopes(scope, cache):
+        if not definition.decorator_list:
+            continue
+        spelled_in = _enclosing_node(
+            definition, (ast.FunctionDef, ast.AsyncFunctionDef), _cached_module_parents(cache)
+        )
+        shapes.append(f"decorated {_definition_qualname(definition, cache)}")
+        for decorator in definition.decorator_list:
+            shapes.append(f"decorator {ast.unparse(decorator)}")
+            pending = list(_decorator_definitions(decorator, spelled_in, cache))
+            while pending:
+                function = pending.pop()
+                if id(function) in reached:
+                    continue
+                reached[id(function)] = function
+                pending.extend(_cached_callee_callees(function, cache))
+    shapes.extend(
+        shape
+        for function in sorted(reached.values(), key=lambda node: _definition_qualname(node, cache))
+        for shape in _cached_callee_shapes(function, cache)
+    )
+    return tuple(shapes)
 
 
 def _cached_module_parents(cache: _DerivationCache) -> dict[int, ast.AST]:
@@ -3286,6 +3403,9 @@ def extract_origin_records(
         # reaches that function is withdrawn, so the controls at the immediate call site are part
         # of the record too.
         callers = _call_site_shapes(scope, annotations, cache)
+        # Every shape above describes what the guard's function does once it is entered. A
+        # decorator decides whether that function is what the caller reaches at all.
+        decorators = _decorator_shapes(scope, cache)
         called = {name for node in _own_expressions(statement) if (name := _called_name(node))}
         carried = tuple(shape for name, shape in sorted(transports.items()) if name in called)
         digest = hashlib.sha256(
@@ -3301,6 +3421,7 @@ def extract_origin_records(
                     *raising,
                     *callees,
                     *callers,
+                    *decorators,
                 )
             ).encode("utf-8")
         ).hexdigest()

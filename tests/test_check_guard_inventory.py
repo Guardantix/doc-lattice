@@ -4544,6 +4544,92 @@ def test_fingerprint_tracks_a_writer_read_through_a_shadowed_attribute_subscript
     )
 
 
+_DECORATED_GUARD = (
+    "def noop(fn):\n"
+    "    return fn\n"
+    "{decorator}"
+    "def _guard(items, limits):\n"
+    "    if len(items) > limits.max_items:\n"
+    '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.decorated", "nope"))\n'
+    "def scan(items, limits):\n"
+    "    return _guard(items, limits)\n"
+)
+"""A guard whose function a decorator can replace before any caller reaches it."""
+
+
+@pytest.mark.parametrize(
+    "decorator",
+    [
+        # A bare name wraps the function directly.
+        "@noop\n",
+        # A call names a factory whose return is the wrapper.
+        "@noop(1)\n",
+        # An attribute resolves to no definition, so only its spelling is recorded. That is still
+        # enough to move the record, which is what the rule needs of it.
+        "@registry.noop\n",
+    ],
+)
+def test_decorating_a_guards_function_moves_its_fingerprint(decorator: str) -> None:
+    # Every other shape in a record describes what the guard's function does once entered. A
+    # decorator decides whether that function is what a caller reaches at all, so an undecorated
+    # and a decorated guard sharing a fingerprint is an accepted withdrawal.
+    plain = _DECORATED_GUARD.format(decorator="")
+    wrapped = _DECORATED_GUARD.format(decorator=decorator)
+
+    assert _fingerprint_for(plain, "shell_taint.py", "taint.demo.decorated") != _fingerprint_for(
+        wrapped, "shell_taint.py", "taint.demo.decorated"
+    )
+
+
+def test_rewriting_what_a_decorator_returns_moves_the_fingerprint() -> None:
+    # The control for the rule above. Hashing the decorator's spelling alone would leave `@noop`
+    # withdrawable by editing what `noop` returns, which is the defect the callee closure fixed for
+    # ordinary calls: the spelling is identical while the wrapper a caller reaches is a stub.
+    wrapped = _DECORATED_GUARD.format(decorator="@noop\n")
+    withdrawn = wrapped.replace("    return fn\n", "    return lambda *a, **k: None\n")
+
+    assert _fingerprint_for(wrapped, "shell_taint.py", "taint.demo.decorated") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.decorated"
+    )
+
+
+def test_decorating_a_scope_holding_the_guard_moves_its_fingerprint() -> None:
+    # A decorator on the class or the outer function can replace the guard's own definition just as
+    # completely, so the whole enclosing chain is recorded rather than the guard's own definition.
+    method = (
+        "class Scanner:\n"
+        "    def check(self, items, limits):\n"
+        "        if len(items) > limits.max_items:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.held", "nope"))\n'
+        "def scan(scanner, items, limits):\n"
+        "    return scanner.check(items, limits)\n"
+    )
+    nested = (
+        "def outer(items, limits):\n"
+        "    def _guard():\n"
+        "        if len(items) > limits.max_items:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.held", "nope"))\n'
+        "    return _guard()\n"
+    )
+    for source in (method, nested):
+        assert _fingerprint_for(source, "shell_taint.py", "taint.demo.held") != _fingerprint_for(
+            "@register\n" + source, "shell_taint.py", "taint.demo.held"
+        )
+
+
+def test_an_undecorated_guard_records_no_decorator_shape() -> None:
+    # The component is variadic, so a guard wrapped by nothing hashes exactly what it hashed before
+    # the rule existed. That is what keeps this fix from churning records it cannot protect.
+    tree = ast.parse(_DECORATED_GUARD.format(decorator=""))
+    scope = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_guard"
+    )
+
+    assert checker._decorator_shapes(scope, checker._DerivationCache(module=tree)) == ()
+
+
 def test_an_unrelated_alias_on_a_read_import_does_not_move_a_fingerprint() -> None:
     # The guard reads one name off a shared import line. Hashing the whole line would churn the
     # record of every guard reading any other name on it, forcing the mass regeneration this gate

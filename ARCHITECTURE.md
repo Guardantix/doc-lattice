@@ -1288,6 +1288,24 @@ which is the same reason closure names none. Making a withdrawn guard's function
 the rule is not a way through, because the rename moves the record's qualified name and the
 base-relative comparison reports that as new debt.
 
+Every shape named so far describes what the guard's function does once it is entered, which left
+open whether that function is what a caller reaches at all. A decorator decides exactly that: it
+runs before any caller, and it may return something other than the function it wraps. Adding
+`@functools.cache`, a bare `@noop` returning a stub, a called `@noop(1)` or an unresolvable
+`@mod.attr` each withdrew a guard while its origin, condition, writers, callee closure and caller
+graph stayed byte-identical. A record therefore covers the decorators of the guard's own definition
+and of every definition holding it, since a decorator on the enclosing class or outer function
+replaces the guard just as completely. Both halves of a decorator are recorded, for the reason
+calls are: the spelling alone leaves `@noop` withdrawable by editing what `noop` returns, so a
+decorator that resolves to a definition is followed into its return-deciding statements exactly as a
+callee is. Every bare name in the decorator expression is resolved rather than only a callee in call
+position, because `@noop` names the wrapper while `@noop(1)` names a factory whose return is the
+wrapper, and one rule covering both is worth following a name that merely appears as an argument. An
+attribute-spelled decorator resolves to nothing and contributes its spelling alone, the boundary
+call resolution already draws. The component is variadic like every other, so a guard wrapped by
+nothing hashes what it hashed before the rule existed: no shipped guard's function carries a
+decorator, and the three records that moved are the ones whose methods sit in `@dataclass` classes.
+
 Two withdrawals remain outside both rules, and are recorded rather than implied: inverting a
 condition two or more levels above the guard's own function, and, for a function whose name another
 definition in the module shares, orphaning the chain that reaches it while a call to that other

@@ -115,13 +115,13 @@
       "qualname": "_static_eval_descriptor"
     },
     {
-      "fingerprint": "840d-aa5c-dd09-74bc-31fc-49cd",
+      "fingerprint": "9f21-884f-0efb-cdea-43ca-4c12",
       "origin_id": "taint.eval-discovery.update-limit",
       "path": "shell_taint.py",
       "qualname": "_EvalDiscoveryBudget.charge_update"
     },
     {
-      "fingerprint": "fc10-2b4f-8046-8b44-5a81-623c",
+      "fingerprint": "53c4-d3ed-fafc-836d-ce96-a9fc",
       "origin_id": "taint.eval-discovery.work-limit",
       "path": "shell_taint.py",
       "qualname": "_EvalDiscoveryBudget.charge_work"
@@ -181,7 +181,7 @@
       "qualname": "_eval_syntax_token"
     },
     {
-      "fingerprint": "c5ee-806e-23f7-3281-5b2c-d155",
+      "fingerprint": "2efc-a740-55fb-c466-3e1a-1b0a",
       "origin_id": "taint.eval-syntax.cleared-projection-without-widening",
       "path": "shell_taint.py",
       "qualname": "_EvalSyntaxState.__post_init__"
@@ -391,5 +391,5 @@
       "qualname": "_project_read_value"
     }
   ],
-  "schema": 12
+  "schema": 13
 }
