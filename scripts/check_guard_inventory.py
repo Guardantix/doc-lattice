@@ -5,7 +5,7 @@ Every fail-closed guard below the CI scanner's guard package has one *origin*: t
 detects the condition and constructs a `GuardRefusal`. This module reads that package as inert
 source text, never importing it, and produces one canonical record per origin.
 
-It enforces five separable properties:
+It enforces six separable properties:
 
 1. **Canonical refusal shapes.** A refusal may only reach an exception, a `ShellScanResult`, or a
    verdict return as a `GuardRefusal` construction with a literal identifier and literal reason,
@@ -17,10 +17,13 @@ It enforces five separable properties:
 3. **Guard reachability.** Every origin must sit in a function some public entry point of its own
    module can reach. Orphaning the function holding a guard withdraws it as completely as
    inverting its condition, and leaves every shape in its record untouched.
-4. **Invariant evidence relevance.** A guard classified as unreachable by an invariant witness must
+4. **Statement reachability.** No statement in a guarded module may sit after a statement that
+   leaves its block, because dead code above a guard withdraws it while every record stays frozen.
+   The rule is syntactic; a condition that is constantly false is out of scope.
+5. **Invariant evidence relevance.** A guard classified as unreachable by an invariant witness must
    carry a boundary-evidence predicate that reads something the guard's own condition reads. Every
    other assertion about such a row holds for a predicate about unrelated data.
-5. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
+6. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
    re-derive to a record the base already carried. Freezing *records* rather than bare identifiers
    means an unclassified guard cannot be moved or semantically edited while keeping its debt entry.
 
@@ -2752,6 +2755,79 @@ def find_reachability_violations(source: str, path: str) -> tuple[str, ...]:
     return tuple(violations)
 
 
+_TERMINAL_STATEMENTS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+"""Statements that leave their own block unconditionally, so nothing after them in it can run."""
+
+
+def _statement_blocks(tree: ast.AST) -> Iterator[tuple[ast.stmt, ...]]:
+    """Yield every statement list in the module, whichever construct owns it.
+
+    Reading the lists structurally rather than naming the constructs that carry them is what keeps
+    the dead-statement rule from having a blind spot per construct: a module body, a function body,
+    each arm of an `if` chain, a loop body and its `else`, a `try` body, its handlers, its `else`
+    and its `finally`, a `with` body and a `match` case body are all just a field holding
+    statements. A field holding anything else, such as a call's arguments or a module's type
+    ignores, is not a block and is skipped.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        Every block of statements in the module, in walk order.
+    """
+    for node in ast.walk(tree):
+        for _, value in ast.iter_fields(node):
+            if not isinstance(value, list):
+                continue
+            statements = tuple(item for item in value if isinstance(item, ast.stmt))
+            if statements and len(statements) == len(value):
+                yield statements
+
+
+def find_dead_statement_violations(source: str, path: str) -> tuple[str, ...]:
+    """Return every statement a guarded module cannot reach, block by block.
+
+    Dead code above a guard withdraws it as completely as inverting its condition, and it moves no
+    fingerprint: an unconditional `return None` at the top of the scan method makes every scanner
+    guard dead while all of the origins persist, every record stays byte-identical and every other
+    gate passes. The crude form of that edit is visible in the syntax alone, as a terminal statement
+    with more statements after it in the same block, and this rule rejects it there.
+
+    The rule is syntactic and evaluates no condition. `if True: return` above the rest of a function
+    makes that rest dead without any statement following a terminal one in the same block, and
+    deciding it needs constant folding this parse deliberately does not do. That conditional form is
+    the AD-20 residual: it is bounded by the frozen-debt window, because a classified guard's
+    witness executes the guard and turns the same edit into a failing test, and the dynamic control
+    for the window is the recurring checkpoint-corpus differential of issue #182.
+
+    Polarity kin: like the magnitude, constructor-reference and relevance rules, this one names what
+    it can decide and reports what it finds rather than enumerating known bypasses. Its scope is the
+    crude form of withdrawal by dead code; the targeted conditional form stays with classification
+    and the corpus differential.
+
+    Args:
+        source: Module source text, parsed but never executed.
+        path: Name reported with each violation.
+
+    Returns:
+        Human-readable violations, empty when every statement in the module is reachable.
+    """
+    violations: list[str] = []
+    for block in _statement_blocks(ast.parse(source)):
+        for index, statement in enumerate(block):
+            if not isinstance(statement, _TERMINAL_STATEMENTS):
+                continue
+            violations.extend(
+                f"{path}:{dead.lineno}: this statement is unreachable, because line "
+                f"{statement.lineno} leaves the block first; every statement in a guarded module "
+                f"must be reachable, since dead code above a guard withdraws it while its record "
+                f"stays frozen"
+                for dead in block[index + 1 :]
+            )
+            break
+    return tuple(violations)
+
+
 def _is_guard_refusal_call(node: ast.AST, names: frozenset[str]) -> bool:
     return _called_name(node) in names
 
@@ -4804,6 +4880,26 @@ def repository_shape_violations(root: Path) -> tuple[str, ...]:
     return tuple(violations)
 
 
+def repository_dead_statement_violations(root: Path) -> tuple[str, ...]:
+    """Return every unreachable statement across the repository's guarded modules.
+
+    The surface is the one shape validation uses, the discovered modules together with the
+    allowlist, because a module that stops being discovered is exactly where dead code would be
+    cheapest to hide.
+
+    Args:
+        root: Repository root to read the guarded modules from.
+
+    Returns:
+        Human-readable violations, empty when every statement in every guarded module is reachable.
+    """
+    violations: list[str] = []
+    for module in sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root))):
+        source = (root / module).read_text(encoding="utf-8")
+        violations.extend(find_dead_statement_violations(source, Path(module).name))
+    return tuple(violations)
+
+
 def repository_coverage_violations(root: Path) -> tuple[str, ...]:
     """Return every guard-protocol module omitted from the guarded-module allowlist.
 
@@ -5377,6 +5473,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("limits provenance", lambda: repository_limits_violations(arguments.root)),
                 ("guard thresholds", lambda: repository_threshold_violations(arguments.root)),
                 ("guard reachability", lambda: repository_reachability_violations(arguments.root)),
+                ("dead statements", lambda: repository_dead_statement_violations(arguments.root)),
                 (
                     "invariant evidence relevance",
                     lambda: repository_invariant_relevance_violations(arguments.root),

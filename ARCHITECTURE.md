@@ -1170,6 +1170,29 @@ second needs receiver type resolution the parse does not have, and tightening th
 trade a withheld report for a false one against callback dispatch. What stands against both is
 classification: a reachable witness proves dynamic reachability by executing the guard.
 
+Withdrawal by dead code above the guard's function belongs to that family, and its crude form is
+closed syntactically rather than left to classification. An unconditional `return None` at the top
+of `_ShellScanner.scan` makes every scanner guard dead; measured against a candidate tree it kept
+all 194 origins, moved no fingerprint and passed every other gate. That edit is visible in the
+syntax alone, as a statement sitting after one that leaves its own block, so no statement in a
+guarded module may be unreachable in that sense. The rule reads blocks structurally rather than
+naming the constructs that carry them, so a module body, an `if` arm, a loop body and its `else`, a
+`try` body, handler, `else` and `finally`, a `with` body and a `match` case are all held to it, and
+a rule with a blind spot per construct is what a naming-based version would have been.
+
+That rule evaluates no condition, and the targeted conditional form is therefore the residual:
+`if option.startswith("--split-string="): return <refusal>` above a frozen guard needs constant
+folding to see statically, and hashing transitive callers to reach it is the churn this decision
+rejects. The residual's exposure is exactly coextensive with the frozen-debt window. A classified
+guard is not exposed to it, because its witness executes the guard through the public path, so the
+same edit becomes a failing test rather than a green gate. The residual therefore shrinks
+one-for-one as debt is classified, and vanishes when the debt snapshot is empty, which is the
+closure target this decision already names. The dynamic control while the window is open is the
+recurring checkpoint-corpus differential proposed in issue #182: it replays the authored corpus
+against base and candidate and reports every verdict divergence, so it sees an over-refusal as
+readily as a certification, which the taint fuzzer's seed-gated false-certification counter
+deliberately does not.
+
 Because a tree-local check cannot enforce that debt only shrinks, the comparison against the
 protected base runs the base revision's own copy of the checker with the candidate tree as inert
 input, on pushes as well as pull requests. That checker reads only the identifiers the candidate

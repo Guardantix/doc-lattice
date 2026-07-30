@@ -4524,3 +4524,87 @@ def test_an_imported_threshold_forwarded_by_a_parameter_default_is_rejected() ->
     violations = checker.find_threshold_violations(source, "shell_taint.py")
 
     assert any("guard threshold CEILING" in violation for violation in violations)
+
+
+def test_a_statement_after_an_unconditional_return_is_rejected() -> None:
+    source = (
+        "def scan(script):\n"
+        "    return None\n"
+        "    if len(script) > _MAX_DEMO:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.dead", "nope"))\n'
+    )
+
+    violations = checker.find_dead_statement_violations(source, "shell_scanner.py")
+
+    assert violations
+    assert any("shell_scanner.py:3" in violation for violation in violations)
+    assert any("unreachable" in violation for violation in violations)
+
+
+def test_a_statement_after_a_raise_in_the_same_block_is_rejected() -> None:
+    source = 'def _guard(value):\n    raise ValueError("always")\n    return value\n'
+
+    assert checker.find_dead_statement_violations(source, "shell_taint.py")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(x):\n    if x:\n        return 1\n    return 2\n",
+        "def f(items):\n    for item in items:\n        if item:\n            continue\n"
+        "        yield item\n",
+        "def f(x):\n    try:\n        return g(x)\n    finally:\n        h(x)\n",
+        "def f(x):\n    while x:\n        break\n    return x\n",
+    ],
+)
+def test_reachable_control_flow_is_accepted(source: str) -> None:
+    assert checker.find_dead_statement_violations(source, "shell_taint.py") == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(items):\n    for item in items:\n        continue\n        _log(item)\n",
+        "def f(x):\n    try:\n        _do(x)\n    except ValueError:\n        raise\n"
+        "        _log(x)\n",
+        "def f(x):\n    try:\n        _do(x)\n    except ValueError:\n        _log(x)\n"
+        "    else:\n        return x\n        _log(x)\n",
+        "def f(x):\n    try:\n        return x\n    finally:\n        return 0\n        _log(x)\n",
+        "def f(x):\n    with _open(x) as handle:\n        return handle\n        _log(x)\n",
+        "def f(x):\n    match x:\n        case 1:\n            return 1\n            _log(x)\n",
+        "def f(x):\n    if x:\n        return 1\n        _log(x)\n    return 2\n",
+        "def f(x):\n    while x:\n        break\n        _log(x)\n",
+    ],
+)
+def test_a_dead_statement_in_every_kind_of_block_is_rejected(source: str) -> None:
+    assert checker.find_dead_statement_violations(source, "shell_taint.py")
+
+
+def test_an_unevaluated_condition_leaves_a_reachable_looking_block_alone() -> None:
+    # Condition evaluation is out of scope: this rule is syntactic, and `if True` is semantic
+    # reachability, which the AD-20 residual covers instead.
+    source = "def f(x):\n    if True:\n        return 1\n    return 2\n"
+
+    assert checker.find_dead_statement_violations(source, "shell_taint.py") == ()
+
+
+def test_the_shipped_guarded_modules_carry_no_dead_statement() -> None:
+    assert checker.repository_dead_statement_violations(_ROOT) == ()
+
+
+def test_a_return_above_the_scanner_body_is_reported_over_the_candidate_tree(
+    tmp_path: Path,
+) -> None:
+    # The round-6 repro: an unconditional return at the top of the scan method makes every scanner
+    # guard dead while all 194 origins persist, no fingerprint moves, and every other gate passes.
+    root = _fake_root(tmp_path, [])
+    scanner = root / checker.GUARD_MODULE_ROOT / "shell_scanner.py"
+    header = "    def scan(self) -> tuple[_Invocation, ...]:\n"
+    source = scanner.read_text(encoding="utf-8")
+    assert source.count(header) == 1
+    scanner.write_text(source.replace(header, f"{header}        return None\n"), encoding="utf-8")
+
+    violations = checker.repository_dead_statement_violations(root)
+
+    assert any("shell_scanner.py" in violation for violation in violations)
+    assert any("unreachable" in violation for violation in violations)
