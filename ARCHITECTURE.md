@@ -932,6 +932,22 @@ and `CAPS = (1, 100)` caps the scan at 100 whichever element a subscript reads. 
 side the same two forms are descended, along with the value of a subscript but never its slice, so
 `(100, 200)[flag]` is the cap it is while `words[2]` stays a position in a fixed grammar. A name already resolved to a magnitude stays a threshold wherever
 it is spelled, including as the receiver of an accessor, while a callee itself is machinery.
+Every rule above reads a magnitude out of numeric literals and the arithmetic over them, so a cap
+fixed at authoring time by way of a *nonnumeric* literal was invisible to all of them: `cap =
+int("100")` and `cap = ord("d")` each bound `len(items) > cap` at 100 while carrying no numeric
+literal for either the binding rule or the bare-literal rule to find. An ordering comparison's
+operand is therefore rejected when its value is fixed when written but cannot be read as a number,
+whether the operand spells it directly, a module or local binding does, a parameter default does, a
+chain of plain aliases does, or a class field the receiver closure reaches does. A value is fixed
+when written if every leaf of the expression is a literal, a call included, since `int("100")` and
+`"abcdef".index("f")` evaluate to the same number on every run. Such an operand is rejected rather
+than resolved: resolving it would mean folding an open set of conversions, and every conversion left
+out is another spelling that ships uninventoried, so a cap is spelled plainly or taken from the
+scan's limits. Only ordering comparisons are read, for the reason given below for imported bounds,
+and only the expressions fixing the operand's own spelling, never the whole writer closure, since that
+closure holds the string and container bindings deciding identity rather than magnitude and reading
+those as caps reported `state = "body"` as an unprovenanced bound. No shipped guard compares such a
+value, so the rule carries no allowance.
 The search covers the writers feeding a guard's condition as well as the
 condition itself, and the preceding controls that decide whether the origin is reached plus their
 writers—the same closures the fingerprint records. A comparison computed one statement
@@ -1092,6 +1108,28 @@ selected. Lambda parameters and comprehension targets shadow only within their e
 free names in those expressions still reach the referenced module binding. Unrelated module
 bindings, whole bodies of other functions, and nested function and class bodies remain outside the
 record.
+
+The class a guard's method is written in is not one of those outside scopes, and stopping at the
+function and the module skipped it entirely. An attribute read off the receiver is fixed by the
+class body declaring it and by every write the class makes to it, and a class body appears in
+neither scope the two fixpoints walk: it is a scope, so the module fixpoint does not descend into
+it, and it is not the method's body. `taint.eval-discovery.work-limit` is the concrete case, where
+`work: int = 0` in `_EvalDiscoveryBudget` seeds the counter the condition tests, and reseeding it to
+`-100` delays the guard by 100 charges with every fingerprint in the tree unchanged.
+`scanner.budget.step-limit` is the same defect one scope over, its counter seeded by
+`_ScanBudget.__post_init__` rather than by the field default, so a record covers the enclosing class
+body and the guard's sibling methods as well. Each of those scopes runs its own fixpoint, seeded
+with the attribute spelled the way that scope spells it, and a sibling's receiver name is read from
+its own signature rather than assumed. What those fixpoints read that no scope of theirs binds seeds
+the module fixpoint, so a field defaulted to a module constant reaches that constant. Only the
+attributes the guard's dataflow reads are followed, never the receiver itself, for the reason object
+configuration is matched that way: folding in every sibling's write to an unrelated attribute would
+churn the record of every guard in the class on any edit inside it. Measured across both modules the
+widened closure moves 35 of the 194 records and leaves an unrelated edit to a scanner method, a new
+field or a new constructor attribute moving none. The boundary is the class the method is written
+in: a field inherited from a base class, one a caller assigns onto the instance from outside, and a
+write reached through a second name aliasing the same instance are all outside it, and no shipped
+guard reads one.
 
 A writer hashes the spelling of a call and nothing the call computes, so a guard whose dataflow
 reads a callee's return value is withdrawn by editing that callee with the whole closure left

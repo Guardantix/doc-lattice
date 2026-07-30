@@ -4706,3 +4706,281 @@ def test_a_return_above_the_scanner_body_is_reported_over_the_candidate_tree(
 
     assert any("shell_scanner.py" in violation for violation in violations)
     assert any("unreachable" in violation for violation in violations)
+
+
+_RECEIVER_SOURCE = (
+    "class _Budget:\n"
+    "    limits: TaintLimits\n"
+    "    work: int = 0\n"
+    "    unrelated: int = 0\n"
+    "\n"
+    "    def charge(self, amount: int = 1) -> None:\n"
+    "        self.work += amount\n"
+    "        if self.work > self.limits.max_work:\n"
+    '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.charge", "nope"))\n'
+)
+
+
+def test_fingerprint_tracks_the_class_field_the_guard_reads_through_its_receiver() -> None:
+    # A class body is a scope, so its statements appear in neither the method the local fixpoint
+    # walks nor the module statements the second one walks. Seeding the counter 100 below zero
+    # delays the guard by 100 charges, and the record did not move.
+    withdrawn = _RECEIVER_SOURCE.replace("work: int = 0", "work: int = -100")
+
+    assert _fingerprint_for(
+        _RECEIVER_SOURCE, "shell_taint.py", "taint.demo.charge"
+    ) != _fingerprint_for(withdrawn, "shell_taint.py", "taint.demo.charge")
+
+
+def test_fingerprint_tracks_a_sibling_methods_write_to_what_the_guard_reads() -> None:
+    # The same hole one scope over: a constructor or any other method of the class fixes the
+    # attribute the guard compares, and none of its statements are in the reading method either.
+    source = _RECEIVER_SOURCE.replace(
+        "    def charge(self",
+        "    def __post_init__(self) -> None:\n"
+        "        self.work = self.limits.max_work\n"
+        "\n"
+        "    def charge(self",
+    )
+    withdrawn = source.replace("self.work = self.limits.max_work", "self.work = -100")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.charge") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.charge"
+    )
+
+
+def test_fingerprint_tracks_the_module_constant_a_read_class_field_defaults_to() -> None:
+    # A class field's own reads resolve at module level, so the constant behind the default is part
+    # of the closure exactly as a parameter default's is.
+    source = "_SEED = 0\n" + _RECEIVER_SOURCE.replace("work: int = 0", "work: int = _SEED")
+    withdrawn = source.replace("_SEED = 0", "_SEED = -100")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.charge") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.charge"
+    )
+
+
+def test_a_class_field_the_guard_does_not_read_leaves_the_fingerprint_alone() -> None:
+    # The control. Treating every attribute of the receiver as read would churn the record of every
+    # guard in the class on any edit to any field, which is the laundering path this gate closes.
+    edited = _RECEIVER_SOURCE.replace("unrelated: int = 0", "unrelated: int = 99")
+
+    assert _fingerprint_for(
+        _RECEIVER_SOURCE, "shell_taint.py", "taint.demo.charge"
+    ) == _fingerprint_for(edited, "shell_taint.py", "taint.demo.charge")
+
+
+def test_a_sibling_methods_unrelated_attribute_write_leaves_the_fingerprint_alone() -> None:
+    # The same control for the sibling scopes: a method that writes another attribute entirely
+    # decides nothing about this guard.
+    source = _RECEIVER_SOURCE.replace(
+        "    def charge(self",
+        "    def note(self) -> None:\n        self.unrelated = 1\n\n    def charge(self",
+    )
+    edited = source.replace("self.unrelated = 1", "self.unrelated = 99")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.charge") == _fingerprint_for(
+        edited, "shell_taint.py", "taint.demo.charge"
+    )
+
+
+def test_a_static_method_first_parameter_is_not_read_as_a_receiver() -> None:
+    # A `staticmethod` binds no receiver, so its first parameter is ordinary data the parameter
+    # defaults already cover, and a same-named class field is not what it reads.
+    source = (
+        "class _Budget:\n"
+        "    work: int = 0\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def charge(self, limits) -> None:\n"
+        "        if self.work > limits.max_work:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.static", "nope"))\n'
+    )
+    edited = source.replace("work: int = 0", "work: int = -100")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.static") == _fingerprint_for(
+        edited, "shell_taint.py", "taint.demo.static"
+    )
+
+
+def test_the_receiver_closure_follows_a_classmethod_receiver_under_any_name() -> None:
+    # `cls` reads the same class body `self` does, and the name is read from the signature rather
+    # than assumed, so a method spelling its receiver anything else is still followed.
+    source = (
+        "class _Budget:\n"
+        "    work: int = 0\n"
+        "\n"
+        "    @classmethod\n"
+        "    def charge(this, limits) -> None:\n"
+        "        if this.work > limits.max_work:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.cls", "nope"))\n'
+    )
+    withdrawn = source.replace("work: int = 0", "work: int = -100")
+
+    assert _fingerprint_for(source, "shell_taint.py", "taint.demo.cls") != _fingerprint_for(
+        withdrawn, "shell_taint.py", "taint.demo.cls"
+    )
+
+
+def test_fingerprint_tracks_the_real_eval_discovery_budgets_class_fields() -> None:
+    # The same defect on the shipped guards it was reported against.
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_taint.py").read_text(encoding="utf-8")
+    edited = source.replace(
+        "    work: int = 0\n    updates: int = 0\n",
+        "    work: int = -100\n    updates: int = -100\n",
+    )
+    assert edited != source
+
+    for origin_id in ("taint.eval-discovery.work-limit", "taint.eval-discovery.update-limit"):
+        assert _fingerprint_for(source, "shell_taint.py", origin_id) != _fingerprint_for(
+            edited, "shell_taint.py", origin_id
+        )
+
+
+def test_fingerprint_tracks_the_real_scan_budgets_construction_hook() -> None:
+    # And on the scanner budget, whose step guard reads a counter `__post_init__` seeds.
+    source = (_ROOT / "src/doc_lattice/github_ci/shell_scanner.py").read_text(encoding="utf-8")
+    edited = source.replace(
+        "            self.remaining_steps = self.limits.scanner.max_scan_steps\n",
+        "            self.remaining_steps = self.limits.scanner.max_scan_steps + 100\n",
+    )
+    assert edited != source
+
+    assert _fingerprint_for(
+        source, "shell_scanner.py", "scanner.budget.step-limit"
+    ) != _fingerprint_for(edited, "shell_scanner.py", "scanner.budget.step-limit")
+
+
+def test_compare_against_base_rejects_a_frozen_guard_whose_class_field_changed(
+    tmp_path: Path,
+) -> None:
+    # The end-to-end form: the base-owned comparison must reject a candidate that delays a frozen
+    # guard by reseeding the class field its condition reads.
+    root = _fake_root(tmp_path, [{"origin_id": "taint.eval-discovery.work-limit"}])
+    module = root / "src/doc_lattice/github_ci/shell_taint.py"
+    source = module.read_text(encoding="utf-8")
+    assert source.count("    work: int = 0\n") == 1
+    base = json.dumps(
+        {
+            "schema": checker.SCHEMA_VERSION,
+            "records": [
+                record.as_json()
+                for record in checker.repository_origin_records(root)
+                if record.origin_id == "taint.eval-discovery.work-limit"
+            ],
+        }
+    )
+    module.write_text(source.replace("    work: int = 0\n", "    work: int = -100\n"), "utf-8")
+
+    failures = checker.compare_against_base(root, base)
+
+    assert any("taint.eval-discovery.work-limit" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        'int("100")',
+        'ord("d")',
+        '"abcdefghij".index("j")',
+        'len(("a", "b", "c"))',
+        'int("64", 16)',
+    ],
+)
+def test_a_cap_converted_from_a_nonnumeric_literal_is_rejected(binding: str) -> None:
+    # A magnitude fixed at authoring time by way of a nonnumeric literal carries no numeric literal
+    # for the threshold rules to find, so a new resource bound shipped with no provenance at all.
+    source = (
+        "def _guard(items):\n"
+        f"    cap = {binding}\n"
+        "    if _measure(items) > cap:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.converted", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("fixes a magnitude no numeric literal records" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        'def _guard(items):\n    if _measure(items) > int("100"):\n',
+        'def _guard(items):\n    raw = ord("d")\n    cap = raw\n    if _measure(items) > cap:\n',
+        'def _guard(items, cap: int = int("100")):\n    if _measure(items) > cap:\n',
+        'from operator import gt\ndef _guard(items):\n    if gt(_measure(items), int("100")):\n',
+    ],
+)
+def test_a_converted_cap_is_rejected_however_it_reaches_the_comparison(spelling: str) -> None:
+    # Directly, through an alias chain, through a parameter default, and through the call spelling
+    # of the comparison itself.
+    source = (
+        f'{spelling}        raise _TaintLimitExceeded(GuardRefusal("taint.demo.reached", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("fixes a magnitude no numeric literal records" in v for v in violations)
+
+
+def test_a_converted_cap_in_a_module_constant_is_rejected() -> None:
+    # A module-level binding escapes `_module_constants` for the same reason a local one escapes
+    # `_is_magnitude_binding`: neither finds a numeric literal to read.
+    source = (
+        '_CAP = int("100")\n'
+        "def _guard(items):\n"
+        "    if _measure(items) > _CAP:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.demo.module-converted", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("fixes a magnitude no numeric literal records" in v for v in violations)
+
+
+def test_a_converted_cap_on_a_class_field_the_guard_reads_is_rejected() -> None:
+    # The receiver closure brings the class body into the guard's dataflow, and the operand
+    # resolution matches the bare spelling the class body writes.
+    source = (
+        "class _Budget:\n"
+        '    cap: int = int("100")\n'
+        "\n"
+        "    def charge(self, items) -> None:\n"
+        "        if _measure(items) > self.cap:\n"
+        '            raise _TaintLimitExceeded(GuardRefusal("taint.demo.field", "nope"))\n'
+    )
+
+    violations = checker.find_threshold_violations(source, "shell_taint.py")
+
+    assert any("fixes a magnitude no numeric literal records" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Equality asks which value something is, so a fixed string bounds nothing.
+        'def _guard(word):\n    if word == "esac":\n'
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.a", "nope"))\n',
+        # Nor does membership in a literal grammar set.
+        'def _guard(word):\n    if word in frozenset({"if", "then"}):\n'
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.b", "nope"))\n',
+        # An identity binding in a guard scope that also orders against a limits field.
+        'def _guard(word, items, limits):\n    state = "body"\n'
+        "    if word == state and _measure(items) > limits.max_items:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.c", "nope"))\n',
+        # Ordering against runtime data on both sides.
+        "def _guard(items, other):\n    if _measure(items) > _measure(other):\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.d", "nope"))\n',
+        # A magnitude spelled plainly is read by the existing rules instead.
+        "def _guard(items, limits):\n    if _measure(items) > limits.max_items:\n"
+        '        raise _ShellScanIncomplete(GuardRefusal("scanner.demo.e", "nope"))\n',
+    ],
+)
+def test_a_fixed_value_that_bounds_nothing_is_not_an_opaque_magnitude(source: str) -> None:
+    violations = checker.find_threshold_violations(source, "shell_scanner.py")
+
+    assert not [v for v in violations if "fixes a magnitude no numeric literal records" in v]
+
+
+def test_the_shipped_guarded_modules_carry_no_opaque_magnitude() -> None:
+    assert checker.repository_threshold_violations(_ROOT) == ()

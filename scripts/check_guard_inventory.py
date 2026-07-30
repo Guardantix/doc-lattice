@@ -154,6 +154,12 @@ no call in either module spells. Reading a construction as an edge to these is w
 reachability rule from reporting it as orphaned."""
 """A function definition, whichever way it is spelled."""
 
+_RECEIVERLESS_DECORATORS = frozenset({"staticmethod"})
+"""Decorators that leave a method's first parameter an ordinary argument rather than a receiver.
+
+A `classmethod` is absent deliberately: `cls` reads the same class body `self` does, so the receiver
+closure follows it identically."""
+
 _MUTATING_METHODS = frozenset(
     {
         "add",
@@ -1654,6 +1660,9 @@ def _writer_derivation(
         if scope is not None
         else ()
     )
+    receiver_writers, receiver_read, receiver_values = _receiver_derivation(
+        scope, grown_read, grown_values, cache
+    )
     defaults = _read_parameter_defaults(scope, grown_read)
     default_shapes = tuple(
         f"default {name}={ast.dump(default, include_attributes=False)}"
@@ -1661,12 +1670,16 @@ def _writer_derivation(
     )
     default_expressions = tuple(default for _name, default in defaults)
     shadowed = _cached_local_binding_names(scope, cache)
-    module_read = {
-        spelling for spelling in grown_read if _spelling_root(spelling) not in shadowed
-    } | set(_read_spellings(default_expressions))
-    module_values = {
-        spelling for spelling in grown_values if _spelling_root(spelling) not in shadowed
-    } | set(_read_value_spellings(default_expressions))
+    module_read = (
+        {spelling for spelling in grown_read if _spelling_root(spelling) not in shadowed}
+        | set(_read_spellings(default_expressions))
+        | set(receiver_read)
+    )
+    module_values = (
+        {spelling for spelling in grown_values if _spelling_root(spelling) not in shadowed}
+        | set(_read_value_spellings(default_expressions))
+        | set(receiver_values)
+    )
     module = cache.module
     module_writers = (
         _select_writer_statements(
@@ -1685,13 +1698,181 @@ def _writer_derivation(
     grown_read |= module_read
     grown_values |= module_values
     result = (
-        (*module_writers, *local),
+        (*module_writers, *receiver_writers, *local),
         default_shapes,
         frozenset(grown_read),
         frozenset(grown_values),
     )
     cache.closures[key] = result
     return result
+
+
+def _receiver_name(function: _Function) -> str | None:
+    """Return the name a method binds its receiver to, or `None` when it binds none.
+
+    A `staticmethod` takes no receiver, so its first parameter is an ordinary argument the parameter
+    defaults already cover. Every other method form binds one, and `cls` reads the same class body
+    `self` does, so both are treated alike.
+
+    Args:
+        function: A function written directly in a class body.
+
+    Returns:
+        The receiver parameter's name, or `None` when the method takes none.
+    """
+    if any(
+        _referenced_name(decorator) in _RECEIVERLESS_DECORATORS
+        for decorator in function.decorator_list
+    ):
+        return None
+    positional = (*function.args.posonlyargs, *function.args.args)
+    return positional[0].arg if positional else None
+
+
+def _receiver_binding(
+    scope: ast.AST | None, cache: _DerivationCache
+) -> tuple[ast.ClassDef, str] | None:
+    """Return the class a method is written in and the name it binds its receiver to.
+
+    Only a function written directly in a class body qualifies. A nested function reaches the
+    receiver as a closure variable rather than as a parameter, and its enclosing method is the scope
+    the closure follows.
+
+    Args:
+        scope: Enclosing function, or `None` at class or module level.
+        cache: Per-parse derivation memo carrying the module.
+
+    Returns:
+        The holding class and the receiver's name, or `None` for a scope that binds no receiver.
+    """
+    if not isinstance(scope, _Function):
+        return None
+    klass = _cached_module_parents(cache).get(id(scope))
+    if not isinstance(klass, ast.ClassDef):
+        return None
+    receiver = _receiver_name(scope)
+    return None if receiver is None else (klass, receiver)
+
+
+def _receiver_relative_spellings(receiver: str, spellings: set[str]) -> frozenset[str]:
+    """Return what these spellings read off the receiver, each alongside its own root.
+
+    The root is included because a class scope fixes an attribute by binding it whole: a guard
+    reading `self.limits.max_expression_nodes` is decided by `limits: TaintLimits` in the class body
+    and by any `self.limits = ...` a sibling runs, neither of which spells the full path. The
+    receiver itself is deliberately not a seed, for the reason `_configured_receivers` gives: a
+    closure reaching `self` only as the base of one path does not read an unrelated `self.other`.
+
+    Args:
+        receiver: The name the reading method binds its receiver to.
+        spellings: The spellings that dataflow reads.
+
+    Returns:
+        Receiver-relative spellings, empty when the dataflow reads nothing off the receiver.
+    """
+    prefix = f"{receiver}."
+    relative: set[str] = set()
+    for spelling in spellings:
+        if spelling.startswith(prefix):
+            trimmed = spelling[len(prefix) :]
+            relative.add(trimmed)
+            relative.add(_spelling_root(trimmed))
+    return frozenset(relative)
+
+
+def _receiver_scopes(klass: ast.ClassDef, scope: ast.AST) -> tuple[tuple[ast.AST, str], ...]:
+    """Return the class scopes that fix a receiver attribute, each with its spelling prefix.
+
+    The class body is one, spelling an attribute bare, and every sibling method is another, spelling
+    it through its own receiver. A sibling's receiver name is read from its own signature rather
+    than assumed, so a method spelling it `this` is still followed.
+
+    Args:
+        klass: The class holding the reading method.
+        scope: The reading method, excluded because the local fixpoint already covers it.
+
+    Returns:
+        Scope and spelling-prefix pairs, the class body first and siblings in source order.
+    """
+    scopes: list[tuple[ast.AST, str]] = [(klass, "")]
+    for statement in klass.body:
+        if statement is scope or not isinstance(statement, _Function):
+            continue
+        sibling = _receiver_name(statement)
+        if sibling is not None:
+            scopes.append((statement, f"{sibling}."))
+    return tuple(scopes)
+
+
+def _receiver_derivation(
+    scope: ast.AST | None,
+    read: set[str],
+    values: set[str],
+    cache: _DerivationCache,
+) -> tuple[tuple[ast.stmt, ...], frozenset[str], frozenset[str]]:
+    """Return the class-scope statements that fix what this method reads through its receiver.
+
+    A method scope and the module are not the only scopes a guard's dataflow resolves through. An
+    attribute read off the receiver is fixed by the class body that declares it and by every write
+    to it the class runs, and neither of those is a statement in the reading method or at module
+    level: a class body does not appear in `_scope_statements(module)`, because a class is a scope,
+    and a sibling method's body is a scope of its own. `_EvalDiscoveryBudget.charge_work` is the
+    concrete case, where `work: int = 0` in the class body seeds the counter the guard compares.
+    Changing it to `work: int = -100` delays `taint.eval-discovery.work-limit` by 100 charges, and
+    with the closure stopping at the method it left every fingerprint in the tree unchanged. The
+    same held for `_ScanBudget`, whose `__post_init__` seeds `remaining_steps` for a guard in
+    `step`.
+
+    Each scope runs its own fixpoint, seeded with the attribute spelled the way that scope spells
+    it, so a sibling's locals stay in the sibling and cannot select an unrelated statement in
+    another. What those fixpoints grow to that no scope of theirs binds is returned for the module
+    fixpoint to resolve, which is how a class field defaulted to a module constant reaches that
+    constant.
+
+    The boundary is the class the method is written in. A field inherited from a base class, or one
+    a caller assigns onto the instance from outside, is outside it, as is a write reached through a
+    second object aliasing the same instance.
+
+    Args:
+        scope: Enclosing function, or `None` at class or module level.
+        read: The spellings the dataflow reads, left unmodified.
+        values: The subset read as whole values, left unmodified.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The selected statements in scope order, and the read and whole-value spellings the class
+        fixpoints grew to that their own scopes do not bind.
+    """
+    binding = _receiver_binding(scope, cache)
+    if binding is None or scope is None:
+        return (), frozenset(), frozenset()
+    klass, receiver = binding
+    relative_read = _receiver_relative_spellings(receiver, read)
+    relative_values = _receiver_relative_spellings(receiver, values)
+    if not relative_read and not relative_values:
+        return (), frozenset(), frozenset()
+    selected: list[ast.stmt] = []
+    free_read: set[str] = set()
+    free_values: set[str] = set()
+    for owner, prefix in _receiver_scopes(klass, scope):
+        seeds = {f"{prefix}{spelling}" for spelling in relative_read}
+        seed_values = {f"{prefix}{spelling}" for spelling in relative_values}
+        grown_read, grown_values = set(seeds), set(seed_values)
+        selected.extend(
+            _select_writer_statements(
+                _cached_scope_statements(owner, cache), grown_read, grown_values, cache
+            )
+        )
+        shadowed = _cached_local_binding_names(owner, cache)
+        free_read |= {
+            spelling for spelling in grown_read - seeds if _spelling_root(spelling) not in shadowed
+        }
+        free_values |= {
+            spelling
+            for spelling in grown_values - seed_values
+            if _spelling_root(spelling) not in shadowed
+        }
+    return tuple(selected), frozenset(free_read), frozenset(free_values)
 
 
 def _read_parameter_defaults(
@@ -3336,6 +3517,12 @@ FIXED_SEMANTIC_BOUNDS = {
         "The index of the marker automaton's start state. A position in the state vector rather "
         "than a magnitude, and the same kind of quantity a subscript literal is exempt as."
     ),
+    "_DERIVE_STEPS_FROM_LIMITS": (
+        "The sentinel asking `_ScanBudget` to take its step count from the scan limits, reached by "
+        "the guard in `step` through the class field it defaults. Not a budget: `__post_init__` "
+        "resolves it to `limits.scanner.max_scan_steps` and refuses every other negative count, so "
+        "the sentinel cannot stand in for one."
+    ),
     "_UNICODE_MAX": "The last Unicode code point. Not a budget; authorable as an escape.",
     "_SURROGATE_MIN": "The first surrogate code point. Not a budget; authorable as an escape.",
     "_SURROGATE_MAX": "The last surrogate code point. Not a budget; authorable as an escape.",
@@ -4299,6 +4486,166 @@ def _binding_magnitudes(expression: ast.expr) -> set[int | float]:
     return _operand_magnitudes(expression, containers=True)
 
 
+_AUTHORING_FIXED_NODES = (
+    ast.Constant,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.BoolOp,
+    ast.IfExp,
+    ast.Compare,
+    ast.Tuple,
+    ast.List,
+    ast.Set,
+    ast.Dict,
+    ast.JoinedStr,
+    ast.FormattedValue,
+    ast.Slice,
+    ast.Subscript,
+    ast.Starred,
+    ast.keyword,
+    ast.operator,
+    ast.unaryop,
+    ast.boolop,
+    ast.cmpop,
+    ast.expr_context,
+)
+"""Expression nodes that compute from their own children alone.
+
+An `ast.Name` and an `ast.Attribute` are absent: each reads a value from outside the expression, so
+nothing about the expression fixes what it evaluates to. A call is handled separately, because its
+callee is a name while its arguments are not."""
+
+
+def _is_authoring_fixed(expression: ast.expr) -> bool:
+    """Return whether every leaf of this expression is a literal, fixing its value when written.
+
+    A call qualifies when its arguments and its receiver are all fixed this way, because
+    `int("100")` and `"abcdef".index("f")` each evaluate to the same number on every run. What the
+    callee itself computes is not read, which is the point: the value is fixed but unreadable.
+
+    Args:
+        expression: The expression to classify.
+
+    Returns:
+        Whether the expression's value is fixed at authoring time.
+    """
+    pending: list[ast.AST] = [expression]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                pending.append(node.func.value)
+            elif not isinstance(node.func, ast.Name):
+                return False
+            pending.extend(node.args)
+            pending.extend(keyword.value for keyword in node.keywords)
+            continue
+        if not isinstance(node, _AUTHORING_FIXED_NODES):
+            return False
+        pending.extend(ast.iter_child_nodes(node))
+    return True
+
+
+def _fixing_expressions(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    operand: ast.expr,
+    cache: _DerivationCache,
+) -> tuple[ast.expr, ...]:
+    """Return the expressions that can fix one comparison operand's value.
+
+    The operand itself is one. So is every value bound to the spelling it names, followed through a
+    chain of plain aliases, so `raw = ord("d")` reaches the comparison through `cap = raw`. A
+    receiver attribute is matched against the bare spelling too, because the class body that
+    declares it writes `cap`, not `self.cap`.
+
+    Only statements that write the operand's own spelling are read, never the whole writer closure.
+    A guard's closure holds every binding its condition transitively depends on, including the
+    string and container bindings that decide identity rather than magnitude, and reading those as
+    caps reported `state = "body"` as an unprovenanced bound.
+
+    Args:
+        origin: The statement that constructs the refusal.
+        scope: Enclosing function, or `None` at class or module level.
+        operand: The comparison operand to resolve.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The operand and every expression bound to the spellings it aliases.
+    """
+    found: list[ast.expr] = []
+    pending = [operand]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        found.append(current)
+        if not isinstance(current, ast.Name | ast.Attribute):
+            continue
+        spelling = ast.unparse(current)
+        targets = {spelling}
+        binding = _receiver_binding(scope, cache)
+        if binding is not None:
+            targets |= _receiver_relative_spellings(binding[1], {spelling})
+        for statement in _writer_statements(origin, scope, set(targets), set(targets), cache):
+            if _cached_written_spellings(statement, cache) & targets:
+                pending.extend(_forwarded_value_roots((statement,)))
+        pending.extend(
+            default
+            for name, default in _read_parameter_defaults(scope, targets)
+            if name == spelling
+        )
+    return tuple(found)
+
+
+def _opaque_magnitudes(
+    origin: ast.stmt,
+    scope: ast.AST | None,
+    comparisons: tuple[ast.Compare, ...],
+    cache: _DerivationCache,
+) -> set[str]:
+    """Return the guard's ordering operands whose fixed value cannot be read as a magnitude.
+
+    `_operand_magnitudes` reads a magnitude out of numeric literals and the arithmetic over them,
+    and `_is_magnitude_binding` decides which bindings fix one from the same evidence. A value fixed
+    at authoring time by way of a nonnumeric literal is invisible to both: `cap = int("100")` and
+    `cap = ord("d")` each bound `len(items) > cap` at 100 while carrying no numeric literal for
+    either rule to find, so a new resource cap shipped with no `ScanLimits` field and no fixed-bound
+    provenance behind it.
+
+    Such an operand is rejected rather than resolved. Resolving it would mean folding an open set of
+    conversions, and every conversion left out is another spelling that ships uninventoried; a cap
+    is spelled plainly or taken from the scan's limits instead. Only ordering comparisons are read,
+    for the reason `_ORDERING_OPERATORS` gives: equality asks which value something is, so a fixed
+    string or container compared that way bounds nothing.
+
+    Args:
+        origin: The statement that constructs the refusal.
+        scope: Enclosing function, or `None` at class or module level.
+        comparisons: The comparisons the guard's dataflow spells.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The rejected expressions as source text, empty when every fixed operand reads as a number.
+    """
+    opaque: set[str] = set()
+    for comparison in comparisons:
+        operands = (comparison.left, *comparison.comparators)
+        for operator, pair in zip(comparison.ops, pairwise(operands), strict=True):
+            if not isinstance(operator, _ORDERING_OPERATORS):
+                continue
+            for operand in pair:
+                opaque.update(
+                    ast.unparse(expression)
+                    for expression in _fixing_expressions(origin, scope, operand, cache)
+                    if _is_authoring_fixed(expression)
+                    and not _is_numeric_constant_expression(expression)
+                )
+    return opaque
+
+
 def _threshold_literals(nodes: tuple[ast.AST, ...]) -> set[int | float]:
     """Return every bare numeric magnitude the guard compares against."""
     return {
@@ -4400,6 +4747,11 @@ def find_threshold_violations(source: str, path: str) -> tuple[str, ...]:
             f"{path}: guard threshold literal {literal} has no provenance; take it from the "
             f"scan's limits, or name it and inventory it as a fixed semantic bound"
             for literal in sorted(_threshold_literals(nodes))
+        )
+        violations.extend(
+            f"{path}: guard bound {expression} fixes a magnitude no numeric literal records; "
+            f"spell the magnitude plainly, or take it from the scan's limits"
+            for expression in sorted(_opaque_magnitudes(statement, scope, comparisons, cache))
         )
     return tuple(violations)
 

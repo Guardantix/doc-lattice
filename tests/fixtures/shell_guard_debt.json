@@ -7,43 +7,43 @@
       "qualname": "_ShellScanner._advance_case_body"
     },
     {
-      "fingerprint": "c9af-13c1-069d-91d2-84c8-3388",
+      "fingerprint": "21f9-bc9e-8728-9673-da71-84bb",
       "origin_id": "scanner.case.unbalanced-pattern-parenthesis",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._consume_case_pattern_close"
     },
     {
-      "fingerprint": "0836-2d08-ca77-6127-14b0-40b5",
+      "fingerprint": "583e-4599-c73e-3f6d-1f8c-e7a4",
       "origin_id": "scanner.control-flow.frame-stack-mismatch",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
     },
     {
-      "fingerprint": "9b8f-a788-0368-c072-66e2-dcf6",
+      "fingerprint": "7625-db70-eae4-289a-bf36-0c53",
       "origin_id": "scanner.control-flow.freeze-without-taint-builder",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._freeze_control"
     },
     {
-      "fingerprint": "203c-22cb-2483-6d05-a090-37b8",
+      "fingerprint": "aeb4-7bbd-ccf3-9edd-3ae9-450e",
       "origin_id": "scanner.control-flow.if-branch-arity-mismatch",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._finish_if"
     },
     {
-      "fingerprint": "cf58-55d4-949e-b0e0-5259-059f",
+      "fingerprint": "064e-eb63-4db2-c0cb-7d67-eaa6",
       "origin_id": "scanner.control-flow.open-without-taint-builder",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._open_control"
     },
     {
-      "fingerprint": "83e4-9d30-19c4-4ca6-d197-1e6c",
+      "fingerprint": "8348-19d5-814e-f619-2503-4eb8",
       "origin_id": "scanner.control-flow.unfinished-case",
       "path": "shell_scanner.py",
       "qualname": "_ShellScanner._finish_case"
     },
     {
-      "fingerprint": "d562-b7d7-c391-ebc9-516f-c8f4",
+      "fingerprint": "4c0e-0c62-f0d7-6e60-6c9a-fb99",
       "origin_id": "scanner.descriptor.unparsable",
       "path": "shell_scanner.py",
       "qualname": "_parse_static_descriptor"
@@ -115,13 +115,13 @@
       "qualname": "_static_eval_descriptor"
     },
     {
-      "fingerprint": "e8e2-f3ce-50d3-9e75-a3b1-7644",
+      "fingerprint": "840d-aa5c-dd09-74bc-31fc-49cd",
       "origin_id": "taint.eval-discovery.update-limit",
       "path": "shell_taint.py",
       "qualname": "_EvalDiscoveryBudget.charge_update"
     },
     {
-      "fingerprint": "e2c8-b818-85e4-eb82-9ba1-dca9",
+      "fingerprint": "fc10-2b4f-8046-8b44-5a81-623c",
       "origin_id": "taint.eval-discovery.work-limit",
       "path": "shell_taint.py",
       "qualname": "_EvalDiscoveryBudget.charge_work"
@@ -181,7 +181,7 @@
       "qualname": "_eval_syntax_token"
     },
     {
-      "fingerprint": "4073-ba40-b132-19d8-894c-9a4c",
+      "fingerprint": "c5ee-806e-23f7-3281-5b2c-d155",
       "origin_id": "taint.eval-syntax.cleared-projection-without-widening",
       "path": "shell_taint.py",
       "qualname": "_EvalSyntaxState.__post_init__"
