@@ -882,6 +882,30 @@ This is deliberately a syntactic boundary, not a claim to prove arbitrary callab
 does not trace a computed value first assigned to a plain alias. A future need for a computed
 callee must be modeled explicitly, and no guarded module carries one today.
 
+Requiring a named callee settled what a call spells, not which name inside it is the target. The
+callee's last component is what every construction rule resolves, which is what lets
+`shell_guards.GuardRefusal(...)` read as the construction it is, so a constructor spelled earlier in
+the same chain is not the call's target at all. `GuardRefusal.__call__("taint.new", "reason")` mints
+a real refusal while every rule reads a call to `__call__`: the origin extractor records nothing,
+the shape gate sees no refusal, and the reference rule accepted it because a named callee was
+followable in full, including the constructor buried inside it. Handed to a declared transport it
+added a fail-closed guard that no record describes, with the candidate gate and the base-owned
+comparison both at exit 0, and it needs no alias, no import and no reflective lookup to spell. So
+only the callee itself is followable, and a constructor in a non-final position of it is rejected.
+The neighbouring routes were already closed, `getattr(GuardRefusal, "__call__")(...)` as a computed
+target and `GuardRefusal.__new__(GuardRefusal, ...)` as a constructor named in an argument, which is
+what makes this the last spelling that reached a constructor without naming it as one.
+
+A `type` statement binds a name the same way. The `TypeAliasType` it binds is not callable, so
+`type Alias = GuardRefusal` is not a constructor binding as an assignment is, but `Alias.__value__`
+hands the constructor straight back and reached it through a name no rule tracked. That alias is
+therefore registered like any other, which puts the unwrapping dunder in a non-final position and
+rejects it by the same rule rather than by a case of its own. Only a value read as a bare reference
+registers, so the verdict union `type ScanVerdict = Certified | MarkerDetected | GuardRefusal` binds
+no constructor spelling and stays the ordinary type alias it is. Neither rule carries an allowance:
+across the three guarded modules, no call spells a tracked constructor in a non-final callee
+position, and the shipped tree's 194 fingerprints stay byte-identical.
+
 Closing the computed callee left the same construction spelled across two named calls, which is why
 a guarded module resolves no name at runtime at all. `factory = getattr(shell_guards,
 "GuardRefusal")` followed by `factory(...)` names both callees plainly, so the call boundary accepts

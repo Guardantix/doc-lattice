@@ -534,6 +534,56 @@ def test_a_type_alias_annotated_conditional_binding_is_still_rejected() -> None:
     assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
 
 
+def test_a_dunder_call_on_the_refusal_constructor_is_rejected() -> None:
+    # The callee's last component names the dunder rather than the constructor, so every
+    # construction rule reads an unrelated call while the interpreter mints a real refusal.
+    source = 'refusal = GuardRefusal.__call__("taint.demo.hidden", "nope")\n'
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
+def test_a_dunder_call_on_a_bound_refusal_alias_is_rejected() -> None:
+    # A plainly bound alias is the spelling the rejection message recommends, so reaching the
+    # constructor through its dunder must be rejected on the alias exactly as on the canonical name.
+    source = '_Alias = GuardRefusal\nrefusal = _Alias.__call__("taint.demo.hidden", "nope")\n'
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="_Alias") in violation for violation in violations)
+
+
+def test_a_dunder_value_call_on_a_type_aliased_constructor_is_rejected() -> None:
+    # `type _Alias = GuardRefusal` binds a `TypeAliasType` whose `__value__` hands the constructor
+    # straight back, so the alias it binds is tracked and the dunder that unwraps it is rejected.
+    source = 'type _Alias = GuardRefusal\nrefusal = _Alias.__value__("taint.demo.hidden", "nope")\n'
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="_Alias") in violation for violation in violations)
+
+
+def test_a_chained_dunder_call_on_the_refusal_constructor_is_rejected() -> None:
+    # Rejection reads every component of the callee, so lengthening the chain does not evade it.
+    source = 'refusal = GuardRefusal.__call__.__call__("taint.demo.hidden", "nope")\n'
+
+    violations = checker.find_shape_violations(source, "shell_taint.py")
+
+    assert any(_UNFOLLOWABLE.format(name="GuardRefusal") in violation for violation in violations)
+
+
+def test_a_module_qualified_construction_stays_followable() -> None:
+    # The constructor is the callee's last component here, which is the spelling `_called_name`
+    # resolves. Rejecting a constructor in a non-final position must not reach it.
+    source = 'refusal = shell_guards.GuardRefusal("taint.demo.hidden", "nope")\n'
+
+    assert not any(
+        "cannot follow" in violation
+        for violation in checker.find_shape_violations(source, "shell_taint.py")
+    )
+
+
 def test_an_unanalyzable_refusal_reference_is_rejected() -> None:
     source = (
         "def _helper(use_default, injected):\n"

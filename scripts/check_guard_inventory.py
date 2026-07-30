@@ -309,6 +309,15 @@ def _paired_bindings(target: ast.expr, value: ast.expr) -> list[tuple[str, ast.e
 def _rebinding_targets(node: ast.AST) -> list[tuple[str, ast.expr]]:
     """Return every constructor spelling a binding statement reads, paired with its target.
 
+    A `type` statement binds a name too. The `TypeAliasType` it binds is not callable, so the name
+    is not a constructor the way an assigned one is, but `__value__` hands the constructor back
+    unchanged: `type Alias = GuardRefusal` puts the refusal one dunder away from a caller.
+    Registering the alias is what makes every constructor rule read that name, so the unwrapping
+    dunder is rejected in a non-final callee position exactly as it is on the canonical name.
+    Only a value `_paired_bindings` reads as a bare reference registers, so the verdict union
+    `type ScanVerdict = Certified | MarkerDetected | GuardRefusal` binds no constructor spelling
+    and stays the ordinary type alias it is.
+
     Args:
         node: Any AST node.
 
@@ -319,6 +328,8 @@ def _rebinding_targets(node: ast.AST) -> list[tuple[str, ast.expr]]:
         case ast.Assign(value=value, targets=targets):
             pass
         case ast.AnnAssign(value=ast.expr() as value, target=target):
+            targets = [target]
+        case ast.TypeAlias(name=ast.Name() as target, value=value):
             targets = [target]
         case _:
             return []
@@ -713,7 +724,7 @@ def _bound_value_references(target: ast.expr, value: ast.expr) -> list[ast.expr]
             return []
 
 
-def _call_reference_contexts(call: ast.Call) -> Iterator[ast.AST]:
+def _call_reference_contexts(call: ast.Call, constructors: frozenset[str]) -> Iterator[ast.AST]:
     """Yield every node one call names a constructor in without hiding it.
 
     A callee is the direct construction every constructor rule already reads, but only while
@@ -722,17 +733,32 @@ def _call_reference_contexts(call: ast.Call) -> Iterator[ast.AST]:
     so `(TaintLimits if use_default else injected)()` constructs production limits that no
     construction rule reports, and its references are left for this module's rule to reject.
 
+    `_called_name` reads the callee's *last* component, which is what lets
+    `shell_guards.GuardRefusal(...)` resolve as the construction it is. A constructor spelled
+    anywhere earlier in that chain is therefore not the call's target, and the call reaches it
+    through an attribute the inventory does not track: `GuardRefusal.__call__(...)` mints a real
+    refusal while every construction rule reads a call to `__call__`. Only the callee itself is
+    followable, so a constructor in a non-final position is left for this module's rule to reject.
+    The dynamic sibling `getattr(GuardRefusal, "__call__")(...)` is already rejected as a computed
+    target, and naming the constructor in an argument is already unfollowable, so this is the last
+    spelling that reached a constructor without naming it as one.
+
     A `field` default factory is the indirect construction the limits rule reads, and the class
     argument of a membership predicate names a type without constructing anything.
 
     Args:
         call: The call to read.
+        constructors: Constructor spellings to track, including the aliases already followed.
 
     Yields:
         The nodes of that call's followable contexts.
     """
     if isinstance(call.func, ast.Name | ast.Attribute):
-        yield from ast.walk(call.func)
+        yield from (
+            node
+            for node in ast.walk(call.func)
+            if node is call.func or _referenced_name(node) not in constructors
+        )
     if _called_name(call) == "field":
         for keyword in call.keywords:
             if keyword.arg == "default_factory":
@@ -869,7 +895,7 @@ def _binding_reference_contexts(node: ast.AST) -> Iterator[ast.AST]:
             yield default
 
 
-def _followable_reference_contexts(tree: ast.AST) -> set[int]:
+def _followable_reference_contexts(tree: ast.AST, constructors: frozenset[str]) -> set[int]:
     """Return the node identities a constructor reference may occupy without hiding a constructor.
 
     Every context is pinned by a spelling the guarded modules already carry, and each is enumerated
@@ -878,6 +904,8 @@ def _followable_reference_contexts(tree: ast.AST) -> set[int]:
 
     Args:
         tree: Parsed module.
+        constructors: Constructor spellings to track, which the callee rule reads to tell a
+            construction from a call that reaches a constructor through one of its attributes.
 
     Returns:
         The `id` of every node inside a followable context.
@@ -885,7 +913,7 @@ def _followable_reference_contexts(tree: ast.AST) -> set[int]:
     allowed: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            allowed.update(id(inner) for inner in _call_reference_contexts(node))
+            allowed.update(id(inner) for inner in _call_reference_contexts(node, constructors))
         allowed.update(id(inner) for inner in _declared_reference_contexts(node))
         allowed.update(id(inner) for inner in _binding_reference_contexts(node))
     return allowed
@@ -919,7 +947,7 @@ def _unanalyzable_constructor_references(
     Returns:
         Human-readable violations, empty when every reference sits in a followable context.
     """
-    allowed = _followable_reference_contexts(tree)
+    allowed = _followable_reference_contexts(tree, constructors)
     violations: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Name | ast.Attribute) or not isinstance(node.ctx, ast.Load):
