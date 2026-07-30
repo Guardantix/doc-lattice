@@ -35,7 +35,8 @@ uv run --group dev python scripts/bench_sections.py
 
 uv run --group dev python scripts/check_guard_inventory.py
 uv run --group dev python scripts/guard_witness_sweep.py
-uv run --group dev python scripts/guard_witness_sweep.py --trace 'eval "$X"lattice'
+uv run --group dev python scripts/guard_witness_sweep.py \
+  --trace "eval 'X=\${Y=q}'; eval \"\$X\"lattice"
 
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
