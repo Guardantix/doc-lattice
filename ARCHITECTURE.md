@@ -1000,7 +1000,7 @@ authoring-fixed slice bounds, every one of them a lookahead of three characters 
 of those sit outside the zero-and-one exemption. Reading slice bounds as caps would therefore report
 seven of the scanner's own grammar offsets as unprovenanced bounds while the same rule caught no
 budget, so that family needs evidence separating an offset from a budget before it can be gated
-rather than a widening of this rule.
+rather than a widening of this rule. That gap is tracked in issue #183.
 Module and function-local imports participate structurally too. A guard-visible imported value on
 the value side of an *ordering* comparison is a named threshold whether imported directly, aliased,
 module-qualified, forwarded through an assignment, or bound as the default of a parameter the
