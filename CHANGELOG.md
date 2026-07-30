@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Fail-closed guards in the CI shell scanner now carry a stable origin identifier through both
+  layers, so a refusal names the guard that produced it. `scan_doc_lattice_invocations` accepts
+  an optional `ScanLimits` value and reports a discriminated verdict. See
+  [AD-20](ARCHITECTURE.md#ad-20-a-fail-closed-guard-is-identified-by-its-origin-and-classified-by-executable-evidence).
+
 - Explicit `init --github --repository OWNER/REPO` generation for create-only managed offline,
   trusted Linear, and human-run GitHub bootstrap artifacts.
 - A reviewed two-stage GitHub environment bootstrap that verifies an exact `main` deployment

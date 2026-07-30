@@ -10,6 +10,15 @@ from enum import Enum
 from typing import TYPE_CHECKING, TypeAlias
 
 from doc_lattice.error_types import ProjectError
+from doc_lattice.github_ci.shell_guards import (
+    Certified,
+    GuardRefusal,
+    MarkerDetected,
+    ScanVerdict,
+    TaintLimits,
+)
+
+__all__ = ["TaintLimits", "analyze_marker_taint"]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -17,8 +26,6 @@ if TYPE_CHECKING:
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
 _MAX_BRACE_INTEGER_DIGITS = 256
-_MAX_FUNCTION_EFFECT_DEPTH = 64
-_MAX_LOCAL_SUBSTITUTION_DEPTH = 128
 _QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
 _STATIC_EVAL_SHADOW_NAMES = frozenset({"builtin", "command", "eval", "false", "true"})
 _UNICODE_MAX = 0x10FFFF
@@ -126,34 +133,32 @@ ContentExpr: TypeAlias = (  # noqa: UP040
 )
 
 
-@dataclass(frozen=True, slots=True)
-class TaintLimits:
-    """Deterministic caps for one taint pass."""
-
-    max_alternatives: int = 256
-    max_expression_nodes: int = 100_000
-    max_table_entries: int = 10_000
-    max_edges: int = 50_000
-    max_fixed_point_updates: int = 100_000
-    max_brace_expansions: int = 4_096
-    max_brace_depth: int = 16
-    max_exact_value_chars: int = 8_192
-    max_eval_reparse_branches: int = 256
-    max_eval_reparse_depth: int = 128
-
-
 class _TaintLimitExceeded(ProjectError):
-    """A deterministic taint bound prevented certification."""
+    """A deterministic taint bound prevented certification.
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="SHELL_TAINT_LIMIT_EXCEEDED")
+    The constructor accepts only a `GuardRefusal` so a bound can never be reported as bare text.
+    Handlers that re-raise or re-wrap this error carry `refusal` through unchanged.
+    """
+
+    def __init__(self, refusal: GuardRefusal) -> None:
+        if not isinstance(refusal, GuardRefusal):
+            raise TypeError("a fail-closed taint bound must carry a GuardRefusal origin")
+        super().__init__(refusal.reason, code="SHELL_TAINT_LIMIT_EXCEEDED")
+        self.refusal = refusal
 
 
 class _MalformedTaintEvidence(ProjectError):
-    """Structured shell evidence cannot be analyzed safely."""
+    """Structured shell evidence cannot be analyzed safely.
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="SHELL_TAINT_EVIDENCE_INVALID")
+    The constructor accepts only a `GuardRefusal` so malformed evidence can never be reported as
+    bare text. Handlers that re-raise or re-wrap this error carry `refusal` through unchanged.
+    """
+
+    def __init__(self, refusal: GuardRefusal) -> None:
+        if not isinstance(refusal, GuardRefusal):
+            raise TypeError("malformed taint evidence must carry a GuardRefusal origin")
+        super().__init__(refusal.reason, code="SHELL_TAINT_EVIDENCE_INVALID")
+        self.refusal = refusal
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,7 +485,7 @@ class _BuiltContent:
     conditional_assignments: tuple[_AssignmentEvidence, ...] = ()
     process_resource_id: int | None = None
     argv_ports: tuple[_WordContentPort, ...] | None = None
-    brace_expansion_error: str | None = None
+    brace_expansion_error: GuardRefusal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,9 +546,17 @@ def _brace_integer(value: str) -> int:
     """Convert one bounded signed brace integer or fail closed."""
     digits = _signed_decimal(value)
     if digits is None:
-        raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.brace.integer-not-decimal", "shell taint brace expansion limit exceeded"
+            )
+        )
     if len(digits) > _MAX_BRACE_INTEGER_DIGITS:
-        raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.brace.integer-digit-limit", "shell taint brace expansion limit exceeded"
+            )
+        )
     return int(value)
 
 
@@ -602,7 +615,12 @@ def _brace_alternatives(
         step = _brace_range_step(first, last, step_text)
         expansion_count = abs(last - first) // abs(step) + 1
         if expansion_count > limits.max_brace_expansions:
-            raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.brace.numeric-sequence-limit",
+                    "shell taint brace expansion limit exceeded",
+                )
+            )
         values = range(first, last + (1 if step > 0 else -1), step)
         return [_literal_tokens(_brace_range_number(value, start, stop)) for value in values]
     if (
@@ -617,7 +635,11 @@ def _brace_alternatives(
         step = _brace_range_step(first, last, step_text)
         expansion_count = abs(last - first) // abs(step) + 1
         if expansion_count > limits.max_brace_expansions:
-            raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.brace.alpha-sequence-limit", "shell taint brace expansion limit exceeded"
+                )
+            )
         return [
             _literal_tokens(chr(value))
             for value in range(first, last + (1 if step > 0 else -1), step)
@@ -644,7 +666,12 @@ def _expand_braces(
                 if alternatives is None:
                     break
                 if depth >= limits.max_brace_depth:
-                    raise _TaintLimitExceeded("shell taint brace expansion depth limit exceeded")
+                    raise _TaintLimitExceeded(
+                        GuardRefusal(
+                            "taint.brace.depth-limit",
+                            "shell taint brace expansion depth limit exceeded",
+                        )
+                    )
                 expanded: list[list[_ContentToken]] = []
                 for alternative in alternatives:
                     for result in _expand_braces(
@@ -654,7 +681,12 @@ def _expand_braces(
                     ):
                         expanded.append(result)
                         if len(expanded) > limits.max_brace_expansions:
-                            raise _TaintLimitExceeded("shell taint brace expansion limit exceeded")
+                            raise _TaintLimitExceeded(
+                                GuardRefusal(
+                                    "taint.brace.expansion-limit",
+                                    "shell taint brace expansion limit exceeded",
+                                )
+                            )
                 return expanded
         # An unrecognized outer brace can still contain a recognized nested expansion.
     return [tokens]
@@ -703,7 +735,7 @@ class ContentBuilder:
 
     def build(
         self,
-        limits: TaintLimits = TaintLimits(),  # noqa: B008 - immutable limits value object
+        limits: TaintLimits,
         *,
         defer_brace_errors: bool = False,
     ) -> _BuiltContent:
@@ -713,13 +745,13 @@ class ContentBuilder:
             if self.assignment_value_start is not None
             else None
         )
-        brace_expansion_error: str | None = None
+        brace_expansion_error: GuardRefusal | None = None
         try:
             expanded_ports = _expand_braces(self.tokens, limits)
         except _TaintLimitExceeded as error:
             if not defer_brace_errors:
                 raise
-            brace_expansion_error = str(error)
+            brace_expansion_error = error.refusal
             expanded_ports = [self.tokens]
         ports = tuple(
             _WordContentPort(
@@ -983,11 +1015,19 @@ _MAX_SHELL_DESCRIPTOR_DIGITS = 64
 def _static_eval_descriptor(digits: str) -> int:
     """Parse one bounded descriptor an exact eval payload spells, or fail closed."""
     if len(digits) > _MAX_SHELL_DESCRIPTOR_DIGITS:
-        raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-descriptor.digit-limit", "shell eval payload cannot be tokenized"
+            )
+        )
     try:
         return int(digits)
     except ValueError as error:
-        raise _TaintLimitExceeded("shell eval payload cannot be tokenized") from error
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-descriptor.unparsable", "shell eval payload cannot be tokenized"
+            )
+        ) from error
 
 
 def _dev_fd_write_descriptor(resource: str, parse_descriptor: Callable[[str], int]) -> int | None:
@@ -1606,7 +1646,12 @@ def _project_read_value(
                 if sum(character in ifs for character in literal_text) > (
                     _MAX_TRACKED_LITERAL_ALTERNATIVES - 1
                 ):
-                    raise _TaintLimitExceeded("shell read projection cannot be represented")
+                    raise _TaintLimitExceeded(
+                        GuardRefusal(
+                            "taint.read.ifs-field-alternatives",
+                            "shell read projection cannot be represented",
+                        )
+                    )
                 relocatable_fields = _read_literal_fields(
                     literal_text,
                     ifs,
@@ -1615,7 +1660,12 @@ def _project_read_value(
                 )
                 sole_field = _read_literal_fields(literal_text, ifs, 1, raw=raw)
                 if relocatable_fields is None or sole_field is None:
-                    raise _TaintLimitExceeded("shell read projection cannot be represented")
+                    raise _TaintLimitExceeded(
+                        GuardRefusal(
+                            "taint.read.field-relocation",
+                            "shell read projection cannot be represented",
+                        )
+                    )
                 projected.update(
                     _TransferSummary.literal(field)
                     for field in (
@@ -1737,7 +1787,9 @@ def _assignment_identity(
 
 def _cap_value(value: _ContentValue, limits: TaintLimits) -> _ContentValue:
     if len(value) > limits.max_alternatives:
-        raise _TaintLimitExceeded("shell taint alternative limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal("taint.values.alternative-limit", "shell taint alternative limit exceeded")
+        )
     return value
 
 
@@ -1882,15 +1934,26 @@ def _cyclic_write_keys(writes: tuple[_FlowWrite, ...]) -> frozenset[str | int]:
 def _solve_flow_definitions(
     definitions: _FlowDefinitions,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> _SolvedFlow:
     nodes, edges, entries = _definition_counts(definitions)
     if nodes > limits.max_expression_nodes:
-        raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.flow-solve.expression-node-limit",
+                "shell taint expression node limit exceeded",
+            )
+        )
     if edges > limits.max_edges:
-        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal("taint.flow-solve.edge-limit", "shell taint edge limit exceeded")
+        )
     if entries > limits.max_table_entries:
-        raise _TaintLimitExceeded("shell taint table entry limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.flow-solve.table-entry-limit", "shell taint table entry limit exceeded"
+            )
+        )
 
     # Keys on a reference cycle are seeded with epsilon rather than the lattice bottom. Bottom
     # means "unreachable" and ``_compose_values`` annihilates it, so a key whose write set is
@@ -1958,7 +2021,12 @@ def _solve_flow_definitions(
             table[write.key] = widened
             updates += 1
             if updates > limits.max_fixed_point_updates:
-                raise _TaintLimitExceeded("shell taint fixed-point update limit exceeded")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.flow-solve.fixed-point-limit",
+                        "shell taint fixed-point update limit exceeded",
+                    )
+                )
             changed = True
 
     return _SolvedFlow(variables, resources, streams, limits)
@@ -1980,7 +2048,11 @@ def _output_children(output: OutputExpr) -> tuple[OutputExpr, ...]:
         return (output.part,)
     if isinstance(output, CommandOutput | ScopeOutput):
         return ()
-    raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+    raise _MalformedTaintEvidence(
+        GuardRefusal(
+            "taint.evidence.unknown-output-node", "shell taint evidence cannot be structured"
+        )
+    )
 
 
 def _validated_output_scope_refs(
@@ -2002,11 +2074,21 @@ def _validated_output_scope_refs(
             active.remove(current_id)
             if isinstance(current, CommandOutput):
                 if current.command_id not in command_ids:
-                    raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+                    raise _MalformedTaintEvidence(
+                        GuardRefusal(
+                            "taint.evidence.output-command-ref",
+                            "shell taint evidence cannot be structured",
+                        )
+                    )
                 refs: set[int] = set()
             elif isinstance(current, ScopeOutput):
                 if current.scope_id not in stream_ids:
-                    raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+                    raise _MalformedTaintEvidence(
+                        GuardRefusal(
+                            "taint.evidence.nested-scope-output",
+                            "shell taint evidence cannot be structured",
+                        )
+                    )
                 refs = {current.scope_id} if current.scope_id in scope_ids else set()
             else:
                 refs = set()
@@ -2015,9 +2097,18 @@ def _validated_output_scope_refs(
             state.memo[current_id] = frozenset(refs)
             continue
         if current_id in active:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.output-scope-cycle", "shell taint evidence cannot be structured"
+                )
+            )
         if state.remaining_nodes < 1:
-            raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.evidence.output-scope-node-limit",
+                    "shell taint expression node limit exceeded",
+                )
+            )
         state.remaining_nodes -= 1
         active.add(current_id)
         pending.append((current, True))
@@ -2028,7 +2119,7 @@ def _validated_output_scope_refs(
 def _validate_acyclic_graph(
     graph: dict[int, frozenset[int]],
     *,
-    reason: str,
+    refusal: GuardRefusal,
 ) -> None:
     """Reject directed cycles without recursive graph traversal."""
     active: set[int] = set()
@@ -2046,7 +2137,7 @@ def _validate_acyclic_graph(
             if node in visited:
                 continue
             if node in active:
-                raise _MalformedTaintEvidence(reason)
+                raise _MalformedTaintEvidence(refusal)
             active.add(node)
             pending.append((node, True))
             pending.extend((child, False) for child in reversed(tuple(graph[node])))
@@ -2073,7 +2164,11 @@ def _validate_nested_evidence(
             stream_id_values,
         )
     ):
-        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.evidence.duplicate-identifier", "shell taint evidence cannot be structured"
+            )
+        )
 
     command_ids = set(command_id_values)
     scope_ids = set(scope_id_values)
@@ -2084,9 +2179,19 @@ def _validate_nested_evidence(
     output_state = _OutputValidationState(limits.max_expression_nodes)
     for scope in evidence.scopes:
         if scope.parent_scope_id is not None and scope.parent_scope_id not in scope_ids:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.unknown-parent-scope",
+                    "shell taint evidence cannot be structured",
+                )
+            )
         if scope.parent_command_id is not None and scope.parent_command_id not in command_ids:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.unknown-parent-command",
+                    "shell taint evidence cannot be structured",
+                )
+            )
         parent_graph[scope.scope_id] = (
             frozenset({scope.parent_scope_id}) if scope.parent_scope_id is not None else frozenset()
         )
@@ -2113,22 +2218,47 @@ def _validate_nested_evidence(
 
     _validate_acyclic_graph(
         parent_graph,
-        reason="shell taint stream scope cannot be structured",
+        refusal=GuardRefusal(
+            "taint.evidence.scope-parent-cycle",
+            "shell taint stream scope cannot be structured",
+        ),
     )
     _validate_acyclic_graph(
         output_graph,
-        reason="shell taint evidence cannot be structured",
+        refusal=GuardRefusal(
+            "taint.evidence.output-graph-cycle",
+            "shell taint evidence cannot be structured",
+        ),
     )
 
     for pipe in evidence.pipes:
         if pipe.producer_scope_id not in stream_ids:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.unknown-pipe-producer",
+                    "shell taint evidence cannot be structured",
+                )
+            )
         if pipe.consumer_command_id is not None and pipe.consumer_command_id not in command_ids:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.unknown-pipe-consumer-command",
+                    "shell taint evidence cannot be structured",
+                )
+            )
         if pipe.consumer_scope_id is not None and pipe.consumer_scope_id not in scope_ids:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.unknown-pipe-consumer-scope",
+                    "shell taint evidence cannot be structured",
+                )
+            )
     if any(resource.scope_id not in scope_ids for resource in evidence.process_resources):
-        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.evidence.unknown-resource-scope", "shell taint evidence cannot be structured"
+            )
+        )
 
     redirection_groups = (
         *(command.redirections for command in evidence.commands),
@@ -2140,13 +2270,22 @@ def _validate_nested_evidence(
         for events in redirection_groups
         for event in events
     ):
-        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.evidence.unknown-redirection-resource",
+                "shell taint evidence cannot be structured",
+            )
+        )
     if any(
         port.process_resource_id is not None and port.process_resource_id not in resource_ids
         for command in evidence.commands
         for port in command.argv
     ):
-        raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.evidence.unknown-argv-resource", "shell taint evidence cannot be structured"
+            )
+        )
 
 
 def _output_input_parts(
@@ -2184,7 +2323,12 @@ def _output_input_parts(
         elif isinstance(current, RepeatOutput):
             pending.append(current.part)
         else:
-            raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+            raise _MalformedTaintEvidence(
+                GuardRefusal(
+                    "taint.evidence.unknown-output-input-node",
+                    "shell taint evidence cannot be structured",
+                )
+            )
     return tuple(commands), tuple(dependencies)
 
 
@@ -2224,7 +2368,12 @@ def _scope_input_commands(
                 state[scope_id] = 2
                 continue
             if state.get(scope_id) == 1:
-                raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+                raise _MalformedTaintEvidence(
+                    GuardRefusal(
+                        "taint.evidence.scope-input-cycle",
+                        "shell taint evidence cannot be structured",
+                    )
+                )
             state[scope_id] = 1
             pending.append((scope_id, True))
             for dependency in reversed(parts[scope_id][1]):
@@ -2274,7 +2423,12 @@ def _resolve_output_descriptor_source(
     current = descriptor
     while True:
         if current in visited:
-            raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.descriptor.output-alias-cycle",
+                    "shell descriptor source cannot be represented",
+                )
+            )
         visited.add(current)
         found = bindings.get(current)
         if found is None and inherited is not None:
@@ -2287,7 +2441,12 @@ def _resolve_output_descriptor_source(
                 # it, so an authored marker could reach a file the scan reads as unwritten.
                 # A descriptor no part of this body binds is a runtime error in Bash rather
                 # than missing evidence, so it keeps the existing dynamic-target behavior.
-                raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.descriptor.output-alias-unresolved",
+                        "shell descriptor source cannot be represented",
+                    )
+                )
             return (DynamicResourceTarget(), False)
         target, append = found
         if isinstance(target, DescriptorTarget):
@@ -2524,7 +2683,12 @@ def _resolve_input_descriptor_source(
     current = descriptor
     while True:
         if current in visited:
-            raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.descriptor.input-alias-cycle",
+                    "shell descriptor source cannot be represented",
+                )
+            )
         visited.add(current)
         found = bindings.get(current)
         if found is None and inherited is not None:
@@ -2535,7 +2699,12 @@ def _resolve_input_descriptor_source(
                 # per-command redirection evidence cannot carry. Substituting a certifying
                 # ``OutsideGap()`` here would discard this read instead of routing it, so an
                 # authored marker could reach a sink through a source the scan reads as absent.
-                raise _TaintLimitExceeded("shell descriptor source cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.descriptor.input-alias-unresolved",
+                        "shell descriptor source cannot be represented",
+                    )
+                )
             return OutsideGap()
         if isinstance(found, DescriptorTarget):
             current = found.descriptor
@@ -2733,7 +2902,12 @@ def _resolved_scope_inputs(
         current = scope_id
         while current not in memo:
             if current in active:
-                raise _MalformedTaintEvidence("shell taint evidence cannot be structured")
+                raise _MalformedTaintEvidence(
+                    GuardRefusal(
+                        "taint.evidence.scope-input-resolution-cycle",
+                        "shell taint evidence cannot be structured",
+                    )
+                )
             active.add(current)
             scope = scopes.get(current)
             if scope is None:
@@ -2935,7 +3109,12 @@ def _exact_content_literal(
         else:
             value = None
         if value is not None and len(value) > limits.max_exact_value_chars:
-            raise _TaintLimitExceeded("shell taint exact value length limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.exact-value.length-limit",
+                    "shell taint exact value length limit exceeded",
+                )
+            )
         memo[current_id] = value
     return memo[id(expression)]
 
@@ -3381,7 +3560,7 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
             )
             if not routed.nameref_unset
         )
-        eval_assignments, _eval_unsets = _static_eval_mutations(command)
+        eval_assignments, _eval_unsets = _static_eval_mutations(command, limits=limits)
         for mutation in eval_assignments:
             if mutation.assignment.nameref_target is not None or mutation.assignment.nameref_unset:
                 route_assignment(mutation.assignment)
@@ -3426,10 +3605,7 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
     if saw_nameref:
         commands = list(
             _refresh_runtime_eval_programs(
-                tuple(commands),
-                command_environments,
-                environment_parents,
-                limits,
+                tuple(commands), command_environments, environment_parents, limits
             )
         )
     return replace(evidence, commands=tuple(commands))
@@ -3533,7 +3709,7 @@ def _refresh_runtime_eval_programs(
         for assignment in command.assignments:
             if assignment.conditional or assignment.assign_if_null:
                 apply_exact(assignment, values, conditional=True)
-        eval_assignments, eval_unsets = _static_eval_mutations(refreshed_command)
+        eval_assignments, eval_unsets = _static_eval_mutations(refreshed_command, limits=limits)
         for mutation in eval_assignments:
             apply_exact(mutation.assignment, values, conditional=conditional)
         unset_names, unknown_unset = _unset_action(command)
@@ -3961,7 +4137,12 @@ def _scope_environment_ids(
         current = scope.scope_id
         while current not in environments:
             if current in active:
-                raise _MalformedTaintEvidence("shell taint stream scope cannot be structured")
+                raise _MalformedTaintEvidence(
+                    GuardRefusal(
+                        "taint.evidence.scope-environment-cycle",
+                        "shell taint stream scope cannot be structured",
+                    )
+                )
             active.add(current)
             path.append(current)
             current_scope = by_id.get(current)
@@ -4070,6 +4251,7 @@ def _expression_function_positionals(expression: ContentExpr) -> set[str]:
 def _substitute_local_contents(
     expression: ContentExpr,
     local_contents: Mapping[str, ContentExpr],
+    limits: TaintLimits,
     *,
     resolving: frozenset[str] = frozenset(),
 ) -> ContentExpr:
@@ -4092,7 +4274,12 @@ def _substitute_local_contents(
                 )
                 continue
             if not isinstance(current, Choice | Concat):
-                raise _MalformedTaintEvidence("local content substitution cannot be structured")
+                raise _MalformedTaintEvidence(
+                    GuardRefusal(
+                        "taint.local-substitution.unassembled-result",
+                        "local content substitution cannot be structured",
+                    )
+                )
             parts = current.parts
             count = len(parts)
             resolved_parts = tuple(results[-count:]) if count else ()
@@ -4108,8 +4295,12 @@ def _substitute_local_contents(
             if replacement is None or name in active_names:
                 results.append(current)
                 continue
-            if depth >= _MAX_LOCAL_SUBSTITUTION_DEPTH:
-                raise _TaintLimitExceeded("local substitution depth limit")
+            if depth >= limits.max_local_substitution_depth:
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.local-substitution.depth-limit", "local substitution depth limit"
+                    )
+                )
             pending.append(
                 (
                     replacement,
@@ -4131,7 +4322,12 @@ def _substitute_local_contents(
             continue
         pending.extend((part, active_names, depth, False) for part in reversed(current.parts))
     if len(results) != 1:
-        raise _MalformedTaintEvidence("local content substitution cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.local-substitution.multiple-results",
+                "local content substitution cannot be structured",
+            )
+        )
     return results[0]
 
 
@@ -4148,12 +4344,22 @@ def _substitute_function_positionals(  # noqa: PLR0911
         if name in {"@", "*", _QUOTED_FUNCTION_POSITIONAL_STAR}:
             if arguments is None and shift_offset == 0:
                 return expression
-            raise _TaintLimitExceeded("unsupported function positional mutation")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.unsupported-star-mutation",
+                    "unsupported function positional mutation",
+                )
+            )
         index = _function_positional_index(name, len(arguments)) if arguments is not None else None
         if arguments is not None:
             return arguments[index] if index is not None else LiteralTransfer("")
         if len(name) > _MAX_BRACE_INTEGER_DIGITS:
-            raise _TaintLimitExceeded("function positional mutation limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.index-digit-limit",
+                    "function positional mutation limit exceeded",
+                )
+            )
         return VariableRef(str(int(name) + shift_offset))
     if isinstance(
         expression,
@@ -4605,20 +4811,28 @@ def _decode_ansi_c_eval_word(body: str) -> str:
     return "".join(decoded)
 
 
-def _static_eval_commands(command: _CommandEvidence) -> tuple[_StaticEvalCommand, ...]:
+def _static_eval_commands(
+    command: _CommandEvidence,
+    *,
+    limits: TaintLimits,
+) -> tuple[_StaticEvalCommand, ...]:
     """Tokenize bounded static eval input into simple command words."""
     commands: list[_StaticEvalCommand] = []
     for program in _static_eval_programs(command):
         commands.extend(
             _static_eval_program_commands(
-                program,
-                active_function_names=command.active_function_names,
+                program, active_function_names=command.active_function_names, limits=limits
             )
         )
     return tuple(commands)
 
 
-def _static_eval_redirection_target(source_word: str, operator: str) -> RedirectionTarget:
+def _static_eval_redirection_target(
+    source_word: str,
+    operator: str,
+    *,
+    limits: TaintLimits,
+) -> RedirectionTarget:
     """Resolve one exact eval payload redirection operand to the target it names.
 
     The operand is reparsed with the payload's own second-pass quote and parameter semantics, so
@@ -4635,7 +4849,7 @@ def _static_eval_redirection_target(source_word: str, operator: str) -> Redirect
         The target this operand resolves to.
     """
     literal = _exact_content_literal(
-        _eval_reparse_content(LiteralTransfer(source_word)), {}, TaintLimits()
+        _eval_reparse_content(LiteralTransfer(source_word), limits), {}, limits
     )
     return resolve_redirection_target(
         source_word if literal is None else literal,
@@ -4667,6 +4881,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
     program: str,
     *,
     active_function_names: frozenset[str] = frozenset(),
+    limits: TaintLimits,
 ) -> tuple[_StaticEvalCommand, ...]:
     """Tokenize one exact eval program and retain reserved-word eligibility."""
     program = _strip_active_shell_comments(program)
@@ -4690,7 +4905,11 @@ def _static_eval_program_commands(  # noqa: PLR0915
         # An eval payload the tokenizer cannot accept is missing evidence, not the absence of
         # any: silently contributing nothing here let a prior mutation, or a later sink's
         # dependence on one, certify by omission (issue #134). Fail closed instead.
-        raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-payload.missing-metadata", "shell eval payload cannot be tokenized"
+            )
+        )
     metadata_index = 0
     commands: list[_StaticEvalCommand] = []
     words: list[str] = []
@@ -4703,7 +4922,9 @@ def _static_eval_program_commands(  # noqa: PLR0915
     try:
         tokens = tuple(lexer)
     except ValueError as error:
-        raise _TaintLimitExceeded("shell eval payload cannot be tokenized") from error
+        raise _TaintLimitExceeded(
+            GuardRefusal("taint.eval-payload.lex-error", "shell eval payload cannot be tokenized")
+        ) from error
     for lexeme in tokens:
         if lexeme and all(character in ";&|()\n" for character in lexeme):
             if words:
@@ -4740,7 +4961,12 @@ def _static_eval_program_commands(  # noqa: PLR0915
                 # absence of any: dropping it would leave the write it performs unmodeled while
                 # the rest of the payload still contributed state (issue #146, the same
                 # reasoning issue #134 applied to an untokenizable payload).
-                raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-payload.redirection-lexeme",
+                        "shell eval payload cannot be tokenized",
+                    )
+                )
             prefix: str | None = None
             if redirection_prefixes and redirection_prefixes[-1]:
                 prefix = source_words[-1]
@@ -4753,7 +4979,12 @@ def _static_eval_program_commands(  # noqa: PLR0915
         if metadata_index >= len(metadata):
             # ``shlex`` and the metadata walk disagree on word count for this payload; treat the
             # mismatch as missing evidence rather than none (issue #134).
-            raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-payload.metadata-exhausted",
+                    "shell eval payload cannot be tokenized",
+                )
+            )
         token_metadata = metadata[metadata_index]
         metadata_index += 1
         if pending_redirection is not None:
@@ -4764,7 +4995,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
                     len(redirections),
                     operator,
                     descriptor,
-                    _static_eval_redirection_target(token_metadata.source, operator),
+                    _static_eval_redirection_target(token_metadata.source, operator, limits=limits),
                 )
             )
             continue
@@ -4773,7 +5004,11 @@ def _static_eval_program_commands(  # noqa: PLR0915
         source_words.append(token_metadata.source)
         redirection_prefixes.append(token_metadata.redirection_prefix)
     if metadata_index != len(metadata):
-        raise _TaintLimitExceeded("shell eval payload cannot be tokenized")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-payload.metadata-residue", "shell eval payload cannot be tokenized"
+            )
+        )
     if words:
         commands.append(
             _StaticEvalCommand(
@@ -4784,7 +5019,7 @@ def _static_eval_program_commands(  # noqa: PLR0915
                 redirections=tuple(redirections),
             )
         )
-    return _annotate_static_eval_control(tuple(commands))
+    return _annotate_static_eval_control(tuple(commands), limits=limits)
 
 
 def _static_status_and(left: bool | None, right: bool | None) -> bool | None:
@@ -4867,7 +5102,11 @@ def _static_eval_wrapped_executable(
     )
 
 
-def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutable | None:
+def _static_eval_executable(
+    command: _StaticEvalCommand,
+    *,
+    limits: TaintLimits,
+) -> _StaticEvalExecutable | None:
     """Resolve one static eval command head and its literal negation."""
     index = 0
     negated = False
@@ -4906,7 +5145,7 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
     while (
         index < len(command.words)
         and _static_assignment_word(command.words[index]) is not None
-        and _static_eval_assignment_content(command.source_words[index]) is not None
+        and _static_eval_assignment_content(command.source_words[index], limits=limits) is not None
     ):
         index += 1
     return _static_eval_wrapped_executable(
@@ -4918,17 +5157,21 @@ def _static_eval_executable(command: _StaticEvalCommand) -> _StaticEvalExecutabl
 
 
 def _static_eval_operand_expressions(
-    parsed: _StaticEvalCommand, environment: int, *, scoped: bool
+    parsed: _StaticEvalCommand,
+    environment: int,
+    *,
+    scoped: bool,
+    limits: TaintLimits,
 ) -> tuple[tuple[ContentExpr, ...], tuple[ContentExpr, ...]]:
     """Lower one payload command's operand words into content and script-source expressions."""
-    executable = _static_eval_executable(parsed)
+    executable = _static_eval_executable(parsed, limits=limits)
     start = min(1, len(parsed.source_words)) if executable is None else executable.argv_index + 1
     contents: list[ContentExpr] = []
     sources: list[ContentExpr] = []
     for source_word in parsed.source_words[start:]:
-        reparsed = _eval_reparse_content(LiteralTransfer(source_word))
+        reparsed = _eval_reparse_content(LiteralTransfer(source_word), limits)
         content = _lower_eval_assignment_operand(reparsed, environment, scoped=scoped)
-        literal = _exact_content_literal(reparsed, {}, TaintLimits())
+        literal = _exact_content_literal(reparsed, {}, limits)
         contents.append(content)
         sources.append(
             _script_port_expression(
@@ -4944,7 +5187,11 @@ def _static_eval_operand_expressions(
 
 
 def _static_eval_command_stdout(
-    parsed: _StaticEvalCommand, environment: int, *, scoped: bool
+    parsed: _StaticEvalCommand,
+    environment: int,
+    *,
+    scoped: bool,
+    limits: TaintLimits,
 ) -> ContentExpr:
     """Return the authored stdout one exact eval payload command produces.
 
@@ -4967,17 +5214,20 @@ def _static_eval_command_stdout(
     Returns:
         The content expression this payload command writes to its standard output.
     """
-    contents, sources = _static_eval_operand_expressions(parsed, environment, scoped=scoped)
+    contents, sources = _static_eval_operand_expressions(
+        parsed, environment, scoped=scoped, limits=limits
+    )
     return choice(OutsideGap(), concat(*contents), *sources)
 
 
-def _static_eval_resource_writes(
+def _static_eval_resource_writes(  # noqa: PLR0913
     command: _CommandEvidence,
     environment: int,
     inherited: _DescriptorBindings,
     guarded: frozenset[int],
     *,
     scoped: bool,
+    limits: TaintLimits,
 ) -> tuple[_FlowWrite, ...]:
     """Return the resource writes an exact eval payload's own redirections perform.
 
@@ -5010,13 +5260,13 @@ def _static_eval_resource_writes(
         return ()
     payload_bindings = _output_bindings(command.redirections, inherited=inherited, guarded=guarded)
     writes: list[_FlowWrite] = []
-    for parsed in _static_eval_commands(command):
+    for parsed in _static_eval_commands(command, limits=limits):
         if parsed.execution_status is False or not parsed.redirections:
             continue
         writes.extend(
             _static_write_definitions(
                 parsed.redirections,
-                _static_eval_command_stdout(parsed, environment, scoped=scoped),
+                _static_eval_command_stdout(parsed, environment, scoped=scoped, limits=limits),
                 payload_bindings,
                 guarded,
             )
@@ -5024,9 +5274,13 @@ def _static_eval_resource_writes(
     return tuple(writes)
 
 
-def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
+def _static_eval_literal_status(
+    command: _StaticEvalCommand,
+    *,
+    limits: TaintLimits,
+) -> bool | None:
     """Return exact status for a resolved, unshadowed true/false eval command."""
-    executable = _static_eval_executable(command)
+    executable = _static_eval_executable(command, limits=limits)
     if (
         executable is None
         or executable.name not in {"false", "true"}
@@ -5043,6 +5297,8 @@ def _static_eval_literal_status(command: _StaticEvalCommand) -> bool | None:
 
 def _annotate_static_eval_control(
     commands: tuple[_StaticEvalCommand, ...],
+    *,
+    limits: TaintLimits,
 ) -> tuple[_StaticEvalCommand, ...]:
     """Annotate exact eval commands with nested if-branch reachability."""
     controls: list[_StaticEvalControl] = []
@@ -5062,7 +5318,7 @@ def _annotate_static_eval_control(
             controls.append(
                 _StaticEvalControl(
                     parent_status=parent,
-                    current_test_status=_static_eval_literal_status(command),
+                    current_test_status=_static_eval_literal_status(command, limits=limits),
                 )
             )
             annotated.append(replace(command, execution_status=parent))
@@ -5085,7 +5341,7 @@ def _annotate_static_eval_control(
                 frame.prior_branch_status,
                 frame.current_test_status,
             )
-            frame.current_test_status = _static_eval_literal_status(command)
+            frame.current_test_status = _static_eval_literal_status(command, limits=limits)
             frame.phase = "test"
             annotated.append(
                 replace(
@@ -5155,7 +5411,11 @@ def _static_eval_element_assignment(word: str) -> bool:
     return bool(bracket) and subscript.endswith("]") and _static_variable_name(target)
 
 
-def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
+def _static_eval_assignment_content(
+    source_word: str,
+    *,
+    limits: TaintLimits,
+) -> ContentExpr | None:
     """Lower one static eval assignment RHS with its second-pass quote semantics."""
     quote: str | None = None
     index = 0
@@ -5181,7 +5441,7 @@ def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
                 name = name[:-1]
             if not _static_variable_name(name):
                 return None
-            rhs = _eval_reparse_content(LiteralTransfer(source_word[index + 1 :]))
+            rhs = _eval_reparse_content(LiteralTransfer(source_word[index + 1 :]), limits)
             return _lower_eval_assignment_operand(rhs, 0, scoped=False)
         index += 1
     return None
@@ -5189,6 +5449,8 @@ def _static_eval_assignment_content(source_word: str) -> ContentExpr | None:
 
 def _static_eval_mutations(  # noqa: PLR0912, PLR0915
     command: _CommandEvidence,
+    *,
+    limits: TaintLimits,
 ) -> tuple[tuple[_StaticEvalAssignment, ...], tuple[str, ...]]:
     """Return exact scalar assignments and unsets from bounded static eval input."""
     assignments: list[_StaticEvalAssignment] = []
@@ -5209,19 +5471,29 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
         visited: set[str] = set()
         while target in aliases:
             if target in visited:
-                raise _TaintLimitExceeded("shell eval nameref cycle cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-nameref.assignment-cycle",
+                        "shell eval nameref cycle cannot be represented",
+                    )
+                )
             visited.add(target)
             target = aliases[target]
         if target == assignment.name:
             return mutation
         return replace(mutation, assignment=replace(assignment, name=target))
 
-    for parsed in _static_eval_commands(command):
+    for parsed in _static_eval_commands(command, limits=limits):
         if parsed.execution_status is False:
             continue
         if parsed.array_compound:
-            raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
-        nested_eval_executable = _static_eval_executable(parsed)
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-array.compound-assignment",
+                    "shell eval array assignment cannot be represented",
+                )
+            )
+        nested_eval_executable = _static_eval_executable(parsed, limits=limits)
         if (
             command.execution_status is not False
             and nested_eval_executable is not None
@@ -5232,7 +5504,11 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                 or nested_eval_executable.name not in parsed.active_function_names
             )
         ):
-            raise _TaintLimitExceeded("shell nested eval state cannot be represented")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval.nested-eval-state", "shell nested eval state cannot be represented"
+                )
+            )
         words = parsed.words
         index = 0
         while index < len(words) and parsed.keyword_eligible[index]:
@@ -5246,14 +5522,21 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
         prefix_assignments: list[_StaticEvalAssignment] = []
         while index < len(words):
             if _static_eval_element_assignment(words[index]):
-                raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-array.element-assignment-operand",
+                        "shell eval array assignment cannot be represented",
+                    )
+                )
             assignment = _static_assignment_word(words[index])
             if assignment is None:
                 break
             prefix_assignments.append(
                 _StaticEvalAssignment(
                     assignment,
-                    eval_content=_static_eval_assignment_content(parsed.source_words[index]),
+                    eval_content=_static_eval_assignment_content(
+                        parsed.source_words[index], limits=limits
+                    ),
                 )
             )
             index += 1
@@ -5292,7 +5575,12 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                 for option in options
                 if option.startswith("-")
             ):
-                raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-array.declaration-builtin",
+                        "shell eval array assignment cannot be represented",
+                    )
+                )
             force_global = executable in {"declare", "typeset"} and any(
                 option.startswith("-") and "g" in option[1:] for option in options
             )
@@ -5313,7 +5601,12 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
             for word_index in range(index + 1, len(words)):
                 word = words[word_index]
                 if _static_eval_element_assignment(word):
-                    raise _TaintLimitExceeded("shell eval array assignment cannot be represented")
+                    raise _TaintLimitExceeded(
+                        GuardRefusal(
+                            "taint.eval-array.element-assignment-word",
+                            "shell eval array assignment cannot be represented",
+                        )
+                    )
                 assignment = _static_assignment_word(word)
                 if assignment is not None:
                     if nameref_action is False:
@@ -5326,7 +5619,10 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                         )
                         if not _static_variable_name(target):
                             raise _TaintLimitExceeded(
-                                "shell eval nameref target cannot be represented"
+                                GuardRefusal(
+                                    "taint.eval-nameref.non-static-target",
+                                    "shell eval nameref target cannot be represented",
+                                )
                             )
                         assignment = replace(
                             assignment,
@@ -5338,7 +5634,7 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                         local=local,
                         force_global=force_global,
                         eval_content=_static_eval_assignment_content(
-                            parsed.source_words[word_index]
+                            parsed.source_words[word_index], limits=limits
                         ),
                     )
                     assignments.append(route_assignment(mutation))
@@ -5364,7 +5660,12 @@ def _static_eval_mutations(  # noqa: PLR0912, PLR0915
                 # `unset -f` removes only a function; the variable survives.
                 continue
             if "n" in flags:
-                raise _TaintLimitExceeded("shell eval nameref unset cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-nameref.unset-with-flag",
+                        "shell eval nameref unset cannot be represented",
+                    )
+                )
             unsets.extend(word for word in operands[operand_start:] if _static_variable_name(word))
     return tuple(assignments), tuple(dict.fromkeys(unsets))
 
@@ -5401,11 +5702,15 @@ def _eval_assignment_transfers(
     return tuple(transfers)
 
 
-def _static_eval_command_names(command: _CommandEvidence) -> tuple[str, ...]:
+def _static_eval_command_names(
+    command: _CommandEvidence,
+    *,
+    limits: TaintLimits,
+) -> tuple[str, ...]:
     """Return exact simple-command heads executed by bounded static eval input."""
     names: list[str] = []
-    for parsed in _static_eval_commands(command):
-        executable = _static_eval_executable(parsed)
+    for parsed in _static_eval_commands(command, limits=limits):
+        executable = _static_eval_executable(parsed, limits=limits)
         if executable is not None and not executable.bypasses_functions:
             names.append(executable.name)
     return tuple(dict.fromkeys(names))
@@ -5440,7 +5745,7 @@ def _unset_function_names(command: _CommandEvidence) -> tuple[str, ...]:
 def _contextualize_evidence(  # noqa: PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> _ShellTaintEvidence:
     """Bind command-local first-pass variable reads before solving global flow tables."""
     if not evidence.scopes:
@@ -5470,7 +5775,11 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         nonlocal contextualization_edges
         contextualization_edges += amount
         if contextualization_edges > limits.max_edges:
-            raise _TaintLimitExceeded("shell taint edge limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.contextualization.edge-limit", "shell taint edge limit exceeded"
+                )
+            )
 
     environments, _parents = _scope_environment_ids(evidence.scopes)
     command_environments, execution_parents, _lastpipe = _execution_environment_ids(evidence)
@@ -5609,7 +5918,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             else command.execution_status
         )
         eval_assignments, eval_unsets = (
-            _static_eval_mutations(resolved) if status is not False else ((), ())
+            _static_eval_mutations(resolved, limits=limits) if status is not False else ((), ())
         )
         # issue #117: a recovered eval assignment used to feed only this command's own
         # exact-literal table below, so it reached AD-18's "a later sink observes it" promise
@@ -5791,7 +6100,9 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         if command.executable.name is not None:
             names.append(command.executable.name)
         names.extend(
-            name for name in _static_eval_command_names(command) if name in definitions_by_name
+            name
+            for name in _static_eval_command_names(command, limits=limits)
+            if name in definitions_by_name
         )
         return tuple(dict.fromkeys(names))
 
@@ -5866,7 +6177,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             ]
             if command.unknown_builtin_content is not None:
                 expressions.append(command.unknown_builtin_content)
-            eval_assignments, _eval_unsets = _static_eval_mutations(command)
+            eval_assignments, _eval_unsets = _static_eval_mutations(command, limits=limits)
             expressions.extend(
                 mutation.eval_content
                 for mutation in eval_assignments
@@ -5946,9 +6257,19 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             return {}
         arguments = positional_call_arguments(command, callee)
         if arguments is None:
-            raise _TaintLimitExceeded("unsupported function positional argument")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.unsupported-call-arguments",
+                    "unsupported function positional argument",
+                )
+            )
         if any(argument.dynamic for argument in arguments):
-            raise _TaintLimitExceeded("dynamic function positional argument")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.dynamic-call-argument",
+                    "dynamic function positional argument",
+                )
+            )
         joined = concat(
             *(
                 part
@@ -5999,7 +6320,11 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             return
         if "IFS" not in values:
             if not default_ifs:
-                raise _TaintLimitExceeded("dynamic function positional IFS")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-positional.dynamic-ifs", "dynamic function positional IFS"
+                    )
+                )
             values["IFS"] = " "
         values[_QUOTED_FUNCTION_POSITIONAL_STAR] = values["IFS"][:1].join(arguments)
 
@@ -6023,14 +6348,29 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             return
         arguments = positional_call_arguments(command, callee)
         if arguments is None:
-            raise _TaintLimitExceeded("unsupported function positional argument")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.unsupported-bind-arguments",
+                    "unsupported function positional argument",
+                )
+            )
         if any(argument.dynamic for argument in arguments):
-            raise _TaintLimitExceeded("dynamic function positional argument")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.dynamic-bind-argument",
+                    "dynamic function positional argument",
+                )
+            )
         exact_arguments: list[str] = []
         for argument in arguments:
             value = exact_literal(argument.content, values)
             if value is None:
-                raise _TaintLimitExceeded("dynamic function positional argument")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-positional.unresolved-bind-value",
+                        "dynamic function positional argument",
+                    )
+                )
             exact_arguments.append(value)
         replace_exact_positionals(values, exact_arguments, callee)
 
@@ -6049,10 +6389,20 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         operands = command.argv[executable_index + 1 :]
         if kind == "shift":
             if len(operands) > 1 or any(operand.dynamic for operand in operands):
-                raise _TaintLimitExceeded("dynamic function positional mutation")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-positional.exact-shift-dynamic-operand",
+                        "dynamic function positional mutation",
+                    )
+                )
             amount_text = operands[0].literal if operands else "1"
             if not amount_text.isdigit():
-                raise _TaintLimitExceeded("dynamic function positional mutation")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-positional.exact-shift-non-numeric",
+                        "dynamic function positional mutation",
+                    )
+                )
             digits = amount_text.lstrip("0") or "0"
             maximum = str(len(arguments))
             if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
@@ -6062,14 +6412,29 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             return
         set_operands, unknown = positional_set_operands(command)
         if unknown or set_operands is None:
-            raise _TaintLimitExceeded("dynamic function positional mutation")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.function-positional.exact-set-unknown-operands",
+                    "dynamic function positional mutation",
+                )
+            )
         exact_arguments = []
         for operand in set_operands:
             if operand.dynamic:
-                raise _TaintLimitExceeded("dynamic function positional mutation")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-positional.exact-set-dynamic-operand",
+                        "dynamic function positional mutation",
+                    )
+                )
             value = exact_literal(operand.content, values)
             if value is None:
-                raise _TaintLimitExceeded("dynamic function positional mutation")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-positional.exact-set-unresolved-value",
+                        "dynamic function positional mutation",
+                    )
+                )
             exact_arguments.append(value)
         replace_exact_positionals(values, exact_arguments, context)
 
@@ -6114,7 +6479,12 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                     values = exact_call_values(command, caller_values, context)
                     variants.setdefault(exact_variant_identity(values), values)
             if len(variants) > limits.max_alternatives:
-                raise _TaintLimitExceeded("shell taint alternative limit exceeded")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.contextualization.entry-alternative-limit",
+                        "shell taint alternative limit exceeded",
+                    )
+                )
             candidate = tuple(variants.values())
             if tuple(map(exact_variant_identity, candidate)) == tuple(
                 map(exact_variant_identity, exact_entry_variants[context])
@@ -6124,7 +6494,10 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             exact_entry_updates += 1
             if exact_entry_updates > limits.max_fixed_point_updates:
                 raise _TaintLimitExceeded(
-                    "shell taint contextualization fixed-point update limit exceeded"
+                    GuardRefusal(
+                        "taint.contextualization.entry-fixed-point-limit",
+                        "shell taint contextualization fixed-point update limit exceeded",
+                    )
                 )
             changed = True
 
@@ -6178,17 +6551,32 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 operands = command.argv[executable_index + 1 :]
                 if kind == "shift":
                     if len(operands) > 1 or any(operand.dynamic for operand in operands):
-                        raise _TaintLimitExceeded("dynamic function positional mutation")
+                        raise _TaintLimitExceeded(
+                            GuardRefusal(
+                                "taint.function-positional.effect-shift-dynamic-operand",
+                                "dynamic function positional mutation",
+                            )
+                        )
                     amount_text = operands[0].literal if operands else "1"
                     if not amount_text.isdigit() or len(amount_text) > _MAX_BRACE_INTEGER_DIGITS:
-                        raise _TaintLimitExceeded("dynamic function positional mutation")
+                        raise _TaintLimitExceeded(
+                            GuardRefusal(
+                                "taint.function-positional.effect-shift-non-numeric",
+                                "dynamic function positional mutation",
+                            )
+                        )
                     amount = int(amount_text)
                     if effect_positional_arguments is None:
                         argument_counts: set[int] = set()
                         for call in preliminary_call_sites.get(effect_context, ()):
                             arguments = positional_call_arguments(call, effect_context)
                             if arguments is None or any(argument.dynamic for argument in arguments):
-                                raise _TaintLimitExceeded("dynamic function positional mutation")
+                                raise _TaintLimitExceeded(
+                                    GuardRefusal(
+                                        "taint.function-positional.effect-shift-unknown-arguments",
+                                        "dynamic function positional mutation",
+                                    )
+                                )
                             argument_counts.add(len(arguments))
                         if argument_counts and all(
                             count >= effect_shift_offset + amount for count in argument_counts
@@ -6197,13 +6585,23 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                         elif any(
                             count >= effect_shift_offset + amount for count in argument_counts
                         ):
-                            raise _TaintLimitExceeded("dynamic function positional mutation")
+                            raise _TaintLimitExceeded(
+                                GuardRefusal(
+                                    "taint.function-positional.effect-shift-underflow",
+                                    "dynamic function positional mutation",
+                                )
+                            )
                     elif amount <= len(effect_positional_arguments):
                         effect_positional_arguments = effect_positional_arguments[amount:]
                     return
                 set_operands, dynamic = positional_set_operands(command)
                 if dynamic or set_operands is None:
-                    raise _TaintLimitExceeded("dynamic function positional mutation")
+                    raise _TaintLimitExceeded(
+                        GuardRefusal(
+                            "taint.function-positional.effect-set-unknown-operands",
+                            "dynamic function positional mutation",
+                        )
+                    )
                 effect_positional_arguments = tuple(operand.content for operand in set_operands)
                 effect_shift_offset = 0
 
@@ -6218,6 +6616,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 content = _substitute_local_contents(
                     assignment.content,
                     contents,
+                    limits,
                 )
                 resolved = replace(assignment, content=content)
                 if conditional:
@@ -6257,7 +6656,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                         for assignment in command.builtin_assignments
                     ),
                 )
-                eval_assignments, eval_unsets = _static_eval_mutations(command)
+                eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
                 eval_assignments = (*eval_assignments, *_eval_assignment_transfers(command))
                 for assignment, local in assignments:
                     resolved_effect_assignment = replace(
@@ -6282,6 +6681,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                             content=_substitute_local_contents(
                                 resolved_effect_assignment.content,
                                 local_contents,
+                                limits,
                             ),
                         )
                         value = exact_literal(resolved_assignment.content, local_values)
@@ -6335,6 +6735,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                             content=_substitute_local_contents(
                                 assignment.content,
                                 local_contents,
+                                limits,
                             ),
                         )
                         value = exact_literal(assignment.content, local_values)
@@ -6382,6 +6783,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                                         effect_shift_offset,
                                     ),
                                     local_contents,
+                                    limits,
                                 ),
                             )
                             apply_exact_assignment(
@@ -6398,6 +6800,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                                     content=_substitute_local_contents(
                                         assignment.content,
                                         local_contents,
+                                        limits,
                                     ),
                                 )
                                 value = exact_literal(assignment.content, callee_values)
@@ -6421,7 +6824,12 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                         unknown = unknown or callee in exact_effect_unknown
                 apply_effect_positional_mutation(command)
                 if len(effects) > limits.max_edges:
-                    raise _TaintLimitExceeded("shell taint edge limit exceeded")
+                    raise _TaintLimitExceeded(
+                        GuardRefusal(
+                            "taint.contextualization.effect-edge-limit",
+                            "shell taint edge limit exceeded",
+                        )
+                    )
             frozen_effects = tuple(effects)
             if frozen_effects != exact_effects[context]:
                 exact_effects[context] = frozen_effects
@@ -6433,7 +6841,10 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 changed = True
             if exact_effect_updates > limits.max_fixed_point_updates:
                 raise _TaintLimitExceeded(
-                    "shell taint contextualization fixed-point update limit exceeded"
+                    GuardRefusal(
+                        "taint.contextualization.effect-fixed-point-limit",
+                        "shell taint contextualization fixed-point update limit exceeded",
+                    )
                 )
 
     call_time_values = {
@@ -6450,7 +6861,12 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             # and non-authored, so `set -- "$M"; "$1"` has to fail closed the same way the
             # function form already does.
             if positional_mutation_kind(command) is not None:
-                raise _TaintLimitExceeded("dynamic top-level positional mutation")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.top-level-positional.dynamic-mutation",
+                        "dynamic top-level positional mutation",
+                    )
+                )
             call_time_resolved_commands.append(command)
             continue
         states = call_time_values.setdefault(context, [])
@@ -6507,7 +6923,9 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                     if assignment_only
                     else command.builtin_assignments
                 )
-                eval_assignments, eval_unsets = _static_eval_mutations(resolved_variant)
+                eval_assignments, eval_unsets = _static_eval_mutations(
+                    resolved_variant, limits=limits
+                )
                 for assignment in (
                     *assignments,
                     *(mutation.assignment for mutation in eval_assignments),
@@ -6562,7 +6980,12 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 apply_exact_positional_mutation(command, updated, context)
             next_states.setdefault(exact_variant_identity(updated), updated)
         if len(next_states) > limits.max_alternatives:
-            raise _TaintLimitExceeded("shell taint alternative limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.contextualization.state-alternative-limit",
+                    "shell taint alternative limit exceeded",
+                )
+            )
         call_time_values[context] = list(next_states.values())
         if not programs:
             programs.update(_static_eval_programs(command))
@@ -6661,7 +7084,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if assignment_only
             else command.builtin_assignments
         )
-        eval_assignments, eval_unsets = _static_eval_mutations(command)
+        eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
         assignments = (
             *assignments,
             *command.assignments,
@@ -6841,7 +7264,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
             if assignment_only
             else command.builtin_assignments
         )
-        eval_assignments, eval_unsets = _static_eval_mutations(command)
+        eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
         for assignment in (
             *assignments,
             *(mutation.assignment for mutation in eval_assignments),
@@ -7150,7 +7573,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 for assignment in command.builtin_assignments
                 if _scoped_variable_environment(assignment.name) != context
             )
-            eval_assignments, eval_unsets = _static_eval_mutations(original)
+            eval_assignments, eval_unsets = _static_eval_mutations(original, limits=limits)
             for mutation in eval_assignments:
                 assignments.extend(
                     assignment
@@ -7242,13 +7665,23 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 charge_edges(len(nested))
                 assignment_stack[-1].extend(nested)
                 continue
-            if len(context_stack) - 1 >= _MAX_FUNCTION_EFFECT_DEPTH:
-                raise _TaintLimitExceeded("shell taint function effect depth limit exceeded")
+            if len(context_stack) - 1 >= limits.max_function_effect_depth:
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.function-effects.depth-limit",
+                        "shell taint function effect depth limit exceeded",
+                    )
+                )
             context_stack.append(segment)
             active_stack.append(active_stack[-1] | {segment})
             index_stack.append(0)
             assignment_stack.append([])
-        raise _MalformedTaintEvidence("shell function effects cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.function-effects.unstructured-segment",
+                "shell function effects cannot be structured",
+            )
+        )
 
     effects_by_context = {
         context: (
@@ -7372,7 +7805,7 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
 def _build_flow_definitions(  # noqa: PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> tuple[_FlowDefinitions, dict[int, ContentExpr]]:
     """Lower typed shell evidence into fixed-point definitions and command stdin."""
     environments, _lexical_parents = _scope_environment_ids(evidence.scopes)
@@ -7419,9 +7852,18 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
 
     def append_variable_write(write: _FlowWrite) -> None:
         if len(variable_writes) >= limits.max_edges:
-            raise _TaintLimitExceeded("shell taint edge limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.flow-build.variable-write-edge-limit", "shell taint edge limit exceeded"
+                )
+            )
         if write.key not in variable_keys and len(variable_keys) >= limits.max_table_entries:
-            raise _TaintLimitExceeded("shell taint table entry limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.flow-build.variable-key-table-limit",
+                    "shell taint table entry limit exceeded",
+                )
+            )
         variable_writes.append(write)
         variable_keys.add(write.key)
 
@@ -7557,6 +7999,7 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
                 inherited_bindings,
                 guarded_descriptors,
                 scoped=scoped_variables,
+                limits=limits,
             )
         )
 
@@ -7665,7 +8108,6 @@ _EVAL_UNICODE_MAX = 0x10FFFF
 _EVAL_SURROGATE_MIN = 0xD800
 _EVAL_SURROGATE_MAX = 0xDFFF
 _EVAL_SPECIAL_PARAMETERS = frozenset("@*#?-$!0123456789")
-_EVAL_COMMAND_SUBSTITUTION_REASON = "shell taint eval command substitution cannot be bounded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -7696,7 +8138,10 @@ class _EvalSyntaxState:
         """
         if not self.summary.literal_texts and not self.summary.projection_incomplete:
             raise _MalformedTaintEvidence(
-                "shell taint eval syntax state cleared literal projection without widening"
+                GuardRefusal(
+                    "taint.eval-syntax.cleared-projection-without-widening",
+                    "shell taint eval syntax state cleared literal projection without widening",
+                )
             )
 
 
@@ -7802,7 +8247,12 @@ class _EvalSyntaxContext:
         ):
             return cached[3]
         if len(self.variable_overlays) >= self.limits.max_table_entries:
-            raise _TaintLimitExceeded("shell taint eval syntax variable table limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-syntax.variable-overlay-table-limit",
+                    "shell taint eval syntax variable table limit exceeded",
+                )
+            )
         local_variables: dict[str | int, _ContentValue] = dict(state.local_variables)
         environment_variables: dict[str | int, _ContentValue] = dict(state.environment_variables)
         fixed_point_overrides: dict[str | int, _ContentValue] = dict(state.fixed_point_overrides)
@@ -7831,7 +8281,7 @@ def _eval_syntax_programs(writes: tuple[_FlowWrite, ...]) -> _EvalSyntaxPrograms
 
 def _eval_reparse_content(
     expression: ContentExpr,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> ContentExpr:
     """Interpret the minimal shell syntax that ``eval`` reparses from literal content."""
     branches = _eval_reparse_branches(expression, quote=None, depth=0, limits=limits)
@@ -7847,7 +8297,12 @@ def _eval_reparse_branches(
 ) -> list[tuple[ContentExpr, str | None]]:
     """Reparse content while retaining quote state across symbolic expression boundaries."""
     if depth > limits.max_eval_reparse_depth:
-        raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-reparse.branch-depth-limit",
+                "shell taint eval reparse depth limit exceeded",
+            )
+        )
     if isinstance(expression, LiteralTransfer):
         parsed, resulting_quote = _eval_reparse_literal(expression.text, quote, limits)
         return [(parsed, resulting_quote)]
@@ -7864,7 +8319,12 @@ def _eval_reparse_branches(
                 ):
                     expanded.append((concat(prefix, suffix), resulting_quote))
                     if len(expanded) > limits.max_eval_reparse_branches:
-                        raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
+                        raise _TaintLimitExceeded(
+                            GuardRefusal(
+                                "taint.eval-reparse.expanded-branch-limit",
+                                "shell taint eval reparse branch limit exceeded",
+                            )
+                        )
             branches = expanded
         return branches
     if isinstance(expression, Choice):
@@ -7879,7 +8339,12 @@ def _eval_reparse_branches(
                 )
             )
             if len(branches) > limits.max_eval_reparse_branches:
-                raise _TaintLimitExceeded("shell taint eval reparse branch limit exceeded")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-reparse.merged-branch-limit",
+                        "shell taint eval reparse branch limit exceeded",
+                    )
+                )
         return branches
     return [(expression, quote)]
 
@@ -7912,7 +8377,12 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
 ) -> tuple[tuple[_ContentToken, ...], str | None, str]:
     """Tokenize eval text while retaining active brace and quote provenance."""
     if depth > limits.max_eval_reparse_depth:
-        raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-reparse.stream-depth-limit",
+                "shell taint eval reparse depth limit exceeded",
+            )
+        )
     tokens: list[_ContentToken] = []
     index = 0
 
@@ -7965,11 +8435,21 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
                 and defer_incomplete_parameter
             ):
                 return tuple(tokens), quote, text[index:]
-            raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-reparse.dollar-command-substitution",
+                    "shell taint eval command substitution cannot be bounded",
+                )
+            )
         if character == "`":
             if _eval_backtick_closing(text, index) is None and defer_incomplete_parameter:
                 return tuple(tokens), quote, text[index:]
-            raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-reparse.backquote-substitution",
+                    "shell taint eval command substitution cannot be bounded",
+                )
+            )
         if character == "$":
             if index + 1 == len(text) and defer_incomplete_parameter:
                 return tuple(tokens), quote, text[index:]
@@ -8009,7 +8489,7 @@ def _eval_reparse_tokens_streaming(  # noqa: PLR0912, PLR0915
 def _eval_reparse_literal(
     text: str,
     quote: str | None,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> tuple[ContentExpr, str | None]:
     """Reparse quote, escape, parameter, and bounded brace syntax."""
     tokens, resulting_quote = _eval_reparse_tokens(text, quote, limits)
@@ -8026,7 +8506,12 @@ def _eval_command_substitution_closing(
 ) -> int | None:
     """Return the balanced closing parenthesis for one active eval-time ``$(...)``."""
     if depth > limits.max_eval_reparse_depth:
-        raise _TaintLimitExceeded(_EVAL_COMMAND_SUBSTITUTION_REASON)
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-reparse.closing-depth-limit",
+                "shell taint eval command substitution cannot be bounded",
+            )
+        )
     index = start + 2
     parentheses = 1
     quote: str | None = None
@@ -8228,7 +8713,11 @@ def _eval_ansi_c_literal(text: str, start: int) -> tuple[str, int]:
             continue
         decoded, index = _eval_ansi_c_escape(text, index + 1)
         characters.append(decoded)
-    raise _TaintLimitExceeded("unterminated eval ANSI-C quoted literal")
+    raise _TaintLimitExceeded(
+        GuardRefusal(
+            "taint.eval-ansi-c.unterminated-literal", "unterminated eval ANSI-C quoted literal"
+        )
+    )
 
 
 def _eval_ansi_c_escape(text: str, start: int) -> tuple[str, int]:  # noqa: PLR0911
@@ -8287,7 +8776,12 @@ def _eval_ansi_c_character(value: int) -> str:
         or value > _EVAL_UNICODE_MAX
         or _EVAL_SURROGATE_MIN <= value <= _EVAL_SURROGATE_MAX
     ):
-        raise _TaintLimitExceeded("eval ANSI-C escape cannot be represented")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-ansi-c.unrepresentable-codepoint",
+                "eval ANSI-C escape cannot be represented",
+            )
+        )
     return chr(value)
 
 
@@ -8387,7 +8881,12 @@ def _merge_eval_syntax_states(states: Iterable[_EvalSyntaxState]) -> _EvalSyntax
 def _cap_eval_syntax(value: _EvalSyntaxValue, limits: TaintLimits) -> _EvalSyntaxValue:
     merged = _merge_eval_syntax_states(value)
     if len(merged) > limits.max_alternatives:
-        raise _TaintLimitExceeded("shell taint eval syntax alternative limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.alternative-limit",
+                "shell taint eval syntax alternative limit exceeded",
+            )
+        )
     return merged
 
 
@@ -8439,7 +8938,11 @@ def _eval_syntax_record_assignment(
     evidence = _AssignmentEvidence(assignment.name, content)
     assignments = (*state.conditional_assignments, evidence)
     if len(assignments) > limits.max_edges:
-        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.record-assignment-edge-limit", "shell taint edge limit exceeded"
+            )
+        )
     return replace(state, conditional_assignments=assignments)
 
 
@@ -8452,7 +8955,11 @@ def _eval_syntax_record_decision(
     """Retain one parameter-operator branch for correlated enclosing operands."""
     decisions = (*state.conditional_decisions, (assignment, taken))
     if len(decisions) > limits.max_edges:
-        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.record-decision-edge-limit", "shell taint edge limit exceeded"
+            )
+        )
     return replace(state, conditional_decisions=decisions)
 
 
@@ -8527,7 +9034,11 @@ def _eval_syntax_merge_assignments(
     """Join sequential taken assignment branches without exceeding discovery bounds."""
     assignments = (*left, *right)
     if len(assignments) > limits.max_edges:
-        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.merge-assignment-edge-limit", "shell taint edge limit exceeded"
+            )
+        )
     return assignments
 
 
@@ -8539,7 +9050,11 @@ def _eval_syntax_merge_decisions(
     """Join sequential parameter branch decisions under the shared edge cap."""
     decisions = (*left, *right)
     if len(decisions) > limits.max_edges:
-        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.merge-decision-edge-limit", "shell taint edge limit exceeded"
+            )
+        )
     return decisions
 
 
@@ -8652,12 +9167,22 @@ def _eval_syntax_token(  # noqa: PLR0911, PLR0912
     if state.brace_tokens:
         brace_tokens = (*state.brace_tokens, token)
         if len(brace_tokens) > limits.max_expression_nodes:
-            raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-syntax.brace-token-node-limit",
+                    "shell taint expression node limit exceeded",
+                )
+            )
         brace_depth = state.brace_depth
         if _active_character(token, "{"):
             brace_depth += 1
             if brace_depth > limits.max_brace_depth:
-                raise _TaintLimitExceeded("shell taint brace expansion depth limit exceeded")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-syntax.brace-depth-limit",
+                        "shell taint brace expansion depth limit exceeded",
+                    )
+                )
         elif _active_character(token, "}"):
             brace_depth -= 1
         if brace_depth:
@@ -8748,11 +9273,21 @@ def _eval_syntax_variable_transition(
         context.inherit_observations(cached.observed)
         return cached.value
     if key in context.active_transitions:
-        raise _TaintLimitExceeded("shell taint eval syntax fixed-point update limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.transition-reentry",
+                "shell taint eval syntax fixed-point update limit exceeded",
+            )
+        )
     program = context.programs.get(name)
     if program is None:
         if state.parameter_text:
-            raise _TaintLimitExceeded("shell taint eval parameter expansion cannot be bounded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-syntax.unbounded-parameter-program",
+                    "shell taint eval parameter expansion cannot be bounded",
+                )
+            )
         return _eval_syntax_token(
             state,
             _ContentToken(OutsideGap(), "", False),
@@ -8766,7 +9301,12 @@ def _eval_syntax_variable_transition(
         observed = context.end_observations()
         context.active_transitions.remove(key)
     if len(context.transitions) >= context.limits.max_table_entries:
-        raise _TaintLimitExceeded("shell taint eval syntax transition table limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.transition-table-limit",
+                "shell taint eval syntax transition table limit exceeded",
+            )
+        )
     context.transitions[key] = _EvalSyntaxTransition(value, observed)
     return value
 
@@ -8817,7 +9357,10 @@ def _replay_eval_syntax_program(
             context.transition_updates += 1
             if context.transition_updates > context.limits.max_fixed_point_updates:
                 raise _TaintLimitExceeded(
-                    "shell taint eval syntax fixed-point update limit exceeded"
+                    GuardRefusal(
+                        "taint.eval-syntax.replay-fixed-point-limit",
+                        "shell taint eval syntax fixed-point update limit exceeded",
+                    )
                 )
             changed = True
     return value
@@ -8832,7 +9375,12 @@ def _eval_syntax_append(
 ) -> _EvalSyntaxValue:
     """Append authored eval syntax to one bounded streaming parse state."""
     if depth > context.limits.max_eval_reparse_depth:
-        raise _TaintLimitExceeded("shell taint eval reparse depth limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-syntax.append-depth-limit",
+                "shell taint eval reparse depth limit exceeded",
+            )
+        )
     if isinstance(expression, LiteralTransfer):
         tokens, resulting_quote, pending_parameter = _eval_reparse_tokens_streaming(
             f"{state.parameter_text}{expression.text}",
@@ -8867,7 +9415,10 @@ def _eval_syntax_append(
         if transition_key in context.active_transitions:
             if state.brace_tokens or state.parameter_text:
                 raise _TaintLimitExceeded(
-                    "shell taint eval syntax fixed-point update limit exceeded"
+                    GuardRefusal(
+                        "taint.eval-syntax.append-transition-reentry",
+                        "shell taint eval syntax fixed-point update limit exceeded",
+                    )
                 )
             slot = (expression.name, state.quote)
             context.observe_slot(slot)
@@ -8912,7 +9463,12 @@ def _eval_syntax_append(
         )
     if isinstance(expression, OutsideGap | ResourceRef | StreamRef):
         if state.parameter_text:
-            raise _TaintLimitExceeded("shell taint eval parameter expansion cannot be bounded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-syntax.append-unbounded-expansion",
+                    "shell taint eval parameter expansion cannot be bounded",
+                )
+            )
         return _eval_syntax_token(
             state,
             _ContentToken(expression, "", False),
@@ -8934,7 +9490,12 @@ def _eval_syntax_append(
         # Returning the outside value here would discard the incoming state, including a marker
         # prefix already accumulated, and read as "no marker". An unhandled node type is missing
         # evidence, so it has to fail closed like every other unrepresentable shape.
-        raise _MalformedTaintEvidence("shell taint eval syntax expression cannot be structured")
+        raise _MalformedTaintEvidence(
+            GuardRefusal(
+                "taint.eval-syntax.append-non-concat",
+                "shell taint eval syntax expression cannot be structured",
+            )
+        )
     value = frozenset({state})
     for part in _coalesced_eval_parts(expression.parts):
         value = _cap_eval_syntax(
@@ -9163,7 +9724,10 @@ def _solve_eval_syntax_variables(
                 updates += 1
                 if updates > limits.max_fixed_point_updates:
                     raise _TaintLimitExceeded(
-                        "shell taint eval syntax fixed-point update limit exceeded"
+                        GuardRefusal(
+                            "taint.eval-syntax.solve-fixed-point-limit",
+                            "shell taint eval syntax fixed-point update limit exceeded",
+                        )
                     )
                 changed = True
     return variables
@@ -9184,7 +9748,7 @@ def _builtin_eval_candidates(command: _CommandEvidence) -> tuple[_ExecutableEvid
 
 def _eval_content_dependencies(
     expression: ContentExpr,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
+    limits: TaintLimits,
 ) -> set[str]:
     """Collect variable names that can enter eval syntax from one authored expression."""
     names: set[str] = set()
@@ -9814,7 +10378,11 @@ def _append_eval_conditional_writes(  # noqa: PLR0913
             )
         )
     if len(lowered) > limits.max_edges:
-        raise _TaintLimitExceeded("shell taint edge limit exceeded")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.eval-conditional-writes.edge-limit", "shell taint edge limit exceeded"
+            )
+        )
 
 
 def _eval_conditional_variable_writes(
@@ -9863,12 +10431,21 @@ class _EvalDiscoveryBudget:
     def charge_work(self, amount: int = 1) -> None:
         self.work += amount
         if self.work > self.limits.max_expression_nodes:
-            raise _TaintLimitExceeded("shell taint expression node limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-discovery.work-limit", "shell taint expression node limit exceeded"
+                )
+            )
 
     def charge_update(self, amount: int = 1) -> None:
         self.updates += amount
         if self.updates > self.limits.max_fixed_point_updates:
-            raise _TaintLimitExceeded("shell taint fixed-point update limit exceeded")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.eval-discovery.update-limit",
+                    "shell taint fixed-point update limit exceeded",
+                )
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -10277,7 +10854,7 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
                         definite=False,
                     )
         unset_names, unknown_unset_target = _unset_action(command)
-        _eval_assignments, eval_unsets = _static_eval_mutations(command)
+        _eval_assignments, eval_unsets = _static_eval_mutations(command, limits=limits)
         unset_names = (*unset_names, *eval_unsets)
         if unknown_unset_target:
             persistent_set.clear()
@@ -10612,6 +11189,8 @@ def _eval_sink_marker_capable(
     command: _CommandEvidence,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> bool:
     """Return whether any builtin eval candidate reparses an authored marker flow."""
     for executable in _builtin_eval_candidates(command):
@@ -10650,11 +11229,7 @@ def _eval_sink_marker_capable(
                 )
             ):
                 return True
-        if _static_eval_prefix_sink_marker_capable(
-            command,
-            context,
-            environment,
-        ):
+        if _static_eval_prefix_sink_marker_capable(command, context, environment, limits=limits):
             return True
     return False
 
@@ -10663,22 +11238,29 @@ def _static_eval_prefix_sink_marker_capable(  # noqa: PLR0912
     command: _CommandEvidence,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> bool:
     """Check exact eval sinks under temporary leading assignment environments."""
     outer_variables: Mapping[str | int, _ContentValue] = ChainMap(
         dict(environment.fixed_point_overrides),
         context.raw_variables,
     )
-    for parsed in _static_eval_commands(command):
+    for parsed in _static_eval_commands(command, limits=limits):
         index = 0
         prefix_variables: dict[str | int, _ContentValue] = {}
         while index < len(parsed.words):
             assignment = _static_assignment_word(parsed.words[index])
             if assignment is None:
                 break
-            content = _static_eval_assignment_content(parsed.source_words[index])
+            content = _static_eval_assignment_content(parsed.source_words[index], limits=limits)
             if content is None:
-                raise _TaintLimitExceeded("shell taint eval command prefix cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.eval-prefix.unrepresentable-content",
+                        "shell taint eval command prefix cannot be represented",
+                    )
+                )
             prefix_variables[assignment.name] = _evaluate_with_tables(
                 content,
                 ChainMap(prefix_variables, outer_variables),
@@ -11160,7 +11742,8 @@ def _child_shell_payload_assignments(
     if payload is None:
         return ()
     mutations, _unsets = _static_eval_mutations(
-        replace(command, resolved_eval_program=None, resolved_eval_programs=(payload,))
+        replace(command, resolved_eval_program=None, resolved_eval_programs=(payload,)),
+        limits=limits,
     )
     return tuple(
         replace(
@@ -11206,7 +11789,12 @@ def _child_shell_positional_environment(
     if not operands:
         return environment
     if len(operands) > context.limits.max_table_entries:
-        raise _TaintLimitExceeded("shell payload positional operands cannot be represented")
+        raise _TaintLimitExceeded(
+            GuardRefusal(
+                "taint.child-shell.positional-operand-limit",
+                "shell payload positional operands cannot be represented",
+            )
+        )
     inherited: Mapping[str | int, _ContentValue] = ChainMap(
         dict(environment.fixed_point_overrides),
         dict(environment.variables),
@@ -11228,6 +11816,8 @@ def _child_shell_assignment_environment(
     payload_index: int,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> _EvalCommandEnvironment | None:
     """Return the payload environment with the payload's own assignments applied.
 
@@ -11246,7 +11836,7 @@ def _child_shell_assignment_environment(
     Returns:
         The environment the payload's own assignments produce, or None when it assigns nothing.
     """
-    assignments = _child_shell_payload_assignments(command, payload_index, context.limits)
+    assignments = _child_shell_payload_assignments(command, payload_index, limits)
     if not assignments:
         return None
     overrides: dict[str | int, _ContentValue] = dict(environment.fixed_point_overrides)
@@ -11311,6 +11901,8 @@ def _shell_command_payload_marker_capable(
     stdin: ContentExpr,
     context: _EvalSyntaxContext,
     environment: _EvalCommandEnvironment,
+    *,
+    limits: TaintLimits,
 ) -> bool:
     """Return whether a shell ``-c`` payload composes the marker through its own expansion.
 
@@ -11373,7 +11965,7 @@ def _shell_command_payload_marker_capable(
                 # This is the same recovery the ``-c`` payload gets, and it may raise on state
                 # this analysis cannot represent, so it runs only after the plain parse declined.
                 assigned = _child_shell_assignment_environment(
-                    command, action_index, context, environment
+                    command, action_index, context, environment, limits=limits
                 )
                 if assigned is not None and _payload_second_parse_marker_capable(
                     action, context, assigned
@@ -11400,7 +11992,9 @@ def _shell_command_payload_marker_capable(
             )
             if _payload_second_parse_marker_capable(payload, context, positional):
                 return True
-            assigned = _child_shell_assignment_environment(command, index, context, positional)
+            assigned = _child_shell_assignment_environment(
+                command, index, context, positional, limits=limits
+            )
             if assigned is not None and _payload_second_parse_marker_capable(
                 payload, context, assigned
             ):
@@ -12892,21 +13486,40 @@ def _sink_expressions(
 def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
     evidence: _ShellTaintEvidence,
     *,
-    limits: TaintLimits = TaintLimits(),  # noqa: B008
-) -> tuple[bool, str | None]:
-    """Return a fail-closed verdict for authored marker flow in one run body."""
+    limits: TaintLimits = TaintLimits(),  # noqa: B008 - immutable limits value object
+) -> ScanVerdict:
+    """Return a discriminated verdict for authored marker flow in one run body.
+
+    Args:
+        evidence: Frozen structured evidence for one run body.
+        limits: Deterministic caps for this pass.
+
+    Returns:
+        `Certified` when no authored marker flow reaches an execution sink,
+        `MarkerDetected` when it does, or the originating `GuardRefusal` when a
+        fail-closed bound stopped the analysis first.
+    """
     if any(scope.kind not in _STREAM_SCOPE_KINDS for scope in evidence.scopes):
-        return True, "shell taint stream scope cannot be structured"
+        return GuardRefusal(
+            "taint.evidence.stream-scope-kind",
+            "shell taint stream scope cannot be structured",
+        )
     if any(
         (pipe.consumer_command_id is None) == (pipe.consumer_scope_id is None)
         for pipe in evidence.pipes
     ):
-        return True, "shell taint pipe cannot be structured"
+        return GuardRefusal(
+            "taint.evidence.pipe-consumer-arity",
+            "shell taint pipe cannot be structured",
+        )
     if any(
         resource.direction not in _PROCESS_RESOURCE_DIRECTIONS
         for resource in evidence.process_resources
     ):
-        return True, "shell taint process resource cannot be structured"
+        return GuardRefusal(
+            "taint.evidence.process-resource-direction",
+            "shell taint process resource cannot be structured",
+        )
     evidence_edges = (
         len(evidence.pipes)
         + len(evidence.process_resources)
@@ -12914,7 +13527,10 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
         + sum(len(scope.redirections) for scope in evidence.scopes)
     )
     if evidence_edges > limits.max_edges:
-        return True, "shell taint edge limit exceeded"
+        return GuardRefusal(
+            "taint.evidence.edge-limit",
+            "shell taint edge limit exceeded",
+        )
     evidence_entries = (
         len(evidence.commands)
         + len(evidence.scopes)
@@ -12922,7 +13538,10 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
         + sum(_executable_alternate_count(command.executable) for command in evidence.commands)
     )
     if evidence_entries > limits.max_table_entries:
-        return True, "shell taint table entry limit exceeded"
+        return GuardRefusal(
+            "taint.evidence.table-entry-limit",
+            "shell taint table entry limit exceeded",
+        )
 
     try:
         _validate_nested_evidence(evidence, limits)
@@ -12946,11 +13565,21 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
             )
         evidence = _resolve_builtin_writer_evidence(evidence, limits)
         if any(command.unsupported_builtin_write for command in evidence.commands):
-            raise _TaintLimitExceeded("shell builtin writer cannot be represented")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.builtin-writer.unsupported-before-context",
+                    "shell builtin writer cannot be represented",
+                )
+            )
         evidence = _contextualize_evidence(evidence, limits=limits)
         evidence = _route_runtime_nameref_writes(evidence, limits)
         if any(command.unsupported_builtin_write for command in evidence.commands):
-            raise _TaintLimitExceeded("shell builtin writer cannot be represented")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.builtin-writer.unsupported-after-nameref-routing",
+                    "shell builtin writer cannot be represented",
+                )
+            )
         definitions, inputs = _build_flow_definitions(evidence, limits=limits)
         (
             command_environment_ids,
@@ -13001,10 +13630,11 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 command,
                 ordered_eval_context,
                 command_environments[command.command_id],
+                limits=limits,
             )
             for command in eval_commands
         ):
-            return True, TAINT_REFUSAL_REASON
+            return MarkerDetected()
         eval_context = _EvalSyntaxContext(
             eval_syntax_variables,
             solved.variables,
@@ -13016,19 +13646,18 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
         }
         for command in evidence.commands:
             if command in eval_commands and _eval_sink_marker_capable(
-                command,
-                eval_context,
-                command_environments[command.command_id],
+                command, eval_context, command_environments[command.command_id], limits=limits
             ):
-                return True, TAINT_REFUSAL_REASON
+                return MarkerDetected()
             stdin = inputs[command.command_id]
             if _shell_command_payload_marker_capable(
                 command,
                 stdin,
                 eval_context,
                 command_environments[command.command_id],
+                limits=limits,
             ):
-                return True, TAINT_REFUSAL_REASON
+                return MarkerDetected()
             sink_variables: Mapping[str | int, _ContentValue] = ChainMap(
                 dict(command_environments[command.command_id].fixed_point_overrides),
                 solved.variables,
@@ -13054,7 +13683,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                         limits,
                     )
                 ):
-                    return True, TAINT_REFUSAL_REASON
+                    return MarkerDetected()
             if _source_payload_state_unrepresentable(
                 command,
                 sink_variables,
@@ -13062,7 +13691,12 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 solved.streams,
                 limits,
             ):
-                raise _TaintLimitExceeded("shell source payload state cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.source.payload-state",
+                        "shell source payload state cannot be represented",
+                    )
+                )
             if _source_glob_operand_state_unrepresentable(
                 command,
                 sink_variables,
@@ -13070,9 +13704,19 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 solved.streams,
                 limits,
             ):
-                raise _TaintLimitExceeded("shell source glob operand state cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.source.glob-operand-state",
+                        "shell source glob operand state cannot be represented",
+                    )
+                )
             if _glob_script_operand_state_unrepresentable(command, solved.resources, limits):
-                raise _TaintLimitExceeded("shell glob script operand state cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.glob-script.operand-state",
+                        "shell glob script operand state cannot be represented",
+                    )
+                )
             if _shell_script_operand_state_unrepresentable(
                 command,
                 sink_variables,
@@ -13080,7 +13724,12 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 solved.streams,
                 limits,
             ):
-                raise _TaintLimitExceeded("shell script operand state cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.shell-script.operand-state",
+                        "shell script operand state cannot be represented",
+                    )
+                )
             if _shell_script_positional_state_unrepresentable(
                 command,
                 sink_variables,
@@ -13088,7 +13737,12 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 solved.streams,
                 limits,
             ):
-                raise _TaintLimitExceeded("shell script positional state cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.shell-script.positional-state",
+                        "shell script positional state cannot be represented",
+                    )
+                )
             if _launcher_shell_positional_state_unrepresentable(
                 command,
                 stdin,
@@ -13098,7 +13752,10 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 limits,
             ):
                 raise _TaintLimitExceeded(
-                    "launcher-fed shell positional state cannot be represented"
+                    GuardRefusal(
+                        "taint.launcher-shell.positional-state",
+                        "launcher-fed shell positional state cannot be represented",
+                    )
                 )
             if _bash_env_shell_source_unrepresentable(
                 command,
@@ -13107,9 +13764,19 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 solved.streams,
                 limits,
             ):
-                raise _TaintLimitExceeded("shell BASH_ENV source state cannot be represented")
+                raise _TaintLimitExceeded(
+                    GuardRefusal(
+                        "taint.bash-env.source-state",
+                        "shell BASH_ENV source state cannot be represented",
+                    )
+                )
         if any(_printf_b_unrepresentable(command, limits) for command in evidence.commands):
-            raise _TaintLimitExceeded("dynamic printf %b output cannot be represented")
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.printf-b.unrepresentable-output",
+                    "dynamic printf %b output cannot be represented",
+                )
+            )
     except (_MalformedTaintEvidence, _TaintLimitExceeded) as error:
-        return True, str(error)
-    return False, None
+        return error.refusal
+    return Certified()

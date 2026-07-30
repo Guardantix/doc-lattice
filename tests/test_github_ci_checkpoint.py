@@ -1,11 +1,35 @@
 """Integrity gates for the issue #100 predeclaration checkpoint artifacts."""
 
 import hashlib
+import importlib.util
+import inspect
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
+
+from doc_lattice.github_ci import shell_scanner
+
+_ROOT = Path(__file__).resolve().parents[1]
+_PLUGIN = _ROOT / "scripts/checkpoint_record_scanner_inputs.py"
+
+
+def _load_plugin() -> ModuleType:
+    # scripts/ is not an importable package, and the repository root is only on sys.path under
+    # `python -m pytest`. Loading by file location keeps this module collectable under the
+    # console-script invocation CI uses. Import is inert: the plugin patches in pytest_configure.
+    spec = importlib.util.spec_from_file_location("checkpoint_record_scanner_inputs", _PLUGIN)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+plugin = _load_plugin()
 
 CHECKPOINT = Path("tests/fixtures/github_ci_checkpoint")
 _FROZEN_ACCEPTANCE_AUTHORED_CASE_COUNT = 78
@@ -253,3 +277,15 @@ def test_mutation_sites_reference_real_spans():
         assert (site["fixture_id"], site["span_id"]) in span_ids
         assert site["expected_reason_category"] in REASON_CATEGORIES
         assert site["offset"] >= 0
+
+
+def test_recording_wrappers_mirror_the_public_scanner_signatures():
+    # The recording plugin replaces the public entry points, so a new parameter on either one
+    # silently stops being recordable unless the wrapper grows it too.
+    for wrapper, original in (
+        (plugin._recording_scan, shell_scanner.scan_doc_lattice_invocations),
+        (plugin._recording, shell_scanner.direct_doc_lattice_invocations),
+    ):
+        assert list(inspect.signature(wrapper).parameters) == list(
+            inspect.signature(original).parameters
+        )

@@ -1,10 +1,20 @@
 """Bounded scanner for direct doc-lattice invocations and authored marker flow."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 
 from doc_lattice.error_types import ConfigError, ProjectError
+from doc_lattice.github_ci.shell_guards import (
+    Certified,
+    GuardRefusal,
+    MarkerDetected,
+    ScanLimits,
+    ScanVerdict,
+    TaintLimits,
+)
 from doc_lattice.github_ci.shell_taint import (
     _ANSI_C_SIMPLE_ESCAPES,
     _MAX_SHELL_DESCRIPTOR_DIGITS,
@@ -49,11 +59,6 @@ from doc_lattice.github_ci.shell_taint import (
 )
 
 _Invocation = tuple[str, bool]
-_MAX_SHELL_SOURCE_CHARS = 1_048_576
-_MAX_SHELL_SCAN_STEPS = 4_194_304
-_MAX_SHELL_RECURSION_DEPTH = 64
-_MAX_SHELL_INVOCATIONS = 10_000
-_MAX_LAUNCHER_NESTING_DEPTH = 64
 _OCTAL_BASE = 8
 _ANSI_C_OCTAL_BYTE_MASK = 0xFF
 _UNICODE_MAX = 0x10FFFF
@@ -65,13 +70,11 @@ _PRINTF_FIELD_LIMIT = 4096
 _LOOP_HEADER_NAME_WORDS = 2
 _CASE_HEADER_PATTERN_WORDS = 4
 _CASE_HEADER_SUBJECT_WORDS = 3
-_MAX_CASE_ARMS = 256
 # Bounds the alternative width the taint solver explores per case statement (how many arms whose
 # match against the subject cannot be resolved statically it will retain), not the total arm
 # count; every exhaustion still fails closed. 32 comfortably covers a real subcommand or
 # job-matrix dispatch table (#124) without materially widening the solver's search space; see
 # scripts/bench_sections.py and the seeded fuzz run in scripts/fuzz_shell_taint.py.
-_MAX_CASE_DYNAMIC_BRANCHES = 32
 
 _COMMAND_PREFIXES = frozenset(
     {
@@ -437,7 +440,7 @@ class _LauncherOptions:
         options_with_arguments: frozenset[str],
         flags: frozenset[str],
         non_command_options: frozenset[str] = frozenset(),
-    ) -> "_LauncherOptions":
+    ) -> _LauncherOptions:
         """Bundle option data with its short-option subsets computed once at import."""
         return cls(
             options_with_arguments=options_with_arguments,
@@ -483,7 +486,7 @@ class _ShellWord:
     process_resource_id: int | None = None
     keyword_eligible: bool = True
     argv_ports: tuple[_WordContentPort, ...] | None = None
-    brace_expansion_error: str | None = None
+    brace_expansion_error: GuardRefusal | None = None
 
 
 def _is_array_subscript_element(literal: str) -> bool:
@@ -589,10 +592,18 @@ class _ShellWordBuilder:
             return
         self.assignment_name += character
 
-    def build(self) -> _ShellWord:
-        """Build the immutable decoded word and its expansion provenance."""
+    def build(self, limits: TaintLimits) -> _ShellWord:
+        """Build the immutable decoded word and its expansion provenance.
+
+        Args:
+            limits: The scan's deterministic taint caps, so a shrunk cap reaches the
+                brace-expansion guards this word's content construction can trip.
+
+        Returns:
+            The decoded word.
+        """
         literal = "".join(self.characters)
-        built_content = self.content.build(defer_brace_errors=True)
+        built_content = self.content.build(limits, defer_brace_errors=True)
         return _ShellWord(
             literal=literal,
             content=built_content.expression,
@@ -654,7 +665,11 @@ def _reject_active_extglob_opener(
         and builder.active_syntax
         and builder.active_syntax[-1] in "?*+@!"
     ):
-        raise _ShellScanIncomplete("extglob expansion cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.word.extglob-opener", "extglob expansion cannot be scanned safely"
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,7 +767,7 @@ class _ScopeFrame:
     outputs: list[OutputExpr]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
     loop_bindings: list[_AssignmentEvidence] = field(default_factory=list)
-    controls: list["_ControlFrame"] = field(default_factory=list)
+    controls: list[_ControlFrame] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -797,7 +812,7 @@ class _PipelineFrame:
 class _CommandScanState:
     words: list[_ShellWord]
     heredocs: list[_Heredoc]
-    cases: list["_CaseScanState"]
+    cases: list[_CaseScanState]
     redirections: list[_RedirectionEvent] = field(default_factory=list)
     redirection_assignments: list[_AssignmentEvidence] = field(default_factory=list)
     owned_heredoc_count: int = 0
@@ -837,37 +852,108 @@ class _CaseScanState:
 
 @dataclass(frozen=True, slots=True)
 class ShellScanResult:
-    """Complete invocations or an explicit reason the bounded scan stopped."""
+    """Accumulated invocations plus the authoritative verdict for one bounded scan.
+
+    `verdict` is the single stored discriminator. `incomplete_reason` and `guard_id` are
+    projections of it rather than independently stored fields, so operator text and guard
+    identity cannot drift apart from the verdict that produced them.
+    """
 
     invocations: tuple[_Invocation, ...]
-    incomplete_reason: str | None = None
+    verdict: ScanVerdict
+
+    @property
+    def incomplete_reason(self) -> str | None:
+        """Return the operator-facing reason the scan stopped, or None when it completed.
+
+        Only `Certified` projects to "no refusal". Everything else refuses, so a verdict variant
+        added later fails closed here instead of certifying until this projection catches up.
+        """
+        if isinstance(self.verdict, Certified):
+            return None
+        if isinstance(self.verdict, GuardRefusal):
+            return self.verdict.reason
+        return TAINT_REFUSAL_REASON
+
+    @property
+    def guard_id(self) -> str | None:
+        """Return the refusing guard origin's identifier, or None when no guard refused."""
+        return self.verdict.origin_id if isinstance(self.verdict, GuardRefusal) else None
 
 
 class _ShellScanIncomplete(ProjectError):
-    """A declared scanner resource bound prevented a complete result."""
+    """A declared scanner resource bound prevented a complete result.
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="SHELL_SCAN_INCOMPLETE")
+    The constructor accepts only a `GuardRefusal` so a bound can never be reported as bare
+    text. Handlers that re-raise or re-wrap this error carry `refusal` through unchanged.
+    """
+
+    def __init__(self, refusal: GuardRefusal) -> None:
+        if not isinstance(refusal, GuardRefusal):
+            raise TypeError("an incomplete shell scan must carry a GuardRefusal origin")
+        super().__init__(refusal.reason, code="SHELL_SCAN_INCOMPLETE")
+        self.refusal = refusal
+
+
+class _ShellMarkerDetected(ProjectError):
+    """Authored marker flow reaches an execution sink in this run body.
+
+    Deliberately guard-identity-free: it reports the taint analysis's conclusion about the
+    script, not a bound that stopped the analysis, so no guard origin owns it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(TAINT_REFUSAL_REASON, code="SHELL_SCAN_INCOMPLETE")
 
 
 def _parse_static_descriptor(digits: str) -> int:
     """Parse one bounded static descriptor or stop the scan safely."""
     if len(digits) > _MAX_SHELL_DESCRIPTOR_DIGITS:
-        raise _ShellScanIncomplete("file descriptor digit limit exceeded")
+        raise _ShellScanIncomplete(
+            GuardRefusal("scanner.descriptor.digit-limit", "file descriptor digit limit exceeded")
+        )
     try:
         return int(digits)
     except ValueError as error:
-        raise _ShellScanIncomplete("file descriptor cannot be scanned safely") from error
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.descriptor.unparsable", "file descriptor cannot be scanned safely"
+            )
+        ) from error
+
+
+_DERIVE_STEPS_FROM_LIMITS = -1
 
 
 @dataclass(slots=True)
 class _ScanBudget:
-    remaining_steps: int = _MAX_SHELL_SCAN_STEPS
+    """Mutable per-scan counters derived from one immutable `ScanLimits` value.
+
+    Children share the exact budget instance, so sharing counters also shares limits and the two
+    cannot drift apart.
+    """
+
+    remaining_steps: int = _DERIVE_STEPS_FROM_LIMITS
+    limits: ScanLimits = field(default_factory=ScanLimits)
+
+    def __post_init__(self) -> None:
+        """Derive the step counter from the scan limits unless an explicit budget was given.
+
+        Raises:
+            ValueError: If an explicit budget is negative. Only the derive sentinel may be, so a
+                miscomputed count cannot silently grant a full production budget.
+        """
+        if self.remaining_steps == _DERIVE_STEPS_FROM_LIMITS:
+            self.remaining_steps = self.limits.scanner.max_scan_steps
+        elif self.remaining_steps < 0:
+            raise ValueError(f"a scan step budget cannot be negative: {self.remaining_steps}")
 
     def step(self) -> None:
         """Charge one scan step, raising when the declared step budget is exhausted."""
         if self.remaining_steps < 1:
-            raise _ShellScanIncomplete("step limit exceeded")
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.budget.step-limit", "step limit exceeded")
+            )
         self.remaining_steps -= 1
 
 
@@ -945,9 +1031,17 @@ class _ShellScanner:
             kind="command",
         )
         if self.owns_taint_builder and self.taint_builder is not None:
-            refused, reason = analyze_marker_taint(self.taint_builder.freeze())
-            if refused:
-                raise _ShellScanIncomplete(reason or TAINT_REFUSAL_REASON)
+            verdict = analyze_marker_taint(
+                self.taint_builder.freeze(),
+                limits=self.budget.limits.taint,
+            )
+            if isinstance(verdict, GuardRefusal):
+                raise _ShellScanIncomplete(verdict)
+            if not isinstance(verdict, Certified):
+                # Only a positive certification may return normally. Matching `MarkerDetected`
+                # positively instead would let a verdict variant added to `ScanVerdict` later fall
+                # through to the public boundary, which projects a normal return as `Certified()`.
+                raise _ShellMarkerDetected
         return tuple(self.invocations)
 
     def _child_scanner(
@@ -956,7 +1050,7 @@ class _ShellScanner:
         *,
         invocations: list[_Invocation] | None = None,
         classify_commands: bool = True,
-    ) -> "_ShellScanner":
+    ) -> _ShellScanner:
         """Construct a non-taint child without extending private subclass constructors."""
         child = _ShellScanner(
             source,
@@ -1133,7 +1227,12 @@ class _ShellScanner:
         """Open a structured compound beneath the current output target."""
         builder = self.taint_builder
         if builder is None:
-            raise _ShellScanIncomplete("missing shell taint evidence builder")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.control-flow.open-without-taint-builder",
+                    "missing shell taint evidence builder",
+                )
+            )
         scope = self.scope_stack[-1]
         frame = _ControlFrame(
             kind=kind,
@@ -1167,10 +1266,20 @@ class _ShellScanner:
         """Freeze one completed control scope and expose it as a compound output."""
         builder = self.taint_builder
         if builder is None:
-            raise _ShellScanIncomplete("missing shell taint evidence builder")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.control-flow.freeze-without-taint-builder",
+                    "missing shell taint evidence builder",
+                )
+            )
         controls = self.scope_stack[-1].controls
         if not controls or controls[-1] is not frame:
-            raise _ShellScanIncomplete("ambiguous nested shell control flow")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.control-flow.frame-stack-mismatch",
+                    "ambiguous nested shell control flow",
+                )
+            )
         controls.pop()
         binding_command_id = (
             builder.commands[frame.command_start].command_id
@@ -1210,9 +1319,15 @@ class _ShellScanner:
         elif frame.phase == "else":
             tail = self._sequence_output(frame.current_outputs)
         else:
-            raise _ShellScanIncomplete("unfinished if control flow")
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.control-flow.unfinished-if", "unfinished if control flow")
+            )
         if not (len(frame.if_tests) == len(frame.if_test_statuses) == len(frame.branches)):
-            raise _ShellScanIncomplete("ambiguous if control flow")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.control-flow.if-branch-arity-mismatch", "ambiguous if control flow"
+                )
+            )
         entries = zip(
             frame.if_tests,
             frame.branches,
@@ -1233,7 +1348,9 @@ class _ShellScanner:
     def _finish_loop(self, state: _CommandScanState, frame: _ControlFrame) -> None:
         """Close one bounded loop using zero-or-more structured body repetition."""
         if frame.phase != "body":
-            raise _ShellScanIncomplete("unfinished loop control flow")
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.control-flow.unfinished-loop", "unfinished loop control flow")
+            )
         body = self._sequence_output(frame.current_outputs)
         if frame.kind in {"for", "select"}:
             output: OutputExpr = RepeatOutput(body) if frame.loop_values else SequenceOutput(())
@@ -1315,11 +1432,15 @@ class _ShellScanner:
     def _finish_case(self, state: _CommandScanState, frame: _ControlFrame) -> None:
         """Close one case compound, preserving arm exclusivity and fallthrough."""
         if frame.phase == "body":
-            if len(frame.case_arms) >= _MAX_CASE_ARMS:
-                raise _ShellScanIncomplete("case arm limit exceeded")
+            if len(frame.case_arms) >= self.budget.limits.scanner.max_case_arms:
+                raise _ShellScanIncomplete(
+                    GuardRefusal("scanner.case.arm-limit-at-finish", "case arm limit exceeded")
+                )
             frame.case_arms.append(self._sequence_output(frame.current_outputs))
         elif frame.phase not in {"pattern", "word"}:
-            raise _ShellScanIncomplete("unfinished case control flow")
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.control-flow.unfinished-case", "unfinished case control flow")
+            )
         self._freeze_control(state, frame, ChoiceOutput(self._case_chains(frame)))
 
     def _capture_loop_header(
@@ -1420,7 +1541,11 @@ class _ShellScanner:
                 return
             expected_phase = "header" if frame.kind in {"for", "select"} else "test"
             if frame.phase != expected_phase:
-                raise _ShellScanIncomplete("ambiguous loop control flow")
+                raise _ShellScanIncomplete(
+                    GuardRefusal(
+                        "scanner.control-flow.duplicate-loop-do", "ambiguous loop control flow"
+                    )
+                )
             zero_iterations = (frame.kind == "while" and frame.current_test_status is False) or (
                 frame.kind == "until" and frame.current_test_status is True
             )
@@ -1447,8 +1572,10 @@ class _ShellScanner:
         terminator: str | None,
         depth: int,
     ) -> int:
-        if depth > _MAX_SHELL_RECURSION_DEPTH:
-            raise _ShellScanIncomplete("recursion limit exceeded")
+        if depth > self.budget.limits.scanner.max_recursion_depth:
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.commands.recursion-depth", "recursion limit exceeded")
+            )
         state = _CommandScanState(words=[], heredocs=[], cases=[])
         index = start
         while index < limit:
@@ -1461,7 +1588,12 @@ class _ShellScanner:
                 self._flush_command(state)
                 self._finalize_pipeline(state)
                 if self.scope_stack and self.scope_stack[-1].controls:
-                    raise _ShellScanIncomplete("unfinished shell control flow")
+                    raise _ShellScanIncomplete(
+                        GuardRefusal(
+                            "scanner.control-flow.unterminated-at-terminator",
+                            "unfinished shell control flow",
+                        )
+                    )
                 return index + 1
             boundary_end = self._consume_command_boundary(
                 index,
@@ -1502,7 +1634,12 @@ class _ShellScanner:
         self._flush_command(state)
         self._finalize_pipeline(state)
         if self.scope_stack and self.scope_stack[-1].controls:
-            raise _ShellScanIncomplete("unfinished shell control flow")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.control-flow.unterminated-at-scope-end",
+                    "unfinished shell control flow",
+                )
+            )
         return index
 
     def _consume_arithmetic_command(
@@ -1564,8 +1701,10 @@ class _ShellScanner:
         An element spelled ``[subscript]=value`` leaves literal order no longer equal to index
         order, and a joined read concatenates by index, so that spelling fails closed instead.
         """
-        if depth > _MAX_SHELL_RECURSION_DEPTH:
-            raise _ShellScanIncomplete("recursion limit exceeded")
+        if depth > self.budget.limits.scanner.max_recursion_depth:
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.array-assignment.recursion-depth", "recursion limit exceeded")
+            )
         contents: list[ContentExpr] = []
         end = self._consume_array_elements(index, limit, state, depth, contents)
         if state.words:
@@ -1623,7 +1762,12 @@ class _ShellScanner:
             )
             if next_index != index:
                 if _is_array_subscript_element(word.literal):
-                    raise _ShellScanIncomplete("array element subscript cannot be represented")
+                    raise _ShellScanIncomplete(
+                        GuardRefusal(
+                            "scanner.array-assignment.element-subscript",
+                            "array element subscript cannot be represented",
+                        )
+                    )
                 state.command_has_marker = state.command_has_marker or word.has_doc_lattice_marker
                 contents.append(word.content)
                 index = next_index
@@ -2008,13 +2152,23 @@ class _ShellScanner:
             option, attached_value = _resolve_env_long_option(literal)
             kind = _ENV_LONG_OPTION_KINDS[option]
             if kind == "split":
-                raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+                raise _ShellScanIncomplete(
+                    GuardRefusal(
+                        "scanner.env-prefix.split-string-long-option",
+                        "env split-string option cannot be scanned safely",
+                    )
+                )
             if kind == "stop":
                 state.prefix_mode = "env_stop"
             elif kind == "required" and not attached_value:
                 state.prefix_pending = 1
             elif kind == "flag" and attached_value:
-                raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+                raise _ShellScanIncomplete(
+                    GuardRefusal(
+                        "scanner.env-prefix.unsupported-option",
+                        "unsupported env option cannot be scanned safely",
+                    )
+                )
             return True
         if literal.startswith("-"):
             if _env_short_option_requires_separate_value(literal):
@@ -2124,7 +2278,12 @@ class _ShellScanner:
             return
         lookahead_index = self._next_significant_index(next_index, limit)
         if lookahead_index < limit and self.source[lookahead_index] == ")":
-            raise _ShellScanIncomplete("keyword-shaped case pattern cannot be scanned safely")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.case.keyword-shaped-pattern",
+                    "keyword-shaped case pattern cannot be scanned safely",
+                )
+            )
 
     def _next_significant_index(self, index: int, limit: int) -> int:
         """Return the index of the next token-starting character, skipping insignificant text.
@@ -2156,22 +2315,39 @@ class _ShellScanner:
         else:
             frame = self._matching_control({"case"})
             if frame is None or frame.phase not in {"word", "pattern"}:
-                raise _ShellScanIncomplete("ambiguous case control flow")
+                raise _ShellScanIncomplete(
+                    GuardRefusal(
+                        "scanner.case.unbalanced-pattern-parenthesis", "ambiguous case control flow"
+                    )
+                )
             # ``frame.case_word`` is set exactly once, the first time this branch runs for the
             # frame, so it is the authoritative signal that ``state.words`` still carries the
             # unparsed header rather than checking whether the first accumulated word reads
             # ``case``: a later arm's own pattern can literally be the word ``case`` too (#124).
             if frame.case_word is None:
                 if len(state.words) < _CASE_HEADER_PATTERN_WORDS or state.words[2].literal != "in":
-                    raise _ShellScanIncomplete("dynamic case header cannot be scanned safely")
+                    raise _ShellScanIncomplete(
+                        GuardRefusal(
+                            "scanner.case.dynamic-header",
+                            "dynamic case header cannot be scanned safely",
+                        )
+                    )
                 frame.case_word = state.words[1]
                 patterns = state.words[3:]
             else:
                 patterns = state.words
             match_status = self._case_match_status(frame.case_word, patterns)
             if match_status is None:
-                if frame.case_dynamic_branches >= _MAX_CASE_DYNAMIC_BRANCHES:
-                    raise _ShellScanIncomplete("case dynamic branch limit exceeded")
+                if (
+                    frame.case_dynamic_branches
+                    >= self.budget.limits.scanner.max_case_dynamic_branches
+                ):
+                    raise _ShellScanIncomplete(
+                        GuardRefusal(
+                            "scanner.case.dynamic-branch-limit",
+                            "case dynamic branch limit exceeded",
+                        )
+                    )
                 frame.case_dynamic_branches += 1
             frame.case_match_statuses.append(match_status)
             state.reset_command()
@@ -2200,9 +2376,15 @@ class _ShellScanner:
             case = state.cases[-1]
             frame = self._matching_control({"case"})
             if frame is None or frame.phase != "body":
-                raise _ShellScanIncomplete("ambiguous case control flow")
-            if len(frame.case_arms) >= _MAX_CASE_ARMS:
-                raise _ShellScanIncomplete("case arm limit exceeded")
+                raise _ShellScanIncomplete(
+                    GuardRefusal(
+                        "scanner.case.terminator-outside-arm", "ambiguous case control flow"
+                    )
+                )
+            if len(frame.case_arms) >= self.budget.limits.scanner.max_case_arms:
+                raise _ShellScanIncomplete(
+                    GuardRefusal("scanner.case.arm-limit-at-terminator", "case arm limit exceeded")
+                )
             frame.case_arms.append(self._sequence_output(frame.current_outputs))
             frame.case_terminators.append(operator)
             frame.current_outputs = []
@@ -2343,7 +2525,12 @@ class _ShellScanner:
             # The descriptor belongs to the shell from here on, not to this command, so binding
             # the redirection to the ``exec`` alone would model every later command as writing to
             # its original stream. Modeling the persistent rebinding is future work.
-            raise _ShellScanIncomplete("shell exec scope redirection cannot be represented")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.exec.scope-redirection",
+                    "shell exec scope redirection cannot be represented",
+                )
+            )
         active_control = (
             self.scope_stack[-1].controls[-1]
             if self.scope_stack and self.scope_stack[-1].controls
@@ -2441,8 +2628,10 @@ class _ShellScanner:
                 ),
             )
             if invocation is not None:
-                if len(self.invocations) >= _MAX_SHELL_INVOCATIONS:
-                    raise _ShellScanIncomplete("invocation limit exceeded")
+                if len(self.invocations) >= self.budget.limits.scanner.max_invocations:
+                    raise _ShellScanIncomplete(
+                        GuardRefusal("scanner.invocations.limit", "invocation limit exceeded")
+                    )
                 self.invocations.append(invocation)
         for index, word in enumerate(state.words):
             if index not in assignment_indices and word.brace_expansion_error is not None:
@@ -2737,7 +2926,10 @@ class _ShellScanner:
                 continue
             if self.source.startswith('$"', index):
                 raise _ShellScanIncomplete(
-                    "locale-translated heredoc delimiter cannot be scanned safely"
+                    GuardRefusal(
+                        "scanner.heredoc.locale-translated-delimiter",
+                        "locale-translated heredoc delimiter cannot be scanned safely",
+                    )
                 )
             character = self.source[index]
             if character in {"'", '"'}:
@@ -2881,7 +3073,7 @@ class _ShellScanner:
                 continue
             content.append_literal(body[index])
             index += 1
-        built = content.build()
+        built = content.build(self.budget.limits.taint)
         return built.expression, built.conditional_assignments
 
     def _consume_unquoted_heredoc_line(
@@ -2944,9 +3136,9 @@ class _ShellScanner:
 
         def finish() -> _ShellWord:
             try:
-                return builder.build()
+                return builder.build(self.budget.limits.taint)
             except _TaintLimitExceeded as error:
-                raise _ShellScanIncomplete(str(error)) from error
+                raise _ShellScanIncomplete(error.refusal) from error
 
         index = start
         while index < limit and self._word_component_at(index, limit):
@@ -3097,8 +3289,10 @@ class _ShellScanner:
         *,
         double_quoted: bool = False,
     ) -> _ShellExpansion | None:
-        if depth > _MAX_SHELL_RECURSION_DEPTH:
-            raise _ShellScanIncomplete("recursion limit exceeded")
+        if depth > self.budget.limits.scanner.max_recursion_depth:
+            raise _ShellScanIncomplete(
+                GuardRefusal("scanner.active-expansion.recursion-depth", "recursion limit exceeded")
+            )
         if double_quoted and self.source.startswith(("$'", '$"'), index, limit):
             return None
         end: int | None = None
@@ -3333,7 +3527,7 @@ class _ShellScanner:
                 continue
             content.append_literal(character)
             index += 1
-        built = content.build()
+        built = content.build(self.budget.limits.taint)
         self._parameter_content_assignments[(start, closing)] = built.conditional_assignments
         return built.expression
 
@@ -3464,7 +3658,12 @@ class _ShellScanner:
                 continue
             body.append(character)
             index += 1
-        raise _ShellScanIncomplete("unterminated command substitution cannot be scanned")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.legacy-substitution.unterminated",
+                "unterminated command substitution cannot be scanned",
+            )
+        )
 
     def _command_operator_at(self, index: int, limit: int) -> str | None:
         for operator in _COMMAND_OPERATORS:
@@ -3501,18 +3700,28 @@ def _remove_active_line_continuations(source: str) -> str:
     return re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", source)
 
 
-def scan_doc_lattice_invocations(script: str) -> ShellScanResult:
+def scan_doc_lattice_invocations(
+    script: str,
+    *,
+    limits: ScanLimits | None = None,
+) -> ShellScanResult:
     """Scan literal Bash syntax and explicitly report bounded-scan exhaustion."""
+    scan_limits = limits if limits is not None else ScanLimits()
     normalized = script.replace("\r\n", "\n")
-    if len(normalized) > _MAX_SHELL_SOURCE_CHARS:
-        return ShellScanResult((), "source character limit exceeded")
+    if len(normalized) > scan_limits.scanner.max_source_chars:
+        return ShellScanResult(
+            (),
+            GuardRefusal("scanner.source.character-limit", "source character limit exceeded"),
+        )
 
-    scanner = _ShellScanner(normalized)
+    scanner = _ShellScanner(normalized, budget=_ScanBudget(limits=scan_limits))
     try:
         invocations = scanner.scan()
     except _ShellScanIncomplete as error:
-        return ShellScanResult(tuple(scanner.invocations), str(error))
-    return ShellScanResult(invocations)
+        return ShellScanResult(tuple(scanner.invocations), error.refusal)
+    except _ShellMarkerDetected:
+        return ShellScanResult(tuple(scanner.invocations), MarkerDetected())
+    return ShellScanResult(invocations, Certified())
 
 
 def direct_doc_lattice_invocations(
@@ -3575,7 +3784,12 @@ def _invocation_in_simple_command(  # noqa: PLR0913
         return None
     subcommand_resolution = _doc_lattice_subcommand_index(words, executable.index + 1)
     if executable.ambiguous or subcommand_resolution.ambiguous:
-        raise _ShellScanIncomplete("command-position expansion cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.simple-command.ambiguous-command-position",
+                "command-position expansion cannot be scanned safely",
+            )
+        )
     if subcommand_resolution.index is None or subcommand_resolution.index >= len(words):
         return None
     subcommand_index = subcommand_resolution.index
@@ -3585,7 +3799,12 @@ def _invocation_in_simple_command(  # noqa: PLR0913
         # word at runtime, so Bash may run linear/reconcile while the unexpanded literal never
         # matches classification. The scanner cannot certify which subcommand runs, so it fails
         # closed rather than silently approving the workflow.
-        raise _ShellScanIncomplete("subcommand word uses brace or glob expansion")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.simple-command.subcommand-argv-expansion",
+                "subcommand word uses brace or glob expansion",
+            )
+        )
     if subcommand.dynamic or not subcommand.literal:
         return None
     arguments = words[subcommand_index + 1 :]
@@ -4197,7 +4416,10 @@ def _reject_marker_bearing_non_invocation(command_has_marker: bool) -> None:
     """Fail closed when an unresolved command contains a retained doc-lattice marker."""
     if command_has_marker:
         raise _ShellScanIncomplete(
-            "marker-bearing command is not a certified doc-lattice invocation"
+            GuardRefusal(
+                "scanner.marker.non-invocation-command",
+                "marker-bearing command is not a certified doc-lattice invocation",
+            )
         )
 
 
@@ -4256,12 +4478,24 @@ def _word_may_change_argv(word: _ShellWord) -> bool:
 def _reject_unsafe_executable_word(word: _ShellWord) -> None:
     """Reject a runtime-translated or argv-expanded executable word."""
     if word.locale_translated:
-        raise _ShellScanIncomplete("locale-translated executable cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.executable.locale-translated",
+                "locale-translated executable cannot be scanned safely",
+            )
+        )
     if word.active_argv_expansion:
-        raise _ShellScanIncomplete("executable word uses brace or glob expansion")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.executable.argv-expansion", "executable word uses brace or glob expansion"
+            )
+        )
     if _is_dynamic_relative_doc_lattice_executable(word):
         raise _ShellScanIncomplete(
-            "dynamic relative doc-lattice executable cannot be scanned safely"
+            GuardRefusal(
+                "scanner.executable.dynamic-relative-path",
+                "dynamic relative doc-lattice executable cannot be scanned safely",
+            )
         )
 
 
@@ -4594,7 +4828,12 @@ def _exec_option_requires_separate_argv0(literal: str) -> bool:
             continue
         if option == "a":
             return offset == len(literal) - 1
-        raise _ShellScanIncomplete("unsupported exec option cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.exec-option.requires-separate-argv0",
+                "unsupported exec option cannot be scanned safely",
+            )
+        )
     return False
 
 
@@ -4633,7 +4872,12 @@ def _resolve_env_long_option(literal: str) -> tuple[str, bool]:
         candidate for candidate in _ENV_LONG_OPTION_KINDS if candidate.startswith(option)
     )
     if len(candidates) != 1:
-        raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.env-option.ambiguous-long-option",
+                "unsupported env option cannot be scanned safely",
+            )
+        )
     return candidates[0], bool(separator)
 
 
@@ -4645,10 +4889,20 @@ def _env_short_option_requires_separate_value(literal: str) -> bool:
         if option in _ENV_SHORT_FLAGS:
             continue
         if option == "S":
-            raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.env-option.split-string-short-option",
+                    "env split-string option cannot be scanned safely",
+                )
+            )
         if option in _ENV_SHORT_REQUIRED:
             return offset == len(literal) - 1
-        raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.env-option.unsupported-short-option",
+                "unsupported env option cannot be scanned safely",
+            )
+        )
     return False
 
 
@@ -4656,7 +4910,11 @@ def _skip_env_option_value(words: list[_ShellWord], option_index: int) -> int:
     """Consume one required separate GNU env option value."""
     value_index = option_index + 1
     if value_index >= len(words) or _word_may_change_argv(words[value_index]):
-        raise _ShellScanIncomplete("env option value cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.env-option.unscannable-value", "env option value cannot be scanned safely"
+            )
+        )
     return value_index + 1
 
 
@@ -4670,13 +4928,23 @@ def _skip_static_env_option(words: list[_ShellWord], index: int) -> int:
     option, attached_value = _resolve_env_long_option(literal)
     kind = _ENV_LONG_OPTION_KINDS[option]
     if kind == "split":
-        raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.env-option.static-split-string",
+                "env split-string option cannot be scanned safely",
+            )
+        )
     if kind == "stop":
         return len(words)
     if kind == "required" and not attached_value:
         return _skip_env_option_value(words, index)
     if kind == "flag" and attached_value:
-        raise _ShellScanIncomplete("unsupported env option cannot be scanned safely")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.env-option.static-flag-with-value",
+                "unsupported env option cannot be scanned safely",
+            )
+        )
     return index + 1
 
 
@@ -4693,17 +4961,39 @@ def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
             _is_env_split_string_long_option(word.literal)
             or _is_env_split_string_short_option(word.literal)
         ):
-            raise _ShellScanIncomplete("env split-string option cannot be scanned safely")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.env-prefix.split-string-option",
+                    "env split-string option cannot be scanned safely",
+                )
+            )
         if word.dynamic:
             if _is_env_assignment_operand(word.literal):
                 if word.unquoted_dynamic:
                     raise _ShellScanIncomplete(
-                        "unquoted dynamic env assignment cannot be scanned safely"
+                        GuardRefusal(
+                            "scanner.env-prefix.unquoted-dynamic-assignment",
+                            "unquoted dynamic env assignment cannot be scanned safely",
+                        )
                     )
-                raise _ShellScanIncomplete("quoted dynamic env assignment cannot be scanned safely")
-            raise _ShellScanIncomplete("dynamic env prefix cannot be scanned safely")
+                raise _ShellScanIncomplete(
+                    GuardRefusal(
+                        "scanner.env-prefix.quoted-dynamic-assignment",
+                        "quoted dynamic env assignment cannot be scanned safely",
+                    )
+                )
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.env-prefix.dynamic-word", "dynamic env prefix cannot be scanned safely"
+                )
+            )
         if _word_may_change_argv(word):
-            raise _ShellScanIncomplete("expandable env prefix cannot be scanned safely")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.env-prefix.argv-changing-word",
+                    "expandable env prefix cannot be scanned safely",
+                )
+            )
         if options_enabled and word.literal.startswith("-"):
             index = _skip_static_env_option(words, index)
         elif _is_env_assignment_operand(word.literal):
@@ -4936,7 +5226,11 @@ def _resolve_uv_payload_index(
         if dynamic_launcher.index is not None:
             return dynamic_launcher
     if subcommand_resolution.unresolved_option:
-        raise _ShellScanIncomplete("unresolved uv global option")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.uv.unresolved-global-option-at-payload", "unresolved uv global option"
+            )
+        )
     if subcommand_resolution.index is None or subcommand_resolution.index >= len(words):
         return _ResolvedIndex(None, subcommand_resolution.ambiguous)
     subcommand_index = subcommand_resolution.index
@@ -4993,11 +5287,21 @@ def _uv_tool_payload_index(
         return _ResolvedIndex(None, request.inherited_ambiguity)
     run = words[run_index]
     if run.active_argv_expansion:
-        raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.uv-tool.run-selector-argv-expansion",
+                "uv command word uses brace or glob expansion",
+            )
+        )
     dynamic_run = run.dynamic
     if not dynamic_run and run.literal.startswith("-"):
         if request.fail_on_unknown:
-            raise _ShellScanIncomplete("uv tool option before the run selector")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.uv-tool.option-before-run-selector",
+                    "uv tool option before the run selector",
+                )
+            )
         return _unresolved_uv_launcher_option(
             fail_on_unknown=False,
             ambiguous=request.inherited_ambiguity,
@@ -5025,7 +5329,12 @@ def _uv_tool_payload_index(
         resolution.step()
         alternate_run = words[alternate_run_index]
         if alternate_run.active_argv_expansion:
-            raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.uv-tool.alternate-run-argv-expansion",
+                    "uv command word uses brace or glob expansion",
+                )
+            )
         if alternate_run.dynamic or alternate_run.literal != "run":
             continue
         alternate_payload = _launcher_payload_index(
@@ -5188,8 +5497,10 @@ def _nested_launcher_payload_index(
     )
     if is_doc_lattice:
         return _ResolvedIndex(payload_index, payload_resolution.ambiguous)
-    if launcher_depth >= _MAX_LAUNCHER_NESTING_DEPTH:
-        raise _ShellScanIncomplete("launcher nesting limit exceeded")
+    if launcher_depth >= resolution.budget.limits.scanner.max_launcher_nesting_depth:
+        raise _ShellScanIncomplete(
+            GuardRefusal("scanner.launcher.nesting-limit", "launcher nesting limit exceeded")
+        )
     if raw_basename == "env":
         nested_start = _skip_env_prefix(words, payload_index + 1)
         nested = _nested_launcher_payload_index(
@@ -5239,14 +5550,23 @@ def _skip_external_time_prefix(words: list[_ShellWord], start: int) -> int:
     while index < len(words):
         word = words[index]
         if _word_may_change_argv(word):
-            raise _ShellScanIncomplete("dynamic external time prefix cannot be scanned safely")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.time-prefix.dynamic-word",
+                    "dynamic external time prefix cannot be scanned safely",
+                )
+            )
         if word.literal == "--":
             return index + 1
         if word.literal == "-p":
             index += 1
             continue
         if word.literal.startswith("-"):
-            raise _ShellScanIncomplete("external time option cannot be scanned safely")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.time-prefix.option", "external time option cannot be scanned safely"
+                )
+            )
         return index
     return index
 
@@ -5257,7 +5577,12 @@ def _dynamic_uv_global_word_result(
 ) -> tuple[int, int | None, bool] | None:
     """Return the next index, injected-launcher start, and unresolved-option state for one word."""
     if word.active_argv_expansion:
-        raise _ShellScanIncomplete("uv command word uses brace or glob expansion")
+        raise _ShellScanIncomplete(
+            GuardRefusal(
+                "scanner.uv.dynamic-global-word-argv-expansion",
+                "uv command word uses brace or glob expansion",
+            )
+        )
     option_name = word.literal.split("=", 1)[0]
     if word.dynamic and "=" in word.literal and option_name in _UV_GLOBAL_OPTIONS_WITH_ARGUMENTS:
         candidate_start = index + 1 if _word_may_change_option_value_shape(word) else None
@@ -5305,7 +5630,9 @@ def _unresolved_uv_global_option(
             tuple(launcher_starts),
             unresolved_option=True,
         )
-    raise _ShellScanIncomplete("unresolved uv global option")
+    raise _ShellScanIncomplete(
+        GuardRefusal("scanner.uv.unresolved-global-option", "unresolved uv global option")
+    )
 
 
 def _skip_uv_global_options(
@@ -5383,7 +5710,12 @@ def _doc_lattice_subcommand_index(
             index += 1
             continue
         if word.literal.startswith("-"):
-            raise _ShellScanIncomplete("unresolved doc-lattice root option")
+            raise _ShellScanIncomplete(
+                GuardRefusal(
+                    "scanner.doc-lattice.unresolved-root-option",
+                    "unresolved doc-lattice root option",
+                )
+            )
         return _ResolvedIndex(index, ambiguous)
     return _ResolvedIndex(index, ambiguous)
 
@@ -5411,7 +5743,9 @@ def _unresolved_uv_launcher_option(
 ) -> _ResolvedIndex:
     """Raise in strict mode or abandon one speculative launcher grammar path."""
     if fail_on_unknown:
-        raise _ShellScanIncomplete("unresolved uv launcher option")
+        raise _ShellScanIncomplete(
+            GuardRefusal("scanner.uv.unresolved-launcher-option", "unresolved uv launcher option")
+        )
     return _ResolvedIndex(None, ambiguous)
 
 
@@ -5596,7 +5930,9 @@ def _read_ansi_c_digits(
 
 def _valid_ansi_c_character(value: int, source: str) -> str:
     if value == 0:
-        raise _ShellScanIncomplete("ANSI-C quoted word decodes to NUL")
+        raise _ShellScanIncomplete(
+            GuardRefusal("scanner.ansi-c.nul-decode", "ANSI-C quoted word decodes to NUL")
+        )
     if value > _UNICODE_MAX or _SURROGATE_MIN <= value <= _SURROGATE_MAX:
         return f"\\{source}"
     return chr(value)

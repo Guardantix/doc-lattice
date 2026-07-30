@@ -13,6 +13,7 @@ from typer.main import get_command
 from doc_lattice.cli.application import create_app
 from doc_lattice.error_types import ConfigError, ProjectError
 from doc_lattice.github_ci import shell_scanner, shell_taint
+from doc_lattice.github_ci.shell_guards import GuardRefusal
 from doc_lattice.github_ci.shell_scanner import (
     _DOC_LATTICE_NON_COMMAND_ROOT_OPTIONS,
     _DOC_LATTICE_ROOT_OPTIONS,
@@ -37,6 +38,7 @@ from doc_lattice.github_ci.shell_taint import (
     LiteralTransfer,
     RepeatOutput,
     SequenceOutput,
+    TaintLimits,
     choice,
     concat,
 )
@@ -3320,10 +3322,12 @@ def test_scanner_reconcile_option_grammar_matches_typer_command():
 
 
 def test_shell_scan_incomplete_is_a_coded_project_error():
-    error = _ShellScanIncomplete("step limit exceeded")
+    refusal = GuardRefusal("scanner.budget.step-limit", "step limit exceeded")
+    error = _ShellScanIncomplete(refusal)
 
     assert isinstance(error, ProjectError)
     assert error.code == "SHELL_SCAN_INCOMPLETE"
+    assert error.refusal is refusal
 
 
 def test_nested_dynamic_uv_resolution_charges_shared_scan_budget():
@@ -6253,7 +6257,7 @@ def test_static_eval_newline_separates_payload_commands(script: str):
 def test_static_eval_program_commands_split_on_unquoted_newlines(
     program: str, expected: tuple[tuple[str, ...], ...]
 ):
-    commands = shell_taint._static_eval_program_commands(program)
+    commands = shell_taint._static_eval_program_commands(program, limits=TaintLimits())
 
     assert tuple(command.words for command in commands) == expected
 
@@ -6274,7 +6278,7 @@ def test_decode_ansi_c_eval_word_uses_the_shared_escape_table(body: str, expecte
 
 
 def test_static_eval_background_newline_still_marks_asynchronous():
-    commands = shell_taint._static_eval_program_commands("false &\ntrue")
+    commands = shell_taint._static_eval_program_commands("false &\ntrue", limits=TaintLimits())
 
     assert commands[0].asynchronous is True
     assert commands[1].asynchronous is False
@@ -9507,3 +9511,27 @@ def test_plain_assignment_in_dynamic_if_body_still_refuses(script: str):
     false-safe to function-definition handling specifically.
     """
     assert_taint_refusal(script)
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
+def test_printf_b_representable_control_executes_the_marker_under_bash(tmp_path: Path):
+    """Direction check for the ``printf %b`` guard cluster (issue #139).
+
+    ``%b`` decodes escapes, so it can compose the marker out of bytes that no content port shows
+    literally. The unrepresentable fixture below refuses at
+    ``taint.printf-b.unrepresentable-output``; refusing is always safe, so the meaningful
+    direction check runs on the matched representable control: the scanner reports marker flow,
+    and real bash genuinely executes the stub. Without it the guard could be pinned against a
+    ``%b`` spelling that never composes anything.
+    """
+    control = 'X=$(printf %b "\\x64oc-"); eval "$X"lattice'
+    unrepresentable = 'X=$(printf %b "\\U0110FFFF"); eval "$X"lattice'
+
+    assert scan_doc_lattice_invocations(control).incomplete_reason == TAINT_REFUSAL_REASON
+    assert (
+        scan_doc_lattice_invocations(unrepresentable).guard_id
+        == "taint.printf-b.unrepresentable-output"
+    )
+    executed, stderr = _marker_executes_under_bash(control, {}, tmp_path)
+
+    assert executed, f"the representable %b control never ran the stub under bash: {stderr}"
