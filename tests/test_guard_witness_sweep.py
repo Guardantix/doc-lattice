@@ -507,7 +507,23 @@ def test_a_negative_corpus_size_is_refused_rather_than_emptying_the_corpus(optio
 def test_a_zero_corpus_size_is_still_accepted() -> None:
     # Zero is how a quick pass over the recorded corpus alone is asked for, and how the tests here
     # skip generation, so the refusal has to be of negatives rather than of anything falsy.
-    assert tool.nonnegative("0") == 0
+    assert tool.nonnegative_count("0") == 0
+
+
+def test_a_negative_shrink_is_refused_rather_than_witnessing_under_a_degenerate_cap() -> None:
+    # A negative cap is not a smaller bound but a broken one: every count exceeds it before the
+    # scan has read anything, so the empty script renders a row for a recursion-depth guard, and
+    # the configurations refusing that early mask the guards a zero cap reaches with a real shape.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--shrink", "-1"])
+
+    assert raised.value.code == 2
+
+
+def test_a_zero_shrink_is_still_accepted() -> None:
+    # Zero is the most-shrunk value the default grid searches, so the refusal has to be of
+    # negatives rather than of anything falsy.
+    assert tool.nonnegative_cap("0") == 0
 
 
 def test_a_bare_shrink_is_refused_rather_than_searching_production_only() -> None:
@@ -551,6 +567,20 @@ def test_load_corpus_refuses_a_replay_inventory_it_cannot_read(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="checkpoint_record_scanner_inputs"):
         tool.load_corpus(root, seeds=0, iterations=0)
+
+
+def test_load_corpus_refuses_a_replay_inventory_that_records_no_scripts(tmp_path: Path) -> None:
+    # An empty entry list satisfies every per-entry check vacuously, so a sweep would search the
+    # generated half alone while reporting a script count that reads like the whole corpus. The
+    # recorded half is the shapes the scanner was actually built against, and losing it silently
+    # turns "reached nothing" into an answer about a corpus nobody asked to run.
+    root = tmp_path / "candidate"
+    inventory = root / tool.REPLAY_INVENTORY
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text(json.dumps({"entries": []}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checkpoint_record_scanner_inputs"):
+        tool.load_corpus(root, seeds=1, iterations=1)
 
 
 def test_scanner_checkout_refuses_a_copy_resolving_near_the_filesystem_root(

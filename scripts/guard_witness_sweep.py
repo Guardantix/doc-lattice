@@ -236,8 +236,16 @@ def load_corpus(
     entries = inventory.get("entries") if isinstance(inventory, dict) else None
     # Named here rather than left as a bare KeyError from a restructured fixture, which reports
     # neither the file that no longer holds what a sweep reads nor the script that writes it.
-    if not isinstance(entries, list) or not all(
-        isinstance(entry, dict) and isinstance(entry.get("source"), str) for entry in entries
+    # An empty list is refused with it: every per-entry check below passes vacuously, so a sweep
+    # would search the generated half alone and report a script count that reads like the whole
+    # corpus. The recorded half is the shapes the scanner was built against, and dropping it in
+    # silence turns "reached nothing" into an answer about a corpus nobody asked to run.
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or not all(
+            isinstance(entry, dict) and isinstance(entry.get("source"), str) for entry in entries
+        )
     ):
         message = (
             f"{root / REPLAY_INVENTORY} holds no entries carrying a 'source' script, so the "
@@ -587,7 +595,26 @@ def render_rows(found: Reach) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def nonnegative(text: str) -> int:
+def _nonnegative(text: str, reason: str) -> int:
+    """Return `text` as an integer, refusing a negative one.
+
+    Args:
+        text: The value as spelled on the command line.
+        reason: What a negative value would mean here, completing the refusal after the value.
+
+    Returns:
+        The value.
+
+    Raises:
+        ArgumentTypeError: If the value is negative.
+    """
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{value} {reason}")
+    return value
+
+
+def nonnegative_count(text: str) -> int:
     """Return `text` as a count of scripts, refusing a negative one.
 
     The three options this converts all size the corpus, and Python spells a negative size as an
@@ -604,11 +631,30 @@ def nonnegative(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no corpus has a negative size.
     """
-    value = int(text)
-    if value < 0:
-        message = f"{value} is not a count of scripts; a corpus cannot be smaller than empty"
-        raise argparse.ArgumentTypeError(message)
-    return value
+    return _nonnegative(text, "is not a count of scripts; a corpus cannot be smaller than empty")
+
+
+def nonnegative_cap(text: str) -> int:
+    """Return `text` as a cap to shrink to, refusing a negative one.
+
+    A cap bounds something a scan counts, so zero is the smallest one there is and a negative value
+    is not a tighter bound but a degenerate one: the count exceeds it before the scan has read
+    anything. Every row that comes back is then a guard refusing on the shape of its cap rather
+    than on the shape of an input, down to the empty script rendering a paste-ready witness for the
+    recursion-depth guard, which passes the suite while attesting nothing about authored input.
+    The same configurations refuse early enough to mask the guards a zero cap reaches with a real
+    script, so a negative value also loses reach the run had, with nothing printed to say so.
+
+    Args:
+        text: The value as spelled on the command line.
+
+    Returns:
+        The value as a cap.
+
+    Raises:
+        ArgumentTypeError: If the value is negative, since no scan counts fewer than none.
+    """
+    return _nonnegative(text, "is not a cap; a scan cannot count fewer than none")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -633,23 +679,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--seeds",
-        type=nonnegative,
+        type=nonnegative_count,
         help=f"fuzzer seeds to generate bodies from, one grammar walk each (default {SEEDS})",
     )
     parser.add_argument(
         "--iterations",
-        type=nonnegative,
+        type=nonnegative_count,
         help=f"bodies to request per seed (default {ITERATIONS})",
     )
     parser.add_argument(
         "--max-length",
-        type=nonnegative,
+        type=nonnegative_count,
         help=f"drop generated scripts longer than this many characters (default {MAX_LENGTH})",
     )
     parser.add_argument("--extra", type=Path, help="JSON list of hand-authored candidates")
     parser.add_argument(
         "--shrink",
-        type=int,
+        type=nonnegative_cap,
         # At least one value, because a bare `--shrink` binds an empty list rather than the
         # default, which collapses the grid to production caps and reports every resource-bound
         # guard as unreached by a run the operator believes searched each cap shrunk.
