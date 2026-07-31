@@ -7682,26 +7682,90 @@ def test_compound_stage_heredoc_controls_still_refuse(script: str):
 
 
 def test_pipeline_consumer_still_owns_its_own_heredoc():
-    result = scan_doc_lattice_invocations(
+    assert_taint_refusal(
         "A=doc-\nB=lattice\n{ true; } <<EOF | bash <<INNER\nquiet\nEOF\n$A$B reconcile\nINNER\n"
     )
 
-    assert result.incomplete_reason == TAINT_REFUSAL_REASON
-
 
 def test_heredoc_without_a_modeled_reader_fails_closed():
-    """A heredoc body no owner can read refuses instead of being dropped from the model.
+    """A heredoc body no owner can read refuses the whole scan instead of being dropped.
 
-    A loop header is discarded before command evidence exists, so a heredoc parsed inside one
-    reaches neither a command nor a compound scope. Bash rejects that header as a syntax error,
-    so the refusal costs nothing that could run, while the same guard covers any later shape
-    whose body would otherwise leave its reader modeled as reading nothing.
+    The guard's origin identity and its control are pinned by the witness registry in
+    `tests/guard_witnesses.py`; what this pins instead is the scan-level contract around it, that
+    an unattributed body yields no invocations and raises through the public entry point rather
+    than certifying a body whose reader is modeled as reading nothing.
     """
-    unowned = "for i in a <<EOF\ndoc-lattice reconcile\nEOF\ndo\n:\ndone\n"
-    control = "for i in a\ndo\ncat <<EOF\ndoc-lattice reconcile\nEOF\ndone\n"
+    assert_marker_refusal("for i in a <<EOF\ndoc-lattice reconcile\nEOF\ndo\n:\ndone\n")
 
-    assert scan_doc_lattice_invocations(unowned).guard_id == "scanner.heredoc.unattributed-body"
-    assert scan_doc_lattice_invocations(control).guard_id is None
+
+# Verified false certifications outside issue #167, kept certifying deliberately and tracked as
+# issue #192 rather than dropped from the suite, per AD-19 in ARCHITECTURE.md. Each body
+# below was scored against real Bash 5.x through the differential oracle in
+# `scripts/fuzz_shell_taint.py` with a `doc-lattice` shim on `PATH`: Bash runs the marker and the
+# scanner certifies. The mechanism is a variable reference inside a compound scope's OWN
+# redirection content, where that scope is a pipeline producer and its environment is a subshell
+# environment. It is distinct from issue #167's heredoc ownership, which these do not touch: the
+# here-string spellings never reach the heredoc path at all, the literal spellings of the same
+# bodies refuse, and every row here certifies identically on this branch and on the base revision.
+# Fixing one of these should delete its row here, not edit this comment.
+_SUBSHELL_PRODUCER_SCOPE_REDIRECTION_CERTIFICATIONS = (
+    ('A=doc-\nB=lattice\n( cat ) <<<"$A$B reconcile" | bash\n', "subshell-producer-here-string"),
+    (
+        "A=doc-\nB=lattice\n( cat ) <<EOF | bash\n$A$B reconcile\nEOF\n",
+        "subshell-producer-heredoc",
+    ),
+    (
+        "A=doc-\nB=lattice\n(\n{ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n)\n",
+        "issue-167-body-inside-a-subshell",
+    ),
+    (
+        "A=doc-\nB=lattice\nx=$({ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n)\n",
+        "issue-167-body-inside-a-command-substitution",
+    ),
+    (
+        "A=doc-\nB=lattice\nx=`{ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n`\n",
+        "issue-167-body-inside-a-backtick-substitution",
+    ),
+    (
+        "A=doc-\nB=lattice\ncat <({ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n)\n",
+        "issue-167-body-inside-a-process-substitution",
+    ),
+    ('A=doc-\n( cat ) <<<"${A}lattice reconcile" | bash\n', "single-variable-producer"),
+)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [row[0] for row in _SUBSHELL_PRODUCER_SCOPE_REDIRECTION_CERTIFICATIONS],
+    ids=[row[1] for row in _SUBSHELL_PRODUCER_SCOPE_REDIRECTION_CERTIFICATIONS],
+)
+def test_subshell_producer_scope_redirection_still_certifies(script: str):
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'A=doc-\nB=lattice\n{ cat; } <<<"$A$B reconcile" | bash\n',
+        'A=doc-\nB=lattice\n( cat ) <<<"$A$B reconcile" > s.sh\nbash s.sh\n',
+        'A=doc-\nB=lattice\n(\ncat <<<"$A$B reconcile" | bash\n)\n',
+        '( cat ) <<<"doc-lattice reconcile" | bash\n',
+        "A=doc-\nB=lattice\n{\n{ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n}\n",
+    ],
+    ids=(
+        "brace-group-producer",
+        "same-subshell-without-the-pipe",
+        "command-owned-redirection-inside-the-subshell",
+        "literal-content-in-the-same-subshell",
+        "issue-167-body-inside-a-brace-group-wrapper",
+    ),
+)
+def test_subshell_producer_scope_redirection_controls_refuse(script: str):
+    """Controls isolating the mechanism above from the sink, the carrier, and the composition."""
+    assert_taint_refusal(script)
 
 
 @pytest.mark.parametrize(

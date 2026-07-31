@@ -713,7 +713,12 @@ a `read` writing from stdin, not for every conditional-on-lastpipe context such 
 (issue #118). A `read` beyond
 the first record of a shared stream is projected as record one, so a marker split across later
 records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
-over-refusal it interacts with is issue #119.
+over-refusal it interacts with is issue #119. A heredoc or here-string redirected onto a compound
+scope keeps its content for the reader inside that scope, but a variable reference in that content
+resolves to nothing when the scope is a pipeline producer and its environment is a subshell
+environment, so `( cat ) <<<"${A}lattice reconcile" | bash` certifies while the brace-group,
+no-pipe, command-owned, and literal-content spellings of the same body all refuse; that is issue
+#192, pinned as certifying.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
 that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
 required character comes only from external content continue to certify with the boundary
