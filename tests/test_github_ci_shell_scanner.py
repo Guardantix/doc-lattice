@@ -1063,6 +1063,9 @@ def test_output_process_substitution_routes_writer_to_consumer_stdin():
         "{ printf doc-; printf '%s\\n' 'lattice reconcile'; } > >(bash)",
         "if :; then printf '%s%s\\n' doc- 'lattice reconcile'; fi > >(bash)",
         "for word in x; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+        "while :; do printf '%s%s\\n' doc- 'lattice reconcile'; break; done > >(bash)",
+        "until :; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+        "case x in x) printf '%s%s\\n' doc- 'lattice reconcile';; esac > >(bash)",
     ],
     ids=(
         "brace-group",
@@ -1073,9 +1076,38 @@ def test_output_process_substitution_routes_writer_to_consumer_stdin():
         "multi-command-group",
         "if-compound",
         "for-compound",
+        "while-compound",
+        "until-compound",
+        "case-compound",
     ),
 )
 def test_compound_scope_stdout_process_substitution_reaches_consumer_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' >&3 ) 3> >(bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&2; } 2> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+    ],
+    ids=(
+        "brace-group-descriptor-3",
+        "subshell-descriptor-3",
+        "nested-brace-group-descriptor-3",
+        "brace-group-descriptor-2",
+        "brace-group-self-duplication",
+    ),
+)
+def test_compound_descriptor_binding_routes_writer_into_process_substitution(script: str):
+    # A ``>&N`` inside the compound resolves against the descriptor that compound bound, so a
+    # writer reaches the substitution's consumer through any descriptor, not only stdout. Each
+    # body below executes the shim under bash 5.2, and the ungrouped ``printf ... >&3 3> >(bash)``
+    # already failed closed, so leaving these unlinked was the same grouped-versus-ungrouped
+    # asymmetry issue #116 reports.
     assert_taint_refusal(script)
 
 
@@ -1086,6 +1118,56 @@ def test_compound_scope_stdout_file_redirect_does_not_feed_process_substitution(
 
     assert result.incomplete_reason is None
     assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ doc-lattice check; } >out 2> >(bash)",
+        "{ doc-lattice check >&3; } 3> >(cat)",
+    ],
+    ids=("stdout-to-file", "descriptor-to-consumer"),
+)
+def test_compound_process_substitution_binding_preserves_invocations(script: str):
+    # Over-refusal control for the two bindings above: neither routes an authored marker into an
+    # execution sink, so the ordinary invocation each body carries must survive intact rather than
+    # being swallowed by a refusal.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == CHECK
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash) > >(cat)",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > >(bash) > >(cat)",
+    ],
+    ids=("compound-writer", "simple-writer"),
+)
+def test_chained_output_process_substitutions_certify_until_issue_187(script: str):
+    """Disclosure pin for issue #187, per AD-19.
+
+    Bash forks the second substitution's child with its own stdout already bound to the first
+    substitution's pipe, so these chain producer to ``cat`` to ``bash`` and the shim executes 5
+    times out of 5 under bash 5.2. Ordered descriptor replay keeps only the last binding per
+    descriptor, so the earlier consumer is dropped and both bodies certify. The gap predates the
+    compound-writer fix and is symmetric between the two spellings above, which is why it is
+    disclosed rather than pinned as fixed. A change that starts refusing either body closes #187
+    and should delete this pin instead of updating it.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+def test_reversed_chained_output_process_substitutions_still_refuse():
+    # Control for issue #187: the same two substitutions in the other order leave the sink as the
+    # final descriptor-1 binding, which isolates the last-wins replay as the mechanism rather than
+    # the marker or the compound.
+    assert_taint_refusal("{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat) > >(bash)")
 
 
 def test_multi_command_substitution_scope_sequences_stdout():

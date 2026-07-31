@@ -2866,27 +2866,56 @@ def _pipe_source(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _OutputProcessWriter:
+    """One writer whose descriptor replay can route stdout into a process resource."""
+
+    redirections: tuple[_RedirectionEvent, ...]
+    stream_scope_id: int
+    inherited: _DescriptorBindings
+
+
 def _output_process_writers(
     evidence: _ShellTaintEvidence,
-) -> tuple[tuple[tuple[_RedirectionEvent, ...], int], ...]:
-    """Return every stdout writer that can bind a descriptor to a process resource.
+) -> tuple[_OutputProcessWriter, ...]:
+    """Return every stdout writer whose descriptors can reach a process resource.
 
     A writer is anything the evidence gives both a redirection list and an output stream: one
     command, or one structured scope. ``{ printf x; } > >(bash)`` attaches the redirection to the
     compound rather than to any command inside it, so a scope has to be a writer here for the
-    compound's stdout to reach the substitution at all.
+    compound's stdout to reach the substitution at all. Each writer carries the bindings its
+    enclosing chain installed, because ``{ printf x >&3; } 3> >(bash)`` routes stdout to the
+    substitution through a descriptor only that chain names.
 
     Args:
         evidence: The typed shell execution evidence for one run body.
 
     Returns:
-        Each writer's redirection events paired with the stream scope its stdout carries,
-        commands before scopes.
+        Every writer, commands before scopes, each with the redirection events it replays, the
+        stream scope its stdout carries, and the bindings its enclosing chain installed.
     """
-    writers: list[tuple[tuple[_RedirectionEvent, ...], int]] = [
-        (command.redirections, command.output_scope_id) for command in evidence.commands
-    ]
-    writers.extend((scope.redirections, scope.scope_id) for scope in evidence.scopes)
+    scope_bindings = _scope_inherited_bindings(evidence)
+    command_paths = _command_scope_paths(evidence)
+    writers: list[_OutputProcessWriter] = []
+    for command in evidence.commands:
+        enclosing = command_paths[command.command_id]
+        writers.append(
+            _OutputProcessWriter(
+                command.redirections,
+                command.output_scope_id,
+                scope_bindings.get(enclosing[-1], {}) if enclosing else {},
+            )
+        )
+    writers.extend(
+        _OutputProcessWriter(
+            scope.redirections,
+            scope.scope_id,
+            scope_bindings.get(scope.parent_scope_id, {})
+            if scope.parent_scope_id is not None
+            else {},
+        )
+        for scope in evidence.scopes
+    )
     return tuple(writers)
 
 
@@ -2905,17 +2934,31 @@ def _output_process_scope_inputs(
     Returns:
         A mapping from each output substitution's body scope to the stdout stream its writer
         sends there.
+
+    Raises:
+        _TaintLimitExceeded: If a writer routes stdout through a guarded descriptor whose
+            binding the evidence cannot name.
     """
+    guarded = _guarded_output_descriptors(evidence)
     inputs: dict[int, ContentExpr] = {}
-    for redirections, stream_scope_id in _output_process_writers(evidence):
-        binding = _output_bindings(redirections).get(1)
+    for writer in _output_process_writers(evidence):
+        bindings = _output_bindings(
+            writer.redirections, inherited=writer.inherited, guarded=guarded
+        )
+        binding = bindings.get(1)
         if binding is None or not isinstance(binding[0], ProcessResourceTarget):
             continue
         resource = resources.get(binding[0].resource_id)
         if resource is None or resource.direction != "output":
             continue
         if resource.scope_id in scopes:
-            inputs[resource.scope_id] = StreamRef(stream_scope_id)
+            # Two writers reach the same substitution only when a command inside a compound
+            # routes stdout to the descriptor that compound bound, as in
+            # ``{ printf x >&1; } > >(bash)``. Scopes are appended after commands and the last
+            # writer wins, so the consumer reads the compound's aggregated stream, which already
+            # contains that command's own output. Two substitutions never collide: every
+            # ``>(...)`` occurrence mints its own resource and body scope.
+            inputs[resource.scope_id] = StreamRef(writer.stream_scope_id)
     return inputs
 
 

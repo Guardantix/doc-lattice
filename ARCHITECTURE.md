@@ -447,12 +447,14 @@ against the bindings its enclosing compounds installed, innermost first, so
 `{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. A stdout writer is a
 simple command or a compound, since a compound carries redirections and aggregated stdout of its
 own, so `{ producer; } > >(consumer)` binds the compound's stdout to the substitution's consumer
-exactly as the ungrouped `producer > >(consumer)` binds one command's. Descriptors 1 and 2 are
-always inherited from the enclosing shell and need no such binding. Any other descriptor that some
-part of the body binds, but that this command's lexical chain cannot supply, is missing evidence
-rather than an inherited stream: a bare `exec 3> out.sh` rebinds the shell scope, which the
-per-command `redirections` field cannot carry, so a later `>&3` fails closed. A descriptor nothing
-in the body binds is a Bash runtime error rather than a flow, so it keeps routing nowhere.
+exactly as the ungrouped `producer > >(consumer)` binds one command's. A process substitution is a
+descriptor target like any other on that chain, so `{ producer >&3; } 3> >(consumer)` reaches the
+consumer as well. Descriptors 1 and 2 are always inherited from the enclosing shell and need no
+such binding. Any other descriptor that some part of the body binds, but that this command's
+lexical chain cannot supply, is missing evidence rather than an inherited stream: a bare
+`exec 3> out.sh` rebinds the shell scope, which the per-command `redirections` field cannot carry,
+so a later `>&3` fails closed. A descriptor nothing in the body binds is a Bash runtime error
+rather than a flow, so it keeps routing nowhere.
 
 Execution sinks are `eval`, shell `-c`, selected shell stdin, a registered `trap` action, and
 static script execution through a shell operand, direct path, `source`, or `.`. A `trap` action is
@@ -708,16 +710,15 @@ descriptor state carried across commands by a bare `exec`, eval payload construc
 bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
 This list is the boundary as designed, not a complete inventory of what the engine currently
 misses; open gaps against this decision are tracked in issues #125 through #141, and this
-enumeration itself is not exhaustive. One further gap outside these categories: `lastpipe` state
+enumeration itself is not exhaustive. Two further gaps outside these categories: `lastpipe` state
 reached through a function call site or a loop back edge is widened only for a pipeline whose last
 stage is a `read` writing from stdin, not for every conditional-on-lastpipe context such as a
-trailing `eval` (issue #118). Only descriptor 1 selects an output process substitution's consumer,
-so a writer that reaches the substitution through descriptor 2 alone, as in
-`{ producer >&2; } 2> >(consumer)`, is still not linked to it; that holds for a simple command and
-a compound alike. A `read` beyond
-the first record of a shared stream is projected as record one, so a marker split across later
-records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
-over-refusal it interacts with is issue #119.
+trailing `eval` (issue #118), and one descriptor bound to two output process substitutions keeps
+only the last binding, so the earlier consumer Bash chains behind it, as in
+`producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the first record of
+a shared stream is projected as record one, so a marker split across later records is not yet seen;
+that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it interacts with is
+issue #119.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
 that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
 required character comes only from external content continue to certify with the boundary
