@@ -133,6 +133,98 @@ jobs:
             --compare-base "$RUNNER_TEMP/base/shell_guard_debt.json" \
             --base-registry "$RUNNER_TEMP/base/guard_witnesses.py"
 
+  corpus-differential:
+    name: Corpus differential
+    runs-on: ubuntu-latest
+    # The gate replays one corpus against the candidate and against the revision it is proposed on
+    # top of, and only a pull request payload names that pair. It deliberately stays out of the
+    # `release` job's `needs`: a job skipped for push events skips every dependent with it.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The base tree is not present otherwise: a pull_request run checks out the merge ref
+          # and the pinned action fetches one commit by default.
+          fetch-depth: 0
+      - name: Decide whether the differential has anything to compare
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Every input the replay reads, so a change to the tool or to the frozen corpus is in
+          # scope exactly as a change to the guard package is, and an unrelated pull request pays
+          # for a checkout and one diff rather than for twenty thousand scans. Bound here rather
+          # than spelled in the run body because the guard package's own path carries the
+          # distribution marker, which AD-17 refuses in an uncertified command.
+          REPLAYED_PATHS: >-
+            src/doc_lattice/github_ci/
+            scripts/corpus_differential.py
+            scripts/fuzz_shell_taint.py
+            tests/fixtures/github_ci_checkpoint/replay_inventory.json
+        run: |
+          set -euo pipefail
+          # A base whose object is missing is not a base that predates the gate: a force-push or a
+          # re-created branch can leave it unreachable, and skipping there would wave a scanner
+          # change through with a green job and nothing replayed.
+          if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "base is not readable in this clone; refusing to skip the differential" >&2
+            exit 1
+          fi
+          # Split deliberately: the binding above is a path list, not one path.
+          # shellcheck disable=SC2086
+          changed="$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" -- $REPLAYED_PATHS)"
+          if [ -z "$changed" ]; then
+            echo "no replayed input changed; the differential has nothing to compare"
+            echo "in-scope=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "replaying because these inputs changed:"
+          echo "$changed"
+          echo "in-scope=true" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        if: steps.scope.outputs.in-scope == 'true'
+        with:
+          enable-cache: true
+      - name: Install a pinned interpreter and the locked environment
+        if: steps.scope.outputs.in-scope == 'true'
+        run: |
+          set -euo pipefail
+          uv python install 3.13
+          uv sync --locked --group dev
+      - name: Materialize the protected base revision
+        if: steps.scope.outputs.in-scope == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+      - name: Replay the corpus against the protected base
+        if: steps.scope.outputs.in-scope == 'true'
+        # The tool and the corpus are the candidate's in both runs, so the two records score the
+        # same scripts and the guard package is the only thing that differs between them.
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/corpus_differential.py record \
+            --scanner-root "$RUNNER_TEMP/base" \
+            --out "$RUNNER_TEMP/base-verdicts.json"
+      - name: Replay the corpus against the candidate
+        if: steps.scope.outputs.in-scope == 'true'
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/corpus_differential.py record \
+            --scanner-root . \
+            --out "$RUNNER_TEMP/candidate-verdicts.json"
+      - name: Report verdict divergence the pull request has not acknowledged
+        if: steps.scope.outputs.in-scope == 'true'
+        # The base's own copy of the frozen inventory is the corpus floor: without it a candidate
+        # could shrink the corpus until the divergence it introduces has nothing left to report.
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/corpus_differential.py compare \
+            --base "$RUNNER_TEMP/base-verdicts.json" \
+            --candidate "$RUNNER_TEMP/candidate-verdicts.json" \
+            --base-inventory "$RUNNER_TEMP/base/tests/fixtures/github_ci_checkpoint/replay_inventory.json" \
+            --acknowledged tests/fixtures/corpus_differential_acknowledgements.json
+
   release:
     name: Release
     needs: [code-quality, tests, security-scan, guard-debt]

@@ -38,6 +38,12 @@ uv run --group dev python scripts/guard_witness_sweep.py
 uv run --group dev python scripts/guard_witness_sweep.py \
   --trace "eval 'X=\${Y=q}'; eval \"\$X\"lattice"
 
+uv run --group dev python scripts/corpus_differential.py record \
+  --scanner-root . --out /tmp/candidate-verdicts.json
+uv run --group dev python scripts/corpus_differential.py compare \
+  --base /tmp/base-verdicts.json --candidate /tmp/candidate-verdicts.json \
+  --acknowledged tests/fixtures/corpus_differential_acknowledgements.json
+
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
   --iterations 1200 --seed 1 --baseline tests/fixtures/shell_taint_fuzz_baseline.tsv
@@ -111,6 +117,32 @@ It is a search, not a gate. The default sweep drives thousands of scripts throug
 configuration and takes several minutes, and printing no rows means the corpus reached nothing new
 rather than that anything failed. Shrink `--seeds` and `--iterations` for a quick pass, and use
 `--all-guards` to see what the corpus reaches at all.
+
+`scripts/corpus_differential.py` is the dynamic control for the residual AD-20 records: a targeted
+early refusal above a frozen guard withdraws it with every static gate green. The tool replays one
+fixed corpus, the frozen replay inventory plus four fuzzer seeds, about twenty thousand scripts,
+through the public scan path once per revision and reports every script whose verdict differs.
+Direction is irrelevant to it, so it sees an over-refusal as readily as a new certification, which
+is what the taint fuzzer's false-certification counter does not report. A verdict label carries the
+refusing guard's identifier, which is what makes a refusal that moves to another origin a
+divergence rather than two refusals that look alike.
+
+Two revisions of one package cannot be imported side by side, so a run is two `record` processes
+and one `compare`. The CI job replays the base from a worktree of the protected base revision and
+the candidate from the checkout; locally, materialize the other revision anywhere and point
+`--scanner-root` at it. The tool and the corpus come from the tree holding the tool in both runs,
+so only the guard package differs between the two records, and `compare --base-inventory` holds the
+scored corpus to the base revision's own frozen inventory as its floor.
+
+An intentional behavior change is acknowledged rather than silenced. Add an entry to
+`tests/fixtures/corpus_differential_acknowledgements.json` naming the script digest, both verdicts
+and a reason a reviewer can read. An entry covers exactly the transition it names, so it expires on
+its own once the base carries the new behavior, and the report names an entry nothing matched
+instead of leaving it to rot silently.
+
+The gate is scoped to pull requests that touch the guard package, this tool, the fuzzer grammar or
+the frozen inventory, and a full run replays roughly twenty thousand scripts per side. Shrink
+`--seeds` and `--iterations` while iterating locally.
 
 ## Enforced repository rules
 

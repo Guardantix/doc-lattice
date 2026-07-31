@@ -1433,7 +1433,7 @@ guard is not exposed to it, because its witness executes the guard through the p
 same edit becomes a failing test rather than a green gate. The residual therefore shrinks
 one-for-one as debt is classified, and vanishes when the debt snapshot is empty, which is the
 closure target this decision already names. The dynamic control while the window is open is the
-recurring checkpoint-corpus differential proposed in issue #182: it replays the authored corpus
+recurring checkpoint-corpus differential recorded in AD-21: it replays the authored corpus
 against base and candidate and reports every verdict divergence, so it sees an over-refusal as
 readily as a certification, which the taint fuzzer's seed-gated false-certification counter
 deliberately does not.
@@ -1526,3 +1526,60 @@ limits reach the bounds they name, so a resource guard is witnessed by a small s
 an enormous one. The cost is a second gate to maintain and a debt snapshot that must be regenerated
 whenever a guard legitimately moves; the closure target is an empty snapshot, which this decision
 does not by itself reach.
+
+### AD-21: A scanner change replays the frozen corpus against the revision it is proposed on
+
+**Date:** 2026-07-31
+**Status:** Accepted
+**Context:** AD-20 records one residual it does not close: a targeted early refusal above a frozen
+guard's function, such as refusing any body containing `--split-string=` at the top of
+`_ShellScanner.scan`, withdraws that guard while every static gate stays green. A fingerprint
+records the immediate call site's controls, the reachability rule follows syntactic call edges, and
+a frozen origin has no witness executing it. The one control that saw the round-6 demonstration on
+PR #179 was dynamic and ran once: a differential over the recorded corpus, comparing two revisions
+script by script. The taint fuzzer does not substitute for it. Its gate counts false
+certifications, so it is blind by construction to a change that refuses more than the base did, and
+withdrawal by early refusal is exactly that shape.
+**Decision:** A pull request that touches the guard package, the differential tool, the fuzzer
+grammar or the frozen replay inventory replays one fixed corpus against both revisions and reports
+every script whose verdict differs. The corpus is the in-tree frozen inventory recorded by
+`scripts/checkpoint_record_scanner_inputs.py` plus the bodies four fixed fuzzer seeds draw from the
+compositional grammar, roughly twenty thousand scripts, which is the scale of the one-off run. It
+is in-tree on purpose: the evaluation branch that carries the successor evidence is read-only
+history, and a gate that reads it would make a protected branch a build input.
+
+A verdict label is the refusing guard's origin identifier, the analysis's own marker verdict, or
+the certified invocations. Identity is what makes this catch the demonstration at all: the corpus
+carries one script spelling the targeted option, the base refuses it as
+`scanner.env-prefix.split-string-long-option`, and the early refusal refuses it as whatever origin
+it mints. A label that recorded only "refused" would report those two as the same verdict.
+
+Two revisions of one package cannot be imported side by side, so the gate is two recording
+processes and one comparison. The tool and the corpus are the candidate's in both recordings, so
+the two records score the same scripts and the guard package is the only thing that differs;
+the base revision's own copy of the inventory is then the floor the scored corpus may not fall
+below, since a candidate that shrank the corpus would make its own divergence disappear rather than
+report it. The comparison refuses outright, rather than reporting a count, when the two records did
+not score the same corpus.
+
+An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
+script digest, both verdicts and a reason, so it covers exactly the transition it was written for
+and expires on its own once the base carries the new behavior, and the report names an
+acknowledgement nothing matched instead of leaving it to accumulate. Acknowledgements are a file in
+the diff, which is what makes them reviewable; a label or a phrase in a pull request body is
+neither versioned nor reviewable alongside the change it excuses.
+
+The gate runs on pull requests and stays out of the release job's `needs`, because a job skipped
+for push events skips every dependent with it. Its scope step reads the diff against the base and
+exits early when no replayed input changed, so an unrelated pull request pays for a checkout and
+one `git diff`. A base whose object cannot be read is a failure rather than a skip, for the reason
+AD-20's base-owned comparison gives.
+**Consequences:** An over-refusal is visible to automation for the first time, in either direction
+and without a witness for the guard involved, which is what makes this the standing control while
+the frozen-debt window is open. The cost is roughly two minutes of replay per revision on a change
+that touches the scanner, and nothing on a change that does not. Two limits are disclosed rather
+than closed. A withdrawal that mints exactly the origin identifier the deeper guard would have
+returned, over exactly the corpus scripts that guard already refuses, moves no label and stays
+invisible; widening the corpus is what shrinks that, not a rule. And the corpus is a fixed sample
+rather than a proof, so a clean differential is evidence about those scripts and not a statement
+about every input the scanner accepts.
