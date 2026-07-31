@@ -7659,6 +7659,54 @@ def test_compound_redirection_content_uses_scope_environment(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        "A=doc-\nB=lattice\n{ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n",
+        "A=doc-\nB=lattice\n{ cat; } <<EOF | cat | bash\n$A$B reconcile\nEOF\n",
+        'A=doc-\nB=lattice\n{ cat; } <<EOF | bash\n$A$B reconcile\nEOF\n{ cat; } <<"X"\nplain\nX\n',
+    ],
+    ids=("brace-stage", "three-stage", "stage-then-later-compound"),
+)
+def test_compound_stage_heredoc_survives_its_pipeline_consumer(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "A=doc-\nB=lattice\ncat <<EOF | bash\n$A$B reconcile\nEOF\n",
+        "A=doc-\nB=lattice\n{ cat; } <<EOF > s.sh\n$A$B reconcile\nEOF\nbash s.sh\n",
+    ],
+    ids=("simple-stage-control", "no-pipeline-control"),
+)
+def test_compound_stage_heredoc_controls_still_refuse(script: str):
+    assert_taint_refusal(script)
+
+
+def test_pipeline_consumer_still_owns_its_own_heredoc():
+    result = scan_doc_lattice_invocations(
+        "A=doc-\nB=lattice\n{ true; } <<EOF | bash <<INNER\nquiet\nEOF\n$A$B reconcile\nINNER\n"
+    )
+
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+def test_heredoc_without_a_modeled_reader_fails_closed():
+    """A heredoc body no owner can read refuses instead of being dropped from the model.
+
+    A loop header is discarded before command evidence exists, so a heredoc parsed inside one
+    reaches neither a command nor a compound scope. Bash rejects that header as a syntax error,
+    so the refusal costs nothing that could run, while the same guard covers any later shape
+    whose body would otherwise leave its reader modeled as reading nothing.
+    """
+    unowned = "for i in a <<EOF\ndoc-lattice reconcile\nEOF\ndo\n:\ndone\n"
+    control = "for i in a\ndo\ncat <<EOF\ndoc-lattice reconcile\nEOF\ndone\n"
+
+    assert scan_doc_lattice_invocations(unowned).guard_id == "scanner.heredoc.unattributed-body"
+    assert scan_doc_lattice_invocations(control).guard_id is None
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "printf '%s%s\\n' doc- lattice 2>&1 1>&2 | bash",
         "printf '%s%s\\n' doc- lattice 3>&1 1>&3 | bash",
         "printf '%s%s\\n' doc- lattice 2>&1 1>&2 | { bash; }",

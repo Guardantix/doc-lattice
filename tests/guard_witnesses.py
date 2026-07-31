@@ -639,6 +639,15 @@ REACHABLE_WITNESSES: tuple[ReachableWitness, ...] = (
         "bash",
         limits=ScanLimits(taint=TaintLimits(max_alternatives=0)),
     ),
+    ReachableWitness(
+        "scanner.heredoc.unattributed-body",
+        # A loop header is discarded before any command evidence exists, so a heredoc parsed
+        # inside it reaches no command and no compound scope that could read its body. Bash
+        # rejects this header outright, so nothing that runs is refused by reaching here.
+        "for i in a <<EOF\ndoc-lattice reconcile\nEOF\ndo\n:\ndone\n",
+        control_script="for i in a\ndo\ncat <<EOF\ndoc-lattice reconcile\nEOF\ndone\n",
+        control_guard_id=None,
+    ),
 )
 
 INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (
