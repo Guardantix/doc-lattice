@@ -704,8 +704,9 @@ beyond generic may-output, arbitrary encoding/transforms, dynamic resource alias
 descriptor state carried across commands by a bare `exec`, eval payload constructs outside the
 bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
 This list is the boundary as designed, not a complete inventory of what the engine currently
-misses; open gaps against this decision are tracked in issues #125 through #141, and this
-enumeration itself is not exhaustive. Two further gaps outside these categories: a compound
+misses; open gaps against this decision are tracked as individual issues rather than by a fixed
+range of issue numbers, and this enumeration itself is not exhaustive. Two further gaps outside
+these categories: a compound
 command's stdout redirected into an output process substitution is not yet linked into that
 substitution's consumer, only a simple command's is (issue #116), and `lastpipe` state reached
 through a function call site or a loop back edge is widened only for a pipeline whose last stage is
@@ -1526,3 +1527,74 @@ limits reach the bounds they name, so a resource guard is witnessed by a small s
 an enormous one. The cost is a second gate to maintain and a debt snapshot that must be regenerated
 whenever a guard legitimately moves; the closure target is an empty snapshot, which this decision
 does not by itself reach.
+
+### AD-21: A missing content-table key stays inert, and widening that default is rejected
+
+**Date:** 2026-07-31
+**Status:** Accepted
+**Context:** Three review passes over the false certifications open in July 2026 converged on one
+cross-cutting cause. When the taint solver resolves a `VariableRef`, `ResourceRef`, or `StreamRef`
+whose key is absent from the layered content tables, `shell_taint.py` yields `_OUTSIDE_VALUE`, which
+is inert and never marker-capable, rather than `_UNKNOWN_VALUE`, the top of the content lattice. The
+proposal was that inverting that default would turn every present and future evidence-construction
+gap from a silent certification into a refusal, closing the class instead of its instances. Issue
+#143 measured that proposal rather than reasoning about it, and it is recorded here with its numbers
+so the option is not re-proposed without them.
+
+The measurement was taken on 2026-07-26 at 85922d3, the revision on the cross-command marker taint
+branch that introduced `scripts/fuzz_shell_taint.py`. The numbers below describe that tree, not the
+current one, and the row for the unchanged default reproduces there. The method was that fuzzer at
+1200 generated recipes and seed 1, run with `--no-shrink` so failing recipe sets are directly
+comparable between variants. Shrinking has to be off for that comparison: a variant that refuses
+more also shrinks less, which inflates the distinct-recipe count and reads as a regression when it
+is not. The comparable quantities are the failing cases and the set difference between variants,
+never the shrunk count.
+
+Measured at 85922d3:
+
+| variant | false certifications | fixed | introduced | suite failures | fuzz over-refusals |
+|---|---|---|---|---|---|
+| current default | 191 | - | - | 0 | 112 |
+| streams and resources widen | 175 | 16 | 0 | 41 | 180 |
+| streams only widen | 175 | 16 | 0 | 12 | 180 |
+| resources only widen | - | 0 | - | 30 | - |
+| synthetic negative scope ids only | 191 | 0 | 0 | 0 | 112 |
+
+**Decision:** A missing key in the variable, resource, or stream tables continues to resolve to the
+inert `_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither
+globally nor for one table. Reopening the proposal means re-running this five-variant comparison
+against the tree it targets and reporting the same columns, not matching the numbers above, which
+belong to a tree the fixes since have replaced.
+
+Every measured variant was strictly sound-improving, introducing zero new false certifications, so
+the rejection was about yield against cost. Widening resource lookups contributed zero fixes and 30
+of the 41 suite failures the widest variant produced, which is pure cost. The two single-table rows
+sum to 42 against that 41, so one suite failure was reached by either widening on its own. All 16
+fixes came from stream lookups, bought with 12 legitimate certifications, and ten of those twelve
+were a `read` from a non-literal stream, for example
+`shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
+because the `read` projects a record. Restricting the widening to the synthetic negative scope ids
+minted by `_OutputLowering`, which are provably internal to the body, cost nothing and fixed
+nothing: the 16 fixes all came from non-negative scope ids, the same population those `read`
+certifications depend on.
+
+The default is therefore not separable at this granularity. Internal solver gaps and legitimately
+external streams share one lookup-miss population, and scope-id sign, the most promising cheap
+discriminator, captured none of the benefit. The hypothesis that this default was the dominant cause
+of the false certifications open at the time was also wrong: it accounted for 16 of 191 failing
+bodies, about 8 percent, and the rest came from evidence never being constructed at all, the class
+AD-18 discloses and tracks issue by issue. Closing the class was that issue-by-issue work, not one
+default change, and the work that followed this measurement bears that out. The branch it was
+measured on merged as 763f43d on 2026-07-27, closing the individual issues the remaining bodies were
+attributed to, and the same seed and method re-run at 1c7a6df report 2 false certifications and 167
+over-refusals. A later attempt has to supply the discriminator this experiment lacked, which is
+knowing whether the body itself should have defined a key, rather than inferring that from the key's
+shape.
+**Consequences:** The inert missing-key default is the pinned behavior of an unresolved content
+reference, and the false certifications AD-18 discloses stay open under their individual issues
+rather than behind one pending global fix. This rejects one widening, not fail-closed defaults in
+general: AD-18's rule that a projection which is merely lost widens to the top of the lattice is
+unchanged, because there the solver knows it lost track, while a table miss does not say whether the
+key was ever meant to exist. The residual cost is explicit. An evidence-construction gap in a new
+lowering still certifies silently instead of refusing, so that risk is carried by the review and
+fuzz measurement of the lowering itself rather than by a lattice-wide backstop.
