@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from doc_lattice.github_ci import shell_scanner, shell_taint
+from doc_lattice.github_ci import shell_guards, shell_scanner, shell_taint
 from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ def _load_tool() -> ModuleType:
 
 
 tool = _load_tool()
+checker = tool.check_guard_inventory
 
 
 def test_limits_grid_shrinks_every_declared_cap() -> None:
@@ -208,10 +210,42 @@ def test_guarded_filenames_track_the_imported_modules() -> None:
     # Composing the path from the repository root instead would stop matching whenever the tree is
     # reached through a symlink, and a tracer that matches nothing reports the same empty set as a
     # candidate that reaches no guard machinery.
-    names = tool.guarded_filenames()
+    names = tool.guarded_filenames(_ROOT)
 
     assert shell_scanner.__file__ in names
     assert shell_taint.__file__ in names
+
+
+def test_guarded_filenames_cover_every_module_the_inventory_guards() -> None:
+    # A list of modules kept here is a second allowlist, and it goes stale the moment a guard
+    # module is added: the inventory would name the new module's origins while the tracer recorded
+    # none of its frames, so every one of them would be intersected away and the trace would read
+    # exactly like a candidate that reaches no guard machinery at all.
+    names = tool.guarded_filenames(_ROOT)
+
+    assert shell_guards.__file__ in names
+    for module in checker.GUARDED_MODULES:
+        assert str(_ROOT / module) in names
+
+
+def test_guarded_modules_include_one_the_inventory_discovers(tmp_path: Path) -> None:
+    # Discovery, not the allowlist, is what sees a guard module the moment it is written, and it
+    # is the surface the gate's own repository rules read. Tracking it is what keeps the tool
+    # usable on the tree where a new module is still being classified.
+    root = tmp_path / "candidate"
+    for module in checker.GUARDED_MODULES:
+        target = root / module
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(_ROOT / module, target)
+    added = root / checker.GUARD_MODULE_ROOT / "shell_taint_eval.py"
+    added.write_text(
+        "def _bound(depth, limits):\n"
+        "    if depth > limits.taint.max_eval_reparse_depth:\n"
+        '        raise _TaintLimitExceeded(GuardRefusal("taint.eval.new-bound", "too deep"))\n',
+        encoding="utf-8",
+    )
+
+    assert added.relative_to(root).as_posix() in tool.guarded_modules(root)
 
 
 def test_load_corpus_rejects_an_extra_file_that_is_not_a_list_of_scripts(
@@ -283,6 +317,25 @@ def test_a_trace_filters_against_the_checkout_whose_scanner_it_executes(
     assert tool.main(["--trace", "echo hello"]) == 0
 
     assert filtered == [Path(shell_scanner.__file__).resolve().parents[3]]
+
+
+def test_a_trace_records_frames_from_the_checkout_whose_scanner_it_executes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The traced surface is derived from a tree too, and it has to be the same one the accepted
+    # names come from: a module read from another revision contributes frames the inventory never
+    # names, or names the tracer never records.
+    traced: list[Path] = []
+
+    def record(root: Path) -> frozenset[str]:
+        traced.append(root)
+        return frozenset()
+
+    monkeypatch.setattr(tool, "guarded_filenames", record)
+
+    assert tool.main(["--trace", "echo hello"]) == 0
+
+    assert traced == [Path(shell_scanner.__file__).resolve().parents[3]]
 
 
 def test_main_traces_one_script_without_running_a_sweep(capsys: pytest.CaptureFixture) -> None:

@@ -59,10 +59,6 @@ if TYPE_CHECKING:
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 SCANNER_MODULE = "src/doc_lattice/github_ci/shell_scanner.py"
-GUARDED_MODULES = (
-    "src/doc_lattice/github_ci/shell_taint.py",
-    SCANNER_MODULE,
-)
 PRODUCTION = "production"
 
 Reach = dict[str, tuple[str, str]]
@@ -240,20 +236,46 @@ def sweep(
     return found
 
 
-def guarded_filenames() -> frozenset[str]:
+def guarded_modules(root: Path) -> tuple[str, ...]:
+    """Return the modules a trace records frames from.
+
+    Taken from the gate's own guarded surface rather than a list kept here, for the reason
+    `guard_owning_qualnames` records at one level down: a list here is a second allowlist, and a
+    guard module missing from it contributes no frames while the inventory still names its
+    origins, so every one of them is intersected away with no diagnostic. That surface is the
+    discovered modules together with the checker's allowlist, so a module reaches this tool while
+    it is still being classified, which is when a trace is worth running.
+
+    Args:
+        root: Repository root to read the guard package from.
+
+    Returns:
+        Repository-relative module paths in path order.
+    """
+    return check_guard_inventory.repository_guarded_modules(root)
+
+
+def guarded_filenames(root: Path) -> frozenset[str]:
     """Return the source filenames CPython reports for frames in the guarded modules.
 
-    Read from the imported modules rather than composed from `_ROOT`, so the tracer still matches
+    Read from the imported modules rather than composed from the root, so the tracer still matches
     when the checkout is reached through a symlink or the package resolves to an installed copy
     instead of the tree beside this script. A composed path that failed to match would make every
     trace report an empty set, which reads exactly like a candidate that reaches no guard
     machinery at all.
 
+    Args:
+        root: Repository root the guarded modules are read from.
+
     Returns:
         Every spelling of a guarded module's filename a traced frame may carry.
+
+    Raises:
+        ModuleNotFoundError: If a guarded module cannot be imported, since tracing the rest would
+            report a partial reach as the whole one.
     """
     names: set[str] = set()
-    for module in GUARDED_MODULES:
+    for module in guarded_modules(root):
         # Derived from the recorded path rather than a hard-coded package prefix, so a guarded
         # module that moves within the tree still resolves to the module actually imported.
         dotted = ".".join(Path(module).with_suffix("").parts[1:])
@@ -262,7 +284,7 @@ def guarded_filenames() -> frozenset[str]:
         if source is not None:
             names.add(source)
             names.add(str(Path(source).resolve()))
-        names.add(str(_ROOT / module))
+        names.add(str(root / module))
     return frozenset(names)
 
 
@@ -300,7 +322,10 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
     Returns:
         Qualified names, with nested-function `<locals>` markers removed.
     """
-    guarded = guarded_filenames()
+    # The tree is derived here rather than accepted, for the reason `main` records: the frames a
+    # run records and the names it accepts have to describe one revision, and that is the revision
+    # whose scanner this process executes.
+    guarded = guarded_filenames(scanner_checkout())
     reached: set[str] = set()
 
     def trace(frame, event, _argument):  # noqa: ANN001, ANN202 - CPython tracer signature
