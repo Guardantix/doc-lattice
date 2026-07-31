@@ -414,6 +414,57 @@ def test_load_corpus_refuses_an_authored_candidate_it_would_drop(tmp_path: Path)
         tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=extra)
 
 
+def test_load_corpus_reports_a_recorded_script_the_length_filter_drops(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The refusal above says why an authored candidate cannot be dropped in silence, and the same
+    # reading applies to a recorded one: the recorded half is the shapes the scanner was built
+    # against, so a sweep that never scanned one prints what a sweep that scanned it and reached no
+    # guard prints. The filter still has to bound the grammar, so this is counted, not refused.
+    tool.load_corpus(_ROOT, seeds=0, iterations=0, max_length=8)
+
+    assert "recorded script" in capsys.readouterr().err
+
+
+def test_load_corpus_stays_quiet_when_it_drops_no_recorded_script(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    tool.load_corpus(_ROOT, seeds=0, iterations=0, max_length=1_000_000)
+
+    assert "recorded script" not in capsys.readouterr().err
+
+
+def test_a_trace_that_reaches_nothing_says_so(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An empty stdout and a zero exit is also what a run that never traced anything prints, and
+    # telling the two apart is the whole answer this mode was asked for.
+    monkeypatch.setattr(tool, "guard_owning_functions", lambda _root: frozenset())
+
+    assert tool.main(["--trace", "echo hello"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "reached 0 guard-holding functions" in captured.err
+
+
+def test_a_trace_counts_the_functions_it_reported(capsys: pytest.CaptureFixture) -> None:
+    assert tool.main(["--trace", "eval 'X=${Y=q}'; eval \"$X\"lattice"]) == 0
+
+    captured = capsys.readouterr()
+    assert f"reached {len(captured.out.split())} guard-holding functions" in captured.err
+
+
+def test_a_trace_all_run_counts_the_wider_surface_it_reported(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    assert tool.main(["--trace", "echo hello", "--trace-all"]) == 0
+
+    captured = capsys.readouterr()
+    assert f"reached {len(captured.out.split())} guarded-module functions" in captured.err
+
+
 def test_sweep_reports_the_scripts_it_could_not_scan(
     capsys: pytest.CaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

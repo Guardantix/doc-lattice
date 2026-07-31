@@ -253,7 +253,8 @@ def load_corpus(
             f"{RECORDER_SCRIPT}"
         )
         raise ValueError(message)
-    corpus.update(entry["source"] for entry in entries)
+    recorded = {entry["source"] for entry in entries}
+    corpus.update(recorded)
     for seed in range(seeds):
         for case in fuzz_shell_taint.generate(random.Random(seed), iterations):
             corpus.add(case.script)
@@ -277,6 +278,17 @@ def load_corpus(
             )
             raise ValueError(message)
         corpus.update(candidates)
+    # A recorded script the filter removes is reported for the reason the refusal above gives for
+    # an authored one: the recorded half is the shapes the scanner was built against, and one
+    # dropped in silence leaves a sweep that never scanned it printing what a sweep that scanned it
+    # and reached no guard prints. Counted rather than refused, because the filter exists to bound
+    # what the grammar generates and the inventory records bodies far past any reviewable witness.
+    dropped = sum(1 for script in recorded if len(script) > max_length)
+    if dropped:
+        sys.stderr.write(
+            f"dropped {dropped} recorded script(s) longer than the {max_length}-character "
+            "--max-length; raise it to sweep them\n"
+        )
     # The text tie-break keeps equal-length scripts in a deterministic order, so a sweep prints
     # the same witness rows under every PYTHONHASHSEED.
     return sorted(
@@ -736,7 +748,13 @@ def main(argv: list[str] | None = None) -> int:
         if not arguments.trace_all:
             reached &= guard_owning_functions(root)
         # The module decided the intersection; the names alone are what a candidate is aimed with.
-        for name in sorted({qualname for _module, qualname in reached}):
+        names = sorted({qualname for _module, qualname in reached})
+        # Counted on stderr the way a sweep counts its origins. A candidate that reaches nothing
+        # otherwise prints an empty stdout and exits zero, which is what a run that never traced
+        # prints too, and the difference is the whole answer this mode was asked for.
+        surface = "guarded-module" if arguments.trace_all else "guard-holding"
+        sys.stderr.write(f"reached {len(names)} {surface} functions\n")
+        for name in names:
             sys.stdout.write(f"{name}\n")
         return 0
 
