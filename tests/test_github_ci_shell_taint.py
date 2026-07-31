@@ -66,6 +66,7 @@ from doc_lattice.github_ci.shell_taint import (
     _PipeEvidence,
     _PositionalBinding,
     _ProcessResourceEvidence,
+    _recorded_definition_cycles,
     _RedirectionEvent,
     _scoped_variable_name,
     _ShellTaintEvidence,
@@ -2353,6 +2354,137 @@ def test_mutually_referential_variables_converge_by_least_fixed_point() -> None:
         _marker_capable(solved.evaluate(Concat((VariableRef("Y"), LiteralTransfer("lattice")))))
         is True
     )
+
+
+def test_definition_cycle_through_a_stream_is_recorded_and_epsilon_seeded() -> None:
+    """Issue #163: a cycle through a command substitution reaches the same seed as a direct one.
+
+    ``X=$(printf "doc-%slattice reconcile" "$X")`` writes ``X`` from a stream whose own write
+    reads ``X`` back. `_cyclic_write_keys` reads the variable writes alone and so cannot see that
+    cycle; without the recorded self-reference the key keeps the lattice bottom and
+    ``_compose_values`` annihilates the authored marker composed around it, which is the failure
+    #115 recorded for the direct spelling.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(_FlowWrite("X", StreamRef(3)),),
+        stream_writes=(
+            _FlowWrite(
+                3,
+                Concat(
+                    (
+                        LiteralTransfer("doc-"),
+                        VariableRef("X"),
+                        LiteralTransfer("lattice reconcile"),
+                    )
+                ),
+            ),
+        ),
+    )
+
+    unrecorded = _solve_flow_definitions(definitions, limits=TaintLimits())
+    recorded = _solve_flow_definitions(
+        _recorded_definition_cycles(definitions), limits=TaintLimits()
+    )
+
+    assert _marker_capable(unrecorded.evaluate(VariableRef("X"))) is False
+    assert _marker_capable(recorded.evaluate(VariableRef("X"))) is True
+
+
+def test_definition_cycle_through_a_resource_is_recorded_and_epsilon_seeded() -> None:
+    """The file carrier reaches the same seed as the command-substitution carrier."""
+    definitions = _FlowDefinitions(
+        variable_writes=(_FlowWrite("X", ResourceRef("task.sh")),),
+        resource_writes=(
+            _FlowWrite(
+                "task.sh",
+                Concat(
+                    (
+                        LiteralTransfer("doc-"),
+                        VariableRef("X"),
+                        LiteralTransfer("lattice reconcile"),
+                    )
+                ),
+            ),
+        ),
+    )
+
+    solved = _solve_flow_definitions(_recorded_definition_cycles(definitions), limits=TaintLimits())
+
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
+
+
+def test_recording_a_definition_cycle_leaves_an_acyclic_flow_untouched() -> None:
+    """Over-refusal control for issue #163: reaching a carrier is not the same as cycling to it.
+
+    ``X`` reads a stream that reads ``Y``, and nothing reads ``X`` back, so no key here lies on a
+    cycle and none may be recorded. Seeding this flow with epsilon because the walk now reaches
+    the stream would let the first fixed-point round compose ``doc-`` with the empty string and
+    ``lattice``, which is the declared-forward-reference over-refusal the bottom seed prevents.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(
+            _FlowWrite(
+                "X",
+                Concat((LiteralTransfer("doc-"), StreamRef(3), LiteralTransfer("lattice"))),
+            ),
+            _FlowWrite("Y", LiteralTransfer("x")),
+        ),
+        stream_writes=(_FlowWrite(3, VariableRef("Y")),),
+    )
+
+    recorded = _recorded_definition_cycles(definitions)
+    solved = _solve_flow_definitions(recorded, limits=TaintLimits())
+
+    assert recorded == definitions
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is False
+
+
+def test_recording_a_definition_cycle_does_not_widen_a_solved_value() -> None:
+    """The recorded write only exposes the cycle; joining a key with itself never widens it.
+
+    A direct cycle is already visible to the seeder, so recording adds nothing for it, and the
+    solved table has to be identical either way.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(
+            _FlowWrite("X", LiteralTransfer("doc-")),
+            _FlowWrite("X", VariableRef("Y")),
+            _FlowWrite("Y", VariableRef("X")),
+        )
+    )
+
+    recorded = _recorded_definition_cycles(definitions)
+
+    assert recorded == definitions
+    assert (
+        _solve_flow_definitions(recorded, limits=TaintLimits()).variables
+        == _solve_flow_definitions(definitions, limits=TaintLimits()).variables
+    )
+
+
+def test_issue_163_indirect_definition_cycle_exploit_stays_refused() -> None:
+    """Verified false certification from issue #163, reproduced under real Bash 5.2.
+
+    Bash expands the not-yet-assigned ``$X`` inside the substitution to the empty string, so the
+    surrounding literals reconstitute the marker and the shim runs. The control spells the same
+    cycle without the substitution carrier and already refused before this fix, which isolates
+    the carrier the cycle detection could not follow rather than the cycle seeding itself.
+    """
+    exploit = 'X=$(printf "doc-%slattice reconcile" "$X"); $X'
+    control = 'X="doc-${X}lattice reconcile"; $X'
+
+    exploit_result = scan_doc_lattice_invocations(exploit)
+    control_result = scan_doc_lattice_invocations(control)
+
+    assert control_result.incomplete_reason is not None
+    assert exploit_result.incomplete_reason is not None
+
+
+def test_issue_163_marker_free_command_substitution_still_certifies() -> None:
+    """Over-refusal control: an ordinary self-accumulating variable carries no marker."""
+    result = scan_doc_lattice_invocations('X=$(printf "%s-more" "$X"); echo "$X"')
+
+    assert result.incomplete_reason is None
 
 
 @pytest.mark.parametrize(

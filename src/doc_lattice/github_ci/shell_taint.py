@@ -180,6 +180,12 @@ class _FlowDefinitions:
     stream_writes: tuple[_FlowWrite, ...] = ()
 
 
+# One flow table entry, named by the table holding it and its key. Keys are unique only inside
+# their own table, so a stream scope and a resource can carry the same integer key and still be
+# separate entries.
+_FlowNode: TypeAlias = tuple[str, str | int]  # noqa: UP040
+
+
 @dataclass(frozen=True, slots=True)
 class _ArgPort:
     """One shell argv port and its authored content transfer."""
@@ -1889,6 +1895,161 @@ class _SolvedFlow:
             self.streams,
             self.limits,
         )
+
+
+def _expression_reference_keys(expression: ContentExpr) -> set[_FlowNode]:
+    """Return every typed table entry one content expression reads.
+
+    Streams and resources are reported beside variables because a definition cycle can run
+    through either of them. In ``X=$(printf "doc-%slattice reconcile" "$X")`` the variable's only
+    definition reads a command substitution whose own content reads that variable back, and a
+    walk that stopped at variable references could not see that cycle at all.
+
+    Args:
+        expression: The content expression to walk.
+
+    Returns:
+        The ``(kind, key)`` table entries the expression reads.
+    """
+    keys: set[_FlowNode] = set()
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, VariableRef | _SecondPassVariableRef):
+            keys.add(("variable", current.name))
+            continue
+        if isinstance(current, _SecondPassConditionalAssignment):
+            keys.add(("variable", current.name))
+            pending.append(current.operand)
+            continue
+        if isinstance(current, ResourceRef):
+            keys.add(("resource", current.key))
+            continue
+        if isinstance(current, StreamRef):
+            keys.add(("stream", current.scope_id))
+            continue
+        if isinstance(current, Choice | Concat):
+            pending.extend(current.parts)
+    return keys
+
+
+def _flow_dependency_graph(definitions: _FlowDefinitions) -> dict[_FlowNode, set[_FlowNode]]:
+    """Return the read-dependency graph over one flow's typed table entries.
+
+    Args:
+        definitions: The variable, resource, and stream writes of one flow.
+
+    Returns:
+        A mapping from each written ``(kind, key)`` entry to the entries its writes read.
+    """
+    graph: dict[_FlowNode, set[_FlowNode]] = {}
+    for kind, writes in (
+        ("variable", definitions.variable_writes),
+        ("resource", definitions.resource_writes),
+        ("stream", definitions.stream_writes),
+    ):
+        for write in writes:
+            graph.setdefault((kind, write.key), set()).update(
+                _expression_reference_keys(write.expression)
+            )
+    return graph
+
+
+def _self_reaching_nodes(graph: Mapping[_FlowNode, set[_FlowNode]]) -> set[_FlowNode]:
+    """Return every graph node that can reach itself.
+
+    A node reaches itself exactly when it carries a self edge or shares a strongly connected
+    component with another node, so this runs Tarjan's algorithm. Iteratively, because a
+    dependency chain is as long as the run body is, and in one pass, because the graph carries a
+    node per written table entry and a per-node reachability walk would be quadratic in the
+    number of commands a body runs.
+
+    Args:
+        graph: The read-dependency graph to search.
+
+    Returns:
+        The nodes lying on a dependency cycle.
+    """
+    index_of: dict[_FlowNode, int] = {}
+    low_of: dict[_FlowNode, int] = {}
+    component_stack: list[_FlowNode] = []
+    on_component_stack: set[_FlowNode] = set()
+    cyclic: set[_FlowNode] = set()
+    counter = 0
+
+    def enter(node: _FlowNode) -> tuple[_FlowNode, list[_FlowNode]]:
+        nonlocal counter
+        index_of[node] = counter
+        low_of[node] = counter
+        counter += 1
+        component_stack.append(node)
+        on_component_stack.add(node)
+        return node, list(graph.get(node, ()))
+
+    for root in graph:
+        if root in index_of:
+            continue
+        pending = [enter(root)]
+        while pending:
+            node, successors = pending[-1]
+            if successors:
+                successor = successors.pop()
+                if successor not in index_of:
+                    pending.append(enter(successor))
+                elif successor in on_component_stack:
+                    low_of[node] = min(low_of[node], index_of[successor])
+                continue
+            pending.pop()
+            if low_of[node] == index_of[node]:
+                component = [component_stack.pop()]
+                on_component_stack.discard(component[0])
+                while component[-1] != node:
+                    component.append(component_stack.pop())
+                    on_component_stack.discard(component[-1])
+                if len(component) > 1 or node in graph.get(node, ()):
+                    cyclic.update(component)
+            if pending:
+                parent = pending[-1][0]
+                low_of[parent] = min(low_of[parent], low_of[node])
+    return cyclic
+
+
+def _recorded_definition_cycles(definitions: _FlowDefinitions) -> _FlowDefinitions:
+    """Record every carrier-borne definition cycle in the direct self-reference spelling.
+
+    A variable whose definition reaches itself only through a command substitution or a file sits
+    on a definition cycle exactly as one that reads itself directly does, and the solver seeds a
+    cycle with epsilon rather than with the annihilating lattice bottom. `_cyclic_write_keys`
+    decides that seed from the variable writes alone and therefore cannot see a carrier-borne
+    cycle, so the cycle is recorded here in the spelling it does see: one self-reference write per
+    variable key that only reaches itself through a stream or a resource.
+
+    The recorded write is a fixed-point no-op, since joining a key's value with itself never
+    widens it. What it changes is that the cycle is visible where the seed is chosen, which is
+    what keeps ``X=$(printf "doc-%slattice reconcile" "$X"); $X`` from resolving to bottom and
+    reading as marker-free (issue #163, the carrier-borne residue of #115).
+
+    Args:
+        definitions: The flow definitions built for one run body.
+
+    Returns:
+        The definitions, with a self-reference write added for each carrier-borne cycle.
+    """
+    direct = _cyclic_write_keys(definitions.variable_writes)
+    carried = sorted(
+        key
+        for kind, key in _self_reaching_nodes(_flow_dependency_graph(definitions))
+        if kind == "variable" and isinstance(key, str) and key not in direct
+    )
+    if not carried:
+        return definitions
+    return replace(
+        definitions,
+        variable_writes=(
+            *definitions.variable_writes,
+            *(_FlowWrite(key, VariableRef(key)) for key in carried),
+        ),
+    )
 
 
 def _expression_variable_names(expression: ContentExpr) -> set[str]:
@@ -8079,10 +8240,12 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
         )
 
     return (
-        _FlowDefinitions(
-            variable_writes=tuple(variable_writes),
-            resource_writes=tuple(resource_writes),
-            stream_writes=tuple(stream_writes),
+        _recorded_definition_cycles(
+            _FlowDefinitions(
+                variable_writes=tuple(variable_writes),
+                resource_writes=tuple(resource_writes),
+                stream_writes=tuple(stream_writes),
+            )
         ),
         inputs,
     )
