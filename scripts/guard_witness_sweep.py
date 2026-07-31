@@ -13,11 +13,15 @@ unambiguous: the reported origin is the guard that cap governs. The corpus is th
 inventory plus bodies from the fuzzer's compositional grammar, which between them cover the
 shapes the scanner was built against.
 
-**Trace.** For one candidate script, report which guard *functions* it executes at all. A sweep
-that finds nothing says only that the corpus never reached the machinery; the trace says how far
-it got, so the next candidate can be aimed one level deeper. Locating
+**Trace.** For one candidate script, report which guard-holding *functions* it executes at all. A
+sweep that finds nothing says only that the corpus never reached the machinery; the trace says how
+far it got, so the next candidate can be aimed one level deeper. Locating
 `eval 'X=${Y=q}'` as the shape that reaches the eval-syntax assignment and decision recorders,
 where a plain `eval 'X=${Y}'` does not, came from this mode rather than from any sweep.
+
+The functions between the guards separate two shapes too, and `--trace-all` keeps them: it reports
+every function in a guarded module, most of which hold no guard. That is the wider, noisier view,
+worth reaching for once the filtered one stops distinguishing two candidates.
 
 Neither mode classifies anything on its own. A row it prints is a candidate: paste it into
 `tests/guard_witnesses.py`, where the suite then holds it to returning that exact identifier.
@@ -38,6 +42,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "scripts"))
 
+import check_guard_inventory  # noqa: E402
 import fuzz_shell_taint  # noqa: E402
 
 from doc_lattice.github_ci.shell_guards import (  # noqa: E402
@@ -229,6 +234,30 @@ def guarded_filenames() -> frozenset[str]:
     return frozenset(names)
 
 
+def guard_owning_qualnames(root: Path) -> frozenset[str]:
+    """Return the qualified names of the functions that construct a guard refusal.
+
+    Taken from the gate's own inventory rather than a list kept here, so a guard that moves takes
+    its name with it. The inventory derives the name from the source tree and the tracer reads it
+    off a running frame, and the two agree because neither spells a nested function's `<locals>`.
+
+    Args:
+        root: Repository root holding the guarded modules.
+
+    Returns:
+        One name per function holding at least one guard origin.
+
+    Raises:
+        ValueError: If the inventory reports no origin at all, which would filter every trace down
+            to nothing and read exactly like a candidate that reaches no guard machinery.
+    """
+    records = check_guard_inventory.repository_origin_records(root)
+    if not records:
+        message = f"{root} reports no guard origins to filter a trace against"
+        raise ValueError(message)
+    return frozenset(record.qualname for record in records)
+
+
 def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[str]:
     """Return the guarded-module functions one script executes.
 
@@ -301,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=_ROOT)
     parser.add_argument("--trace", metavar="SCRIPT", help="report the guards one script reaches")
+    parser.add_argument(
+        "--trace-all",
+        action="store_true",
+        help="trace every guarded-module function, not only the ones holding a guard",
+    )
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=400)
     parser.add_argument("--max-length", type=int, default=600)
@@ -314,7 +348,10 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     if arguments.trace is not None:
-        for name in sorted(trace_guard_functions(arguments.trace)):
+        reached = trace_guard_functions(arguments.trace)
+        if not arguments.trace_all:
+            reached &= guard_owning_qualnames(arguments.root)
+        for name in sorted(reached):
             sys.stdout.write(f"{name}\n")
         return 0
 

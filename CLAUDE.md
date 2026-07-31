@@ -97,8 +97,9 @@ classified or froze that your tree no longer constructs.
 `scripts/guard_witness_sweep.py` searches for the inputs that classification needs. Its default
 sweep drives the replay corpus and fuzzer grammar through the public scan path once per shrunk
 cap and prints paste-ready witness rows for the guards still frozen as debt. When a sweep finds
-nothing, `--trace SCRIPT` reports which guard functions one candidate reaches at all, so the next
-candidate can be aimed one level deeper. It classifies nothing on its own: a row it prints is a
+nothing, `--trace SCRIPT` reports which guard-holding functions one candidate reaches at all, so
+the next candidate can be aimed one level deeper; add `--trace-all` for the wider view that keeps
+the functions between the guards. It classifies nothing on its own: a row it prints is a
 candidate, and the suite then holds it to returning that exact identifier.
 
 It is a search, not a gate. The default sweep drives thousands of scripts through every

@@ -115,6 +115,45 @@ def test_trace_distinguishes_a_shape_that_never_reaches_that_machinery() -> None
     assert "_eval_syntax_record_assignment" not in reached
 
 
+def test_guard_owning_qualnames_come_from_the_recorded_inventory() -> None:
+    owning = tool.guard_owning_qualnames(_ROOT)
+
+    assert "_eval_syntax_record_assignment" in owning
+    assert "_ascii_lower" not in owning
+
+
+def test_guard_owning_qualnames_spell_a_nested_guard_the_way_a_frame_does() -> None:
+    # The inventory derives its qualified names from the source tree and the tracer reads them off
+    # a running frame. A nested guard is where the two spellings can drift apart, and a drift would
+    # filter real reach away silently rather than reporting anything wrong.
+    owning = tool.guard_owning_qualnames(_ROOT)
+
+    assert "_contextualize_evidence.charge_edges" in owning
+    assert "_contextualize_evidence.charge_edges" in tool.trace_guard_functions("echo hello")
+
+
+def test_trace_output_omits_a_guarded_module_function_owning_no_guard(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Every call in a guarded module swamps the reach signal this mode exists to give and presents
+    # ordinary helpers as guard machinery.
+    assert tool.main(["--trace", "echo hello"]) == 0
+
+    reported = capsys.readouterr().out.split()
+    assert "_ScanBudget.step" in reported
+    assert "_ascii_lower" not in reported
+
+
+def test_trace_all_reports_the_whole_guarded_module_reach(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Aiming the next candidate deeper uses the functions between the guards too: most of what
+    # separates the worked eval shape from a plain one owns no guard of its own.
+    assert tool.main(["--trace", "echo hello", "--trace-all"]) == 0
+
+    assert "_ascii_lower" in capsys.readouterr().out.split()
+
+
 def test_rendered_rows_are_paste_ready_registry_entries() -> None:
     rendered = tool.render_rows({"scanner.budget.step-limit": ("TaintLimits(max_edges=0)", "x")})
 
