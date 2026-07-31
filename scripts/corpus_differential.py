@@ -22,19 +22,21 @@ Two modes, one process each, because two revisions of one package cannot be impo
 
     corpus_differential.py record --scanner-root PATH --out FILE
     corpus_differential.py compare --base FILE --candidate FILE
-        [--acknowledged FILE] [--base-inventory FILE]
+        [--acknowledged FILE] [--base-inventory FILE] [--write-acknowledgements FILE]
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
 script digest and both verdicts, so it covers exactly the transition it was written for and expires
-on its own once the base carries the new behavior.
+on its own once the base carries the new behavior. A change that legitimately moves thousands of
+verdicts is not transcribed by hand: `--write-acknowledgements` writes the file this comparison
+would need, with every reason left empty, and an empty reason is refused when the file is read.
 
 A verdict label carries the refusing guard's origin identifier, which is what makes a refusal that
-moves to another origin a divergence rather than two refusals that look alike. Two limits follow
-from the same reading and are disclosed rather than closed: a withdrawal that mints exactly the
-identifier the deeper guard would have returned, over exactly the scripts that guard already
-refuses, moves no label; and the corpus is a fixed sample, so a clean run is evidence about those
-scripts rather than a statement about every input the scanner accepts. AD-21 in ARCHITECTURE.md
-owns both.
+moves to another origin a divergence rather than two refusals that look alike. Three limits follow
+and are disclosed rather than closed: a withdrawal that mints exactly the identifier the deeper
+guard would have returned, over exactly the scripts that guard already refuses, moves no label; the
+corpus is a fixed sample, so a clean run is evidence about those scripts rather than a statement
+about every input the scanner accepts; and this tool is the candidate's in both recordings, so only
+the corpus floor is base-owned. AD-21 in ARCHITECTURE.md owns all three.
 """
 
 from __future__ import annotations
@@ -76,15 +78,18 @@ REFUSALS = (ValueError, OSError, KeyError)
 `ValueError` covers this tool's own refusals and malformed JSON, which raises a subclass of it.
 `OSError` covers an input the caller named that is not there, such as a base revision whose
 worktree carries no frozen inventory. `KeyError` covers a record or an inventory missing a field
-this tool reads. Named rather than caught as `Exception`, which the repository rules forbid.
+this tool reads. A field the document carries with the wrong shape is turned into a `ValueError` at
+the read helpers below rather than being left to surface as some other type further in. Named
+rather than caught as `Exception`, which the repository rules forbid.
 """
 
 PROJECTION = ("invocations", "guard_id", "incomplete_reason")
 """The public scan-result surface a verdict label is derived from.
 
 Read off the result rather than off the verdict classes so a revision that renames a verdict
-variant is still scored, and checked once per run so a revision that drops one of these is a named
-refusal instead of a traceback in the middle of a twenty-thousand script replay.
+variant is still scored, and checked on the first case of every replay so a revision that drops one
+of these is a named refusal instead of a traceback in the middle of a twenty-thousand script run.
+`replay` refuses an empty corpus, which is what makes that first case exist.
 """
 
 
@@ -161,6 +166,76 @@ def digest_of(source: str) -> str:
     return hashlib.sha256(source.encode()).hexdigest()
 
 
+def read_document(path: Path) -> dict[str, object]:
+    """Read one JSON document this tool was pointed at.
+
+    Args:
+        path: Path to the document.
+
+    Returns:
+        The parsed object.
+
+    Raises:
+        ValueError: If the file does not hold a JSON object, so a hand-written file of the wrong
+            shape is one refusal line rather than whatever type error its first field access
+            happens to raise.
+    """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        message = f"{path} holds a JSON {type(document).__name__}, not an object"
+        raise ValueError(message)
+    return document
+
+
+def read_entries(document: dict[str, object], key: str, path: Path) -> list[object]:
+    """Read a named list out of one document.
+
+    Args:
+        document: The parsed document.
+        key: Name of the list.
+        path: Path the document came from, named in a refusal.
+
+    Returns:
+        The entries, each read through `read_text`.
+
+    Raises:
+        ValueError: If the value is not a list.
+    """
+    entries = document[key]
+    if not isinstance(entries, list):
+        message = f"{path} records {key} as a {type(entries).__name__}, not as a list"
+        raise ValueError(message)
+    return list(entries)
+
+
+def read_text(entry: object, key: str, path: Path) -> str:
+    """Read a named text field out of one object.
+
+    Args:
+        entry: The object carrying the field.
+        key: Name of the field.
+        path: Path the document came from, named in a refusal.
+
+    Returns:
+        The field's text.
+
+    Raises:
+        ValueError: If the entry is not an object, or the field is absent or is not text.
+    """
+    if not isinstance(entry, dict):
+        message = f"{path} records a {type(entry).__name__} where an object carrying {key} belongs"
+        raise ValueError(message)
+    fields = {str(name): value for name, value in entry.items()}
+    if key not in fields:
+        message = f"{path} records an entry carrying no {key}"
+        raise ValueError(message)
+    value = fields[key]
+    if not isinstance(value, str):
+        message = f"{path} records {key} as a {type(value).__name__}, not as text"
+        raise ValueError(message)
+    return value
+
+
 def inventory_cases(path: Path) -> list[CorpusCase]:
     """Return the frozen replay inventory as corpus cases, in file order.
 
@@ -171,21 +246,24 @@ def inventory_cases(path: Path) -> list[CorpusCase]:
         One case per inventory entry.
 
     Raises:
-        ValueError: If a recorded entry's digest does not match its source, since the inventory is
-            what an acknowledgement is written against and a drifted entry names the wrong script.
+        ValueError: If the inventory carries a shape this tool cannot read, or if a recorded
+            entry's digest does not match its source, since the inventory is what an
+            acknowledgement is written against and a drifted entry names the wrong script.
     """
-    document = json.loads(path.read_text(encoding="utf-8"))
+    document = read_document(path)
     cases: list[CorpusCase] = []
-    for entry in document["entries"]:
-        source = entry["source"]
+    for entry in read_entries(document, "entries", path):
+        source = read_text(entry, "source", path)
+        recorded = read_text(entry, "sha256", path)
+        case_id = read_text(entry, "id", path)
         digest = digest_of(source)
-        if digest != entry["sha256"]:
+        if digest != recorded:
             message = (
-                f"replay inventory entry {entry['id']} records digest {entry['sha256']} for a "
-                f"source that hashes to {digest}"
+                f"replay inventory entry {case_id} records digest {recorded} for a source that "
+                f"hashes to {digest}"
             )
             raise ValueError(message)
-        cases.append(CorpusCase(case_id=entry["id"], digest=digest, source=source))
+        cases.append(CorpusCase(case_id=case_id, digest=digest, source=source))
     return cases
 
 
@@ -336,15 +414,17 @@ def check_projection(result: object) -> None:
 def invocation_label(invocation: object) -> str:
     """Return one certified invocation as stable text.
 
+    Encoded as JSON rather than joined on a separator, so a part that itself carries the separator
+    cannot spell the same label as a different invocation and hide a transition inside it.
+
     Args:
         invocation: One entry of the result's invocation tuple.
 
     Returns:
         Text naming the invocation's parts.
     """
-    if isinstance(invocation, tuple):
-        return "|".join(str(part) for part in invocation)
-    return str(invocation)
+    parts = list(invocation) if isinstance(invocation, tuple) else [invocation]
+    return json.dumps([str(part) for part in parts])
 
 
 def verdict_label(result: object) -> str:
@@ -378,7 +458,15 @@ def replay(cases: Sequence[CorpusCase], scan: Callable[[str], object]) -> list[d
 
     Returns:
         One record per case, carrying its name, digest, source and verdict label.
+
+    Raises:
+        ValueError: If the corpus is empty. A run that scored nothing would report no divergence
+            for a revision nothing was replayed against, and would never reach the projection
+            check that the first case carries.
     """
+    if not cases:
+        message = "the corpus holds no scripts, so this revision was not replayed against anything"
+        raise ValueError(message)
     scored: list[dict[str, str]] = []
     for index, case in enumerate(cases):
         result = scan(case.source)
@@ -453,12 +541,16 @@ def load_record(path: Path) -> dict[str, object]:
         The parsed record.
 
     Raises:
-        ValueError: If the record carries another schema version.
+        ValueError: If the record carries another schema version, or a shape this tool cannot read.
     """
-    document = json.loads(path.read_text(encoding="utf-8"))
+    document = read_document(path)
     if document.get("schema") != SCHEMA:
         message = f"{path} carries schema {document.get('schema')}, not {SCHEMA}"
         raise ValueError(message)
+    read_text(document, "corpus_sha256", path)
+    for case in read_entries(document, "cases", path):
+        for field in ("id", "sha256", "source", "verdict"):
+            read_text(case, field, path)
     return document
 
 
@@ -472,21 +564,24 @@ def load_acknowledgements(path: Path) -> list[Acknowledgement]:
         One entry per acknowledgement, empty when the file declares none.
 
     Raises:
-        ValueError: If an entry carries no reason. An acknowledgement is what a reviewer reads
-            instead of the divergence, so one without a reason silences rather than declares.
+        ValueError: If the file carries a shape this tool cannot read, or if an entry carries no
+            reason. An acknowledgement is what a reviewer reads instead of the divergence, so one
+            without a reason silences rather than declares. That is also what keeps the file
+            `--write-acknowledgements` emits from passing a comparison before anybody wrote it.
     """
-    document = json.loads(path.read_text(encoding="utf-8"))
+    document = read_document(path)
     entries: list[Acknowledgement] = []
-    for entry in document["acknowledgements"]:
-        reason = entry["reason"].strip()
+    for entry in read_entries(document, "acknowledgements", path):
+        digest = read_text(entry, "sha256", path)
+        reason = read_text(entry, "reason", path).strip()
         if not reason:
-            message = f"acknowledgement for {entry['sha256']} carries no reason"
+            message = f"acknowledgement for {digest} carries no reason"
             raise ValueError(message)
         entries.append(
             Acknowledgement(
-                digest=entry["sha256"],
-                base=entry["base_verdict"],
-                candidate=entry["candidate_verdict"],
+                digest=digest,
+                base=read_text(entry, "base_verdict", path),
+                candidate=read_text(entry, "candidate_verdict", path),
                 reason=reason,
             )
         )
@@ -528,8 +623,13 @@ def check_corpus_retained(candidate: dict[str, object], base_inventory: Path) ->
         ValueError: If any script the base froze is missing from the scored corpus.
     """
     scored = {case["sha256"] for case in candidate["cases"]}  # ty: ignore[not-iterable]
-    document = json.loads(base_inventory.read_text(encoding="utf-8"))
-    missing = [entry["id"] for entry in document["entries"] if entry["sha256"] not in scored]
+    document = read_document(base_inventory)
+    entries = read_entries(document, "entries", base_inventory)
+    missing = [
+        read_text(entry, "id", base_inventory)
+        for entry in entries
+        if read_text(entry, "sha256", base_inventory) not in scored
+    ]
     if missing:
         message = (
             f"{len(missing)} script(s) the base revision froze were not replayed, starting with "
@@ -625,6 +725,42 @@ def report(
     return unacknowledged, unmatched
 
 
+def acknowledgement_document(
+    found: Sequence[Divergence],
+    acknowledged: Sequence[Acknowledgement],
+) -> dict[str, object]:
+    """Return the acknowledgements file this comparison would need.
+
+    A scanner fix that legitimately moves thousands of verdicts is not transcribed by hand, and a
+    gate that is impractical to satisfy for an intended change is a gate that gets switched off.
+    This writes the entries instead, keeping the reason already on file for a transition that has
+    one and leaving the rest empty for the author to write. An empty reason is refused when the
+    file is read, so nothing is acknowledged until somebody says why. Transitions the comparison
+    did not report are dropped, which is how a stale entry leaves the file.
+
+    Args:
+        found: Every divergence between the two records.
+        acknowledged: The declared intentional divergences.
+
+    Returns:
+        The document to write.
+    """
+    reasons = {entry.key: entry.reason for entry in acknowledged}
+    return {
+        "acknowledgements": [
+            {
+                "sha256": divergence.digest,
+                "base_verdict": divergence.base,
+                "candidate_verdict": divergence.candidate,
+                "reason": reasons.get(
+                    (divergence.digest, divergence.base, divergence.candidate), ""
+                ),
+            }
+            for divergence in found
+        ]
+    }
+
+
 def _record_command(args: argparse.Namespace) -> int:
     """Run the record mode and write its verdict record.
 
@@ -660,11 +796,18 @@ def _compare_command(args: argparse.Namespace) -> int:
     if args.base_inventory:
         check_corpus_retained(candidate, Path(args.base_inventory))
     acknowledged = load_acknowledgements(Path(args.acknowledged)) if args.acknowledged else []
-    unacknowledged, _unmatched = report(
-        divergences(base, candidate),
-        acknowledged,
-        limit=args.report_limit,
-    )
+    found = divergences(base, candidate)
+    unacknowledged, _unmatched = report(found, acknowledged, limit=args.report_limit)
+    if args.write_acknowledgements:
+        draft = Path(args.write_acknowledgements)
+        draft.write_text(
+            json.dumps(acknowledgement_document(found, acknowledged), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            f"wrote {len(found)} acknowledgement draft(s) to {draft}; each reason is left empty "
+            "for the author to write, and an empty reason is refused on read"
+        )
     if unacknowledged:
         print(
             "the candidate scores the frozen corpus differently from the protected base; "
@@ -713,6 +856,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-inventory",
         default="",
         help="the base revision's replay inventory, which the scored corpus may not drop",
+    )
+    comparer.add_argument(
+        "--write-acknowledgements",
+        default="",
+        help="write the acknowledgements this comparison would need, with the reasons left empty",
     )
     comparer.add_argument("--report-limit", type=int, default=REPORT_LIMIT)
     comparer.set_defaults(handler=_compare_command)

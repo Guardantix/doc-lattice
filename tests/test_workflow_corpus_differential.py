@@ -60,13 +60,15 @@ def test_the_differential_checks_out_enough_history_to_reach_the_base() -> None:
 def test_the_differential_is_scoped_to_changes_that_can_move_a_verdict() -> None:
     # An unrelated pull request must not pay for a twenty-thousand script replay, and the scope
     # step is what decides that. Every input the replay reads is named, so a change to the tool or
-    # to the frozen corpus is in scope exactly as a change to the guard package is. The list is an
-    # env binding because the guard package's own path carries the distribution marker, which the
-    # repository's own scanner refuses in an uncertified run body.
+    # to the frozen corpus is in scope exactly as a change to the guard package is, and
+    # `error_types.py` is named because it is the one module outside the guard package the scan
+    # path imports. The list is an env binding because the guard package's own path carries the
+    # distribution marker, which the repository's own scanner refuses in an uncertified run body.
     step = _step("Decide whether the differential has anything to compare")
     replayed = step["env"]["REPLAYED_PATHS"].split()
 
     assert "src/doc_lattice/github_ci/" in replayed
+    assert "src/doc_lattice/error_types.py" in replayed
     assert _TOOL in replayed
     assert "scripts/fuzz_shell_taint.py" in replayed
     assert "tests/fixtures/github_ci_checkpoint/replay_inventory.json" in replayed

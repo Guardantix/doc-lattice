@@ -1565,21 +1565,41 @@ not score the same corpus.
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
 script digest, both verdicts and a reason, so it covers exactly the transition it was written for
 and expires on its own once the base carries the new behavior, and the report names an
-acknowledgement nothing matched instead of leaving it to accumulate. Acknowledgements are a file in
-the diff, which is what makes them reviewable; a label or a phrase in a pull request body is
-neither versioned nor reviewable alongside the change it excuses.
+acknowledgement nothing matched so a stale entry is read out rather than sitting unseen.
+Acknowledgements are a file in the diff, which is what makes them reviewable; a label or a phrase
+in a pull request body is neither versioned nor reviewable alongside the change it excuses. A
+change that legitimately moves thousands of verdicts is not transcribed by hand, so the comparison
+writes the file it would need on request, with every reason left empty and an empty reason refused
+on read. A gate that is impractical to satisfy for an intended change is a gate that gets switched
+off, and that is the failure mode the mode exists against.
 
 The gate runs on pull requests and stays out of the release job's `needs`, because a job skipped
-for push events skips every dependent with it. Its scope step reads the diff against the base and
-exits early when no replayed input changed, so an unrelated pull request pays for a checkout and
-one `git diff`. A base whose object cannot be read is a failure rather than a skip, for the reason
-AD-20's base-owned comparison gives.
+for push events skips every dependent with it. It is therefore enforced by the repository's
+required status checks rather than by a `needs` edge, and `Corpus differential` belongs in that
+list; nothing in the tree can assert that setting. Its scope step reads the diff against the base
+and exits early when no replayed input changed, so an unrelated pull request pays for a checkout
+and one `git diff`. The scoped paths are the guard package, `error_types.py` as the one module
+outside it the scan path imports, the tool, the fuzzer grammar and the frozen inventory. A base
+whose object cannot be read is a failure rather than a skip, for the reason AD-20's base-owned
+comparison gives.
 **Consequences:** An over-refusal is visible to automation for the first time, in either direction
 and without a witness for the guard involved, which is what makes this the standing control while
 the frozen-debt window is open. The cost is roughly two minutes of replay per revision on a change
-that touches the scanner, and nothing on a change that does not. Two limits are disclosed rather
+that touches the scanner, and nothing on a change that does not. Three limits are disclosed rather
 than closed. A withdrawal that mints exactly the origin identifier the deeper guard would have
 returned, over exactly the corpus scripts that guard already refuses, moves no label and stays
-invisible; widening the corpus is what shrinks that, not a rule. And the corpus is a fixed sample
+invisible; widening the corpus is what shrinks that, not a rule. The corpus is a fixed sample
 rather than a proof, so a clean differential is evidence about those scripts and not a statement
-about every input the scanner accepts.
+about every input the scanner accepts; and its generated half saturates on distinct verdict labels
+within a few hundred draws, so the scale it is run at buys sensitivity per script rather than more
+kinds of verdict.
+
+And unlike AD-20's base-owned comparison, only the corpus floor here is base-owned: the tool that
+builds the corpus, labels a verdict and matches an acknowledgement is the candidate's in both
+recordings, so a pull request can shrink the drawn half or coarsen a label in the same diff that
+withdraws a guard. That is deliberate. Running the base's copy of the tool would hard-fail every
+pull request that legitimately moves the scanner module, with no acknowledgement path to declare
+the move, and the tool has to build one corpus for both revisions to compare them at all. What is
+left is a change that has to be spelled out in the diff of the pull request it protects, next to a
+pinned expectation on the corpus scale and on identity-carrying labels, which is where review sees
+it.

@@ -170,7 +170,10 @@ def test_corpus_digest_binds_the_order_scripts_are_replayed_in():
 
 def test_the_default_corpus_is_the_scale_the_one_off_run_covered():
     # The one-off differential run during PR #179's review covered roughly twenty thousand
-    # scripts. Shrinking the default silently narrows what the gate can see.
+    # scripts. The generated half saturates on distinct verdict labels within a few hundred draws,
+    # measured at seven labels and five guard origins from two hundred draws onwards, so what the
+    # scale buys is sensitivity per script: a targeted refusal keyed on a rare shape has to meet a
+    # script carrying that shape, and every draw dropped is a script that cannot report it.
     assert tool.SEEDS == (1, 2, 3, 4)
     assert tool.ITERATIONS == 5000
     assert len(tool.SEEDS) * tool.ITERATIONS >= 20000
@@ -221,12 +224,32 @@ def test_verdict_label_records_which_invocations_were_certified():
         invocations=(("check", True), ("lint", False)),
     )
 
-    assert tool.verdict_label(result) == "certified[check|True,lint|False]"
+    assert tool.verdict_label(result) == 'certified[["check", "True"],["lint", "False"]]'
+
+
+def test_verdict_label_keeps_two_invocation_shapes_apart_when_a_part_carries_a_separator():
+    # The label is the only thing a comparison reads, so two different invocation tuples that
+    # spelled the same label would hide the transition between them rather than report it.
+    split = SimpleNamespace(
+        guard_id=None, incomplete_reason=None, invocations=(("check",), ("lint",))
+    )
+    joined = SimpleNamespace(
+        guard_id=None, incomplete_reason=None, invocations=(('check"],["lint',),)
+    )
+
+    assert tool.verdict_label(split) != tool.verdict_label(joined)
 
 
 def test_check_projection_refuses_a_result_missing_part_of_the_public_surface():
     with pytest.raises(ValueError, match="guard_id"):
         tool.check_projection(SimpleNamespace(invocations=(), incomplete_reason=None))
+
+
+def test_replay_refuses_an_empty_corpus_rather_than_scoring_nothing():
+    # A corpus that reached zero scripts never reaches the projection check either, so a revision
+    # that dropped part of the public surface would be reported as a clean differential.
+    with pytest.raises(ValueError, match="holds no scripts"):
+        tool.replay([], lambda _source: SimpleNamespace())
 
 
 def test_load_scanner_refuses_a_root_that_holds_no_guard_package(tmp_path):
@@ -335,6 +358,126 @@ def test_load_acknowledgements_refuses_an_entry_that_declares_no_reason(tmp_path
 
     with pytest.raises(ValueError, match="no reason"):
         tool.load_acknowledgements(path)
+
+
+def test_load_acknowledgements_refuses_a_reason_that_is_not_text(tmp_path):
+    path = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                {
+                    "sha256": "d1",
+                    "base_verdict": "certified[]",
+                    "candidate_verdict": "guard:x",
+                    "reason": 5,
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="not as text"):
+        tool.load_acknowledgements(path)
+
+
+def test_load_acknowledgements_refuses_an_entry_that_is_not_an_object(tmp_path):
+    path = _write(tmp_path / "acknowledged.json", {"acknowledgements": ["d1"]})
+
+    with pytest.raises(ValueError, match="where an object carrying"):
+        tool.load_acknowledgements(path)
+
+
+def test_load_acknowledgements_refuses_an_entry_that_names_no_digest(tmp_path):
+    path = _write(
+        tmp_path / "acknowledged.json",
+        {"acknowledgements": [{"base_verdict": "certified[]", "candidate_verdict": "guard:x"}]},
+    )
+
+    with pytest.raises(ValueError, match="carrying no sha256"):
+        tool.load_acknowledgements(path)
+
+
+def test_compare_refuses_a_malformed_input_as_a_refusal_rather_than_as_divergence(tmp_path, capsys):
+    # A file of the wrong shape means the comparison could not run. Reporting that as the exit
+    # status divergence uses would read as "the candidate moved a verdict" in the job log.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _record_document([_scored("true", "certified[]")])
+    )
+    acknowledged = _write(tmp_path / "acknowledged.json", [])
+
+    status = tool.main(
+        [
+            "compare",
+            "--base",
+            str(base),
+            "--candidate",
+            str(candidate),
+            "--acknowledged",
+            str(acknowledged),
+        ]
+    )
+
+    assert status == tool.EXIT_REFUSED
+    assert "corpus differential refused" in capsys.readouterr().err
+
+
+def test_load_record_refuses_a_case_list_of_the_wrong_shape(tmp_path):
+    document = _record_document([])
+    document["cases"] = "every case"
+    path = _write(tmp_path / "base.json", document)
+
+    with pytest.raises(ValueError, match="cases"):
+        tool.load_record(path)
+
+
+def test_write_acknowledgements_drafts_every_divergence_with_the_reason_left_to_the_author(
+    tmp_path,
+):
+    # A scanner fix that legitimately moves thousands of verdicts is not transcribed by hand, and
+    # a gate nobody can satisfy for an intended change is a gate that gets switched off. The draft
+    # still refuses on read until a reason is written, so it declares nothing on its own.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(tmp_path / "candidate.json", _record_document([_scored("true", "guard:x")]))
+    draft = tmp_path / "draft.json"
+
+    status = tool.main(
+        [
+            "compare",
+            "--base",
+            str(base),
+            "--candidate",
+            str(candidate),
+            "--write-acknowledgements",
+            str(draft),
+        ]
+    )
+
+    assert status == tool.EXIT_DIVERGED
+    written = json.loads(draft.read_text(encoding="utf-8"))["acknowledgements"]
+    assert [entry["base_verdict"] for entry in written] == ["certified[]"]
+    assert [entry["candidate_verdict"] for entry in written] == ["guard:x"]
+    assert [entry["reason"] for entry in written] == [""]
+    with pytest.raises(ValueError, match="no reason"):
+        tool.load_acknowledgements(draft)
+
+
+def test_a_written_draft_keeps_the_reason_already_on_file_and_drops_a_stale_entry():
+    found = [tool.Divergence("a", "d1", "s1", "certified[]", "guard:x")]
+    current = tool.Acknowledgement("d1", "certified[]", "guard:x", "intended by issue #182")
+    stale = tool.Acknowledgement("d9", "certified[]", "guard:x", "landed two releases ago")
+
+    document = tool.acknowledgement_document(found, [current, stale])
+
+    assert document == {
+        "acknowledgements": [
+            {
+                "sha256": "d1",
+                "base_verdict": "certified[]",
+                "candidate_verdict": "guard:x",
+                "reason": "intended by issue #182",
+            }
+        ]
+    }
 
 
 def test_the_repository_acknowledges_no_divergence_today():

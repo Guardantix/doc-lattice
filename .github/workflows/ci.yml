@@ -152,11 +152,14 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # Every input the replay reads, so a change to the tool or to the frozen corpus is in
           # scope exactly as a change to the guard package is, and an unrelated pull request pays
-          # for a checkout and one diff rather than for twenty thousand scans. Bound here rather
-          # than spelled in the run body because the guard package's own path carries the
-          # distribution marker, which AD-17 refuses in an uncertified command.
+          # for a checkout and one diff rather than for twenty thousand scans. `error_types.py` is
+          # named because it is the one module outside the guard package the scan path imports,
+          # and the refusals the labels carry are raised through it. Bound here rather than
+          # spelled in the run body because the guard package's own path carries the distribution
+          # marker, which AD-17 refuses in an uncertified command.
           REPLAYED_PATHS: >-
             src/doc_lattice/github_ci/
+            src/doc_lattice/error_types.py
             scripts/corpus_differential.py
             scripts/fuzz_shell_taint.py
             tests/fixtures/github_ci_checkpoint/replay_inventory.json
