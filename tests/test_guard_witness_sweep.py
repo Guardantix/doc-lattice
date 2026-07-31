@@ -353,6 +353,56 @@ def test_rendered_rows_preserve_a_script_containing_quotes() -> None:
     assert ast.literal_eval(call.args[1]) == script
 
 
+def test_rendered_rows_quote_a_script_the_formatter_would_requote() -> None:
+    # `ruff format` runs from the same pre-commit hook the line limit does, and it rewrites a
+    # double-quoted literal that escapes a quote it could have avoided. Emitted with the escape,
+    # the row is rewritten the moment it is pasted, so the registry never holds the row the sweep
+    # printed and the contributor has to re-stage the file the hook just changed.
+    script = 'env FOO="$@" harmless'
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    assert "'env FOO=\"$@\" harmless'" in rendered
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
+def test_rendered_rows_keep_double_quotes_when_switching_removes_no_escape() -> None:
+    # The formatter only switches quoting when it removes every escape, so a script carrying both
+    # quote characters stays double-quoted. Switched anyway, the row grows an escaped apostrophe
+    # the formatter then reverses, which is the same churn the other direction.
+    script = "env FOO=\"$@\" 'harmless'"
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    assert '"env FOO=\\"$@\\" \'harmless\'"' in rendered
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
+def test_rendered_rows_quote_a_wrapped_part_on_its_own() -> None:
+    # The formatter quotes each piece of an implicit concatenation separately, so a row wide enough
+    # to wrap can need one part single-quoted and the next double-quoted. Decided once for the whole
+    # script, whichever parts disagree with it are rewritten on paste.
+    script = 'echo "' + "a" * 200 + "' " + "b" * 200
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    quotes = {line.strip()[0] for line in rendered.splitlines() if line.startswith(tool.ROW_INDENT)}
+    assert quotes == {"'", '"'}
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
 def test_rendered_rows_preserve_a_script_containing_astral_characters() -> None:
     # A surrogate-pair escape like 😀 is one character in JSON but two lone surrogates
     # in a Python literal, so the pasted row would scan a different script than the sweep did.
@@ -1190,6 +1240,24 @@ def test_a_sweep_reports_a_debt_snapshot_it_cannot_read_as_a_usage_error(
 
     with pytest.raises(SystemExit) as raised:
         tool.main([])
+
+    assert raised.value.code == 2
+
+
+def test_a_run_reports_a_checkout_it_cannot_locate_as_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The refusal already names what went wrong and tells the operator to run against a source
+    # checkout with the package installed editable. Left to propagate, that advice arrives under a
+    # traceback out of the documented command, which reads as a broken tool rather than a usage
+    # error, and it reaches every mode before any of them has done any work.
+    installed = SimpleNamespace(
+        __file__="/venv/lib/python3.13/site-packages/doc_lattice/github_ci/shell_scanner.py"
+    )
+    monkeypatch.setattr(tool.importlib, "import_module", lambda _dotted: installed)
+
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--trace", "echo hello"])
 
     assert raised.value.code == 2
 

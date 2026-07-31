@@ -146,7 +146,7 @@ def limits_grid(values: Sequence[int] = SHRINK) -> list[tuple[str, ScanLimits]]:
     ordered = sorted(set(values), reverse=True)
     defaults = ScanLimits()
     grid: list[tuple[str, ScanLimits]] = [(PRODUCTION, defaults)]
-    for name, slot in caps_slots(ScanLimits).items():
+    for name, slot in limits_slots().items():
         caps = type(getattr(defaults, slot))
         for field in dataclasses.fields(caps):
             for value in ordered:
@@ -617,7 +617,7 @@ def _literal(text: str) -> str:
         text: Identifier or script to embed in a rendered row.
 
     Returns:
-        Source text for the literal, in ASCII.
+        Source text for the literal, in ASCII, quoted the way `ruff format` would leave it.
     """
     # json.dumps escapes exactly what a double-quoted Python literal needs escaped, so the row
     # stays valid for a script that itself contains quotes. ensure_ascii must stay off: a \uXXXX
@@ -628,7 +628,21 @@ def _literal(text: str) -> str:
     # stdout that is not UTF-8 and cost the run every row it found. A lone surrogate, which
     # json.loads accepts from an --extra candidate and UTF-8 cannot encode at all, escapes the same
     # way and round-trips.
-    return "".join(_escaped(character) for character in json.dumps(text, ensure_ascii=False))
+    encoded = "".join(_escaped(character) for character in json.dumps(text, ensure_ascii=False))
+    # A double-quoted literal that escapes a quote it could have avoided is rewritten by
+    # `ruff format`, which the pre-commit hook runs, so a row emitted that way is rewritten the
+    # moment it is pasted for the same reason an over-wide one is: paste-ready means the hooks
+    # leave it alone. The formatter's rule is to switch quoting only when it removes every escape,
+    # which is exactly a script carrying a double quote and no apostrophe. Replayed here rather
+    # than left to the hook so the row a sweep prints is the row the registry ends up holding.
+    #
+    # Only the escaped quotes are unescaped: json doubles a backslash, so every remaining `\"` in
+    # the body is one Python spells raw under the new quoting, and no apostrophe is present to
+    # need escaping in its place. Decided per part, since the formatter quotes each piece of an
+    # implicit concatenation on its own.
+    if '"' in text and "'" not in text:
+        return "'" + encoded[1:-1].replace('\\"', '"') + "'"
+    return encoded
 
 
 def _escaped(character: str) -> str:
@@ -868,6 +882,27 @@ def _deliver(text: str, described: str) -> int:
     return 0
 
 
+def _resolved_checkout(parser: argparse.ArgumentParser) -> Path:
+    """Return the checkout a run searches, reporting an unlocatable one as a usage error.
+
+    Reported the way the reads a sweep is configured from are, and for the same reason: the refusal
+    already names what went wrong and tells the operator to run against a source checkout with the
+    package installed editable. Left to propagate it delivers that advice under a traceback out of
+    the documented command, which reads as a broken tool rather than as a usage error, and it
+    reaches every mode before any of them has done any work.
+
+    Args:
+        parser: Parser to report an unlocatable checkout through.
+
+    Returns:
+        Repository root containing the imported guard package.
+    """
+    try:
+        return scanner_checkout()
+    except ValueError as error:
+        parser.error(str(error))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Search for witnesses, or trace one candidate script.
 
@@ -943,7 +978,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{spelled} describes the sweep, not the trace --trace runs; to trace under "
                 "shrunk caps, call trace_guard_functions(script, limits) directly"
             )
-    root = scanner_checkout()
+    root = _resolved_checkout(parser)
 
     if arguments.trace is not None:
         reached = trace_guard_functions(arguments.trace)
