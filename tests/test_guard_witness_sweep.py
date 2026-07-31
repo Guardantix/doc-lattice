@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -208,6 +210,45 @@ def test_rendered_rows_survive_a_script_carrying_a_lone_surrogate() -> None:
     assert ast.literal_eval(call.args[1]) == script
 
 
+def test_rendered_rows_refuse_a_label_they_cannot_place() -> None:
+    # `sweep` accepts any labelled grid, and a label no limits class minted has no field to sit in.
+    # Guessing one renders `ScanLimits(scanner=tiny-source)`, which parses as a subtraction rather
+    # than failing, so the pasted row raises NameError at collection and takes the suite with it.
+    with pytest.raises(ValueError, match="tiny-source"):
+        tool.render_rows({"scanner.source.character-limit": ("tiny-source", "x")})
+
+
+def test_rendered_rows_stay_within_the_repository_line_limit() -> None:
+    # A row wider than the 100-character limit fails the ruff hook the moment it is pasted, so it
+    # is not paste-ready however faithful the literal is.
+    script = "echo " + "a" * 400
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    assert max(len(line) for line in rendered.splitlines()) <= 100
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
+def test_rendered_rows_carry_no_character_a_narrow_stdout_cannot_write() -> None:
+    # Every row is emitted in one write, so a single non-ASCII candidate would cost a multi-minute
+    # sweep every row it found rather than only its own.
+    script = "doc-lattice '😀 café'"
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    assert rendered.isascii()
+    rendered.encode("ascii")
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
 def test_rendered_rows_omit_limits_for_a_production_reach() -> None:
     rendered = tool.render_rows({"scanner.source.character-limit": ("production", "x")})
 
@@ -274,6 +315,90 @@ def test_load_corpus_rejects_an_extra_file_that_is_not_a_list_of_scripts(
 
     with pytest.raises(ValueError, match="JSON list of scripts"):
         tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=extra)
+
+
+def test_load_corpus_refuses_an_authored_candidate_it_would_drop(tmp_path: Path) -> None:
+    # A hand-authored candidate silently length-filtered away prints the same nothing as one that
+    # reached no guard, so the operator abandons a shape the sweep never scanned.
+    extra = tmp_path / "candidates.json"
+    extra.write_text(json.dumps(["echo " + "a" * 800]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max-length"):
+        tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=extra)
+
+
+def test_sweep_reports_the_scripts_it_could_not_scan(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A candidate that crashes the scanner is dropped for every configuration. Counted nowhere, it
+    # reads exactly like a candidate that reached nothing.
+    def refuse(_script: str, *, limits: object) -> object:  # noqa: ARG001 - scanner signature
+        raise RecursionError
+
+    monkeypatch.setattr(tool, "scan_doc_lattice_invocations", refuse)
+
+    assert tool.sweep(["echo one"], tool.limits_grid((0,))) == {}
+
+    assert "skipped 1" in capsys.readouterr().err
+
+
+def test_scanner_checkout_refuses_a_tree_that_holds_no_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An installed copy of the package derives a root holding none of the debt snapshot, replay
+    # corpus or inventory a run reads, and the tool no longer takes a root to correct it with.
+    installed = SimpleNamespace(
+        __file__="/venv/lib/python3.13/site-packages/doc_lattice/github_ci/shell_scanner.py"
+    )
+    monkeypatch.setattr(tool.importlib, "import_module", lambda _dotted: installed)
+
+    with pytest.raises(ValueError, match="source checkout"):
+        tool.scanner_checkout()
+
+
+def test_a_trace_refuses_an_option_only_the_sweep_reads() -> None:
+    # Accepted and ignored, `--shrink` traces production limits while reporting on a run the
+    # operator believes was shrunk, which is the wrong answer with nothing to say so.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--trace", "echo hello", "--shrink", "0"])
+
+    assert raised.value.code == 2
+
+
+def test_a_sweep_refuses_an_option_only_a_trace_reads() -> None:
+    # `--trace-all` alone otherwise falls through to a multi-minute sweep the operator did not ask
+    # for, with no message that the flag was inert.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--trace-all"])
+
+    assert raised.value.code == 2
+
+
+def test_help_describes_the_shrink_grid_the_sweep_is_built_around(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # `--shrink` is what the whole sweep is organized around and is named in no other document, so
+    # an operator reading `--shrink [SHRINK ...]` alone has nowhere to learn what a value means.
+    with pytest.raises(SystemExit):
+        tool.main(["--help"])
+
+    documented = capsys.readouterr().out
+    assert "seed" in documented
+    assert "bodies" in documented
+    assert "characters" in documented
+    assert "cap" in documented
+
+
+def test_trace_can_be_run_under_a_shrunk_cap() -> None:
+    # The reach under production caps is not the reach under the caps a sweep searched, and the
+    # deeper machinery a candidate is being aimed at is exactly what a shrunk cap cuts off.
+    shrunk = tool.trace_guard_functions(
+        "echo one; echo two", ScanLimits(scanner=ScannerLimits(max_scan_steps=0))
+    )
+
+    assert shrunk != tool.trace_guard_functions("echo one; echo two")
+    assert shrunk - tool.trace_guard_functions("echo one; echo two")
 
 
 def test_unclassified_ids_match_the_frozen_debt_snapshot() -> None:

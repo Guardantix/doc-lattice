@@ -60,6 +60,14 @@ REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 SCANNER_MODULE = "src/doc_lattice/github_ci/shell_scanner.py"
 PRODUCTION = "production"
+SEEDS = 4
+ITERATIONS = 400
+MAX_LENGTH = 600
+SHRINK = (0, 1, 2, 3)
+LINE_LIMIT = 100
+ROW_INDENT = "        "
+BMP_MAX = 0xFFFF
+"""Highest code point a Python literal spells with the four-digit escape."""
 
 Reach = dict[str, tuple[str, str]]
 """Guard origin identifier -> (limits label, the shortest script that reached it)."""
@@ -74,7 +82,19 @@ def limits_field_count() -> int:
     return len(dataclasses.fields(TaintLimits)) + len(dataclasses.fields(ScannerLimits))
 
 
-def limits_grid(values: Sequence[int] = (0, 1, 2, 3)) -> list[tuple[str, ScanLimits]]:
+def limits_slots() -> dict[str, str]:
+    """Return which `ScanLimits` field each caps class is constructed into.
+
+    Derived from `ScanLimits` itself rather than spelled here, so the grid that mints a label and
+    the renderer that has to place it back cannot disagree about where a caps value belongs.
+
+    Returns:
+        Caps class name mapped to the keyword that carries it.
+    """
+    return {str(field.type): field.name for field in dataclasses.fields(ScanLimits)}
+
+
+def limits_grid(values: Sequence[int] = SHRINK) -> list[tuple[str, ScanLimits]]:
     """Return one configuration per cap per shrink value, plus the unshrunk one.
 
     Only one cap is shrunk at a time, so whichever guard refuses is the guard that cap governs.
@@ -126,7 +146,8 @@ def scanner_checkout() -> Path:
         Repository root containing the imported guard package.
 
     Raises:
-        ValueError: If the imported scanner reports no source file to locate a checkout from.
+        ValueError: If the imported scanner reports no source file to locate a checkout from, or
+            resolves outside a checkout, since everything else a run reads lives only in one.
     """
     relative = Path(SCANNER_MODULE)
     dotted = ".".join(relative.with_suffix("").parts[1:])
@@ -136,7 +157,20 @@ def scanner_checkout() -> Path:
         raise ValueError(message)
     # Walked back by the recorded path's own depth, so moving the guard package within the tree
     # moves the derivation with it instead of silently naming a directory inside the package.
-    return Path(source).resolve().parents[len(relative.parts) - 1]
+    root = Path(source).resolve().parents[len(relative.parts) - 1]
+    if not (root / relative).exists():
+        # An installed copy walks back to a site-packages ancestor holding none of the debt
+        # snapshot, replay inventory or guard sources, and the tool takes no root to correct that
+        # with. Said here rather than as a missing-file traceback from whichever read got there
+        # first, which names a path nothing explains.
+        message = (
+            f"{root} holds no {SCANNER_MODULE}: the scanner was imported from an installed copy "
+            "rather than a source checkout, and the debt snapshot, replay corpus and guard "
+            "sources a run reads exist only in the checkout. Run against one, with the package "
+            "installed editable."
+        )
+        raise ValueError(message)
+    return root
 
 
 def unclassified_ids(root: Path) -> frozenset[str]:
@@ -155,9 +189,9 @@ def unclassified_ids(root: Path) -> frozenset[str]:
 def load_corpus(
     root: Path,
     *,
-    seeds: int = 4,
-    iterations: int = 400,
-    max_length: int = 600,
+    seeds: int = SEEDS,
+    iterations: int = ITERATIONS,
+    max_length: int = MAX_LENGTH,
     extra: Path | None = None,
 ) -> list[str]:
     """Return the scripts to sweep, shortest first.
@@ -166,11 +200,16 @@ def load_corpus(
         root: Repository root holding the replay inventory.
         seeds: How many fuzzer seeds to generate bodies from.
         iterations: Bodies to request per seed.
-        max_length: Drop scripts longer than this; a witness has to stay reviewable.
+        max_length: Drop generated scripts longer than this; a witness has to stay reviewable.
         extra: Optional JSON file holding a list of hand-authored candidates.
 
     Returns:
         Deduplicated scripts ordered by length.
+
+    Raises:
+        ValueError: If the extra file is not a list of scripts, or holds a candidate the length
+            filter would drop, since a sweep that never scanned it prints the same nothing as one
+            that scanned it and reached no guard.
     """
     corpus: set[str] = set()
     inventory = json.loads((root / REPLAY_INVENTORY).read_text(encoding="utf-8"))
@@ -186,6 +225,16 @@ def load_corpus(
             isinstance(candidate, str) for candidate in candidates
         ):
             message = f"{extra} must hold a JSON list of scripts"
+            raise ValueError(message)
+        overlong = [candidate for candidate in candidates if len(candidate) > max_length]
+        if overlong:
+            # The filter below bounds what the grammar generates. Applied to what somebody wrote by
+            # hand it removes the one candidate the run was for, and reports it as a corpus that
+            # reached nothing.
+            message = (
+                f"{extra} holds {len(overlong)} candidate(s) longer than the {max_length}"
+                "-character --max-length; raise it rather than sweeping without them"
+            )
             raise ValueError(message)
         corpus.update(candidates)
     # The text tie-break keeps equal-length scripts in a deterministic order, so a sweep prints
@@ -210,16 +259,22 @@ def sweep(
         wanted: Restrict the result to these identifiers, or None for every guard reached.
 
     Returns:
-        Guard identifier mapped to the labelled configuration and script that reached it.
+        Guard identifier mapped to the labelled configuration and script that reached it. Scripts
+        the scanner could not parse are counted on stderr rather than dropped in silence.
     """
     scripts = list(corpus)
     found: Reach = {}
     best: dict[str, tuple[int, int]] = {}
+    skipped: set[str] = set()
     for rank, (label, limits) in enumerate(grid):
         for script in scripts:
             try:
                 result = scan_doc_lattice_invocations(script, limits=limits)
             except RecursionError:
+                # Counted rather than dropped: a candidate the scanner cannot parse is scored by no
+                # configuration at all, and silence about it reads as a candidate that reached
+                # nothing, which is the opposite conclusion about the same shape.
+                skipped.add(script)
                 continue
             verdict = result.verdict
             if not isinstance(verdict, GuardRefusal):
@@ -233,6 +288,11 @@ def sweep(
             if verdict.origin_id not in best or key < best[verdict.origin_id]:
                 best[verdict.origin_id] = key
                 found[verdict.origin_id] = (label, script)
+    if skipped:
+        sys.stderr.write(
+            f"skipped {len(skipped)} scripts the scanner could not parse within the interpreter's "
+            "recursion limit\n"
+        )
     return found
 
 
@@ -349,20 +409,71 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
 
 
 def _literal(text: str) -> str:
-    """Return `text` as a double-quoted Python literal a normal stdout can carry.
+    """Return `text` as a double-quoted Python literal any stdout can carry.
 
     Args:
         text: Identifier or script to embed in a rendered row.
 
     Returns:
-        Source text for the literal.
+        Source text for the literal, in ASCII.
     """
     # json.dumps escapes exactly what a double-quoted Python literal needs escaped, so the row
     # stays valid for a script that itself contains quotes. ensure_ascii must stay off: a \uXXXX
-    # surrogate pair is one character in JSON but two in a Python literal. That leaves a lone
-    # surrogate raw, which json.loads accepts from an --extra candidate and UTF-8 cannot encode,
-    # so backslashreplace escapes it here rather than failing the write of every row at once.
-    return json.dumps(text, ensure_ascii=False).encode("utf-8", "backslashreplace").decode("utf-8")
+    # surrogate pair is one character in JSON but two in a Python literal.
+    #
+    # Every non-ASCII character is then escaped the way Python spells it, astral characters
+    # included, so no candidate can make the single write that emits the whole sweep fail on a
+    # stdout that is not UTF-8 and cost the run every row it found. A lone surrogate, which
+    # json.loads accepts from an --extra candidate and UTF-8 cannot encode at all, escapes the same
+    # way and round-trips.
+    return "".join(_escaped(character) for character in json.dumps(text, ensure_ascii=False))
+
+
+def _escaped(character: str) -> str:
+    """Return one character as the ASCII source Python reads it back from.
+
+    Args:
+        character: A single character of an encoded literal.
+
+    Returns:
+        The character itself, or its escape.
+    """
+    if character.isascii():
+        return character
+    point = ord(character)
+    return f"\\u{point:04x}" if point <= BMP_MAX else f"\\U{point:08x}"
+
+
+def _literal_lines(text: str, indent: str, suffix: str) -> list[str]:
+    """Return `text` as literal lines that fit the repository's line limit.
+
+    A row wider than the limit fails the lint hook the moment it is pasted, and `ruff format`
+    cannot split a string literal, so the split happens here. Implicitly concatenated parts are one
+    literal to the parser, so a wrapped row still carries the exact script the sweep scanned.
+
+    Args:
+        text: Identifier or script to embed in a rendered row.
+        indent: Leading whitespace each line carries.
+        suffix: Trailing source the last line carries.
+
+    Returns:
+        Complete source lines, one literal each.
+    """
+    budget = LINE_LIMIT - len(indent) - len(suffix)
+    parts: list[str] = []
+    part = ""
+    for character in text:
+        # Measured on the encoded part rather than the raw one, since an escape can be twelve
+        # characters wide for one that reads as a single character here.
+        if part and len(_literal(part + character)) > budget:
+            parts.append(part)
+            part = character
+        else:
+            part += character
+    parts.append(part)
+    return [f"{indent}{_literal(part)}" for part in parts[:-1]] + [
+        f"{indent}{_literal(parts[-1])}{suffix}"
+    ]
 
 
 def render_rows(found: Reach) -> str:
@@ -374,17 +485,27 @@ def render_rows(found: Reach) -> str:
     Returns:
         Registry source text. Every row still has to earn its place: the suite holds it to
         returning that exact identifier through the public scan path.
+
+    Raises:
+        ValueError: If a label names no caps class, since there is no field to construct it into
+            and a guessed one renders a row that parses as arithmetic rather than failing.
     """
+    slots = limits_slots()
     lines: list[str] = []
     for origin_id in sorted(found):
         label, script = found[origin_id]
         lines.append("    ReachableWitness(")
-        lines.append(f"        {_literal(origin_id)},")
-        lines.append(f"        {_literal(script)},")
+        lines.extend(_literal_lines(origin_id, ROW_INDENT, ","))
+        lines.extend(_literal_lines(script, ROW_INDENT, ","))
         if label != PRODUCTION:
-            kind = label.split("(", 1)[0]
-            field = "taint" if kind == "TaintLimits" else "scanner"
-            lines.append(f"        limits=ScanLimits({field}={label}),")
+            field = slots.get(label.split("(", 1)[0])
+            if field is None:
+                message = (
+                    f"{label!r} names no caps class of ScanLimits, so there is no field to render "
+                    f"it into; expected one of {', '.join(sorted(slots))} or {PRODUCTION!r}"
+                )
+                raise ValueError(message)
+            lines.append(f"{ROW_INDENT}limits=ScanLimits({field}={label}),")
         lines.append("    ),")
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -406,19 +527,58 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trace-all",
         action="store_true",
+        default=None,
         help="trace every guarded-module function, not only the ones holding a guard",
     )
-    parser.add_argument("--seeds", type=int, default=4)
-    parser.add_argument("--iterations", type=int, default=400)
-    parser.add_argument("--max-length", type=int, default=600)
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        help=f"fuzzer seeds to generate bodies from, one grammar walk each (default {SEEDS})",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        help=f"bodies to request per seed (default {ITERATIONS})",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        help=f"drop generated scripts longer than this many characters (default {MAX_LENGTH})",
+    )
     parser.add_argument("--extra", type=Path, help="JSON list of hand-authored candidates")
-    parser.add_argument("--shrink", type=int, nargs="*", default=[0, 1, 2, 3])
+    parser.add_argument(
+        "--shrink",
+        type=int,
+        nargs="*",
+        help=(
+            "cap values to shrink each cap to, one cap at a time and lower being more shrunk; "
+            f"searched least-shrunk first so a witness says as little about the caps as it can "
+            f"(default {' '.join(str(value) for value in SHRINK)})"
+        ),
+    )
     parser.add_argument(
         "--all-guards",
         action="store_true",
+        default=None,
         help="report every guard reached, not only the still-unclassified ones",
     )
     arguments = parser.parse_args(argv)
+    # An option the selected mode does not read is refused rather than ignored: accepted and
+    # dropped, `--shrink` reports the reach under production caps for a run the operator believes
+    # was shrunk, and `--trace-all` alone runs the multi-minute sweep instead of the trace asked
+    # for. Both are answers about something other than the question.
+    sweep_only = ("seeds", "iterations", "max_length", "extra", "shrink", "all_guards")
+    if arguments.trace is None:
+        if arguments.trace_all is not None:
+            parser.error("--trace-all describes a trace, and --trace was not given")
+    else:
+        given = [name for name in sweep_only if getattr(arguments, name) is not None]
+        if given:
+            spelled = ", ".join(f"--{name.replace('_', '-')}" for name in given)
+            parser.error(
+                f"{spelled} describes the sweep, not the trace --trace runs; to trace under "
+                "shrunk caps, call trace_guard_functions(script, limits) directly"
+            )
     root = scanner_checkout()
 
     if arguments.trace is not None:
@@ -432,12 +592,12 @@ def main(argv: list[str] | None = None) -> int:
     wanted = None if arguments.all_guards else unclassified_ids(root)
     corpus = load_corpus(
         root,
-        seeds=arguments.seeds,
-        iterations=arguments.iterations,
-        max_length=arguments.max_length,
+        seeds=SEEDS if arguments.seeds is None else arguments.seeds,
+        iterations=ITERATIONS if arguments.iterations is None else arguments.iterations,
+        max_length=MAX_LENGTH if arguments.max_length is None else arguments.max_length,
         extra=arguments.extra,
     )
-    grid = limits_grid(tuple(arguments.shrink))
+    grid = limits_grid(SHRINK if arguments.shrink is None else tuple(arguments.shrink))
     sys.stderr.write(f"sweeping {len(corpus)} scripts over {len(grid)} configurations\n")
     found = sweep(corpus, grid, wanted=wanted)
     sys.stderr.write(f"reached {len(found)} guard origins\n")
