@@ -58,9 +58,10 @@ if TYPE_CHECKING:
 
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
+SCANNER_MODULE = "src/doc_lattice/github_ci/shell_scanner.py"
 GUARDED_MODULES = (
     "src/doc_lattice/github_ci/shell_taint.py",
-    "src/doc_lattice/github_ci/shell_scanner.py",
+    SCANNER_MODULE,
 )
 PRODUCTION = "production"
 
@@ -109,6 +110,37 @@ def limits_grid(values: Sequence[int] = (0, 1, 2, 3)) -> list[tuple[str, ScanLim
                 )
             )
     return grid
+
+
+def scanner_checkout() -> Path:
+    """Return the repository the scanner this process executes was imported from.
+
+    Everything a run reads describes the guards of one revision: the debt snapshot names the ones a
+    sweep is looking for, and the recorded inventory supplies the names a trace accepts. The
+    scanner that decides which guards exist at all is imported statically, and so are the corpus
+    grammar and the inventory checker. Reading the tree from anywhere else would filter a run
+    against guards it never executed, and reach the read tree does not record would be dropped with
+    no diagnostic, which reads exactly like a candidate that reaches nothing.
+
+    Derived from the imported module rather than from this file's location for the reason
+    `guarded_filenames` records: the package can resolve somewhere other than the tree beside this
+    script, and that copy is the one whose guards a run observes.
+
+    Returns:
+        Repository root containing the imported guard package.
+
+    Raises:
+        ValueError: If the imported scanner reports no source file to locate a checkout from.
+    """
+    relative = Path(SCANNER_MODULE)
+    dotted = ".".join(relative.with_suffix("").parts[1:])
+    source = importlib.import_module(dotted).__file__
+    if source is None:
+        message = "the imported scanner reports no source file to locate its checkout from"
+        raise ValueError(message)
+    # Walked back by the recorded path's own depth, so moving the guard package within the tree
+    # moves the derivation with it instead of silently naming a directory inside the package.
+    return Path(source).resolve().parents[len(relative.parts) - 1]
 
 
 def unclassified_ids(root: Path) -> frozenset[str]:
@@ -327,8 +359,10 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Process exit status.
     """
+    # No option selects the tree to search: `scanner_checkout` decides it, because a run only
+    # means anything against the revision whose scanner, corpus grammar and inventory checker this
+    # process imported.
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=_ROOT)
     parser.add_argument("--trace", metavar="SCRIPT", help="report the guards one script reaches")
     parser.add_argument(
         "--trace-all",
@@ -346,18 +380,19 @@ def main(argv: list[str] | None = None) -> int:
         help="report every guard reached, not only the still-unclassified ones",
     )
     arguments = parser.parse_args(argv)
+    root = scanner_checkout()
 
     if arguments.trace is not None:
         reached = trace_guard_functions(arguments.trace)
         if not arguments.trace_all:
-            reached &= guard_owning_qualnames(arguments.root)
+            reached &= guard_owning_qualnames(root)
         for name in sorted(reached):
             sys.stdout.write(f"{name}\n")
         return 0
 
-    wanted = None if arguments.all_guards else unclassified_ids(arguments.root)
+    wanted = None if arguments.all_guards else unclassified_ids(root)
     corpus = load_corpus(
-        arguments.root,
+        root,
         seeds=arguments.seeds,
         iterations=arguments.iterations,
         max_length=arguments.max_length,

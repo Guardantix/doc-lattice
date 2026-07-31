@@ -233,6 +233,58 @@ def test_unclassified_ids_match_the_frozen_debt_snapshot() -> None:
     assert "scanner.source.character-limit" not in unclassified
 
 
+def test_the_tool_accepts_no_alternate_root() -> None:
+    # The scanner, the corpus grammar and the inventory checker are all imported from the checkout
+    # holding the tool. A root naming another revision would filter a run against guards it never
+    # executed, so the flag is refused rather than honored against the wrong tree.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--root", str(_ROOT), "--trace", "echo hello"])
+
+    assert raised.value.code == 2
+
+
+def test_a_sweep_searches_the_checkout_whose_scanner_it_executes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The debt snapshot names the guards a sweep is looking for and the scanner decides which
+    # guards exist. Read from different revisions, a reachable origin is filtered away silently.
+    searched: list[Path] = []
+
+    def record_debt(root: Path) -> frozenset[str]:
+        searched.append(root)
+        return frozenset()
+
+    def record_corpus(root: Path, **_kwargs: object) -> list[str]:
+        searched.append(root)
+        return []
+
+    monkeypatch.setattr(tool, "unclassified_ids", record_debt)
+    monkeypatch.setattr(tool, "load_corpus", record_corpus)
+
+    assert tool.main([]) == 0
+
+    checkout = Path(shell_scanner.__file__).resolve().parents[3]
+    assert searched == [checkout, checkout]
+
+
+def test_a_trace_filters_against_the_checkout_whose_scanner_it_executes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same revision coupling on the trace side: the inventory supplies the accepted names and the
+    # executed scanner supplies the frames, and a name only one of them carries drops the reach.
+    filtered: list[Path] = []
+
+    def record(root: Path) -> frozenset[str]:
+        filtered.append(root)
+        return frozenset()
+
+    monkeypatch.setattr(tool, "guard_owning_qualnames", record)
+
+    assert tool.main(["--trace", "echo hello"]) == 0
+
+    assert filtered == [Path(shell_scanner.__file__).resolve().parents[3]]
+
+
 def test_main_traces_one_script_without_running_a_sweep(capsys: pytest.CaptureFixture) -> None:
     assert tool.main(["--trace", "eval 'X=${Y=q}'; eval \"$X\"lattice"]) == 0
 
