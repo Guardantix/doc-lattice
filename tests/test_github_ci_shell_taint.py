@@ -2034,6 +2034,118 @@ def test_static_normalization_collapses_parent_segments(literal: str, expected: 
     assert normalize_static_resource(literal, dynamic=False) == expected
 
 
+def _dynamic_redirection(operator: str, word: ContentExpr) -> _RedirectionEvent:
+    """Build one redirection event whose operand named no resource by its syntax."""
+    descriptor = 0 if operator in {"<", "<>"} else 1
+    return _RedirectionEvent(
+        0,
+        operator,
+        descriptor,
+        DynamicResourceTarget(),
+        target_word=word,
+    )
+
+
+@pytest.mark.parametrize(
+    ("operator", "word", "values", "expected"),
+    [
+        (">", VariableRef("P"), {"P": "task.sh"}, StaticResourceTarget("task.sh")),
+        ("<", VariableRef("P"), {"P": "dir/../task.sh"}, StaticResourceTarget("task.sh")),
+        (
+            ">",
+            concat(VariableRef("D"), LiteralTransfer("/task.sh")),
+            {"D": "build"},
+            StaticResourceTarget("build/task.sh"),
+        ),
+        (">", VariableRef("P"), {"P": "/dev/null"}, NullTarget()),
+        (">", VariableRef("P"), {"P": "/dev/fd/2"}, DescriptorTarget(2)),
+        (">&", VariableRef("N"), {"N": "2"}, DescriptorTarget(2)),
+    ],
+    ids=(
+        "output-resource",
+        "input-resource",
+        "composed-resource",
+        "null-device",
+        "device-descriptor",
+        "descriptor-duplication",
+    ),
+)
+def test_dynamic_redirection_operand_resolves_to_its_exact_value(
+    operator: str,
+    word: ContentExpr,
+    values: dict[str, str],
+    expected: object,
+) -> None:
+    """Issue #151: a resolvable operand names the resource its literal spelling would name."""
+    events = (_dynamic_redirection(operator, word),)
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(events, values, TaintLimits())
+
+    assert resolved[0].target == expected
+    assert resolved[0].ordinal == events[0].ordinal
+    assert resolved[0].descriptor == events[0].descriptor
+    assert resolved[0].target_word is None
+
+
+@pytest.mark.parametrize(
+    ("word", "values"),
+    [
+        (VariableRef("P"), {}),
+        (VariableRef("P"), {"Q": "task.sh"}),
+        (Choice((LiteralTransfer("task.sh"), LiteralTransfer("other.sh"))), {}),
+        (concat(VariableRef("D"), LiteralTransfer("/task.sh")), {}),
+    ],
+    ids=("absent", "unrelated", "two-alternatives", "partially-known"),
+)
+def test_unresolvable_redirection_operand_keeps_its_dynamic_target(
+    word: ContentExpr,
+    values: dict[str, str],
+) -> None:
+    """A word without one exact value stays as unnamed as its syntax left it.
+
+    The word is consumed either way. It is valid only between the scanner and this projection,
+    so a declined event carries no expression forward for a later stage to read as if it were
+    still scoped to the evidence around it.
+    """
+    events = (_dynamic_redirection(">", word),)
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(events, values, TaintLimits())
+
+    assert resolved[0].target == DynamicResourceTarget()
+    assert resolved[0].target_word is None
+    assert resolved[0].ordinal == events[0].ordinal
+    assert resolved[0].descriptor == events[0].descriptor
+
+
+def test_redirection_events_without_an_unnamed_operand_are_returned_unchanged() -> None:
+    """A target the syntax already named carries no operand word and is left alone."""
+    events = (
+        _RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),
+        _RedirectionEvent(1, "<<<", 0, ContentTarget(LiteralTransfer("doc-lattice\n"))),
+        _RedirectionEvent(2, ">", 1, DynamicResourceTarget()),
+    )
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(
+        events, {"P": "task.sh"}, TaintLimits()
+    )
+
+    assert resolved is events
+
+
+def test_resolved_redirection_operand_respects_the_exact_value_length_limit() -> None:
+    """The projection is bounded by the same cap every other exact projection answers to."""
+    events = (_dynamic_redirection(">", VariableRef("P")),)
+
+    with pytest.raises(_TaintLimitExceeded) as error:
+        shell_taint._resolve_dynamic_redirection_targets(
+            events,
+            {"P": "task.sh"},
+            TaintLimits(max_exact_value_chars=3),
+        )
+
+    assert error.value.refusal.origin_id == "taint.exact-value.length-limit"
+
+
 def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
     output: OutputExpr = CommandOutput(1)
     for _ in range(1_200):

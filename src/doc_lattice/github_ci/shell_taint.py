@@ -358,12 +358,27 @@ RedirectionTarget: TypeAlias = (  # noqa: UP040
 
 @dataclass(frozen=True, slots=True)
 class _RedirectionEvent:
-    """One ordered descriptor mutation."""
+    """One ordered descriptor mutation.
+
+    ``target_word`` carries the operand's own content expression for a simple command's operand
+    that named no static resource by its syntax alone. Resource identity used to stop at that
+    syntax, so ``P=task.sh; printf ... > "$P"`` wrote to a nameless target while ``bash task.sh``
+    read a key nothing had written, and the body certified while Bash ran the marker (issue
+    #151). Keeping the word lets ``_resolve_dynamic_redirection_targets`` project it against the
+    same exact scalar values the eval replay already trusts, once those values exist.
+
+    The field is valid only between the scanner and that projection, which clears it on every
+    event it resolves and on every event it declines to resolve. Nothing downstream may read it:
+    ``_contextualize_evidence`` rewrites contents into scope-qualified expressions and never
+    visits this word, so a retained expression would carry unscoped names that no longer mean
+    what the evidence around them means.
+    """
 
     ordinal: int
     operator: str
     descriptor: int | None
     target: RedirectionTarget
+    target_word: ContentExpr | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3596,6 +3611,74 @@ def _read_literal_fields(  # noqa: PLR0912
     return tuple(assigned)
 
 
+def _resolve_dynamic_redirection_targets(
+    events: tuple[_RedirectionEvent, ...],
+    values: Mapping[str, str],
+    limits: TaintLimits,
+) -> tuple[_RedirectionEvent, ...]:
+    """Name the resource an unnamed redirection operand resolves to under exact values.
+
+    A redirection operand spelled as a variable reference named no resource at all, however
+    provably constant the variable was, so a write through it landed on a target the model
+    discards while a later read of the same file saw a key nothing had written (issue #151).
+    Projecting the operand's own content expression against the exact scalar values already
+    resolved for this point gives the operand the identity its literal spelling would have had.
+
+    The projection is the same one the eval replay trusts, so an operand only resolves when
+    every path reaching it assigns the same literal. Anything else keeps the dynamic target it
+    already had.
+
+    Resolving an operand can name a descriptor rather than a file, because a variable holding
+    ``/dev/stdout``, a ``/dev/fd`` alias, or a digit under ``>&`` is exactly what its literal
+    spelling names. ``_guarded_output_descriptors`` reads a non-descriptor target as a direct
+    binding, so a descriptor an ``exec`` bound through such a word stops being guarded and a
+    later ``>&N`` through it is dropped rather than refused. That widening is deliberate and
+    measured: it makes the variable spelling agree with the literal spelling, which already
+    certified, and AD-18 records it with the fixtures that pin it.
+
+    ``target_word`` is consumed here and cleared on every event, resolved or not, so no later
+    stage can read an expression whose names are no longer scoped to the evidence around them.
+
+    Args:
+        events: The redirection events attached to one command.
+        values: The exact scalar values in effect where Bash expands these operands.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        The events with every resolvable dynamic resource target named.
+
+    Raises:
+        _TaintLimitExceeded: If a projected value or descriptor exceeds its bound.
+    """
+    if not any(event.target_word is not None for event in events):
+        return events
+    resolved: list[_RedirectionEvent] = []
+    for event in events:
+        literal = (
+            _exact_content_literal(event.target_word, values, limits)
+            if isinstance(event.target, DynamicResourceTarget) and event.target_word is not None
+            else None
+        )
+        target = (
+            event.target
+            if literal is None
+            else resolve_redirection_target(
+                literal,
+                event.operator,
+                dynamic=False,
+                # The descriptor bound this route needs is the one the eval payload route
+                # already spells, and its reason is the eval payload's. Giving the authored
+                # route its own origin would put that origin in a callback the guard inventory
+                # counts no call to, so it reports the guard as unreachable. A resolved operand
+                # spelling more descriptor digits than Bash accepts therefore still fails
+                # closed, in the payload route's words, tracked as issue #191.
+                parse_descriptor=_static_eval_descriptor,
+            )
+        )
+        resolved.append(replace(event, target=target, target_word=None))
+    return tuple(resolved)
+
+
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
@@ -3740,6 +3823,14 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 read_ifs=ifs_value if deferred_projection else None,
             )
 
+        assignment_only = not command.argv or command.executable.argv_index is None
+        # Bash expands a redirection word before it applies the prefix assignments of a command
+        # that runs one, so ``P=other.sh; P=task.sh printf ... > "$P"`` writes to ``other.sh``.
+        # An assignment-only command is the measured exception: its assignments land first, and
+        # ``P=task.sh > "$P"`` truncates the file the NEW value names. Reading the wrong table
+        # would name a file Bash never touches, which is a certification rather than a refusal
+        # whenever the file the marker really reaches stays unmodeled.
+        redirection_values = command_values if assignment_only else exact_values
         routed = replace(
             command,
             assignments=tuple(route(assignment) for assignment in command.assignments),
@@ -3749,6 +3840,9 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             builtin_assignments=tuple(
                 route(assignment) for assignment in command.builtin_assignments
             ),
+            redirections=_resolve_dynamic_redirection_targets(
+                command.redirections, redirection_values, limits
+            ),
             unsupported_builtin_write=(command.unsupported_builtin_write or read_ifs_unknown),
         )
         commands.append(routed)
@@ -3757,7 +3851,6 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         # the live value, and the exact ``read`` projection below substituted that stale text as a
         # literal.
         conditional = command.conditionally_executed or command.execution_status is not True
-        assignment_only = not command.argv or command.executable.argv_index is None
         if assignment_only:
             for assignment in routed.definite_assignments:
                 apply_exact(
@@ -5238,9 +5331,10 @@ def _static_eval_redirection_target(
 
     The operand is reparsed with the payload's own second-pass quote and parameter semantics, so
     a quoted ``'$LOG'`` names the literal file Bash names while an unquoted ``$LOG`` resolves to
-    no static key. The latter is the same dynamic target the authored path already declines to
-    write through, and stays tracked as issue #151 for both routes rather than being modeled
-    here.
+    no static key. Issue #151 gave the authored route the exact-value projection that names the
+    file behind such an operand, but this route reparses one payload word with no table of the
+    values in effect around it, so an unquoted reference here still resolves to the dynamic
+    target rather than being modeled.
 
     Args:
         source_word: The operand word exactly as the payload spells it.

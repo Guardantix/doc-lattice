@@ -815,6 +815,43 @@ resource this body writes. Such an operand resolves to no static key, so the exa
 the glob target guard both skipped it and `F=t.sh; source "$F"` certified a file the body itself
 wrote the marker into.
 
+A simple command's redirection operand that names no resource by its syntax alone is projected
+against the exact scalar values in effect where Bash expands it, so `P=task.sh; printf ... > "$P"`
+writes to the key `bash task.sh` later reads. Resource identity used to follow literal syntax only,
+which left that write on a nameless target while the read saw a key nothing had written, and the
+body certified while Bash ran the marker (issue #151). The projection is the one the eval replay
+already trusts, so an operand resolves only when every path reaching it assigns the same literal,
+and anything else keeps the dynamic target it had. Which values apply is measured against Bash 5.2
+rather than assumed: a command that runs an argv expands the word before its own prefix assignments
+take effect, so `P=other.sh; P=task.sh printf ... > "$P"` writes to `other.sh`, while an
+assignment-only command applies its assignments first and `P=task.sh > "$P"` truncates the file the
+new value names. Reading the wrong table would name a file Bash never touches and leave the file the
+marker really reaches unmodeled, which is a certification rather than a refusal.
+
+Resolving an operand can name a descriptor rather than a file, because a variable holding
+`/dev/stdout`, a `/dev/fd` alias, or a digit under `>&` is exactly what its literal spelling names.
+That widens the analysis in one measured place: a non-descriptor target makes the descriptor an
+`exec` binds directly guarded, so `P=/dev/stdout; exec 3> "$P"` used to refuse a later `>&3` as an
+unresolved source and now drops it as a duplication of a standard stream. The literal spelling
+`exec 3> /dev/stdout` always certified, so the resolution makes the two spellings agree rather than
+withdrawing a guard from a shape that had one on its own merits, and the fixtures that pin the
+shape carry the real-Bash evidence that Bash runs no marker through it. A guard that refuses
+because a target is dynamic would have to be reconsidered against this decision before it is added.
+
+The resolution reaches one simple command's own operand and one operand form. Four classes stay
+inside the dynamic resource alias boundary above, each pinned as certifying with the real-Bash
+differential attached so a change that closes or widens one is visible. A compound command's
+redirection word is expanded at compound entry rather than at any command inside it, and this
+evidence shape carries no scope-entry value table, so `{ ...; } > "$P"` is not projected; a
+function body's and a loop body's assignments are conditional in this model, so the exact table
+inside them is empty and the same write in either place is not projected (issue #188). An unquoted
+operand is pathname-expanded by Bash before anything is opened, so `P='ta*.sh'` names a pattern
+rather than the file the marker reaches, exactly as the literal `> ta*.sh` spelling already did
+(issue #189). A parameter expansion that transforms, indexes, defaults, or indirects its value
+lowers to no closed content expression, so `${P%.txt}` and its family keep a dynamic target
+(issue #190). The exact eval payload route reparses one payload word with no table of the values
+around it, so an unquoted reference inside a payload is not projected either.
+
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
 shell scope for every later command, which the per-command `redirections` field cannot express. A

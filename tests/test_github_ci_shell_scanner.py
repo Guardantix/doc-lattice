@@ -304,6 +304,36 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "printf 'doc-' > s.sh; eval \"printf 'lattice reconcile' >> s.sh\"; bash s.sh",
         {},
     ),
+    # Issue #151: a redirection target spelled as a variable reference resolved to no resource
+    # identity at all, even when the variable holds a literal every reaching path assigns
+    # unconditionally. The write landed on a dynamic target the model discards, so the later
+    # script sink read a key nothing had written and the body certified while real bash ran the
+    # marker. The first row is the fixture issue #139 verified and excluded from the
+    # certify-direction differential; it now belongs on this side of the ledger.
+    (
+        "dynamic-resource-identity",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "literal-variable-input-target",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; P=task.sh; bash < \"$P\"",
+        {},
+    ),
+    (
+        "literal-variable-append-target",
+        "P=task.sh; printf doc- > task.sh; printf 'lattice reconcile\\n' >> \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # Bash expands a redirection word BEFORE it applies the command's own prefix assignment,
+        # so this writes the marker to ``other.sh``. Resolving the word against the values the
+        # prefix assignment leaves behind would name ``task.sh`` and certify a body real bash
+        # runs the marker in, which is why the resolution reads the pre-command values.
+        "prefix-assignment-does-not-retarget-the-word",
+        "P=other.sh; P=task.sh printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -487,6 +517,16 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         "eval 'printf X=doc- > /dev/fd/1' > s.sh; source s.sh; eval \"${X}lattice reconcile\"",
         {},
         "shell source payload state cannot be represented",
+    ),
+    # Issue #151: the write target resolves to ``task.sh``, which puts the marker into the
+    # resource table the content-gated dynamic script operand guard consults. The operand itself
+    # is still a word this analysis does not resolve to a file, so the guard that already covers
+    # that shape reaches the body it could not see while the write stayed nameless.
+    (
+        "literal-variable-write-target-then-dynamic-operand",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash \"$P\"",
+        {},
+        "shell glob script operand state cannot be represented",
     ),
 ]
 
@@ -8311,6 +8351,59 @@ def test_loop_evidence_routes_repetition_scopes_into_their_pipelines(
     assert any(pipe.producer_scope_id == scope.scope_id for pipe in builder.pipes)
 
 
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ('printf a > "$P"', True),
+        ("printf a > out.txt", False),
+        ("printf a > /dev/null", False),
+        ("printf a >&2", False),
+        ("cat <<<hello", False),
+        ("cat <<EOF\nhello\nEOF", False),
+        ("printf a > >(cat)", False),
+        ('{ printf a; } > "$P"', False),
+    ],
+    ids=(
+        "dynamic-operand",
+        "literal-operand",
+        "null-operand",
+        "descriptor-operand",
+        "herestring",
+        "heredoc",
+        "process-substitution",
+        "compound-scope-operand",
+    ),
+)
+def test_redirection_event_carries_its_word_only_where_the_projection_runs(
+    script: str,
+    expected: bool,
+):
+    """The producer side of the invariant issue #151's projection relies on.
+
+    ``_resolve_dynamic_redirection_targets`` decides what to project by testing the event's
+    target and its word, so a word attached to any other event would be projected against a
+    value table that does not apply to it, or retained past the stage that rewrites content into
+    scope-qualified expressions. A compound scope's redirection is the case that matters most:
+    the values that apply to it are the ones at compound entry, which this evidence shape has no
+    table for, and that gap is tracked as issue #188.
+    """
+    scanner = _ShellScanner(script, classify_commands=False)
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    events = [
+        event
+        for events in (
+            *(command.redirections for command in builder.commands),
+            *(scope.redirections for scope in builder.scopes),
+        )
+        for event in events
+    ]
+    assert events
+    assert any(event.target_word is not None for event in events) is expected
+
+
 def test_case_evidence_routes_a_choice_scope_into_its_pipeline():
     scanner = _ShellScanner(
         "case x in x) printf a;; y) printf b;; esac | cat",
@@ -8761,8 +8854,41 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         {},
     ),
     (
-        "dynamic-resource-identity",
-        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        # Issue #151 over-refusal guard: resolving a literal-valued word to the resource it
+        # names must stay a resource identity, not a reason to refuse every dynamic target. This
+        # body writes no marker to the file it names, so it stays certified.
+        "marker-free-literal-variable-write-target",
+        "P=task.sh; printf 'make build\\n' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 measured widening. Resolving an operand can name a descriptor rather than a
+    # file, because a variable holding "/dev/stdout", a "/dev/fd" alias, or a digit under ">&" is
+    # exactly what its literal spelling names. "_guarded_output_descriptors" reads a
+    # non-descriptor target as a direct binding, so before the resolution these bodies refused
+    # with "shell descriptor source cannot be represented" and now they certify: descriptor 3 is
+    # a transitive dependent of a standard stream rather than an unresolved binding. Real bash
+    # runs the marker in none of them, because the descriptor "exec" bound points at the enclosing
+    # shell's stream and not at the pipe, and the literal spelling of each already certified on
+    # the revision before #151. These rows are what makes that widening measured rather than
+    # assumed, so a change that unguards a descriptor for any other reason has to move them.
+    (
+        "exec-bound-descriptor-through-a-dev-stdout-variable",
+        "P=/dev/stdout; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-dev-fd-variable",
+        "P=/dev/fd/1; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-digit-variable",
+        "P=1; exec 3>& \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-literal-dev-stdout",
+        "exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
         {},
     ),
     (
@@ -8932,32 +9058,18 @@ def test_fail_closed_refusal_fixture_executes_marker_under_real_bash(
     assert executed, stderr
 
 
-# Issue #139: "dynamic-resource-identity" is a verified exception, not a fixture bug. Its write
-# target is spelled "$P", a variable reference, so the scanner classifies it as a
-# DynamicResourceTarget at the redirection site and never connects it to the literal "task.sh"
-# read target -- even though P is assigned the literal "task.sh" a line earlier and the two
-# resources are the same file at runtime. ARCHITECTURE.md documents "dynamic resource aliases" as
-# part of the designed absence-of-evidence boundary (not the fail-closed guarantee's scope), and
-# the open gaps in that boundary are tracked as separate issues (#125-#141) rather than folded
-# into this one. Confirmed under real bash: this fixture's doc-lattice stub DOES execute, so it
-# is intentionally excluded from the "never executes" assertion below and tracked instead as
-# issue #151, rather than silently dropped or asserted false.
-_DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP = "dynamic-resource-identity"
+# Issue #139 recorded "dynamic-resource-identity" here as the one verified exception to the
+# certify-direction differential: its write target was spelled "$P", so the scanner classified it
+# as a DynamicResourceTarget and never connected it to the literal "task.sh" read target, even
+# though P held that literal unconditionally. Issue #151 closed that gap, so the fixture moved
+# into PHASE_TWO_RUNTIME_REFUSALS and every row below is held to the assertion without exception.
 
 
 @pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
 @pytest.mark.parametrize(
     ("_description", "script", "extra_environment"),
-    [
-        row
-        for row in PHASE_TWO_MANDATORY_CERTIFICATIONS
-        if row[0] != _DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP
-    ],
-    ids=[
-        row[0]
-        for row in PHASE_TWO_MANDATORY_CERTIFICATIONS
-        if row[0] != _DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP
-    ],
+    PHASE_TWO_MANDATORY_CERTIFICATIONS,
+    ids=[row[0] for row in PHASE_TWO_MANDATORY_CERTIFICATIONS],
 )
 def test_phase_two_mandatory_certification_fixture_does_not_execute_under_bash(
     _description,
@@ -8983,6 +9095,140 @@ def test_phase_two_mandatory_certification_fixture_does_not_execute_under_bash(
         f"certified fixture {_description!r} executed the doc-lattice stub under real bash: "
         f"{stderr}"
     )
+
+
+# (description, script, extra_environment) triples for the operand shapes issue #151's
+# resolution does NOT reach. Every one of them certifies while real bash runs the marker, so they
+# are characterized false certifications rather than true negatives, and they must never join
+# PHASE_TWO_MANDATORY_CERTIFICATIONS. They are pinned in both directions below: the scan is held
+# to certifying, and the same differential the refusal fixtures use is held to the marker
+# executing. Closing the tracked issue flips both assertions at once, which is what stops the gap
+# from being closed or widened unnoticed. All of them predate #151 and behave identically on the
+# revision before it, so they are its siblings, not its regressions.
+KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
+    # Issue #188: the projection runs per simple command, against the exact table in effect
+    # there. A compound command's redirections belong to the scope and apply from compound entry,
+    # which this evidence shape carries no value table for, and a function body's or loop body's
+    # assignments are conditional in this model, so the exact table inside them is empty.
+    (
+        "compound-scope-word",
+        "P=task.sh; { printf doc-; printf 'lattice reconcile'; } > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "function-body-word",
+        "f() { P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; }; f; bash task.sh",
+        {},
+    ),
+    (
+        "loop-binding-word",
+        "for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash task.sh",
+        {},
+    ),
+    # Issue #189: bash pathname-expands an unquoted operand before opening anything, so the text
+    # is a pattern rather than the name of the file the marker reaches. The literal spelling has
+    # the same hole, which is why the resolved spelling reproduces it.
+    (
+        "glob-valued-operand",
+        "printf x > task.sh; P='ta*.sh'; printf '%s%s\\n' doc- 'lattice reconcile' > $P"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "glob-literal-operand",
+        "printf x > task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > ta*.sh; bash task.sh",
+        {},
+    ),
+    # Issue #190: the word lowering builds a closed content expression for a plain reference and
+    # not for a parameter expansion that transforms, indexes, defaults, or indirects its value,
+    # so the exact projection returns nothing to name the operand with.
+    (
+        "suffix-strip-operand",
+        "P=task.sh.txt; printf '%s%s\\n' doc- 'lattice reconcile' > \"${P%.txt}\"; bash task.sh",
+        {},
+    ),
+    (
+        "indirect-operand",
+        "T=task.sh; P=T; printf '%s%s\\n' doc- 'lattice reconcile' > \"${!P}\"; bash task.sh",
+        {},
+    ),
+    (
+        "array-element-operand",
+        "A=(task.sh); printf '%s%s\\n' doc- 'lattice reconcile' > \"${A[0]}\"; bash task.sh",
+        {},
+    ),
+    (
+        "default-value-operand",
+        "P=; printf '%s%s\\n' doc- 'lattice reconcile' > \"${P:-task.sh}\"; bash task.sh",
+        {},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script", "_environment"),
+    KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS,
+    ids=[row[0] for row in KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS],
+)
+def test_unresolved_redirection_operand_gap_certifies(_description, script, _environment):
+    """The edge of issue #151's resolution, pinned as certifying per AD-19.
+
+    These are not true negatives. The companion test below runs the same real-bash differential
+    the refusal fixtures use and requires the marker to execute, so the pin records a known false
+    certification with its evidence attached rather than a claim that the flow is safe. Each row
+    stays inside the dynamic resource alias boundary AD-18 discloses and cites the issue tracking
+    it.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
+@pytest.mark.parametrize(
+    ("_description", "script", "extra_environment"),
+    KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS,
+    ids=[row[0] for row in KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS],
+)
+def test_unresolved_redirection_operand_gap_executes_the_marker_under_real_bash(
+    _description,
+    script,
+    extra_environment,
+    tmp_path: Path,
+):
+    """Executable evidence that every pinned gap above is a false certification.
+
+    Issue #139's ledger recorded its one excluded row in prose. A prose exclusion cannot tell a
+    gap that closed from a gap that widened, so the exclusion is executable here: the marker must
+    still run under real bash for the certification above to be the known gap it claims to be.
+    """
+    executed, stderr = _marker_executes_under_bash(script, extra_environment, tmp_path)
+
+    assert executed, stderr
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf doc-; printf 'lattice reconcile'; } > task.sh; bash task.sh",
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; }; f; bash task.sh",
+        "for i in 1; do printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; done; bash task.sh",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+    ],
+    ids=("compound-scope", "function-body", "loop-body", "simple-command"),
+)
+def test_literal_redirection_target_refuses_in_every_shape_above(script):
+    """The control for the pinned gaps: the same flow refuses once the operand names its file.
+
+    The last row is the operand form issue #151 resolved, which isolates the operand rather than
+    the scope for the parameter-expansion rows above.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
 def test_select_header_retaining_marker_fails_closed():
