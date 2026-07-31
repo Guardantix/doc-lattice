@@ -42,6 +42,10 @@ def _qualnames(reached: set[tuple[str, str]]) -> set[str]:
     return {qualname for _module, qualname in reached}
 
 
+def _reported_qualnames(out: str) -> set[str]:
+    return {line.split(":", 1)[1] for line in out.split()}
+
+
 def _declared_cap_count() -> int:
     defaults = ScanLimits()
     return sum(
@@ -146,6 +150,23 @@ def test_sweep_keeps_the_better_row_a_reused_accumulator_holds() -> None:
         "ScannerLimits(max_source_chars=30)",
         "a" * 40,
     )
+
+
+def test_sweep_keeps_a_row_this_grid_cannot_score() -> None:
+    # A label this grid does not mint came from a grid this call cannot rank, and ranking it last
+    # is not neutrality: the first entry the grid mints then displaces it, so a production reach an
+    # earlier call recorded loses to a shrunk-cap reach here and the registry pins the weaker claim.
+    found = {"scanner.source.character-limit": (tool.PRODUCTION, "a" * 40)}
+    grid = [
+        (
+            "ScannerLimits(max_source_chars=4)",
+            ScanLimits(scanner=ScannerLimits(max_source_chars=4)),
+        )
+    ]
+
+    tool.sweep(["a" * 8], grid, found=found)
+
+    assert found["scanner.source.character-limit"] == (tool.PRODUCTION, "a" * 40)
 
 
 def test_sweep_can_restrict_itself_to_still_unclassified_guards() -> None:
@@ -295,7 +316,7 @@ def test_trace_output_omits_a_guarded_module_function_owning_no_guard(
     # ordinary helpers as guard machinery.
     assert tool.main(["--trace", "echo hello"]) == 0
 
-    reported = capsys.readouterr().out.split()
+    reported = _reported_qualnames(capsys.readouterr().out)
     assert "_ScanBudget.step" in reported
     assert "_ascii_lower" not in reported
 
@@ -307,7 +328,7 @@ def test_trace_all_reports_the_whole_guarded_module_reach(
     # separates the worked eval shape from a plain one owns no guard of its own.
     assert tool.main(["--trace", "echo hello", "--trace-all"]) == 0
 
-    assert "_ascii_lower" in capsys.readouterr().out.split()
+    assert "_ascii_lower" in _reported_qualnames(capsys.readouterr().out)
 
 
 def test_rendered_rows_are_paste_ready_registry_entries() -> None:
@@ -488,17 +509,59 @@ def test_guarded_filenames_import_a_package_initializer_as_its_package(
 
 def test_guarded_filenames_refuse_a_module_they_cannot_import(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # The gate reads the guard package as inert source text and discovers any module in it that
     # mentions the protocol, one still being written included, which is exactly when a trace is
     # worth running. Left to propagate, the half-written module's own traceback is all the operator
     # gets, and it says nothing about which tool stopped or why.
-    monkeypatch.setattr(
-        tool, "guarded_modules", lambda _root: (f"{checker.GUARD_MODULE_ROOT}/shell_budget.py",)
-    )
+    root = tmp_path / "candidate"
+    module = f"{checker.GUARD_MODULE_ROOT}/shell_budget.py"
+    (root / module).parent.mkdir(parents=True)
+    (root / module).write_text("raise ImportError('half written')\n", encoding="utf-8")
+    monkeypatch.setattr(tool, "guarded_modules", lambda _root: (module,))
 
     with pytest.raises(ValueError, match="shell_budget"):
+        tool.guarded_filenames(root)
+
+
+def test_guarded_filenames_refuse_a_module_that_fails_to_import_for_another_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A module body runs on import, so an unfinished one fails in more ways than an unfinished
+    # import statement: a typo'd constant raises NameError, and a helper that is not written yet
+    # raises AttributeError or TypeError from a decorator or a module-level call. Each one aborts
+    # the trace with the module's own traceback, which says nothing about the traced surface.
+    def explode(_dotted: str) -> ModuleType:
+        message = "name 'MAX_EVAL_DEPTH' is not defined"
+        raise NameError(message)
+
+    monkeypatch.setattr(
+        tool, "guarded_modules", lambda _root: (f"{checker.GUARD_MODULE_ROOT}/shell_scanner.py",)
+    )
+    monkeypatch.setattr(tool.importlib, "import_module", explode)
+
+    with pytest.raises(ValueError, match="could not be imported"):
         tool.guarded_filenames(_ROOT)
+
+
+def test_guarded_filenames_skip_a_module_the_tree_no_longer_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The traced surface unions the checker's hand-kept allowlist with what it discovers, so an
+    # entry naming a module a contributor has just moved outlives the file until the allowlist is
+    # edited. Refused, every trace aborts during a guard move, and the message diagnoses a deleted
+    # module as a half-written one; the module contributes no origins to intersect against either.
+    monkeypatch.setattr(
+        tool,
+        "guarded_modules",
+        lambda _root: (
+            f"{checker.GUARD_MODULE_ROOT}/shell_scanner.py",
+            f"{checker.GUARD_MODULE_ROOT}/shell_moved_away.py",
+        ),
+    )
+
+    assert shell_scanner.__file__ in tool.guarded_filenames(_ROOT)
 
 
 def test_guarded_modules_include_one_the_inventory_discovers(tmp_path: Path) -> None:
@@ -530,6 +593,24 @@ def test_load_corpus_rejects_an_extra_file_that_is_not_a_list_of_scripts(
     extra.write_text('"eval $X"', encoding="utf-8")
 
     with pytest.raises(ValueError, match="JSON list of scripts"):
+        tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=extra)
+
+
+def test_load_corpus_refuses_an_extra_file_it_cannot_find(tmp_path: Path) -> None:
+    # Every other read on this path refuses with the file it could not read and what writes it. The
+    # one input the operator authored themselves would report a bare FileNotFoundError naming
+    # neither the option that read it nor what it is supposed to hold.
+    with pytest.raises(ValueError, match="--extra"):
+        tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=tmp_path / "candidates.json")
+
+
+def test_load_corpus_refuses_an_extra_file_it_cannot_parse(tmp_path: Path) -> None:
+    # A decoder error reports a line and column of a file the message never names, in a tool whose
+    # every other refusal names both the file and what regenerates it.
+    extra = tmp_path / "candidates.json"
+    extra.write_text('["eval $X",]', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="--extra"):
         tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=extra)
 
 
@@ -735,6 +816,24 @@ def test_slots_survive_a_scan_limits_field_annotated_as_optional() -> None:
         )
 
     assert tool.caps_slots(OptionallyTainted) == {"TaintLimits": "taint"}
+
+
+def test_slots_refuse_two_fields_carrying_the_same_caps_class() -> None:
+    # The caps class name is what the grid mints a label from and what the renderer places one back
+    # with. Collapsed onto one entry, the field that loses is never shrunk at all, so the guards its
+    # caps govern are reported unreached by a run that never configured them, and a row for the
+    # field that survived names caps the sweep did not run under.
+    @dataclasses.dataclass(frozen=True)
+    class TwiceTainted:
+        taint: shell_guards.TaintLimits = dataclasses.field(
+            default_factory=shell_guards.TaintLimits
+        )
+        eval_taint: shell_guards.TaintLimits = dataclasses.field(
+            default_factory=shell_guards.TaintLimits
+        )
+
+    with pytest.raises(ValueError, match="TaintLimits"):
+        tool.caps_slots(TwiceTainted)
 
 
 def test_load_corpus_refuses_a_replay_inventory_it_cannot_read(tmp_path: Path) -> None:
@@ -961,4 +1060,146 @@ def test_a_trace_records_frames_from_the_checkout_whose_scanner_it_executes(
 def test_main_traces_one_script_without_running_a_sweep(capsys: pytest.CaptureFixture) -> None:
     assert tool.main(["--trace", "eval 'X=${Y=q}'; eval \"$X\"lattice"]) == 0
 
-    assert "_eval_syntax_record_assignment" in capsys.readouterr().out
+    assert "_eval_syntax_record_assignment" in _reported_qualnames(capsys.readouterr().out)
+
+
+def test_trace_output_names_the_module_each_function_ran_in(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The reach is intersected on (module, qualified name) precisely because a bare name does not
+    # identify a function. Printed without the module, the operator reads the answer the
+    # intersection refused to give and aims the next candidate at another module's guard.
+    assert tool.main(["--trace", "eval 'X=${Y=q}'; eval \"$X\"lattice"]) == 0
+
+    assert "shell_taint.py:_eval_syntax_record_assignment" in capsys.readouterr().out.split()
+
+
+def test_trace_output_keeps_one_name_two_guarded_modules_define(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_is_function_positional_parameter` is defined in both guarded modules today, so a reach into
+    # each is two guard-holding functions. Collapsed onto the name, one of them is dropped and the
+    # count this mode is read for reports the other as the whole reach.
+    both = frozenset({("shell_taint.py", "_shared"), ("shell_scanner.py", "_shared")})
+    monkeypatch.setattr(tool, "trace_guard_functions", lambda _script: set(both))
+    monkeypatch.setattr(tool, "guard_owning_functions", lambda _root: both)
+
+    assert tool.main(["--trace", "echo hello"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.split() == ["shell_scanner.py:_shared", "shell_taint.py:_shared"]
+    assert "reached 2 guard-holding functions" in captured.err
+
+
+def test_a_trace_that_cannot_write_its_reach_reports_it_and_fails(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Piping a `--trace-all` run into `head` closes stdout, and the sweep answers that with a
+    # diagnosis and a failing status. Unguarded, the same pipe answers a trace with a traceback out
+    # of `main` and a second ignored exception at interpreter shutdown.
+    class Closed:
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(sys, "stdout", Closed())
+
+    assert tool.main(["--trace", "eval 'X=${Y=q}'; eval \"$X\"lattice"]) == 1
+
+    assert "could not write" in capsys.readouterr().err
+
+
+def test_a_sweep_that_cannot_flush_its_rows_reports_it_and_fails(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A write smaller than the stream's buffer, which is every sweep that finds a handful of rows,
+    # reaches no syscall at all. Taken as delivery, the run reports the rows written and exits
+    # zero, and the failure surfaces at interpreter shutdown as an ignored exception on the final
+    # flush, long after the rows it names were lost.
+    class Buffered:
+        def write(self, _text: str) -> int:
+            return 0
+
+        def flush(self) -> None:
+            raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(tool, "unclassified_ids", lambda _root: frozenset())
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
+    monkeypatch.setattr(sys, "stdout", Buffered())
+
+    assert tool.main([]) == 1
+
+    assert "could not write" in capsys.readouterr().err
+
+
+def test_a_sweep_that_cannot_render_its_rows_reports_it_and_fails(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `render_rows` refuses a caps value no line can carry, and it is called from the block that
+    # exists to rescue the rows. Raised from there it delivers nothing and reports nothing.
+    def refuse(_found: object) -> str:
+        raise ValueError("no line can carry that caps value")
+
+    monkeypatch.setattr(tool, "unclassified_ids", lambda _root: frozenset())
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
+    monkeypatch.setattr(tool, "render_rows", refuse)
+
+    assert tool.main([]) == 1
+
+    assert "could not render" in capsys.readouterr().err
+
+
+def test_a_sweep_that_cannot_render_its_rows_keeps_the_failure_it_was_propagating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rescue block exists so an unexpected scanner failure does not cost the run its rows. A
+    # rendering failure raised from inside it replaces that failure with one about the rendering,
+    # so the run reports neither the rows nor the diagnosis.
+    scanned = shell_scanner.scan_doc_lattice_invocations
+
+    def fail_once_a_row_has_been_found(script: str, *, limits: ScanLimits) -> object:
+        if limits.scanner.max_scan_steps == 0:
+            raise ValueError("scanner failed on a shape nothing pinned")
+        return scanned(script, limits=limits)
+
+    def refuse(_found: object) -> str:
+        raise ValueError("no line can carry that caps value")
+
+    monkeypatch.setattr(tool, "scan_doc_lattice_invocations", fail_once_a_row_has_been_found)
+    monkeypatch.setattr(tool, "unclassified_ids", lambda _root: None)
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one; echo two"])
+    monkeypatch.setattr(tool, "render_rows", refuse)
+
+    with pytest.raises(ValueError, match="nothing pinned"):
+        tool.main(["--shrink", "0"])
+
+
+def test_a_sweep_reports_a_debt_snapshot_it_cannot_read_as_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An empty snapshot is the end state AD-20 drives toward, and the refusal already names the
+    # file and says the remaining reach is asked for with --all-guards. Left to propagate, that
+    # advice arrives under a traceback that reads as a broken tool, out of the documented command.
+    def refuse(_root: Path) -> frozenset[str]:
+        raise ValueError("holds no records carrying an origin_id for a sweep to look for")
+
+    monkeypatch.setattr(tool, "unclassified_ids", refuse)
+
+    with pytest.raises(SystemExit) as raised:
+        tool.main([])
+
+    assert raised.value.code == 2
+
+
+def test_a_sweep_reports_an_extra_file_it_cannot_read_as_a_usage_error(tmp_path: Path) -> None:
+    # The candidates file is the one input on this path the operator wrote themselves, and the one
+    # a traceback names worst.
+    missing = tmp_path / "candidates.json"
+
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--seeds", "0", "--iterations", "0", "--extra", str(missing)])
+
+    assert raised.value.code == 2

@@ -68,6 +68,16 @@ ROW_INDENT = "        "
 BMP_MAX = 0xFFFF
 """Highest code point a Python literal spells with the four-digit escape."""
 
+IMPORT_FAILURES = (ImportError, SyntaxError, NameError, AttributeError, TypeError, ValueError)
+"""What executing a half-written guarded module raises, as `guarded_filenames` reports it.
+
+The module body runs on import, so the failure is not only the two an unfinished file suggests: a
+typo'd constant raises NameError, a not-yet-written helper referenced from a decorator or a
+module-level call raises AttributeError or TypeError, and a dataclass or enum rejecting its own
+declaration raises ValueError. Named rather than caught as `Exception`, which the repository rules
+forbid, and kept here so the reason the tuple is this wide is written once.
+"""
+
 Reach = dict[str, tuple[str, str]]
 """Guard origin identifier -> (limits label, the shortest script that reached it)."""
 
@@ -86,12 +96,27 @@ def caps_slots(limits: type) -> dict[str, str]:
 
     Returns:
         Caps class name mapped to the keyword that carries it.
+
+    Raises:
+        ValueError: If two fields carry the same caps class, since the class name is what the grid
+            mints a label from and what the renderer places one back with. Collapsed to a single
+            entry, one of the fields would never be shrunk at all, and the guards its caps govern
+            would be reported as unreached by a run that never configured them, while a row for the
+            field that survived names caps the sweep did not run under.
     """
     defaults = limits()
-    return {
-        type(getattr(defaults, field.name)).__name__: field.name
-        for field in dataclasses.fields(defaults)
-    }
+    slots: dict[str, str] = {}
+    for field in dataclasses.fields(defaults):
+        name = type(getattr(defaults, field.name)).__name__
+        if name in slots:
+            message = (
+                f"{name} is carried by both {slots[name]!r} and {field.name!r} of "
+                f"{type(defaults).__name__}, so a label naming it cannot say which field it came "
+                "from; give one of them a caps class of its own"
+            )
+            raise ValueError(message)
+        slots[name] = field.name
+    return slots
 
 
 def limits_slots() -> dict[str, str]:
@@ -241,10 +266,10 @@ def load_corpus(
         Deduplicated scripts ordered by length.
 
     Raises:
-        ValueError: If the replay inventory carries no recorded scripts, or the extra file is not
-            a list of scripts, or holds a candidate the length filter would drop, since a sweep
-            that never scanned it prints the same nothing as one that scanned it and reached no
-            guard.
+        ValueError: If the replay inventory carries no recorded scripts, or the extra file cannot
+            be read, or is not a list of scripts, or holds a candidate the length filter would
+            drop, since a sweep that never scanned it prints the same nothing as one that scanned
+            it and reached no guard.
     """
     corpus: set[str] = set()
     inventory = json.loads((root / REPLAY_INVENTORY).read_text(encoding="utf-8"))
@@ -274,7 +299,18 @@ def load_corpus(
         for case in fuzz_shell_taint.generate(random.Random(seed), iterations):
             corpus.add(case.script)
     if extra is not None:
-        candidates = json.loads(extra.read_text(encoding="utf-8"))
+        try:
+            candidates = json.loads(extra.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            # The one input on this path the operator wrote themselves is the one a bare traceback
+            # names worst: a decoder error reports a line and column of a file the message never
+            # names, and a missing path reports neither the option that read it nor what it holds.
+            # Every other read here refuses with both, and the check below already validates this
+            # file, only after the read has already had to succeed.
+            message = (
+                f"{extra} could not be read as the JSON list of scripts --extra takes ({error!r})"
+            )
+            raise ValueError(message) from error
         # A bare JSON string would otherwise update the set with its characters and a JSON object
         # with its keys, so the sweep would quietly search something nobody authored.
         if not isinstance(candidates, list) or not all(
@@ -343,12 +379,16 @@ def sweep(
     # documented as caller-owned: a caller sweeping a corpus in chunks into one accumulator would
     # otherwise let the first reach of the second call overwrite a better row from the first with
     # no comparison at all. A label this grid does not mint came from a grid this call cannot
-    # score, so it ranks below every entry here rather than pretending to a place among them.
+    # score, and ranking it last is not neutrality but a verdict: the first entry this grid mints
+    # then displaces it, so a production reach recorded by an earlier call loses to a shrunk-cap
+    # reach here and the registry pins the weaker claim, which is the inversion the ordering below
+    # exists to prevent. Kept instead, since a row nothing here can compare against is evidence the
+    # caller already holds; a caller that wants it re-scored sweeps into a fresh accumulator.
     ranks: dict[str, int] = {}
     for rank, (label, _limits) in enumerate(grid):
         ranks.setdefault(label, rank)
     best: dict[str, tuple[int, int]] = {
-        origin_id: (ranks.get(label, len(grid)), len(script))
+        origin_id: (ranks.get(label, -1), len(script))
         for origin_id, (label, script) in found.items()
     }
     scanned: set[str] = set()
@@ -420,6 +460,14 @@ def guarded_filenames(root: Path) -> frozenset[str]:
     trace report an empty set, which reads exactly like a candidate that reaches no guard
     machinery at all.
 
+    A module the tree no longer holds is skipped rather than refused. The surface unions the
+    checker's hand-kept allowlist with what it discovers, so an entry that names a module a
+    contributor has just moved outlives the file by exactly the edit that adds the new path to the
+    allowlist. That module contributes no frames, and no origins either, since the inventory a
+    trace filters against is discovered from the same tree, so nothing is intersected away by
+    passing over it. Refused instead, it would abort every trace during a guard move, with a
+    message diagnosing a deleted module as a half-written one.
+
     Args:
         root: Repository root the guarded modules are read from.
 
@@ -427,12 +475,14 @@ def guarded_filenames(root: Path) -> frozenset[str]:
         Every spelling of a guarded module's filename a traced frame may carry.
 
     Raises:
-        ValueError: If a guarded module cannot be imported, since tracing the rest would report a
-            partial reach as the whole one, and the module's own traceback says nothing about why
-            the tool stopped.
+        ValueError: If a guarded module the tree holds cannot be imported, since tracing the rest
+            would report a partial reach as the whole one, and the module's own traceback says
+            nothing about why the tool stopped.
     """
     names: set[str] = set()
     for module in guarded_modules(root):
+        if not (root / module).exists():
+            continue
         # Derived from the recorded path rather than a hard-coded package prefix, so a guarded
         # module that moves within the tree still resolves to the module actually imported.
         parts = Path(module).with_suffix("").parts[1:]
@@ -445,7 +495,7 @@ def guarded_filenames(root: Path) -> frozenset[str]:
         dotted = ".".join(parts)
         try:
             imported = importlib.import_module(dotted)
-        except (ImportError, SyntaxError) as error:
+        except IMPORT_FAILURES as error:
             # The gate reads the guard package as inert source text and discovers any module in it
             # that mentions the protocol, one still being written included. That is exactly when a
             # trace is worth running, so the refusal names the module and says the trace could not
@@ -788,6 +838,36 @@ def nonnegative_cap(text: str) -> int:
     return _nonnegative(text, "is not a cap; a scan cannot count fewer than none")
 
 
+def _deliver(text: str, described: str) -> int:
+    """Write a run's whole result to stdout, reporting a sink that could not take it.
+
+    The write is fallible: piping a several-minute run into `head` closes stdout part way through
+    it. Raised from a sweep's rescue block that failure would replace the one the sweep is
+    propagating, which is the diagnosis, and deliver no rows either, so the recovery would cost
+    both. Reported instead, and answered with a failing status, since a run that could not deliver
+    its result exits like one that found nothing.
+
+    Flushed inside the same guard, because a buffered write is not delivery. A result smaller than
+    the stream's buffer, which is every sweep that finds a handful of rows, reaches no syscall
+    here at all: the failure would surface at interpreter shutdown, as an ignored exception on the
+    final flush, long after this returned a status saying the rows were written.
+
+    Args:
+        text: The complete result, already rendered.
+        described: What the result holds, completing the refusal after "could not write".
+
+    Returns:
+        Process exit status.
+    """
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except OSError as error:
+        sys.stderr.write(f"could not write {described}: {error}\n")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Search for witnesses, or trace one candidate script.
 
@@ -869,25 +949,39 @@ def main(argv: list[str] | None = None) -> int:
         reached = trace_guard_functions(arguments.trace)
         if not arguments.trace_all:
             reached &= guard_owning_functions(root)
-        # The module decided the intersection; the names alone are what a candidate is aimed with.
-        names = sorted({qualname for _module, qualname in reached})
+        # Reported with the module the intersection was decided on, not the qualified name alone:
+        # `_is_function_positional_parameter` is defined in both guarded modules today, so a bare
+        # name leaves the operator aiming the next candidate at whichever module's guard they read
+        # it as, and collapses two reaches into one row of a count this mode exists to give.
+        names = sorted(reached)
         # Counted on stderr the way a sweep counts its origins. A candidate that reaches nothing
         # otherwise prints an empty stdout and exits zero, which is what a run that never traced
         # prints too, and the difference is the whole answer this mode was asked for.
         surface = "guarded-module" if arguments.trace_all else "guard-holding"
         sys.stderr.write(f"reached {len(names)} {surface} functions\n")
-        for name in names:
-            sys.stdout.write(f"{name}\n")
-        return 0
+        # Guarded and flushed for the reason the sweep's own write is: piping a trace into `head`
+        # closes stdout, and an unguarded write answers with a traceback where the sweep answers
+        # with a diagnosis and a failing status.
+        return _deliver(
+            "".join(f"{module}:{qualname}\n" for module, qualname in names),
+            f"the {len(names)} functions this trace reached",
+        )
 
-    wanted = None if arguments.all_guards else unclassified_ids(root)
-    corpus = load_corpus(
-        root,
-        seeds=SEEDS if arguments.seeds is None else arguments.seeds,
-        iterations=ITERATIONS if arguments.iterations is None else arguments.iterations,
-        max_length=MAX_LENGTH if arguments.max_length is None else arguments.max_length,
-        extra=arguments.extra,
-    )
+    try:
+        wanted = None if arguments.all_guards else unclassified_ids(root)
+        corpus = load_corpus(
+            root,
+            seeds=SEEDS if arguments.seeds is None else arguments.seeds,
+            iterations=ITERATIONS if arguments.iterations is None else arguments.iterations,
+            max_length=MAX_LENGTH if arguments.max_length is None else arguments.max_length,
+            extra=arguments.extra,
+        )
+    except ValueError as error:
+        # These read the inputs a run is configured from, and each refusal already names the file
+        # and what writes it. Reported the way a mistyped option is, since a traceback out of the
+        # first read reads as a broken tool: the snapshot emptying is the end state AD-20 drives
+        # toward, and an unreadable --extra file is something the operator wrote a moment ago.
+        parser.error(str(error))
     grid = limits_grid(SHRINK if arguments.shrink is None else tuple(arguments.shrink))
     sys.stderr.write(f"sweeping {len(corpus)} scripts over {len(grid)} configurations\n")
     # Rows are buffered until the sweep ends, so the accumulator is owned here and rendered even
@@ -895,23 +989,23 @@ def main(argv: list[str] | None = None) -> int:
     # propagates; what it no longer takes with it is every origin the run had already reached,
     # which is a multi-minute search and exactly the shape a witness hunt exists to find.
     found: Reach = {}
-    written = False
+    status = 1
     try:
         sweep(corpus, grid, wanted=wanted, found=found)
         sys.stderr.write(f"reached {len(found)} guard origins\n")
     finally:
-        # The write is itself fallible: piping a several-minute run into `head` closes stdout part
-        # way through it. Raised from here that failure would replace the one the sweep is
-        # propagating, which is the diagnosis, and deliver no rows either, so the recovery this
-        # block exists to be would cost both. Reported instead, and answered with a failing status
-        # below, since a run that could not deliver its rows exits like one that found none.
+        # Rendering is fallible too, and from inside this block: a cap value wider than a line
+        # carries no row, and `render_rows` says so with a ValueError. Raised from here it would do
+        # what the write below is caught to stop it doing, replacing the failure the sweep is
+        # propagating, which is the diagnosis, while delivering no rows either.
+        described = f"the {len(found)} rows this run found"
         try:
-            sys.stdout.write(render_rows(found))
-        except OSError as error:
-            sys.stderr.write(f"could not write the {len(found)} rows this run found: {error}\n")
+            rows = render_rows(found)
+        except ValueError as error:
+            sys.stderr.write(f"could not render {described}: {error}\n")
         else:
-            written = True
-    return 0 if written else 1
+            status = _deliver(rows, described)
+    return status
 
 
 if __name__ == "__main__":
