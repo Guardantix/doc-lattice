@@ -2866,22 +2866,56 @@ def _pipe_source(
     )
 
 
+def _output_process_writers(
+    evidence: _ShellTaintEvidence,
+) -> tuple[tuple[tuple[_RedirectionEvent, ...], int], ...]:
+    """Return every stdout writer that can bind a descriptor to a process resource.
+
+    A writer is anything the evidence gives both a redirection list and an output stream: one
+    command, or one structured scope. ``{ printf x; } > >(bash)`` attaches the redirection to the
+    compound rather than to any command inside it, so a scope has to be a writer here for the
+    compound's stdout to reach the substitution at all.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        Each writer's redirection events paired with the stream scope its stdout carries,
+        commands before scopes.
+    """
+    writers: list[tuple[tuple[_RedirectionEvent, ...], int]] = [
+        (command.redirections, command.output_scope_id) for command in evidence.commands
+    ]
+    writers.extend((scope.redirections, scope.scope_id) for scope in evidence.scopes)
+    return tuple(writers)
+
+
 def _output_process_scope_inputs(
     evidence: _ShellTaintEvidence,
     scopes: dict[int, _StreamScopeEvidence],
     resources: dict[int, _ProcessResourceEvidence],
 ) -> dict[int, ContentExpr]:
-    """Return direct scope inputs created by output process substitutions."""
+    """Return direct scope inputs created by output process substitutions.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        scopes: The validated structured scopes of this body, by scope id.
+        resources: Process-substitution resources referenced by descriptor.
+
+    Returns:
+        A mapping from each output substitution's body scope to the stdout stream its writer
+        sends there.
+    """
     inputs: dict[int, ContentExpr] = {}
-    for writer in evidence.commands:
-        binding = _output_bindings(writer.redirections).get(1)
+    for redirections, stream_scope_id in _output_process_writers(evidence):
+        binding = _output_bindings(redirections).get(1)
         if binding is None or not isinstance(binding[0], ProcessResourceTarget):
             continue
         resource = resources.get(binding[0].resource_id)
         if resource is None or resource.direction != "output":
             continue
         if resource.scope_id in scopes:
-            inputs[resource.scope_id] = StreamRef(writer.output_scope_id)
+            inputs[resource.scope_id] = StreamRef(stream_scope_id)
     return inputs
 
 

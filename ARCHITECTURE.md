@@ -444,7 +444,10 @@ sequence. Ordered descriptor replay installs pipeline endpoints first and then a
 left to right, so only final descriptor bindings route bytes while earlier truncations retain their
 empty-file side effect. A `>&N` source resolves first against the command's own events and then
 against the bindings its enclosing compounds installed, innermost first, so
-`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. Descriptors 1 and 2 are
+`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. A stdout writer is a
+simple command or a compound, since a compound carries redirections and aggregated stdout of its
+own, so `{ producer; } > >(consumer)` binds the compound's stdout to the substitution's consumer
+exactly as the ungrouped `producer > >(consumer)` binds one command's. Descriptors 1 and 2 are
 always inherited from the enclosing shell and need no such binding. Any other descriptor that some
 part of the body binds, but that this command's lexical chain cannot supply, is missing evidence
 rather than an inherited stream: a bare `exec 3> out.sh` rebinds the shell scope, which the
@@ -705,12 +708,13 @@ descriptor state carried across commands by a bare `exec`, eval payload construc
 bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
 This list is the boundary as designed, not a complete inventory of what the engine currently
 misses; open gaps against this decision are tracked in issues #125 through #141, and this
-enumeration itself is not exhaustive. Two further gaps outside these categories: a compound
-command's stdout redirected into an output process substitution is not yet linked into that
-substitution's consumer, only a simple command's is (issue #116), and `lastpipe` state reached
-through a function call site or a loop back edge is widened only for a pipeline whose last stage is
-a `read` writing from stdin, not for every conditional-on-lastpipe context such as a trailing `eval`
-(issue #118). A `read` beyond
+enumeration itself is not exhaustive. One further gap outside these categories: `lastpipe` state
+reached through a function call site or a loop back edge is widened only for a pipeline whose last
+stage is a `read` writing from stdin, not for every conditional-on-lastpipe context such as a
+trailing `eval` (issue #118). Only descriptor 1 selects an output process substitution's consumer,
+so a writer that reaches the substitution through descriptor 2 alone, as in
+`{ producer >&2; } 2> >(consumer)`, is still not linked to it; that holds for a simple command and
+a compound alike. A `read` beyond
 the first record of a shared stream is projected as record one, so a marker split across later
 records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
 over-refusal it interacts with is issue #119.

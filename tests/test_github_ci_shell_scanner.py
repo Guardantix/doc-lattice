@@ -1052,6 +1052,42 @@ def test_output_process_substitution_routes_writer_to_consumer_stdin():
     assert_taint_refusal("printf '%s%s\\n' doc- 'lattice reconcile' > >(bash)")
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash)",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' ) > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } 1> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat | bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile'; } ; } > >(bash)",
+        "{ printf doc-; printf '%s\\n' 'lattice reconcile'; } > >(bash)",
+        "if :; then printf '%s%s\\n' doc- 'lattice reconcile'; fi > >(bash)",
+        "for word in x; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+    ],
+    ids=(
+        "brace-group",
+        "subshell",
+        "explicit-descriptor",
+        "pipeline-consumer",
+        "nested-brace-group",
+        "multi-command-group",
+        "if-compound",
+        "for-compound",
+    ),
+)
+def test_compound_scope_stdout_process_substitution_reaches_consumer_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+def test_compound_scope_stdout_file_redirect_does_not_feed_process_substitution():
+    result = scan_doc_lattice_invocations(
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } >out 2> >(bash)"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
 def test_multi_command_substitution_scope_sequences_stdout():
     assert_taint_refusal("eval \"$(printf doc-; printf 'lattice reconcile')\"\n")
 
