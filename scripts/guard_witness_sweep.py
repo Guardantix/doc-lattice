@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import importlib
 import json
 import random
 import sys
@@ -145,7 +146,15 @@ def load_corpus(
         for case in fuzz_shell_taint.generate(random.Random(seed), iterations):
             corpus.add(case.script)
     if extra is not None:
-        corpus.update(json.loads(extra.read_text(encoding="utf-8")))
+        candidates = json.loads(extra.read_text(encoding="utf-8"))
+        # A bare JSON string would otherwise update the set with its characters and a JSON object
+        # with its keys, so the sweep would quietly search something nobody authored.
+        if not isinstance(candidates, list) or not all(
+            isinstance(candidate, str) for candidate in candidates
+        ):
+            message = f"{extra} must hold a JSON list of scripts"
+            raise ValueError(message)
+        corpus.update(candidates)
     # The text tie-break keeps equal-length scripts in a deterministic order, so a sweep prints
     # the same witness rows under every PYTHONHASHSEED.
     return sorted(
@@ -194,6 +203,32 @@ def sweep(
     return found
 
 
+def guarded_filenames() -> frozenset[str]:
+    """Return the source filenames CPython reports for frames in the guarded modules.
+
+    Read from the imported modules rather than composed from `_ROOT`, so the tracer still matches
+    when the checkout is reached through a symlink or the package resolves to an installed copy
+    instead of the tree beside this script. A composed path that failed to match would make every
+    trace report an empty set, which reads exactly like a candidate that reaches no guard
+    machinery at all.
+
+    Returns:
+        Every spelling of a guarded module's filename a traced frame may carry.
+    """
+    names: set[str] = set()
+    for module in GUARDED_MODULES:
+        # Derived from the recorded path rather than a hard-coded package prefix, so a guarded
+        # module that moves within the tree still resolves to the module actually imported.
+        dotted = ".".join(Path(module).with_suffix("").parts[1:])
+        imported = importlib.import_module(dotted)
+        source = imported.__file__
+        if source is not None:
+            names.add(source)
+            names.add(str(Path(source).resolve()))
+        names.add(str(_ROOT / module))
+    return frozenset(names)
+
+
 def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[str]:
     """Return the guarded-module functions one script executes.
 
@@ -204,7 +239,7 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
     Returns:
         Qualified names, with nested-function `<locals>` markers removed.
     """
-    guarded = {str(_ROOT / module) for module in GUARDED_MODULES}
+    guarded = guarded_filenames()
     reached: set[str] = set()
 
     def trace(frame, event, _argument):  # noqa: ANN001, ANN202 - CPython tracer signature
@@ -217,6 +252,11 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
     sys.settrace(trace)
     try:
         scan_doc_lattice_invocations(script, limits=limits)
+    except RecursionError:
+        # Report how far the candidate got instead of losing the whole trace to a traceback. The
+        # sweep skips these bodies for the same reason, and a partial reach is still the signal
+        # this mode exists to give.
+        return reached
     finally:
         sys.settrace(previous)
     return reached

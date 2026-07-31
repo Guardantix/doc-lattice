@@ -101,6 +101,11 @@ nothing, `--trace SCRIPT` reports which guard functions one candidate reaches at
 candidate can be aimed one level deeper. It classifies nothing on its own: a row it prints is a
 candidate, and the suite then holds it to returning that exact identifier.
 
+It is a search, not a gate. The default sweep drives thousands of scripts through every
+configuration and takes several minutes, and printing no rows means the corpus reached nothing new
+rather than that anything failed. Shrink `--seeds` and `--iterations` for a quick pass, and use
+`--all-guards` to see what the corpus reaches at all.
+
 ## Enforced repository rules
 
 - Keep production code compatible with the supported Python versions and use `uv`, not ad hoc

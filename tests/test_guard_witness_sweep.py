@@ -8,12 +8,13 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
+
+from doc_lattice.github_ci import shell_scanner, shell_taint
 from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits
 
 if TYPE_CHECKING:
     from types import ModuleType
-
-    import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _TOOL = _ROOT / "scripts/guard_witness_sweep.py"
@@ -162,6 +163,28 @@ def test_corpus_order_does_not_depend_on_set_iteration_order() -> None:
     corpus = tool.load_corpus(_ROOT, seeds=1, iterations=50)
 
     assert corpus == sorted(corpus, key=lambda script: (len(script), script))
+
+
+def test_guarded_filenames_track_the_imported_modules() -> None:
+    # Composing the path from the repository root instead would stop matching whenever the tree is
+    # reached through a symlink, and a tracer that matches nothing reports the same empty set as a
+    # candidate that reaches no guard machinery.
+    names = tool.guarded_filenames()
+
+    assert shell_scanner.__file__ in names
+    assert shell_taint.__file__ in names
+
+
+def test_load_corpus_rejects_an_extra_file_that_is_not_a_list_of_scripts(
+    tmp_path: Path,
+) -> None:
+    # `set.update` would otherwise take a bare JSON string apart into its characters and sweep
+    # something nobody authored, with no diagnostic.
+    extra = tmp_path / "candidates.json"
+    extra.write_text('"eval $X"', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="JSON list of scripts"):
+        tool.load_corpus(_ROOT, seeds=0, iterations=0, extra=extra)
 
 
 def test_unclassified_ids_match_the_frozen_debt_snapshot() -> None:
