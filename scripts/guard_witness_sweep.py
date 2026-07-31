@@ -387,14 +387,21 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
     # whose scanner this process executes.
     guarded = guarded_filenames(scanner_checkout())
     reached: set[str] = set()
-
-    def trace(frame, event, _argument):  # noqa: ANN001, ANN202 - CPython tracer signature
-        if event == "call" and frame.f_code.co_filename in guarded:
-            reached.add(frame.f_code.co_qualname.replace(".<locals>", ""))
-
     # Restore whatever hook was active, not None: coverage collection and debuggers also use
     # settrace, and clearing it would silently disable them for the rest of the process.
     previous = sys.gettrace()
+
+    def trace(frame, event, argument):  # noqa: ANN001, ANN202 - CPython tracer signature
+        if event == "call" and frame.f_code.co_filename in guarded:
+            reached.add(frame.f_code.co_qualname.replace(".<locals>", ""))
+        if previous is None:
+            return None
+        # Restoring that hook afterwards protects only what runs later: for the length of the scan
+        # it is replaced, and these are the frames a settrace-based coverage run or a debugger
+        # session most needs to see. A global hook's return value is the local trace function for
+        # the frame, so handing back what it returns keeps its line and return events flowing too.
+        return previous(frame, event, argument)
+
     sys.settrace(trace)
     try:
         scan_doc_lattice_invocations(script, limits=limits)

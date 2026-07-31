@@ -113,6 +113,26 @@ def test_trace_restores_the_previously_installed_tracer() -> None:
         sys.settrace(ambient)
 
 
+def test_trace_keeps_the_previously_installed_tracer_running_during_the_scan() -> None:
+    # Restoring the ambient hook afterwards only protects what runs later. Replacing it for the
+    # duration of the scan is still disabling it, and over exactly the frames a settrace-based
+    # coverage run or a debugger session cares about most.
+    observed: list[str] = []
+
+    def ambient(frame: object, event: str, _argument: object) -> None:
+        if event == "call":
+            observed.append(frame.f_code.co_filename)  # ty: ignore[unresolved-attribute]
+
+    restore = sys.gettrace()
+    sys.settrace(ambient)
+    try:
+        tool.trace_guard_functions("echo one; echo two")
+    finally:
+        sys.settrace(restore)
+
+    assert any(name == shell_scanner.__file__ for name in observed)
+
+
 def test_trace_distinguishes_a_shape_that_never_reaches_that_machinery() -> None:
     reached = tool.trace_guard_functions("echo hello")
 
