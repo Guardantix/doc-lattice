@@ -147,6 +147,30 @@ def test_trace_keeps_the_previously_installed_tracer_running_during_the_scan() -
     assert any(name == shell_scanner.__file__ for name in observed)
 
 
+def test_trace_keeps_reporting_under_an_ambient_hook_that_reinstalls_itself() -> None:
+    # The hook above is a plain Python function, which leaves the global hook where it found it.
+    # `coverage.CTracer` does not: invoked through Python dispatch it re-installs itself at the C
+    # level, which is how a delegating hook loses the dispatch it delegated from. Under that hook
+    # a trace that only delegates records its own entry frame and nothing below it, so the ambient
+    # hook has to be handed the event *and* the global hook taken back afterwards.
+    restore = sys.gettrace()
+    reinstalling: list[object] = []
+
+    def ambient(frame: object, event: str, _argument: object) -> None:
+        if event == "call":
+            reinstalling.append(frame.f_code.co_filename)  # ty: ignore[unresolved-attribute]
+        sys.settrace(ambient)
+
+    sys.settrace(ambient)
+    try:
+        reached = _qualnames(tool.trace_guard_functions("eval 'X=${Y=q}'; eval \"$X\"lattice"))
+    finally:
+        sys.settrace(restore)
+
+    assert "_eval_syntax_record_assignment" in reached
+    assert any(name == shell_scanner.__file__ for name in reinstalling)
+
+
 def test_trace_distinguishes_a_shape_that_never_reaches_that_machinery() -> None:
     reached = _qualnames(tool.trace_guard_functions("echo hello"))
 

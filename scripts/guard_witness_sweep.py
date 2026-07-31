@@ -454,7 +454,15 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
         # it is replaced, and these are the frames a settrace-based coverage run or a debugger
         # session most needs to see. A global hook's return value is the local trace function for
         # the frame, so handing back what it returns keeps its line and return events flowing too.
-        return previous(frame, event, argument)
+        result = previous(frame, event, argument)
+        # Delegating to it is not enough to keep receiving events. `coverage.CTracer` re-installs
+        # itself at the C level when it is invoked through Python dispatch, so the call above hands
+        # the global hook away and every frame below this one is dispatched past this function: the
+        # reach comes back holding the scan's entry frame and nothing under it. Take the hook back
+        # each time it is taken, which leaves the ambient hook collecting and this one dispatching.
+        if sys.gettrace() is not trace:
+            sys.settrace(trace)
+        return result
 
     sys.settrace(trace)
     try:
