@@ -34,6 +34,9 @@ uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
 
 uv run --group dev python scripts/check_guard_inventory.py
+uv run --group dev python scripts/guard_witness_sweep.py
+uv run --group dev python scripts/guard_witness_sweep.py \
+  --trace "eval 'X=\${Y=q}'; eval \"\$X\"lattice"
 
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
@@ -90,6 +93,24 @@ runs the base revision's copy of the checker against your tree and rejects any r
 not carry. When you remove a guard, record the identifier and the reason in
 `tests/fixtures/shell_guard_retirements.json`; that same base-owned run rejects an origin the base
 classified or froze that your tree no longer constructs.
+
+`scripts/guard_witness_sweep.py` searches for the inputs that classification needs. Its default
+sweep drives the replay corpus and fuzzer grammar through the public scan path once per shrunk
+cap and prints paste-ready witness rows for the guards still frozen as debt. When a sweep finds
+nothing, `--trace SCRIPT` reports which guard-holding functions one candidate reaches at all, so
+the next candidate can be aimed one level deeper; add `--trace-all` for the wider view that keeps
+the functions between the guards. It classifies nothing on its own: a row it prints is a
+candidate, and the suite then holds it to returning that exact identifier.
+
+Classifying a row is two edits, not one. Every row a default sweep prints names a guard that is
+currently frozen, so pasting it into `tests/guard_witnesses.py` also means deleting that origin's
+record from `tests/fixtures/shell_guard_debt.json`. Leave the record and the gate refuses the
+guard as both classified and frozen.
+
+It is a search, not a gate. The default sweep drives thousands of scripts through every
+configuration and takes several minutes, and printing no rows means the corpus reached nothing new
+rather than that anything failed. Shrink `--seeds` and `--iterations` for a quick pass, and use
+`--all-guards` to see what the corpus reaches at all.
 
 ## Enforced repository rules
 

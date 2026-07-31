@@ -6130,6 +6130,23 @@ def _repository_guard_modules(root: Path) -> tuple[str, ...]:
     )
 
 
+def repository_guarded_modules(root: Path) -> tuple[str, ...]:
+    """Return the guarded surface: the discovered modules together with the allowlist.
+
+    This is the surface the repository rules that read a module rather than an origin run over,
+    and the one a tool outside this checker should ask for instead of keeping a list of its own.
+    Discovery alone would miss an allowlisted module that stopped mentioning the protocol, and the
+    allowlist alone would miss a module the candidate has written but not yet declared.
+
+    Args:
+        root: Repository root to read the guard package from.
+
+    Returns:
+        Repository-relative module paths in path order.
+    """
+    return tuple(sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root))))
+
+
 def _guard_package_sources(root: Path) -> dict[str, str]:
     """Return the source of every module below the guard package, keyed by repository-relative path.
 
@@ -6215,8 +6232,7 @@ def repository_shape_violations(root: Path) -> tuple[str, ...]:
     """
     seeds = _package_constructors(tuple(_guard_package_sources(root).values()))
     violations: list[str] = []
-    modules = sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root)))
-    for module in modules:
+    for module in repository_guarded_modules(root):
         source = (root / module).read_text(encoding="utf-8")
         violations.extend(find_shape_violations(source, Path(module).name, seeds))
     return tuple(violations)
@@ -6236,7 +6252,7 @@ def repository_dead_statement_violations(root: Path) -> tuple[str, ...]:
         Human-readable violations, empty when every statement in every guarded module is reachable.
     """
     violations: list[str] = []
-    for module in sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root))):
+    for module in repository_guarded_modules(root):
         source = (root / module).read_text(encoding="utf-8")
         violations.extend(find_dead_statement_violations(source, Path(module).name))
     return tuple(violations)
@@ -6256,7 +6272,7 @@ def repository_deferred_annotation_violations(root: Path) -> tuple[str, ...]:
         Human-readable violations, empty when every guarded module defers its annotations.
     """
     violations: list[str] = []
-    for module in sorted(set(GUARDED_MODULES) | set(_repository_guard_modules(root))):
+    for module in repository_guarded_modules(root):
         source = (root / module).read_text(encoding="utf-8")
         violations.extend(find_deferred_annotation_violations(source, Path(module).name))
     return tuple(violations)
