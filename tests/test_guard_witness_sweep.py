@@ -42,6 +42,14 @@ def _qualnames(reached: set[tuple[str, str]]) -> set[str]:
     return {qualname for _module, qualname in reached}
 
 
+def _declared_cap_count() -> int:
+    defaults = ScanLimits()
+    return sum(
+        len(dataclasses.fields(getattr(defaults, field.name)))
+        for field in dataclasses.fields(defaults)
+    )
+
+
 def test_limits_grid_shrinks_every_declared_cap() -> None:
     labels = {label for label, _limits in tool.limits_grid((0,))}
     shrunk = labels - {tool.PRODUCTION}
@@ -49,7 +57,14 @@ def test_limits_grid_shrinks_every_declared_cap() -> None:
     assert "TaintLimits(max_edges=0)" in shrunk
     assert "ScannerLimits(max_scan_steps=0)" in shrunk
     # Every field of both limits values must appear, or a cap silently goes unsearched.
-    assert len(shrunk) == tool.limits_field_count()
+    assert len(shrunk) == _declared_cap_count()
+
+
+def test_limits_grid_searches_a_repeated_shrink_value_once() -> None:
+    # A duplicate mints an identical configuration under an identical label, which loses the
+    # tie-break to the first one, so the only thing it can add is another pass over the whole
+    # corpus in a run that already takes several minutes.
+    assert tool.limits_grid((0, 3, 0)) == tool.limits_grid((0, 3))
 
 
 def test_limits_grid_includes_the_unshrunk_configuration() -> None:
@@ -81,6 +96,56 @@ def test_sweep_prefers_the_least_shrunk_reaching_configuration() -> None:
 
     label, _script = found["scanner.budget.step-limit"]
     assert label == "ScannerLimits(max_scan_steps=3)"
+
+
+def test_sweep_prefers_a_least_shrunk_reach_to_a_shorter_shrunk_one() -> None:
+    # The two preferences compete whenever a longer script reaches a guard under looser caps, and
+    # only one of them is about the strength of the evidence: authored input reaching the guard
+    # under production caps says the guard is reachable, where the same guard under a shrunk cap
+    # says only that a resource bound refuses. Resolved by length first, the run pastes the weaker
+    # claim into the registry and the stronger one it also found is gone.
+    grid = [
+        (
+            "ScannerLimits(max_source_chars=30)",
+            ScanLimits(scanner=ScannerLimits(max_source_chars=30)),
+        ),
+        (
+            "ScannerLimits(max_source_chars=4)",
+            ScanLimits(scanner=ScannerLimits(max_source_chars=4)),
+        ),
+    ]
+
+    found = tool.sweep(["a" * 40, "a" * 8], grid)
+
+    assert found["scanner.source.character-limit"] == (
+        "ScannerLimits(max_source_chars=30)",
+        "a" * 40,
+    )
+
+
+def test_sweep_keeps_the_better_row_a_reused_accumulator_holds() -> None:
+    # The accumulator is documented as caller-owned, so a corpus swept in chunks shares one. Scored
+    # from an empty map each call, the first reach of the second chunk replaces a better row from
+    # the first with no comparison at all.
+    grid = [
+        (
+            "ScannerLimits(max_source_chars=30)",
+            ScanLimits(scanner=ScannerLimits(max_source_chars=30)),
+        ),
+        (
+            "ScannerLimits(max_source_chars=4)",
+            ScanLimits(scanner=ScannerLimits(max_source_chars=4)),
+        ),
+    ]
+    found: dict[str, tuple[str, str]] = {}
+
+    tool.sweep(["a" * 40], grid, found=found)
+    tool.sweep(["a" * 8], grid, found=found)
+
+    assert found["scanner.source.character-limit"] == (
+        "ScannerLimits(max_source_chars=30)",
+        "a" * 40,
+    )
 
 
 def test_sweep_can_restrict_itself_to_still_unclassified_guards() -> None:
@@ -320,6 +385,32 @@ def test_rendered_rows_stay_within_the_repository_line_limit() -> None:
     assert ast.literal_eval(call.args[1]) == script
 
 
+@pytest.mark.parametrize("digits", [40, 61])
+def test_rendered_rows_wrap_a_caps_value_too_wide_for_one_line(digits: int) -> None:
+    # The literals either side of it are wrapped for exactly this reason, and `--shrink` takes any
+    # non-negative integer, so the caps line can be the widest thing in a row. Emitted flat, the
+    # pasted row fails the ruff hook the rest of the renderer exists to satisfy.
+    label = f"ScannerLimits(max_scan_steps={10 ** (digits - 1)})"
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (label, "x")})
+
+    assert max(len(line) for line in rendered.splitlines()) <= 100
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.unparse(call.keywords[0].value).replace(" ", "") == f"ScanLimits(scanner={label})"
+
+
+def test_rendered_rows_refuse_a_caps_value_no_line_can_carry() -> None:
+    # Nothing splits an integer literal, so a value wider than the limit on a line of its own has
+    # no rendering; said here rather than emitted as a row nobody can paste.
+    label = f"ScannerLimits(max_scan_steps={10**200})"
+
+    with pytest.raises(ValueError, match="line limit"):
+        tool.render_rows({"scanner.budget.step-limit": (label, "x")})
+
+
 def test_rendered_rows_carry_no_character_a_narrow_stdout_cannot_write() -> None:
     # Every row is emitted in one write, so a single non-ASCII candidate would cost a multi-minute
     # sweep every row it found rather than only its own.
@@ -370,6 +461,44 @@ def test_guarded_filenames_cover_every_module_the_inventory_guards() -> None:
     assert shell_guards.__file__ in names
     for module in checker.GUARDED_MODULES:
         assert str(_ROOT / module) in names
+
+
+def test_guarded_filenames_import_a_package_initializer_as_its_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Discovery returns `__init__.py` the moment the package re-exports the guard protocol, and
+    # `package.__init__` is a module name CPython has not imported: it builds a second module
+    # object and runs the initializer again, so its module-level effects run twice in this process.
+    imported: list[str] = []
+    import_module = tool.importlib.import_module
+
+    def record(dotted: str) -> ModuleType:
+        imported.append(dotted)
+        return import_module(dotted)
+
+    monkeypatch.setattr(
+        tool, "guarded_modules", lambda _root: (f"{checker.GUARD_MODULE_ROOT}/__init__.py",)
+    )
+    monkeypatch.setattr(tool.importlib, "import_module", record)
+
+    tool.guarded_filenames(_ROOT)
+
+    assert imported == ["doc_lattice.github_ci"]
+
+
+def test_guarded_filenames_refuse_a_module_they_cannot_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The gate reads the guard package as inert source text and discovers any module in it that
+    # mentions the protocol, one still being written included, which is exactly when a trace is
+    # worth running. Left to propagate, the half-written module's own traceback is all the operator
+    # gets, and it says nothing about which tool stopped or why.
+    monkeypatch.setattr(
+        tool, "guarded_modules", lambda _root: (f"{checker.GUARD_MODULE_ROOT}/shell_budget.py",)
+    )
+
+    with pytest.raises(ValueError, match="shell_budget"):
+        tool.guarded_filenames(_ROOT)
 
 
 def test_guarded_modules_include_one_the_inventory_discovers(tmp_path: Path) -> None:
@@ -709,6 +838,53 @@ def test_unclassified_ids_match_the_frozen_debt_snapshot() -> None:
 
     assert unclassified
     assert "scanner.source.character-limit" not in unclassified
+
+
+def test_unclassified_ids_refuse_a_debt_snapshot_they_cannot_read(tmp_path: Path) -> None:
+    # A bare KeyError from a restructured snapshot names neither the file that no longer holds what
+    # a sweep reads nor the gate that maintains it, which is what `load_corpus` refuses to leave
+    # behind for the replay inventory.
+    root = tmp_path / "candidate"
+    debt = root / tool.DEBT_PATH
+    debt.parent.mkdir(parents=True)
+    debt.write_text(json.dumps({"frozen": [{"origin_id": "scanner.budget.step-limit"}]}), "utf-8")
+
+    with pytest.raises(ValueError, match="check_guard_inventory"):
+        tool.unclassified_ids(root)
+
+
+def test_unclassified_ids_refuse_a_snapshot_that_freezes_nothing(tmp_path: Path) -> None:
+    # A sweep filters every origin it reaches against this set, so an empty one discards the whole
+    # run and prints what a corpus that reached nothing prints. That is also the state the rollout
+    # is driving toward, and the reach a run still has is asked for with --all-guards.
+    root = tmp_path / "candidate"
+    debt = root / tool.DEBT_PATH
+    debt.parent.mkdir(parents=True)
+    debt.write_text(json.dumps({"schema": 3, "records": []}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="all-guards"):
+        tool.unclassified_ids(root)
+
+
+def test_a_sweep_that_cannot_write_its_rows_reports_it_and_fails(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rows are written from a `finally` so a scanner failure does not cost the run every origin
+    # it had reached. The write is fallible too: piping a several-minute run into `head` closes
+    # stdout part way through it, and raised from there that failure replaces the one the sweep was
+    # propagating and delivers no rows either.
+    class Closed:
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(tool, "unclassified_ids", lambda _root: frozenset())
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
+    monkeypatch.setattr(sys, "stdout", Closed())
+
+    assert tool.main([]) == 1
+
+    assert "could not write" in capsys.readouterr().err
 
 
 def test_the_tool_accepts_no_alternate_root() -> None:

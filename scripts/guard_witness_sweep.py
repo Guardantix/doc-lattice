@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 RECORDER_SCRIPT = "scripts/checkpoint_record_scanner_inputs.py"
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
+CHECKER_SCRIPT = "scripts/check_guard_inventory.py"
 SCANNER_MODULE = "src/doc_lattice/github_ci/shell_scanner.py"
 PRODUCTION = "production"
 SEEDS = 4
@@ -102,19 +103,6 @@ def limits_slots() -> dict[str, str]:
     return caps_slots(ScanLimits)
 
 
-def limits_field_count() -> int:
-    """Return how many distinct caps a single-cap sweep shrinks.
-
-    Returns:
-        The combined field count of every caps value `ScanLimits` carries.
-    """
-    defaults = ScanLimits()
-    return sum(
-        len(dataclasses.fields(getattr(defaults, field.name)))
-        for field in dataclasses.fields(defaults)
-    )
-
-
 def limits_grid(values: Sequence[int] = SHRINK) -> list[tuple[str, ScanLimits]]:
     """Return one configuration per cap per shrink value, plus the unshrunk one.
 
@@ -123,12 +111,14 @@ def limits_grid(values: Sequence[int] = SHRINK) -> list[tuple[str, ScanLimits]]:
     the preference order `sweep` resolves ties with.
 
     Args:
-        values: Shrink values to try for each cap.
+        values: Shrink values to try for each cap. Repeats are searched once: a duplicate mints an
+            identical configuration under an identical label, which loses the tie-break to the
+            first one and can only cost the run another pass over the whole corpus.
 
     Returns:
         Labelled scan-limits configurations.
     """
-    ordered = sorted(values, reverse=True)
+    ordered = sorted(set(values), reverse=True)
     defaults = ScanLimits()
     grid: list[tuple[str, ScanLimits]] = [(PRODUCTION, defaults)]
     for name, slot in caps_slots(ScanLimits).items():
@@ -200,9 +190,31 @@ def unclassified_ids(root: Path) -> frozenset[str]:
 
     Returns:
         Identifiers with no witness yet.
+
+    Raises:
+        ValueError: If the snapshot records no identifier a default sweep can look for, for the
+            reason `load_corpus` refuses an empty replay inventory: a sweep filters every origin it
+            reaches against this set, so an empty one discards the whole run and prints what a
+            corpus that reached nothing prints. A restructured snapshot is refused with it, rather
+            than left as a bare KeyError naming neither the file nor the gate that maintains it.
     """
+    identity = check_guard_inventory.IDENTITY_FIELD
     payload = json.loads((root / DEBT_PATH).read_text(encoding="utf-8"))
-    return frozenset(record["origin_id"] for record in payload["records"])
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if (
+        not isinstance(records, list)
+        or not records
+        or not all(
+            isinstance(record, dict) and isinstance(record.get(identity), str) for record in records
+        )
+    ):
+        message = (
+            f"{root / DEBT_PATH} holds no records carrying a {identity!r} for a sweep to look "
+            "for: either every guard is classified, and the reach a run still has is asked for "
+            f"with --all-guards, or the snapshot no longer holds what {CHECKER_SCRIPT} freezes"
+        )
+        raise ValueError(message)
+    return frozenset(record[identity] for record in records)
 
 
 def load_corpus(
@@ -327,7 +339,18 @@ def sweep(
     """
     scripts = list(corpus)
     found = {} if found is None else found
-    best: dict[str, tuple[int, int]] = {}
+    # Scored from the rows the accumulator already holds rather than from an empty map, since it is
+    # documented as caller-owned: a caller sweeping a corpus in chunks into one accumulator would
+    # otherwise let the first reach of the second call overwrite a better row from the first with
+    # no comparison at all. A label this grid does not mint came from a grid this call cannot
+    # score, so it ranks below every entry here rather than pretending to a place among them.
+    ranks: dict[str, int] = {}
+    for rank, (label, _limits) in enumerate(grid):
+        ranks.setdefault(label, rank)
+    best: dict[str, tuple[int, int]] = {
+        origin_id: (ranks.get(label, len(grid)), len(script))
+        for origin_id, (label, script) in found.items()
+    }
     scanned: set[str] = set()
     skipped: set[str] = set()
     for rank, (label, limits) in enumerate(grid):
@@ -346,10 +369,14 @@ def sweep(
                 continue
             if wanted is not None and verdict.origin_id not in wanted:
                 continue
-            # Prefer the shortest script, then the earliest grid entry, so a witness stays
-            # readable and says as little about the caps as it can get away with: the grid puts
-            # production first and orders each cap's values least-shrunk first.
-            key = (len(script), rank)
+            # Prefer the earliest grid entry, then the shortest script, so a witness says as
+            # little about the caps as it can get away with and stays readable within that: the
+            # grid puts production first and orders each cap's values least-shrunk first, and a
+            # guard authored input reaches under production caps is strictly stronger evidence
+            # than the same guard reached under a shrunk one. Keyed the other way round, a short
+            # script under a shrunk cap discards a production reach the run had, and the registry
+            # then pins the weaker claim, which is a resource bound rather than a reachable shape.
+            key = (rank, len(script))
             if verdict.origin_id not in best or key < best[verdict.origin_id]:
                 best[verdict.origin_id] = key
                 found[verdict.origin_id] = (label, script)
@@ -400,15 +427,36 @@ def guarded_filenames(root: Path) -> frozenset[str]:
         Every spelling of a guarded module's filename a traced frame may carry.
 
     Raises:
-        ModuleNotFoundError: If a guarded module cannot be imported, since tracing the rest would
-            report a partial reach as the whole one.
+        ValueError: If a guarded module cannot be imported, since tracing the rest would report a
+            partial reach as the whole one, and the module's own traceback says nothing about why
+            the tool stopped.
     """
     names: set[str] = set()
     for module in guarded_modules(root):
         # Derived from the recorded path rather than a hard-coded package prefix, so a guarded
         # module that moves within the tree still resolves to the module actually imported.
-        dotted = ".".join(Path(module).with_suffix("").parts[1:])
-        imported = importlib.import_module(dotted)
+        parts = Path(module).with_suffix("").parts[1:]
+        # A package initializer names the package. Imported as `package.__init__` CPython builds a
+        # second module object and runs the initializer a second time, so a re-export of the guard
+        # protocol from it, which is what puts it on the discovered surface, would abort every run
+        # over a package layout change that has nothing to do with the guards being searched for.
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        dotted = ".".join(parts)
+        try:
+            imported = importlib.import_module(dotted)
+        except (ImportError, SyntaxError) as error:
+            # The gate reads the guard package as inert source text and discovers any module in it
+            # that mentions the protocol, one still being written included. That is exactly when a
+            # trace is worth running, so the refusal names the module and says the trace could not
+            # run, rather than handing back a half-written module's own traceback.
+            message = (
+                f"{module} could not be imported to record its frames ({error!r}); the traced "
+                "surface is discovered from the source tree, so a module still being written "
+                "reaches this tool, and tracing the rest would report a partial reach as the "
+                "whole one"
+            )
+            raise ValueError(message) from error
         source = imported.__file__
         if source is not None:
             names.add(source)
@@ -580,6 +628,49 @@ def _literal_lines(text: str, indent: str, suffix: str) -> list[str]:
     ]
 
 
+def _limits_lines(field: str, label: str) -> list[str]:
+    """Return the `limits=` row lines, wrapped to the repository's line limit.
+
+    The literals either side of it are wrapped for the reason `_literal_lines` records, and the
+    caps line is the one row line wide enough to need it too: `--shrink` takes any non-negative
+    integer, and a wide one mints a label no single line can carry. `ruff format` would split the
+    nested call, but only after the row has already failed the lint hook it was pasted to satisfy.
+    Each wrapped call keeps a trailing comma, which is what holds the split open through a format.
+
+    Args:
+        field: `ScanLimits` keyword the caps value is constructed into.
+        label: Caps label the grid minted, spelled `CapsClass(field=value)`.
+
+    Returns:
+        Complete source lines carrying the caps value.
+
+    Raises:
+        ValueError: If the caps value alone is wider than the line limit, since nothing splits an
+            integer literal and a row nobody can paste is not a row.
+    """
+    flat = f"{ROW_INDENT}limits=ScanLimits({field}={label}),"
+    if len(flat) <= LINE_LIMIT:
+        return [flat]
+    nested = f"{ROW_INDENT}    {field}={label},"
+    if len(nested) <= LINE_LIMIT:
+        return [f"{ROW_INDENT}limits=ScanLimits(", nested, f"{ROW_INDENT}),"]
+    caps, _, argument = label.partition("(")
+    assignment = f"{ROW_INDENT}        {argument.removesuffix(')')},"
+    if len(assignment) > LINE_LIMIT:
+        message = (
+            f"{label!r} is wider than the {LINE_LIMIT}-character line limit even on a line of its "
+            "own, so no row carrying it can be pasted; sweep with a cap value that fits"
+        )
+        raise ValueError(message)
+    return [
+        f"{ROW_INDENT}limits=ScanLimits(",
+        f"{ROW_INDENT}    {field}={caps}(",
+        assignment,
+        f"{ROW_INDENT}    ),",
+        f"{ROW_INDENT}),",
+    ]
+
+
 def render_rows(found: Reach) -> str:
     """Return paste-ready `ReachableWitness` rows for a sweep result.
 
@@ -592,7 +683,8 @@ def render_rows(found: Reach) -> str:
 
     Raises:
         ValueError: If a label names no caps class, since there is no field to construct it into
-            and a guessed one renders a row that parses as arithmetic rather than failing.
+            and a guessed one renders a row that parses as arithmetic rather than failing, or if
+            the caps value is too wide to render within the line limit at all.
     """
     slots = limits_slots()
     lines: list[str] = []
@@ -609,7 +701,7 @@ def render_rows(found: Reach) -> str:
                     f"it into; expected one of {', '.join(sorted(slots))} or {PRODUCTION!r}"
                 )
                 raise ValueError(message)
-            lines.append(f"{ROW_INDENT}limits=ScanLimits({field}={label}),")
+            lines.extend(_limits_lines(field, label))
         lines.append("    ),")
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -636,10 +728,10 @@ def _nonnegative(text: str, reason: str) -> int:
 def nonnegative_count(text: str) -> int:
     """Return `text` as a count of scripts, refusing a negative one.
 
-    The three options this converts all size the corpus, and Python spells a negative size as an
-    empty one rather than as an error: `range(-1)` walks no grammar and a negative length filter
-    drops every script. Left to argparse's `int`, a mistyped value sweeps the recorded half alone,
-    or nothing at all, and reports a script count that reads like the run that was asked for.
+    The options this converts size the corpus, and Python spells a negative size as an empty one
+    rather than as an error: `range(-1)` walks no grammar. Left to argparse's `int`, a mistyped
+    value sweeps the recorded half alone, or nothing at all, and reports a script count that reads
+    like the run that was asked for.
 
     Args:
         text: The value as spelled on the command line.
@@ -651,6 +743,26 @@ def nonnegative_count(text: str) -> int:
         ArgumentTypeError: If the value is negative, since no corpus has a negative size.
     """
     return _nonnegative(text, "is not a count of scripts; a corpus cannot be smaller than empty")
+
+
+def nonnegative_length(text: str) -> int:
+    """Return `text` as a script length in characters, refusing a negative one.
+
+    Kept apart from the corpus-size converter because the refusal is the only thing an operator
+    reads: a negative length filter drops every script, exactly as a negative size empties the
+    corpus, but naming that a count of scripts describes another option's domain and says nothing
+    about the quantity that was actually mistyped.
+
+    Args:
+        text: The value as spelled on the command line.
+
+    Returns:
+        The value as a length in characters.
+
+    Raises:
+        ArgumentTypeError: If the value is negative, since no script is shorter than empty.
+    """
+    return _nonnegative(text, "is not a length in characters; no script is shorter than empty")
 
 
 def nonnegative_cap(text: str) -> int:
@@ -708,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-length",
-        type=nonnegative_count,
+        type=nonnegative_length,
         help=(
             "drop scripts longer than this many characters, recorded as well as generated; "
             f"recorded drops are counted on stderr (default {MAX_LENGTH})"
@@ -783,12 +895,23 @@ def main(argv: list[str] | None = None) -> int:
     # propagates; what it no longer takes with it is every origin the run had already reached,
     # which is a multi-minute search and exactly the shape a witness hunt exists to find.
     found: Reach = {}
+    written = False
     try:
         sweep(corpus, grid, wanted=wanted, found=found)
         sys.stderr.write(f"reached {len(found)} guard origins\n")
     finally:
-        sys.stdout.write(render_rows(found))
-    return 0
+        # The write is itself fallible: piping a several-minute run into `head` closes stdout part
+        # way through it. Raised from here that failure would replace the one the sweep is
+        # propagating, which is the diagnosis, and deliver no rows either, so the recovery this
+        # block exists to be would cost both. Reported instead, and answered with a failing status
+        # below, since a run that could not deliver its rows exits like one that found none.
+        try:
+            sys.stdout.write(render_rows(found))
+        except OSError as error:
+            sys.stderr.write(f"could not write the {len(found)} rows this run found: {error}\n")
+        else:
+            written = True
+    return 0 if written else 1
 
 
 if __name__ == "__main__":
