@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib.util
 import json
 import shutil
@@ -35,6 +36,10 @@ def _load_tool() -> ModuleType:
 
 tool = _load_tool()
 checker = tool.check_guard_inventory
+
+
+def _qualnames(reached: set[tuple[str, str]]) -> set[str]:
+    return {qualname for _module, qualname in reached}
 
 
 def test_limits_grid_shrinks_every_declared_cap() -> None:
@@ -91,10 +96,19 @@ def test_sweep_can_restrict_itself_to_still_unclassified_guards() -> None:
 def test_trace_reports_the_guarded_functions_a_script_executes() -> None:
     # This is what locates a reaching *shape* when the sweep finds nothing: it shows which guard
     # machinery a candidate reaches at all, so the next candidate can be aimed one level deeper.
-    reached = tool.trace_guard_functions("eval 'X=${Y=q}'; eval \"$X\"lattice")
+    reached = _qualnames(tool.trace_guard_functions("eval 'X=${Y=q}'; eval \"$X\"lattice"))
 
     assert "_eval_syntax_record_assignment" in reached
     assert "_eval_syntax_record_decision" in reached
+
+
+def test_trace_records_the_module_each_function_ran_in() -> None:
+    # A bare qualified name cannot say which module ran: `_is_function_positional_parameter` is
+    # defined in both guarded modules today. Recorded without the module, reach in one of them is
+    # accepted against a guard the other one owns.
+    reached = tool.trace_guard_functions("eval 'X=${Y=q}'; eval \"$X\"lattice")
+
+    assert ("shell_taint.py", "_eval_syntax_record_assignment") in reached
 
 
 def test_trace_restores_the_previously_installed_tracer() -> None:
@@ -134,26 +148,55 @@ def test_trace_keeps_the_previously_installed_tracer_running_during_the_scan() -
 
 
 def test_trace_distinguishes_a_shape_that_never_reaches_that_machinery() -> None:
-    reached = tool.trace_guard_functions("echo hello")
+    reached = _qualnames(tool.trace_guard_functions("echo hello"))
 
     assert "_eval_syntax_record_assignment" not in reached
 
 
-def test_guard_owning_qualnames_come_from_the_recorded_inventory() -> None:
-    owning = tool.guard_owning_qualnames(_ROOT)
+def test_guard_owning_functions_come_from_the_recorded_inventory() -> None:
+    owning = _qualnames(tool.guard_owning_functions(_ROOT))
 
     assert "_eval_syntax_record_assignment" in owning
     assert "_ascii_lower" not in owning
 
 
-def test_guard_owning_qualnames_spell_a_nested_guard_the_way_a_frame_does() -> None:
+def test_guard_owning_functions_name_the_module_that_owns_the_guard() -> None:
+    # The inventory knows which module each origin lives in, and dropping that is what lets one
+    # module's reach be accepted as evidence for another module's guard of the same name.
+    owning = tool.guard_owning_functions(_ROOT)
+
+    assert ("shell_taint.py", "_eval_syntax_record_assignment") in owning
+    assert ("shell_scanner.py", "_eval_syntax_record_assignment") not in owning
+
+
+def test_trace_omits_a_function_whose_guard_another_module_owns(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_ScanBudget.step` runs in the scanner, so a guard of that name owned by the taint module is
+    # evidence this candidate does not carry. Intersected on the bare name it would be printed,
+    # and the pasted witness then fails asserting an origin the shape never reaches.
+    monkeypatch.setattr(
+        tool,
+        "guard_owning_functions",
+        lambda _root: frozenset({("shell_taint.py", "_ScanBudget.step")}),
+    )
+
+    assert tool.main(["--trace", "echo one; echo two"]) == 0
+
+    assert capsys.readouterr().out.split() == []
+
+
+def test_guard_owning_functions_spell_a_nested_guard_the_way_a_frame_does() -> None:
     # The inventory derives its qualified names from the source tree and the tracer reads them off
     # a running frame. A nested guard is where the two spellings can drift apart, and a drift would
     # filter real reach away silently rather than reporting anything wrong.
-    owning = tool.guard_owning_qualnames(_ROOT)
+    owning = _qualnames(tool.guard_owning_functions(_ROOT))
 
     assert "_contextualize_evidence.charge_edges" in owning
-    assert "_contextualize_evidence.charge_edges" in tool.trace_guard_functions("echo hello")
+    assert "_contextualize_evidence.charge_edges" in _qualnames(
+        tool.trace_guard_functions("echo hello")
+    )
 
 
 def test_trace_output_omits_a_guarded_module_function_owning_no_guard(
@@ -363,6 +406,124 @@ def test_sweep_reports_the_scripts_it_could_not_scan(
     assert "skipped 1" in capsys.readouterr().err
 
 
+def test_sweep_counts_no_script_another_configuration_scanned(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Deep recursion is a property of the script and the caps together, so a body only the most
+    # shrunk entry cannot parse is still scored by every other one. Counted as unscannable, it
+    # sends the operator after coverage the sweep already had.
+    scanned = shell_scanner.scan_doc_lattice_invocations
+
+    def refuse_when_shrunk(script: str, *, limits: ScanLimits) -> object:
+        if limits.scanner.max_scan_steps == 0:
+            raise RecursionError
+        return scanned(script, limits=limits)
+
+    monkeypatch.setattr(tool, "scan_doc_lattice_invocations", refuse_when_shrunk)
+
+    tool.sweep(["echo one; echo two"], tool.limits_grid((0, 3)))
+
+    assert "skipped" not in capsys.readouterr().err
+
+
+def test_trace_reports_a_candidate_it_could_not_finish_scanning(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A truncated trace prints a shorter reach, which is the same output as a candidate that
+    # genuinely stops there. Silence about the truncation is what turns it into an invariant
+    # justification for a guard the candidate was still walking toward.
+    def refuse(_script: str, *, limits: object) -> object:  # noqa: ARG001 - scanner signature
+        raise RecursionError
+
+    monkeypatch.setattr(tool, "scan_doc_lattice_invocations", refuse)
+
+    tool.trace_guard_functions("echo one")
+
+    assert "recursion limit" in capsys.readouterr().err
+
+
+def test_a_sweep_prints_the_rows_it_found_before_a_scan_it_could_not_finish(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every row is buffered until the run ends, so an unexpected scanner failure would otherwise
+    # cost a multi-minute sweep every origin it had already reached, and exactly for the shape a
+    # witness search exists to find.
+    scanned = shell_scanner.scan_doc_lattice_invocations
+
+    def fail_once_a_row_has_been_found(script: str, *, limits: ScanLimits) -> object:
+        # Later in the grid than the source-character cap, so the run has already reached a guard.
+        if limits.scanner.max_scan_steps == 0:
+            raise ValueError("scanner failed on a shape nothing pinned")
+        return scanned(script, limits=limits)
+
+    monkeypatch.setattr(tool, "scan_doc_lattice_invocations", fail_once_a_row_has_been_found)
+    monkeypatch.setattr(tool, "unclassified_ids", lambda _root: None)
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one; echo two"])
+
+    with pytest.raises(ValueError, match="nothing pinned"):
+        tool.main(["--shrink", "0"])
+
+    assert "scanner.source.character-limit" in capsys.readouterr().out
+
+
+def test_a_bare_shrink_is_refused_rather_than_searching_production_only() -> None:
+    # `--shrink` with no values would otherwise bind an empty list, collapsing the grid to
+    # production caps, and report the resource-bound guards as unreached by a run the operator
+    # believes searched every shrunk cap.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--shrink"])
+
+    assert raised.value.code == 2
+
+
+def test_slot_keys_are_the_caps_classes_the_grid_constructs() -> None:
+    # The label a sweep mints and the field a row is rendered into are two readings of the same
+    # `ScanLimits` shape. Derived apart, a renderer that cannot place a label raises only after
+    # the whole sweep has run, discarding every row it found.
+    minted = {label.split("(", 1)[0] for label, _limits in tool.limits_grid((0,))}
+
+    assert set(tool.limits_slots()) == minted - {tool.PRODUCTION}
+
+
+def test_slots_survive_a_scan_limits_field_annotated_as_optional() -> None:
+    # The annotation is text under `from __future__ import annotations`, so `TaintLimits | None`
+    # or an aliased import silently stops matching the class name the grid mints.
+    @dataclasses.dataclass(frozen=True)
+    class OptionallyTainted:
+        taint: shell_guards.TaintLimits | None = dataclasses.field(
+            default_factory=shell_guards.TaintLimits
+        )
+
+    assert tool.caps_slots(OptionallyTainted) == {"TaintLimits": "taint"}
+
+
+def test_load_corpus_refuses_a_replay_inventory_it_cannot_read(tmp_path: Path) -> None:
+    # A bare KeyError from a restructured fixture names neither the fixture nor the script that
+    # regenerates it, in a tool whose whole point is that a run reports what it was asked.
+    root = tmp_path / "candidate"
+    inventory = root / tool.REPLAY_INVENTORY
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text(json.dumps({"entries": [{"script": "echo one"}]}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="checkpoint_record_scanner_inputs"):
+        tool.load_corpus(root, seeds=0, iterations=0)
+
+
+def test_scanner_checkout_refuses_a_copy_resolving_near_the_filesystem_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Walking back the recorded path's depth from a flattened copy has no ancestor to reach, and
+    # an index traceback names nothing the refusal below it was written to explain.
+    flattened = SimpleNamespace(__file__="/shell_scanner.py")
+    monkeypatch.setattr(tool.importlib, "import_module", lambda _dotted: flattened)
+
+    with pytest.raises(ValueError, match="source checkout"):
+        tool.scanner_checkout()
+
+
 def test_scanner_checkout_refuses_a_tree_that_holds_no_checkout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -473,7 +634,7 @@ def test_a_trace_filters_against_the_checkout_whose_scanner_it_executes(
         filtered.append(root)
         return frozenset()
 
-    monkeypatch.setattr(tool, "guard_owning_qualnames", record)
+    monkeypatch.setattr(tool, "guard_owning_functions", record)
 
     assert tool.main(["--trace", "echo hello"]) == 0
 

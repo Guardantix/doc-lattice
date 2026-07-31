@@ -24,7 +24,9 @@ every function in a guarded module, most of which hold no guard. That is the wid
 worth reaching for once the filtered one stops distinguishing two candidates.
 
 Neither mode classifies anything on its own. A row it prints is a candidate: paste it into
-`tests/guard_witnesses.py`, where the suite then holds it to returning that exact identifier.
+`tests/guard_witnesses.py`, where the suite then holds it to returning that exact identifier, and
+delete that origin's record from the debt snapshot, since a default sweep reports only guards that
+are still frozen there and the gate refuses one that is both classified and frozen.
 """
 
 from __future__ import annotations
@@ -45,18 +47,14 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 import check_guard_inventory  # noqa: E402
 import fuzz_shell_taint  # noqa: E402
 
-from doc_lattice.github_ci.shell_guards import (  # noqa: E402
-    GuardRefusal,
-    ScanLimits,
-    ScannerLimits,
-    TaintLimits,
-)
+from doc_lattice.github_ci.shell_guards import GuardRefusal, ScanLimits  # noqa: E402
 from doc_lattice.github_ci.shell_scanner import scan_doc_lattice_invocations  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
+RECORDER_SCRIPT = "scripts/checkpoint_record_scanner_inputs.py"
 DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 SCANNER_MODULE = "src/doc_lattice/github_ci/shell_scanner.py"
 PRODUCTION = "production"
@@ -73,25 +71,48 @@ Reach = dict[str, tuple[str, str]]
 """Guard origin identifier -> (limits label, the shortest script that reached it)."""
 
 
-def limits_field_count() -> int:
-    """Return how many distinct caps a single-cap sweep shrinks.
+def caps_slots(limits: type) -> dict[str, str]:
+    """Return which field of `limits` each caps class is constructed into.
+
+    Read off the values a default instance holds rather than the field annotations, which are text
+    under `from __future__ import annotations`: an annotation written `TaintLimits | None`, or
+    under an alias, still names the same class but no longer spells it. The grid that mints a label
+    and the renderer that has to place it back both read this one derivation, so they cannot
+    disagree about where a caps value belongs.
+
+    Args:
+        limits: Dataclass whose fields carry the caps values.
 
     Returns:
-        The combined field count of both limits values.
+        Caps class name mapped to the keyword that carries it.
     """
-    return len(dataclasses.fields(TaintLimits)) + len(dataclasses.fields(ScannerLimits))
+    defaults = limits()
+    return {
+        type(getattr(defaults, field.name)).__name__: field.name
+        for field in dataclasses.fields(defaults)
+    }
 
 
 def limits_slots() -> dict[str, str]:
     """Return which `ScanLimits` field each caps class is constructed into.
 
-    Derived from `ScanLimits` itself rather than spelled here, so the grid that mints a label and
-    the renderer that has to place it back cannot disagree about where a caps value belongs.
-
     Returns:
         Caps class name mapped to the keyword that carries it.
     """
-    return {str(field.type): field.name for field in dataclasses.fields(ScanLimits)}
+    return caps_slots(ScanLimits)
+
+
+def limits_field_count() -> int:
+    """Return how many distinct caps a single-cap sweep shrinks.
+
+    Returns:
+        The combined field count of every caps value `ScanLimits` carries.
+    """
+    defaults = ScanLimits()
+    return sum(
+        len(dataclasses.fields(getattr(defaults, field.name)))
+        for field in dataclasses.fields(defaults)
+    )
 
 
 def limits_grid(values: Sequence[int] = SHRINK) -> list[tuple[str, ScanLimits]]:
@@ -108,23 +129,18 @@ def limits_grid(values: Sequence[int] = SHRINK) -> list[tuple[str, ScanLimits]]:
         Labelled scan-limits configurations.
     """
     ordered = sorted(values, reverse=True)
-    grid: list[tuple[str, ScanLimits]] = [(PRODUCTION, ScanLimits())]
-    for field in dataclasses.fields(TaintLimits):
-        for value in ordered:
-            grid.append(
-                (
-                    f"TaintLimits({field.name}={value})",
-                    ScanLimits(taint=TaintLimits(**{field.name: value})),
+    defaults = ScanLimits()
+    grid: list[tuple[str, ScanLimits]] = [(PRODUCTION, defaults)]
+    for name, slot in caps_slots(ScanLimits).items():
+        caps = type(getattr(defaults, slot))
+        for field in dataclasses.fields(caps):
+            for value in ordered:
+                grid.append(
+                    (
+                        f"{name}({field.name}={value})",
+                        ScanLimits(**{slot: caps(**{field.name: value})}),
+                    )
                 )
-            )
-    for field in dataclasses.fields(ScannerLimits):
-        for value in ordered:
-            grid.append(
-                (
-                    f"ScannerLimits({field.name}={value})",
-                    ScanLimits(scanner=ScannerLimits(**{field.name: value})),
-                )
-            )
     return grid
 
 
@@ -157,7 +173,10 @@ def scanner_checkout() -> Path:
         raise ValueError(message)
     # Walked back by the recorded path's own depth, so moving the guard package within the tree
     # moves the derivation with it instead of silently naming a directory inside the package.
-    root = Path(source).resolve().parents[len(relative.parts) - 1]
+    # Clamped to the shallowest ancestor a flattened copy has, since walking back off the end
+    # raises an index traceback naming nothing where the refusal below explains the case.
+    parents = Path(source).resolve().parents
+    root = parents[min(len(relative.parts) - 1, len(parents) - 1)]
     if not (root / relative).exists():
         # An installed copy walks back to a site-packages ancestor holding none of the debt
         # snapshot, replay inventory or guard sources, and the tool takes no root to correct that
@@ -207,13 +226,26 @@ def load_corpus(
         Deduplicated scripts ordered by length.
 
     Raises:
-        ValueError: If the extra file is not a list of scripts, or holds a candidate the length
-            filter would drop, since a sweep that never scanned it prints the same nothing as one
-            that scanned it and reached no guard.
+        ValueError: If the replay inventory carries no recorded scripts, or the extra file is not
+            a list of scripts, or holds a candidate the length filter would drop, since a sweep
+            that never scanned it prints the same nothing as one that scanned it and reached no
+            guard.
     """
     corpus: set[str] = set()
     inventory = json.loads((root / REPLAY_INVENTORY).read_text(encoding="utf-8"))
-    corpus.update(entry["source"] for entry in inventory["entries"])
+    entries = inventory.get("entries") if isinstance(inventory, dict) else None
+    # Named here rather than left as a bare KeyError from a restructured fixture, which reports
+    # neither the file that no longer holds what a sweep reads nor the script that writes it.
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict) and isinstance(entry.get("source"), str) for entry in entries
+    ):
+        message = (
+            f"{root / REPLAY_INVENTORY} holds no entries carrying a 'source' script, so the "
+            "recorded half of the corpus cannot be read; regenerate it with "
+            f"{RECORDER_SCRIPT}"
+        )
+        raise ValueError(message)
+    corpus.update(entry["source"] for entry in entries)
     for seed in range(seeds):
         for case in fuzz_shell_taint.generate(random.Random(seed), iterations):
             corpus.add(case.script)
@@ -250,6 +282,7 @@ def sweep(
     grid: Sequence[tuple[str, ScanLimits]],
     *,
     wanted: frozenset[str] | None = None,
+    found: Reach | None = None,
 ) -> Reach:
     """Return the shortest script that reaches each guard origin the corpus can reach.
 
@@ -257,25 +290,30 @@ def sweep(
         corpus: Scripts to drive through the public scan path.
         grid: Labelled scan-limits configurations to try.
         wanted: Restrict the result to these identifiers, or None for every guard reached.
+        found: Accumulator to record reach into. A caller that owns it still holds every origin
+            reached so far when a scan raises something no configuration was expected to raise,
+            rather than losing a multi-minute run's rows to the traceback.
 
     Returns:
         Guard identifier mapped to the labelled configuration and script that reached it. Scripts
-        the scanner could not parse are counted on stderr rather than dropped in silence.
+        no configuration could parse are counted on stderr rather than dropped in silence.
     """
     scripts = list(corpus)
-    found: Reach = {}
+    found = {} if found is None else found
     best: dict[str, tuple[int, int]] = {}
+    scanned: set[str] = set()
     skipped: set[str] = set()
     for rank, (label, limits) in enumerate(grid):
         for script in scripts:
             try:
                 result = scan_doc_lattice_invocations(script, limits=limits)
             except RecursionError:
-                # Counted rather than dropped: a candidate the scanner cannot parse is scored by no
-                # configuration at all, and silence about it reads as a candidate that reached
-                # nothing, which is the opposite conclusion about the same shape.
+                # Counted rather than dropped: a candidate no configuration can parse is scored by
+                # none of them, and silence about it reads as a candidate that reached nothing,
+                # which is the opposite conclusion about the same shape.
                 skipped.add(script)
                 continue
+            scanned.add(script)
             verdict = result.verdict
             if not isinstance(verdict, GuardRefusal):
                 continue
@@ -288,10 +326,14 @@ def sweep(
             if verdict.origin_id not in best or key < best[verdict.origin_id]:
                 best[verdict.origin_id] = key
                 found[verdict.origin_id] = (label, script)
-    if skipped:
+    # Only the bodies no configuration scanned: recursion depth is a property of the script and
+    # the caps together, so a body one shrunk entry cannot parse is still scored by the rest, and
+    # counting it here sends the operator after coverage the sweep already had.
+    unscanned = skipped - scanned
+    if unscanned:
         sys.stderr.write(
-            f"skipped {len(skipped)} scripts the scanner could not parse within the interpreter's "
-            "recursion limit\n"
+            f"skipped {len(unscanned)} scripts no configuration could parse within the "
+            "interpreter's recursion limit\n"
         )
     return found
 
@@ -300,7 +342,7 @@ def guarded_modules(root: Path) -> tuple[str, ...]:
     """Return the modules a trace records frames from.
 
     Taken from the gate's own guarded surface rather than a list kept here, for the reason
-    `guard_owning_qualnames` records at one level down: a list here is a second allowlist, and a
+    `guard_owning_functions` records at one level down: a list here is a second allowlist, and a
     guard module missing from it contributes no frames while the inventory still names its
     origins, so every one of them is intersected away with no diagnostic. That surface is the
     discovered modules together with the checker's allowlist, so a module reaches this tool while
@@ -348,18 +390,23 @@ def guarded_filenames(root: Path) -> frozenset[str]:
     return frozenset(names)
 
 
-def guard_owning_qualnames(root: Path) -> frozenset[str]:
-    """Return the qualified names of the functions that construct a guard refusal.
+def guard_owning_functions(root: Path) -> frozenset[tuple[str, str]]:
+    """Return the functions that construct a guard refusal, each with its module.
 
     Taken from the gate's own inventory rather than a list kept here, so a guard that moves takes
     its name with it. The inventory derives the name from the source tree and the tracer reads it
     off a running frame, and the two agree because neither spells a nested function's `<locals>`.
 
+    Carried with the module the inventory records, since a qualified name alone does not identify
+    a function: `_is_function_positional_parameter` is defined in both guarded modules today, so a
+    bare-name intersection would accept reach into one of them as evidence for a guard the other
+    one owns, and the pasted witness then fails on an origin the shape never reaches.
+
     Args:
         root: Repository root holding the guarded modules.
 
     Returns:
-        One name per function holding at least one guard origin.
+        One (module filename, qualified name) pair per function holding at least one guard origin.
 
     Raises:
         ValueError: If the inventory reports no origin at all, which would filter every trace down
@@ -369,10 +416,10 @@ def guard_owning_qualnames(root: Path) -> frozenset[str]:
     if not records:
         message = f"{root} reports no guard origins to filter a trace against"
         raise ValueError(message)
-    return frozenset(record.qualname for record in records)
+    return frozenset((record.path, record.qualname) for record in records)
 
 
-def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[str]:
+def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[tuple[str, str]]:
     """Return the guarded-module functions one script executes.
 
     Args:
@@ -380,20 +427,27 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
         limits: Optional shrunk caps.
 
     Returns:
-        Qualified names, with nested-function `<locals>` markers removed.
+        (Module filename, qualified name) pairs, with nested-function `<locals>` markers removed.
+        The module is the filename the inventory records a guard under, so a reach and an origin
+        are compared as the same function rather than as the same name.
     """
     # The tree is derived here rather than accepted, for the reason `main` records: the frames a
     # run records and the names it accepts have to describe one revision, and that is the revision
     # whose scanner this process executes.
     guarded = guarded_filenames(scanner_checkout())
-    reached: set[str] = set()
+    reached: set[tuple[str, str]] = set()
     # Restore whatever hook was active, not None: coverage collection and debuggers also use
     # settrace, and clearing it would silently disable them for the rest of the process.
     previous = sys.gettrace()
 
     def trace(frame, event, argument):  # noqa: ANN001, ANN202 - CPython tracer signature
         if event == "call" and frame.f_code.co_filename in guarded:
-            reached.add(frame.f_code.co_qualname.replace(".<locals>", ""))
+            reached.add(
+                (
+                    Path(frame.f_code.co_filename).name,
+                    frame.f_code.co_qualname.replace(".<locals>", ""),
+                )
+            )
         if previous is None:
             return None
         # Restoring that hook afterwards protects only what runs later: for the length of the scan
@@ -409,6 +463,14 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
         # Report how far the candidate got instead of losing the whole trace to a traceback. The
         # sweep skips these bodies for the same reason, and a partial reach is still the signal
         # this mode exists to give.
+        #
+        # Said out loud, because a truncated reach prints exactly what a candidate that genuinely
+        # stops there prints, and read as the second it becomes an invariant justification for a
+        # guard this shape was still walking toward.
+        sys.stderr.write(
+            "the scan did not finish within the interpreter's recursion limit: the reach below "
+            "is how far this candidate got, not everything it would have reached\n"
+        )
         return reached
     finally:
         sys.settrace(previous)
@@ -556,7 +618,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--shrink",
         type=int,
-        nargs="*",
+        # At least one value, because a bare `--shrink` binds an empty list rather than the
+        # default, which collapses the grid to production caps and reports every resource-bound
+        # guard as unreached by a run the operator believes searched each cap shrunk.
+        nargs="+",
         help=(
             "cap values to shrink each cap to, one cap at a time and lower being more shrunk; "
             f"searched least-shrunk first so a witness says as little about the caps as it can "
@@ -591,8 +656,9 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.trace is not None:
         reached = trace_guard_functions(arguments.trace)
         if not arguments.trace_all:
-            reached &= guard_owning_qualnames(root)
-        for name in sorted(reached):
+            reached &= guard_owning_functions(root)
+        # The module decided the intersection; the names alone are what a candidate is aimed with.
+        for name in sorted({qualname for _module, qualname in reached}):
             sys.stdout.write(f"{name}\n")
         return 0
 
@@ -606,9 +672,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     grid = limits_grid(SHRINK if arguments.shrink is None else tuple(arguments.shrink))
     sys.stderr.write(f"sweeping {len(corpus)} scripts over {len(grid)} configurations\n")
-    found = sweep(corpus, grid, wanted=wanted)
-    sys.stderr.write(f"reached {len(found)} guard origins\n")
-    sys.stdout.write(render_rows(found))
+    # Rows are buffered until the sweep ends, so the accumulator is owned here and rendered even
+    # when a scan raises something no configuration was expected to raise. The failure still
+    # propagates; what it no longer takes with it is every origin the run had already reached,
+    # which is a multi-minute search and exactly the shape a witness hunt exists to find.
+    found: Reach = {}
+    try:
+        sweep(corpus, grid, wanted=wanted, found=found)
+        sys.stderr.write(f"reached {len(found)} guard origins\n")
+    finally:
+        sys.stdout.write(render_rows(found))
     return 0
 
 
