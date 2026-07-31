@@ -579,6 +579,30 @@ def render_rows(found: Reach) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
+def nonnegative(text: str) -> int:
+    """Return `text` as a count of scripts, refusing a negative one.
+
+    The three options this converts all size the corpus, and Python spells a negative size as an
+    empty one rather than as an error: `range(-1)` walks no grammar and a negative length filter
+    drops every script. Left to argparse's `int`, a mistyped value sweeps the recorded half alone,
+    or nothing at all, and reports a script count that reads like the run that was asked for.
+
+    Args:
+        text: The value as spelled on the command line.
+
+    Returns:
+        The value as a count.
+
+    Raises:
+        ArgumentTypeError: If the value is negative, since no corpus has a negative size.
+    """
+    value = int(text)
+    if value < 0:
+        message = f"{value} is not a count of scripts; a corpus cannot be smaller than empty"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     """Search for witnesses, or trace one candidate script.
 
@@ -601,17 +625,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--seeds",
-        type=int,
+        type=nonnegative,
         help=f"fuzzer seeds to generate bodies from, one grammar walk each (default {SEEDS})",
     )
     parser.add_argument(
         "--iterations",
-        type=int,
+        type=nonnegative,
         help=f"bodies to request per seed (default {ITERATIONS})",
     )
     parser.add_argument(
         "--max-length",
-        type=int,
+        type=nonnegative,
         help=f"drop generated scripts longer than this many characters (default {MAX_LENGTH})",
     )
     parser.add_argument("--extra", type=Path, help="JSON list of hand-authored candidates")

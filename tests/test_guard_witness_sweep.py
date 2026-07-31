@@ -469,6 +469,23 @@ def test_a_sweep_prints_the_rows_it_found_before_a_scan_it_could_not_finish(
     assert "scanner.source.character-limit" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("option", ["--seeds", "--iterations", "--max-length"])
+def test_a_negative_corpus_size_is_refused_rather_than_emptying_the_corpus(option: str) -> None:
+    # `range(-1)` walks no grammar and a negative length filter drops every script, so a negative
+    # value sweeps the recorded half alone, or nothing at all, while reporting a script count that
+    # reads like the run the operator asked for.
+    with pytest.raises(SystemExit) as raised:
+        tool.main([option, "-1"])
+
+    assert raised.value.code == 2
+
+
+def test_a_zero_corpus_size_is_still_accepted() -> None:
+    # Zero is how a quick pass over the recorded corpus alone is asked for, and how the tests here
+    # skip generation, so the refusal has to be of negatives rather than of anything falsy.
+    assert tool.nonnegative("0") == 0
+
+
 def test_a_bare_shrink_is_refused_rather_than_searching_production_only() -> None:
     # `--shrink` with no values would otherwise bind an empty list, collapsing the grid to
     # production caps, and report the resource-bound guards as unreached by a run the operator
