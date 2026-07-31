@@ -219,7 +219,10 @@ def load_corpus(
         root: Repository root holding the replay inventory.
         seeds: How many fuzzer seeds to generate bodies from.
         iterations: Bodies to request per seed.
-        max_length: Drop generated scripts longer than this; a witness has to stay reviewable.
+        max_length: Drop scripts longer than this, recorded as well as generated; a witness has to
+            stay reviewable, and a body no operator would paste into a witness record is one the
+            sweep cannot report an answer with. Recorded drops are counted on stderr, since the
+            recorded half is the shapes the scanner was built against.
         extra: Optional JSON file holding a list of hand-authored candidates.
 
     Returns:
@@ -281,8 +284,12 @@ def load_corpus(
     # A recorded script the filter removes is reported for the reason the refusal above gives for
     # an authored one: the recorded half is the shapes the scanner was built against, and one
     # dropped in silence leaves a sweep that never scanned it printing what a sweep that scanned it
-    # and reached no guard prints. Counted rather than refused, because the filter exists to bound
-    # what the grammar generates and the inventory records bodies far past any reviewable witness.
+    # and reached no guard prints. Counted rather than refused, and rather than exempted from the
+    # cap the way an authored candidate cannot be: the inventory records bodies far past any
+    # reviewable witness, and a body past the cap loses the (length, rank) tie-break to anything
+    # shorter reaching the same guard, so admitting one can only add a row no operator would paste.
+    # The one entry the current inventory drops is 52,798 characters and reaches ten origins that
+    # the capped corpus already reaches with witnesses of 6 to 28 characters.
     dropped = sum(1 for script in recorded if len(script) > max_length)
     if dropped:
         sys.stderr.write(
@@ -702,7 +709,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-length",
         type=nonnegative_count,
-        help=f"drop generated scripts longer than this many characters (default {MAX_LENGTH})",
+        help=(
+            "drop scripts longer than this many characters, recorded as well as generated; "
+            f"recorded drops are counted on stderr (default {MAX_LENGTH})"
+        ),
     )
     parser.add_argument("--extra", type=Path, help="JSON list of hand-authored candidates")
     parser.add_argument(
