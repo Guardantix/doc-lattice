@@ -6,6 +6,8 @@ import ast
 import dataclasses
 import importlib.util
 import json
+import multiprocessing
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -177,6 +179,190 @@ def test_sweep_can_restrict_itself_to_still_unclassified_guards() -> None:
     )
 
     assert "scanner.budget.step-limit" not in found
+
+
+def _entry(rank: int, label: str, origin: str, script: str) -> object:
+    return tool.EntryReach(
+        rank=rank,
+        label=label,
+        best={origin: script},
+        scanned=frozenset({script}),
+        skipped=frozenset(),
+    )
+
+
+_PRODUCTION_ENTRY = ("production", ScanLimits())
+_SHRUNK_ENTRY = (
+    "ScannerLimits(max_source_chars=4)",
+    ScanLimits(scanner=ScannerLimits(max_source_chars=4)),
+)
+_ORIGIN = "scanner.source.character-limit"
+
+
+def test_a_parallel_sweep_reports_what_the_serial_one_reports() -> None:
+    # The whole closure criterion: splitting the grid across processes changes how long a run
+    # takes and nothing about what it prints.
+    corpus = ["echo one; echo two", "a" * 40, "eval 'X=${Y=q}'; eval \"$X\"lattice"]
+    grid = tool.limits_grid((0, 2))
+
+    assert tool.sweep(corpus, grid, jobs=4) == tool.sweep(corpus, grid)
+
+
+def test_a_merge_prefers_the_least_shrunk_reach_whatever_order_workers_finish_in() -> None:
+    # Workers finish in whatever order the scheduler hands back, so a merge keyed on arrival prints
+    # different rows for the same corpus run to run, and half of them pin the weaker claim.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    entries = [
+        _entry(0, _PRODUCTION_ENTRY[0], _ORIGIN, "a" * 40),
+        _entry(1, _SHRUNK_ENTRY[0], _ORIGIN, "a" * 8),
+    ]
+    rows = []
+    for arrival in (entries, list(reversed(entries))):
+        found: dict[str, tuple[str, str]] = {}
+        tool.merge_reach(arrival, tool.initial_totals(grid, found), found)
+        rows.append(found)
+
+    assert rows[0] == rows[1] == {_ORIGIN: (_PRODUCTION_ENTRY[0], "a" * 40)}
+
+
+def test_a_merge_counts_no_script_another_configuration_scanned(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Each worker sees only its own configuration, so a difference taken per worker reports every
+    # body one shrunk configuration could not parse, which is the overcount the union avoids.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    totals = tool.initial_totals(grid, {})
+
+    tool.merge_reach(
+        [
+            tool.EntryReach(0, grid[0][0], {}, frozenset({"deep"}), frozenset()),
+            tool.EntryReach(1, grid[1][0], {}, frozenset(), frozenset({"deep"})),
+        ],
+        totals,
+        {},
+    )
+    tool.report_unscanned(totals)
+
+    assert "skipped" not in capsys.readouterr().err
+
+
+def test_a_merge_counts_a_script_no_configuration_scanned(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The other half of the union: a body every configuration refused is coverage the run does not
+    # have, and silence about it reads as a candidate that reached nothing.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    totals = tool.initial_totals(grid, {})
+
+    tool.merge_reach(
+        [
+            tool.EntryReach(0, grid[0][0], {}, frozenset(), frozenset({"deep"})),
+            tool.EntryReach(1, grid[1][0], {}, frozenset(), frozenset({"deep"})),
+        ],
+        totals,
+        {},
+    )
+    tool.report_unscanned(totals)
+
+    assert "skipped 1" in capsys.readouterr().err
+
+
+def test_a_merge_keeps_what_the_configurations_before_a_failure_found() -> None:
+    # A pool collects results as its workers finish, so a merge that waited for the whole grid
+    # would lose every completed configuration's reach to the one worker that died.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    found: dict[str, tuple[str, str]] = {}
+
+    def arriving() -> object:
+        yield _entry(0, _PRODUCTION_ENTRY[0], _ORIGIN, "a" * 40)
+        raise ValueError("a worker died holding a configuration")
+
+    with pytest.raises(ValueError, match="died holding"):
+        tool.merge_reach(arriving(), tool.initial_totals(grid, found), found)
+
+    assert found == {_ORIGIN: (_PRODUCTION_ENTRY[0], "a" * 40)}
+
+
+def test_a_pooled_sweep_keeps_the_rows_the_worker_that_died_was_not_holding() -> None:
+    # The same guarantee through real processes. One worker runs the two configurations in
+    # submission order, so the reach of the first is merged before the second one raises what no
+    # configuration was expected to raise.
+    grid = [_SHRUNK_ENTRY, ("no caps at all", object())]
+    found: dict[str, tuple[str, str]] = {}
+    entries = tool.pooled_entries(["a" * 40], grid, jobs=1)
+
+    with pytest.raises(AttributeError):
+        tool.merge_reach(entries, tool.initial_totals(grid, found), found)
+
+    assert found == {_ORIGIN: (_SHRUNK_ENTRY[0], "a" * 40)}
+
+
+def test_a_pooled_run_resolves_its_filter_and_prints_its_rows_once(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reads that configure a run and the filter it restricts reach with belong to the parent.
+    # Repeated per worker they become N copies of one diagnostic, and N copies of one row.
+    resolved: list[Path] = []
+
+    def record_debt(root: Path) -> frozenset[str]:
+        resolved.append(root)
+        return frozenset({_ORIGIN})
+
+    monkeypatch.setattr(tool, "unclassified_ids", record_debt)
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["a" * 40])
+
+    assert tool.main(["--shrink", "0", "--jobs", "2"]) == 0
+
+    assert len(resolved) == 1
+    assert capsys.readouterr().out.count(_ORIGIN) == 1
+
+
+def test_a_pooled_run_reports_the_recorded_scripts_it_dropped_once(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The corpus is read once by the parent and handed to the workers, so the count of recorded
+    # bodies the length filter dropped is written once however many ways the grid is split.
+    status = tool.main(
+        ["--seeds", "0", "--iterations", "0", "--max-length", "12", "--shrink", "0", "--jobs", "2"]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().err.count("dropped") == 1
+
+
+def test_pooled_workers_do_not_inherit_this_process() -> None:
+    # A forked worker inherits a scanner a caller has replaced here, so the same run reports reach
+    # through one scanner on Linux and another everywhere else. It is also what CPython deprecates
+    # once a process has threads, which a pool has by its second worker.
+    assert tool.start_method() != "fork"
+    assert tool.start_method() in multiprocessing.get_all_start_methods()
+
+
+def test_the_default_worker_count_fits_the_work_there_is() -> None:
+    # A default derived from the machine rather than from the grid starts workers with nothing to
+    # scan, and one that can reach zero leaves the sweep with nobody to run it.
+    assert tool.default_jobs(1) == 1
+    assert tool.default_jobs(0) == 1
+    assert tool.default_jobs(1000) == os.process_cpu_count()
+
+
+def test_a_sweep_with_no_workers_is_refused_rather_than_run_by_nobody() -> None:
+    # Zero workers is not a smaller sweep, and left to argparse it is refused several layers down
+    # in a traceback naming the pool rather than the option that sized it.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--jobs", "0"])
+
+    assert raised.value.code == 2
+
+
+def test_a_trace_refuses_the_worker_count_only_a_sweep_reads() -> None:
+    # A trace runs one script in this process. Accepted and ignored, `--jobs` reports on a run the
+    # operator believes was split.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--trace", "echo hello", "--jobs", "2"])
+
+    assert raised.value.code == 2
 
 
 def test_trace_reports_the_guarded_functions_a_script_executes() -> None:
@@ -798,8 +984,10 @@ def test_a_sweep_prints_the_rows_it_found_before_a_scan_it_could_not_finish(
     monkeypatch.setattr(tool, "unclassified_ids", lambda _root: None)
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one; echo two"])
 
+    # Serial, because this pins the finest granularity the guarantee has: a worker that dies takes
+    # its whole configuration with it, and a scanner replaced here is not the one a worker imports.
     with pytest.raises(ValueError, match="nothing pinned"):
-        tool.main(["--shrink", "0"])
+        tool.main(["--shrink", "0", "--jobs", "1"])
 
     assert "scanner.source.character-limit" in capsys.readouterr().out
 
@@ -1031,7 +1219,7 @@ def test_a_sweep_that_cannot_write_its_rows_reports_it_and_fails(
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
     monkeypatch.setattr(sys, "stdout", Closed())
 
-    assert tool.main([]) == 1
+    assert tool.main(["--jobs", "1"]) == 1
 
     assert "could not write" in capsys.readouterr().err
 
@@ -1064,7 +1252,7 @@ def test_a_sweep_searches_the_checkout_whose_scanner_it_executes(
     monkeypatch.setattr(tool, "unclassified_ids", record_debt)
     monkeypatch.setattr(tool, "load_corpus", record_corpus)
 
-    assert tool.main([]) == 0
+    assert tool.main(["--jobs", "1"]) == 0
 
     checkout = Path(shell_scanner.__file__).resolve().parents[3]
     assert searched == [checkout, checkout]
@@ -1179,7 +1367,7 @@ def test_a_sweep_that_cannot_flush_its_rows_reports_it_and_fails(
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
     monkeypatch.setattr(sys, "stdout", Buffered())
 
-    assert tool.main([]) == 1
+    assert tool.main(["--jobs", "1"]) == 1
 
     assert "could not write" in capsys.readouterr().err
 
@@ -1197,7 +1385,7 @@ def test_a_sweep_that_cannot_render_its_rows_reports_it_and_fails(
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
     monkeypatch.setattr(tool, "render_rows", refuse)
 
-    assert tool.main([]) == 1
+    assert tool.main(["--jobs", "1"]) == 1
 
     assert "could not render" in capsys.readouterr().err
 
@@ -1224,7 +1412,7 @@ def test_a_sweep_that_cannot_render_its_rows_keeps_the_failure_it_was_propagatin
     monkeypatch.setattr(tool, "render_rows", refuse)
 
     with pytest.raises(ValueError, match="nothing pinned"):
-        tool.main(["--shrink", "0"])
+        tool.main(["--shrink", "0", "--jobs", "1"])
 
 
 def test_a_sweep_reports_a_debt_snapshot_it_cannot_read_as_a_usage_error(

@@ -108,9 +108,12 @@ record from `tests/fixtures/shell_guard_debt.json`. Leave the record and the gat
 guard as both classified and frozen.
 
 It is a search, not a gate. The default sweep drives thousands of scripts through every
-configuration and takes several minutes, and printing no rows means the corpus reached nothing new
-rather than that anything failed. Shrink `--seeds` and `--iterations` for a quick pass, and use
-`--all-guards` to see what the corpus reaches at all.
+configuration, which is a couple of minutes on an eight-core machine, and printing no rows means
+the corpus reached nothing new rather than that anything failed. Configurations are independent, so
+the grid is split across one worker process per available CPU; `--jobs` sizes that split and
+changes nothing about the rows a run prints, with `--jobs 1` running the whole grid in one process.
+Shrink `--seeds` and `--iterations` for a quick pass, and use `--all-guards` to see what the corpus
+reaches at all.
 
 ## Enforced repository rules
 
