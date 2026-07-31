@@ -192,6 +192,22 @@ def test_rendered_rows_preserve_a_script_containing_astral_characters() -> None:
     assert ast.literal_eval(call.args[1]) == script
 
 
+def test_rendered_rows_survive_a_script_carrying_a_lone_surrogate() -> None:
+    # `--extra` candidates are read with `json.loads`, which accepts an escaped lone surrogate that
+    # UTF-8 cannot encode. Left raw in a row, it fails the single write that emits the whole sweep,
+    # so one such candidate costs every row the run found rather than only its own.
+    script = "echo x\ud800"
+
+    rendered = tool.render_rows({"scanner.budget.step-limit": (tool.PRODUCTION, script)})
+
+    rendered.encode("utf-8")
+    row = ast.parse(f"[{rendered}]", mode="eval").body
+    assert isinstance(row, ast.List)
+    call = row.elts[0]
+    assert isinstance(call, ast.Call)
+    assert ast.literal_eval(call.args[1]) == script
+
+
 def test_rendered_rows_omit_limits_for_a_production_reach() -> None:
     rendered = tool.render_rows({"scanner.source.character-limit": ("production", "x")})
 

@@ -348,6 +348,23 @@ def trace_guard_functions(script: str, limits: ScanLimits | None = None) -> set[
     return reached
 
 
+def _literal(text: str) -> str:
+    """Return `text` as a double-quoted Python literal a normal stdout can carry.
+
+    Args:
+        text: Identifier or script to embed in a rendered row.
+
+    Returns:
+        Source text for the literal.
+    """
+    # json.dumps escapes exactly what a double-quoted Python literal needs escaped, so the row
+    # stays valid for a script that itself contains quotes. ensure_ascii must stay off: a \uXXXX
+    # surrogate pair is one character in JSON but two in a Python literal. That leaves a lone
+    # surrogate raw, which json.loads accepts from an --extra candidate and UTF-8 cannot encode,
+    # so backslashreplace escapes it here rather than failing the write of every row at once.
+    return json.dumps(text, ensure_ascii=False).encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def render_rows(found: Reach) -> str:
     """Return paste-ready `ReachableWitness` rows for a sweep result.
 
@@ -361,12 +378,9 @@ def render_rows(found: Reach) -> str:
     lines: list[str] = []
     for origin_id in sorted(found):
         label, script = found[origin_id]
-        # json.dumps escapes exactly what a double-quoted Python literal needs escaped, so the
-        # row stays valid for a script that itself contains quotes. ensure_ascii must stay off:
-        # a \uXXXX surrogate pair is one character in JSON but two in a Python literal.
         lines.append("    ReachableWitness(")
-        lines.append(f"        {json.dumps(origin_id, ensure_ascii=False)},")
-        lines.append(f"        {json.dumps(script, ensure_ascii=False)},")
+        lines.append(f"        {_literal(origin_id)},")
+        lines.append(f"        {_literal(script)},")
         if label != PRODUCTION:
             kind = label.split("(", 1)[0]
             field = "taint" if kind == "TaintLimits" else "scanner"
