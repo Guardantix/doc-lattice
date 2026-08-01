@@ -38,6 +38,13 @@ uv run --group dev python scripts/guard_witness_sweep.py
 uv run --group dev python scripts/guard_witness_sweep.py \
   --trace "eval 'X=\${Y=q}'; eval \"\$X\"lattice"
 
+uv run --group dev python scripts/corpus_differential.py record \
+  --scanner-root . --out /tmp/candidate-verdicts.json
+uv run --group dev python scripts/corpus_differential.py compare \
+  --base /tmp/base-verdicts.json --candidate /tmp/candidate-verdicts.json \
+  --base-inventory /tmp/base-revision/tests/fixtures/github_ci_checkpoint/replay_inventory.json \
+  --acknowledged tests/fixtures/corpus_differential_acknowledgements.json
+
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
   --iterations 1200 --seed 1 --baseline tests/fixtures/shell_taint_fuzz_baseline.tsv
@@ -111,6 +118,44 @@ It is a search, not a gate. The default sweep drives thousands of scripts throug
 configuration and takes several minutes, and printing no rows means the corpus reached nothing new
 rather than that anything failed. Shrink `--seeds` and `--iterations` for a quick pass, and use
 `--all-guards` to see what the corpus reaches at all.
+
+`scripts/corpus_differential.py` replays one fixed corpus through the public scan path once per
+revision and reports every script whose verdict differs, in either direction. It is the dynamic
+control for the residual AD-20 leaves open, and AD-22 in [ARCHITECTURE.md](ARCHITECTURE.md) owns
+what it gates, what a verdict label carries and the four limits it discloses.
+
+Two revisions of one package cannot be imported side by side, so a run is two `record` processes
+and one `compare`. The CI job replays the base from a worktree of the protected base revision and
+the candidate from the checkout; locally, materialize the other revision anywhere and point
+`--scanner-root` at it. Shrink `--seeds` and `--iterations` while iterating, since a full run
+replays roughly twenty thousand scripts per side, and pass `--allow-shrunk-corpus` to `compare`,
+which otherwise refuses records drawn below the pinned scale. `--base-inventory` is the base-owned
+floor under the corpus and is not optional; `--no-corpus-floor` says out loud that a run has none.
+Two records naming the same scanner file are refused as one revision replayed twice.
+
+The fuzzer builds the corpus for both recordings and imports the scanner at module scope, so a
+change that adds a scanner name and draws on it in the same pull request refuses rather than
+reports: the base does not carry the name. Land the scanner name first and draw on it in a later
+pull request, whose base then carries it. No acknowledgement covers this, since no records were
+produced to compare.
+
+Acknowledge an intentional change in `tests/fixtures/corpus_differential_acknowledgements.json`
+rather than restoring a verdict you meant to move: an entry names the script digest, both verdicts
+and a reason a reviewer can read. Run `compare --acknowledged FILE --write-acknowledgements FILE`
+to have the entries written for you, then write each reason, since an entry with an empty reason is
+refused. Name the same file on both flags: the written document carries only the reasons the
+comparison was handed, so a rewrite of a file the run did not read blanks every reason on it, and
+`compare` refuses that rather than doing it.
+
+An acknowledgement does not expire, and once its transition has landed in the base it matches
+nothing. The comparison then judges it by the base record: an entry whose script the base scores
+at anything other than the entry's base verdict is spent, reported without failing anyone, and
+dropped by the next `--write-acknowledgements` run, so an acknowledging pull request leaves
+nothing behind for a later author to clean up. An entry whose script the base still scores at the
+entry's base verdict is a standing authorization for a move nobody has made, and one naming a
+script the corpus no longer draws can never be judged again; a full-scale comparison fails on
+both until they are removed. Under `--allow-shrunk-corpus` no judgment is made and every
+unmatched entry is kept, because the script it names may simply not have been drawn.
 
 ## Enforced repository rules
 
