@@ -451,12 +451,23 @@ sequence. Ordered descriptor replay installs pipeline endpoints first and then a
 left to right, so only final descriptor bindings route bytes while earlier truncations retain their
 empty-file side effect. A `>&N` source resolves first against the command's own events and then
 against the bindings its enclosing compounds installed, innermost first, so
-`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. A stdout writer is a
-simple command or a compound, since a compound carries redirections and aggregated stdout of its
-own, so `{ producer; } > >(consumer)` binds the compound's stdout to the substitution's consumer
-exactly as the ungrouped `producer > >(consumer)` binds one command's. A process substitution is a
-descriptor target like any other on that chain, so `{ producer >&3; } 3> >(consumer)` reaches the
-consumer as well. Descriptors 1 and 2 are always inherited from the enclosing shell and need no
+`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. That chain records a
+`>&N` as an alias to `N` rather than as the target `N` held when the duplication ran, so a later
+compound that rebinds `N` retargets the earlier duplication, which Bash does not do. It is an
+over-refusal in the same shape as the aggregation above, one property of the shared lookup rather
+than one per sink, and it is issue #202. A stdout writer is a simple command or a compound, since a
+compound carries redirections and aggregated stdout of its own, so `{ producer; } > >(consumer)`
+binds the compound's stdout to the substitution's consumer exactly as the ungrouped
+`producer > >(consumer)` binds one command's. A process substitution is a descriptor target like
+any other on that chain, so `{ producer >&3; } 3> >(consumer)` reaches the consumer as well. Two
+writers reach one output substitution when a compound binds a descriptor that several commands
+inside it write to, and a writer's stream is a scope of its own rather than a member of one output
+expression, so nothing carries the order or the alternation between them. An enclosing writer
+subsumes the writers inside it, because its aggregated stdout already holds them in execution
+order, which is the whole of `{ producer >&1; } > >(consumer)`. Writers neither of which encloses
+the other fail closed rather than being composed, since selecting one drops the rest and
+concatenating them asserts a sequence the evidence does not carry. Descriptors 1 and 2 are always
+inherited from the enclosing shell and need no
 such binding. Any other descriptor that some part of the body binds, but that this command's
 lexical chain cannot supply, is missing evidence rather than an inherited stream: a bare
 `exec 3> out.sh` rebinds the shell scope, which the per-command `redirections` field cannot carry,

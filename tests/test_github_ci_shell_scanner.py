@@ -1166,6 +1166,52 @@ def test_chained_output_process_substitutions_certify_until_issue_187(script: st
 @pytest.mark.parametrize(
     "script",
     [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; printf x >&3; } 3> >(bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; printf x >&3; } 3> >(bash)",
+        "{ printf a >&3; printf b >&3; } 3> >(tee log)",
+    ],
+    ids=("two-commands", "nested-scope-and-command", "marker-free"),
+)
+def test_unordered_writers_into_one_output_substitution_fail_closed(script: str):
+    """Two writers reach one substitution and the evidence shape carries no order between them.
+
+    Each body routes two independent writers into one consumer through the descriptor the
+    compound bound. Their streams are separate scopes rather than members of one output
+    expression, so nothing here carries the ``Choice`` and ``Repeat`` structure their real
+    positions have, and selecting one writer dropped the other: the first body ran the shim 5
+    times out of 5 under bash 5.2 while the scanner certified it. The third body carries no marker
+    at all and is the cost of failing closed instead, which AD-18 discloses.
+    """
+    assert (
+        scan_doc_lattice_invocations(script).guard_id
+        == "taint.output-substitution.unordered-writers"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; printf x >&1; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+    ],
+    ids=("single-writer", "scope-subsumes-both", "self-duplication"),
+)
+def test_enclosing_writer_subsumes_the_writers_inside_it(script: str):
+    # Control for the guard above, and the reason it is not simply "more than one writer". A
+    # scope that writes to the same substitution already aggregates every writer inside it in
+    # execution order, so these stay ordinary marker flow rather than reaching the guard. Bash
+    # runs the shim in all three, so a guard refusal here would hide a true positive behind a
+    # bound.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.guard_id is None
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > >(bash)",
         "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } | bash",
         "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > out.sh\nbash out.sh\n",
@@ -1203,6 +1249,36 @@ def test_inner_stdout_redirect_that_stays_on_the_stream_still_refuses(script: st
     # resolve, rather than only one it resolves away from stdout, launders content out of the
     # stream and turns these into false certifications.
     assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 4> >(bash); } 4>/dev/null 3>&4",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 4> out.sh; } 4>/dev/null 3>&4\n"
+        "bash out.sh\n",
+    ],
+    ids=("output-substitution", "static-file"),
+)
+def test_descriptor_duplication_is_not_snapshotted_until_issue_202(script: str):
+    """Disclosure pin for issue #202, per AD-19.
+
+    ``3>&4`` copies fd 4's target where it stands, so the inner ``4>`` cannot retarget it and bash
+    5.2 runs the shim 0 times out of 5 in both bodies. The chain records the duplication as an
+    alias to fd 4 instead, so both refuse. The static-file spelling refuses on `main` and predates
+    the compound-writer fix, which places the defect in the shared descriptor lookup rather than in
+    the substitution sink that fix links.
+    """
+    assert_taint_refusal(script)
+
+
+def test_descriptor_duplication_reaching_the_rebound_target_still_refuses():
+    # Control for issue #202: the same nesting with ``>&4`` really does reach the substitution, and
+    # bash runs the shim 5 times out of 5, so the pin above isolates the missing snapshot rather
+    # than the nesting or the marker.
+    assert_taint_refusal(
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&4; } 4> >(bash); } 4>/dev/null 3>&4"
+    )
 
 
 def test_reversed_chained_output_process_substitutions_still_refuse():
