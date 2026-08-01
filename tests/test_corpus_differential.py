@@ -480,8 +480,19 @@ def test_a_written_draft_keeps_the_reason_already_on_file_and_drops_a_stale_entr
     }
 
 
-def test_the_repository_acknowledges_no_divergence_today():
-    assert tool.load_acknowledgements(_ACKNOWLEDGEMENTS) == []
+def test_the_repository_acknowledgements_read_as_the_comparison_requires():
+    """Whatever the repository declares today, the comparison has to be able to read it.
+
+    The fixture is empty while nothing has intentionally moved, but the pull request that moves
+    verdicts on purpose is exactly the one that fills it, and the comparison only passes there once
+    it is filled. Pinning it empty here would fail that pull request's test job for taking the
+    documented path, so what this holds is the shape rather than the count.
+    """
+    for entry in tool.load_acknowledgements(_ACKNOWLEDGEMENTS):
+        assert entry.digest
+        assert entry.base
+        assert entry.candidate
+        assert entry.reason
 
 
 def test_compare_returns_zero_when_both_revisions_score_the_corpus_alike(tmp_path):
