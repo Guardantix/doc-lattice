@@ -27,9 +27,12 @@ Two modes, one process each, because two revisions of one package cannot be impo
 
 The comparison refuses rather than reports whenever the protection it describes is not in place: two
 records naming the same scanner source are one revision replayed twice, a record drawn below the
-pinned corpus scale scored fewer scripts than the pin promises, and a comparison with no base-owned
-inventory has no floor under the corpus at all. Each relaxation is a named flag, so a diff that
-takes one is a diff a reviewer can see taking it.
+pinned corpus scale scored fewer scripts than the pin promises, a record whose case list does not
+match the count it declares describes a corpus it did not score, and a comparison with no
+base-owned inventory has no floor under the corpus at all. A `record` run refuses in turn when the
+generated half collapsed below the scale it was asked for, since a scale a record only declares is
+not a scale anything was drawn at. Each relaxation is a named flag, so a diff that takes one is a
+diff a reviewer can see taking it.
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
 script digest and both verdicts, so it covers exactly the transition it was written for. It does not
@@ -40,12 +43,14 @@ writes the file this comparison would need, with every reason left empty and sta
 and an empty reason is refused when the file is read.
 
 A verdict label carries the refusing guard's origin identifier, which is what makes a refusal that
-moves to another origin a divergence rather than two refusals that look alike. Three limits follow
+moves to another origin a divergence rather than two refusals that look alike. Four limits follow
 and are disclosed rather than closed: a withdrawal that mints exactly the identifier the deeper
 guard would have returned, over exactly the scripts that guard already refuses, moves no label; the
 corpus is a fixed sample, so a clean run is evidence about those scripts rather than a statement
-about every input the scanner accepts; and this tool is the candidate's in both recordings, so only
-the corpus floor is base-owned. AD-22 in ARCHITECTURE.md owns all three.
+about every input the scanner accepts; the replay scores every script at the scanner's default
+limits, so a guard governed by a cap the corpus never reaches is outside what a clean run says
+anything about; and this tool is the candidate's in both recordings, so only the corpus floor is
+base-owned. AD-22 in ARCHITECTURE.md owns all four.
 """
 
 from __future__ import annotations
@@ -140,6 +145,17 @@ class Divergence:
     def transition(self) -> tuple[str, str]:
         """Return the base and candidate labels as the transition they spell."""
         return (self.base, self.candidate)
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        """Return the triple an acknowledgement must match exactly to cover this divergence.
+
+        Spelled here rather than at each comparison site so it cannot drift out of step with
+        `Acknowledgement.key`: an ordering that disagrees between the two would either report every
+        acknowledged transition as unacknowledged or let one entry cover a transition it does not
+        name.
+        """
+        return (self.digest, self.base, self.candidate)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -355,7 +371,9 @@ def fuzz_generator() -> Callable[[random.Random, int], Sequence[object]]:
         message = (
             f"{FUZZER_MODULE} could not be imported against the revision under test ({error}); "
             "the fuzzer builds the corpus for both recordings, so every scanner name it reads has "
-            "to exist in the protected base as well as in the candidate"
+            "to exist in the protected base as well as in the candidate. Land the scanner name "
+            "first and draw on it in a later pull request, whose base then carries it; there is no "
+            "acknowledgement for this, because no records were produced to compare"
         )
         raise ValueError(message) from error
 
@@ -381,6 +399,54 @@ def build_corpus(
     return deduplicate(
         [*inventory_cases(inventory), *fuzz_cases(generate, seeds, iterations)],
     )
+
+
+def check_corpus_drawn(
+    cases: Sequence[CorpusCase],
+    seeds: Sequence[int],
+    iterations: int,
+) -> None:
+    """Refuse a corpus that did not draw the generated half the scale asked for.
+
+    The record names the scale it was asked for, which `check_corpus_scale` reads at comparison
+    time. That is not the same as the corpus it drew: an edit to the generator, to `fuzz_cases` or
+    to `deduplicate` that collapses the generated half leaves both records declaring the pinned
+    scale over a corpus a fraction of that size, and both sides collapse alike, so the comparison
+    agrees with itself and reports no divergence for the scripts nobody drew. Checked here, where
+    the drawn corpus is still in hand.
+
+    Args:
+        cases: The deduplicated corpus in replay order.
+        seeds: Seeds the generated half was asked for.
+        iterations: Cases requested per seed.
+
+    Raises:
+        ValueError: If a requested seed drew nothing, or if the generated half survived
+            deduplication at less than one seed's worth of draws. A floor of one seed rather than
+            of every seed is deliberate: repeated bodies across seeds are dropped by design, and
+            what this is against is a collapse, not a dedup rate.
+    """
+    if not seeds or iterations <= 0:
+        return
+    drawn = [case for case in cases if case.case_id.startswith("fuzz-")]
+    empty = [
+        seed
+        for seed in seeds
+        if not any(case.case_id.startswith(f"fuzz-{seed:04d}-") for case in drawn)
+    ]
+    if empty:
+        message = (
+            f"seed(s) {', '.join(str(seed) for seed in empty)} drew no script, so the corpus does "
+            f"not carry the {len(seeds)} seeds it was drawn at"
+        )
+        raise ValueError(message)
+    if len(drawn) < iterations:
+        message = (
+            f"the generated half of the corpus holds {len(drawn)} script(s) for {len(seeds)} seeds "
+            f"of {iterations} draws each, which is below one seed's worth; the corpus collapsed "
+            "rather than being drawn at the scale this run names"
+        )
+        raise ValueError(message)
 
 
 def corpus_digest(cases: Sequence[CorpusCase]) -> str:
@@ -551,6 +617,10 @@ def record(
 
     Returns:
         The verdict record for that revision.
+
+    Raises:
+        ValueError: If the corpus did not draw the generated half the scale names, since the record
+            would otherwise declare a scale nothing in it was scored at.
     """
     scanner = load_scanner(scanner_root)
     corpus = build_corpus(
@@ -559,6 +629,7 @@ def record(
         seeds=seeds,
         iterations=iterations,
     )
+    check_corpus_drawn(corpus, seeds, iterations)
     return {
         "schema": SCHEMA,
         "scanner_source": str(Path(scanner.__file__ or "").resolve()),
@@ -685,8 +756,11 @@ def check_corpus_scale(base: dict[str, object], candidate: dict[str, object]) ->
         candidate: The candidate's record.
 
     Raises:
-        ValueError: If either record names no scale, or was drawn with other seeds than the pin or
-            fewer iterations than it.
+        ValueError: If either record names no scale, was drawn with other seeds than the pin or
+            fewer iterations than it, or holds a different number of cases than the count it
+            declares. The declared scale is what the record was asked for rather than what it
+            scored, so the count is checked against the cases as well; `check_corpus_drawn` is what
+            holds the drawn corpus to the scale at the point the record is written.
     """
     for name, document in (("base", base), ("candidate", candidate)):
         seeds = document.get("seeds")
@@ -699,6 +773,14 @@ def check_corpus_scale(base: dict[str, object], candidate: dict[str, object]) ->
                 f"the {name} record was drawn at seeds {seeds} and {iterations} iterations "
                 f"rather than the pinned {list(SEEDS)} and {ITERATIONS}; a shrunken corpus "
                 "reports no divergence for the scripts it never drew"
+            )
+            raise ValueError(message)
+        count = document.get("count")
+        scored = len(read_entries(document, "cases", Path(f"the {name} record")))
+        if count != scored:
+            message = (
+                f"the {name} record declares {count} script(s) and carries {scored}, so the count "
+                "it reports is not the corpus it scored"
             )
             raise ValueError(message)
 
@@ -796,12 +878,8 @@ def report(
         The unacknowledged divergences and the acknowledgements nothing matched.
     """
     covered = {entry.key for entry in acknowledged}
-    unacknowledged = [
-        divergence
-        for divergence in found
-        if (divergence.digest, divergence.base, divergence.candidate) not in covered
-    ]
-    observed = {(divergence.digest, divergence.base, divergence.candidate) for divergence in found}
+    unacknowledged = [divergence for divergence in found if divergence.key not in covered]
+    observed = {divergence.key for divergence in found}
     unmatched = [entry for entry in acknowledged if entry.key not in observed]
 
     print(
@@ -828,6 +906,8 @@ def report(
 def acknowledgement_document(
     found: Sequence[Divergence],
     acknowledged: Sequence[Acknowledgement],
+    *,
+    drop_stale: bool = True,
 ) -> dict[str, object]:
     """Return the acknowledgements file this comparison would need.
 
@@ -841,24 +921,68 @@ def acknowledgement_document(
     Args:
         found: Every divergence between the two records.
         acknowledged: The declared intentional divergences.
+        drop_stale: Whether an entry this comparison matched nothing for may be dropped. False
+            under a shrunken corpus, for the same reason the comparison does not call such an entry
+            stale there: the script it names may simply not have been drawn, so dropping it would
+            delete a reviewer's reason on the strength of a replay that never looked.
 
     Returns:
         The document to write.
     """
     reasons = {entry.key: entry.reason for entry in acknowledged}
-    return {
-        "acknowledgements": [
+    entries = [
+        {
+            "sha256": divergence.digest,
+            "base_verdict": divergence.base,
+            "candidate_verdict": divergence.candidate,
+            "reason": reasons.get(divergence.key, ""),
+        }
+        for divergence in found
+    ]
+    if not drop_stale:
+        observed = {divergence.key for divergence in found}
+        entries.extend(
             {
-                "sha256": divergence.digest,
-                "base_verdict": divergence.base,
-                "candidate_verdict": divergence.candidate,
-                "reason": reasons.get(
-                    (divergence.digest, divergence.base, divergence.candidate), ""
-                ),
+                "sha256": entry.digest,
+                "base_verdict": entry.base,
+                "candidate_verdict": entry.candidate,
+                "reason": entry.reason,
             }
-            for divergence in found
-        ]
-    }
+            for entry in acknowledged
+            if entry.key not in observed
+        )
+    return {"acknowledgements": entries}
+
+
+def check_write_target(acknowledged: str, destination: str) -> None:
+    """Refuse to rewrite an acknowledgements file this comparison did not read.
+
+    The written document carries only the reasons the comparison was handed, so writing over a file
+    that was never read replaces every reviewer-written reason with an empty one. The next read then
+    refuses the file for carrying no reason, and the text is recoverable only from history. The
+    documented regeneration names the same file on both flags; naming it on one is the slip this
+    refuses.
+
+    Args:
+        acknowledged: Path the comparison reads acknowledgements from, empty for none.
+        destination: Path `--write-acknowledgements` names, empty for no write.
+
+    Raises:
+        ValueError: If the destination already holds a file the comparison did not read.
+    """
+    if not destination:
+        return
+    target = Path(destination)
+    if not target.exists():
+        return
+    if acknowledged and Path(acknowledged).resolve() == target.resolve():
+        return
+    message = (
+        f"{target} already holds acknowledgements this comparison did not read, and the written "
+        "document carries only the reasons it was handed; pass --acknowledged naming the same file "
+        "so the reasons on it survive the rewrite"
+    )
+    raise ValueError(message)
 
 
 def _record_command(args: argparse.Namespace) -> int:
@@ -894,6 +1018,7 @@ def _compare_command(args: argparse.Namespace) -> int:
         ValueError: If the comparison was asked to run without a base-owned corpus floor and
             without saying so.
     """
+    check_write_target(args.acknowledged, args.write_acknowledgements)
     base = load_record(Path(args.base))
     candidate = load_record(Path(args.candidate))
     align(base, candidate)
@@ -914,12 +1039,12 @@ def _compare_command(args: argparse.Namespace) -> int:
     unacknowledged, unmatched = report(found, acknowledged, limit=args.report_limit)
     if args.write_acknowledgements:
         draft = Path(args.write_acknowledgements)
-        draft.write_text(
-            json.dumps(acknowledgement_document(found, acknowledged), indent=2) + "\n",
-            encoding="utf-8",
-        )
+        drop_stale = not args.allow_shrunk_corpus
+        document = acknowledgement_document(found, acknowledged, drop_stale=drop_stale)
+        draft.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        written = len(found) if drop_stale else len(found) + len(unmatched)
         print(
-            f"wrote {len(found)} acknowledgement draft(s) to {draft}; each reason is left empty "
+            f"wrote {written} acknowledgement(s) to {draft}; each new reason is left empty "
             "for the author to write, and an empty reason is refused on read"
         )
     if unacknowledged:

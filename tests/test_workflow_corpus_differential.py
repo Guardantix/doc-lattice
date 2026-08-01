@@ -83,6 +83,16 @@ def test_the_differential_is_scoped_to_changes_that_can_move_a_verdict() -> None
     assert 'echo "in-scope=' in step["run"]
 
 
+def test_a_pull_request_that_only_weakens_the_differential_job_still_replays() -> None:
+    # The scale, the relaxation flags and this very scope list all live in the workflow file. Left
+    # out of scope, a pull request that only edits the job would skip the differential and report
+    # green having replayed nothing, and the weakened job would then be what every later scanner
+    # change runs under.
+    step = _step("Decide whether the differential has anything to compare")
+
+    assert ".github/workflows/ci.yml" in step["env"]["REPLAYED_PATHS"].split()
+
+
 def test_a_pull_request_that_only_edits_an_acknowledgement_still_replays() -> None:
     # An acknowledgement pre-authorizes one verdict transition. Leaving the file out of scope
     # would let a pull request land the excuse with the gate skipped and nothing replayed, ready
@@ -142,6 +152,46 @@ def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_flo
     assert (
         '--base-inventory "$RUNNER_TEMP/base/tests/fixtures/github_ci_checkpoint/'
         'replay_inventory.json"' in compare
+    )
+
+
+def test_neither_replay_step_shrinks_the_corpus_on_the_command_line() -> None:
+    # The pinned scale is the tool's default and `check_corpus_scale` reads what the record names,
+    # so a scale spelled here overrides both. Pinning the module constants does not reach it, which
+    # is why the absence of the flags is what this holds rather than their value.
+    for name in (
+        "Replay the corpus against the protected base",
+        "Replay the corpus against the candidate",
+    ):
+        script = _step(name)["run"]
+
+        assert "--seeds" not in script
+        assert "--iterations" not in script
+
+
+def test_the_comparison_takes_neither_relaxation_the_tool_offers() -> None:
+    # Each relaxation is a named flag so that a diff taking one is visible. That only gates
+    # anything if the workflow is held to taking neither: `--allow-shrunk-corpus` disables the
+    # scale check and the stale-acknowledgement failure together, and `--no-corpus-floor` drops the
+    # base-owned floor the comparison is otherwise refused without.
+    compare = _step("Report verdict divergence the pull request has not acknowledged")["run"]
+
+    assert "--allow-shrunk-corpus" not in compare
+    assert "--no-corpus-floor" not in compare
+
+
+def test_the_differential_skips_a_base_that_carries_none_of_its_inputs() -> None:
+    # A base predating the gate carries no frozen inventory for the comparison's floor, so the
+    # comparison would refuse and leave the required check red until the branch is rebased. The
+    # probe runs only after the base is proved readable, so a force-push cannot reach the skip.
+    step = _step("Decide whether the differential has anything to compare")
+    required = step["env"]["BASE_GATE_INPUTS"].split()
+
+    assert "tests/fixtures/github_ci_checkpoint/replay_inventory.json" in required
+    assert 'git cat-file -e "$BASE_SHA:$required"' in step["run"]
+    assert "predates the corpus differential gate" in step["run"]
+    assert step["run"].index("refusing to skip the differential") < step["run"].index(
+        "predates the corpus"
     )
 
 

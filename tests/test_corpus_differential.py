@@ -365,6 +365,47 @@ def test_check_corpus_scale_refuses_a_record_that_names_no_scale():
         tool.check_corpus_scale(base, candidate)
 
 
+def test_check_corpus_scale_refuses_a_record_that_holds_fewer_cases_than_it_counts():
+    # The count is what a run reports and what a reader takes the corpus to have been; a record
+    # naming one number and carrying another describes a corpus it did not score.
+    base = _record_document([_scored("true", "certified[]")])
+    candidate = _candidate_document([_scored("true", "certified[]")])
+    candidate["count"] = 20580
+
+    with pytest.raises(ValueError, match="not the corpus it scored"):
+        tool.check_corpus_scale(base, candidate)
+
+
+def test_check_corpus_drawn_refuses_a_seed_that_drew_nothing():
+    # The scale a record names is what the run was asked for, not what it drew. A generator that
+    # collapses to the first seed leaves both records declaring the pin over a corpus that carries
+    # a quarter of it, and both sides collapse alike, so the comparison agrees with itself.
+    cases = [_case(f"fuzz-0001-{index:05d}", f"echo {index}") for index in range(1, 11)]
+
+    with pytest.raises(ValueError, match="seed"):
+        tool.check_corpus_drawn(cases, (1, 2), 5)
+
+
+def test_check_corpus_drawn_refuses_a_generated_half_below_one_seeds_draws():
+    cases = [
+        _case("fuzz-0001-00001", "echo one"),
+        _case("fuzz-0002-00001", "echo two"),
+    ]
+
+    with pytest.raises(ValueError, match="below one seed's worth"):
+        tool.check_corpus_drawn(cases, (1, 2), 5)
+
+
+def test_check_corpus_drawn_accepts_the_scale_a_record_run_actually_draws():
+    cases = [_case("replay-0001", "true")] + [
+        _case(f"fuzz-{seed:04d}-{index:05d}", f"echo {seed} {index}")
+        for seed in (1, 2)
+        for index in range(1, 6)
+    ]
+
+    tool.check_corpus_drawn(cases, (1, 2), 5)
+
+
 def test_check_corpus_retained_refuses_a_candidate_that_dropped_a_frozen_script(tmp_path):
     candidate = _record_document([_scored("true", "certified[]")])
     inventory = _write(
@@ -582,6 +623,75 @@ def test_a_written_draft_keeps_the_reason_already_on_file_and_drops_a_stale_entr
             }
         ]
     }
+
+
+def test_a_written_draft_keeps_an_unmatched_entry_when_the_corpus_was_shrunk():
+    # The comparison does not call an entry stale under a shrunken corpus, because the script it
+    # names may simply not have been drawn. Dropping it from the file it rewrites would delete the
+    # reviewer's reason on the strength of exactly that replay.
+    found = [tool.Divergence("a", "d1", "s1", "certified[]", "guard:x")]
+    current = tool.Acknowledgement("d1", "certified[]", "guard:x", "intended by issue #182")
+    undrawn = tool.Acknowledgement("d9", "certified[]", "guard:y", "covered by a script not drawn")
+
+    document = tool.acknowledgement_document(found, [current, undrawn], drop_stale=False)
+
+    assert document["acknowledgements"] == [
+        {
+            "sha256": "d1",
+            "base_verdict": "certified[]",
+            "candidate_verdict": "guard:x",
+            "reason": "intended by issue #182",
+        },
+        {
+            "sha256": "d9",
+            "base_verdict": "certified[]",
+            "candidate_verdict": "guard:y",
+            "reason": "covered by a script not drawn",
+        },
+    ]
+
+
+def test_check_write_target_refuses_rewriting_a_file_the_comparison_did_not_read(tmp_path):
+    # The written document carries only the reasons the comparison was handed, so a rewrite of a
+    # file nobody read replaces every reason with an empty one, and the next read then refuses the
+    # file for carrying none.
+    existing = _write(tmp_path / "acknowledged.json", {"acknowledgements": []})
+
+    with pytest.raises(ValueError, match="did not read"):
+        tool.check_write_target("", str(existing))
+
+
+def test_check_write_target_accepts_the_regeneration_the_documented_command_spells(tmp_path):
+    existing = _write(tmp_path / "acknowledged.json", {"acknowledgements": []})
+
+    tool.check_write_target(str(existing), str(existing))
+    tool.check_write_target("", str(tmp_path / "draft.json"))
+
+
+def test_compare_refuses_to_blank_the_reasons_on_a_file_it_was_not_given(tmp_path, capsys):
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "guard:x")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                {
+                    "sha256": tool.digest_of("true"),
+                    "base_verdict": "certified[]",
+                    "candidate_verdict": "guard:x",
+                    "reason": "written by a reviewer",
+                }
+            ]
+        },
+    )
+
+    status = _compare(base, candidate, "--write-acknowledgements", str(acknowledged))
+
+    assert status == tool.EXIT_REFUSED
+    assert "did not read" in capsys.readouterr().err
+    assert "written by a reviewer" in acknowledged.read_text(encoding="utf-8")
 
 
 def test_the_repository_acknowledgements_read_as_the_comparison_requires():

@@ -162,9 +162,12 @@ jobs:
           # and the refusals the labels carry are raised through it. The acknowledgements file is
           # named because an entry pre-authorizes a verdict transition: skipping the replay for a
           # pull request that only edits it would land the excuse detached from the change it
-          # excuses, ready for a later diff to walk through. Bound here rather than spelled in the
-          # run body because the guard package's own path carries the distribution marker, which
-          # AD-17 refuses in an uncertified command.
+          # excuses, ready for a later diff to walk through. This workflow file is named for the
+          # stronger version of that reason: the scale, the flags and the scope list all live here,
+          # so a pull request that only weakens the job would otherwise skip the differential and
+          # report green having replayed nothing. Bound here rather than spelled in the run body
+          # because the guard package's own path carries the distribution marker, which AD-17
+          # refuses in an uncertified command.
           REPLAYED_PATHS: >-
             src/doc_lattice/github_ci/
             src/doc_lattice/error_types.py
@@ -172,6 +175,13 @@ jobs:
             scripts/fuzz_shell_taint.py
             tests/fixtures/github_ci_checkpoint/replay_inventory.json
             tests/fixtures/corpus_differential_acknowledgements.json
+            .github/workflows/ci.yml
+          # What the base has to carry for the comparison to be possible at all: the inventory the
+          # base-owned floor is read from, and a guard package to replay. Bound here for the same
+          # reason the list above is.
+          BASE_GATE_INPUTS: >-
+            tests/fixtures/github_ci_checkpoint/replay_inventory.json
+            src/doc_lattice/github_ci/shell_scanner.py
         run: |
           set -euo pipefail
           # A base whose object is missing is not a base that predates the gate: a force-push or a
@@ -181,6 +191,20 @@ jobs:
             echo "base is not readable in this clone; refusing to skip the differential" >&2
             exit 1
           fi
+          # The commit that introduces this gate, and any branch opened against a base older than
+          # it, have a base carrying neither the frozen inventory nor a guard package to replay.
+          # The comparison would refuse on the missing base-owned floor and stay red until the
+          # branch is rebased, so skip rather than fail, exactly as the guard-debt job above does.
+          # Only a readable base reaches this probe, so a force-push cannot take the skip.
+          # Split deliberately: the binding above is a path list, not one path.
+          # shellcheck disable=SC2086
+          for required in $BASE_GATE_INPUTS; do
+            if ! git cat-file -e "$BASE_SHA:$required" 2>/dev/null; then
+              echo "base $BASE_SHA predates the corpus differential gate; skipping the comparison"
+              echo "in-scope=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
           # Split deliberately: the binding above is a path list, not one path.
           # shellcheck disable=SC2086
           changed="$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" -- $REPLAYED_PATHS)"

@@ -1662,11 +1662,30 @@ is not in place, because a count read off a comparison that could not have found
 than no gate. It refuses when the two records did not score the same corpus; when both records name
 the same scanner file, which is one revision replayed twice and agrees with itself by construction;
 when either record was drawn below the pinned corpus scale, which is a command line argument and so
-out of reach of pinning the constants; and when no base-owned inventory was named, since without one
-there is no floor under the corpus at all. Each relaxation is a flag spelled out in the diff that
-takes it, `--no-corpus-floor` and `--allow-shrunk-corpus`, rather than a default nobody sees not
-being exercised. A record also names the scanner file it scored and the scale it was drawn at, which
-is what makes the first two of those checkable at comparison time.
+out of reach of pinning the constants; when a record's case list does not match the count it
+declares; and when no base-owned inventory was named, since without one there is no floor under the
+corpus at all. Each relaxation is a flag spelled out in the diff that takes it, `--no-corpus-floor`
+and `--allow-shrunk-corpus`, rather than a default nobody sees not being exercised. A record also
+names the scanner file it scored and the scale it was drawn at, which is what makes the first two of
+those checkable at comparison time.
+
+The scale a record names is what the run was asked for rather than what it drew, so the recording
+refuses in turn when the generated half collapsed: when a requested seed drew no script, or when
+what survived deduplication is below a single seed's worth of draws. An edit to the generator, to
+the case builder or to the deduplication that shrinks the drawn half otherwise leaves both records
+declaring the pin over a corpus a fraction of that size, collapsing alike on both sides, so the
+comparison agrees with itself and reports nothing for the scripts nobody drew.
+
+The recording builds the corpus with the candidate's fuzzer against the base's scanner, so a pull
+request that adds a scanner name and draws on it in the same diff refuses rather than reports: the
+base does not carry the name the fuzzer resolves. There is no acknowledgement for that, because no
+records were produced to compare. The remedy is to land the scanner name first and draw on it in a
+later pull request, whose base then carries it, and the refusal says so.
+
+`--write-acknowledgements` writes only the reasons the comparison was handed, so it refuses a
+destination that already holds acknowledgements the run did not read; naming the file on both flags
+is what keeps the reasons on it. Under `--allow-shrunk-corpus` the write also keeps the entries this
+comparison matched nothing for, for the same reason it does not call them stale.
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
 script digest, both verdicts and a reason, so it covers exactly the transition it was written for.
@@ -1693,13 +1712,23 @@ required status checks rather than by a `needs` edge, and `Corpus differential` 
 list; nothing in the tree can assert that setting. Its scope step reads the diff against the base
 and exits early when no replayed input changed, so an unrelated pull request pays for a checkout
 and one `git diff`. The scoped paths are the guard package, `error_types.py` as the one module
-outside it the scan path imports, the tool, the fuzzer grammar, the frozen inventory and the
-acknowledgements file. A base whose object cannot be read is a failure rather than a skip, for the
-reason AD-20's base-owned comparison gives.
+outside it the scan path imports, the tool, the fuzzer grammar, the frozen inventory, the
+acknowledgements file and the workflow file itself. The last of those is scoped for a stronger
+version of the acknowledgement's reason: the scale, the relaxation flags and the scope list all live
+in the workflow, so a pull request that only weakened the job would skip the differential and report
+green having replayed nothing, leaving the weakened job as what every later scanner change runs
+under. The workflow contract tests hold the job to taking neither relaxation and to naming no scale
+on either recording, since a flag's visibility in a diff gates nothing on its own.
+
+A base whose object cannot be read is a failure rather than a skip, for the reason AD-20's
+base-owned comparison gives. A base whose object reads but which carries neither the frozen
+inventory nor a guard package predates the gate and is skipped instead, as the guard-debt job skips
+a base predating its own inputs: the comparison would otherwise refuse on a floor that is not there
+and leave a required check red until the branch is rebased.
 **Consequences:** An over-refusal is visible to automation for the first time, in either direction
 and without a witness for the guard involved, which is what makes this the standing control while
 the frozen-debt window is open. The cost is roughly two minutes of replay per revision on a change
-that touches the scanner, and nothing on a change that does not. Three limits are disclosed rather
+that touches the scanner, and nothing on a change that does not. Four limits are disclosed rather
 than closed. A withdrawal that mints exactly the origin identifier the deeper guard would have
 returned, over exactly the corpus scripts that guard already refuses, moves no label and stays
 invisible; widening the corpus is what shrinks that, not a rule. The corpus is a fixed sample
@@ -1707,6 +1736,14 @@ rather than a proof, so a clean differential is evidence about those scripts and
 about every input the scanner accepts; and its generated half saturates on distinct verdict labels
 within a few hundred draws, so the scale it is run at buys sensitivity per script rather than more
 kinds of verdict.
+
+The replay also scores every script at the scanner's default limits, and only at those. The
+budget-governed and cap-governed guards are the ones `scripts/guard_witness_sweep.py` drives the
+same corpus once per shrunk cap to reach at all, so a clean differential says nothing about a
+withdrawal of one of them: they are the larger part of what AD-20 still freezes as debt. Closing
+that means replaying the corpus once per cap tier, which multiplies a job that already scores
+roughly forty thousand scripts, and it is deliberately left for the sweep and for the witness rows
+it produces rather than paid for on every scanner pull request.
 
 And unlike AD-20's base-owned comparison, only the corpus floor here is base-owned: the tool that
 builds the corpus, labels a verdict and matches an acknowledgement is the candidate's in both

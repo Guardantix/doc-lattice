@@ -122,7 +122,7 @@ rather than that anything failed. Shrink `--seeds` and `--iterations` for a quic
 `scripts/corpus_differential.py` replays one fixed corpus through the public scan path once per
 revision and reports every script whose verdict differs, in either direction. It is the dynamic
 control for the residual AD-20 leaves open, and AD-22 in [ARCHITECTURE.md](ARCHITECTURE.md) owns
-what it gates, what a verdict label carries and the three limits it discloses.
+what it gates, what a verdict label carries and the four limits it discloses.
 
 Two revisions of one package cannot be imported side by side, so a run is two `record` processes
 and one `compare`. The CI job replays the base from a worktree of the protected base revision and
@@ -133,15 +133,28 @@ which otherwise refuses records drawn below the pinned scale. `--base-inventory`
 floor under the corpus and is not optional; `--no-corpus-floor` says out loud that a run has none.
 Two records naming the same scanner file are refused as one revision replayed twice.
 
+The fuzzer builds the corpus for both recordings and imports the scanner at module scope, so a
+change that adds a scanner name and draws on it in the same pull request refuses rather than
+reports: the base does not carry the name. Land the scanner name first and draw on it in a later
+pull request, whose base then carries it. No acknowledgement covers this, since no records were
+produced to compare.
+
 Acknowledge an intentional change in `tests/fixtures/corpus_differential_acknowledgements.json`
 rather than restoring a verdict you meant to move: an entry names the script digest, both verdicts
-and a reason a reviewer can read. Run `compare --write-acknowledgements FILE` to have the entries
-written for you, then write each reason, since an entry with an empty reason is refused.
+and a reason a reviewer can read. Run `compare --acknowledged FILE --write-acknowledgements FILE`
+to have the entries written for you, then write each reason, since an entry with an empty reason is
+refused. Name the same file on both flags: the written document carries only the reasons the
+comparison was handed, so a rewrite of a file the run did not read blanks every reason on it, and
+`compare` refuses that rather than doing it.
 
 An acknowledgement does not expire. Once its transition has landed in the base it matches nothing,
 and a full-scale comparison then fails until it is removed, because an entry left on file is a
-standing authorization to make that move again. `--write-acknowledgements` drops the stale entries
-while keeping the reasons still in use.
+standing authorization to make that move again. That removal is not the acknowledging pull
+request's to make, since its own comparison needs the entry to match: the entry lands in the base
+and the next pull request touching a replayed input is the one that has to drop it.
+`--write-acknowledgements` drops the stale entries while keeping the reasons still in use, except
+under `--allow-shrunk-corpus`, where an entry matching nothing is kept because the script it names
+may simply not have been drawn.
 
 ## Enforced repository rules
 
