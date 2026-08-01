@@ -467,19 +467,68 @@ def test_report_covers_only_the_transition_an_acknowledgement_names(capsys):
     matching = tool.Acknowledgement("d1", "certified[]", "guard:x", "intended by issue #182")
     other = tool.Acknowledgement("d1", "certified[]", "guard:z", "a different transition")
 
-    assert tool.report(found, [matching])[0] == []
-    assert tool.report(found, [other])[0] == found
+    assert tool.report(found, [matching], {})[0] == []
+    assert tool.report(found, [other], {})[0] == found
     assert "unacknowledged" in capsys.readouterr().out
 
 
-def test_report_names_an_acknowledgement_nothing_diverged_the_way_it_describes(capsys):
-    stale = tool.Acknowledgement("d9", "certified[]", "guard:x", "landed two releases ago")
+def test_report_names_an_acknowledgement_the_base_has_already_spent(capsys):
+    landed = tool.Acknowledgement("d9", "certified[]", "guard:x", "landed two releases ago")
 
-    unacknowledged, unmatched = tool.report([], [stale])
+    unacknowledged, spent, live = tool.report([], [landed], {"d9": "guard:x"})
 
     assert unacknowledged == []
-    assert unmatched == [stale]
+    assert spent == [landed]
+    assert live == []
+    captured = capsys.readouterr().out
+    assert "spent acknowledgement" in captured
+    assert "guard:x" in captured
+
+
+def test_report_names_an_acknowledgement_the_base_still_makes_available(capsys):
+    standing = tool.Acknowledgement("d9", "certified[]", "guard:x", "landed two releases ago")
+
+    unacknowledged, spent, live = tool.report([], [standing], {"d9": "certified[]"})
+
+    assert unacknowledged == []
+    assert spent == []
+    assert live == [standing]
+    assert "live acknowledgement" in capsys.readouterr().out
+
+
+def test_report_classifies_nothing_when_the_draw_was_too_small_to_prove_anything(capsys):
+    # Under a shrunken corpus the script an entry names may simply not have been drawn, so the
+    # unmatched entries are read out undifferentiated and none of them is called live.
+    undrawn = tool.Acknowledgement("d9", "certified[]", "guard:x", "covered by a script not drawn")
+
+    unacknowledged, spent, live = tool.report([], [undrawn], None)
+
+    assert unacknowledged == []
+    assert spent == [undrawn]
+    assert live == []
     assert "stale acknowledgement" in capsys.readouterr().out
+
+
+def test_split_unmatched_calls_an_entry_spent_only_when_the_base_moved_off_its_verdict():
+    landed = tool.Acknowledgement("d1", "certified[]", "guard:x", "the transition landed")
+    superseded = tool.Acknowledgement("d2", "certified[]", "guard:x", "a third verdict took over")
+    standing = tool.Acknowledgement("d3", "certified[]", "guard:x", "the move is still available")
+    undrawn = tool.Acknowledgement("d4", "certified[]", "guard:x", "the corpus no longer scores it")
+    scored = {"d1": "guard:x", "d2": "guard:z", "d3": "certified[]"}
+
+    spent, live = tool.split_unmatched([landed, superseded, standing, undrawn], scored)
+
+    assert spent == [landed, superseded]
+    assert live == [standing, undrawn]
+
+
+def test_base_verdicts_read_the_score_the_protected_base_recorded_for_each_script():
+    base = _record_document([_scored("true", "certified[]"), _scored("false", "guard:a", "c2")])
+
+    assert tool.base_verdicts(base) == {
+        tool.digest_of("true"): "certified[]",
+        tool.digest_of("false"): "guard:a",
+    }
 
 
 def test_load_acknowledgements_refuses_an_entry_that_declares_no_reason(tmp_path):
@@ -784,9 +833,19 @@ def test_compare_refuses_records_drawn_below_the_pinned_corpus_scale(tmp_path, c
     assert _compare(base, candidate, "--allow-shrunk-corpus") == tool.EXIT_OK
 
 
-def test_compare_fails_on_an_acknowledgement_that_matches_no_divergence(tmp_path, capsys):
-    # An entry left on file once its transition landed in the base is a standing authorization to
-    # make that exact move again, so it has to be removed rather than read out into a green log.
+def _acknowledgement(digest: str, base: str, candidate: str, reason: str) -> dict[str, str]:
+    return {
+        "sha256": digest,
+        "base_verdict": base,
+        "candidate_verdict": candidate,
+        "reason": reason,
+    }
+
+
+def test_compare_fails_on_an_acknowledgement_the_base_still_makes_available(tmp_path, capsys):
+    # The base scores the script at the verdict the entry names, so the exact move it authorizes is
+    # available and nobody has made it. That is a standing authorization, and it has to be removed
+    # rather than read out into a green log.
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
     candidate = _write(
         tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
@@ -795,12 +854,9 @@ def test_compare_fails_on_an_acknowledgement_that_matches_no_divergence(tmp_path
         tmp_path / "acknowledged.json",
         {
             "acknowledgements": [
-                {
-                    "sha256": tool.digest_of("true"),
-                    "base_verdict": "certified[]",
-                    "candidate_verdict": "guard:x",
-                    "reason": "landed two releases ago",
-                }
+                _acknowledgement(
+                    tool.digest_of("true"), "certified[]", "guard:x", "authorized last release"
+                )
             ]
         },
     )
@@ -809,13 +865,151 @@ def test_compare_fails_on_an_acknowledgement_that_matches_no_divergence(tmp_path
 
     assert status == tool.EXIT_DIVERGED
     captured = capsys.readouterr()
-    assert "stale acknowledgements: 1" in captured.out
-    assert "match no divergence" in captured.err
+    assert "live acknowledgements: 1" in captured.out
+    assert "standing authorizations" in captured.err
 
 
-def test_a_shrunk_corpus_does_not_call_an_acknowledgement_stale(tmp_path):
+def test_compare_fails_on_an_acknowledgement_the_corpus_no_longer_scores(tmp_path, capsys):
+    # Nothing in the base record scores the script the entry names, so the comparison cannot prove
+    # the transition landed. An entry nobody can audit fails the pull request that made it
+    # unauditable rather than passing on the strength of its own absence.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                _acknowledgement("d9", "certified[]", "guard:x", "named a script nothing draws")
+            ]
+        },
+    )
+
+    status = _compare(base, candidate, "--acknowledged", str(acknowledged))
+
+    assert status == tool.EXIT_DIVERGED
+    assert "nothing about the entry can be proven" in capsys.readouterr().err
+
+
+def test_compare_passes_an_acknowledgement_whose_transition_has_landed_in_the_base(
+    tmp_path, capsys
+):
+    # The base already scores the script at the verdict the entry moves to, so the entry can only
+    # match a divergence this base cannot produce. Failing here would land the acknowledging pull
+    # request's cleanup on whichever unrelated author replayed the corpus next.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                _acknowledgement(
+                    tool.digest_of("true"), "guard:x", "certified[]", "landed two releases ago"
+                )
+            ]
+        },
+    )
+
+    status = _compare(base, candidate, "--acknowledged", str(acknowledged))
+
+    assert status == tool.EXIT_OK
+    captured = capsys.readouterr()
+    assert "spent acknowledgements: 1" in captured.out
+    assert captured.err == ""
+
+
+def test_compare_treats_an_acknowledgement_a_third_verdict_superseded_as_spent(tmp_path, capsys):
+    # The base moved off the entry's base verdict without landing on its candidate verdict either.
+    # The entry is inert against this base all the same, since it can only cover a divergence whose
+    # base verdict is the one it names.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "guard:z")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "guard:z")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                _acknowledgement(
+                    tool.digest_of("true"), "certified[]", "guard:x", "superseded by guard:z"
+                )
+            ]
+        },
+    )
+
+    status = _compare(base, candidate, "--acknowledged", str(acknowledged))
+
+    assert status == tool.EXIT_OK
+    assert "spent acknowledgements: 1" in capsys.readouterr().out
+
+
+def test_a_spent_acknowledgement_leaves_the_file_the_next_write_rewrites(tmp_path):
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                _acknowledgement(
+                    tool.digest_of("true"), "guard:x", "certified[]", "landed two releases ago"
+                )
+            ]
+        },
+    )
+
+    status = _compare(
+        base,
+        candidate,
+        "--acknowledged",
+        str(acknowledged),
+        "--write-acknowledgements",
+        str(acknowledged),
+    )
+
+    assert status == tool.EXIT_OK
+    assert json.loads(acknowledged.read_text(encoding="utf-8"))["acknowledgements"] == []
+
+
+def test_a_full_scale_write_drops_the_spent_and_the_live_entries_alike(tmp_path):
+    # Removing an authorization is safe whichever of the two it was, so the write is what clears a
+    # live entry as well as a spent one.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                _acknowledgement(
+                    tool.digest_of("true"), "guard:x", "certified[]", "spent, the move landed"
+                ),
+                _acknowledgement("d9", "certified[]", "guard:x", "live, nothing scores it"),
+            ]
+        },
+    )
+
+    status = _compare(
+        base,
+        candidate,
+        "--acknowledged",
+        str(acknowledged),
+        "--write-acknowledgements",
+        str(acknowledged),
+    )
+
+    assert status == tool.EXIT_DIVERGED
+    assert json.loads(acknowledged.read_text(encoding="utf-8"))["acknowledgements"] == []
+
+
+def test_a_shrunk_corpus_makes_no_spent_or_live_judgment_at_all(tmp_path, capsys):
     # The script an entry names may simply not have been drawn, so a partial replay is no evidence
-    # that its transition stopped happening.
+    # that its transition stopped happening, and none of it is evidence that one is still standing.
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
     shrunk = _candidate_document([_scored("true", "certified[]")])
     shrunk["seeds"] = [1]
@@ -825,12 +1019,10 @@ def test_a_shrunk_corpus_does_not_call_an_acknowledgement_stale(tmp_path):
         tmp_path / "acknowledged.json",
         {
             "acknowledgements": [
-                {
-                    "sha256": "d9",
-                    "base_verdict": "certified[]",
-                    "candidate_verdict": "guard:x",
-                    "reason": "covered by a script this run never drew",
-                }
+                _acknowledgement("d9", "certified[]", "guard:x", "covered by a script never drawn"),
+                _acknowledgement(
+                    tool.digest_of("true"), "certified[]", "guard:x", "the move is available"
+                ),
             ]
         },
     )
@@ -838,6 +1030,40 @@ def test_a_shrunk_corpus_does_not_call_an_acknowledgement_stale(tmp_path):
     status = _compare(base, candidate, "--allow-shrunk-corpus", "--acknowledged", str(acknowledged))
 
     assert status == tool.EXIT_OK
+    captured = capsys.readouterr()
+    assert "stale acknowledgements: 2" in captured.out
+    assert captured.err == ""
+
+
+def test_a_shrunk_corpus_keeps_every_unmatched_entry_on_the_file_it_rewrites(tmp_path):
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    shrunk = _candidate_document([_scored("true", "certified[]")])
+    shrunk["seeds"] = [1]
+    shrunk["iterations"] = 5
+    candidate = _write(tmp_path / "candidate.json", shrunk)
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                _acknowledgement("d9", "certified[]", "guard:x", "covered by a script never drawn")
+            ]
+        },
+    )
+
+    status = _compare(
+        base,
+        candidate,
+        "--allow-shrunk-corpus",
+        "--acknowledged",
+        str(acknowledged),
+        "--write-acknowledgements",
+        str(acknowledged),
+    )
+
+    assert status == tool.EXIT_OK
+    written = json.loads(acknowledged.read_text(encoding="utf-8"))["acknowledgements"]
+    assert [entry["sha256"] for entry in written] == ["d9"]
+    assert [entry["reason"] for entry in written] == ["covered by a script never drawn"]
 
 
 def test_compare_refuses_rather_than_reports_when_the_corpora_disagree(tmp_path, capsys):

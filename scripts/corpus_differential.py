@@ -36,11 +36,15 @@ diff a reviewer can see taking it.
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
 script digest and both verdicts, so it covers exactly the transition it was written for. It does not
-expire on its own: an entry matching no divergence fails the comparison, because an entry left on
-file after its transition landed is a standing authorization to make that exact move again. A change
-that legitimately moves thousands of verdicts is not transcribed by hand: `--write-acknowledgements`
-writes the file this comparison would need, with every reason left empty and stale entries dropped,
-and an empty reason is refused when the file is read.
+expire on its own, and an entry matching no divergence is read against the base's own verdict for
+the script it names. A base scoring that script at anything other than the entry's base verdict has
+spent the entry: the transition landed, so the entry authorizes a move this base cannot produce, and
+it is reported without failing the run. A base still scoring the script at that verdict, or no
+longer scoring the script at all, leaves a standing authorization nothing has verified, and the
+comparison fails until it is removed. A change that legitimately moves thousands of verdicts is not
+transcribed by hand: `--write-acknowledgements` writes the file this comparison would need, with
+every reason left empty and every unmatched entry dropped, and an empty reason is refused when the
+file is read.
 
 A verdict label carries the refusing guard's origin identifier, which is what makes a refusal that
 moves to another origin a divergence rather than two refusals that look alike. Four limits follow
@@ -843,6 +847,49 @@ def divergences(base: dict[str, object], candidate: dict[str, object]) -> list[D
     return found
 
 
+def base_verdicts(base: dict[str, object]) -> dict[str, str]:
+    """Return the verdict the protected base scored each corpus script at.
+
+    Args:
+        base: The protected base's record.
+
+    Returns:
+        Verdict label by script digest, carrying only the scripts the base scored.
+    """
+    return {case["sha256"]: case["verdict"] for case in base["cases"]}  # ty: ignore[not-iterable]
+
+
+def split_unmatched(
+    unmatched: Sequence[Acknowledgement],
+    scored: dict[str, str],
+) -> tuple[list[Acknowledgement], list[Acknowledgement]]:
+    """Split the acknowledgements nothing matched into the spent ones and the live ones.
+
+    An entry naming `(digest, A -> B)` can only ever cover a divergence whose base verdict is `A`.
+    A base scoring that digest at anything other than `A` therefore cannot produce the divergence
+    the entry authorizes, whether because the transition landed or because a third verdict
+    superseded it, so the entry is provably inert against this base. A base still scoring the digest
+    at `A` leaves the exact move available with nobody having made it, and a base not scoring the
+    digest at all proves nothing either way, so both stay live.
+
+    Args:
+        unmatched: The acknowledgements this comparison matched no divergence for.
+        scored: Verdict label by script digest, as the protected base scored them.
+
+    Returns:
+        The spent entries and the live entries, each in the order they were given.
+    """
+    spent: list[Acknowledgement] = []
+    live: list[Acknowledgement] = []
+    for entry in unmatched:
+        recorded = scored.get(entry.digest)
+        if recorded is not None and recorded != entry.base:
+            spent.append(entry)
+        else:
+            live.append(entry)
+    return spent, live
+
+
 def transition_counts(found: Sequence[Divergence]) -> list[tuple[tuple[str, str], int]]:
     """Return how many scripts each verdict transition covers, most frequent first.
 
@@ -861,31 +908,86 @@ def transition_counts(found: Sequence[Divergence]) -> list[tuple[tuple[str, str]
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
+def report_unmatched(
+    spent: Sequence[Acknowledgement],
+    live: Sequence[Acknowledgement],
+    scored: dict[str, str] | None,
+    limit: int,
+) -> None:
+    """Print the acknowledgements this comparison matched no divergence for.
+
+    Args:
+        spent: The entries the base has spent, or every unmatched entry when nothing was
+            classified.
+        live: The entries still authorizing an available move, empty when nothing was classified.
+        scored: Verdict label by script digest as the base scored them, `None` when the draw was
+            too small to classify against.
+        limit: How many individual rows to print per section.
+    """
+    if scored is None:
+        for entry in spent[:limit]:
+            print(f"  stale acknowledgement, nothing diverged this way: {entry.digest}")
+            print(f"    reason on file: {entry.reason}")
+        if len(spent) > limit:
+            print(f"  ... and {len(spent) - limit} more stale acknowledgement(s)")
+        return
+    for entry in spent[:limit]:
+        print(f"  spent acknowledgement, its transition has landed: {entry.digest}")
+        print(f"    authorized:              {entry.base} -> {entry.candidate}")
+        print(f"    the base now scores it:  {scored[entry.digest]}")
+        print(f"    reason on file:          {entry.reason}")
+        print("    inert against this base, and --write-acknowledgements drops it")
+    if len(spent) > limit:
+        print(f"  ... and {len(spent) - limit} more spent acknowledgement(s)")
+    for entry in live[:limit]:
+        seen = scored.get(entry.digest, "nothing in this corpus")
+        print(f"  live acknowledgement, a standing authorization: {entry.digest}")
+        print(f"    authorizes:              {entry.base} -> {entry.candidate}")
+        print(f"    the base scores it:      {seen}")
+        print(f"    reason on file:          {entry.reason}")
+    if len(live) > limit:
+        print(f"  ... and {len(live) - limit} more live acknowledgement(s)")
+
+
 def report(
     found: Sequence[Divergence],
     acknowledged: Sequence[Acknowledgement],
+    scored: dict[str, str] | None,
     *,
     limit: int = REPORT_LIMIT,
-) -> tuple[list[Divergence], list[Acknowledgement]]:
+) -> tuple[list[Divergence], list[Acknowledgement], list[Acknowledgement]]:
     """Print the divergence report and return what it leaves unacknowledged.
+
+    An acknowledgement nothing matched is read against the base's own verdict for the script it
+    names, so an entry whose transition has landed is reported rather than held against the pull
+    request that inherited it. A comparison too small to prove anything about an entry classifies
+    none of them: `scored` is `None` there, and every unmatched entry comes back as spent so that
+    nothing fails on a draw that never looked.
 
     Args:
         found: Every divergence between the two records.
         acknowledged: The declared intentional divergences.
+        scored: Verdict label by script digest as the protected base scored them, or `None` under a
+            shrunken corpus, where no spent or live judgment is made.
         limit: How many individual rows to print per section.
 
     Returns:
-        The unacknowledged divergences and the acknowledgements nothing matched.
+        The unacknowledged divergences, the spent acknowledgements and the live ones.
     """
     covered = {entry.key for entry in acknowledged}
     unacknowledged = [divergence for divergence in found if divergence.key not in covered]
     observed = {divergence.key for divergence in found}
     unmatched = [entry for entry in acknowledged if entry.key not in observed]
+    spent: list[Acknowledgement]
+    live: list[Acknowledgement]
+    if scored is None:
+        spent, live = list(unmatched), []
+        tally = f"stale acknowledgements: {len(unmatched)}"
+    else:
+        spent, live = split_unmatched(unmatched, scored)
+        tally = f"spent acknowledgements: {len(spent)}; live acknowledgements: {len(live)}"
 
-    print(
-        f"corpus divergences: {len(found)} ({len(unacknowledged)} unacknowledged); "
-        f"stale acknowledgements: {len(unmatched)}"
-    )
+    print(f"corpus divergences: {len(found)} ({len(unacknowledged)} unacknowledged); {tally}")
     for transition, count in transition_counts(found):
         print(f"  {count:>6}  {transition[0]} -> {transition[1]}")
     for divergence in unacknowledged[:limit]:
@@ -895,12 +997,8 @@ def report(
         print(f"    script:    {divergence.source!r}")
     if len(unacknowledged) > limit:
         print(f"  ... and {len(unacknowledged) - limit} more unacknowledged divergence(s)")
-    for entry in unmatched[:limit]:
-        print(f"  stale acknowledgement, nothing diverged this way: {entry.digest}")
-        print(f"    reason on file: {entry.reason}")
-    if len(unmatched) > limit:
-        print(f"  ... and {len(unmatched) - limit} more stale acknowledgement(s)")
-    return unacknowledged, unmatched
+    report_unmatched(spent, live, scored, limit)
+    return unacknowledged, spent, live
 
 
 def acknowledgement_document(
@@ -916,7 +1014,8 @@ def acknowledgement_document(
     This writes the entries instead, keeping the reason already on file for a transition that has
     one and leaving the rest empty for the author to write. An empty reason is refused when the
     file is read, so nothing is acknowledged until somebody says why. Transitions the comparison
-    did not report are dropped, which is how a stale entry leaves the file.
+    did not report are dropped, spent and live alike, which is how an entry leaves the file:
+    removing an authorization is safe whichever of the two it was.
 
     Args:
         found: Every divergence between the two records.
@@ -1036,13 +1135,16 @@ def _compare_command(args: argparse.Namespace) -> int:
         raise ValueError(message)
     acknowledged = load_acknowledgements(Path(args.acknowledged)) if args.acknowledged else []
     found = divergences(base, candidate)
-    unacknowledged, unmatched = report(found, acknowledged, limit=args.report_limit)
+    # A shrunken corpus is not evidence about an entry nothing matched: the script it names may
+    # simply not have been drawn, so no spent or live judgment is made on that draw at all.
+    scored = None if args.allow_shrunk_corpus else base_verdicts(base)
+    unacknowledged, spent, live = report(found, acknowledged, scored, limit=args.report_limit)
     if args.write_acknowledgements:
         draft = Path(args.write_acknowledgements)
         drop_stale = not args.allow_shrunk_corpus
         document = acknowledgement_document(found, acknowledged, drop_stale=drop_stale)
         draft.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-        written = len(found) if drop_stale else len(found) + len(unmatched)
+        written = len(found) if drop_stale else len(found) + len(spent) + len(live)
         print(
             f"wrote {written} acknowledgement(s) to {draft}; each new reason is left empty "
             "for the author to write, and an empty reason is refused on read"
@@ -1055,14 +1157,14 @@ def _compare_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_DIVERGED
-    # A shrunken corpus is not evidence that a transition stopped happening: the script the entry
-    # names may simply not have been drawn. Only a full-scale replay can call an entry stale.
-    if unmatched and not args.allow_shrunk_corpus:
+    if live:
         print(
-            f"{len(unmatched)} acknowledgement(s) in {ACKNOWLEDGEMENTS} match no divergence in "
-            "this comparison; remove them rather than leaving a standing authorization for a "
-            "transition nobody is reviewing, or run compare --write-acknowledgements to have the "
-            "stale entries dropped for you",
+            f"{len(live)} acknowledgement(s) in {ACKNOWLEDGEMENTS} are standing authorizations for "
+            "a transition that has not landed: either the base still scores the script at the "
+            "entry's base verdict, so the move it authorizes is available and nobody has made it, "
+            "or the corpus no longer scores that script at all, so nothing about the entry can be "
+            "proven; remove them, or run compare --write-acknowledgements to have them dropped "
+            "for you",
             file=sys.stderr,
         )
         return EXIT_DIVERGED
@@ -1116,7 +1218,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-shrunk-corpus",
         action="store_true",
         help="accept records drawn below the pinned scale, which also stops an acknowledgement "
-        "matching nothing from being read as stale",
+        "matching nothing from being judged spent or live",
     )
     comparer.add_argument(
         "--write-acknowledgements",

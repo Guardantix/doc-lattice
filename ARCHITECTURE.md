@@ -1685,17 +1685,28 @@ later pull request, whose base then carries it, and the refusal says so.
 `--write-acknowledgements` writes only the reasons the comparison was handed, so it refuses a
 destination that already holds acknowledgements the run did not read; naming the file on both flags
 is what keeps the reasons on it. Under `--allow-shrunk-corpus` the write also keeps the entries this
-comparison matched nothing for, for the same reason it does not call them stale.
+comparison matched nothing for, for the same reason it passes no judgment on them there.
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
 script digest, both verdicts and a reason, so it covers exactly the transition it was written for.
-It does not expire on its own. An entry matching no divergence fails the comparison and is counted
-in the report rather than only listed there, because an entry left on file once its transition
-landed in the base is a standing authorization to make that exact move again, and printing it into
-the log of a green job is not review. Removing it is one line, and `--write-acknowledgements` drops
-stale entries for an author who would rather not find them by hand. A shrunken corpus cannot call an
-entry stale, since the script it names may simply not have been drawn, so `--allow-shrunk-corpus`
-suspends that check with the scale check it belongs to.
+It does not expire on its own; an entry matching no divergence is judged by what the base record
+says about the script it names. An entry whose script the base now scores at anything other than
+its base verdict is spent: it can only match a divergence that opens at that verdict, this base
+opens none, and no candidate edit changes what the base scores, so the entry authorizes nothing
+against this base. Spent entries are counted and reported rather than failed, and the next
+`--write-acknowledgements` run drops them. Failing them uniformly was tried first and moved the
+burden to the wrong author: the acknowledging pull request cannot remove its own entries, since
+its own comparison needs them to match, so they landed in the base and the next pull request
+touching a replayed input inherited a red check and a replay to delete someone else's line. An
+entry whose script the base still scores at exactly its base verdict is a standing authorization
+for a move nobody has made, and an entry naming a script the base record does not score can never
+be judged again, so the comparison fails on both until they are removed, because printing either
+into the log of a green job is not review. The dangerous state is refused earlier than the uniform
+staleness failure refused it: only a reversion landing in the base turns a spent entry back into a
+live one, that reversion is itself a divergence that had to be acknowledged under review, and the
+next comparison refuses the reactivated entry before it can excuse anything. A shrunken corpus
+proves nothing by absence, since the script an entry names may simply not have been drawn, so
+`--allow-shrunk-corpus` suspends the judgment along with the scale check it belongs to.
 
 Acknowledgements are a file in the diff, which is what makes them reviewable; a label or a phrase
 in a pull request body is neither versioned nor reviewable alongside the change it excuses. That

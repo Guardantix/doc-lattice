@@ -147,14 +147,15 @@ refused. Name the same file on both flags: the written document carries only the
 comparison was handed, so a rewrite of a file the run did not read blanks every reason on it, and
 `compare` refuses that rather than doing it.
 
-An acknowledgement does not expire. Once its transition has landed in the base it matches nothing,
-and a full-scale comparison then fails until it is removed, because an entry left on file is a
-standing authorization to make that move again. That removal is not the acknowledging pull
-request's to make, since its own comparison needs the entry to match: the entry lands in the base
-and the next pull request touching a replayed input is the one that has to drop it.
-`--write-acknowledgements` drops the stale entries while keeping the reasons still in use, except
-under `--allow-shrunk-corpus`, where an entry matching nothing is kept because the script it names
-may simply not have been drawn.
+An acknowledgement does not expire, and once its transition has landed in the base it matches
+nothing. The comparison then judges it by the base record: an entry whose script the base scores
+at anything other than the entry's base verdict is spent, reported without failing anyone, and
+dropped by the next `--write-acknowledgements` run, so an acknowledging pull request leaves
+nothing behind for a later author to clean up. An entry whose script the base still scores at the
+entry's base verdict is a standing authorization for a move nobody has made, and one naming a
+script the corpus no longer draws can never be judged again; a full-scale comparison fails on
+both until they are removed. Under `--allow-shrunk-corpus` no judgment is made and every
+unmatched entry is kept, because the script it names may simply not have been drawn.
 
 ## Enforced repository rules
 
