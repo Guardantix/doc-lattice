@@ -1550,6 +1550,9 @@ more also shrinks less, which inflates the distinct-recipe count and reads as a 
 is not. The comparable quantities are the failing cases and the set difference between variants,
 never the shrunk count.
 
+The variants vary the resource and stream lookups. The variable lookup shares the same default and
+was not varied, so the experiment covers two of the three tables the proposal named.
+
 Measured at 85922d3:
 
 | variant | false certifications | fixed | introduced | suite failures | fuzz over-refusals |
@@ -1560,11 +1563,13 @@ Measured at 85922d3:
 | resources only widen | - | 0 | - | 30 | - |
 | synthetic negative scope ids only | 191 | 0 | 0 | 0 | 112 |
 
-**Decision:** A missing key in the variable, resource, or stream tables continues to resolve to the
-inert `_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither
-globally nor for one table. Reopening the proposal means re-running this five-variant comparison
-against the tree it targets and reporting the same columns, not matching the numbers above, which
-belong to a tree the fixes since have replaced.
+**Decision:** A missing key in the resource or stream tables continues to resolve to the inert
+`_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither for the two
+tables together nor for one of them. The variable lookup keeps the same default, which is unchanged
+behavior and not a measured rejection: nothing here varied it, so a variable-only proposal is open
+and needs its own measurement rather than being refused by this entry. Reopening the proposal for a
+table measured here means re-running that comparison against the tree it targets and reporting the
+same columns, not matching the numbers above, which belong to a tree the fixes since have replaced.
 
 Every measured variant was strictly sound-improving, introducing zero new false certifications, so
 the rejection was about yield against cost. Widening resource lookups contributed zero fixes and 30
@@ -1590,11 +1595,11 @@ attributed to, and the same seed and method re-run at 1c7a6df report 2 false cer
 over-refusals. A later attempt has to supply the discriminator this experiment lacked, which is
 knowing whether the body itself should have defined a key, rather than inferring that from the key's
 shape.
-**Consequences:** The inert missing-key default is the pinned behavior of an unresolved content
-reference, and the false certifications AD-18 discloses stay open under their individual issues
-rather than behind one pending global fix. This rejects one widening, not fail-closed defaults in
-general: AD-18's rule that a projection which is merely lost widens to the top of the lattice is
-unchanged, because there the solver knows it lost track, while a table miss does not say whether the
-key was ever meant to exist. The residual cost is explicit. An evidence-construction gap in a new
-lowering still certifies silently instead of refusing, so that risk is carried by the review and
-fuzz measurement of the lowering itself rather than by a lattice-wide backstop.
+**Consequences:** The inert missing-key default is the pinned behavior of an unresolved resource or
+stream reference, and the false certifications AD-18 discloses stay open under their individual
+issues rather than behind one pending global fix. This rejects one widening, not fail-closed
+defaults in general: AD-18's rule that a projection which is merely lost widens to the top of the
+lattice is unchanged, because there the solver knows it lost track, while a table miss does not say
+whether the key was ever meant to exist. The residual cost is explicit. An evidence-construction gap
+in a new lowering still certifies silently instead of refusing, so that risk is carried by the
+review and fuzz measurement of the lowering itself rather than by a lattice-wide backstop.
