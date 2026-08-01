@@ -1052,6 +1052,417 @@ def test_output_process_substitution_routes_writer_to_consumer_stdin():
     assert_taint_refusal("printf '%s%s\\n' doc- 'lattice reconcile' > >(bash)")
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash)",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' ) > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } 1> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat | bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile'; } ; } > >(bash)",
+        "{ printf doc-; printf '%s\\n' 'lattice reconcile'; } > >(bash)",
+        "if :; then printf '%s%s\\n' doc- 'lattice reconcile'; fi > >(bash)",
+        "for word in x; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+        "while :; do printf '%s%s\\n' doc- 'lattice reconcile'; break; done > >(bash)",
+        "until :; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+        "case x in x) printf '%s%s\\n' doc- 'lattice reconcile';; esac > >(bash)",
+    ],
+    ids=(
+        "brace-group",
+        "subshell",
+        "explicit-descriptor",
+        "pipeline-consumer",
+        "nested-brace-group",
+        "multi-command-group",
+        "if-compound",
+        "for-compound",
+        "while-compound",
+        "until-compound",
+        "case-compound",
+    ),
+)
+def test_compound_scope_stdout_process_substitution_reaches_consumer_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' >&3 ) 3> >(bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&2; } 2> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+    ],
+    ids=(
+        "brace-group-descriptor-3",
+        "subshell-descriptor-3",
+        "nested-brace-group-descriptor-3",
+        "brace-group-descriptor-2",
+        "brace-group-self-duplication",
+    ),
+)
+def test_compound_descriptor_binding_routes_writer_into_process_substitution(script: str):
+    # A ``>&N`` inside the compound resolves against the descriptor that compound bound, so a
+    # writer reaches the substitution's consumer through any descriptor, not only stdout. Each
+    # body below executes the shim under bash 5.2, and the ungrouped ``printf ... >&3 3> >(bash)``
+    # already failed closed, so leaving these unlinked was the same grouped-versus-ungrouped
+    # asymmetry issue #116 reports.
+    assert_taint_refusal(script)
+
+
+def test_compound_scope_stdout_file_redirect_does_not_feed_process_substitution():
+    result = scan_doc_lattice_invocations(
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } >out 2> >(bash)"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ doc-lattice check; } >out 2> >(bash)",
+        "{ doc-lattice check >&3; } 3> >(cat)",
+    ],
+    ids=("stdout-to-file", "descriptor-to-consumer"),
+)
+def test_compound_process_substitution_binding_preserves_invocations(script: str):
+    # Over-refusal control for the two bindings above: neither routes an authored marker into an
+    # execution sink, so the ordinary invocation each body carries must survive intact rather than
+    # being swallowed by a refusal.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == CHECK
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash) > >(cat)",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > >(bash) > >(cat)",
+    ],
+    ids=("compound-writer", "simple-writer"),
+)
+def test_chained_output_process_substitutions_certify_until_issue_187(script: str):
+    """Disclosure pin for issue #187, per AD-19.
+
+    Bash forks the second substitution's child with its own stdout already bound to the first
+    substitution's pipe, so these chain producer to ``cat`` to ``bash`` and the shim executes 5
+    times out of 5 under bash 5.2. Ordered descriptor replay keeps only the last binding per
+    descriptor, so the earlier consumer is dropped and both bodies certify. The gap predates the
+    compound-writer fix and is symmetric between the two spellings above, which is why it is
+    disclosed rather than pinned as fixed. A change that starts refusing either body closes #187
+    and should delete this pin instead of updating it.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; printf x >&3; } 3> >(bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; printf x >&3; } 3> >(bash)",
+        "{ printf a >&3; printf b >&3; } 3> >(tee log)",
+    ],
+    ids=("two-commands", "nested-scope-and-command", "marker-free"),
+)
+def test_unordered_writers_into_one_output_substitution_fail_closed(script: str):
+    """Two writers reach one substitution and the evidence shape carries no order between them.
+
+    Each body routes two independent writers into one consumer through the descriptor the
+    compound bound. Their streams are separate scopes rather than members of one output
+    expression, so nothing here carries the ``Choice`` and ``Repeat`` structure their real
+    positions have, and selecting one writer dropped the other: the first body ran the shim 5
+    times out of 5 under bash 5.2 while the scanner certified it. The third body carries no marker
+    at all and is the cost of failing closed instead, which AD-18 discloses.
+    """
+    assert (
+        scan_doc_lattice_invocations(script).guard_id
+        == "taint.output-substitution.unordered-writers"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; printf x >&1; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+    ],
+    ids=("single-writer", "scope-subsumes-both", "self-duplication"),
+)
+def test_enclosing_writer_subsumes_the_writers_inside_it(script: str):
+    # Control for the guard above, and the reason it is not simply "more than one writer". A
+    # scope that writes to the same substitution already aggregates every writer inside it in
+    # execution order, so these stay ordinary marker flow rather than reaching the guard. Bash
+    # runs the shim in all three, so a guard refusal here would hide a true positive behind a
+    # bound.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.guard_id is None
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; } > >(bash) 3>&1",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat ) > >(bash) 3>&1",
+        "if :; then printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; fi > >(bash) 3>&1",
+    ],
+    ids=("brace", "subshell", "if"),
+)
+def test_a_writer_the_enclosing_stream_does_not_carry_is_not_subsumed(script: str):
+    """Lexical nesting does not decide subsumption, and a pipeline producer is where they part.
+
+    The producer sits inside the compound and reaches the substitution through descriptor 3, but
+    the compound's stdout holds ``cat`` rather than the producer, so nothing in the surviving
+    writer's stream carries the marker. Subsuming by nesting dropped the producer and certified
+    each body while bash 5.2 ran the shim 5 times out of 5. Two writers remain once containment
+    decides it, and the evidence carries no order between them, so they fail closed at the guard
+    above.
+    """
+    assert (
+        scan_doc_lattice_invocations(script).guard_id
+        == "taint.output-substitution.unordered-writers"
+    )
+
+
+def test_a_pipeline_producer_reaching_a_substitution_alone_stays_marker_flow():
+    # Control for the three bodies above, isolating the subsumption from the descriptor chain that
+    # carries the producer to the consumer. The compound binds descriptor 4 rather than its own
+    # stdout, so it never writes to the substitution and subsumes nothing, leaving the producer as
+    # the only writer. Bash runs the shim here too, so this stays ordinary marker flow.
+    result = scan_doc_lattice_invocations(
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; } 4> >(bash) 3>&4"
+    )
+
+    assert result.guard_id is None
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } | bash",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > out.sh\nbash out.sh\n",
+        "eval \"$({ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; })\"",
+    ],
+    ids=("output-substitution", "pipe", "static-file", "command-substitution"),
+)
+def test_compound_stream_ignores_inner_stdout_redirect_until_issue_201(script: str):
+    """Disclosure pin for issue #201, per AD-19.
+
+    A scope's aggregated stdout carries an inner command's output whether or not that command's own
+    descriptor replay left it there, so each body above refuses while bash 5.2 runs the shim 0
+    times out of 5. The last three refuse on `main` and predate the compound-writer fix; the first
+    is the same stream reaching the substitution sink that fix links. They are pinned together
+    because the cause is the aggregation rather than any one sink, so a fix has to move all four at
+    once and a change that refuses only some of them is in the wrong place.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } | bash",
+        "X=/dev/stdout\n{ printf '%s%s\\n' doc- 'lattice reconcile' >\"$X\"; } | bash\n",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/fd/1; } | bash",
+    ],
+    ids=("self-duplication", "self-duplication-pipe", "dynamic-target", "descriptor-path"),
+)
+def test_inner_stdout_redirect_that_stays_on_the_stream_still_refuses(script: str):
+    # Control for issue #201, and the boundary any fix there has to hold. Each body redirects
+    # stdout inside the compound and still leaves the content on the scope's stream, and bash 5.2
+    # runs the shim in all four. A narrowing that drops an inner command whose replay it cannot
+    # resolve, rather than only one it resolves away from stdout, launders content out of the
+    # stream and turns these into false certifications.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 4> >(bash); } 4>/dev/null 3>&4",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 4> out.sh; } 4>/dev/null 3>&4\n"
+        "bash out.sh\n",
+    ],
+    ids=("output-substitution", "static-file"),
+)
+def test_descriptor_duplication_is_not_snapshotted_until_issue_202(script: str):
+    """Disclosure pin for issue #202, per AD-19.
+
+    ``3>&4`` copies fd 4's target where it stands, so the inner ``4>`` cannot retarget it and bash
+    5.2 runs the shim 0 times out of 5 in both bodies. The chain records the duplication as an
+    alias to fd 4 instead, so both refuse. The static-file spelling refuses on `main` and predates
+    the compound-writer fix, which places the defect in the shared descriptor lookup rather than in
+    the substitution sink that fix links.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'false && bash -c "$(printf %s doc-)lattice"',
+        'if false; then bash -c "$(printf %s doc-)lattice"; fi',
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash)",
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } | bash",
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } > out.sh\nbash out.sh\n",
+        "false && eval \"$(printf '%s%s\\n' doc- 'lattice reconcile')\"",
+    ],
+    ids=("simple", "if-false", "output-substitution", "pipe", "static-file", "command-subst"),
+)
+def test_statically_unreachable_branch_still_refuses_until_issue_203(script: str):
+    """Disclosure pin for issue #203, per AD-19.
+
+    The authored route takes its union over every branch and never evaluates a command's exit
+    status, so a branch behind a literal `false` is analyzed as if it runs. Bash runs the shim 0
+    times out of 5 in all six bodies and every one refuses. The first two carry no compound and no
+    redirection, which places the property in the route rather than in any sink, and all but the
+    substitution spelling refuse on `main` as well.
+    """
+    assert_taint_refusal(script)
+
+
+def test_literal_status_reachability_applies_inside_an_eval_payload():
+    # Control for issue #203, and what makes it a scoped extension rather than a design property:
+    # the payload sub-analysis already reduces a branch by literal command status, so the same
+    # construct certifies there and refuses on the authored route. The `true` spellings pin that
+    # the difference is the status rather than the branch.
+    assert (
+        scan_doc_lattice_invocations(
+            "eval 'if false; then X=doc-; fi'; eval \"$X\"lattice"
+        ).incomplete_reason
+        is None
+    )
+    assert_taint_refusal("eval 'if true; then X=doc-; fi'; eval \"$X\"lattice")
+    assert_taint_refusal('if false; then X=doc-; fi; eval "$X"lattice')
+    assert_taint_refusal('if true; then X=doc-; fi; eval "$X"lattice')
+
+
+def test_descriptor_duplication_reaching_the_rebound_target_still_refuses():
+    # Control for issue #202: the same nesting with ``>&4`` really does reach the substitution, and
+    # bash runs the shim 5 times out of 5, so the pin above isolates the missing snapshot rather
+    # than the nesting or the marker.
+    assert_taint_refusal(
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&4; } 4> >(bash); } 4>/dev/null 3>&4"
+    )
+
+
+def test_reversed_chained_output_process_substitutions_still_refuse():
+    # Control for issue #187: the same two substitutions in the other order leave the sink as the
+    # final descriptor-1 binding, which isolates the last-wins replay as the mechanism rather than
+    # the marker or the compound.
+    assert_taint_refusal("{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat) > >(bash)")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>/dev/null\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>&1\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>&-\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>/dev/null\n"
+        "f 3> out.sh\nbash out.sh\n",
+    ],
+    ids=("null", "duplicate", "close", "static-file"),
+)
+def test_definition_site_binding_masks_the_alias_guard_until_issue_204(script: str):
+    """Disclosure pin for issue #204, per AD-19.
+
+    A function body is analyzed once where it is defined, carrying the definition scope's
+    descriptor bindings rather than the call site's. The enclosing compound resolves the body's
+    ``>&3`` to a concrete target, so `taint.descriptor.output-alias-unresolved` never fires and
+    each body certifies while bash 5.2 runs the shim 5 times out of 5. The target the definition
+    site binds is irrelevant, and the last body shows the static-file sink masking the same guard,
+    which places the defect in the shared lookup rather than in the substitution sink the
+    compound-writer fix links. All four certify identically on `main`, so this predates that fix.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }\nf 3> >(bash)\n",
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }\nf 3> out.sh\nbash out.sh\n",
+    ],
+    ids=("output-substitution", "static-file"),
+)
+def test_call_site_descriptor_without_a_definition_binding_still_refuses(script: str):
+    # Control for issue #204, and the half of the isolation that makes it a masked guard rather
+    # than an unmodeled construct. These are the pinned bodies above with the definition lifted out
+    # of the compound and nothing else changed, bash runs the shim 5 times out of 5 in both, and
+    # the guard fires on the source it cannot name.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.guard_id == "taint.descriptor.output-alias-unresolved"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)\nf\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)\nf >/dev/null\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > out.sh\nbash out.sh\n",
+        "if :; then f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; fi 3> >(bash)\n"
+        "f 3>/dev/null\n",
+        "if :; then f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; fi 3> out.sh\n"
+        "bash out.sh\n",
+    ],
+    ids=(
+        "uninvoked",
+        "invoked-bare",
+        "invoked-rebound",
+        "uninvoked-static-file",
+        "if-rebound",
+        "if-static-file",
+    ),
+)
+def test_definition_inside_a_redirected_compound_over_refuses_until_issue_204(script: str):
+    """Disclosure pin for issue #204's over-refusing direction, per AD-19.
+
+    The body is credited to the scope it is defined in, so a definition inside a redirected
+    compound contributes to that compound's stream whether or not the function is ever invoked and
+    whatever descriptors its call site installs. Bash runs the shim 0 times out of 5 in all six and
+    every one refuses. The `uninvoked` spellings are what place the property in the definition site
+    rather than in the call site's descriptors, and the static-file spellings refuse on `main`,
+    which makes this the same widening #201 describes: the compound-writer fix gives one modeling
+    property a fourth consumer rather than introducing it.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile'; }\n{ f; } > >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; f; } > >(bash)",
+    ],
+    ids=("call-inside-compound", "definition-and-call-inside-compound"),
+)
+def test_a_call_inside_the_redirected_compound_still_refuses(script: str):
+    # Control for issue #204, and the boundary any fix there has to hold. Both bodies really do
+    # route the marker into the substitution and bash runs the shim 5 times out of 5, and both
+    # certify on `main`, so they are part of what closing #116 fixes. A call-site-aware model that
+    # stopped crediting the definition site must keep refusing these.
+    assert_taint_refusal(script)
+
+
 def test_multi_command_substitution_scope_sequences_stdout():
     assert_taint_refusal("eval \"$(printf doc-; printf 'lattice reconcile')\"\n")
 

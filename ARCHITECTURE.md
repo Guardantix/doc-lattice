@@ -395,14 +395,35 @@ stream-scope evidence with monotonic IDs. Typed ports keep argv, assignments, st
 static-resource content separate. A pure taint module builds `LiteralTransfer`, variable, stream,
 resource, `Choice`, `Concat`, and `OutsideGap` expressions, then evaluates them with a fixed marker
 DFA. Sequential adjacency uses relational composition; competing definitions, truncating writes,
-and mutually exclusive alternatives use set union, so unrelated fragments never concatenate.
+and mutually exclusive alternatives use set union, so unrelated fragments never concatenate. That
+union is taken over every branch, because the authored route does not evaluate a command's exit
+status: a branch behind a literal `false` is analyzed as if it runs, and refusing it over-refuses.
+The eval payload sub-analysis below does reduce a branch by literal command status, so the two
+routes disagree on the same construct, and closing that asymmetry for `true`, `false`, and `:`
+alone is issue #203.
 `OutsideGap` contributes epsilon and an opaque non-authored barrier, which permits only
 authored-only marker paths.
 
 Stream scopes aggregate command stdout with `Sequence`, `Choice`, and reflexive-transitive
 `Repeat`; command substitution alone strips trailing newlines with a finite suffix-aware transfer
-summary. A call to a function defined in the same body reproduces that function scope's aggregated
-stdout, so wrapping a producer in a function preserves the handoff. A pipeline keeps its
+summary. That aggregation takes an inner command's output whether or not the command's own
+descriptor replay left it on the scope's stdout, so `{ producer >/dev/null; }` still contributes
+its output to the scope stream. This over-refuses in the fail-closed direction rather than leaving
+a hole, and it is one property of the aggregation rather than one per sink: every consumer of the
+scope stream reads the same unfiltered content, so the pipe, static-file, command-substitution, and
+output-process-substitution spellings of the same body all refuse together. It is issue #201, and a
+fix belongs at the aggregation so those consumers keep moving together. A call to a function
+defined in the same body reproduces that function scope's aggregated
+stdout, so wrapping a producer in a function preserves the handoff. The function body is analyzed
+once where it is DEFINED, though, carrying the definition scope's stream and descriptor bindings
+rather than the call site's, and it contributes to that scope whether or not the function is ever
+invoked. That cuts both ways and is issue #204. A definition-site binding resolves a body's `>&N`
+to a concrete target, which masks the unresolved-alias guard the same body refuses on without it,
+so `{ f() { producer >&3; }; } 3>/dev/null; f 3> >(bash)` certifies while its no-compound control
+refuses and Bash runs the marker in both. In the other direction a definition placed inside a
+redirected compound is credited with that compound's stream, which over-refuses on every sink the
+same way #201 does. A fix instantiates the body per call site with the descriptors that call
+installs, moving both directions at once. A pipeline keeps its
 producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
 command inside a control body, while a compound consumer still binds the compound scope. A command
 naming a static resource operand this body writes, such as `cat s.sh`, or reading a process
@@ -444,12 +465,32 @@ sequence. Ordered descriptor replay installs pipeline endpoints first and then a
 left to right, so only final descriptor bindings route bytes while earlier truncations retain their
 empty-file side effect. A `>&N` source resolves first against the command's own events and then
 against the bindings its enclosing compounds installed, innermost first, so
-`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. Descriptors 1 and 2 are
-always inherited from the enclosing shell and need no such binding. Any other descriptor that some
-part of the body binds, but that this command's lexical chain cannot supply, is missing evidence
-rather than an inherited stream: a bare `exec 3> out.sh` rebinds the shell scope, which the
-per-command `redirections` field cannot carry, so a later `>&3` fails closed. A descriptor nothing
-in the body binds is a Bash runtime error rather than a flow, so it keeps routing nowhere.
+`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. That chain records a
+`>&N` as an alias to `N` rather than as the target `N` held when the duplication ran, so a later
+compound that rebinds `N` retargets the earlier duplication, which Bash does not do. It is an
+over-refusal in the same shape as the aggregation above, one property of the shared lookup rather
+than one per sink, and it is issue #202. A stdout writer is a simple command or a compound, since a
+compound carries redirections and aggregated stdout of its own, so `{ producer; } > >(consumer)`
+binds the compound's stdout to the substitution's consumer exactly as the ungrouped
+`producer > >(consumer)` binds one command's. A process substitution is a descriptor target like
+any other on that chain, so `{ producer >&3; } 3> >(consumer)` reaches the consumer as well. Two
+writers reach one output substitution when a compound binds a descriptor that several commands
+inside it write to, and a writer's stream is a scope of its own rather than a member of one output
+expression, so nothing carries the order or the alternation between them. One writer subsumes
+another when its aggregated stdout holds that writer's stream, because it already holds it in
+execution order, which is the whole of `{ producer >&1; } > >(consumer)`. That relation is stream
+containment rather than lexical nesting, and the two part on a pipeline: in
+`{ producer >&3 | cat; } > >(consumer) 3>&1` the producer sits inside the compound and reaches the
+consumer through descriptor 3, while the compound's stdout holds `cat` rather than the producer, so
+subsuming by nesting would drop the only writer carrying the producer's content. Writers neither of
+which carries the other fail closed rather than being composed, since selecting one drops the rest
+and concatenating them asserts a sequence the evidence does not carry. Descriptors 1 and 2 are always
+inherited from the enclosing shell and need no
+such binding. Any other descriptor that some part of the body binds, but that this command's
+lexical chain cannot supply, is missing evidence rather than an inherited stream: a bare
+`exec 3> out.sh` rebinds the shell scope, which the per-command `redirections` field cannot carry,
+so a later `>&3` fails closed. A descriptor nothing in the body binds is a Bash runtime error
+rather than a flow, so it keeps routing nowhere.
 
 Execution sinks are `eval`, shell `-c`, selected shell stdin, a registered `trap` action, and
 static script execution through a shell operand, direct path, `source`, or `.`. A `trap` action is
@@ -739,15 +780,14 @@ bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executab
 This list is the boundary as designed, not a complete inventory of what the engine currently
 misses; open gaps against this decision are tracked as individual issues rather than by a fixed
 range of issue numbers, and this enumeration itself is not exhaustive. Two further gaps outside
-these categories: a compound
-command's stdout redirected into an output process substitution is not yet linked into that
-substitution's consumer, only a simple command's is (issue #116), and `lastpipe` state reached
-through a function call site or a loop back edge is widened only for a pipeline whose last stage is
-a `read` writing from stdin, not for every conditional-on-lastpipe context such as a trailing `eval`
-(issue #118). A `read` beyond
-the first record of a shared stream is projected as record one, so a marker split across later
-records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
-over-refusal it interacts with is issue #119.
+these categories: `lastpipe` state reached through a function call site or a loop back edge is
+widened only for a pipeline whose last stage is a `read` writing from stdin, not for every
+conditional-on-lastpipe context such as a trailing `eval` (issue #118), and one descriptor bound to
+two output process substitutions keeps only the last binding, so the earlier consumer Bash chains
+behind it, as in `producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the
+first record of a shared stream is projected as record one, so a marker split across later records
+is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it
+interacts with is issue #119.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
 that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
 required character comes only from external content continue to certify with the boundary

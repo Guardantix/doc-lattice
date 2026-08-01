@@ -3098,22 +3098,191 @@ def _pipe_source(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _OutputProcessWriter:
+    """One writer whose descriptor replay can route stdout into a process resource."""
+
+    redirections: tuple[_RedirectionEvent, ...]
+    stream_scope_id: int
+    inherited: _DescriptorBindings
+    scope_id: int | None
+
+
+def _output_stream_carriers(evidence: _ShellTaintEvidence) -> dict[int, int]:
+    """Return the scope whose aggregated stdout directly contains each stream.
+
+    This is stream containment rather than lexical nesting, and the two differ. A pipeline
+    producer sits lexically inside the compound around it, but the compound's stdout holds the
+    pipeline's last stage, so the producer's own stream is carried by nobody: that is
+    ``{ printf x >&3 | cat; } > >(bash) 3>&1``, where the producer reaches the substitution by a
+    descriptor while the compound stream never holds its content.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        A mapping from stream id to the id of the scope whose output expression names it, for
+        every stream some scope's aggregated stdout holds.
+    """
+    command_streams = {command.command_id: command.output_scope_id for command in evidence.commands}
+    carriers: dict[int, int] = {}
+    for scope in evidence.scopes:
+        pending: list[OutputExpr] = [scope.output]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, CommandOutput):
+                stream = command_streams.get(current.command_id)
+                if stream is not None:
+                    carriers.setdefault(stream, scope.scope_id)
+            elif isinstance(current, ScopeOutput):
+                carriers.setdefault(current.scope_id, scope.scope_id)
+            else:
+                pending.extend(_output_children(current))
+    return carriers
+
+
+def _carrying_scopes(stream_scope_id: int, carriers: dict[int, int]) -> frozenset[int]:
+    """Return every scope whose aggregated stdout holds one stream, transitively.
+
+    Args:
+        stream_scope_id: The stream whose carriers are wanted, excluded from the result.
+        carriers: The direct carrier of each stream, from `_output_stream_carriers`.
+
+    Returns:
+        Each scope id up the carrier chain. A malformed carrier cycle stops at the first repeat
+        rather than looping, matching `_command_scope_paths`.
+    """
+    chain: set[int] = set()
+    current = carriers.get(stream_scope_id)
+    while current is not None and current not in chain:
+        chain.add(current)
+        current = carriers.get(current)
+    return frozenset(chain)
+
+
+def _output_process_writers(
+    evidence: _ShellTaintEvidence,
+) -> tuple[_OutputProcessWriter, ...]:
+    """Return every stdout writer whose descriptors can reach a process resource.
+
+    A writer is anything the evidence gives both a redirection list and an output stream: one
+    command, or one structured scope. ``{ printf x; } > >(bash)`` attaches the redirection to the
+    compound rather than to any command inside it, so a scope has to be a writer here for the
+    compound's stdout to reach the substitution at all. Each writer carries the bindings its
+    enclosing chain installed, because ``{ printf x >&3; } 3> >(bash)`` routes stdout to the
+    substitution through a descriptor only that chain names.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        Every writer, each with the redirection events it replays, the stream scope its stdout
+        carries, the bindings its enclosing chain installed, and its own scope id when the writer
+        is a structured scope rather than a command.
+    """
+    scope_bindings = _scope_inherited_bindings(evidence)
+    command_paths = _command_scope_paths(evidence)
+    writers: list[_OutputProcessWriter] = []
+    for command in evidence.commands:
+        enclosing = command_paths[command.command_id]
+        writers.append(
+            _OutputProcessWriter(
+                command.redirections,
+                command.output_scope_id,
+                scope_bindings.get(enclosing[-1], {}) if enclosing else {},
+                None,
+            )
+        )
+    writers.extend(
+        _OutputProcessWriter(
+            scope.redirections,
+            scope.scope_id,
+            scope_bindings.get(scope.parent_scope_id, {})
+            if scope.parent_scope_id is not None
+            else {},
+            scope.scope_id,
+        )
+        for scope in evidence.scopes
+    )
+    return tuple(writers)
+
+
 def _output_process_scope_inputs(
     evidence: _ShellTaintEvidence,
     scopes: dict[int, _StreamScopeEvidence],
     resources: dict[int, _ProcessResourceEvidence],
 ) -> dict[int, ContentExpr]:
-    """Return direct scope inputs created by output process substitutions."""
-    inputs: dict[int, ContentExpr] = {}
-    for writer in evidence.commands:
-        binding = _output_bindings(writer.redirections).get(1)
+    """Return direct scope inputs created by output process substitutions.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        scopes: The validated structured scopes of this body, by scope id.
+        resources: Process-substitution resources referenced by descriptor.
+
+    Returns:
+        A mapping from each output substitution's body scope to the stdout stream its writer
+        sends there.
+
+    Raises:
+        _TaintLimitExceeded: If a writer routes stdout through a guarded descriptor whose
+            binding the evidence cannot name, or if two writers neither of which encloses the
+            other reach one substitution.
+    """
+    guarded = _guarded_output_descriptors(evidence)
+    reaching: dict[int, list[_OutputProcessWriter]] = {}
+    for writer in _output_process_writers(evidence):
+        bindings = _output_bindings(
+            writer.redirections, inherited=writer.inherited, guarded=guarded
+        )
+        binding = bindings.get(1)
         if binding is None or not isinstance(binding[0], ProcessResourceTarget):
             continue
         resource = resources.get(binding[0].resource_id)
         if resource is None or resource.direction != "output":
             continue
         if resource.scope_id in scopes:
-            inputs[resource.scope_id] = StreamRef(writer.output_scope_id)
+            # Two substitutions never collide: every ``>(...)`` occurrence mints its own resource
+            # and body scope, so each list below belongs to exactly one consumer.
+            reaching.setdefault(resource.scope_id, []).append(writer)
+
+    carriers = _output_stream_carriers(evidence)
+    inputs: dict[int, ContentExpr] = {}
+    for scope_id, writers in reaching.items():
+        writing_scope_ids = {writer.scope_id for writer in writers if writer.scope_id is not None}
+        # A writer is subsumed by a scope writing to the same substitution only when that scope's
+        # aggregated stdout actually holds the writer's stream, which is the whole of
+        # ``{ printf x >&1; } > >(bash)``: the command's stream is what the compound's stdout is
+        # made of. Lexical nesting is not that relation. In
+        # ``{ printf x >&3 | cat; } > >(bash) 3>&1`` the producer sits inside the compound and
+        # reaches the substitution through descriptor 3, while the compound's stdout holds only
+        # ``cat``, so subsuming by nesting dropped the one writer carrying the marker.
+        #
+        # `_validate_nested_evidence` rejects a cycle among scope output references before any of
+        # this runs, so carriage is a strict order over the writing scopes and at least one writer
+        # is always left to index below.
+        outermost = [
+            writer
+            for writer in writers
+            if not (_carrying_scopes(writer.stream_scope_id, carriers) & writing_scope_ids)
+        ]
+        if len(outermost) > 1:
+            # Independent writers reach the consumer in execution order, and the per-writer
+            # evidence shape carries no order between them: their streams are separate scopes
+            # rather than members of one output expression, so composing them here would drop the
+            # ``Choice`` and ``Repeat`` structure their real positions carry. Selecting one writer
+            # instead loses the others outright, which certified
+            # ``{ printf doc-lattice >&3; printf x >&3; } 3> >(bash)`` while Bash ran the marker.
+            raise _TaintLimitExceeded(
+                GuardRefusal(
+                    "taint.output-substitution.unordered-writers",
+                    "multiple writers into one output process substitution cannot be ordered",
+                )
+            )
+        inputs[scope_id] = StreamRef(outermost[0].stream_scope_id)
     return inputs
 
 
