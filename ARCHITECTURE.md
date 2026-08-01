@@ -401,7 +401,14 @@ authored-only marker paths.
 
 Stream scopes aggregate command stdout with `Sequence`, `Choice`, and reflexive-transitive
 `Repeat`; command substitution alone strips trailing newlines with a finite suffix-aware transfer
-summary. A call to a function defined in the same body reproduces that function scope's aggregated
+summary. That aggregation takes an inner command's output whether or not the command's own
+descriptor replay left it on the scope's stdout, so `{ producer >/dev/null; }` still contributes
+its output to the scope stream. This over-refuses in the fail-closed direction rather than leaving
+a hole, and it is one property of the aggregation rather than one per sink: every consumer of the
+scope stream reads the same unfiltered content, so the pipe, static-file, command-substitution, and
+output-process-substitution spellings of the same body all refuse together. It is issue #201, and a
+fix belongs at the aggregation so those consumers keep moving together. A call to a function
+defined in the same body reproduces that function scope's aggregated
 stdout, so wrapping a producer in a function preserves the handoff. A pipeline keeps its
 producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
 command inside a control body, while a compound consumer still binds the compound scope. A command

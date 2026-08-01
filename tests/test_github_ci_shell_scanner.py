@@ -1163,6 +1163,48 @@ def test_chained_output_process_substitutions_certify_until_issue_187(script: st
     assert result.invocations == NONE
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } | bash",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > out.sh\nbash out.sh\n",
+        "eval \"$({ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; })\"",
+    ],
+    ids=("output-substitution", "pipe", "static-file", "command-substitution"),
+)
+def test_compound_stream_ignores_inner_stdout_redirect_until_issue_201(script: str):
+    """Disclosure pin for issue #201, per AD-19.
+
+    A scope's aggregated stdout carries an inner command's output whether or not that command's own
+    descriptor replay left it there, so each body above refuses while bash 5.2 runs the shim 0
+    times out of 5. The last three refuse on `main` and predate the compound-writer fix; the first
+    is the same stream reaching the substitution sink that fix links. They are pinned together
+    because the cause is the aggregation rather than any one sink, so a fix has to move all four at
+    once and a change that refuses only some of them is in the wrong place.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } | bash",
+        "X=/dev/stdout\n{ printf '%s%s\\n' doc- 'lattice reconcile' >\"$X\"; } | bash\n",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/fd/1; } | bash",
+    ],
+    ids=("self-duplication", "self-duplication-pipe", "dynamic-target", "descriptor-path"),
+)
+def test_inner_stdout_redirect_that_stays_on_the_stream_still_refuses(script: str):
+    # Control for issue #201, and the boundary any fix there has to hold. Each body redirects
+    # stdout inside the compound and still leaves the content on the scope's stream, and bash 5.2
+    # runs the shim in all four. A narrowing that drops an inner command whose replay it cannot
+    # resolve, rather than only one it resolves away from stdout, launders content out of the
+    # stream and turns these into false certifications.
+    assert_taint_refusal(script)
+
+
 def test_reversed_chained_output_process_substitutions_still_refuse():
     # Control for issue #187: the same two substitutions in the other order leave the sink as the
     # final descriptor-1 binding, which isolates the last-wins replay as the mechanism rather than
