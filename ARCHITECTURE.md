@@ -414,7 +414,16 @@ scope stream reads the same unfiltered content, so the pipe, static-file, comman
 output-process-substitution spellings of the same body all refuse together. It is issue #201, and a
 fix belongs at the aggregation so those consumers keep moving together. A call to a function
 defined in the same body reproduces that function scope's aggregated
-stdout, so wrapping a producer in a function preserves the handoff. A pipeline keeps its
+stdout, so wrapping a producer in a function preserves the handoff. The function body is analyzed
+once where it is DEFINED, though, carrying the definition scope's stream and descriptor bindings
+rather than the call site's, and it contributes to that scope whether or not the function is ever
+invoked. That cuts both ways and is issue #204. A definition-site binding resolves a body's `>&N`
+to a concrete target, which masks the unresolved-alias guard the same body refuses on without it,
+so `{ f() { producer >&3; }; } 3>/dev/null; f 3> >(bash)` certifies while its no-compound control
+refuses and Bash runs the marker in both. In the other direction a definition placed inside a
+redirected compound is credited with that compound's stream, which over-refuses on every sink the
+same way #201 does. A fix instantiates the body per call site with the descriptors that call
+installs, moving both directions at once. A pipeline keeps its
 producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
 command inside a control body, while a compound consumer still binds the compound scope. A command
 naming a static resource operand this body writes, such as `cat s.sh`, or reading a process

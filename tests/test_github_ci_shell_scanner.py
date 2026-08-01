@@ -1328,6 +1328,103 @@ def test_reversed_chained_output_process_substitutions_still_refuse():
     assert_taint_refusal("{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat) > >(bash)")
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>/dev/null\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>&1\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>&-\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>/dev/null\n"
+        "f 3> out.sh\nbash out.sh\n",
+    ],
+    ids=("null", "duplicate", "close", "static-file"),
+)
+def test_definition_site_binding_masks_the_alias_guard_until_issue_204(script: str):
+    """Disclosure pin for issue #204, per AD-19.
+
+    A function body is analyzed once where it is defined, carrying the definition scope's
+    descriptor bindings rather than the call site's. The enclosing compound resolves the body's
+    ``>&3`` to a concrete target, so `taint.descriptor.output-alias-unresolved` never fires and
+    each body certifies while bash 5.2 runs the shim 5 times out of 5. The target the definition
+    site binds is irrelevant, and the last body shows the static-file sink masking the same guard,
+    which places the defect in the shared lookup rather than in the substitution sink the
+    compound-writer fix links. All four certify identically on `main`, so this predates that fix.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }\nf 3> >(bash)\n",
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }\nf 3> out.sh\nbash out.sh\n",
+    ],
+    ids=("output-substitution", "static-file"),
+)
+def test_call_site_descriptor_without_a_definition_binding_still_refuses(script: str):
+    # Control for issue #204, and the half of the isolation that makes it a masked guard rather
+    # than an unmodeled construct. These are the pinned bodies above with the definition lifted out
+    # of the compound and nothing else changed, bash runs the shim 5 times out of 5 in both, and
+    # the guard fires on the source it cannot name.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.guard_id == "taint.descriptor.output-alias-unresolved"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)\nf\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)\nf >/dev/null\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > out.sh\nbash out.sh\n",
+        "if :; then f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; fi 3> >(bash)\n"
+        "f 3>/dev/null\n",
+        "if :; then f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; fi 3> out.sh\n"
+        "bash out.sh\n",
+    ],
+    ids=(
+        "uninvoked",
+        "invoked-bare",
+        "invoked-rebound",
+        "uninvoked-static-file",
+        "if-rebound",
+        "if-static-file",
+    ),
+)
+def test_definition_inside_a_redirected_compound_over_refuses_until_issue_204(script: str):
+    """Disclosure pin for issue #204's over-refusing direction, per AD-19.
+
+    The body is credited to the scope it is defined in, so a definition inside a redirected
+    compound contributes to that compound's stream whether or not the function is ever invoked and
+    whatever descriptors its call site installs. Bash runs the shim 0 times out of 5 in all six and
+    every one refuses. The `uninvoked` spellings are what place the property in the definition site
+    rather than in the call site's descriptors, and the static-file spellings refuse on `main`,
+    which makes this the same widening #201 describes: the compound-writer fix gives one modeling
+    property a fourth consumer rather than introducing it.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile'; }\n{ f; } > >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; f; } > >(bash)",
+    ],
+    ids=("call-inside-compound", "definition-and-call-inside-compound"),
+)
+def test_a_call_inside_the_redirected_compound_still_refuses(script: str):
+    # Control for issue #204, and the boundary any fix there has to hold. Both bodies really do
+    # route the marker into the substitution and bash runs the shim 5 times out of 5, and both
+    # certify on `main`, so they are part of what closing #116 fixes. A call-site-aware model that
+    # stopped crediting the definition site must keep refusing these.
+    assert_taint_refusal(script)
+
+
 def test_multi_command_substitution_scope_sequences_stdout():
     assert_taint_refusal("eval \"$(printf doc-; printf 'lattice reconcile')\"\n")
 
