@@ -8,11 +8,14 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import select
 import shutil
+import signal
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import pytest
 
@@ -20,6 +23,7 @@ from doc_lattice.github_ci import shell_guards, shell_scanner, shell_taint
 from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import ModuleType
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -273,7 +277,7 @@ def test_a_merge_keeps_what_the_configurations_before_a_failure_found() -> None:
     grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
     found: dict[str, tuple[str, str]] = {}
 
-    def arriving() -> object:
+    def arriving() -> Iterator[object]:
         yield _entry(0, _PRODUCTION_ENTRY[0], _ORIGIN, "a" * 40)
         raise ValueError("a worker died holding a configuration")
 
@@ -286,7 +290,10 @@ def test_a_merge_keeps_what_the_configurations_before_a_failure_found() -> None:
 def test_a_pooled_sweep_keeps_the_rows_the_worker_that_died_was_not_holding() -> None:
     # The same guarantee through real processes. One worker runs the two configurations in
     # submission order, so the reach of the first is merged before the second one raises what no
-    # configuration was expected to raise.
+    # configuration was expected to raise. `as_completed` hands back whatever is already finished
+    # in an order nobody promises, but nothing can be: this frame reaches the waiter in microseconds
+    # and the pool has yet to start the interpreter that will scan the first unit, so the two
+    # results are yielded as they complete.
     grid = [_SHRUNK_ENTRY, ("no caps at all", object())]
     found: dict[str, tuple[str, str]] = {}
     entries = tool.pooled_entries(["a" * 40], grid, jobs=1)
@@ -339,12 +346,107 @@ def test_pooled_workers_do_not_inherit_this_process() -> None:
     assert tool.start_method() in multiprocessing.get_all_start_methods()
 
 
-def test_the_default_worker_count_fits_the_work_there_is() -> None:
+_INTERRUPT_DRIVER = '''\
+"""Run a pooled sweep long enough to be interrupted, announcing when it is under way.
+
+Driven as its own process because the behavior under test is what a Ctrl-C does to a process
+group: this one is signalled along with every worker it started. The work is guarded, since a
+worker re-imports this module to reach the sweep it was told to run.
+"""
+
+import importlib.util
+import sys
+
+
+def load_tool(path):
+    """Return the sweep tool loaded from a path, the way the suite loads it."""
+    spec = importlib.util.spec_from_file_location("guard_witness_sweep", path)
+    tool = importlib.util.module_from_spec(spec)
+    sys.modules["guard_witness_sweep"] = tool
+    spec.loader.exec_module(tool)
+    return tool
+
+
+def main():
+    """Sweep a corpus that outlasts the interrupt, announcing the first unit of work merged."""
+    tool = load_tool(sys.argv[1])
+    merge_entry = tool.merge_entry
+    merged = []
+
+    def announce(entry, totals, found):
+        merge_entry(entry, totals, found)
+        if not merged:
+            merged.append(entry)
+            print("under way", flush=True)
+
+    tool.merge_entry = announce
+    corpus = ["echo %d; eval 'X=${Y=q}'" % index for index in range(int(sys.argv[2]))]
+    tool.sweep(corpus, tool.limits_grid((0, 1, 2)), jobs=2)
+    print("finished", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+_INTERRUPT_CORPUS = 900
+"""Scripts the interrupted run sweeps, sized so a grid of them outlasts the interrupt by far."""
+
+_INTERRUPT_PATIENCE = 60.0
+"""Seconds a stopped run is given to be gone. Measured at 0.6s to 2.5s; a regression never ends."""
+
+
+def _await_line(stream: IO[str], patience: float) -> str:
+    """Return the next line `stream` produces, or the empty string if it produces none in time."""
+    ready, _writable, _failed = select.select([stream], [], [], patience)
+    return stream.readline() if ready else ""
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are a POSIX signal contract")
+def test_an_interrupted_pooled_run_stops_rather_than_having_to_be_killed(tmp_path: Path) -> None:
+    # A search tool that cannot be interrupted is worse than a slow one, and this is the one thing a
+    # pool takes away by default: torn down as the interpreter finalizes, its stop-work sentinels
+    # never reach workers already blocked waiting for them, and the run hangs until it is killed.
+    # Signalled twice, because that is what an operator's single Ctrl-C amounts to under the
+    # documented `uv run` command, which forwards a copy of the one the terminal sent the group, and
+    # because a second interrupt landing inside the teardown is what makes the deadlock reachable.
+    driver = tmp_path / "interruptible_sweep.py"
+    driver.write_text(_INTERRUPT_DRIVER, encoding="utf-8")
+    process = subprocess.Popen(  # noqa: S603 - this interpreter, and a driver written just above
+        [sys.executable, str(driver), str(_TOOL), str(_INTERRUPT_CORPUS)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    try:
+        assert _await_line(process.stdout, _INTERRUPT_PATIENCE).strip() == "under way"
+        os.killpg(process.pid, signal.SIGINT)
+        os.killpg(process.pid, signal.SIGINT)
+        process.wait(timeout=_INTERRUPT_PATIENCE)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"the run was still alive {_INTERRUPT_PATIENCE}s after being interrupted")
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def test_the_default_worker_count_fits_the_work_there_is(monkeypatch: pytest.MonkeyPatch) -> None:
     # A default derived from the machine rather than from the grid starts workers with nothing to
-    # scan, and one that can reach zero leaves the sweep with nobody to run it.
+    # scan, and one that can reach zero leaves the sweep with nobody to run it. Bounds rather than
+    # the machine's count, which restates the expression: read off a host whose affinity the
+    # interpreter cannot see, `os.process_cpu_count()` is None, and the count that has to come back
+    # from that is one.
     assert tool.default_jobs(1) == 1
     assert tool.default_jobs(0) == 1
-    assert tool.default_jobs(1000) == os.process_cpu_count()
+    assert 1 <= tool.default_jobs(1000) <= 1000
+
+    monkeypatch.setattr(tool.os, "process_cpu_count", lambda: None)
+
+    assert tool.default_jobs(1000) == 1
 
 
 def test_a_sweep_with_no_workers_is_refused_rather_than_run_by_nobody() -> None:
