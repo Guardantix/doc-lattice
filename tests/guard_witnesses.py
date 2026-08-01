@@ -606,8 +606,8 @@ REACHABLE_WITNESSES: tuple[ReachableWitness, ...] = (
         limits=ScanLimits(taint=TaintLimits(max_local_substitution_depth=0)),
     ),
     ReachableWitness(
-        # Two commands resolve ``>&3`` to the substitution the compound bound, and neither
-        # encloses the other, so no writer's stream contains the other's. The control keeps one
+        # Two commands resolve ``>&3`` to the substitution the compound bound, and neither one's
+        # stream is carried by the other's, so neither subsumes the other. The control keeps one
         # writer and is detected as marker flow, which isolates the collision from the descriptor
         # chain that carries both writers to the consumer.
         "taint.output-substitution.unordered-writers",

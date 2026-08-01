@@ -476,11 +476,15 @@ binds the compound's stdout to the substitution's consumer exactly as the ungrou
 any other on that chain, so `{ producer >&3; } 3> >(consumer)` reaches the consumer as well. Two
 writers reach one output substitution when a compound binds a descriptor that several commands
 inside it write to, and a writer's stream is a scope of its own rather than a member of one output
-expression, so nothing carries the order or the alternation between them. An enclosing writer
-subsumes the writers inside it, because its aggregated stdout already holds them in execution
-order, which is the whole of `{ producer >&1; } > >(consumer)`. Writers neither of which encloses
-the other fail closed rather than being composed, since selecting one drops the rest and
-concatenating them asserts a sequence the evidence does not carry. Descriptors 1 and 2 are always
+expression, so nothing carries the order or the alternation between them. One writer subsumes
+another when its aggregated stdout holds that writer's stream, because it already holds it in
+execution order, which is the whole of `{ producer >&1; } > >(consumer)`. That relation is stream
+containment rather than lexical nesting, and the two part on a pipeline: in
+`{ producer >&3 | cat; } > >(consumer) 3>&1` the producer sits inside the compound and reaches the
+consumer through descriptor 3, while the compound's stdout holds `cat` rather than the producer, so
+subsuming by nesting would drop the only writer carrying the producer's content. Writers neither of
+which carries the other fail closed rather than being composed, since selecting one drops the rest
+and concatenating them asserts a sequence the evidence does not carry. Descriptors 1 and 2 are always
 inherited from the enclosing shell and need no
 such binding. Any other descriptor that some part of the body binds, but that this command's
 lexical chain cannot supply, is missing evidence rather than an inherited stream: a bare

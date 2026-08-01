@@ -1212,6 +1212,44 @@ def test_enclosing_writer_subsumes_the_writers_inside_it(script: str):
 @pytest.mark.parametrize(
     "script",
     [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; } > >(bash) 3>&1",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat ) > >(bash) 3>&1",
+        "if :; then printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; fi > >(bash) 3>&1",
+    ],
+    ids=("brace", "subshell", "if"),
+)
+def test_a_writer_the_enclosing_stream_does_not_carry_is_not_subsumed(script: str):
+    """Lexical nesting does not decide subsumption, and a pipeline producer is where they part.
+
+    The producer sits inside the compound and reaches the substitution through descriptor 3, but
+    the compound's stdout holds ``cat`` rather than the producer, so nothing in the surviving
+    writer's stream carries the marker. Subsuming by nesting dropped the producer and certified
+    each body while bash 5.2 ran the shim 5 times out of 5. Two writers remain once containment
+    decides it, and the evidence carries no order between them, so they fail closed at the guard
+    above.
+    """
+    assert (
+        scan_doc_lattice_invocations(script).guard_id
+        == "taint.output-substitution.unordered-writers"
+    )
+
+
+def test_a_pipeline_producer_reaching_a_substitution_alone_stays_marker_flow():
+    # Control for the three bodies above, isolating the subsumption from the descriptor chain that
+    # carries the producer to the consumer. The compound binds descriptor 4 rather than its own
+    # stdout, so it never writes to the substitution and subsumes nothing, leaving the producer as
+    # the only writer. Bash runs the shim here too, so this stays ordinary marker flow.
+    result = scan_doc_lattice_invocations(
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; } 4> >(bash) 3>&4"
+    )
+
+    assert result.guard_id is None
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > >(bash)",
         "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } | bash",
         "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > out.sh\nbash out.sh\n",

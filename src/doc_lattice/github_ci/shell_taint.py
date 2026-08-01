@@ -3105,31 +3105,63 @@ class _OutputProcessWriter:
     redirections: tuple[_RedirectionEvent, ...]
     stream_scope_id: int
     inherited: _DescriptorBindings
-    enclosing_scope_ids: frozenset[int]
     scope_id: int | None
 
 
-def _scope_ancestors(evidence: _ShellTaintEvidence) -> dict[int, frozenset[int]]:
-    """Return the structured scopes lexically enclosing each scope, excluding the scope itself.
+def _output_stream_carriers(evidence: _ShellTaintEvidence) -> dict[int, int]:
+    """Return the scope whose aggregated stdout directly contains each stream.
+
+    This is stream containment rather than lexical nesting, and the two differ. A pipeline
+    producer sits lexically inside the compound around it, but the compound's stdout holds the
+    pipeline's last stage, so the producer's own stream is carried by nobody: that is
+    ``{ printf x >&3 | cat; } > >(bash) 3>&1``, where the producer reaches the substitution by a
+    descriptor while the compound stream never holds its content.
 
     Args:
         evidence: The typed shell execution evidence for one run body.
 
     Returns:
-        A mapping from scope id to every ancestor scope id. A malformed parent cycle stops at the
-        first repeat rather than looping, matching `_command_scope_paths`.
+        A mapping from stream id to the id of the scope whose output expression names it, for
+        every stream some scope's aggregated stdout holds.
     """
-    scopes = {scope.scope_id: scope for scope in evidence.scopes}
-    ancestors: dict[int, frozenset[int]] = {}
+    command_streams = {command.command_id: command.output_scope_id for command in evidence.commands}
+    carriers: dict[int, int] = {}
     for scope in evidence.scopes:
-        chain: set[int] = set()
-        current = scope.parent_scope_id
-        while current is not None and current not in chain:
-            chain.add(current)
-            parent = scopes.get(current)
-            current = parent.parent_scope_id if parent is not None else None
-        ancestors[scope.scope_id] = frozenset(chain)
-    return ancestors
+        pending: list[OutputExpr] = [scope.output]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, CommandOutput):
+                stream = command_streams.get(current.command_id)
+                if stream is not None:
+                    carriers.setdefault(stream, scope.scope_id)
+            elif isinstance(current, ScopeOutput):
+                carriers.setdefault(current.scope_id, scope.scope_id)
+            else:
+                pending.extend(_output_children(current))
+    return carriers
+
+
+def _carrying_scopes(stream_scope_id: int, carriers: dict[int, int]) -> frozenset[int]:
+    """Return every scope whose aggregated stdout holds one stream, transitively.
+
+    Args:
+        stream_scope_id: The stream whose carriers are wanted, excluded from the result.
+        carriers: The direct carrier of each stream, from `_output_stream_carriers`.
+
+    Returns:
+        Each scope id up the carrier chain. A malformed carrier cycle stops at the first repeat
+        rather than looping, matching `_command_scope_paths`.
+    """
+    chain: set[int] = set()
+    current = carriers.get(stream_scope_id)
+    while current is not None and current not in chain:
+        chain.add(current)
+        current = carriers.get(current)
+    return frozenset(chain)
 
 
 def _output_process_writers(
@@ -3149,12 +3181,11 @@ def _output_process_writers(
 
     Returns:
         Every writer, each with the redirection events it replays, the stream scope its stdout
-        carries, the bindings its enclosing chain installed, the scopes enclosing it, and its own
-        scope id when the writer is a structured scope rather than a command.
+        carries, the bindings its enclosing chain installed, and its own scope id when the writer
+        is a structured scope rather than a command.
     """
     scope_bindings = _scope_inherited_bindings(evidence)
     command_paths = _command_scope_paths(evidence)
-    scope_ancestors = _scope_ancestors(evidence)
     writers: list[_OutputProcessWriter] = []
     for command in evidence.commands:
         enclosing = command_paths[command.command_id]
@@ -3163,7 +3194,6 @@ def _output_process_writers(
                 command.redirections,
                 command.output_scope_id,
                 scope_bindings.get(enclosing[-1], {}) if enclosing else {},
-                frozenset(enclosing),
                 None,
             )
         )
@@ -3174,7 +3204,6 @@ def _output_process_writers(
             scope_bindings.get(scope.parent_scope_id, {})
             if scope.parent_scope_id is not None
             else {},
-            scope_ancestors[scope.scope_id],
             scope.scope_id,
         )
         for scope in evidence.scopes
@@ -3220,15 +3249,25 @@ def _output_process_scope_inputs(
             # and body scope, so each list below belongs to exactly one consumer.
             reaching.setdefault(resource.scope_id, []).append(writer)
 
+    carriers = _output_stream_carriers(evidence)
     inputs: dict[int, ContentExpr] = {}
     for scope_id, writers in reaching.items():
         writing_scope_ids = {writer.scope_id for writer in writers if writer.scope_id is not None}
-        # A scope's aggregated stdout already contains every writer inside it, so an enclosing
-        # scope that writes to the same substitution subsumes them. That is the whole of
-        # ``{ printf x >&1; } > >(bash)``, where the command and its compound both resolve
-        # descriptor 1 to the substitution.
+        # A writer is subsumed by a scope writing to the same substitution only when that scope's
+        # aggregated stdout actually holds the writer's stream, which is the whole of
+        # ``{ printf x >&1; } > >(bash)``: the command's stream is what the compound's stdout is
+        # made of. Lexical nesting is not that relation. In
+        # ``{ printf x >&3 | cat; } > >(bash) 3>&1`` the producer sits inside the compound and
+        # reaches the substitution through descriptor 3, while the compound's stdout holds only
+        # ``cat``, so subsuming by nesting dropped the one writer carrying the marker.
+        #
+        # `_validate_nested_evidence` rejects a cycle among scope output references before any of
+        # this runs, so carriage is a strict order over the writing scopes and at least one writer
+        # is always left to index below.
         outermost = [
-            writer for writer in writers if not (writer.enclosing_scope_ids & writing_scope_ids)
+            writer
+            for writer in writers
+            if not (_carrying_scopes(writer.stream_scope_id, carriers) & writing_scope_ids)
         ]
         if len(outermost) > 1:
             # Independent writers reach the consumer in execution order, and the per-writer
