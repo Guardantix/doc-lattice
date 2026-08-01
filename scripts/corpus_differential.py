@@ -36,7 +36,7 @@ and are disclosed rather than closed: a withdrawal that mints exactly the identi
 guard would have returned, over exactly the scripts that guard already refuses, moves no label; the
 corpus is a fixed sample, so a clean run is evidence about those scripts rather than a statement
 about every input the scanner accepts; and this tool is the candidate's in both recordings, so only
-the corpus floor is base-owned. AD-21 in ARCHITECTURE.md owns all three.
+the corpus floor is base-owned. AD-22 in ARCHITECTURE.md owns all three.
 """
 
 from __future__ import annotations

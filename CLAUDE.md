@@ -120,7 +120,7 @@ rather than that anything failed. Shrink `--seeds` and `--iterations` for a quic
 
 `scripts/corpus_differential.py` replays one fixed corpus through the public scan path once per
 revision and reports every script whose verdict differs, in either direction. It is the dynamic
-control for the residual AD-20 leaves open, and AD-21 in [ARCHITECTURE.md](ARCHITECTURE.md) owns
+control for the residual AD-20 leaves open, and AD-22 in [ARCHITECTURE.md](ARCHITECTURE.md) owns
 what it gates, what a verdict label carries and the three limits it discloses.
 
 Two revisions of one package cannot be imported side by side, so a run is two `record` processes
