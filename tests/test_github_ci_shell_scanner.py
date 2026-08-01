@@ -1272,6 +1272,46 @@ def test_descriptor_duplication_is_not_snapshotted_until_issue_202(script: str):
     assert_taint_refusal(script)
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        'false && bash -c "$(printf %s doc-)lattice"',
+        'if false; then bash -c "$(printf %s doc-)lattice"; fi',
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash)",
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } | bash",
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } > out.sh\nbash out.sh\n",
+        "false && eval \"$(printf '%s%s\\n' doc- 'lattice reconcile')\"",
+    ],
+    ids=("simple", "if-false", "output-substitution", "pipe", "static-file", "command-subst"),
+)
+def test_statically_unreachable_branch_still_refuses_until_issue_203(script: str):
+    """Disclosure pin for issue #203, per AD-19.
+
+    The authored route takes its union over every branch and never evaluates a command's exit
+    status, so a branch behind a literal `false` is analyzed as if it runs. Bash runs the shim 0
+    times out of 5 in all six bodies and every one refuses. The first two carry no compound and no
+    redirection, which places the property in the route rather than in any sink, and all but the
+    substitution spelling refuse on `main` as well.
+    """
+    assert_taint_refusal(script)
+
+
+def test_literal_status_reachability_applies_inside_an_eval_payload():
+    # Control for issue #203, and what makes it a scoped extension rather than a design property:
+    # the payload sub-analysis already reduces a branch by literal command status, so the same
+    # construct certifies there and refuses on the authored route. The `true` spellings pin that
+    # the difference is the status rather than the branch.
+    assert (
+        scan_doc_lattice_invocations(
+            "eval 'if false; then X=doc-; fi'; eval \"$X\"lattice"
+        ).incomplete_reason
+        is None
+    )
+    assert_taint_refusal("eval 'if true; then X=doc-; fi'; eval \"$X\"lattice")
+    assert_taint_refusal('if false; then X=doc-; fi; eval "$X"lattice')
+    assert_taint_refusal('if true; then X=doc-; fi; eval "$X"lattice')
+
+
 def test_descriptor_duplication_reaching_the_rebound_target_still_refuses():
     # Control for issue #202: the same nesting with ``>&4`` really does reach the substitution, and
     # bash runs the shim 5 times out of 5, so the pin above isolates the missing snapshot rather

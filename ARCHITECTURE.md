@@ -395,7 +395,12 @@ stream-scope evidence with monotonic IDs. Typed ports keep argv, assignments, st
 static-resource content separate. A pure taint module builds `LiteralTransfer`, variable, stream,
 resource, `Choice`, `Concat`, and `OutsideGap` expressions, then evaluates them with a fixed marker
 DFA. Sequential adjacency uses relational composition; competing definitions, truncating writes,
-and mutually exclusive alternatives use set union, so unrelated fragments never concatenate.
+and mutually exclusive alternatives use set union, so unrelated fragments never concatenate. That
+union is taken over every branch, because the authored route does not evaluate a command's exit
+status: a branch behind a literal `false` is analyzed as if it runs, and refusing it over-refuses.
+The eval payload sub-analysis below does reduce a branch by literal command status, so the two
+routes disagree on the same construct, and closing that asymmetry for `true`, `false`, and `:`
+alone is issue #203.
 `OutsideGap` contributes epsilon and an opaque non-authored barrier, which permits only
 authored-only marker paths.
 
