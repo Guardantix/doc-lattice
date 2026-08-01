@@ -1588,13 +1588,17 @@ Widening resource lookups is pure cost. It fixed nothing and moved no fuzz verdi
 direction, leaving the default's 191 false certifications and 112 over-refusals and reproducing its
 failing signature set exactly, and still failed 30 tests. Within the stream and resource pair the
 single-table rows sum to 42 suite failures against that pair's 41, so one failure was reached by
-either widening on its own. The 16 stream fixes were bought with 12 legitimate certifications, and
-ten of those twelve were a `read` from a non-literal stream, for example
+either widening on its own. The 16 stream fixes carry two costs the table keeps in separate columns,
+and neither bounds the other. The suite fails 12, of which ten are clean-control assertions that a
+`read` from a non-literal stream still certifies, for example
 `shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
-because the `read` projects a record. Restricting the widening to the synthetic negative scope ids
-minted by `_OutputLowering`, which are provably internal to the body, cost nothing and fixed
-nothing: the 16 stream fixes all came from non-negative scope ids, the same population those `read`
-certifications depend on.
+because the `read` projects a record; the other two are a replay-inventory coverage check and a
+command-substitution unit test. The fuzz corpus separately adds 68 over-refusing cases on top of the
+default's 112, which is generated bodies that certify correctly today and would begin refusing.
+
+Restricting the widening to the synthetic negative scope ids minted by `_OutputLowering`, which are
+provably internal to the body, cost nothing and fixed nothing: the 16 stream fixes all came from
+non-negative scope ids, the same population those `read` certifications depend on.
 
 The default is therefore not separable at this granularity. In every table that yields fixes,
 internal solver gaps and legitimately external content share one lookup-miss population: an unset or
