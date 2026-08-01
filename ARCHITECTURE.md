@@ -1571,12 +1571,16 @@ and needs its own measurement rather than being refused by this entry. Reopening
 table measured here means re-running that comparison against the tree it targets and reporting the
 same columns, not matching the numbers above, which belong to a tree the fixes since have replaced.
 
-Every measured variant was strictly sound-improving, introducing zero new false certifications, so
-the rejection was about yield against cost. Widening resource lookups contributed zero fixes and 30
-of the 41 suite failures the widest variant produced, which is pure cost. The two single-table rows
-sum to 42 against that 41, so one suite failure was reached by either widening on its own. All 16
-fixes came from stream lookups, bought with 12 legitimate certifications, and ten of those twelve
-were a `read` from a non-literal stream, for example
+No variant the table scores for false certifications introduced one, so the rejection was about
+yield against cost rather than about soundness risk. The two stream widenings fixed 16 and
+introduced zero. The synthetic negative scope id variant left both counts at the current default,
+which holds soundness rather than improving it, and the resource-only variant carries no
+false-certification counts at all; its zero fixes follow from the two stream rows being identical,
+since adding resources to streams moved neither the 175 nor the 16. Widening resource lookups
+therefore contributed zero fixes and 30 of the 41 suite failures the widest variant produced, which
+is pure cost. The two single-table rows sum to 42 against that 41, so one suite failure was reached
+by either widening on its own. All 16 fixes came from stream lookups, bought with 12 legitimate
+certifications, and ten of those twelve were a `read` from a non-literal stream, for example
 `shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
 because the `read` projects a record. Restricting the widening to the synthetic negative scope ids
 minted by `_OutputLowering`, which are provably internal to the body, cost nothing and fixed
