@@ -1560,7 +1560,7 @@ Measured at 85922d3:
 | current default | 191 | - | - | 0 | 112 |
 | streams and resources widen | 175 | 16 | 0 | 41 | 180 |
 | streams only widen | 175 | 16 | 0 | 12 | 180 |
-| resources only widen | - | 0 | - | 30 | - |
+| resources only widen | 191 | 0 | 0 | 30 | 112 |
 | synthetic negative scope ids only | 191 | 0 | 0 | 0 | 112 |
 
 **Decision:** A missing key in the resource or stream tables continues to resolve to the inert
@@ -1571,16 +1571,16 @@ and needs its own measurement rather than being refused by this entry. Reopening
 table measured here means re-running that comparison against the tree it targets and reporting the
 same columns, not matching the numbers above, which belong to a tree the fixes since have replaced.
 
-No variant the table scores for false certifications introduced one, so the rejection was about
-yield against cost rather than about soundness risk. The two stream widenings fixed 16 and
-introduced zero. The synthetic negative scope id variant left both counts at the current default,
-which holds soundness rather than improving it, and the resource-only variant carries no
-false-certification counts at all; its zero fixes follow from the two stream rows being identical,
-since adding resources to streams moved neither the 175 nor the 16. Widening resource lookups
-therefore contributed zero fixes and 30 of the 41 suite failures the widest variant produced, which
-is pure cost. The two single-table rows sum to 42 against that 41, so one suite failure was reached
-by either widening on its own. All 16 fixes came from stream lookups, bought with 12 legitimate
-certifications, and ten of those twelve were a `read` from a non-literal stream, for example
+No measured variant introduced a new false certification, so the rejection was about yield against
+cost rather than about soundness risk. Only the two stream widenings improved soundness at all,
+fixing 16. The resource-only and synthetic negative scope id variants moved no fuzz verdict in
+either direction, which holds soundness rather than improving it: both leave the 191 false
+certifications and 112 over-refusals of the current default, and the resource-only run reproduces
+that default's failing signature set exactly. Widening resource lookups therefore contributed zero
+fixes and 30 of the 41 suite failures the widest variant produced, which is pure cost. The two
+single-table rows sum to 42 against that 41, so one suite failure was reached by either widening on
+its own. All 16 fixes came from stream lookups, bought with 12 legitimate certifications, and ten
+of those twelve were a `read` from a non-literal stream, for example
 `shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
 because the `read` projects a record. Restricting the widening to the synthetic negative scope ids
 minted by `_OutputLowering`, which are provably internal to the body, cost nothing and fixed
