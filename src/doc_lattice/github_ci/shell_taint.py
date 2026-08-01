@@ -7,7 +7,7 @@ import shlex
 from collections import ChainMap
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci.shell_guards import (
@@ -171,6 +171,13 @@ class _FlowWrite:
     read_target_index: int | None = None
     read_target_count: int | None = None
     read_raw: bool = False
+    # True only for the self-reference writes `_carrier_borne_cycle_keys` asks for. They exist so
+    # the fixed-point seeder can see a carrier-borne cycle in the one spelling it reads, and they
+    # describe no authored assignment. The eval layer's reparse is quote-sensitive and streaming
+    # rather than a join lattice, so it must be handed authored writes only; a fabricated one
+    # survives `_reachable_eval_variable_writes` on its own key and can refuse a body that has no
+    # eval-time cycle at all.
+    synthesized: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +185,17 @@ class _FlowDefinitions:
     variable_writes: tuple[_FlowWrite, ...] = ()
     resource_writes: tuple[_FlowWrite, ...] = ()
     stream_writes: tuple[_FlowWrite, ...] = ()
+
+
+# One flow table entry, named by the table holding it and its key. Keys are unique only inside
+# their own table, so a stream scope and a resource can carry the same integer key and still be
+# separate entries. The kind is spelled as a `Literal` rather than as a bare `str` because
+# `_carrier_borne_cycle_keys` filters on it and a wrong label there records nothing, silently
+# withdrawing the carrier-borne cycle detection. `ty` rejects a mislabelled entry where one is
+# built, in `_flow_dependency_graph` and `_expression_reference_keys`; it does not reject a
+# mistyped `==` comparison, which the recording tests catch instead.
+_FlowKind: TypeAlias = Literal["variable", "resource", "stream"]  # noqa: UP040
+_FlowNode: TypeAlias = tuple[_FlowKind, str | int]  # noqa: UP040
 
 
 @dataclass(frozen=True, slots=True)
@@ -1756,9 +1774,22 @@ def _flow_write_identity(
     int | None,
     int | None,
     bool,
+    bool,
     tuple[str | int | bool, ...],
 ]:
-    """Return a recursion-safe structural identity for one flow write."""
+    """Return a recursion-safe structural identity for one flow write.
+
+    `synthesized` is part of the identity so a fabricated self-reference write never stands in for
+    an authored one the eval layer discovers. The two carry different privileges, and deduplicating
+    an authored ``X=$X`` against the fabricated write of the same shape would withdraw it from the
+    eval reparse.
+
+    Args:
+        write: The flow write to identify.
+
+    Returns:
+        A hashable structural identity.
+    """
     return (
         write.key,
         write.append,
@@ -1767,6 +1798,7 @@ def _flow_write_identity(
         write.read_target_index,
         write.read_target_count,
         write.read_raw,
+        write.synthesized,
         _expression_identity(write.expression),
     )
 
@@ -1891,22 +1923,222 @@ class _SolvedFlow:
         )
 
 
-def _expression_variable_names(expression: ContentExpr) -> set[str]:
-    """Return every variable name one content expression reads."""
-    names: set[str] = set()
+def _expression_reference_keys(expression: ContentExpr) -> set[_FlowNode]:
+    """Return every typed table entry one content expression reads.
+
+    Streams and resources are reported beside variables because a definition cycle can run
+    through either of them. In ``X=$(printf "doc-%slattice reconcile" "$X")`` the variable's only
+    definition reads a command substitution whose own content reads that variable back, and a
+    walk that stopped at variable references could not see that cycle at all.
+
+    Args:
+        expression: The content expression to walk.
+
+    Returns:
+        The ``(kind, key)`` table entries the expression reads.
+    """
+    keys: set[_FlowNode] = set()
     pending = [expression]
     while pending:
         current = pending.pop()
         if isinstance(current, VariableRef | _SecondPassVariableRef):
-            names.add(current.name)
+            keys.add(("variable", current.name))
             continue
         if isinstance(current, _SecondPassConditionalAssignment):
-            names.add(current.name)
+            keys.add(("variable", current.name))
             pending.append(current.operand)
+            continue
+        if isinstance(current, ResourceRef):
+            keys.add(("resource", current.key))
+            continue
+        if isinstance(current, StreamRef):
+            keys.add(("stream", current.scope_id))
             continue
         if isinstance(current, Choice | Concat):
             pending.extend(current.parts)
-    return names
+    return keys
+
+
+def _flow_dependency_graph(definitions: _FlowDefinitions) -> dict[_FlowNode, set[_FlowNode]]:
+    """Return the read-dependency graph over one flow's typed table entries.
+
+    Args:
+        definitions: The variable, resource, and stream writes of one flow.
+
+    Returns:
+        A mapping from each written ``(kind, key)`` entry to the entries its writes read.
+    """
+    graph: dict[_FlowNode, set[_FlowNode]] = {}
+    tables: tuple[tuple[_FlowKind, tuple[_FlowWrite, ...]], ...] = (
+        ("variable", definitions.variable_writes),
+        ("resource", definitions.resource_writes),
+        ("stream", definitions.stream_writes),
+    )
+    for kind, writes in tables:
+        for write in writes:
+            graph.setdefault((kind, write.key), set()).update(
+                _expression_reference_keys(write.expression)
+            )
+    return graph
+
+
+def _self_reaching_nodes(graph: Mapping[_FlowNode, set[_FlowNode]]) -> set[_FlowNode]:
+    """Return every graph node that can reach itself.
+
+    A node reaches itself exactly when it carries a self edge or shares a strongly connected
+    component with another node, so this runs Tarjan's algorithm. Iteratively, because a
+    dependency chain is as long as the run body is, and in one pass, because the graph carries a
+    node per written table entry and a per-node reachability walk would be quadratic in the
+    number of commands a body runs.
+
+    Args:
+        graph: The read-dependency graph to search.
+
+    Returns:
+        The nodes lying on a dependency cycle.
+    """
+    index_of: dict[_FlowNode, int] = {}
+    low_of: dict[_FlowNode, int] = {}
+    component_stack: list[_FlowNode] = []
+    on_component_stack: set[_FlowNode] = set()
+    cyclic: set[_FlowNode] = set()
+    counter = 0
+
+    def enter(node: _FlowNode) -> tuple[_FlowNode, list[_FlowNode]]:
+        nonlocal counter
+        index_of[node] = counter
+        low_of[node] = counter
+        counter += 1
+        component_stack.append(node)
+        on_component_stack.add(node)
+        return node, list(graph.get(node, ()))
+
+    for root in graph:
+        if root in index_of:
+            continue
+        pending = [enter(root)]
+        while pending:
+            node, successors = pending[-1]
+            if successors:
+                successor = successors.pop()
+                if successor not in index_of:
+                    pending.append(enter(successor))
+                elif successor in on_component_stack:
+                    low_of[node] = min(low_of[node], index_of[successor])
+                continue
+            pending.pop()
+            if low_of[node] == index_of[node]:
+                component = [component_stack.pop()]
+                on_component_stack.discard(component[0])
+                while component[-1] != node:
+                    component.append(component_stack.pop())
+                    on_component_stack.discard(component[-1])
+                if len(component) > 1 or node in graph.get(node, ()):
+                    cyclic.update(component)
+            if pending:
+                parent = pending[-1][0]
+                low_of[parent] = min(low_of[parent], low_of[node])
+    return cyclic
+
+
+def _synthesized_cycle_write(key: str) -> _FlowWrite:
+    """Return the fabricated self-reference write that records one carrier-borne cycle.
+
+    Recording is a fixed-point no-op for every key whose writes all overwrite, since joining a
+    key's value with itself never widens it. What it changes there is that the cycle is visible
+    where the seed is chosen. A key carrying an appending write is the exception: recording moves
+    that key's seed from bottom to epsilon, and the append branch's ``base = prior or
+    _OUTSIDE_VALUE`` then reads epsilon as the base instead of the conservative outside barrier, so
+    an alternative the barrier would have carried is dropped. That narrowing is the intended #115
+    and #163 behavior rather than an accident of the carrier case: seeding a cyclic key with
+    epsilon is what the direct spelling already does on a key the seeder sees without any
+    recording, and this only extends it to the carrier-borne spelling.
+
+    Args:
+        key: The variable key sitting on the cycle.
+
+    Returns:
+        A self-reference write marked as synthesized.
+    """
+    return _FlowWrite(key, VariableRef(key), synthesized=True)
+
+
+def _carrier_borne_cycle_keys(definitions: _FlowDefinitions) -> tuple[str, ...]:
+    """Return the variable keys whose definition cycle runs only through a carrier.
+
+    A variable whose definition reaches itself only through a command substitution or a file sits
+    on a definition cycle exactly as one that reads itself directly does, and the solver seeds a
+    cycle with epsilon rather than with the annihilating lattice bottom. `_cyclic_write_keys`
+    decides that seed from the variable writes alone and therefore cannot see a carrier-borne
+    cycle, so the cycle is recorded in the spelling it does see: one self-reference write per
+    variable key returned here. That is what keeps
+    ``X=$(printf "doc-%slattice reconcile" "$X"); $X`` from resolving to bottom and reading as
+    marker-free (issue #163, the carrier-borne residue of #115).
+
+    Three narrowings are deliberate rather than incidental. Only a variable key is returned,
+    because `VariableRef` is the only reference the seeder reads and the seeder never seeded a
+    stream or a resource; a cycle confined to those two keeps the bottom seed. Only a string key
+    is returned, for the same reason `VariableRef` names one. And a key the seeder already sees as
+    directly cyclic is skipped, because recording it would add a node and an edge to the
+    definition budget for no change in the solved value.
+
+    The directly cyclic set is read off the variable-restricted projection of the same dependency
+    graph the carrier search walks, rather than from a second `_cyclic_write_keys` call. The two
+    agree by construction: `_cyclic_write_keys` walks variable-to-variable reachability over the
+    variable writes, and that is exactly the ``variable`` slice of this graph. Deriving it here
+    keeps the recording to two linear passes over one graph instead of adding a per-key
+    reachability walk, which is quadratic in the number of variables a run body writes.
+
+    The recording runs once, where the flow is built. `_solve_eval_conditional_flow` then appends
+    eval-discovered assignments and re-solves without re-recording, so a cycle closed only by an
+    eval-lowered assignment keeps the bottom seed and still certifies:
+    ``Q=$(printf "doc-%slattice" "$W"); eval 'W=${W=$Q}'; $Q`` certifies while Bash runs the
+    marker, where the same body without the `eval` refuses. That residual is issue #199, this
+    defect one indirection further out rather than issue #159's carrier opacity, because the marker
+    literal never crosses the eval boundary and it is the seed rather than the value that fails to
+    reach. Re-recording inside that loop moves the fingerprints of two guards the inventory freezes
+    as debt, so closing it depends on classifying those guards first.
+
+    Args:
+        definitions: The flow definitions built for one run body.
+
+    Returns:
+        The variable keys to record, in sorted order.
+    """
+    graph = _flow_dependency_graph(definitions)
+    variable_graph: dict[_FlowNode, set[_FlowNode]] = {
+        node: {edge for edge in edges if edge[0] == "variable"}
+        for node, edges in graph.items()
+        if node[0] == "variable"
+    }
+    direct = _self_reaching_nodes(variable_graph)
+    carried: set[str] = set()
+    for node in _self_reaching_nodes(graph):
+        kind, key = node
+        if kind == "variable" and isinstance(key, str) and node not in direct:
+            carried.add(key)
+    return tuple(sorted(carried))
+
+
+def _expression_variable_names(expression: ContentExpr) -> set[str]:
+    """Return every variable name one content expression reads.
+
+    This is the ``variable`` projection of `_expression_reference_keys` rather than a second walk
+    over the same `ContentExpr` union, so a variant added to that union is seen by both callers or
+    by neither. Two hand-written walkers diverge silently, and the divergence would be a missed
+    dependency edge rather than an error.
+
+    Args:
+        expression: The content expression to walk.
+
+    Returns:
+        The variable names the expression reads.
+    """
+    return {
+        key
+        for kind, key in _expression_reference_keys(expression)
+        if kind == "variable" and isinstance(key, str)
+    }
 
 
 def _cyclic_write_keys(writes: tuple[_FlowWrite, ...]) -> frozenset[str | int]:
@@ -8155,12 +8387,19 @@ def _build_flow_definitions(  # noqa: PLR0912, PLR0915
             )
         )
 
+    built = _FlowDefinitions(
+        variable_writes=tuple(variable_writes),
+        resource_writes=tuple(resource_writes),
+        stream_writes=tuple(stream_writes),
+    )
+    # Routed through the same closure every authored write takes, so a recorded cycle is charged
+    # against the build-stage budget that owns it. Appending straight into the tuple would leave
+    # `_definition_counts` to find the overrun at solve time and refuse from a guard that never
+    # saw the write created.
+    for key in _carrier_borne_cycle_keys(built):
+        append_variable_write(_synthesized_cycle_write(key))
     return (
-        _FlowDefinitions(
-            variable_writes=tuple(variable_writes),
-            resource_writes=tuple(resource_writes),
-            stream_writes=tuple(stream_writes),
-        ),
+        replace(built, variable_writes=tuple(variable_writes)),
         inputs,
     )
 
@@ -11180,7 +11419,15 @@ def _reachable_eval_variable_writes(
             found = dependencies(write.expression)
             pending.extend(found - names)
             names.update(found)
-    return tuple(write for write in writes if isinstance(write.key, str) and write.key in names)
+    # Synthesized writes are dropped rather than filtered late, because their only dependency is
+    # their own key: one survives reachability whenever its key is eval-reachable at all, and the
+    # eval reparse downstream is a quote-sensitive streaming walk rather than a join lattice, so a
+    # fabricated `X=$X` there can refuse a body no authored write made cyclic under eval.
+    return tuple(
+        write
+        for write in writes
+        if not write.synthesized and isinstance(write.key, str) and write.key in names
+    )
 
 
 def _solve_eval_conditional_flow(

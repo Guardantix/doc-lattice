@@ -704,21 +704,54 @@ exhaustion, so an eval payload that grows itself cannot exhaust time or memory. 
 projection caps are the exception: they widen to the top of the content lattice instead of
 refusing, as described at the end of this decision.
 
+A write key that lies on a definition cycle is seeded with epsilon rather than with the
+annihilating lattice bottom, because Bash expands a not-yet-assigned self-reference to the empty
+string and the literals around it reconstitute the marker. The seeder reads the variable writes
+alone, so a cycle that runs through a command substitution or a file was invisible to it and kept
+the bottom seed, which is issue #163. That cycle is now found over the variable, resource, and
+stream writes together and recorded in the spelling the seeder does see: one self-reference write
+per variable key that only reaches itself through a carrier. Those synthesized writes are the one
+sanctioned exception to the sentence above about canonicalizing write tuples. They are appended
+rather than inserted, they are created through the same build-stage closure every authored write
+passes so they are charged to the edge and table budgets where they are made, and they are labelled
+as synthesized so the eval-syntax reparse, which is a quote-sensitive stream rather than a join,
+never sees a write no command authored. A cycle confined to stream and resource keys with no
+variable on it still keeps the bottom seed, matching the seeder's own domain.
+
+Recording is a fixed-point no-op for a key whose writes all overwrite, since joining a key's value
+with itself never widens it. A key carrying an appending write is the exception and is not a no-op:
+moving that key's seed from bottom to epsilon gives the append branch epsilon as its base instead
+of the conservative outside barrier, so an alternative the barrier carried is dropped. That
+narrowing is intended rather than incidental. It is what the direct spelling already does on a
+cyclic key the seeder sees without any recording, and the carrier-borne spelling only reaches the
+same seed.
+
+The recording runs once, when the flow for a run body is built. The eval sub-analysis then
+discovers eval-time assignments, appends them to the write set and re-solves without re-recording,
+so a definition cycle that is closed only by an eval-lowered assignment keeps the bottom seed and
+still certifies: `Q=$(printf "doc-%slattice" "$W"); eval 'W=${W=$Q}'; $Q` certifies while Bash runs
+the marker, where the same body without the `eval` refuses. That residual is issue #163 one
+indirection further out and not issue #159's carrier opacity, because the marker literal never
+crosses the eval boundary; it is the seed, not the value, that fails to reach. It stays open here
+because every spelling of re-recording inside that loop moves the fingerprints of two guards the
+inventory freezes as debt, so closing it depends on classifying those guards first. It is tracked
+as issue #199 and must not be triaged onto #159.
+
 The absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
 beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, shell-scope
 descriptor state carried across commands by a bare `exec`, eval payload constructs outside the
 bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
 This list is the boundary as designed, not a complete inventory of what the engine currently
-misses; open gaps against this decision are tracked in issues #125 through #141, and this
-enumeration itself is not exhaustive. Two further gaps outside these categories: `lastpipe` state
-reached through a function call site or a loop back edge is widened only for a pipeline whose last
-stage is a `read` writing from stdin, not for every conditional-on-lastpipe context such as a
-trailing `eval` (issue #118), and one descriptor bound to two output process substitutions keeps
-only the last binding, so the earlier consumer Bash chains behind it, as in
-`producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the first record of
-a shared stream is projected as record one, so a marker split across later records is not yet seen;
-that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it interacts with is
-issue #119.
+misses; open gaps against this decision are tracked as individual issues rather than by a fixed
+range of issue numbers, and this enumeration itself is not exhaustive. Two further gaps outside
+these categories: `lastpipe` state reached through a function call site or a loop back edge is
+widened only for a pipeline whose last stage is a `read` writing from stdin, not for every
+conditional-on-lastpipe context such as a trailing `eval` (issue #118), and one descriptor bound to
+two output process substitutions keeps only the last binding, so the earlier consumer Bash chains
+behind it, as in `producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the
+first record of a shared stream is projected as record one, so a marker split across later records
+is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it
+interacts with is issue #119.
 **Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
 that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
 required character comes only from external content continue to certify with the boundary
@@ -1438,7 +1471,7 @@ guard is not exposed to it, because its witness executes the guard through the p
 same edit becomes a failing test rather than a green gate. The residual therefore shrinks
 one-for-one as debt is classified, and vanishes when the debt snapshot is empty, which is the
 closure target this decision already names. The dynamic control while the window is open is the
-recurring checkpoint-corpus differential proposed in issue #182: it replays the authored corpus
+recurring checkpoint-corpus differential recorded in AD-22: it replays the authored corpus
 against base and candidate and reports every verdict divergence, so it sees an over-refusal as
 readily as a certification, which the taint fuzzer's seed-gated false-certification counter
 deliberately does not.
@@ -1531,3 +1564,241 @@ limits reach the bounds they name, so a resource guard is witnessed by a small s
 an enormous one. The cost is a second gate to maintain and a debt snapshot that must be regenerated
 whenever a guard legitimately moves; the closure target is an empty snapshot, which this decision
 does not by itself reach.
+
+### AD-21: A missing content-table key stays inert, and widening that default is rejected
+
+**Date:** 2026-07-31
+**Status:** Accepted
+**Context:** Three review passes over the false certifications open in July 2026 converged on one
+cross-cutting cause. When the taint solver resolves a `VariableRef`, `ResourceRef`, or `StreamRef`
+whose key is absent from the layered content tables, `shell_taint.py` yields `_OUTSIDE_VALUE`, which
+is inert and never marker-capable, rather than `_UNKNOWN_VALUE`, the top of the content lattice. The
+proposal was that inverting that default would turn every present and future evidence-construction
+gap from a silent certification into a refusal, closing the class instead of its instances. Issue
+#143 measured that proposal rather than reasoning about it, and it is recorded here with its numbers
+so the option is not re-proposed without them.
+
+The measurement was taken on 2026-07-26 at 85922d3, the revision on the cross-command marker taint
+branch that introduced `scripts/fuzz_shell_taint.py`. The numbers below describe that tree, not the
+current one, and the row for the unchanged default reproduces there. The method was that fuzzer at
+1200 generated recipes and seed 1, run with `--no-shrink` so failing recipe sets are directly
+comparable between variants. Shrinking has to be off for that comparison: a variant that refuses
+more also shrinks less, which inflates the distinct-recipe count and reads as a regression when it
+is not. The comparable quantities are the failing cases and the set difference between variants,
+never the shrunk count.
+
+The variants cover each of the three lookups alone, all three together, the stream and resource
+pair, and one narrowing of the stream case. The stream and scope-id rows were taken on 2026-07-26.
+The combined and variable rows, and the false-certification columns of the resource-only row, were
+scored on 2026-07-31 at the same revision, seed, and method. That later run reproduced the
+unchanged-default control at 191 false certifications, 112 over-refusals, and a clean suite before
+any variant ran, and reproduced the streams-only row exactly, which is what makes the two dates one
+table.
+
+Measured at 85922d3:
+
+| variant | false certifications | fixed | introduced | suite failures | fuzz over-refusals |
+|---|---|---|---|---|---|
+| current default | 191 | - | - | 0 | 112 |
+| all three tables widen | 156 | 35 | 0 | 112 | 439 |
+| variables only widen | 168 | 23 | 0 | 77 | 412 |
+| streams and resources widen | 175 | 16 | 0 | 41 | 180 |
+| streams only widen | 175 | 16 | 0 | 12 | 180 |
+| resources only widen | 191 | 0 | 0 | 30 | 112 |
+| synthetic negative scope ids only | 191 | 0 | 0 | 0 | 112 |
+
+**Decision:** A missing key in the variable, resource, or stream tables continues to resolve to the
+inert `_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither for
+all three tables together nor for any one of them. Reopening the proposal means re-running this
+comparison against the tree it targets and reporting the same columns for the table it proposes to
+widen, not matching the numbers above, which belong to a tree the fixes since have replaced.
+
+No measured variant introduced a new false certification, so the rejection was about yield against
+cost rather than about soundness risk. Widening all three lookups fixed 35 of the 191 failing
+bodies, at 439 over-refusals against the default's 112 and 112 suite failures. The variable lookup
+carried most of that yield and most of that cost: 23 fixes, 412 over-refusals, and 77 suite
+failures, about 13 extra over-refusals and three suite failures per fix, against roughly four and
+one for the 16 that stream lookups fixed. Four bodies are fixed by either widening, so the variable
+and stream fix sets union to exactly the 35 the combined row reports.
+
+Widening resource lookups is pure cost. It fixed nothing and moved no fuzz verdict in either
+direction, leaving the default's 191 false certifications and 112 over-refusals and reproducing its
+failing signature set exactly, and still failed 30 tests. Within the stream and resource pair the
+single-table rows sum to 42 suite failures against that pair's 41, so one failure was reached by
+either widening on its own. The 16 stream fixes carry two costs the table keeps in separate columns,
+and neither bounds the other. The suite fails 12, of which ten are clean-control assertions that a
+`read` from a non-literal stream still certifies, for example
+`shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
+because the `read` projects a record; the other two are a replay-inventory coverage check and a
+command-substitution unit test. The fuzz corpus separately adds 68 over-refusing cases on top of the
+default's 112, which is generated bodies that certify correctly today and would begin refusing.
+
+Restricting the widening to the synthetic negative scope ids minted by `_OutputLowering`, which are
+provably internal to the body, cost nothing and fixed nothing: the 16 stream fixes all came from
+non-negative scope ids, the same population those `read` certifications depend on.
+
+The default is therefore not separable at this granularity. In every table that yields fixes,
+internal solver gaps and legitimately external content share one lookup-miss population: an unset or
+inherited variable and a stream the body never wrote are indistinguishable from a key the solver
+failed to record. Scope-id sign, the most promising cheap discriminator, captured none of the
+benefit. The hypothesis that this default was the dominant cause of the false certifications open at
+the time was also wrong: widening all three lookups accounted for 35 of 191 failing bodies, about 18
+percent, and the rest came from evidence never being constructed at all, the class AD-18 discloses
+and tracks issue by issue. Closing the class was that issue-by-issue work, not one
+default change, and the work that followed this measurement bears that out. The branch it was
+measured on merged as 763f43d on 2026-07-27, closing the individual issues the remaining bodies were
+attributed to, and the same seed and method re-run at 1c7a6df report 2 false certifications and 167
+over-refusals. A later attempt has to supply the discriminator this experiment lacked, which is
+knowing whether the body itself should have defined a key, rather than inferring that from the key's
+shape.
+**Consequences:** The inert missing-key default is the pinned behavior of an unresolved content
+reference, and the false certifications AD-18 discloses stay open under their individual
+issues rather than behind one pending global fix. This rejects one widening, not fail-closed
+defaults in general: AD-18's rule that a projection which is merely lost widens to the top of the
+lattice is unchanged, because there the solver knows it lost track, while a table miss does not say
+whether the key was ever meant to exist. The residual cost is explicit. An evidence-construction gap
+in a new lowering still certifies silently instead of refusing, so that risk is carried by the
+review and fuzz measurement of the lowering itself rather than by a lattice-wide backstop.
+
+### AD-22: A scanner change replays the frozen corpus against the revision it is proposed on
+
+**Date:** 2026-07-31
+**Status:** Accepted
+**Context:** AD-20 records one residual it does not close: a targeted early refusal above a frozen
+guard's function, such as refusing any body containing `--split-string=` at the top of
+`_ShellScanner.scan`, withdraws that guard while every static gate stays green. A fingerprint
+records the immediate call site's controls, the reachability rule follows syntactic call edges, and
+a frozen origin has no witness executing it. The one control that saw the round-6 demonstration on
+PR #179 was dynamic and ran once: a differential over the recorded corpus, comparing two revisions
+script by script. The taint fuzzer does not substitute for it. Its gate counts false
+certifications, so it is blind by construction to a change that refuses more than the base did, and
+withdrawal by early refusal is exactly that shape.
+**Decision:** A pull request that touches the guard package, the differential tool, the fuzzer
+grammar or the frozen replay inventory replays one fixed corpus against both revisions and reports
+every script whose verdict differs. The corpus is the in-tree frozen inventory recorded by
+`scripts/checkpoint_record_scanner_inputs.py` plus the bodies four fixed fuzzer seeds draw from the
+compositional grammar, roughly twenty thousand scripts, which is the scale of the one-off run. It
+is in-tree on purpose: the evaluation branch that carries the successor evidence is read-only
+history, and a gate that reads it would make a protected branch a build input.
+
+A verdict label is the refusing guard's origin identifier, the analysis's own marker verdict, or
+the certified invocations. Identity is what makes this catch the demonstration at all: the corpus
+carries one script spelling the targeted option, the base refuses it as
+`scanner.env-prefix.split-string-long-option`, and the early refusal refuses it as whatever origin
+it mints. A label that recorded only "refused" would report those two as the same verdict.
+
+Two revisions of one package cannot be imported side by side, so the gate is two recording
+processes and one comparison. The tool and the corpus are the candidate's in both recordings, so
+the two records score the same scripts and the guard package is the only thing that differs;
+the base revision's own copy of the inventory is then the floor the scored corpus may not fall
+below, since a candidate that shrank the corpus would make its own divergence disappear rather than
+report it.
+
+The comparison refuses outright, rather than reporting a count, whenever the protection it describes
+is not in place, because a count read off a comparison that could not have found anything is worse
+than no gate. It refuses when the two records did not score the same corpus; when both records name
+the same scanner file, which is one revision replayed twice and agrees with itself by construction;
+when either record was drawn below the pinned corpus scale, which is a command line argument and so
+out of reach of pinning the constants; when a record's case list does not match the count it
+declares; and when no base-owned inventory was named, since without one there is no floor under the
+corpus at all. Each relaxation is a flag spelled out in the diff that takes it, `--no-corpus-floor`
+and `--allow-shrunk-corpus`, rather than a default nobody sees not being exercised. A record also
+names the scanner file it scored and the scale it was drawn at, which is what makes the first two of
+those checkable at comparison time.
+
+The scale a record names is what the run was asked for rather than what it drew, so the recording
+refuses in turn when the generated half collapsed: when a requested seed drew no script, or when
+what survived deduplication is below a single seed's worth of draws. An edit to the generator, to
+the case builder or to the deduplication that shrinks the drawn half otherwise leaves both records
+declaring the pin over a corpus a fraction of that size, collapsing alike on both sides, so the
+comparison agrees with itself and reports nothing for the scripts nobody drew.
+
+The recording builds the corpus with the candidate's fuzzer against the base's scanner, so a pull
+request that adds a scanner name and draws on it in the same diff refuses rather than reports: the
+base does not carry the name the fuzzer resolves. There is no acknowledgement for that, because no
+records were produced to compare. The remedy is to land the scanner name first and draw on it in a
+later pull request, whose base then carries it, and the refusal says so.
+
+`--write-acknowledgements` writes only the reasons the comparison was handed, so it refuses a
+destination that already holds acknowledgements the run did not read; naming the file on both flags
+is what keeps the reasons on it. Under `--allow-shrunk-corpus` the write also keeps the entries this
+comparison matched nothing for, for the same reason it passes no judgment on them there.
+
+An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
+script digest, both verdicts and a reason, so it covers exactly the transition it was written for.
+It does not expire on its own; an entry matching no divergence is judged by what the base record
+says about the script it names. An entry whose script the base now scores at anything other than
+its base verdict is spent: it can only match a divergence that opens at that verdict, this base
+opens none, and no candidate edit changes what the base scores, so the entry authorizes nothing
+against this base. Spent entries are counted and reported rather than failed, and the next
+`--write-acknowledgements` run drops them. Failing them uniformly was tried first and moved the
+burden to the wrong author: the acknowledging pull request cannot remove its own entries, since
+its own comparison needs them to match, so they landed in the base and the next pull request
+touching a replayed input inherited a red check and a replay to delete someone else's line. An
+entry whose script the base still scores at exactly its base verdict is a standing authorization
+for a move nobody has made, and an entry naming a script the base record does not score can never
+be judged again, so the comparison fails on both until they are removed, because printing either
+into the log of a green job is not review. The dangerous state is refused earlier than the uniform
+staleness failure refused it: only a reversion landing in the base turns a spent entry back into a
+live one, that reversion is itself a divergence that had to be acknowledged under review, and the
+next comparison refuses the reactivated entry before it can excuse anything. A shrunken corpus
+proves nothing by absence, since the script an entry names may simply not have been drawn, so
+`--allow-shrunk-corpus` suspends the judgment along with the scale check it belongs to.
+
+Acknowledgements are a file in the diff, which is what makes them reviewable; a label or a phrase
+in a pull request body is neither versioned nor reviewable alongside the change it excuses. That
+only holds if the file is a replayed input: a pull request touching nothing else would otherwise
+skip the gate and land an excuse detached from the change it excuses, for a later diff to walk
+through. A change that legitimately moves thousands of verdicts is not transcribed by hand, so the
+comparison writes the file it would need on request, with every reason left empty and an empty
+reason refused on read. A gate that is impractical to satisfy for an intended change is a gate that
+gets switched off, and that is the failure mode the mode exists against.
+
+The gate runs on pull requests and stays out of the release job's `needs`, because a job skipped
+for push events skips every dependent with it. It is therefore enforced by the repository's
+required status checks rather than by a `needs` edge, and `Corpus differential` belongs in that
+list; nothing in the tree can assert that setting. Its scope step reads the diff against the base
+and exits early when no replayed input changed, so an unrelated pull request pays for a checkout
+and one `git diff`. The scoped paths are the guard package, `error_types.py` as the one module
+outside it the scan path imports, the tool, the fuzzer grammar, the frozen inventory, the
+acknowledgements file and the workflow file itself. The last of those is scoped for a stronger
+version of the acknowledgement's reason: the scale, the relaxation flags and the scope list all live
+in the workflow, so a pull request that only weakened the job would skip the differential and report
+green having replayed nothing, leaving the weakened job as what every later scanner change runs
+under. The workflow contract tests hold the job to taking neither relaxation and to naming no scale
+on either recording, since a flag's visibility in a diff gates nothing on its own.
+
+A base whose object cannot be read is a failure rather than a skip, for the reason AD-20's
+base-owned comparison gives. A base whose object reads but which carries neither the frozen
+inventory nor a guard package predates the gate and is skipped instead, as the guard-debt job skips
+a base predating its own inputs: the comparison would otherwise refuse on a floor that is not there
+and leave a required check red until the branch is rebased.
+**Consequences:** An over-refusal is visible to automation for the first time, in either direction
+and without a witness for the guard involved, which is what makes this the standing control while
+the frozen-debt window is open. The cost is roughly two minutes of replay per revision on a change
+that touches the scanner, and nothing on a change that does not. Four limits are disclosed rather
+than closed. A withdrawal that mints exactly the origin identifier the deeper guard would have
+returned, over exactly the corpus scripts that guard already refuses, moves no label and stays
+invisible; widening the corpus is what shrinks that, not a rule. The corpus is a fixed sample
+rather than a proof, so a clean differential is evidence about those scripts and not a statement
+about every input the scanner accepts; and its generated half saturates on distinct verdict labels
+within a few hundred draws, so the scale it is run at buys sensitivity per script rather than more
+kinds of verdict.
+
+The replay also scores every script at the scanner's default limits, and only at those. The
+budget-governed and cap-governed guards are the ones `scripts/guard_witness_sweep.py` drives the
+same corpus once per shrunk cap to reach at all, so a clean differential says nothing about a
+withdrawal of one of them: they are the larger part of what AD-20 still freezes as debt. Closing
+that means replaying the corpus once per cap tier, which multiplies a job that already scores
+roughly forty thousand scripts, and it is deliberately left for the sweep and for the witness rows
+it produces rather than paid for on every scanner pull request.
+
+And unlike AD-20's base-owned comparison, only the corpus floor here is base-owned: the tool that
+builds the corpus, labels a verdict and matches an acknowledgement is the candidate's in both
+recordings, so a pull request can shrink the drawn half or coarsen a label in the same diff that
+withdraws a guard. That is deliberate. Running the base's copy of the tool would hard-fail every
+pull request that legitimately moves the scanner module, with no acknowledgement path to declare
+the move, and the tool has to build one corpus for both revisions to compare them at all. What is
+left is a change that has to be spelled out in the diff of the pull request it protects, next to a
+pinned expectation on the corpus scale and on identity-carrying labels, which is where review sees
+it.
