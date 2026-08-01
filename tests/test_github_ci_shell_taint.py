@@ -2146,6 +2146,47 @@ def test_resolved_redirection_operand_respects_the_exact_value_length_limit() ->
     assert error.value.refusal.origin_id == "taint.exact-value.length-limit"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "P=other.sh; for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        "P=other.sh; for P in task.sh; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=other.sh; select P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; break; done < /dev/null; bash other.sh",
+    ],
+    ids=("inside-the-body", "after-done", "select"),
+)
+def test_a_loop_binding_withdraws_the_exact_value_its_name_held_outside(body: str) -> None:
+    """Issue #151 review: an operand is never projected against a value the loop has replaced.
+
+    A ``for`` or ``select`` binding is not one of the assignments the exact walk applies, so the
+    table would otherwise still hold whatever the name meant outside the loop. Bash writes the
+    marker to the file the binding names and runs the untouched one, so projecting the outer
+    value put the write on a file bash never opens and refused a body with no flow in it.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_an_assignment_after_a_loop_makes_its_name_exact_again() -> None:
+    """The withdrawal above is a point in the walk, not a name the whole body gives up.
+
+    Withholding every name a body loops over would spell the same over-refusal fix while
+    reopening issue #151 for that name, so the assignment after ``done`` has to resolve the
+    operand and the write has to reach the script sink.
+    """
+    body = "for P in a; do :; done; P=task.sh"
+    body += "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
 def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
     output: OutputExpr = CommandOutput(1)
     for _ in range(1_200):

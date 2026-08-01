@@ -3679,6 +3679,35 @@ def _resolve_dynamic_redirection_targets(
     return tuple(resolved)
 
 
+def _newly_entered_scope_bindings(
+    scope_path: tuple[int, ...],
+    scope_bound_names: Mapping[int, tuple[str, ...]],
+    entered_scopes: set[int],
+) -> tuple[str, ...]:
+    """Return the names the scopes this command is the first to enter rebind.
+
+    A ``for`` or ``select`` loop binds its variable on entry, and a compound's redirection word
+    can assign through an expansion such as ``${X=q}``. Neither is one of the assignments the
+    exact walk applies, so the value table would otherwise keep whatever the name held outside the
+    scope. Bash binds a loop variable for every command in the body and leaves it bound after
+    ``done``, so that outer value is stale from the first command inside the scope onward and only
+    a later assignment can make the name exact again. Every such name is withdrawn rather than
+    projected forward, which is the rule the resolution states: an operand resolves only where
+    every path reaching it fixes it to one literal, and a rebinding the walk never saw is not one.
+
+    Args:
+        scope_path: The structured scope ancestry of one command, outermost first.
+        scope_bound_names: The names each scope rebinds on entry, by scope id.
+        entered_scopes: The scopes the walk has already entered, extended in place by this call.
+
+    Returns:
+        Every name rebound by a scope this command is the first to enter.
+    """
+    entered = [scope_id for scope_id in scope_path if scope_id not in entered_scopes]
+    entered_scopes.update(entered)
+    return tuple(name for scope_id in entered for name in scope_bound_names.get(scope_id, ()))
+
+
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
@@ -3694,6 +3723,14 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    scope_bound_names = {
+        scope.scope_id: tuple(
+            _unscoped_variable_name(binding.name) for binding in scope.loop_bindings
+        )
+        for scope in evidence.scopes
+        if scope.loop_bindings
+    }
+    entered_scopes: set[int] = set()
     commands: list[_CommandEvidence] = []
 
     def exact_values_for(context: int | None, environment: int) -> dict[str, str]:
@@ -3749,6 +3786,14 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         environment = command_environments[command.command_id]
         exact_values = exact_values_for(context, environment)
         unknown_values = unknown_values_for(context, environment)
+        # Withdraw the names an entered scope rebinds, in the same shape a conditional assignment
+        # uses. An operand projected against a value the loop has replaced names a file Bash never
+        # opens, which the redirection resolution below turns into a write on the wrong resource.
+        for bound in _newly_entered_scope_bindings(
+            command_scope_paths[command.command_id], scope_bound_names, entered_scopes
+        ):
+            exact_values.pop(bound, None)
+            unknown_values.add(bound)
         command_values = dict(exact_values)
         command_unknown_values = set(unknown_values)
         for assignment in command.definite_assignments:

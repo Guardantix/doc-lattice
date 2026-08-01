@@ -334,6 +334,29 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "P=other.sh; P=task.sh printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
+    # A loop entry invalidates the name it binds, and only an assignment can make it exact again.
+    # These three hold that invalidation to the name and the moment it applies, so restoring the
+    # over-refusal it removes cannot be spelled as withholding every name a body loops over.
+    (
+        # A subshell binding does not survive its scope, so the outer value still names the file
+        # the marker reaches. Invalidating a name because some scope assigns it would lose this.
+        "subshell-binding-does-not-retarget-the-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; (P=task.sh)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "assignment-after-a-loop-restores-the-word",
+        "for P in a; do :; done; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "loop-binding-leaves-another-name-exact",
+        "P=task.sh; for Q in a; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -8859,6 +8882,26 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         # body writes no marker to the file it names, so it stays certified.
         "marker-free-literal-variable-write-target",
         "P=task.sh; printf 'make build\\n' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guard for the value table the projection reads. A "for" or "select"
+    # loop binds its variable for the whole body and leaves it bound after "done", and that
+    # binding is not one of the assignments the exact walk applies. Projecting an operand against
+    # the value the name held OUTSIDE the loop therefore named a file bash never opens, and the
+    # write on it refused a body whose marker only ever reaches the file the binding names. Both
+    # rows are certified because bash writes the marker to task.sh and runs the untouched
+    # other.sh, and the corresponding loop-bound write stays an unresolved operand of issue #188.
+    (
+        "loop-binding-shadows-an-outer-write-target",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        "escaped-loop-binding-shadows-a-later-write-target",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
     # Issue #151 measured widening. Resolving an operand can name a descriptor rather than a

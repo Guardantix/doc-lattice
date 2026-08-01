@@ -843,14 +843,27 @@ inside the dynamic resource alias boundary above, each pinned as certifying with
 differential attached so a change that closes or widens one is visible. A compound command's
 redirection word is expanded at compound entry rather than at any command inside it, and this
 evidence shape carries no scope-entry value table, so `{ ...; } > "$P"` is not projected; a
-function body's and a loop body's assignments are conditional in this model, so the exact table
-inside them is empty and the same write in either place is not projected (issue #188). An unquoted
-operand is pathname-expanded by Bash before anything is opened, so `P='ta*.sh'` names a pattern
-rather than the file the marker reaches, exactly as the literal `> ta*.sh` spelling already did
-(issue #189). A parameter expansion that transforms, indexes, defaults, or indirects its value
-lowers to no closed content expression, so `${P%.txt}` and its family keep a dynamic target
-(issue #190). The exact eval payload route reparses one payload word with no table of the values
-around it, so an unquoted reference inside a payload is not projected either.
+function body's and a loop body's own assignments are conditional in this model, so a name
+assigned there is unknown from that point and the same write in either place is not projected
+(issue #188). An unquoted operand is pathname-expanded by Bash before anything is opened, so
+`P='ta*.sh'` names a pattern rather than the file the marker reaches, exactly as the literal
+`> ta*.sh` spelling already did (issue #189). A parameter expansion that transforms, indexes,
+defaults, or indirects its value lowers to no closed content expression, so `${P%.txt}` and its
+family keep a dynamic target (issue #190). The exact eval payload route reparses one payload word
+with no table of the values around it, so an unquoted reference inside a payload is not projected
+either.
+
+What a name the surrounding body assigned means inside a loop is a separate question from those
+gaps, because that value is exact and the operand is projected against it. A `for` or `select`
+binding is not one of the assignments this walk applies, so the name is withdrawn at loop entry
+and stays withdrawn until an assignment makes it exact again, for the body and for everything
+after `done` alike, which is where Bash also leaves it bound. Projecting the value the name held
+outside the loop instead named a file Bash never opens: `P=other.sh; for P in task.sh; do printf
+... > "$P"; done; bash other.sh` recorded the write on `other.sh` and refused a body whose marker
+only ever reaches `task.sh`. The withdrawal is a point in the walk rather than a name the body
+gives up, so an assignment after the loop resolves the operand as it always did, and a subshell
+binding, which does not survive its scope, leaves the outer value naming the file the marker
+really reaches.
 
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
