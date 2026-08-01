@@ -2,12 +2,13 @@
 
 import time
 from dataclasses import replace
+from itertools import product
 
 import pytest
 
 from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci import shell_taint
-from doc_lattice.github_ci.shell_guards import GuardRefusal, MarkerDetected
+from doc_lattice.github_ci.shell_guards import GuardRefusal, MarkerDetected, ScanLimits
 from doc_lattice.github_ci.shell_scanner import (
     _effective_executable_evidence,
     _ScanBudget,
@@ -41,10 +42,12 @@ from doc_lattice.github_ci.shell_taint import (
     _ArgPort,
     _AssignmentEvidence,
     _build_flow_definitions,
+    _carrier_borne_cycle_keys,
     _CommandEvidence,
     _ContentToken,
     _ContentValue,
     _contextualize_evidence,
+    _cyclic_write_keys,
     _eval_assignment_transfers,
     _eval_command_substitution_closing,
     _eval_reparse_content,
@@ -57,6 +60,7 @@ from doc_lattice.github_ci.shell_taint import (
     _evaluate_with_tables,
     _ExecutableEvidence,
     _expression_variable_names,
+    _flow_dependency_graph,
     _FlowDefinitions,
     _FlowNode,
     _FlowWrite,
@@ -67,7 +71,7 @@ from doc_lattice.github_ci.shell_taint import (
     _PipeEvidence,
     _PositionalBinding,
     _ProcessResourceEvidence,
-    _recorded_definition_cycles,
+    _reachable_eval_variable_writes,
     _RedirectionEvent,
     _scoped_variable_name,
     _SecondPassConditionalAssignment,
@@ -85,6 +89,7 @@ from doc_lattice.github_ci.shell_taint import (
     _strip_trailing_newlines,
     _substitute_local_contents,
     _substituted_text_composes_marker,
+    _synthesized_cycle_write,
     _TaintLimitExceeded,
     analyze_marker_taint,
     choice,
@@ -2359,16 +2364,27 @@ def test_mutually_referential_variables_converge_by_least_fixed_point() -> None:
     )
 
 
-def test_definition_cycle_through_a_stream_is_recorded_and_epsilon_seeded() -> None:
-    """Issue #163: a cycle through a command substitution reaches the same seed as a direct one.
+def _record_definition_cycles(definitions: _FlowDefinitions) -> _FlowDefinitions:
+    """Record every carrier-borne definition cycle the way `_build_flow_definitions` does.
 
-    ``X=$(printf "doc-%slattice reconcile" "$X")`` writes ``X`` from a stream whose own write
-    reads ``X`` back. `_cyclic_write_keys` reads the variable writes alone and so cannot see that
-    cycle; without the recorded self-reference the key keeps the lattice bottom and
-    ``_compose_values`` annihilates the authored marker composed around it, which is the failure
-    #115 recorded for the direct spelling.
+    Production appends one `_synthesized_cycle_write` per key `_carrier_borne_cycle_keys` returns,
+    through the closure that charges the build-stage budget. These cases drive that same
+    composition over a hand-built flow, where there is no budget to charge.
     """
-    definitions = _FlowDefinitions(
+    keys = _carrier_borne_cycle_keys(definitions)
+    if not keys:
+        return definitions
+    recorded = tuple(_synthesized_cycle_write(key) for key in keys)
+    return replace(definitions, variable_writes=(*definitions.variable_writes, *recorded))
+
+
+def _stream_carrier_cycle_definitions() -> _FlowDefinitions:
+    """Return the flow whose only cycle runs from ``X`` through a command substitution.
+
+    ``X=$(printf "doc-%slattice reconcile" "$X")``: the variable reads the stream and the stream
+    reads the variable back, so no cycle is visible in the variable writes alone.
+    """
+    return _FlowDefinitions(
         variable_writes=(_FlowWrite("X", StreamRef(3)),),
         stream_writes=(
             _FlowWrite(
@@ -2384,10 +2400,20 @@ def test_definition_cycle_through_a_stream_is_recorded_and_epsilon_seeded() -> N
         ),
     )
 
+
+def test_definition_cycle_through_a_stream_is_recorded_and_epsilon_seeded() -> None:
+    """Issue #163: a cycle through a command substitution reaches the same seed as a direct one.
+
+    ``X=$(printf "doc-%slattice reconcile" "$X")`` writes ``X`` from a stream whose own write
+    reads ``X`` back. `_cyclic_write_keys` reads the variable writes alone and so cannot see that
+    cycle; without the recorded self-reference the key keeps the lattice bottom and
+    ``_compose_values`` annihilates the authored marker composed around it, which is the failure
+    #115 recorded for the direct spelling.
+    """
+    definitions = _stream_carrier_cycle_definitions()
+
     unrecorded = _solve_flow_definitions(definitions, limits=TaintLimits())
-    recorded = _solve_flow_definitions(
-        _recorded_definition_cycles(definitions), limits=TaintLimits()
-    )
+    recorded = _solve_flow_definitions(_record_definition_cycles(definitions), limits=TaintLimits())
 
     assert _marker_capable(unrecorded.evaluate(VariableRef("X"))) is False
     assert _marker_capable(recorded.evaluate(VariableRef("X"))) is True
@@ -2411,7 +2437,7 @@ def test_definition_cycle_through_a_resource_is_recorded_and_epsilon_seeded() ->
         ),
     )
 
-    solved = _solve_flow_definitions(_recorded_definition_cycles(definitions), limits=TaintLimits())
+    solved = _solve_flow_definitions(_record_definition_cycles(definitions), limits=TaintLimits())
 
     assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
 
@@ -2435,7 +2461,7 @@ def test_recording_a_definition_cycle_leaves_an_acyclic_flow_untouched() -> None
         stream_writes=(_FlowWrite(3, VariableRef("Y")),),
     )
 
-    recorded = _recorded_definition_cycles(definitions)
+    recorded = _record_definition_cycles(definitions)
     solved = _solve_flow_definitions(recorded, limits=TaintLimits())
 
     assert recorded == definitions
@@ -2452,7 +2478,7 @@ def test_recording_a_definition_cycle_records_nothing_a_direct_cycle_already_sho
         )
     )
 
-    assert _recorded_definition_cycles(definitions) == definitions
+    assert _record_definition_cycles(definitions) == definitions
 
 
 def test_recording_a_definition_cycle_does_not_widen_a_solved_value() -> None:
@@ -2463,35 +2489,129 @@ def test_recording_a_definition_cycle_does_not_widen_a_solved_value() -> None:
     appended by hand: both flows are epsilon-seeded, so the solved tables may differ only if
     joining a key's value with itself widens it, which is the property the design rests on.
     """
-    definitions = _FlowDefinitions(
-        variable_writes=(_FlowWrite("X", StreamRef(3)),),
-        stream_writes=(
-            _FlowWrite(
-                3,
-                Concat(
-                    (
-                        LiteralTransfer("doc-"),
-                        VariableRef("X"),
-                        LiteralTransfer("lattice reconcile"),
-                    )
-                ),
-            ),
-        ),
-    )
+    definitions = _stream_carrier_cycle_definitions()
 
-    recorded = _recorded_definition_cycles(definitions)
+    recorded = _record_definition_cycles(definitions)
     doubled = replace(
         recorded,
-        variable_writes=(*recorded.variable_writes, _FlowWrite("X", VariableRef("X"))),
+        variable_writes=(*recorded.variable_writes, _synthesized_cycle_write("X")),
     )
 
     assert recorded.variable_writes == (
         *definitions.variable_writes,
-        _FlowWrite("X", VariableRef("X")),
+        _synthesized_cycle_write("X"),
     )
     assert (
         _solve_flow_definitions(doubled, limits=TaintLimits()).variables
         == _solve_flow_definitions(recorded, limits=TaintLimits()).variables
+    )
+
+
+def test_recording_a_definition_cycle_narrows_an_appending_key() -> None:
+    """Recording is not a fixed-point no-op on a key that also carries an appending write.
+
+    ``_solve_flow_definitions`` reads an appending write's base as ``prior or _OUTSIDE_VALUE``, so
+    moving the seed from bottom to epsilon substitutes epsilon for the conservative outside
+    barrier and drops the alternative the barrier carried. That narrowing is the intended #115 and
+    #163 behavior, since the direct cycle spelling already narrows the same way without any
+    recording, and this pins the direction so the docstring claim and the code cannot drift apart
+    silently.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(
+            _FlowWrite("X", StreamRef(3)),
+            _FlowWrite("X", LiteralTransfer("tail"), append=True),
+        ),
+        stream_writes=(_FlowWrite(3, VariableRef("X")),),
+    )
+
+    unrecorded = _solve_flow_definitions(definitions, limits=TaintLimits())
+    recorded = _solve_flow_definitions(_record_definition_cycles(definitions), limits=TaintLimits())
+
+    assert any(transfer.projection_opaque for transfer in unrecorded.variables["X"]) is True
+    assert any(transfer.projection_opaque for transfer in recorded.variables["X"]) is False
+
+
+def test_carrier_borne_cycle_keys_agree_with_the_variable_reachability_walk() -> None:
+    """The graph projection selects exactly the keys the per-key reachability walk did.
+
+    `_carrier_borne_cycle_keys` reads the directly cyclic set off the variable-restricted
+    projection of the dependency graph rather than calling `_cyclic_write_keys` a second time.
+    The two are the same relation, and this drives every flow over a two-variable, one-carrier
+    alphabet through both rather than asserting the equality on one hand-built shape.
+    """
+    expressions: tuple[ContentExpr | None, ...] = (
+        None,
+        LiteralTransfer("t"),
+        VariableRef("A"),
+        VariableRef("B"),
+        StreamRef(3),
+        Concat((VariableRef("A"), StreamRef(3))),
+        Concat((VariableRef("B"), LiteralTransfer("t"))),
+    )
+
+    def reference(definitions: _FlowDefinitions) -> tuple[str, ...]:
+        direct = _cyclic_write_keys(definitions.variable_writes)
+        return tuple(
+            sorted(
+                {
+                    key
+                    for kind, key in _self_reaching_nodes(_flow_dependency_graph(definitions))
+                    if kind == "variable" and isinstance(key, str) and key not in direct
+                }
+            )
+        )
+
+    checked = 0
+    for first, second, third, fourth in product(expressions, repeat=4):
+        definitions = _FlowDefinitions(
+            variable_writes=tuple(
+                _FlowWrite(key, expression)
+                for key, expression in (("A", first), ("A", second), ("B", third))
+                if expression is not None
+            ),
+            stream_writes=tuple(
+                _FlowWrite(3, expression) for expression in (fourth,) if expression is not None
+            ),
+        )
+        checked += 1
+
+        assert _carrier_borne_cycle_keys(definitions) == reference(definitions)
+
+    assert checked == len(expressions) ** 4
+
+
+def test_reachable_eval_variable_writes_withhold_a_synthesized_cycle_write() -> None:
+    """A fabricated self-reference write never reaches the eval layer's streaming reparse.
+
+    Its only dependency is its own key, so it survives the reachability filter whenever that key
+    is eval-reachable at all. The reparse downstream is quote-sensitive and streaming rather than
+    a join lattice, so handing it a write nobody authored can refuse a body that has no eval-time
+    cycle. Only the authored write may reach it.
+    """
+    authored = _FlowWrite("X", LiteralTransfer("doc-"))
+    writes = (authored, _synthesized_cycle_write("X"))
+
+    command = _command(1, _arg("eval"), _arg("$X", VariableRef("X")), name="eval")
+    reachable = _reachable_eval_variable_writes((command,), writes, TaintLimits())
+
+    assert reachable == (authored,)
+
+
+def test_a_recorded_cycle_write_is_charged_to_the_build_stage_edge_budget() -> None:
+    """The recorded write is charged where it is created, not recounted at solve time.
+
+    Appending it straight into the tuple left `_definition_counts` to find the overrun and refuse
+    from `taint.flow-solve.edge-limit`, a guard that never saw the write created. Routing it
+    through the same closure every authored variable write takes puts the refusal on the build
+    stage guard that owns the budget.
+    """
+    body = 'for f in a b c d e f g h i j; do Z=$f; done\nX=$(printf "p-%s" "$X")\necho "$X"'
+
+    result = scan_doc_lattice_invocations(body, limits=ScanLimits(taint=TaintLimits(max_edges=6)))
+
+    assert result.verdict == GuardRefusal(
+        "taint.flow-build.variable-write-edge-limit", "shell taint edge limit exceeded"
     )
 
 
@@ -2518,11 +2638,11 @@ def test_recording_a_definition_cycle_follows_a_conditional_assignment_operand()
         ),
     )
 
-    recorded = _recorded_definition_cycles(definitions)
+    recorded = _record_definition_cycles(definitions)
 
     assert recorded.variable_writes == (
         *definitions.variable_writes,
-        _FlowWrite("X", VariableRef("X")),
+        _synthesized_cycle_write("X"),
     )
 
 
