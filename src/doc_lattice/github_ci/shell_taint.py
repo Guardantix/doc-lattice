@@ -7,7 +7,7 @@ import shlex
 from collections import ChainMap
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci.shell_guards import (
@@ -182,8 +182,13 @@ class _FlowDefinitions:
 
 # One flow table entry, named by the table holding it and its key. Keys are unique only inside
 # their own table, so a stream scope and a resource can carry the same integer key and still be
-# separate entries.
-_FlowNode: TypeAlias = tuple[str, str | int]  # noqa: UP040
+# separate entries. The kind is spelled as a `Literal` rather than as a bare `str` because
+# `_recorded_definition_cycles` filters on it and a wrong label there records nothing, silently
+# withdrawing the carrier-borne cycle detection. `ty` rejects a mislabelled entry where one is
+# built, in `_flow_dependency_graph` and `_expression_reference_keys`; it does not reject a
+# mistyped `==` comparison, which the recording tests catch instead.
+_FlowKind: TypeAlias = Literal["variable", "resource", "stream"]  # noqa: UP040
+_FlowNode: TypeAlias = tuple[_FlowKind, str | int]  # noqa: UP040
 
 
 @dataclass(frozen=True, slots=True)
@@ -1943,11 +1948,12 @@ def _flow_dependency_graph(definitions: _FlowDefinitions) -> dict[_FlowNode, set
         A mapping from each written ``(kind, key)`` entry to the entries its writes read.
     """
     graph: dict[_FlowNode, set[_FlowNode]] = {}
-    for kind, writes in (
+    tables: tuple[tuple[_FlowKind, tuple[_FlowWrite, ...]], ...] = (
         ("variable", definitions.variable_writes),
         ("resource", definitions.resource_writes),
         ("stream", definitions.stream_writes),
-    ):
+    )
+    for kind, writes in tables:
         for write in writes:
             graph.setdefault((kind, write.key), set()).update(
                 _expression_reference_keys(write.expression)
@@ -2028,6 +2034,17 @@ def _recorded_definition_cycles(definitions: _FlowDefinitions) -> _FlowDefinitio
     widens it. What it changes is that the cycle is visible where the seed is chosen, which is
     what keeps ``X=$(printf "doc-%slattice reconcile" "$X"); $X`` from resolving to bottom and
     reading as marker-free (issue #163, the carrier-borne residue of #115).
+
+    Three narrowings below are deliberate rather than incidental. Only a variable key is
+    recorded, because `VariableRef` is the only reference the seeder reads and the seeder never
+    seeded a stream or a resource; a cycle confined to those two keeps the bottom seed. Only a
+    string key is recorded, for the same reason `VariableRef` names one. And a key the seeder
+    already sees as directly cyclic is skipped, because recording it would add a node and an edge
+    to the definition budget for no change in the solved value.
+
+    This does not reach across the eval layer's carrier opacity: a value arriving at an eval
+    payload or an eval-lowered assignment through a stream or a resource is folded into an
+    outside gap before any seed matters, which is issue #159 rather than this one.
 
     Args:
         definitions: The flow definitions built for one run body.

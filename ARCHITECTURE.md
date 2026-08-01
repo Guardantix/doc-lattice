@@ -699,6 +699,22 @@ exhaustion, so an eval payload that grows itself cannot exhaust time or memory. 
 projection caps are the exception: they widen to the top of the content lattice instead of
 refusing, as described at the end of this decision.
 
+A write key that lies on a definition cycle is seeded with epsilon rather than with the
+annihilating lattice bottom, because Bash expands a not-yet-assigned self-reference to the empty
+string and the literals around it reconstitute the marker. The seeder reads the variable writes
+alone, so a cycle that runs through a command substitution or a file was invisible to it and kept
+the bottom seed, which is issue #163. That cycle is now found over the variable, resource, and
+stream writes together and recorded in the spelling the seeder does see: one self-reference write
+per variable key that only reaches itself through a carrier. Those synthesized writes are the one
+sanctioned exception to the sentence above about canonicalizing write tuples. They are appended
+rather than inserted, they are a fixed-point no-op because joining a key's value with itself never
+widens it, and they carry no append accumulation, so they change no solved value and only make the
+cycle visible where the seed is chosen. A cycle confined to stream and resource keys with no
+variable on it still keeps the bottom seed, matching the seeder's own domain. None of this reaches
+across the eval layer's empty resource and stream tables: a value arriving at an eval payload or an
+eval-lowered assignment through a carrier is already an outside gap when the seed is applied, which
+stays issue #159.
+
 The absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
 beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, shell-scope
 descriptor state carried across commands by a bare `exec`, eval payload constructs outside the

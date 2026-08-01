@@ -95,7 +95,8 @@ class MarkerDetected:
 # declaration it is. See AD-20.
 #
 # This spelling is therefore gate-required, not style: reverting it to `TypeAlias` fails
-# `scripts/check_guard_inventory.py`. The nine `TypeAlias` aliases in `shell_taint.py` predate the
-# rule and name no tracked constructor, so they are untouched by it; a future ruff UP040 cleanup
-# must carry that awareness rather than normalizing all ten in either direction.
+# `scripts/check_guard_inventory.py`. The `TypeAlias` aliases in `shell_taint.py` name no tracked
+# constructor and so are untouched by the rule, whether they predate it or not; a future ruff
+# UP040 cleanup must carry that awareness rather than normalizing every alias in the package in
+# either direction.
 type ScanVerdict = Certified | MarkerDetected | GuardRefusal
