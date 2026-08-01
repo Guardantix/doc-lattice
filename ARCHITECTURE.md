@@ -1550,57 +1550,68 @@ more also shrinks less, which inflates the distinct-recipe count and reads as a 
 is not. The comparable quantities are the failing cases and the set difference between variants,
 never the shrunk count.
 
-The variants vary the resource and stream lookups. The variable lookup shares the same default and
-was not varied, so the experiment covers two of the three tables the proposal named.
+The variants cover each of the three lookups alone, all three together, the stream and resource
+pair, and one narrowing of the stream case. The stream and scope-id rows were taken on 2026-07-26.
+The combined and variable rows, and the false-certification columns of the resource-only row, were
+scored on 2026-08-01 at the same revision, seed, and method. That later run reproduced the
+unchanged-default control at 191 false certifications, 112 over-refusals, and a clean suite before
+any variant ran, and reproduced the streams-only row exactly, which is what makes the two dates one
+table.
 
 Measured at 85922d3:
 
 | variant | false certifications | fixed | introduced | suite failures | fuzz over-refusals |
 |---|---|---|---|---|---|
 | current default | 191 | - | - | 0 | 112 |
+| all three tables widen | 156 | 35 | 0 | 112 | 439 |
+| variables only widen | 168 | 23 | 0 | 77 | 412 |
 | streams and resources widen | 175 | 16 | 0 | 41 | 180 |
 | streams only widen | 175 | 16 | 0 | 12 | 180 |
 | resources only widen | 191 | 0 | 0 | 30 | 112 |
 | synthetic negative scope ids only | 191 | 0 | 0 | 0 | 112 |
 
-**Decision:** A missing key in the resource or stream tables continues to resolve to the inert
-`_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither for the two
-tables together nor for one of them. The variable lookup keeps the same default, which is unchanged
-behavior and not a measured rejection: nothing here varied it, so a variable-only proposal is open
-and needs its own measurement rather than being refused by this entry. Reopening the proposal for a
-table measured here means re-running that comparison against the tree it targets and reporting the
-same columns, not matching the numbers above, which belong to a tree the fixes since have replaced.
+**Decision:** A missing key in the variable, resource, or stream tables continues to resolve to the
+inert `_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither for
+all three tables together nor for any one of them. Reopening the proposal means re-running this
+comparison against the tree it targets and reporting the same columns for the table it proposes to
+widen, not matching the numbers above, which belong to a tree the fixes since have replaced.
 
 No measured variant introduced a new false certification, so the rejection was about yield against
-cost rather than about soundness risk. Only the two stream widenings improved soundness at all,
-fixing 16. The resource-only and synthetic negative scope id variants moved no fuzz verdict in
-either direction, which holds soundness rather than improving it: both leave the 191 false
-certifications and 112 over-refusals of the current default, and the resource-only run reproduces
-that default's failing signature set exactly. Widening resource lookups therefore contributed zero
-fixes and 30 of the 41 suite failures the widest variant produced, which is pure cost. The two
-single-table rows sum to 42 against that 41, so one suite failure was reached by either widening on
-its own. All 16 fixes came from stream lookups, bought with 12 legitimate certifications, and ten
-of those twelve were a `read` from a non-literal stream, for example
+cost rather than about soundness risk. Widening all three lookups fixed 35 of the 191 failing
+bodies, at 439 over-refusals against the default's 112 and 112 suite failures. The variable lookup
+carried most of that yield and most of that cost: 23 fixes, 412 over-refusals, and 77 suite
+failures, about 13 extra over-refusals and three suite failures per fix, against roughly four and
+one for the 16 that stream lookups fixed. Four bodies are fixed by either widening, so the variable
+and stream fix sets union to exactly the 35 the combined row reports.
+
+Widening resource lookups is pure cost. It fixed nothing and moved no fuzz verdict in either
+direction, leaving the default's 191 false certifications and 112 over-refusals and reproducing its
+failing signature set exactly, and still failed 30 tests. Within the stream and resource pair the
+single-table rows sum to 42 suite failures against that pair's 41, so one failure was reached by
+either widening on its own. The 16 stream fixes were bought with 12 legitimate certifications, and
+ten of those twelve were a `read` from a non-literal stream, for example
 `shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
 because the `read` projects a record. Restricting the widening to the synthetic negative scope ids
 minted by `_OutputLowering`, which are provably internal to the body, cost nothing and fixed
-nothing: the 16 fixes all came from non-negative scope ids, the same population those `read`
+nothing: the 16 stream fixes all came from non-negative scope ids, the same population those `read`
 certifications depend on.
 
-The default is therefore not separable at this granularity. Internal solver gaps and legitimately
-external streams share one lookup-miss population, and scope-id sign, the most promising cheap
-discriminator, captured none of the benefit. The hypothesis that this default was the dominant cause
-of the false certifications open at the time was also wrong: it accounted for 16 of 191 failing
-bodies, about 8 percent, and the rest came from evidence never being constructed at all, the class
-AD-18 discloses and tracks issue by issue. Closing the class was that issue-by-issue work, not one
+The default is therefore not separable at this granularity. In every table that yields fixes,
+internal solver gaps and legitimately external content share one lookup-miss population: an unset or
+inherited variable and a stream the body never wrote are indistinguishable from a key the solver
+failed to record. Scope-id sign, the most promising cheap discriminator, captured none of the
+benefit. The hypothesis that this default was the dominant cause of the false certifications open at
+the time was also wrong: widening all three lookups accounted for 35 of 191 failing bodies, about 18
+percent, and the rest came from evidence never being constructed at all, the class AD-18 discloses
+and tracks issue by issue. Closing the class was that issue-by-issue work, not one
 default change, and the work that followed this measurement bears that out. The branch it was
 measured on merged as 763f43d on 2026-07-27, closing the individual issues the remaining bodies were
 attributed to, and the same seed and method re-run at 1c7a6df report 2 false certifications and 167
 over-refusals. A later attempt has to supply the discriminator this experiment lacked, which is
 knowing whether the body itself should have defined a key, rather than inferring that from the key's
 shape.
-**Consequences:** The inert missing-key default is the pinned behavior of an unresolved resource or
-stream reference, and the false certifications AD-18 discloses stay open under their individual
+**Consequences:** The inert missing-key default is the pinned behavior of an unresolved content
+reference, and the false certifications AD-18 discloses stay open under their individual
 issues rather than behind one pending global fix. This rejects one widening, not fail-closed
 defaults in general: AD-18's rule that a projection which is merely lost widens to the top of the
 lattice is unchanged, because there the solver knows it lost track, while a table miss does not say
