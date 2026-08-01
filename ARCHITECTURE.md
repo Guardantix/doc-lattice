@@ -1553,7 +1553,7 @@ never the shrunk count.
 The variants cover each of the three lookups alone, all three together, the stream and resource
 pair, and one narrowing of the stream case. The stream and scope-id rows were taken on 2026-07-26.
 The combined and variable rows, and the false-certification columns of the resource-only row, were
-scored on 2026-08-01 at the same revision, seed, and method. That later run reproduced the
+scored on 2026-07-31 at the same revision, seed, and method. That later run reproduced the
 unchanged-default control at 191 false certifications, 112 over-refusals, and a clean suite before
 any variant ran, and reproduced the streams-only row exactly, which is what makes the two dates one
 table.
