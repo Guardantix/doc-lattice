@@ -47,6 +47,12 @@ jobs:
         python: ['3.13', '3.14']
     env:
       UV_PYTHON: ${{ matrix.python }}
+      # The coverage gate runs once, on 3.14, where coverage.py measures branch coverage through
+      # the sys.monitoring core. CPython gained the branch events that core needs in 3.14; under
+      # 3.13 the same configuration falls back to the C tracer, which roughly doubles the suite's
+      # runtime to re-measure a number the other leg already enforces. pytest reads this variable
+      # itself, so the run body below stays free of workflow expressions.
+      PYTEST_ADDOPTS: ${{ matrix.python == '3.13' && '--no-cov' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
