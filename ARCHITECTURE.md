@@ -1655,19 +1655,37 @@ processes and one comparison. The tool and the corpus are the candidate's in bot
 the two records score the same scripts and the guard package is the only thing that differs;
 the base revision's own copy of the inventory is then the floor the scored corpus may not fall
 below, since a candidate that shrank the corpus would make its own divergence disappear rather than
-report it. The comparison refuses outright, rather than reporting a count, when the two records did
-not score the same corpus.
+report it.
+
+The comparison refuses outright, rather than reporting a count, whenever the protection it describes
+is not in place, because a count read off a comparison that could not have found anything is worse
+than no gate. It refuses when the two records did not score the same corpus; when both records name
+the same scanner file, which is one revision replayed twice and agrees with itself by construction;
+when either record was drawn below the pinned corpus scale, which is a command line argument and so
+out of reach of pinning the constants; and when no base-owned inventory was named, since without one
+there is no floor under the corpus at all. Each relaxation is a flag spelled out in the diff that
+takes it, `--no-corpus-floor` and `--allow-shrunk-corpus`, rather than a default nobody sees not
+being exercised. A record also names the scanner file it scored and the scale it was drawn at, which
+is what makes the first two of those checkable at comparison time.
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
-script digest, both verdicts and a reason, so it covers exactly the transition it was written for
-and expires on its own once the base carries the new behavior, and the report names an
-acknowledgement nothing matched so a stale entry is read out rather than sitting unseen.
+script digest, both verdicts and a reason, so it covers exactly the transition it was written for.
+It does not expire on its own. An entry matching no divergence fails the comparison and is counted
+in the report rather than only listed there, because an entry left on file once its transition
+landed in the base is a standing authorization to make that exact move again, and printing it into
+the log of a green job is not review. Removing it is one line, and `--write-acknowledgements` drops
+stale entries for an author who would rather not find them by hand. A shrunken corpus cannot call an
+entry stale, since the script it names may simply not have been drawn, so `--allow-shrunk-corpus`
+suspends that check with the scale check it belongs to.
+
 Acknowledgements are a file in the diff, which is what makes them reviewable; a label or a phrase
-in a pull request body is neither versioned nor reviewable alongside the change it excuses. A
-change that legitimately moves thousands of verdicts is not transcribed by hand, so the comparison
-writes the file it would need on request, with every reason left empty and an empty reason refused
-on read. A gate that is impractical to satisfy for an intended change is a gate that gets switched
-off, and that is the failure mode the mode exists against.
+in a pull request body is neither versioned nor reviewable alongside the change it excuses. That
+only holds if the file is a replayed input: a pull request touching nothing else would otherwise
+skip the gate and land an excuse detached from the change it excuses, for a later diff to walk
+through. A change that legitimately moves thousands of verdicts is not transcribed by hand, so the
+comparison writes the file it would need on request, with every reason left empty and an empty
+reason refused on read. A gate that is impractical to satisfy for an intended change is a gate that
+gets switched off, and that is the failure mode the mode exists against.
 
 The gate runs on pull requests and stays out of the release job's `needs`, because a job skipped
 for push events skips every dependent with it. It is therefore enforced by the repository's
@@ -1675,9 +1693,9 @@ required status checks rather than by a `needs` edge, and `Corpus differential` 
 list; nothing in the tree can assert that setting. Its scope step reads the diff against the base
 and exits early when no replayed input changed, so an unrelated pull request pays for a checkout
 and one `git diff`. The scoped paths are the guard package, `error_types.py` as the one module
-outside it the scan path imports, the tool, the fuzzer grammar and the frozen inventory. A base
-whose object cannot be read is a failure rather than a skip, for the reason AD-20's base-owned
-comparison gives.
+outside it the scan path imports, the tool, the fuzzer grammar, the frozen inventory and the
+acknowledgements file. A base whose object cannot be read is a failure rather than a skip, for the
+reason AD-20's base-owned comparison gives.
 **Consequences:** An over-refusal is visible to automation for the first time, in either direction
 and without a witness for the guard involved, which is what makes this the standing control while
 the frozen-debt window is open. The cost is roughly two minutes of replay per revision on a change

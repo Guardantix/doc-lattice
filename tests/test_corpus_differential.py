@@ -57,16 +57,29 @@ def _scored(source: str, verdict: str, case_id: str = "case-1") -> dict[str, str
     }
 
 
-def _record_document(cases: list[dict[str, str]], corpus: str = "corpus-digest") -> dict:
+_BASE_SCANNER = "/somewhere/base/src/doc_lattice/github_ci/shell_scanner.py"
+_CANDIDATE_SCANNER = "/somewhere/candidate/src/doc_lattice/github_ci/shell_scanner.py"
+
+
+def _record_document(
+    cases: list[dict[str, str]],
+    corpus: str = "corpus-digest",
+    source: str = _BASE_SCANNER,
+) -> dict:
+    """Return a synthetic record carrying the provenance and the scale a comparison expects."""
     return {
         "schema": tool.SCHEMA,
-        "scanner_source": "/somewhere/shell_scanner.py",
-        "seeds": [],
-        "iterations": 0,
+        "scanner_source": source,
+        "seeds": list(tool.SEEDS),
+        "iterations": tool.ITERATIONS,
         "corpus_sha256": corpus,
         "count": len(cases),
         "cases": cases,
     }
+
+
+def _candidate_document(cases: list[dict[str, str]], corpus: str = "corpus-digest") -> dict:
+    return _record_document(cases, corpus, source=_CANDIDATE_SCANNER)
 
 
 def _write(path: Path, document: object) -> Path:
@@ -257,12 +270,99 @@ def test_load_scanner_refuses_a_root_that_holds_no_guard_package(tmp_path):
         tool.load_scanner(tmp_path)
 
 
+def test_read_entries_names_the_file_rather_than_raising_the_missing_key(tmp_path):
+    # A bare KeyError reports the key alone, which names neither the file that was malformed nor
+    # what was wrong with it, and the sibling field reader already refuses the same shape by name.
+    path = _write(tmp_path / "acknowledged.json", {"acknowledgments": []})
+
+    with pytest.raises(ValueError, match="records no acknowledgements"):
+        tool.load_acknowledgements(path)
+
+
+def test_record_refuses_a_revision_whose_public_entry_point_moved(tmp_path):
+    # A renamed entry point is a refusal naming the name, not an AttributeError out of the middle
+    # of a twenty-thousand script replay, where it reads like the divergence the gate reports.
+    root = _revision(tmp_path, "renamed", mutate=False)
+    scanner = root / "src/doc_lattice/github_ci/shell_scanner.py"
+    scanner.write_text(
+        scanner.read_text(encoding="utf-8").replace(
+            "def scan_doc_lattice_invocations(", "def scan_invocations_renamed(", 1
+        ),
+        encoding="utf-8",
+    )
+
+    completed = _run(
+        "record",
+        "--scanner-root",
+        str(root),
+        "--out",
+        str(tmp_path / "verdicts.json"),
+        "--inventory",
+        str(_INVENTORY),
+        "--seeds",
+        "",
+        "--iterations",
+        "0",
+    )
+
+    assert completed.returncode == tool.EXIT_REFUSED
+    assert "scan_doc_lattice_invocations" in completed.stderr
+    assert "corpus differential refused" in completed.stderr
+
+
 def test_align_refuses_records_that_scored_different_corpora():
     base = _record_document([_scored("true", "certified[]")], corpus="a" * 64)
-    candidate = _record_document([_scored("true", "certified[]")], corpus="b" * 64)
+    candidate = _candidate_document([_scored("true", "certified[]")], corpus="b" * 64)
 
     with pytest.raises(ValueError, match="different corpora"):
         tool.align(base, candidate)
+
+
+def test_check_distinct_revisions_refuses_one_revision_recorded_twice():
+    # `record` proves which file it scored, and dropping that at comparison time would let two
+    # runs against the same checkout report a clean differential for a change nothing replayed.
+    base = _record_document([_scored("true", "certified[]")])
+    candidate = _record_document([_scored("true", "certified[]")])
+
+    with pytest.raises(ValueError, match="replayed twice"):
+        tool.check_distinct_revisions(base, candidate)
+
+
+def test_check_distinct_revisions_accepts_two_revisions_scored_where_they_live():
+    base = _record_document([_scored("true", "certified[]")])
+    candidate = _candidate_document([_scored("true", "certified[]")])
+
+    tool.check_distinct_revisions(base, candidate)
+
+
+def test_check_corpus_scale_refuses_a_record_drawn_below_the_pin():
+    # The scale is a command line argument on `record`, so pinning the module constants does not
+    # reach a diff that shrinks it; both sides would agree over a corpus too small to carry the
+    # shape the same diff withdrew.
+    base = _record_document([_scored("true", "certified[]")])
+    candidate = _candidate_document([_scored("true", "certified[]")])
+    candidate["iterations"] = 1
+
+    with pytest.raises(ValueError, match="rather than the pinned"):
+        tool.check_corpus_scale(base, candidate)
+
+
+def test_check_corpus_scale_refuses_a_record_drawn_with_other_seeds():
+    base = _record_document([_scored("true", "certified[]")])
+    base["seeds"] = [1]
+    candidate = _candidate_document([_scored("true", "certified[]")])
+
+    with pytest.raises(ValueError, match="rather than the pinned"):
+        tool.check_corpus_scale(base, candidate)
+
+
+def test_check_corpus_scale_refuses_a_record_that_names_no_scale():
+    base = _record_document([_scored("true", "certified[]")])
+    del base["seeds"]
+    candidate = _candidate_document([_scored("true", "certified[]")])
+
+    with pytest.raises(ValueError, match="does not name the corpus scale"):
+        tool.check_corpus_scale(base, candidate)
 
 
 def test_check_corpus_retained_refuses_a_candidate_that_dropped_a_frozen_script(tmp_path):
@@ -299,7 +399,7 @@ def test_check_corpus_retained_accepts_a_corpus_that_only_grew(tmp_path):
 
 def test_divergences_pair_each_script_with_both_verdicts():
     base = _record_document([_scored("true", "certified[]"), _scored("false", "guard:a", "c2")])
-    candidate = _record_document([_scored("true", "guard:b"), _scored("false", "guard:a", "c2")])
+    candidate = _candidate_document([_scored("true", "guard:b"), _scored("false", "guard:a", "c2")])
 
     found = tool.divergences(base, candidate)
 
@@ -401,7 +501,7 @@ def test_compare_refuses_a_malformed_input_as_a_refusal_rather_than_as_divergenc
     # status divergence uses would read as "the candidate moved a verdict" in the job log.
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
     candidate = _write(
-        tmp_path / "candidate.json", _record_document([_scored("true", "certified[]")])
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
     )
     acknowledged = _write(tmp_path / "acknowledged.json", [])
 
@@ -412,6 +512,7 @@ def test_compare_refuses_a_malformed_input_as_a_refusal_rather_than_as_divergenc
             str(base),
             "--candidate",
             str(candidate),
+            "--no-corpus-floor",
             "--acknowledged",
             str(acknowledged),
         ]
@@ -437,7 +538,9 @@ def test_write_acknowledgements_drafts_every_divergence_with_the_reason_left_to_
     # a gate nobody can satisfy for an intended change is a gate that gets switched off. The draft
     # still refuses on read until a reason is written, so it declares nothing on its own.
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
-    candidate = _write(tmp_path / "candidate.json", _record_document([_scored("true", "guard:x")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "guard:x")])
+    )
     draft = tmp_path / "draft.json"
 
     status = tool.main(
@@ -447,6 +550,7 @@ def test_write_acknowledgements_drafts_every_divergence_with_the_reason_left_to_
             str(base),
             "--candidate",
             str(candidate),
+            "--no-corpus-floor",
             "--write-acknowledgements",
             str(draft),
         ]
@@ -495,25 +599,135 @@ def test_the_repository_acknowledgements_read_as_the_comparison_requires():
         assert entry.reason
 
 
+def _compare(base: Path, candidate: Path, *arguments: str) -> int:
+    return tool.main(
+        [
+            "compare",
+            "--base",
+            str(base),
+            "--candidate",
+            str(candidate),
+            "--no-corpus-floor",
+            *arguments,
+        ]
+    )
+
+
 def test_compare_returns_zero_when_both_revisions_score_the_corpus_alike(tmp_path):
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
     candidate = _write(
-        tmp_path / "candidate.json", _record_document([_scored("true", "certified[]")])
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
     )
 
-    assert tool.main(["compare", "--base", str(base), "--candidate", str(candidate)]) == 0
+    assert _compare(base, candidate) == 0
 
 
 def test_compare_reports_divergence_as_a_failure(tmp_path, capsys):
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
-    candidate = _write(tmp_path / "candidate.json", _record_document([_scored("true", "guard:x")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "guard:x")])
+    )
 
-    status = tool.main(["compare", "--base", str(base), "--candidate", str(candidate)])
+    status = _compare(base, candidate)
 
     assert status == tool.EXIT_DIVERGED
     captured = capsys.readouterr()
     assert "certified[] -> guard:x" in captured.out
     assert "acknowledge each intentional transition" in captured.err
+
+
+def test_compare_refuses_a_comparison_that_names_no_base_owned_corpus_floor(tmp_path, capsys):
+    # Without the base's own inventory nothing stops the scored corpus from having shrunk, so a
+    # comparison that omits it is refused rather than reporting a count it cannot stand behind.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
+    )
+
+    status = tool.main(["compare", "--base", str(base), "--candidate", str(candidate)])
+
+    assert status == tool.EXIT_REFUSED
+    assert "no base-owned corpus floor" in capsys.readouterr().err
+
+
+def test_compare_refuses_one_revision_recorded_twice(tmp_path, capsys):
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _record_document([_scored("true", "certified[]")])
+    )
+
+    status = _compare(base, candidate)
+
+    assert status == tool.EXIT_REFUSED
+    assert "replayed twice" in capsys.readouterr().err
+
+
+def test_compare_refuses_records_drawn_below_the_pinned_corpus_scale(tmp_path, capsys):
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    shrunk = _candidate_document([_scored("true", "certified[]")])
+    shrunk["seeds"] = [1]
+    shrunk["iterations"] = 5
+    candidate = _write(tmp_path / "candidate.json", shrunk)
+
+    assert _compare(base, candidate) == tool.EXIT_REFUSED
+    assert "rather than the pinned" in capsys.readouterr().err
+    assert _compare(base, candidate, "--allow-shrunk-corpus") == tool.EXIT_OK
+
+
+def test_compare_fails_on_an_acknowledgement_that_matches_no_divergence(tmp_path, capsys):
+    # An entry left on file once its transition landed in the base is a standing authorization to
+    # make that exact move again, so it has to be removed rather than read out into a green log.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    candidate = _write(
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
+    )
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                {
+                    "sha256": tool.digest_of("true"),
+                    "base_verdict": "certified[]",
+                    "candidate_verdict": "guard:x",
+                    "reason": "landed two releases ago",
+                }
+            ]
+        },
+    )
+
+    status = _compare(base, candidate, "--acknowledged", str(acknowledged))
+
+    assert status == tool.EXIT_DIVERGED
+    captured = capsys.readouterr()
+    assert "stale acknowledgements: 1" in captured.out
+    assert "match no divergence" in captured.err
+
+
+def test_a_shrunk_corpus_does_not_call_an_acknowledgement_stale(tmp_path):
+    # The script an entry names may simply not have been drawn, so a partial replay is no evidence
+    # that its transition stopped happening.
+    base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
+    shrunk = _candidate_document([_scored("true", "certified[]")])
+    shrunk["seeds"] = [1]
+    shrunk["iterations"] = 5
+    candidate = _write(tmp_path / "candidate.json", shrunk)
+    acknowledged = _write(
+        tmp_path / "acknowledged.json",
+        {
+            "acknowledgements": [
+                {
+                    "sha256": "d9",
+                    "base_verdict": "certified[]",
+                    "candidate_verdict": "guard:x",
+                    "reason": "covered by a script this run never drew",
+                }
+            ]
+        },
+    )
+
+    status = _compare(base, candidate, "--allow-shrunk-corpus", "--acknowledged", str(acknowledged))
+
+    assert status == tool.EXIT_OK
 
 
 def test_compare_refuses_rather_than_reports_when_the_corpora_disagree(tmp_path, capsys):
@@ -522,13 +736,13 @@ def test_compare_refuses_rather_than_reports_when_the_corpora_disagree(tmp_path,
     )
     candidate = _write(
         tmp_path / "candidate.json",
-        _record_document([_scored("true", "guard:x")], corpus="b" * 64),
+        _candidate_document([_scored("true", "guard:x")], corpus="b" * 64),
     )
 
-    status = tool.main(["compare", "--base", str(base), "--candidate", str(candidate)])
+    status = _compare(base, candidate)
 
     assert status == tool.EXIT_REFUSED
-    assert "corpus differential refused" in capsys.readouterr().err
+    assert "different corpora" in capsys.readouterr().err
 
 
 def test_compare_refuses_a_record_written_under_another_schema(tmp_path, capsys):
@@ -536,10 +750,10 @@ def test_compare_refuses_a_record_written_under_another_schema(tmp_path, capsys)
     document["schema"] = tool.SCHEMA + 1
     base = _write(tmp_path / "base.json", document)
     candidate = _write(
-        tmp_path / "candidate.json", _record_document([_scored("true", "certified[]")])
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
     )
 
-    status = tool.main(["compare", "--base", str(base), "--candidate", str(candidate)])
+    status = _compare(base, candidate)
 
     assert status == tool.EXIT_REFUSED
     assert "schema" in capsys.readouterr().err
@@ -550,7 +764,7 @@ def test_compare_refuses_when_an_input_it_was_pointed_at_is_not_there(tmp_path, 
     # line, not a traceback out of the middle of the comparison.
     base = _write(tmp_path / "base.json", _record_document([_scored("true", "certified[]")]))
     candidate = _write(
-        tmp_path / "candidate.json", _record_document([_scored("true", "certified[]")])
+        tmp_path / "candidate.json", _candidate_document([_scored("true", "certified[]")])
     )
 
     status = tool.main(
@@ -589,6 +803,7 @@ def test_a_targeted_early_refusal_diverges_every_corpus_script_carrying_the_opti
         str(candidate_record),
         "--base-inventory",
         str(_INVENTORY),
+        "--allow-shrunk-corpus",
         "--acknowledged",
         str(_ACKNOWLEDGEMENTS),
     )
@@ -623,6 +838,7 @@ def test_an_unchanged_revision_replays_the_corpus_clean(tmp_path):
         str(candidate_record),
         "--base-inventory",
         str(_INVENTORY),
+        "--allow-shrunk-corpus",
         "--acknowledged",
         str(_ACKNOWLEDGEMENTS),
     )

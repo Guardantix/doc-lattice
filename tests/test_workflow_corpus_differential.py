@@ -35,6 +35,13 @@ def test_the_corpus_differential_job_exists() -> None:
     assert _JOB in _ci()["jobs"]
 
 
+def test_the_job_keeps_the_display_name_branch_protection_requires() -> None:
+    # The gate is enforced by required status checks rather than by a `needs` edge, and a required
+    # check is matched by display name. Renaming the job would leave every test here green while
+    # the required check never reported again, which is the differential switched off in silence.
+    assert _job()["name"] == "Corpus differential"
+
+
 def test_the_differential_runs_on_pull_requests() -> None:
     # The gate compares a candidate against the revision it is proposed on top of, which is what a
     # pull request payload names. A push to main carries no such pair to replay against.
@@ -74,6 +81,18 @@ def test_the_differential_is_scoped_to_changes_that_can_move_a_verdict() -> None
     assert "tests/fixtures/github_ci_checkpoint/replay_inventory.json" in replayed
     assert "$REPLAYED_PATHS" in step["run"]
     assert 'echo "in-scope=' in step["run"]
+
+
+def test_a_pull_request_that_only_edits_an_acknowledgement_still_replays() -> None:
+    # An acknowledgement pre-authorizes one verdict transition. Leaving the file out of scope
+    # would let a pull request land the excuse with the gate skipped and nothing replayed, ready
+    # for a later diff to make exactly that move through a green comparison.
+    step = _step("Decide whether the differential has anything to compare")
+
+    assert (
+        "tests/fixtures/corpus_differential_acknowledgements.json"
+        in step["env"]["REPLAYED_PATHS"].split()
+    )
 
 
 def test_every_replay_step_is_gated_on_the_scope_decision() -> None:
@@ -134,3 +153,14 @@ def test_the_differential_runs_on_a_pinned_interpreter_and_a_locked_environment(
     assert any(reference.startswith("astral-sh/setup-uv@") for reference in uses)
     assert "uv python install" in script
     assert "uv sync --locked --group dev" in script
+
+
+def test_the_installed_interpreter_is_the_one_the_replay_actually_runs_on() -> None:
+    # Installing an interpreter does not select it: `uv sync` and `uv run --no-sync` resolve from
+    # `.python-version` unless `UV_PYTHON` says otherwise, so without the binding the corpus is
+    # scored on whatever that file happens to pin and the install is dead weight.
+    assert _job()["env"]["UV_PYTHON"] == "3.13"
+    assert (
+        'uv python install "$UV_PYTHON"'
+        in _step("Install a pinned interpreter and the locked environment")["run"]
+    )

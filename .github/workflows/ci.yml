@@ -140,6 +140,11 @@ jobs:
     # top of, and only a pull request payload names that pair. It deliberately stays out of the
     # `release` job's `needs`: a job skipped for push events skips every dependent with it.
     if: github.event_name == 'pull_request'
+    env:
+      # Names the interpreter the corpus is scored under rather than leaving it to whatever
+      # `.python-version` happens to say, which is what the install step below installs. Both
+      # `uv sync` and every `uv run --no-sync` read this.
+      UV_PYTHON: '3.13'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -154,15 +159,19 @@ jobs:
           # scope exactly as a change to the guard package is, and an unrelated pull request pays
           # for a checkout and one diff rather than for twenty thousand scans. `error_types.py` is
           # named because it is the one module outside the guard package the scan path imports,
-          # and the refusals the labels carry are raised through it. Bound here rather than
-          # spelled in the run body because the guard package's own path carries the distribution
-          # marker, which AD-17 refuses in an uncertified command.
+          # and the refusals the labels carry are raised through it. The acknowledgements file is
+          # named because an entry pre-authorizes a verdict transition: skipping the replay for a
+          # pull request that only edits it would land the excuse detached from the change it
+          # excuses, ready for a later diff to walk through. Bound here rather than spelled in the
+          # run body because the guard package's own path carries the distribution marker, which
+          # AD-17 refuses in an uncertified command.
           REPLAYED_PATHS: >-
             src/doc_lattice/github_ci/
             src/doc_lattice/error_types.py
             scripts/corpus_differential.py
             scripts/fuzz_shell_taint.py
             tests/fixtures/github_ci_checkpoint/replay_inventory.json
+            tests/fixtures/corpus_differential_acknowledgements.json
         run: |
           set -euo pipefail
           # A base whose object is missing is not a base that predates the gate: a force-push or a
@@ -191,7 +200,7 @@ jobs:
         if: steps.scope.outputs.in-scope == 'true'
         run: |
           set -euo pipefail
-          uv python install 3.13
+          uv python install "$UV_PYTHON"
           uv sync --locked --group dev
       - name: Materialize the protected base revision
         if: steps.scope.outputs.in-scope == 'true'

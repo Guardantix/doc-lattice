@@ -21,14 +21,23 @@ score the same scripts and only the scanner under test differs.
 Two modes, one process each, because two revisions of one package cannot be imported side by side:
 
     corpus_differential.py record --scanner-root PATH --out FILE
-    corpus_differential.py compare --base FILE --candidate FILE
-        [--acknowledged FILE] [--base-inventory FILE] [--write-acknowledgements FILE]
+    corpus_differential.py compare --base FILE --candidate FILE --base-inventory FILE
+        [--acknowledged FILE] [--write-acknowledgements FILE]
+        [--no-corpus-floor] [--allow-shrunk-corpus]
+
+The comparison refuses rather than reports whenever the protection it describes is not in place: two
+records naming the same scanner source are one revision replayed twice, a record drawn below the
+pinned corpus scale scored fewer scripts than the pin promises, and a comparison with no base-owned
+inventory has no floor under the corpus at all. Each relaxation is a named flag, so a diff that
+takes one is a diff a reviewer can see taking it.
 
 An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
-script digest and both verdicts, so it covers exactly the transition it was written for and expires
-on its own once the base carries the new behavior. A change that legitimately moves thousands of
-verdicts is not transcribed by hand: `--write-acknowledgements` writes the file this comparison
-would need, with every reason left empty, and an empty reason is refused when the file is read.
+script digest and both verdicts, so it covers exactly the transition it was written for. It does not
+expire on its own: an entry matching no divergence fails the comparison, because an entry left on
+file after its transition landed is a standing authorization to make that exact move again. A change
+that legitimately moves thousands of verdicts is not transcribed by hand: `--write-acknowledgements`
+writes the file this comparison would need, with every reason left empty and stale entries dropped,
+and an empty reason is refused when the file is read.
 
 A verdict label carries the refusing guard's origin identifier, which is what makes a refusal that
 moves to another origin a divergence rather than two refusals that look alike. Three limits follow
@@ -62,6 +71,7 @@ REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 ACKNOWLEDGEMENTS = "tests/fixtures/corpus_differential_acknowledgements.json"
 SCANNER_MODULE = "doc_lattice.github_ci.shell_scanner"
 SCANNER_RELATIVE = "src/doc_lattice/github_ci/shell_scanner.py"
+SCANNER_ENTRY_POINT = "scan_doc_lattice_invocations"
 FUZZER_MODULE = "fuzz_shell_taint"
 SCHEMA = 1
 SEEDS = (1, 2, 3, 4)
@@ -199,8 +209,13 @@ def read_entries(document: dict[str, object], key: str, path: Path) -> list[obje
         The entries, each read through `read_text`.
 
     Raises:
-        ValueError: If the value is not a list.
+        ValueError: If the document carries no such key, or if the value is not a list. Named
+            here rather than left to surface as a bare `KeyError`, whose message is the key alone
+            and names neither the file that was malformed nor what was wrong with it.
     """
+    if key not in document:
+        message = f"{path} records no {key}"
+        raise ValueError(message)
     entries = document[key]
     if not isinstance(entries, list):
         message = f"{path} records {key} as a {type(entries).__name__}, not as a list"
@@ -324,9 +339,25 @@ def fuzz_generator() -> Callable[[random.Random, int], Sequence[object]]:
 
     Returns:
         The fuzzer's `generate` function.
+
+    Raises:
+        ValueError: If the fuzzer cannot be imported against the scanner already bound. The fuzzer
+            is the candidate's in both recordings and imports the scanner at module scope, so a
+            candidate that adds a scanner name and draws on it resolves that name against the base
+            revision, which does not carry it. Named here so that arrives as one refusal line
+            rather than as an `ImportError` traceback out of the base recording, where it reads
+            like the divergence the gate exists to report.
     """
     sys.path.insert(0, str(_ROOT / "scripts"))
-    return importlib.import_module(FUZZER_MODULE).generate
+    try:
+        return importlib.import_module(FUZZER_MODULE).generate
+    except (ImportError, AttributeError) as error:
+        message = (
+            f"{FUZZER_MODULE} could not be imported against the revision under test ({error}); "
+            "the fuzzer builds the corpus for both recordings, so every scanner name it reads has "
+            "to exist in the protected base as well as in the candidate"
+        )
+        raise ValueError(message) from error
 
 
 def build_corpus(
@@ -375,10 +406,12 @@ def load_scanner(root: Path) -> ModuleType:
         The imported scanner module.
 
     Raises:
-        ValueError: If the root holds no scanner source, or if the import resolved somewhere else.
-            An installed copy of the distribution resolves ahead of a path entry under some
-            layouts, and scoring the wrong revision twice reports a clean differential for a change
-            nothing replayed.
+        ValueError: If the root holds no scanner source, if the import resolved somewhere else, or
+            if the module carries no public entry point to replay the corpus through. An installed
+            copy of the distribution resolves ahead of a path entry under some layouts, and scoring
+            the wrong revision twice reports a clean differential for a change nothing replayed.
+            The entry point is checked here so a revision that renamed it is a refusal naming the
+            name rather than an `AttributeError` at the first case of a twenty-thousand script run.
     """
     src = (root / "src").resolve()
     if not (root / SCANNER_RELATIVE).exists():
@@ -389,6 +422,12 @@ def load_scanner(root: Path) -> ModuleType:
     source = module.__file__
     if source is None or not Path(source).resolve().is_relative_to(src):
         message = f"{SCANNER_MODULE} resolved to {source}, which is not under {src}"
+        raise ValueError(message)
+    if not hasattr(module, SCANNER_ENTRY_POINT):
+        message = (
+            f"{SCANNER_MODULE} at {source} carries no {SCANNER_ENTRY_POINT}, so this revision "
+            "exposes no public scan path the corpus can be replayed through"
+        )
         raise ValueError(message)
     return module
 
@@ -527,7 +566,7 @@ def record(
         "iterations": iterations,
         "corpus_sha256": corpus_digest(corpus),
         "count": len(corpus),
-        "cases": replay(corpus, scanner.scan_doc_lattice_invocations),
+        "cases": replay(corpus, getattr(scanner, SCANNER_ENTRY_POINT)),
     }
 
 
@@ -548,6 +587,7 @@ def load_record(path: Path) -> dict[str, object]:
         message = f"{path} carries schema {document.get('schema')}, not {SCHEMA}"
         raise ValueError(message)
     read_text(document, "corpus_sha256", path)
+    read_text(document, "scanner_source", path)
     for case in read_entries(document, "cases", path):
         for field in ("id", "sha256", "source", "verdict"):
             read_text(case, field, path)
@@ -606,6 +646,61 @@ def align(base: dict[str, object], candidate: dict[str, object]) -> None:
             "between them is attributable to the scanner"
         )
         raise ValueError(message)
+
+
+def check_distinct_revisions(base: dict[str, object], candidate: dict[str, object]) -> None:
+    """Refuse two records that scored the same scanner file.
+
+    `load_scanner` proves at record time which file a revision's scan path came from, and the
+    record carries that proof. Dropping it at comparison time would leave the hazard that check
+    exists against half defended: two records naming one file are one revision replayed twice, and
+    every verdict matches because nothing changed between them.
+
+    Args:
+        base: The protected base's record.
+        candidate: The candidate's record.
+
+    Raises:
+        ValueError: If both records name the same scanner source.
+    """
+    if base["scanner_source"] == candidate["scanner_source"]:
+        message = (
+            f"both records scored {base['scanner_source']}, so one revision was replayed twice "
+            "and their agreement says nothing about the candidate's scanner"
+        )
+        raise ValueError(message)
+
+
+def check_corpus_scale(base: dict[str, object], candidate: dict[str, object]) -> None:
+    """Refuse two records drawn below the pinned corpus scale.
+
+    The scale is a command line argument on `record`, so a pull request that shrank it in the same
+    diff that withdraws a guard leaves both sides scoring the same handful of scripts and reports a
+    clean differential over a corpus too small to carry the shape it withdrew. Pinning the module
+    constants does not reach that, because the shrinking happens on the command line. A deliberate
+    short run says so with `--allow-shrunk-corpus` instead.
+
+    Args:
+        base: The protected base's record.
+        candidate: The candidate's record.
+
+    Raises:
+        ValueError: If either record names no scale, or was drawn with other seeds than the pin or
+            fewer iterations than it.
+    """
+    for name, document in (("base", base), ("candidate", candidate)):
+        seeds = document.get("seeds")
+        iterations = document.get("iterations")
+        if not isinstance(seeds, list) or not isinstance(iterations, int):
+            message = f"the {name} record does not name the corpus scale it was drawn at"
+            raise ValueError(message)
+        if list(seeds) != list(SEEDS) or iterations < ITERATIONS:
+            message = (
+                f"the {name} record was drawn at seeds {seeds} and {iterations} iterations "
+                f"rather than the pinned {list(SEEDS)} and {ITERATIONS}; a shrunken corpus "
+                "reports no divergence for the scripts it never drew"
+            )
+            raise ValueError(message)
 
 
 def check_corpus_retained(candidate: dict[str, object], base_inventory: Path) -> None:
@@ -709,7 +804,10 @@ def report(
     observed = {(divergence.digest, divergence.base, divergence.candidate) for divergence in found}
     unmatched = [entry for entry in acknowledged if entry.key not in observed]
 
-    print(f"corpus divergences: {len(found)} ({len(unacknowledged)} unacknowledged)")
+    print(
+        f"corpus divergences: {len(found)} ({len(unacknowledged)} unacknowledged); "
+        f"stale acknowledgements: {len(unmatched)}"
+    )
     for transition, count in transition_counts(found):
         print(f"  {count:>6}  {transition[0]} -> {transition[1]}")
     for divergence in unacknowledged[:limit]:
@@ -722,6 +820,8 @@ def report(
     for entry in unmatched[:limit]:
         print(f"  stale acknowledgement, nothing diverged this way: {entry.digest}")
         print(f"    reason on file: {entry.reason}")
+    if len(unmatched) > limit:
+        print(f"  ... and {len(unmatched) - limit} more stale acknowledgement(s)")
     return unacknowledged, unmatched
 
 
@@ -789,15 +889,29 @@ def _compare_command(args: argparse.Namespace) -> int:
 
     Returns:
         Process exit status.
+
+    Raises:
+        ValueError: If the comparison was asked to run without a base-owned corpus floor and
+            without saying so.
     """
     base = load_record(Path(args.base))
     candidate = load_record(Path(args.candidate))
     align(base, candidate)
+    check_distinct_revisions(base, candidate)
+    if not args.allow_shrunk_corpus:
+        check_corpus_scale(base, candidate)
     if args.base_inventory:
         check_corpus_retained(candidate, Path(args.base_inventory))
+    elif not args.no_corpus_floor:
+        message = (
+            "no base-owned corpus floor was named, so nothing stops the scored corpus from having "
+            f"shrunk; pass --base-inventory pointing at the base revision's {REPLAY_INVENTORY}, "
+            "or --no-corpus-floor to compare without one"
+        )
+        raise ValueError(message)
     acknowledged = load_acknowledgements(Path(args.acknowledged)) if args.acknowledged else []
     found = divergences(base, candidate)
-    unacknowledged, _unmatched = report(found, acknowledged, limit=args.report_limit)
+    unacknowledged, unmatched = report(found, acknowledged, limit=args.report_limit)
     if args.write_acknowledgements:
         draft = Path(args.write_acknowledgements)
         draft.write_text(
@@ -813,6 +927,17 @@ def _compare_command(args: argparse.Namespace) -> int:
             "the candidate scores the frozen corpus differently from the protected base; "
             "acknowledge each intentional transition in "
             f"{ACKNOWLEDGEMENTS} or restore the base behavior",
+            file=sys.stderr,
+        )
+        return EXIT_DIVERGED
+    # A shrunken corpus is not evidence that a transition stopped happening: the script the entry
+    # names may simply not have been drawn. Only a full-scale replay can call an entry stale.
+    if unmatched and not args.allow_shrunk_corpus:
+        print(
+            f"{len(unmatched)} acknowledgement(s) in {ACKNOWLEDGEMENTS} match no divergence in "
+            "this comparison; remove them rather than leaving a standing authorization for a "
+            "transition nobody is reviewing, or run compare --write-acknowledgements to have the "
+            "stale entries dropped for you",
             file=sys.stderr,
         )
         return EXIT_DIVERGED
@@ -856,6 +981,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-inventory",
         default="",
         help="the base revision's replay inventory, which the scored corpus may not drop",
+    )
+    comparer.add_argument(
+        "--no-corpus-floor",
+        action="store_true",
+        help="compare without a base-owned corpus floor, which --base-inventory otherwise supplies",
+    )
+    comparer.add_argument(
+        "--allow-shrunk-corpus",
+        action="store_true",
+        help="accept records drawn below the pinned scale, which also stops an acknowledgement "
+        "matching nothing from being read as stale",
     )
     comparer.add_argument(
         "--write-acknowledgements",

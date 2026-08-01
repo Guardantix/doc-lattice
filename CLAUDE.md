@@ -42,6 +42,7 @@ uv run --group dev python scripts/corpus_differential.py record \
   --scanner-root . --out /tmp/candidate-verdicts.json
 uv run --group dev python scripts/corpus_differential.py compare \
   --base /tmp/base-verdicts.json --candidate /tmp/candidate-verdicts.json \
+  --base-inventory /tmp/base-revision/tests/fixtures/github_ci_checkpoint/replay_inventory.json \
   --acknowledged tests/fixtures/corpus_differential_acknowledgements.json
 
 uv run python scripts/fuzz_shell_taint.py --self-check
@@ -127,12 +128,20 @@ Two revisions of one package cannot be imported side by side, so a run is two `r
 and one `compare`. The CI job replays the base from a worktree of the protected base revision and
 the candidate from the checkout; locally, materialize the other revision anywhere and point
 `--scanner-root` at it. Shrink `--seeds` and `--iterations` while iterating, since a full run
-replays roughly twenty thousand scripts per side.
+replays roughly twenty thousand scripts per side, and pass `--allow-shrunk-corpus` to `compare`,
+which otherwise refuses records drawn below the pinned scale. `--base-inventory` is the base-owned
+floor under the corpus and is not optional; `--no-corpus-floor` says out loud that a run has none.
+Two records naming the same scanner file are refused as one revision replayed twice.
 
 Acknowledge an intentional change in `tests/fixtures/corpus_differential_acknowledgements.json`
 rather than restoring a verdict you meant to move: an entry names the script digest, both verdicts
 and a reason a reviewer can read. Run `compare --write-acknowledgements FILE` to have the entries
 written for you, then write each reason, since an entry with an empty reason is refused.
+
+An acknowledgement does not expire. Once its transition has landed in the base it matches nothing,
+and a full-scale comparison then fails until it is removed, because an entry left on file is a
+standing authorization to make that move again. `--write-acknowledgements` drops the stale entries
+while keeping the reasons still in use.
 
 ## Enforced repository rules
 
