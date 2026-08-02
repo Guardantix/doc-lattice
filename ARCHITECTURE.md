@@ -1031,10 +1031,28 @@ The declaration's own operand is stored exactly, and it is every later assignmen
 leaving the name holding what it already had and exiting a non-interactive shell. Only a write to an
 already-declared readonly name is therefore withdrawn, and it is not applied at all, which keeps
 `readonly P=task.sh; printf ... > "$P"` naming the file the marker reaches while
-`readonly P=task.sh; P=other.sh; printf ... > "$P"` stops naming a file the run never opens. The
-attribute sets are not kept per value table, which over-approximates a `local -u` to the whole run
-body in the direction that leaves an operand dynamic, and a `+u` that removes an attribute is not
-read at all, which is the same direction.
+`readonly P=task.sh; P=other.sh; printf ... > "$P"` stops naming a file the run never opens. An
+`unset` of a readonly name is refused by Bash, which reports it and keeps running, so the name is
+left holding the declaration's value rather than made unknown: honouring the unset returned
+`readonly P=task.sh; unset P; printf ... > "$P"` to the certification the row above it already
+refuses.
+
+A declaration withdraws a name, and a withdrawal returns the operand to the dynamic target that
+certified before this resolution, so a declaration the shell never reaches is not read at all.
+Three shapes decide that. A branch `execution_status` proves untaken runs nothing, a function body
+no call reaches runs nothing, and a declaration a subshell makes dies with the subshell, which the
+attribute sets express by being kept per execution environment and inherited exactly as the value
+tables are. Reading any of them withdrew a name over a command that does not exist at runtime, and
+one unreachable word was enough to disable this resolution for the rest of the run body:
+`if false; then readonly P; fi`, `f(){ declare -u P; }` with no call to `f`, and `( readonly P )`
+each certified a body whose marker Bash writes through `> "$P"` and runs. The same reachability
+governs the scopes a command enters, so a loop inside an untaken branch binds nothing.
+
+A declaration that only *may* run is still read, which is the direction that leaves an operand
+dynamic, and so is one a called body makes without `-g`, though Bash restores the caller's variable
+on return. The sets are not kept per function context, which over-approximates a `local -u` to
+every table its environment reaches, and a `+u` that removes an attribute is not read at all. All
+of those are the same direction.
 
 One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
 name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.

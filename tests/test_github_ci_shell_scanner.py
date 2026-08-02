@@ -535,6 +535,66 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "declare -r P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # Bash refuses to unset a readonly name, reports it and keeps running, so the name still holds
+    # the value the declaration stored. Honouring the unset made the name unknown and returned the
+    # operand to the dynamic target it had before issue #151, so one added line disabled the
+    # resolution for a body the row above already refuses.
+    (
+        "unset-of-a-readonly-name-keeps-its-value",
+        "readonly P=task.sh; unset P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A declaration attribute withdraws the name it names from the projection, so a declaration
+    # bash never reaches withdrew a name over a command that does not exist at runtime and one
+    # unreachable word disabled the resolution for the rest of the run body. A branch
+    # "execution_status" proves untaken, a function body no call reaches, and a subshell whose
+    # declaration dies with it are the three shapes, each pinned for a "readonly" and for a value
+    # transforming attribute since the two withdraw through different halves of the same record.
+    (
+        "readonly-in-an-untaken-branch-sets-nothing",
+        "if false; then readonly P; fi; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "uppercase-attribute-in-an-untaken-branch-sets-nothing",
+        "if false; then declare -u P; fi; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-in-an-uncalled-body-sets-nothing",
+        "f(){ readonly P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "uppercase-attribute-in-an-uncalled-body-sets-nothing",
+        "f(){ declare -u P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-a-subshell-makes-leaves-the-parent-writable",
+        "( readonly P ); P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "integer-attribute-a-subshell-makes-leaves-the-parent-exact",
+        "( declare -i P ); P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A command bash never runs enters no scope either, so a loop inside an untaken branch binds
+    # nothing and the name an operand below spells is not withdrawn from the enclosing table.
+    (
+        "loop-in-an-untaken-branch-binds-nothing",
+        "P=task.sh; if false; then for P in x; do :; done; fi"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -9908,6 +9968,29 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
     (
         "attribute-and-value-in-one-declaration-word",
         "declare -u P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
+        {},
+    ),
+    # The controls for the three shapes a declaration is not read in at all, which
+    # PHASE_TWO_RUNTIME_REFUSALS pins as refusing. Each of these is a declaration bash does reach,
+    # so the withdrawal still applies and the operand keeps the dynamic target every withdrawn
+    # operand has. Without them the gate that skips an unreachable declaration could be widened
+    # into one that skips every declaration and no row would notice.
+    (
+        "attribute-a-called-body-sets-globally-word",
+        "f(){ declare -gu P; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
+        {},
+    ),
+    (
+        "conditional-attribute-word",
+        '[ -n "$Q" ] && declare -u P; P=task.sh'
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "attribute-a-subshell-inherits-word",
+        "declare -u P; ( P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\" )"
+        "; bash TASK.SH",
         {},
     ),
 ]
