@@ -2889,6 +2889,11 @@ class _ShellScanner:
         # redirection is projected, so an event bound for a compound scope carries no word: the
         # values that apply there are the ones at compound entry, which this evidence shape has
         # no table for, and retaining the expression would imply a projection that never runs.
+        # An unquoted expansion carries no word either: Bash word-splits and pathname-expands it
+        # before opening anything, so ``> $P`` with ``P='a b.sh'`` is an ambiguous redirect that
+        # opens no file at all and ``P='ta*.sh'`` names a pattern. The projected text would name
+        # a file Bash never touches in either direction, which is the class AD-18 keeps dynamic
+        # as issue #189.
         scope_bound = state.pending_compound_scope_id is not None and self.taint_builder is not None
         self._append_redirection(
             state,
@@ -2899,7 +2904,9 @@ class _ShellScanner:
                 redirection_target,
                 target_word=(
                     target.content
-                    if not scope_bound and isinstance(redirection_target, DynamicResourceTarget)
+                    if not scope_bound
+                    and not target.unquoted_dynamic
+                    and isinstance(redirection_target, DynamicResourceTarget)
                     else None
                 ),
             ),

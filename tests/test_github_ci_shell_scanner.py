@@ -321,6 +321,16 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         {},
     ),
     (
+        # The record a ``read`` draws comes from the operand under ``<``, so the resolution has
+        # to reach the events before the input projection consumes them. Building stdin from the
+        # unresolved events read a resource nothing had written, and the identical body spelled
+        # ``read -r X < f.txt`` refused, so the two spellings disagreed on a flow real bash runs.
+        "literal-variable-read-source",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > f.txt; P=f.txt; read -r X < \"$P\""
+        "; printf '%s\\n' \"$X\" > task.sh; bash task.sh",
+        {},
+    ),
+    (
         "literal-variable-append-target",
         "P=task.sh; printf doc- > task.sh; printf 'lattice reconcile\\n' >> \"$P\"; bash task.sh",
         {},
@@ -8378,6 +8388,7 @@ def test_loop_evidence_routes_repetition_scopes_into_their_pipelines(
     ("script", "expected"),
     [
         ('printf a > "$P"', True),
+        ("printf a > $P", False),
         ("printf a > out.txt", False),
         ("printf a > /dev/null", False),
         ("printf a >&2", False),
@@ -8388,6 +8399,7 @@ def test_loop_evidence_routes_repetition_scopes_into_their_pipelines(
     ],
     ids=(
         "dynamic-operand",
+        "unquoted-dynamic-operand",
         "literal-operand",
         "null-operand",
         "descriptor-operand",
@@ -8408,7 +8420,9 @@ def test_redirection_event_carries_its_word_only_where_the_projection_runs(
     value table that does not apply to it, or retained past the stage that rewrites content into
     scope-qualified expressions. A compound scope's redirection is the case that matters most:
     the values that apply to it are the ones at compound entry, which this evidence shape has no
-    table for, and that gap is tracked as issue #188.
+    table for, and that gap is tracked as issue #188. An unquoted operand carries no word either,
+    because bash word-splits and pathname-expands it before opening anything, so its projected
+    text would name a file bash never touches (issue #189).
     """
     scanner = _ShellScanner(script, classify_commands=False)
     builder = scanner.taint_builder
@@ -8904,6 +8918,39 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
+    # The same over-refusal guard for the tables the withdrawal has to reach. Scope entry is
+    # recorded once in source order, while the values live in one table per function context and
+    # execution environment, so applying the withdrawal only where entry is first seen left every
+    # other table holding the shadowed value. A body whose first command runs in a subshell or a
+    # pipeline stage withdrew nothing from the enclosing environment, and a loop inside a function
+    # body withdrew nothing from its caller's table. Real bash writes the marker to task.sh and
+    # runs the untouched other.sh in all four.
+    (
+        "loop-binding-shadows-past-a-subshell-first-body",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; for P in task.sh; do (:); printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        "loop-binding-shadows-past-a-pipeline-first-body",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; for P in task.sh; do echo x | cat"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done; bash other.sh",
+        {},
+    ),
+    (
+        "loop-binding-shadows-after-a-nested-body",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do (:); done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "function-body-binding-shadows-its-caller-write-target",
+        "printf 'echo safe\\n' > other.sh; f() { for P in task.sh; do :; done; }; P=other.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
     # Issue #151 measured widening. Resolving an operand can name a descriptor rather than a
     # file, because a variable holding "/dev/stdout", a "/dev/fd" alias, or a digit under ">&" is
     # exactly what its literal spelling names. "_guarded_output_descriptors" reads a
@@ -9169,9 +9216,43 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "; bash task.sh",
         {},
     ),
-    # Issue #189: bash pathname-expands an unquoted operand before opening anything, so the text
-    # is a pattern rather than the name of the file the marker reaches. The literal spelling has
-    # the same hole, which is why the resolved spelling reproduces it.
+    # Issue #188, the other side of the same withdrawal. A name a loop binds is withdrawn for the
+    # body and for everything after "done", because this walk has no value for what the binding
+    # left it holding; a name the body assigns is withdrawn from loop entry, because the next
+    # iteration carries that value back to a use above the assignment along an edge a
+    # source-order walk has no shape for. Both leave the operand where the revision before #151
+    # left every operand, so they are that resolution's edge rather than its regression. The
+    # loop header is the same withdrawal reaching one command too early: bash expands the header
+    # before it binds anything, so the value there is the one the body never sees.
+    (
+        "loop-binding-after-done-word",
+        "for P in task.sh; do :; done; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "empty-loop-list-binding-word",
+        "P=task.sh; for P in $Q; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "loop-body-reassigned-word",
+        "P=safe.sh; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; P=task.sh; done; bash task.sh",
+        {},
+    ),
+    (
+        "loop-header-word",
+        "P=task.sh"
+        "; for P in $(printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; echo a); do :; done"
+        "; bash task.sh",
+        {},
+    ),
+    # Issue #189: bash word-splits and pathname-expands an unquoted operand before opening
+    # anything, so the text is a pattern or a field list rather than the name of the file the
+    # marker reaches. The word is not projected at all for that reason, which leaves the unquoted
+    # spelling exactly where the literal spelling already sat.
     (
         "glob-valued-operand",
         "printf x > task.sh; P='ta*.sh'; printf '%s%s\\n' doc- 'lattice reconcile' > $P"
@@ -9181,6 +9262,11 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
     (
         "glob-literal-operand",
         "printf x > task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > ta*.sh; bash task.sh",
+        {},
+    ),
+    (
+        "word-split-valued-operand",
+        "P='task.sh '; printf '%s%s\\n' doc- 'lattice reconcile' > $P; bash task.sh",
         {},
     ),
     # Issue #190: the word lowering builds a closed content expression for a plain reference and

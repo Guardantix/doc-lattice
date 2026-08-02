@@ -360,12 +360,14 @@ RedirectionTarget: TypeAlias = (  # noqa: UP040
 class _RedirectionEvent:
     """One ordered descriptor mutation.
 
-    ``target_word`` carries the operand's own content expression for a simple command's operand
-    that named no static resource by its syntax alone. Resource identity used to stop at that
-    syntax, so ``P=task.sh; printf ... > "$P"`` wrote to a nameless target while ``bash task.sh``
-    read a key nothing had written, and the body certified while Bash ran the marker (issue
-    #151). Keeping the word lets ``_resolve_dynamic_redirection_targets`` project it against the
-    same exact scalar values the eval replay already trusts, once those values exist.
+    ``target_word`` carries the operand's own content expression for a simple command's quoted
+    operand that named no static resource by its syntax alone. Resource identity used to stop at
+    that syntax, so ``P=task.sh; printf ... > "$P"`` wrote to a nameless target while
+    ``bash task.sh`` read a key nothing had written, and the body certified while Bash ran the
+    marker (issue #151). Keeping the word lets ``_resolve_dynamic_redirection_targets`` project it
+    against the same exact scalar values the eval replay already trusts, once those values exist.
+    An unquoted operand carries no word, because Bash word-splits and pathname-expands it before
+    opening anything.
 
     The field is valid only between the scanner and that projection, which clears it on every
     event it resolves and on every event it declines to resolve. Nothing downstream may read it:
@@ -1171,6 +1173,9 @@ _SHARED_ENVIRONMENT_SCOPE_KINDS = frozenset(
 # redefinition it contains may or may not take effect, and dropping/overwriting an existing
 # linkage on that uncertainty is fail-open.
 _AMBIGUOUS_DEFINITION_SCOPE_KINDS = frozenset({"case", "for", "if", "select", "until", "while"})
+# The scope kinds whose body repeats, so a name the body assigns reaches a use above that
+# assignment along a back edge this source-order walk has no shape for.
+_LOOP_SCOPE_KINDS = frozenset({"for", "select", "until", "while"})
 _PROCESS_RESOURCE_DIRECTIONS = frozenset({"input", "output"})
 
 
@@ -3626,7 +3631,10 @@ def _resolve_dynamic_redirection_targets(
 
     The projection is the same one the eval replay trusts, so an operand only resolves when
     every path reaching it assigns the same literal. Anything else keeps the dynamic target it
-    already had.
+    already had, including the rebindings the source-order walk cannot order, which
+    ``_scope_rebound_names`` and ``_function_rebound_names`` withdraw before the values reach
+    here. An arithmetic assignment is recorded nowhere and so is withdrawn nowhere; AD-18 records
+    that residue and the over-refusal it leaves.
 
     Resolving an operand can name a descriptor rather than a file, because a variable holding
     ``/dev/stdout``, a ``/dev/fd`` alias, or a digit under ``>&`` is exactly what its literal
@@ -3679,33 +3687,103 @@ def _resolve_dynamic_redirection_targets(
     return tuple(resolved)
 
 
-def _newly_entered_scope_bindings(
-    scope_path: tuple[int, ...],
-    scope_bound_names: Mapping[int, tuple[str, ...]],
-    entered_scopes: set[int],
-) -> tuple[str, ...]:
-    """Return the names the scopes this command is the first to enter rebind.
+def _scope_rebound_names(
+    evidence: _ShellTaintEvidence,
+    command_scope_paths: Mapping[int, tuple[int, ...]],
+) -> dict[int, tuple[str, ...]]:
+    """Return the names each scope can leave holding a value this walk never applied.
 
-    A ``for`` or ``select`` loop binds its variable on entry, and a compound's redirection word
-    can assign through an expansion such as ``${X=q}``. Neither is one of the assignments the
-    exact walk applies, so the value table would otherwise keep whatever the name held outside the
-    scope. Bash binds a loop variable for every command in the body and leaves it bound after
-    ``done``, so that outer value is stale from the first command inside the scope onward and only
-    a later assignment can make the name exact again. Every such name is withdrawn rather than
-    projected forward, which is the rule the resolution states: an operand resolves only where
-    every path reaching it fixes it to one literal, and a rebinding the walk never saw is not one.
+    Two rebindings escape the source-order assignment walk. A ``for`` or ``select`` loop binds
+    its variable on entry and a compound's redirection word can assign through an expansion such
+    as ``${X=q}``; the scanner records both as the scope's ``loop_bindings``, and neither is an
+    assignment the walk applies. A loop body also has a back edge the walk has no shape for: a
+    name the body assigns after a use is already bound to that value when the next iteration
+    reaches the use again, so the value in the table at the use is the one only the first
+    iteration sees.
+
+    Both classes are collected per scope so that entering the scope withdraws them, which is the
+    rule the redirection resolution states: an operand resolves only where every path reaching it
+    fixes it to one literal, and neither a binding the walk never saw nor a value that arrives
+    along a back edge is one. Withdrawing rather than projecting keeps the resolution from naming
+    a file Bash never opens, which would be a write recorded on the wrong resource in both
+    directions.
 
     Args:
-        scope_path: The structured scope ancestry of one command, outermost first.
-        scope_bound_names: The names each scope rebinds on entry, by scope id.
-        entered_scopes: The scopes the walk has already entered, extended in place by this call.
+        evidence: The scan evidence whose scopes and commands are being walked.
+        command_scope_paths: Each command's structured scope ancestry, outermost first.
 
     Returns:
-        Every name rebound by a scope this command is the first to enter.
+        The names to withdraw on entry, by scope id, for every scope that rebinds any.
     """
-    entered = [scope_id for scope_id in scope_path if scope_id not in entered_scopes]
-    entered_scopes.update(entered)
-    return tuple(name for scope_id in entered for name in scope_bound_names.get(scope_id, ()))
+    rebound: dict[int, set[str]] = {}
+    loop_scopes: set[int] = set()
+    for scope in evidence.scopes:
+        if scope.loop_bindings:
+            rebound.setdefault(scope.scope_id, set()).update(
+                _unscoped_variable_name(binding.name) for binding in scope.loop_bindings
+            )
+        if scope.kind in _LOOP_SCOPE_KINDS:
+            loop_scopes.add(scope.scope_id)
+    for command in evidence.commands:
+        assigned = {
+            _unscoped_variable_name(assignment.name)
+            for assignment in (
+                *command.assignments,
+                *command.definite_assignments,
+                *command.builtin_assignments,
+            )
+        }
+        if not assigned:
+            continue
+        for scope_id in command_scope_paths[command.command_id]:
+            if scope_id in loop_scopes:
+                rebound.setdefault(scope_id, set()).update(assigned)
+    return {scope_id: tuple(sorted(names)) for scope_id, names in rebound.items()}
+
+
+def _function_rebound_names(
+    evidence: _ShellTaintEvidence,
+    command_scope_paths: Mapping[int, tuple[int, ...]],
+    scope_bound_names: Mapping[int, tuple[str, ...]],
+) -> frozenset[str]:
+    """Return every name some function body assigns or binds in the caller's variable space.
+
+    A Bash function body is not a scope for variables: ``f() { for P in task.sh; do :; done; }``
+    leaves ``P`` bound to ``task.sh`` in the caller once ``f`` runs. The exact walk keys its value
+    tables by function context, so a body's rebinding never reaches the caller's table and the
+    caller keeps whatever the name held before the call. Which call reaches which definition is
+    resolved by ``_contextualize_evidence``, which runs after this pass, so there is no call
+    linkage here to withdraw the name at.
+
+    A redirection operand is therefore never projected against a name any body rebinds, for the
+    whole run body rather than from the call onward. That is coarser than a withdrawal at the
+    call, and it is the direction that leaves the operand dynamic rather than resolved to a file
+    Bash never opens; every other consumer of the value table is unaffected, since only the
+    projection reads the filtered table.
+
+    Args:
+        evidence: The scan evidence whose commands carry their function context.
+        command_scope_paths: Each command's structured scope ancestry, outermost first.
+        scope_bound_names: The names each scope rebinds on entry, by scope id.
+
+    Returns:
+        Every name a function body can leave rebound for its caller.
+    """
+    names: set[str] = set()
+    for command in evidence.commands:
+        if command.function_context_id is None:
+            continue
+        names.update(
+            _unscoped_variable_name(assignment.name)
+            for assignment in (
+                *command.assignments,
+                *command.definite_assignments,
+                *command.builtin_assignments,
+            )
+        )
+        for scope_id in command_scope_paths[command.command_id]:
+            names.update(scope_bound_names.get(scope_id, ()))
+    return frozenset(names)
 
 
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
@@ -3723,14 +3801,13 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
-    scope_bound_names = {
-        scope.scope_id: tuple(
-            _unscoped_variable_name(binding.name) for binding in scope.loop_bindings
-        )
-        for scope in evidence.scopes
-        if scope.loop_bindings
-    }
-    entered_scopes: set[int] = set()
+    scope_bound_names = _scope_rebound_names(evidence, command_scope_paths)
+    function_rebound_names = _function_rebound_names(
+        evidence, command_scope_paths, scope_bound_names
+    )
+    entered_scopes: list[int] = []
+    entered_scope_ids: set[int] = set()
+    withdrawn_scopes_by_environment: dict[tuple[int | None, int], set[int]] = {}
     commands: list[_CommandEvidence] = []
 
     def exact_values_for(context: int | None, environment: int) -> dict[str, str]:
@@ -3752,6 +3829,47 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         inherited = set(unknown_values_for(context, parent)) if parent is not None else set()
         unknown_values_by_environment[key] = inherited
         return inherited
+
+    def withdrawn_scopes_for(context: int | None, environment: int) -> set[int]:
+        key = (context, environment)
+        cached = withdrawn_scopes_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = set(withdrawn_scopes_for(context, parent)) if parent is not None else set()
+        withdrawn_scopes_by_environment[key] = inherited
+        return inherited
+
+    def withdraw_entered_scopes(
+        command: _CommandEvidence,
+        environment: int,
+        values: dict[str, str],
+        unknown_values: set[str],
+    ) -> None:
+        """Withdraw every name an already-entered scope rebinds from this command's table.
+
+        Entry is recorded once in source order, but the value tables are per function context
+        and per execution environment, so applying the withdrawal only where entry is first seen
+        left every other table holding the shadowed value: a loop body whose first command runs
+        in a subshell or a pipeline stage withdrew nothing from the enclosing environment, a loop
+        inside a function body withdrew nothing from its caller's table, and neither the rest of
+        the body nor anything after ``done`` saw the binding at all. Each table therefore carries
+        its own record of which scopes it has already applied, seeded from its parent when the
+        environment is first reached, so a later assignment still makes the name exact again and
+        no scope is applied to one table twice.
+        """
+        for scope_id in command_scope_paths[command.command_id]:
+            if scope_id not in entered_scope_ids:
+                entered_scope_ids.add(scope_id)
+                entered_scopes.append(scope_id)
+        withdrawn = withdrawn_scopes_for(command.function_context_id, environment)
+        for scope_id in entered_scopes:
+            if scope_id in withdrawn:
+                continue
+            withdrawn.add(scope_id)
+            for bound in scope_bound_names.get(scope_id, ()):
+                values.pop(bound, None)
+                unknown_values.add(bound)
 
     def apply_exact(
         assignment: _AssignmentEvidence,
@@ -3789,11 +3907,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         # Withdraw the names an entered scope rebinds, in the same shape a conditional assignment
         # uses. An operand projected against a value the loop has replaced names a file Bash never
         # opens, which the redirection resolution below turns into a write on the wrong resource.
-        for bound in _newly_entered_scope_bindings(
-            command_scope_paths[command.command_id], scope_bound_names, entered_scopes
-        ):
-            exact_values.pop(bound, None)
-            unknown_values.add(bound)
+        withdraw_entered_scopes(command, environment, exact_values, unknown_values)
         command_values = dict(exact_values)
         command_unknown_values = set(unknown_values)
         for assignment in command.definite_assignments:
@@ -3803,9 +3917,33 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 command_unknown_values,
                 conditional=False,
             )
+        assignment_only = not command.argv or command.executable.argv_index is None
+        # Bash expands a redirection word before it applies the prefix assignments of a command
+        # that runs one, so ``P=other.sh; P=task.sh printf ... > "$P"`` writes to ``other.sh``.
+        # An assignment-only command is the measured exception: its assignments land first, and
+        # ``P=task.sh > "$P"`` truncates the file the NEW value names. Reading the wrong table
+        # would name a file Bash never touches, which is a certification rather than a refusal
+        # whenever the file the marker really reaches stays unmodeled.
+        redirection_values = command_values if assignment_only else exact_values
+        if function_rebound_names:
+            redirection_values = {
+                name: value
+                for name, value in redirection_values.items()
+                if name not in function_rebound_names
+            }
+        # Resolve before the input projection reads the redirections, not after: an operand under
+        # ``<`` names the file a ``read`` draws its record from, so building stdin from the
+        # unresolved events left ``read -r X < "$P"`` reading a resource nothing had written
+        # while the literal spelling of the same body refused.
+        redirected = replace(
+            command,
+            redirections=_resolve_dynamic_redirection_targets(
+                command.redirections, redirection_values, limits
+            ),
+        )
         stdin = _strip_one_trailing_newline(
             _input_expression(
-                command,
+                redirected,
                 pipe_inputs,
                 process_resources,
                 command_scope_paths,
@@ -3868,25 +4006,14 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 read_ifs=ifs_value if deferred_projection else None,
             )
 
-        assignment_only = not command.argv or command.executable.argv_index is None
-        # Bash expands a redirection word before it applies the prefix assignments of a command
-        # that runs one, so ``P=other.sh; P=task.sh printf ... > "$P"`` writes to ``other.sh``.
-        # An assignment-only command is the measured exception: its assignments land first, and
-        # ``P=task.sh > "$P"`` truncates the file the NEW value names. Reading the wrong table
-        # would name a file Bash never touches, which is a certification rather than a refusal
-        # whenever the file the marker really reaches stays unmodeled.
-        redirection_values = command_values if assignment_only else exact_values
         routed = replace(
-            command,
+            redirected,
             assignments=tuple(route(assignment) for assignment in command.assignments),
             definite_assignments=tuple(
                 route(assignment) for assignment in command.definite_assignments
             ),
             builtin_assignments=tuple(
                 route(assignment) for assignment in command.builtin_assignments
-            ),
-            redirections=_resolve_dynamic_redirection_targets(
-                command.redirections, redirection_values, limits
             ),
             unsupported_builtin_write=(command.unsupported_builtin_write or read_ifs_unknown),
         )
