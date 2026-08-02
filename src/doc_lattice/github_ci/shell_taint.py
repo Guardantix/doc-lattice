@@ -1176,6 +1176,46 @@ _AMBIGUOUS_DEFINITION_SCOPE_KINDS = frozenset({"case", "for", "if", "select", "u
 # The scope kinds whose body repeats, so a name the body assigns reaches a use above that
 # assignment along a back edge this source-order walk has no shape for.
 _LOOP_SCOPE_KINDS = frozenset({"for", "select", "until", "while"})
+# The shell parameters Bash gives its own value to, so an assignment to one never leaves the name
+# holding the text the assignment spells. It is the "declare -u" mismatch with the attribute
+# already set and no declaration in the run body to read it from, and it runs in both directions:
+# "SECONDS=task.sh; printf ... > \"$SECONDS\"; bash 0" writes the marker into the file "0" and
+# runs it while an exact table reads "task.sh", and the same body sinking "bash task.sh" refuses
+# for a marker Bash leaves somewhere it never runs.
+#
+# Three families, measured under Bash 5.2 by assigning a name and expanding it. A counter or
+# generator replaces the value outright ("SECONDS", "LINENO", "RANDOM", "SRANDOM", "HISTCMD",
+# "BASHPID", "EPOCHSECONDS", "EPOCHREALTIME", "BASH_SUBSHELL", "BASH_COMMAND"); an integer
+# attribute Bash sets itself evaluates the operand arithmetically, and refuses a word that is not
+# an arithmetic expression ("OPTIND", and "PPID" and "EUID", which are readonly with it); and an
+# array Bash maintains is read back from its own elements ("GROUPS", "FUNCNAME", "BASH_SOURCE",
+# "BASH_LINENO", "BASH_ARGC", "BASH_ARGV"). "UID" and "BASH_ARGV0" are measured storing an
+# assignment verbatim and are deliberately absent, since withdrawing a name Bash does store is
+# the direction that leaves an operand dynamic. What Bash really stores is the residue issue #205
+# owns, exactly as it does for a declared attribute.
+_SELF_VALUED_SHELL_PARAMETERS = frozenset(
+    {
+        "BASHPID",
+        "BASH_ARGC",
+        "BASH_ARGV",
+        "BASH_COMMAND",
+        "BASH_LINENO",
+        "BASH_SOURCE",
+        "BASH_SUBSHELL",
+        "EPOCHREALTIME",
+        "EPOCHSECONDS",
+        "EUID",
+        "FUNCNAME",
+        "GROUPS",
+        "HISTCMD",
+        "LINENO",
+        "OPTIND",
+        "PPID",
+        "RANDOM",
+        "SECONDS",
+        "SRANDOM",
+    }
+)
 _PROCESS_RESOURCE_DIRECTIONS = frozenset({"input", "output"})
 
 
@@ -4404,7 +4444,12 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         expansion_values: Mapping[str, str] | None = None,
     ) -> None:
         name = _unscoped_variable_name(assignment.name)
-        if conditional:
+        # A shell parameter Bash gives its own value to never holds the text an assignment spells,
+        # which is the ``declare -u`` mismatch with the attribute already set and no declaration to
+        # read it from. The value is dropped rather than stored, so every reader of this table is
+        # covered rather than the redirection projection alone: the eval replay and the exact
+        # ``read`` projection substitute out of the same table.
+        if conditional or name in _SELF_VALUED_SHELL_PARAMETERS:
             values.pop(name, None)
             unknown_values.add(name)
             return

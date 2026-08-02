@@ -1054,6 +1054,21 @@ on return. The sets are not kept per function context, which over-approximates a
 every table its environment reaches, and a `+u` that removes an attribute is not read at all. All
 of those are the same direction.
 
+A shell parameter Bash gives its own value to is that mismatch with the attribute already set and
+no declaration in the run body to read it from, so an assignment to one stores nothing in this
+table at all rather than being withdrawn from the projection alone. The eval replay and the exact
+`read` projection substitute out of the same table, and dropping the value leaves them reading no
+text rather than the wrong text, which is a fail-closed refusal where they can no longer read a
+payload. Three families are measured under Bash 5.2 and named in `shell_taint.py`: a counter or generator
+that replaces the value outright, an integer attribute Bash sets itself, and an array Bash
+maintains and reads back from its own elements. Both directions were reachable, and only the
+milder one was reported: `SECONDS=task.sh; printf ... > "$SECONDS"; bash task.sh` was refused for a
+marker Bash writes to the file `0` and never runs, while the same body sinking `bash 0` certified
+for one Bash writes there and does run. `UID` and `BASH_ARGV0` store an assignment verbatim and are
+deliberately absent, since withdrawing a name Bash does store is the direction that leaves an
+operand dynamic. What Bash really stores is the residue issue #205 owns, as it is for a declared
+attribute.
+
 One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
 name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.
 An arithmetic assignment (`(( P = 1 ))`, `let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))`

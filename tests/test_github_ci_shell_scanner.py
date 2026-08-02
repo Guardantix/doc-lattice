@@ -9471,6 +9471,28 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
+    # A shell parameter bash gives its own value to is the case-converting attribute above with
+    # the attribute already set and no declaration in the run body to read it from, so an exact
+    # table reading the assignment's own text named a file bash never opens. A counter, an
+    # integer attribute bash sets itself, and an array bash maintains are the three families.
+    (
+        "marker-free-counter-parameter",
+        "printf 'echo safe\\n' > task.sh; SECONDS=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$SECONDS\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-line-number-parameter",
+        "printf 'echo safe\\n' > task.sh; LINENO=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$LINENO\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-array-parameter",
+        "printf 'echo safe\\n' > task.sh; GROUPS=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$GROUPS\"; bash task.sh",
+        {},
+    ),
 ]
 
 
@@ -9991,6 +10013,21 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "attribute-a-subshell-inherits-word",
         "declare -u P; ( P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\" )"
         "; bash TASK.SH",
+        {},
+    ),
+    # The certify half of the same mismatch for a shell parameter bash gives its own value to.
+    # "SECONDS=task.sh" stores 0 and "LINENO=task.sh" stores the line number, so bash writes the
+    # marker into a numeric file and runs it while the operand keeps the dynamic target the
+    # withdrawal leaves it. This is "integer-attribute-word" reached without a declaration to
+    # read, and what bash really stores is the residue issue #205 tracks.
+    (
+        "counter-parameter-word",
+        "SECONDS=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$SECONDS\"; bash 0",
+        {},
+    ),
+    (
+        "line-number-parameter-word",
+        "LINENO=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$LINENO\"; bash 1",
         {},
     ),
 ]
