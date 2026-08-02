@@ -9504,6 +9504,23 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "; source vars.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # The same residue in a third construct: "getopts" writes its name operand in the current
+    # shell, and no evidence records that write, so the name keeps the value it held before. Both
+    # spellings are pinned because the write reaches the caller from a function body and from the
+    # top level alike, which is why withdrawing the name where a body rebinds it would not even
+    # reach the second row.
+    (
+        "getopts-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; f(){ OPTIND=1; getopts x P; }; f -x"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash x",
+        {},
+    ),
+    (
+        "top-level-getopts-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; OPTIND=1; getopts x P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash '?'",
+        {},
+    ),
 ]
 
 
@@ -9592,27 +9609,42 @@ def test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs(scr
         "P=task.sh; eval 'Q=1'; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         "printf 'Q=1\\n' > vars.sh; P=task.sh; source vars.sh"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; f(){ OPTIND=1; getopts x P; }; f -x"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; OPTIND=1; getopts x P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=task.sh; f(){ OPTIND=1; getopts x Q; }; f -x"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "P=task.sh; f(){ OPTIND=1; getopts x P; }"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
     ],
     ids=(
         "eval-payload-rebinding",
         "sourced-rebinding",
         "eval-that-rebinds-another-name",
         "source-that-rebinds-another-name",
+        "getopts-rebinding",
+        "top-level-getopts-rebinding",
+        "getopts-that-rebinds-another-name",
+        "uncalled-getopts-body",
     ),
 )
 def test_rebinding_this_table_does_not_record_keeps_the_prior_value(script):
     """The residue AD-18 discloses for a rebinding no evidence carries, pinned in both directions.
 
-    An ``eval`` payload assignment and a ``source`` of another file both rebind in the current
-    shell, and neither is recorded in the value table this projection reads. The name therefore
-    keeps the value it held before, exactly as an arithmetic assignment leaves it, so the first two
-    rows resolve the operand to a file bash never opens and refuse a body whose marker only ever
-    reaches the other file.
+    An ``eval`` payload assignment, a ``source`` of another file and a ``getopts`` write of its
+    name operand all rebind in the current shell, and none is recorded in the value table this
+    projection reads. The name therefore keeps the value it held before, exactly as an arithmetic
+    assignment leaves it, so the rows that rebind the operand's own name resolve it to a file bash
+    never opens and refuse a body whose marker only ever reaches the other file.
 
-    That is the over-refusing direction, and the last two rows are why the remedy is not to clear
-    the table at these commands: the same construct that rebinds nothing at all is far more common,
-    and withdrawing there would return a body whose marker bash really does write and run to the
-    certification it had before issue #151. Recording the rebinding is what closes this, tracked as
+    That is the over-refusing direction, and the rows that rebind another name, or no name at all
+    because the body is never called, are why the remedy is not to withdraw at these commands: the
+    same construct that leaves the operand's name alone is far more common, and withdrawing there
+    would return a body whose marker bash really does write and run to the certification it had
+    before issue #151. A ``getopts`` write reaches the current shell from the top level as well as
+    from a function body, so withdrawing it as a function rebinding would pay that price and still
+    leave the second row over-refusing. Recording the rebinding is what closes this, tracked as
     issue #205 rather than folded into the projection.
     """
     result = scan_doc_lattice_invocations(script)

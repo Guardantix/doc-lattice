@@ -3634,8 +3634,9 @@ def _resolve_dynamic_redirection_targets(
     already had, including the rebindings the source-order walk cannot order, which
     ``_scope_rebound_names`` and ``_function_rebound_names`` withdraw before the values reach
     here. A rebinding no evidence records at all is withdrawn nowhere, an arithmetic assignment,
-    an ``eval`` payload assignment and a sourced file among them; AD-18 records that residue in
-    both of its directions, and issue #205 tracks recording them.
+    an ``eval`` payload assignment, a sourced file and a ``getopts`` write of its name operand
+    among them; AD-18 records that residue in both of its directions, and issue #205 tracks
+    recording them.
 
     Resolving an operand can name a descriptor rather than a file, because a variable holding
     ``/dev/stdout``, a ``/dev/fd`` alias, or a digit under ``>&`` is exactly what its literal
@@ -3775,6 +3776,16 @@ def _function_rebound_names(
     nothing, while projecting the value ``P`` still held named a file the run never writes. An
     unset whose target this scan cannot read, and a builtin write to a name it cannot read,
     withdraw the whole table instead, since either may be the operand's own name.
+
+    A caller-visible write no evidence records is not collected here, because there is no record to
+    collect it from: ``getopts`` writes its name operand in the caller's variable space and the
+    deterministic writer evidence recognizes ``printf -v`` and ``read`` rather than it, so
+    ``f(){ getopts x P; }`` leaves the caller's value exact and an operand spelling it resolves to
+    the file that value names. Reading the name out of the ``getopts`` argv and withdrawing it here
+    would take the caller's exact value away for the whole run body whether or not any call rebinds
+    it, which is the trade the declaration exclusion above rejects, and it would leave the
+    top-level spelling, which is no function rebinding at all, exactly where it is. AD-18 discloses
+    the class with the other rebindings no evidence carries, and issue #205 tracks recording them.
 
     A redirection operand is therefore never projected against a name any body rebinds, for the
     whole run body rather than from the call onward. That is coarser than a withdrawal at the

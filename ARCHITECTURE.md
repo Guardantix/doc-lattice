@@ -942,20 +942,26 @@ name keeps the value it held before and an operand spelling it resolves to a fil
 An arithmetic assignment (`(( P = 1 ))`, `let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))`
 expansion) is one. An `eval` payload assignment is another, since the payload route lowers its
 assignments for its own replay and does not apply them to this table, and so is a `source` or `.`
-of another file, whose content this scan does not read. All three are pre-existing holes in this
-value table, which the eval replay reads as well; the projection makes them reachable as
-over-refusals, `P=other.sh; (( P = 1 )); printf ... > "$P"; bash other.sh` and its `eval 'P=1'` and
-`source vars.sh` spellings being rejected for a marker flow they do not have, and reachable in the
-certify direction too, where the write lands on the resource the stale value names while the file
-the marker really reaches goes unmodeled.
+of another file, whose content this scan does not read. A `getopts` write of its name operand is
+the fourth: the deterministic writer evidence covers `printf -v` and `read` and does not recognize
+`getopts`, so `f(){ OPTIND=1; getopts x P; }; f -x` leaves this table holding the value `P` had
+before the call while Bash leaves it holding the option character. All four are pre-existing holes
+in this value table, which the eval replay reads as well; the projection makes them reachable as
+over-refusals, `P=other.sh; (( P = 1 )); printf ... > "$P"; bash other.sh` and its `eval 'P=1'`,
+`source vars.sh` and `getopts x P` spellings being rejected for a marker flow they do not have, and
+reachable in the certify direction too, where the write lands on the resource the stale value names
+while the file the marker really reaches goes unmodeled.
 
-The remedy is to record the rebinding, not to clear the table where one might have happened.
-Clearing returns every body carrying one of these constructs to the certification it had before
-this resolution, including the far more common body whose `eval` or `source` rebinds nothing the
-operand names, and that direction gives back a marker flow Bash really runs for an over-refusal it
-does not. Recording an arithmetic rebinding and applying an exact `eval` payload's assignments are
-each tracked as issue #205 rather than folded in here; a sourced file's content stays outside what
-this scan reads.
+The remedy is to record the rebinding, not to withdraw the name where one might have happened.
+Withdrawing returns every body carrying one of these constructs to the certification it had before
+this resolution, including the far more common body whose `eval`, `source` or `getopts` rebinds
+nothing the operand names, and that direction gives back a marker flow Bash really runs for an
+over-refusal it does not. A `getopts` write shows the second half of that trade as well: it reaches
+the current shell from the top level exactly as it does from a function body, so withdrawing it
+with the names a body rebinds would pay the price above and still leave the top-level spelling
+over-refusing. Recording an arithmetic rebinding, applying an exact `eval` payload's assignments,
+and recording a `getopts` write are each tracked as issue #205 rather than folded in here; a
+sourced file's content stays outside what this scan reads.
 
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
