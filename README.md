@@ -674,7 +674,8 @@ outcomes.
 This contract is step-local and marker-anchored, not a general proof that dynamic shell execution
 is safe. The shell analysis is a best-effort lint that catches accidental or naive doc-lattice
 invocations; it is not a security boundary, an author who can edit workflows can bypass it, and
-human review of workflow changes remains the enforced control. Audit does not aggregate across
+human review of workflow changes, which each repository must enforce through its own branch
+governance, remains the load-bearing control. Audit does not aggregate across
 steps, jobs, `uses:` actions, or reusable workflows.
 [AD-18](ARCHITECTURE.md) owns the modeled-flow boundary and records which shell constructs the
 analysis interprets, which it deliberately does not, and where the absence of evidence is a

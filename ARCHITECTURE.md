@@ -2214,8 +2214,9 @@ the create-only managed artifacts, and the environment protection scoping the Li
 **Decision:** The CI shell scanner is a best-effort lint that catches accidental or naive
 doc-lattice invocations in workflows that have not yet been reviewed. It is not a security
 boundary, and soundness against a deliberate adversary is a non-goal. The enforced boundary
-remains human review of workflow changes, together with the managed-artifact and
-environment-protection setup that README owns.
+remains human review of workflow changes, enforced by the adopting repository's own branch
+governance per AD-16, together with the managed-artifact and environment-protection setup that
+README owns.
 
 Known certify-anyway and over-refusal corner cases inside the disclosed model are accepted
 behavior within this scope, not defects. New scanner work is limited to three classes: a false
