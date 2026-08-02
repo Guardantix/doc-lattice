@@ -649,6 +649,64 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # What bash does with a write it refuses is measured rather than assumed. Only a plain
+    # assignment to a readonly name exits a non-interactive shell; every write a builtin performs
+    # reports the error and keeps running, leaving the name holding exactly the value it had.
+    # Withdrawing the name there discarded a value the run provably keeps and returned the operand
+    # to the dynamic target issue #151 exists to remove.
+    (
+        "rejected-readonly-builtin-write-keeps-the-value",
+        "readonly P=task.sh; export P=other.sh || :"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "rejected-readonly-read-write-keeps-the-value",
+        "readonly P=task.sh; read P <<< other.sh || :"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A declaration builtin refuses its whole command for one option it does not take, applying no
+    # attribute and assigning nothing, so the letter alone does not spell one. "export" takes none
+    # of the value transforming letters and "readonly" takes no "-r": reading either as an
+    # attribute withdrew a name over a command bash rejects outright.
+    (
+        "export-u-is-an-invalid-option-and-attributes-nothing",
+        "P=task.sh; export -u P || :"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-r-is-an-invalid-option-and-attributes-nothing",
+        "readonly -r P || :; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # An attribute a called body binds for its caller takes effect where bash runs the call, not
+    # where the body is written. Reading it at the declaration bound the name before the call had
+    # happened, and one word inside one body disabled this resolution for every operand below it
+    # in the text, whichever side of the sink the call itself falls on.
+    (
+        "readonly-in-a-called-body-binds-at-the-call-not-the-definition",
+        "f(){ readonly P; }; P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; bash task.sh; f",
+        {},
+    ),
+    (
+        "readonly-in-a-called-body-leaves-an-earlier-assignment-applied",
+        "f(){ readonly P; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The same ordering read from the value transforming half, and the scope that decides it: a
+    # body's "-l" without "-g" is restored on return, so the caller's later assignment is stored
+    # exactly as it is spelled and its operand still names the file the marker reaches.
+    (
+        "lowercase-attribute-in-a-body-leaves-the-caller-untransformed",
+        "f(){ declare -l P; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -10111,12 +10169,13 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
-    # A declaration attribute decides what bash stores rather than what the assignment spells, and
-    # this evidence carries the assignment's own text, so the name is withdrawn from the
-    # projection and the operand keeps the dynamic target every withdrawn operand has. Recording
-    # the assignment's text instead named a resource the run never opens, which is the refusing
-    # half these rows' guards in PHASE_TWO_MANDATORY_CERTIFICATIONS pin. Tracking what bash really
-    # stores is the residue, and it sits with the rebindings issue #205 tracks.
+    # Issue #206: a declaration attribute decides what bash stores rather than what the assignment
+    # spells, and this evidence carries the assignment's own text, so the name is withdrawn from
+    # the projection and the operand keeps the dynamic target every withdrawn operand has.
+    # Recording the assignment's text instead named a resource the run never opens, which is the
+    # refusing half these rows' guards in PHASE_TWO_MANDATORY_CERTIFICATIONS pin. Tracking what
+    # bash really stores is the residue: #206 owns the three conversions whose result is a pure
+    # function of the text, and an "-i" needs the arithmetic evaluator issue #205 tracks.
     (
         "uppercase-attribute-word",
         "declare -u P; P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",

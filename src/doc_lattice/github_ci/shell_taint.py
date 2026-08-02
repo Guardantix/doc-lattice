@@ -3903,6 +3903,79 @@ def _called_function_contexts(
     return frozenset(reached)
 
 
+def _called_declaration_attributes(
+    evidence: _ShellTaintEvidence,
+    call_targets: Mapping[int, frozenset[int]],
+) -> dict[int, tuple[tuple[str, ...], ...]]:
+    """Return the declaration attributes each call leaves set for its caller, by command id.
+
+    An attribute a called body binds in the caller's variable space takes effect where Bash runs
+    the call, not where the body is written. Reading it at the declaration bound the name over a
+    call Bash had not made yet, and one word inside one body was enough to disable the redirection
+    resolution for every operand below it in the text:
+    ``f(){ readonly P; }; P=task.sh; printf ... > "$P"; bash task.sh; f`` certified a body whose
+    marker Bash writes into ``task.sh`` and runs. ``_caller_declaration_attribute_names`` owns
+    which attributes survive the return; this owns where they land.
+
+    The collection is closed over the call graph before any call site reads it, exactly as
+    ``_function_call_rebindings`` closes the names a body rebinds, so a call reaches the attributes
+    of every body its own body can call in turn. The closure is iterated rather than recursed,
+    because a body may call itself and this module lowers every walk it owns.
+
+    A declaration a branch provably never takes sets nothing, which is the same reachability
+    ``_declaration_attributes_apply`` reads. The call edges themselves are left un-gated, since
+    ``_function_call_targets`` already over-approximates them on every axis it can.
+
+    Args:
+        evidence: The scan evidence whose commands carry their function context.
+        call_targets: The contexts each calling command reaches directly, by command id.
+
+    Returns:
+        The names each call leaves transformed and made readonly for its caller, by command id.
+    """
+    context_transformed: dict[int, set[str]] = {}
+    context_readonly: dict[int, set[str]] = {}
+    context_calls: dict[int, set[int]] = {}
+    for command in evidence.commands:
+        context = command.function_context_id
+        if context is None:
+            continue
+        called = call_targets.get(command.command_id, ())
+        context_calls.setdefault(context, set()).update(called)
+        if command.execution_status is False:
+            continue
+        transformed, readonly = _caller_declaration_attribute_names(command)
+        context_transformed.setdefault(context, set()).update(transformed)
+        context_readonly.setdefault(context, set()).update(readonly)
+    changed = True
+    while changed:
+        changed = False
+        for context, callees in context_calls.items():
+            for table in (context_transformed, context_readonly):
+                carried = table.setdefault(context, set())
+                for callee in callees:
+                    addition = table.get(callee)
+                    if addition is not None and not addition <= carried:
+                        carried |= addition
+                        changed = True
+    attributes: dict[int, tuple[tuple[str, ...], ...]] = {}
+    for command in evidence.commands:
+        called = call_targets.get(command.command_id, ())
+        if not called:
+            continue
+        transformed_names: set[str] = set()
+        readonly_names: set[str] = set()
+        for context in called:
+            transformed_names.update(context_transformed.get(context, ()))
+            readonly_names.update(context_readonly.get(context, ()))
+        if transformed_names or readonly_names:
+            attributes[command.command_id] = (
+                tuple(sorted(transformed_names)),
+                tuple(sorted(readonly_names)),
+            )
+    return attributes
+
+
 def _function_call_rebindings(
     evidence: _ShellTaintEvidence,
     command_scope_paths: Mapping[int, tuple[int, ...]],
@@ -4200,6 +4273,7 @@ class _NameProjectionInputs:
     scope_bound_names: dict[int, tuple[str, ...]]
     command_rebindings: dict[int, frozenset[str]]
     declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
+    called_declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
     withdraw_every_name: bool
 
 
@@ -4256,6 +4330,9 @@ def _name_projection_inputs(
         for command in evidence.commands
         if _declaration_attributes_apply(command, called_contexts)
     )
+    # An attribute a called body leaves set for its caller lands at the call instead, so the
+    # declaration a body is walked at governs that body's own table alone.
+    called_declaration_attributes = _called_declaration_attributes(evidence, call_targets)
     attribute_rebindings = {
         command_id: frozenset(transformed)
         for command_id, (transformed, _readonly) in declaration_attributes.items()
@@ -4274,6 +4351,7 @@ def _name_projection_inputs(
         scope_bound_names=_scope_rebound_names(evidence, command_scope_paths, command_rebindings),
         command_rebindings=command_rebindings,
         declaration_attributes=declaration_attributes,
+        called_declaration_attributes=called_declaration_attributes,
         withdraw_every_name=(
             function_unreadable_rebinding
             or nameref_unreadable_rebinding
@@ -4380,6 +4458,25 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     environment_parents = inputs.environment_parents
     command_rebindings = inputs.command_rebindings
     declaration_attributes = inputs.declaration_attributes
+    called_declaration_attributes = inputs.called_declaration_attributes
+
+    def apply_called_attributes(command_id: int, tables: _NameProjectionTables) -> None:
+        """Set the attributes a body this command calls leaves bound in its caller.
+
+        Both are applied after the command rather than before it, because Bash expands a
+        redirection word before it runs the command, so a call's own operand reads the table the
+        call was reached with. Neither withdraws the name: applying an attribute leaves the value
+        already stored untouched under Bash 5.2, so the caller's exact value survives the call and
+        it is the writes below that ``note_write`` measures against the attribute.
+
+        Args:
+            command_id: The command whose calls may leave an attribute set.
+            tables: The attribute sets of the table this command runs against.
+        """
+        transformed, readonly = called_declaration_attributes.get(command_id, ((), ()))
+        tables.transformed.update(transformed)
+        tables.readonly.update(readonly)
+
     scope_environments: dict[int, int] = {}
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
@@ -4389,12 +4486,18 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     # environment, inherited exactly as the value tables are, because a declaration a subshell
     # makes is gone when the subshell exits: "( readonly P ); P=task.sh" leaves the parent's "P"
     # writable, and withdrawing it there returned the operand below to the certification issue
-    # #151 exists to remove. A function body is not an execution environment, so a "readonly" a
-    # called body sets still reaches its caller, which is what Bash does with one. Neither set is
-    # kept per function context, which over-approximates a "local -u" to every table its
-    # environment reaches in the direction that leaves an operand dynamic.
-    transformed_by_environment: dict[int, set[str]] = {}
-    readonly_by_environment: dict[int, set[str]] = {}
+    # #151 exists to remove.
+    #
+    # Each is kept per function context as well, for the same reason the value tables are: a body
+    # is walked where it is written, so an attribute recorded against the environment alone bound
+    # the name before Bash had run the call, and "f(){ readonly P; }; P=task.sh; printf ... >
+    # "$P"; bash task.sh; f" certified a body whose marker Bash writes into "task.sh" and runs. A
+    # function body is still not an execution environment, so an attribute a called body binds in
+    # the caller's variable space does reach the caller, which is what Bash does with one:
+    # "_called_declaration_attributes" carries exactly those to the call sites, and the walk
+    # applies them after the call rather than at the declaration.
+    transformed_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    readonly_by_environment: dict[tuple[int | None, int], set[str]] = {}
     scope_bound_names = inputs.scope_bound_names
     withdraw_every_name = inputs.withdraw_every_name
     entered_scopes: list[int] = []
@@ -4445,22 +4548,24 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         withdrawn_by_environment[key] = inherited
         return inherited
 
-    def transformed_names_for(environment: int) -> set[str]:
-        cached = transformed_by_environment.get(environment)
+    def transformed_names_for(context: int | None, environment: int) -> set[str]:
+        key = (context, environment)
+        cached = transformed_by_environment.get(key)
         if cached is not None:
             return cached
         parent = environment_parents.get(environment)
-        inherited = set(transformed_names_for(parent)) if parent is not None else set()
-        transformed_by_environment[environment] = inherited
+        inherited = set(transformed_names_for(context, parent)) if parent is not None else set()
+        transformed_by_environment[key] = inherited
         return inherited
 
-    def readonly_names_for(environment: int) -> set[str]:
-        cached = readonly_by_environment.get(environment)
+    def readonly_names_for(context: int | None, environment: int) -> set[str]:
+        key = (context, environment)
+        cached = readonly_by_environment.get(key)
         if cached is not None:
             return cached
         parent = environment_parents.get(environment)
-        inherited = set(readonly_names_for(parent)) if parent is not None else set()
-        readonly_by_environment[environment] = inherited
+        inherited = set(readonly_names_for(context, parent)) if parent is not None else set()
+        readonly_by_environment[key] = inherited
         return inherited
 
     def environments_visible_to(environment: int) -> frozenset[int]:
@@ -4592,10 +4697,20 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         class, and the value applied below is left where every other reader of this table already
         had it, since the withdrawal is the projection's alone.
 
-        A ``readonly`` name is the same mismatch from the other side. Bash rejects the write and a
-        non-interactive shell exits, so the name keeps the value it already had and nothing after
-        the write runs at all. The assignment is therefore not applied, and the name is withdrawn
-        rather than left naming a file the run never opens.
+        A ``readonly`` name is the same mismatch from the other side, and what Bash does with the
+        rejected write is measured under 5.2 rather than assumed. Only a plain assignment exits a
+        non-interactive shell. Every write a builtin performs reports the error and keeps running:
+        ``export``, ``declare``, ``readonly``, ``typeset``, ``read``, ``printf -v``, a prefix
+        assignment on a command that runs an argv, an arithmetic evaluation, an ``unset`` and a
+        ``for`` loop's own variable each leave the name holding exactly the value it already had.
+        The write is therefore not applied, and the name is *not* withdrawn: the table already
+        holds the value Bash kept, and discarding it returned the operand to the dynamic target
+        issue #151 exists to remove. ``readonly P=task.sh; export P=other.sh || :; printf ... >
+        "$P"; bash task.sh`` certified a body whose marker Bash writes into ``task.sh`` and runs.
+
+        Keeping the value is the sound reading of the exiting spelling too. Nothing after a plain
+        assignment runs, so an operand below it names a file the run never reaches, and resolving
+        it refuses a body Bash never runs the marker in rather than certifying one it does.
 
         Args:
             name: The variable this command writes.
@@ -4605,7 +4720,6 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             Whether the write is one Bash refuses, so the caller must not apply it.
         """
         if name in tables.readonly:
-            tables.withdrawn.add(name)
             return True
         if name in tables.transformed:
             tables.withdrawn.add(name)
@@ -4708,8 +4822,8 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         withdrawn_names = withdrawn_names_for(context, environment)
         tables = _NameProjectionTables(
             withdrawn=withdrawn_names,
-            transformed=transformed_names_for(environment),
-            readonly=readonly_names_for(environment),
+            transformed=transformed_names_for(context, environment),
+            readonly=readonly_names_for(context, environment),
         )
         # Withdraw the names an entered scope rebinds from the projection below. An operand
         # projected against a value the loop has replaced names a file Bash never opens, which the
@@ -4794,6 +4908,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             record_effects(command, redirected, exact_values, unknown_values, tables)
             withdrawn_names.update(command_rebindings.get(command.command_id, ()))
             tables.readonly.update(declaration_attributes[command.command_id][1])
+            apply_called_attributes(command.command_id, tables)
             continue
         stdin = _strip_one_trailing_newline(
             _input_expression(
@@ -4875,6 +4990,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         record_effects(command, routed, exact_values, unknown_values, tables)
         withdrawn_names.update(command_rebindings.get(command.command_id, ()))
         tables.readonly.update(declaration_attributes[command.command_id][1])
+        apply_called_attributes(command.command_id, tables)
     return replace(evidence, commands=tuple(commands))
 
 
@@ -11390,6 +11506,18 @@ def _static_variable_name(value: str) -> bool:
 
 _DECLARATION_BUILTIN_NAMES = ("declare", "typeset", "local", "export", "readonly")
 _VALUE_TRANSFORMING_DECLARATION_FLAGS = frozenset("ulci")
+# The option letters each declaration builtin accepts, measured under Bash 5.2 by offering every
+# letter to each builtin and reading back which ones it refuses. Bash refuses the whole command for
+# one letter outside its builtin's set, digits included, so a declaration spelling any of them
+# applies no attribute at all. "export" and "readonly" accept none of the value-transforming
+# letters and no "-r": "export -u P" and "readonly -r P" are both invalid options.
+_VALID_DECLARATION_FLAGS = {
+    "declare": frozenset("acfgilnprtuxAFGI"),
+    "typeset": frozenset("acfgilnprtuxAFGI"),
+    "local": frozenset("acfgilnprtuxAFGI"),
+    "export": frozenset("afnpA"),
+    "readonly": frozenset("afnpA"),
+}
 # "-f" and "-F" select shell functions, so a declaration carrying either names no variable at all.
 _FUNCTION_SELECTING_DECLARATION_FLAGS = frozenset("fF")
 # The builtins whose "-r" binds in the current scope rather than globally. "readonly" itself marks
@@ -11411,11 +11539,16 @@ def _declaration_attributes_apply(
     each certified a body whose marker Bash writes through ``> "$P"`` and runs.
 
     Two shapes are decided here and the third, a declaration a subshell makes, is decided by the
-    per-environment attribute tables that read this. A branch ``execution_status`` proves untaken
-    runs nothing; a function body no call reaches runs nothing either, which is the same
-    reachability ``_function_call_rebindings`` already withdraws a body's assignments by. A
-    command that only *may* run still counts, since the attribute may be set by the time an
-    operand below expands, and that is the direction this withdrawal is built on.
+    attribute tables that read this. A branch ``execution_status`` proves untaken runs nothing; a
+    function body no call reaches runs nothing either, which is the same reachability
+    ``_function_call_rebindings`` already withdraws a body's assignments by. A command that only
+    *may* run still counts, since the attribute may be set by the time an operand below expands,
+    and that is the direction this withdrawal is built on.
+
+    Reachability is all this decides. *Where* a reachable body's attribute lands is a separate
+    question those tables answer by keeping a set per function context, so what a body declares
+    governs the body's own table here and reaches its caller only through the call sites
+    ``_called_declaration_attributes`` carries it to.
 
     Args:
         command: The command whose argv may spell a declaration builtin.
@@ -11507,20 +11640,18 @@ def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, 
     resolves to a resource the run never opens, in both directions at once. Case conversion
     (``-u``, ``-l``, ``-c``) and arithmetic evaluation (``-i``) are that class.
 
-    ``readonly``, and ``-r`` on any of the declaration builtins, is the same mismatch reached from
-    the other side: the declaration's own operand is stored exactly, and it is every *later*
-    assignment that Bash refuses, leaving the name holding what it already had and exiting a
-    non-interactive shell. The two are reported separately because the first withdraws the name
-    from its declaration onward and the second only from a write Bash rejects, which is what keeps
+    ``readonly``, and ``-r`` on any of the scoped declaration builtins, is the same mismatch
+    reached from the other side: the declaration's own operand is stored exactly, and it is every
+    *later* assignment that Bash refuses, leaving the name holding what it already had. The two are
+    reported separately because the first withdraws the name from its declaration onward and the
+    second only decides that a write is one Bash rejects, which is what keeps
     ``readonly P=task.sh; printf ... > "$P"`` naming the file the marker reaches.
 
-    Which scope a ``-r`` binds in is measured under Bash 5.2 rather than assumed, because reading
-    it too widely stops a *real* later assignment from being applied and leaves the table holding a
-    value the run replaced: ``f(){ local -r Q=zz; }; f; Q=task.sh; printf ... > "$Q"`` certified a
-    body whose marker Bash writes into ``task.sh`` and runs. ``local -r``, and ``declare -r`` or
-    ``typeset -r`` inside a body without ``-g``, restore the caller's variable on return, so none
-    of them is read as readonly. ``readonly`` itself marks the caller's variable even from a body,
-    and ``export`` has no ``-r`` at all: ``export -r`` is an invalid option Bash refuses outright.
+    What this reports is the attribute in the scope the declaration runs in: the caller's variable
+    space for a top-level command, and the body's own for one inside a function.
+    ``_caller_declaration_attribute_names`` owns the narrower question of what survives the return,
+    and the walk applies that at the call site rather than at this command, since a body Bash has
+    not called yet has set nothing.
 
     ``-f`` and ``-F`` select shell *functions*, so a declaration carrying either attributes no
     variable. Reading ``readonly -f g`` as a readonly variable froze the like-named variable and
@@ -11540,22 +11671,96 @@ def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, 
     words = _declaration_words(command)
     if words is None or words.flags & _FUNCTION_SELECTING_DECLARATION_FLAGS or not words.names:
         return (), ()
-    transforms = bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS)
-    readonly = _declaration_is_readonly(words, command.function_context_id)
-    if not (transforms or readonly):
+    if not _declaration_flags_accepted(words):
         return (), ()
+    transforms = bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS)
+    readonly = _declaration_marks_readonly(words)
     return (words.names if transforms else (), words.names if readonly else ())
 
 
-def _declaration_is_readonly(words: _DeclarationWords, function_context_id: int | None) -> bool:
-    """Return whether this declaration makes its names readonly for the caller's variable space."""
+def _caller_declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
+    """Return the names a declaration inside a function body leaves attributed for its caller.
+
+    A function body is not an execution environment, so an attribute it sets can outlive the call,
+    but only where Bash binds it in the caller's variable space rather than in the local one the
+    return discards. Which of them do is measured under Bash 5.2:
+    ``f(){ D P; }; P=task.sh; f; P=task2.sh`` leaves ``task2.sh`` untransformed for every ``D``
+    without ``-g`` and transformed for every one with it, ``declare``, ``typeset`` and ``local``
+    alike, and ``readonly`` marks the caller's variable from a body with no ``-g`` at all.
+
+    Reading this at the declaration instead of at the call is what
+    ``_declaration_attributes_apply`` could not fix by reachability alone. A body is walked where
+    it is written, so an attribute read there bound the name before Bash had run the call:
+    ``f(){ readonly P; }; P=task.sh; printf ... > "$P"; bash task.sh; f`` certified a body whose
+    marker Bash writes into ``task.sh`` and runs, and so did the same body with the call moved
+    ahead of the sink, since the withdrawal followed the text rather than the call.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        The names the caller sees transformed, and the names the caller sees made readonly.
+    """
+    if command.function_context_id is None:
+        return (), ()
+    words = _declaration_words(command)
+    if words is None or not _declaration_survives_return(words):
+        return (), ()
+    return _declaration_attribute_names(command)
+
+
+def _declaration_flags_accepted(words: _DeclarationWords) -> bool:
+    """Return whether the selected builtin accepts every option letter this declaration spells.
+
+    A declaration builtin refuses its whole command for one option it does not take, applying no
+    attribute and assigning nothing, so reading an attribute out of the letter regardless withdrew
+    a name over a command that sets nothing. The generic letter test read ``export -u P`` as a case
+    conversion, and ``P=task.sh; export -u P || :; printf ... > "$P"; bash task.sh`` certified a
+    body whose marker Bash writes into ``task.sh`` and runs, while Bash 5.2 reports ``-u: invalid
+    option``, continues through ``|| :`` and leaves ``P`` naming the file the marker reaches.
+
+    Only the setting spelling is read, exactly as ``_declaration_words`` collects it. A ``+u``
+    Bash also refuses spells no attribute here either, so nothing is withdrawn on its account and
+    the name keeps the exact value Bash left it holding.
+
+    Args:
+        words: The option letters and selected builtin of one declaration.
+
+    Returns:
+        Whether Bash runs this declaration rather than refusing it for an invalid option.
+    """
+    return not words.flags - _VALID_DECLARATION_FLAGS[words.builtin]
+
+
+def _declaration_marks_readonly(words: _DeclarationWords) -> bool:
+    """Return whether this declaration makes its names readonly in the scope it runs in.
+
+    Args:
+        words: The option letters and selected builtin of one declaration.
+
+    Returns:
+        Whether a later write to one of its names is one Bash refuses in that scope.
+    """
     if words.builtin == "readonly":
         return True
-    if "r" not in words.flags or words.builtin not in _SCOPED_DECLARATION_BUILTIN_NAMES:
-        return False
-    if function_context_id is None:
-        return True
-    return words.builtin != "local" and "g" in words.flags
+    return "r" in words.flags and words.builtin in _SCOPED_DECLARATION_BUILTIN_NAMES
+
+
+def _declaration_survives_return(words: _DeclarationWords) -> bool:
+    """Return whether an attribute a function body declares still binds once the call returns.
+
+    ``-g`` is what binds a scoped builtin's attribute in the caller's variable space, and it is
+    read for ``local`` as well as ``declare`` and ``typeset``, because ``local -gr`` and
+    ``local -gu`` both reach the caller under Bash 5.2 while their spellings without ``-g`` do not.
+    ``readonly`` marks the caller's variable from a body with no ``-g`` at all.
+
+    Args:
+        words: The option letters and selected builtin of one declaration.
+
+    Returns:
+        Whether the attribute outlives the function body that declares it.
+    """
+    return words.builtin == "readonly" or "g" in words.flags
 
 
 def _declaration_names_unreadable(command: _CommandEvidence) -> bool:
@@ -11582,8 +11787,10 @@ def _declaration_names_unreadable(command: _CommandEvidence) -> bool:
         return False
     if words.flags & _FUNCTION_SELECTING_DECLARATION_FLAGS:
         return False
-    return bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS) or _declaration_is_readonly(
-        words, command.function_context_id
+    if not _declaration_flags_accepted(words):
+        return False
+    return bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS) or _declaration_marks_readonly(
+        words
     )
 
 
