@@ -1236,7 +1236,8 @@ each widening is known rather than assumed.
 loop terminates. The engine's disclosed boundary can grow deliberately instead of by whichever
 channel a reviewer happened to probe. The cost is explicit: pinned certifying bodies are known
 evasions that remain open, so the boundary AD-18 discloses is load bearing and this analysis stays
-defense in depth behind human review of workflow changes, never the sole control.
+defense in depth behind human review of workflow changes, never the sole control. AD-23 later
+narrows the boundary-extension default from file-and-pin to accept-and-disclose.
 
 ### AD-20: A fail-closed guard is identified by its origin, and classified by executable evidence
 
@@ -2191,3 +2192,57 @@ the move, and the tool has to build one corpus for both revisions to compare the
 left is a change that has to be spelled out in the diff of the pull request it protects, next to a
 pinned expectation on the corpus scale and on identity-carrying labels, which is where review sees
 it.
+
+### AD-23: The CI shell scanner is an accident lint with a frozen scope, not a security boundary
+
+**Date:** 2026-08-02
+**Status:** Accepted
+**Context:** AD-17 through AD-22 built the scanner's marker analysis, its finding-triage rule, its
+guard inventory, and its replay gates, and each one records disclosed limits: AD-18 names inputs
+that certify while Bash runs the marker, AD-19 pins verified evasions instead of chasing them, and
+AD-22 calls its corpus a sample rather than a proof. Practice still treated every disclosed limit
+as a backlog. Each fuzz signature, review round, and modeled-flow asymmetry became an open issue,
+most fixes surfaced further corner cases on the next fuzz run, and roughly forty scanner issues
+stood open with no terminating condition, because certifying non-execution over Bash plus
+everything on `PATH` is undecidable and the backlog regenerates from whatever depth the model
+reaches. The threat model never asked for that depth. An author who can add or edit a workflow
+already executes arbitrary code in CI, and steps around a shell-layer marker analysis trivially:
+through another interpreter, or by editing the audited state directly. No reachable amount of
+shell modeling turns this scanner into a boundary against that author. The controls that hold that
+line are the ones AD-16 and README's managed setup already own: human review of workflow changes,
+the create-only managed artifacts, and the environment protection scoping the Linear credential.
+**Decision:** The CI shell scanner is a best-effort lint that catches accidental or naive
+doc-lattice invocations in workflows that have not yet been reviewed. It is not a security
+boundary, and soundness against a deliberate adversary is a non-goal. The enforced boundary
+remains human review of workflow changes, together with the managed-artifact and
+environment-protection setup that README owns.
+
+Known certify-anyway and over-refusal corner cases inside the disclosed model are accepted
+behavior within this scope, not defects. New scanner work is limited to three classes: a false
+negative a non-adversarial author plausibly writes by accident; an over-refusal that blocks a
+legitimate real-world workflow; and a crash or regression the frozen corpus, the fuzz baseline, or
+the suite catches. Modeling deeper shell semantics for adversarial completeness is explicitly out
+of scope, whatever severity a report assigns.
+
+This narrows AD-19's default disposition for a boundary-extension finding from file-and-pin to
+accept-and-disclose: no issue is opened for an evasion outside the three classes above, and
+pinning the certifying body in the suite stays available where a pin is cheap. AD-19's
+model-integrity class is unchanged, since an analysis silently lacking coverage it claims is a
+defect at any scope, and its verification bar stands: an unreproduced report is still not triaged
+at all. AD-20's context calls the fail-closed guards the security contract of the scanner; within
+this scope that phrase reads as the scanner's own integrity contract, the guarantee that the tool
+does what it says at the scale it says, not as a claim that the scanner is a boundary.
+
+The standing gates keep their jobs unchanged, re-read as regression controls over the frozen model
+rather than as steps toward completeness: the guard inventory and its witnesses per AD-20, the
+corpus differential per AD-22, and the fuzz baseline, whose entries now record accepted disclosed
+behavior rather than fixes owed. A new fuzz signature is triaged against the three classes; one
+falling outside them is added to the baseline citing this record instead of being filed.
+**Consequences:** The scanner backlog terminates. Open issues describing adversarial corner cases
+are closed citing this record, and their pinned certifying bodies remain in the suite as
+disclosures rather than obligations. The cost is explicit: known evasions stay open behavior, and
+anyone reading a green audit must weigh it as the lint result it is, which README states next to
+the audit contract. This is a scope freeze, not a teardown: no guard, gate, or modeled flow is
+removed, and the scanner keeps its claim to what the freeze protects, deterministic fail-closed
+linting of the invocations a careless author actually writes, held to its recorded behavior by the
+corpus, the baseline, and the guard inventory.
