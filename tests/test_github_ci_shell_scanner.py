@@ -409,6 +409,33 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # A body nothing calls rebinds nothing, and the withdrawal is what puts an operand back where
+    # issue #151 found it, so collecting from a definition alone let one uninvoked helper return
+    # the whole resolution to the certification it replaced. These two are the same shape the
+    # declaration rows above reject one construct at a time, in the two spellings a declaration
+    # does not cover: a plain assignment and an unset.
+    (
+        "uncalled-function-assignment-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "uncalled-function-unset-leaves-the-caller-word-exact",
+        "f(){ unset P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # Bash applies a prefix assignment for the duration of the command it prefixes and
+        # restores the name after it, so no iteration of this loop carries "other.sh" back to the
+        # operand below. Counting it as a name the body rebinds withdrew a value the loop never
+        # replaces, and the marker write landed on a target the model discards.
+        "loop-prefix-assignment-does-not-retarget-the-word",
+        "P=task.sh; for i in 1 2; do P=other.sh true; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -9145,6 +9172,49 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "A=doc-; B='lattice reconcile'; export A B; timeout 60 bash '$A$B'",
         {},
     ),
+    # Issue #151 over-refusal guards for narrowing the function-body withdrawal to the bodies a
+    # call can reach. A body that IS called still withdraws, so the operand keeps the target it
+    # had, the marker write lands on the file the call names, and the sink below opens a file bash
+    # never wrote. The third row calls through a bounded static ``eval`` input, which is the other
+    # half of the called-name notion the later call-site resolution is built from.
+    (
+        "called-function-assignment-withdraws-the-caller-word",
+        "f(){ P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "called-function-unset-withdraws-the-caller-word",
+        "f(){ unset P; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "eval-called-function-withdraws-the-caller-word",
+        "f(){ P=other.sh; }; P=task.sh; eval f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guards for keeping the scope withdrawal inside the projection. It
+    # used to pop the name from the shared exact table and mark it unknown, which every other
+    # reader of that table saw: an unknown ``IFS`` makes a later ``read`` a builtin write the
+    # model cannot represent, so each of these marker-free bodies failed the whole scan closed
+    # rather than leaving one redirection operand dynamic.
+    (
+        "marker-free-loop-binding-leaves-a-later-read-scannable",
+        "for IFS in , ; do :; done; printf 'task.sh\\n' | { read -r X; bash \"$X\"; }",
+        {},
+    ),
+    (
+        "marker-free-uncalled-function-loop-leaves-a-later-read-scannable",
+        "printf 'a b\\n' > f; g(){ for i in 1 2; do IFS=:; done; }; read -r A B < f; echo \"$A\"",
+        {},
+    ),
+    (
+        "marker-free-loop-prefix-assignment-leaves-a-later-read-scannable",
+        "printf 'a b\\n' > f; while false; do IFS=: true; done; read -r A B < f; echo \"$A\"",
+        {},
+    ),
 ]
 
 
@@ -9454,14 +9524,6 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         {},
     ),
     (
-        # The body-wide half of the same coarseness: the withdrawal has no call site to apply at,
-        # so a body that unsets a name withdraws it whether or not the function is ever called.
-        "uncalled-function-unset-word",
-        "f(){ unset P; }; P=task.sh"
-        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
-        {},
-    ),
-    (
         "local-nameref-alias-word",
         "f(){ local -n r=P; r=other.sh; }; P=task.sh; f"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
@@ -9519,6 +9581,44 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "top-level-getopts-rebound-word",
         "printf 'echo safe\\n' > safe.sh; P=safe.sh; OPTIND=1; getopts x P"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash '?'",
+        {},
+    ),
+    # The same residue in two further constructs. A "${P:=q}" or "${P=q}" in an ordinary command's
+    # word assigns in the current shell and is recorded as that command's assignments, which no
+    # value table applies, so the name keeps whatever it held before; the compound-redirection
+    # spelling of the same expansion IS recorded, as the scope's loop bindings. A trap handler is
+    # a payload this scan does not read at all, and bash runs it between the commands around it.
+    # Neither has an over-refusing spelling of its own here: an unset name leaves the operand
+    # dynamic rather than resolved, which is why only the certify direction appears in this table
+    # for the first, while the second's refusing direction is pinned with the "eval" rows.
+    (
+        "conditional-expansion-rebound-word",
+        'unset P; : "${P:=task.sh}"'
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "trap-rebound-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; trap 'P=task.sh' DEBUG"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The certify-direction half of the value the operand-naming pass cannot carry. That pass
+    # builds no stdin, because building stdin is what needs the pipe inputs it feeds, so a name a
+    # "read" supplies is unknown there and the operand keeps its dynamic target. The here-string
+    # spelling of the same body refuses, since its record comes from a redirection the pass does
+    # read. "test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs" pins the
+    # over-refusing half of the same residue.
+    (
+        "pipe-read-supplied-word",
+        "echo task.sh | { read -r P; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; }"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "process-substitution-read-supplied-word",
+        "read -r P < <(echo task.sh)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
 ]
@@ -9617,6 +9717,10 @@ def test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs(scr
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         "P=task.sh; f(){ OPTIND=1; getopts x P; }"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "trap 'P=other.sh' DEBUG; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "P=task.sh; trap 'Q=1' DEBUG"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
     ],
     ids=(
         "eval-payload-rebinding",
@@ -9627,16 +9731,19 @@ def test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs(scr
         "top-level-getopts-rebinding",
         "getopts-that-rebinds-another-name",
         "uncalled-getopts-body",
+        "trap-handler-rebinding",
+        "trap-that-rebinds-another-name",
     ),
 )
 def test_rebinding_this_table_does_not_record_keeps_the_prior_value(script):
     """The residue AD-18 discloses for a rebinding no evidence carries, pinned in both directions.
 
-    An ``eval`` payload assignment, a ``source`` of another file and a ``getopts`` write of its
-    name operand all rebind in the current shell, and none is recorded in the value table this
-    projection reads. The name therefore keeps the value it held before, exactly as an arithmetic
-    assignment leaves it, so the rows that rebind the operand's own name resolve it to a file bash
-    never opens and refuse a body whose marker only ever reaches the other file.
+    An ``eval`` payload assignment, a ``source`` of another file, a ``getopts`` write of its name
+    operand and a trap handler bash runs between two commands all rebind in the current shell, and
+    none is recorded in the value table this projection reads. The name therefore keeps the value
+    it held before, exactly as an arithmetic assignment leaves it, so the rows that rebind the
+    operand's own name resolve it to a file bash never opens and refuse a body whose marker only
+    ever reaches the other file.
 
     That is the over-refusing direction, and the rows that rebind another name, or no name at all
     because the body is never called, are why the remedy is not to withdraw at these commands: the
