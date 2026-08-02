@@ -587,6 +587,60 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # Which scope a "-r" binds in is the fourth shape, and it is the one that reaches a false
+    # certification through a declaration bash DOES reach. "local -r", and "declare -r" or
+    # "typeset -r" inside a body without "-g", restore the caller's variable on return, so reading
+    # any of them as readonly refused the later top-level assignment and left the table holding a
+    # value the run replaced: one unrelated declaration in a called helper disabled this
+    # resolution for the name for the rest of the run body.
+    (
+        "local-readonly-in-a-body-leaves-the-caller-writable",
+        "f(){ local -r P=zz; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "declared-readonly-in-a-body-leaves-the-caller-writable",
+        "f(){ declare -r P=zz; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "typeset-readonly-in-a-body-leaves-the-caller-writable",
+        "f(){ typeset -r P=zz; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The same wrong reading reaching the exact "read" projection rather than the operand: a
+    # function-scoped readonly IFS suppressed the top-level "IFS=:" that bash accepts, so the
+    # fields were split on the default separator and the composed marker went unmodeled.
+    (
+        "local-readonly-ifs-in-a-body-leaves-the-caller-splitting",
+        'f(){ local -r IFS=,; }; f; IFS=:; read -r A B <<< "doc-:lattice reconcile"'
+        '; printf \'%s%s\\n\' "$A" "$B" > r.sh; bash r.sh',
+        {},
+    ),
+    # "-f" and "-F" select shell functions, so a declaration carrying either attributes no
+    # variable at all. Reading "readonly -f" as a readonly variable froze the like-named one and
+    # returned its operand to the dynamic target that certified before issue #151 closed it.
+    (
+        "readonly-f-freezes-a-function-not-a-variable",
+        "g(){ :; }; readonly -f g; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "declare-rf-freezes-a-function-not-a-variable",
+        "g(){ :; }; declare -rf g; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-f-names-the-like-named-variable-nothing",
+        "P(){ :; }; readonly -f P; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
     # A command bash never runs enters no scope either, so a loop inside an untaken branch binds
     # nothing and the name an operand below spells is not withdrawn from the enclosing table.
     (
@@ -9493,6 +9547,60 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$GROUPS\"; bash task.sh",
         {},
     ),
+    (
+        # "DIRSTACK" is read back from its own elements exactly as "GROUPS" is, so the operand
+        # expands to a directory path and the redirect opens nothing named "task.sh".
+        "marker-free-directory-stack-parameter",
+        "printf 'echo safe\\n' > task.sh; DIRSTACK=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$DIRSTACK\"; bash task.sh",
+        {},
+    ),
+    (
+        # Bash overwrites "_" with the last argument of the command just run, so the assignment's
+        # own text is never what the operand below expands to.
+        "marker-free-last-argument-parameter",
+        "printf 'echo safe\\n' > task.sh; _=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$_\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guards for the withdrawal being transitive. A copy of a withdrawn
+    # name republishes the stale value under a fresh name, so projecting it named a file the run
+    # never opens in exactly the direction the withdrawal exists to prevent. The clean copy below
+    # is the control that keeps the transitive test from withdrawing every copy there is.
+    (
+        "marker-free-copy-of-a-call-rebound-name",
+        "printf 'echo safe\\n' > task.sh; f(){ P=other.sh; }; P=task.sh; f; Q=$P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$Q\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-copy-of-a-loop-bound-name",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do :; done; Q=$P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$Q\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-copy-of-an-attributed-name",
+        "printf 'echo safe\\n' > task.sh; declare -u P; P=task.sh; Q=$P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$Q\"; bash task.sh",
+        {},
+    ),
+    (
+        # A nameref stands for no value of its own here, so releasing the alias's own name at its
+        # declaration projected the operand against the value the referent held at that point.
+        "marker-free-alias-own-name-stays-withdrawn",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; declare -n R=P; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$R\"; bash other.sh",
+        {},
+    ),
+    (
+        # The attribute is attached to a name no word of the command spells, so the readable
+        # operands carry none of it and the table below kept the assignment's own text.
+        "marker-free-attribute-on-an-unreadable-name",
+        "printf 'echo safe\\n' > task.sh; N=P; declare -gu \"$N\"; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 
@@ -9680,6 +9788,31 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "loop-binding-word",
         "for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
         "; bash task.sh",
+        {},
+    ),
+    # Issue #188, the same conditional status reached through the two other constructs that set
+    # it. A "case" arm and a "&&"/"||" operand are conditionally executed exactly as a function
+    # body and a loop body are, so an assignment inside one is unknown from that point and the
+    # operand below keeps the dynamic target every unresolved operand has. They are pinned
+    # separately from the two rows above because the same rule reaches them through a different
+    # construct, so a narrowing of that rule that leaves the rows above passing would turn either
+    # of these into a live regression with the whole suite green.
+    (
+        "case-arm-word",
+        "P=other.sh; case a in a) P=task.sh;; esac"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "and-list-word",
+        "P=other.sh; true && P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "or-list-word",
+        "P=other.sh; false || P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
     # Issue #188, the other side of the same withdrawal. A name a loop binds is withdrawn for the
@@ -9883,10 +10016,16 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
     ),
     # The certify-direction half of the value the operand-naming pass cannot carry. That pass
     # builds no stdin, because building stdin is what needs the pipe inputs it feeds, so a name a
-    # "read" supplies is unknown there and the operand keeps its dynamic target. The here-string
-    # spelling of the same body refuses, since its record comes from a redirection the pass does
-    # read. "test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs" pins the
+    # "read" supplies is unknown there and the operand keeps its dynamic target.
+    # "test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs" pins the
     # over-refusing half of the same residue.
+    #
+    # What separates this family from the here-string and heredoc spellings, which refuse, is
+    # whether the record is inline literal text: those two carry theirs in the redirection itself,
+    # while a pipe, a process substitution and a plain file all draw it from a resource, which
+    # yields a deferred projection rather than an exact value here. The file spelling is pinned
+    # with the other two for that reason, since reading the discriminator as "a redirection the
+    # naming pass does read" puts it on the refusing side, where it does not sit.
     (
         "pipe-read-supplied-word",
         "echo task.sh | { read -r P; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; }"
@@ -9896,6 +10035,12 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
     (
         "process-substitution-read-supplied-word",
         "read -r P < <(echo task.sh)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "file-read-supplied-word",
+        "printf 'task.sh\\n' > n.txt; read -r P < n.txt"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),

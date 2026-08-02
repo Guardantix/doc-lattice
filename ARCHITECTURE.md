@@ -856,9 +856,12 @@ descriptor stays guarded, and a later `>&3` refuses where every other spelling n
 residue runs in both directions rather than one. The refusing direction is pinned with the literal
 control that isolates the withheld value from the `read` and from the descriptor shape. The
 certifying direction is the same unknown name under a write: `echo task.sh | { read -r P; printf ...
-> "$P"; }; bash task.sh` and its process-substitution spelling record the marker on a target the
-model discards, while the here-string spelling of the same body refuses, because its record comes
-from a redirection the naming pass does read. Both sit with the pinned gaps below.
+> "$P"; }; bash task.sh`, its process-substitution spelling, and the plain file spelling
+`read -r P < n.txt` all record the marker on a target the model discards. What separates them from
+the here-string and heredoc spellings, which refuse, is whether the record is inline literal text:
+those two carry theirs in the redirection itself, while a pipe, a process substitution and a file
+each draw it from a resource, which yields a deferred projection rather than an exact value in the
+naming pass. All three sit with the pinned gaps below.
 
 The resolution reaches one simple command's own quoted operand. Four classes stay inside the
 dynamic resource alias boundary above, each pinned as certifying with the real-Bash differential
@@ -895,7 +898,19 @@ rather than in the table, because popping the name there and marking it unknown 
 reader of that table, and one of them fails the whole scan closed: an unknown `IFS` makes a later
 `read` a builtin write the model cannot represent, so `for IFS in , ; do :; done` ahead of any
 `read` reported a marker-free body as unscannable. An effect that names the variable releases it
-again, which is the same point the table itself stops being stale. What a loop binding leaves the
+again, which is the same point the table itself stops being stale.
+
+Two writes release nothing, because the value they leave is the stale one the withdrawal exists to
+keep out of an operand. A write whose own content reads a withdrawn name republished that value
+under a fresh name that carried no withdrawal at all: `f(){ P=other.sh; }; P=task.sh; f; Q=$P;
+printf ... > "$Q"; bash other.sh` recorded the marker on `task.sh` and certified a body Bash runs
+it in, and the same one-hop copy laundered a loop binding, a nameref alias and a declared attribute
+alike. The copy is therefore withdrawn wherever taking the withdrawn names away changes what its
+content resolves to, which is the one-hop test applied at every hop rather than a depth this walk
+has to bound, and an append to an already-withdrawn name extends that same text. A rebinding the
+*writing command itself* performs is the second: `declare -n R=P` records a write to `R`, and
+releasing `R` there projected `> "$R"` against the value `P` held at the declaration, so the
+withdrawal is reapplied after each command's own effects. What a loop binding leaves the
 read and eval projections holding is therefore exactly what it held before this decision, including
 the value a loop really replaces: `for IFS in , ; do :; done; read -r A B < f` splits on the IFS the
 table already had. That is a hole in this value table rather than in the operand resolution, it
@@ -1026,7 +1041,8 @@ were reachable before that: the marker write landed on the lowercase file while 
 uppercase one, and a body whose marker Bash leaves somewhere it never runs was refused. What Bash
 really stores is the residue, and it sits with the rebindings issue #205 tracks.
 
-`readonly`, and `-r` on any declaration builtin, is the same mismatch reached from the other side.
+`readonly`, and `-r` on a declaration builtin that binds globally, is the same mismatch reached from
+the other side.
 The declaration's own operand is stored exactly, and it is every later assignment that Bash refuses,
 leaving the name holding what it already had and exiting a non-interactive shell. Only a write to an
 already-declared readonly name is therefore withdrawn, and it is not applied at all, which keeps
@@ -1036,6 +1052,21 @@ already-declared readonly name is therefore withdrawn, and it is not applied at 
 left holding the declaration's value rather than made unknown: honouring the unset returned
 `readonly P=task.sh; unset P; printf ... > "$P"` to the certification the row above it already
 refuses.
+
+Which scope a `-r` binds in is measured rather than assumed, because reading it too widely stops a
+*real* later assignment from being applied and leaves this table holding a value the run replaced,
+which is the one direction a readonly name reaches a false certification from. Under Bash 5.2
+`local -r`, and `declare -r` or `typeset -r` inside a body without `-g`, restore the caller's
+variable on return, so none of them is read as readonly at all: one unrelated `f(){ local -r Q=zz; }`
+in a called helper disabled this resolution for `Q` for the whole run body, and
+`f(){ local -r IFS=,; }; f; IFS=:; read -r A B <<< ...` left the exact `read` projection splitting
+on the default separator while Bash split on the one the body really set. `readonly` itself marks
+the caller's variable even from a body and is read there, and `export` has no `-r` to read, since
+`export -r` is an invalid option Bash refuses outright. `-f` and `-F` select shell functions rather
+than variables, so `readonly -f g` attributes nothing here; reading it as a readonly variable froze
+the like-named one and reopened the certification this resolution exists to close. Unlike the
+value-transforming attributes, none of this is a direction that merely leaves an operand dynamic,
+which is why the scope is read rather than over-approximated.
 
 A declaration withdraws a name, and a withdrawal returns the operand to the dynamic target that
 certified before this resolution, so a declaration the shell never reaches is not read at all.
@@ -1049,10 +1080,20 @@ each certified a body whose marker Bash writes through `> "$P"` and runs. The sa
 governs the scopes a command enters, so a loop inside an untaken branch binds nothing.
 
 A declaration that only *may* run is still read, which is the direction that leaves an operand
-dynamic, and so is one a called body makes without `-g`, though Bash restores the caller's variable
-on return. The sets are not kept per function context, which over-approximates a `local -u` to
-every table its environment reaches, and a `+u` that removes an attribute is not read at all. All
-of those are the same direction.
+dynamic, and so is a value-transforming attribute a called body sets without `-g`, though Bash
+restores the caller's variable on return. The sets are not kept per function context, which
+over-approximates a `local -u` to every table its environment reaches, and a `+u` that removes an
+attribute is not read at all. All of those are the same direction, which is why the scope a `-r`
+binds in is read where a `-u`'s is not.
+
+An attribute attached to a name this scan cannot read is not that direction. `N=P; declare -gu
+"$N"; P=task.sh; printf ... > "$P"` attaches the attribute to a name no word of the command spells,
+so the readable operands carry none of it and nothing else clears the table: the operand resolved
+to `task.sh` while Bash wrote the marker into `TASK.SH`. Such a declaration withdraws the whole
+body's projection instead, exactly as an unreadable nameref binding or unset target does, since the
+name it attributes may be the operand's own and there is no name for a later assignment to release.
+A declaration whose *option* is the expansion spells no attribute here and stays with every other
+word this scan cannot read.
 
 A shell parameter Bash gives its own value to is that mismatch with the attribute already set and
 no declaration in the run body to read it from, so an assignment to one stores nothing in this

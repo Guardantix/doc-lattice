@@ -22,6 +22,7 @@ __all__ = ["TaintLimits", "analyze_marker_taint"]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
+    from collections.abc import Set as AbstractSet
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
@@ -1189,12 +1190,15 @@ _LOOP_SCOPE_KINDS = frozenset({"for", "select", "until", "while"})
 # attribute Bash sets itself evaluates the operand arithmetically, and refuses a word that is not
 # an arithmetic expression ("OPTIND", and "PPID" and "EUID", which are readonly with it); and an
 # array Bash maintains is read back from its own elements ("GROUPS", "FUNCNAME", "BASH_SOURCE",
-# "BASH_LINENO", "BASH_ARGC", "BASH_ARGV"). "UID" and "BASH_ARGV0" are measured storing an
-# assignment verbatim and are deliberately absent, since withdrawing a name Bash does store is
-# the direction that leaves an operand dynamic. What Bash really stores is the residue issue #205
-# owns, exactly as it does for a declared attribute.
+# "BASH_LINENO", "BASH_ARGC", "BASH_ARGV", "DIRSTACK"). "_" belongs with them and is measured
+# separately: Bash overwrites it with the last argument of the command just run, so
+# "_=task.sh; printf ... > \"$_\"" expands to something the assignment never spelled. "UID" and
+# "BASH_ARGV0" are measured storing an assignment verbatim and are deliberately absent, since
+# withdrawing a name Bash does store is the direction that leaves an operand dynamic. What Bash
+# really stores is the residue issue #205 owns, exactly as it does for a declared attribute.
 _SELF_VALUED_SHELL_PARAMETERS = frozenset(
     {
+        "_",
         "BASHPID",
         "BASH_ARGC",
         "BASH_ARGV",
@@ -1202,6 +1206,7 @@ _SELF_VALUED_SHELL_PARAMETERS = frozenset(
         "BASH_LINENO",
         "BASH_SOURCE",
         "BASH_SUBSHELL",
+        "DIRSTACK",
         "EPOCHREALTIME",
         "EPOCHSECONDS",
         "EUID",
@@ -4180,64 +4185,39 @@ class _NameProjectionTables:
     readonly: set[str]
 
 
-def _resolve_builtin_writer_evidence(  # noqa: PLR0915
+@dataclass(frozen=True, slots=True)
+class _NameProjectionInputs:
+    """Every table the redirection operand projection derives from the evidence alone.
+
+    None of them depends on anything the walk that reads them produces, so both passes over one
+    run body read the same ones. Building them per pass walked every scope and every command of
+    the body a second time per scan and discarded the result.
+    """
+
+    command_scope_paths: dict[int, tuple[int, ...]]
+    command_environments: dict[int, int]
+    environment_parents: dict[int, int | None]
+    scope_bound_names: dict[int, tuple[str, ...]]
+    command_rebindings: dict[int, frozenset[str]]
+    declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
+    withdraw_every_name: bool
+
+
+def _name_projection_inputs(
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
-    *,
-    project_inputs: bool = True,
-) -> _ShellTaintEvidence:
-    """Attach finalized stdin and exact bounded read-field projections.
+) -> _NameProjectionInputs:
+    """Build the evidence-derived tables the redirection operand projection is decided by.
 
     Args:
         evidence: The typed shell execution evidence for one run body.
         limits: The bounds this scan enforces.
-        project_inputs: Whether to build each command's stdin. The pass that projects the
-            redirection operands feeding ``_pipe_inputs`` runs with this false, which is what
-            keeps the two passes from depending on each other.
 
     Returns:
-        The evidence with every command's redirections resolved and, when ``project_inputs``,
-        its stdin and read-field projections attached.
+        The scope, environment, rebinding and declaration-attribute tables of that run body.
     """
-    process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
     command_scope_paths = _command_scope_paths(evidence)
-    # Resolve the redirection operands before the pipe inputs read them, for the same reason the
-    # walk below resolves them before the input projection: ``_pipe_inputs`` replays each writer's
-    # output descriptors against ``_guarded_output_descriptors``, which reads an unresolved operand
-    # as a direct binding and so guards a descriptor a resolved one names. ``P=/dev/stdout;
-    # exec 3> "$P"`` then refused a later ``>&3`` as an unresolved alias while the literal spelling
-    # of the same body certified, which is the asymmetry issue #151 exists to remove.
-    #
-    # The input descriptor context is built from that same resolved evidence, because
-    # ``_guarded_input_descriptors`` classifies a target by the identical test its output twin
-    # uses: reading the unresolved events there left the two halves of one descriptor
-    # classification disagreeing about which operand names a descriptor, and left the input half
-    # disagreeing with ``_build_flow_definitions``, which rebuilds this context from the resolved
-    # evidence one stage later.
-    #
-    # The naming pass builds no stdin, so a name a ``read`` supplies is unknown there and an
-    # operand spelling it keeps its dynamic target. That residue runs in both directions rather
-    # than one, and AD-18 records both.
-    #
-    # Only the projecting pass has a reader for either of these: the naming pass stops at the
-    # resolution and neither builds stdin nor replays a pipe. Building them there anyway walked
-    # every scope and every command of the body twice per scan and discarded both results.
-    if project_inputs:
-        descriptor_evidence = _resolve_builtin_writer_evidence(
-            evidence, limits, project_inputs=False
-        )
-        input_descriptors = _InputDescriptorContext(
-            scope_bindings=_scope_inherited_input_bindings(descriptor_evidence, process_resources),
-            guarded=_guarded_input_descriptors(descriptor_evidence),
-        )
-        pipe_inputs = _pipe_inputs(descriptor_evidence, input_descriptors)
-    else:
-        input_descriptors = _InputDescriptorContext(scope_bindings={}, guarded=frozenset())
-        pipe_inputs = {}
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
-    scope_environments: dict[int, int] = {}
-    exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
-    unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
     # The two rebindings a command performs outside its own assignments are collected before the
     # scopes are, because a loop returns each of them to a use above it on the next iteration and
     # ``_scope_rebound_names`` is what withdraws along that back edge. The scope names it produces
@@ -4268,6 +4248,14 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         )
         for command in evidence.commands
     }
+    # An attribute attached to a name this scan cannot read may be attached to the operand's own
+    # name, and there is no name for a later assignment to release, so the whole body's projection
+    # is withdrawn exactly as it is for an unreadable nameref binding or unset target.
+    declaration_unreadable_names = any(
+        _declaration_names_unreadable(command)
+        for command in evidence.commands
+        if _declaration_attributes_apply(command, called_contexts)
+    )
     attribute_rebindings = {
         command_id: frozenset(transformed)
         for command_id, (transformed, _readonly) in declaration_attributes.items()
@@ -4279,6 +4267,122 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         | attribute_rebindings.get(command_id, frozenset())
         for command_id in (*nameref_rebindings, *call_rebindings, *attribute_rebindings)
     }
+    return _NameProjectionInputs(
+        command_scope_paths=command_scope_paths,
+        command_environments=command_environments,
+        environment_parents=environment_parents,
+        scope_bound_names=_scope_rebound_names(evidence, command_scope_paths, command_rebindings),
+        command_rebindings=command_rebindings,
+        declaration_attributes=declaration_attributes,
+        withdraw_every_name=(
+            function_unreadable_rebinding
+            or nameref_unreadable_rebinding
+            or declaration_unreadable_names
+        ),
+    )
+
+
+def _projection_launders_withdrawn_value(
+    content: ContentExpr,
+    values: Mapping[str, str],
+    withdrawn: AbstractSet[str],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether this content reads a name the redirection projection has withdrawn.
+
+    A withdrawal keeps one name out of the operand projection, but the stale value stays in the
+    table every other reader shares, so an ordinary copy republished it under a fresh name that
+    carried no withdrawal at all: ``f(){ P=other.sh; }; P=task.sh; f; Q=$P; printf ... > "$Q"``
+    resolved the operand to ``task.sh`` and certified a body whose marker Bash writes into
+    ``other.sh`` and runs. The copy is therefore withdrawn too, wherever taking the withdrawn
+    names away changes what the content resolves to, which is the same one-hop test applied at
+    every hop rather than a depth this walk has to bound.
+
+    Args:
+        content: The assignment content being applied to the table.
+        values: The exact scalar values the content is resolved against.
+        withdrawn: The names this table's operand projection has withdrawn.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        Whether the value this content resolves to depends on a withdrawn name.
+    """
+    if not withdrawn:
+        return False
+    resolved = _exact_content_literal(content, values, limits)
+    if resolved is None:
+        return False
+    visible = {name: value for name, value in values.items() if name not in withdrawn}
+    return _exact_content_literal(content, visible, limits) != resolved
+
+
+def _resolve_builtin_writer_evidence(  # noqa: PLR0915
+    evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
+    *,
+    project_inputs: bool = True,
+    inputs: _NameProjectionInputs | None = None,
+) -> _ShellTaintEvidence:
+    """Attach finalized stdin and exact bounded read-field projections.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        limits: The bounds this scan enforces.
+        project_inputs: Whether to build each command's stdin. The pass that projects the
+            redirection operands feeding ``_pipe_inputs`` runs with this false, which is what
+            keeps the two passes from depending on each other.
+        inputs: The evidence-derived projection tables, built here when the caller has none. Both
+            passes over one run body read the same ones, since neither depends on anything either
+            walk produces.
+
+    Returns:
+        The evidence with every command's redirections resolved and, when ``project_inputs``,
+        its stdin and read-field projections attached.
+    """
+    process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
+    if inputs is None:
+        inputs = _name_projection_inputs(evidence, limits)
+    command_scope_paths = inputs.command_scope_paths
+    # Resolve the redirection operands before the pipe inputs read them, for the same reason the
+    # walk below resolves them before the input projection: ``_pipe_inputs`` replays each writer's
+    # output descriptors against ``_guarded_output_descriptors``, which reads an unresolved operand
+    # as a direct binding and so guards a descriptor a resolved one names. ``P=/dev/stdout;
+    # exec 3> "$P"`` then refused a later ``>&3`` as an unresolved alias while the literal spelling
+    # of the same body certified, which is the asymmetry issue #151 exists to remove.
+    #
+    # The input descriptor context is built from that same resolved evidence, because
+    # ``_guarded_input_descriptors`` classifies a target by the identical test its output twin
+    # uses: reading the unresolved events there left the two halves of one descriptor
+    # classification disagreeing about which operand names a descriptor, and left the input half
+    # disagreeing with ``_build_flow_definitions``, which rebuilds this context from the resolved
+    # evidence one stage later.
+    #
+    # The naming pass builds no stdin, so a name a ``read`` supplies is unknown there and an
+    # operand spelling it keeps its dynamic target. That residue runs in both directions rather
+    # than one, and AD-18 records both.
+    #
+    # Only the projecting pass has a reader for either of these: the naming pass stops at the
+    # resolution and neither builds stdin nor replays a pipe. Building them there anyway walked
+    # every scope and every command of the body twice per scan and discarded both results.
+    if project_inputs:
+        descriptor_evidence = _resolve_builtin_writer_evidence(
+            evidence, limits, project_inputs=False, inputs=inputs
+        )
+        input_descriptors = _InputDescriptorContext(
+            scope_bindings=_scope_inherited_input_bindings(descriptor_evidence, process_resources),
+            guarded=_guarded_input_descriptors(descriptor_evidence),
+        )
+        pipe_inputs = _pipe_inputs(descriptor_evidence, input_descriptors)
+    else:
+        input_descriptors = _InputDescriptorContext(scope_bindings={}, guarded=frozenset())
+        pipe_inputs = {}
+    command_environments = inputs.command_environments
+    environment_parents = inputs.environment_parents
+    command_rebindings = inputs.command_rebindings
+    declaration_attributes = inputs.declaration_attributes
+    scope_environments: dict[int, int] = {}
+    exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
+    unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
     # Both attribute sets accumulate in source order: a declaration decides what every later write
     # to the name stores, and a "readonly" declaration is what makes a later write one Bash
     # refuses, so the declaring command's own operand still applies. Each is kept per execution
@@ -4291,8 +4395,8 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     # environment reaches in the direction that leaves an operand dynamic.
     transformed_by_environment: dict[int, set[str]] = {}
     readonly_by_environment: dict[int, set[str]] = {}
-    scope_bound_names = _scope_rebound_names(evidence, command_scope_paths, command_rebindings)
-    withdraw_every_name = function_unreadable_rebinding or nameref_unreadable_rebinding
+    scope_bound_names = inputs.scope_bound_names
+    withdraw_every_name = inputs.withdraw_every_name
     entered_scopes: list[int] = []
     entered_scope_ids: set[int] = set()
     scope_contexts: dict[int, int | None] = {}
@@ -4528,27 +4632,31 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
 
         Every effect that names a variable also releases it from the projection's withdrawal set,
         so an assignment after ``done`` makes an operand spelling that name exact again, which is
-        the point the value a loop left it holding stops being the one an operand would read.
+        the point the value a loop left it holding stops being the one an operand would read. A
+        write whose own value is read out of a withdrawn name releases nothing, since the text it
+        stores here is the stale one the withdrawal exists to keep out of an operand.
         """
         conditional = command.conditionally_executed or command.execution_status is not True
         assignment_only = not command.argv or command.executable.argv_index is None
-        if assignment_only:
-            for assignment in routed.definite_assignments:
-                name = _unscoped_variable_name(assignment.name)
-                if note_write(name, tables):
-                    continue
-                apply_exact(
-                    assignment,
-                    values,
-                    unknown_values,
-                    conditional=conditional or assignment.from_stdin,
-                )
-        # One snapshot for the whole operand list, taken before any of them is applied.
-        expansion_values = dict(values)
-        for assignment in routed.builtin_assignments:
+
+        def apply_write(
+            assignment: _AssignmentEvidence,
+            *,
+            expansion_values: dict[str, str] | None = None,
+        ) -> None:
             name = _unscoped_variable_name(assignment.name)
+            # Read before the write, since ``note_write`` releases the name being written and an
+            # append extends the very text the withdrawal keeps out of an operand.
+            laundered = (assignment.append and name in tables.withdrawn) or (
+                _projection_launders_withdrawn_value(
+                    assignment.content,
+                    values if expansion_values is None else expansion_values,
+                    tables.withdrawn,
+                    limits,
+                )
+            )
             if note_write(name, tables):
-                continue
+                return
             apply_exact(
                 assignment,
                 values,
@@ -4556,6 +4664,16 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 conditional=conditional or assignment.from_stdin,
                 expansion_values=expansion_values,
             )
+            if laundered:
+                tables.withdrawn.add(name)
+
+        if assignment_only:
+            for assignment in routed.definite_assignments:
+                apply_write(assignment)
+        # One snapshot for the whole operand list, taken before any of them is applied.
+        expansion_values = dict(values)
+        for assignment in routed.builtin_assignments:
+            apply_write(assignment, expansion_values=expansion_values)
         unset_names, unknown_unset = _unset_action(command)
         for name in unset_names:
             # Bash refuses to unset a readonly name, reports it, and keeps running, so the name
@@ -4614,6 +4732,12 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         # the command, so a call site's own operand could keep the value it reads, but a prefix
         # assignment through an alias makes that ordering a second measurement rather than the one
         # ``record_effects`` already pins.
+        #
+        # It is applied again after that call, because a rebinding this command performs is not
+        # something this command's own writes release: ``declare -n R=P`` records a write to ``R``,
+        # and releasing ``R`` there projected the operand in ``> "$R"`` against the value ``P`` held
+        # at the declaration, so ``P=other.sh; declare -n R=P; P=task.sh; printf ... > "$R"``
+        # certified a body whose marker Bash writes into ``task.sh`` and runs.
         withdrawn_names.update(command_rebindings.get(command.command_id, ()))
         # The attribute this command sets governs its own operands too, so it is read before the
         # values below are projected. A "readonly" name is collected after the command instead,
@@ -4668,6 +4792,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             # value below rather than one drawn from a stream this pass has not built.
             commands.append(redirected)
             record_effects(command, redirected, exact_values, unknown_values, tables)
+            withdrawn_names.update(command_rebindings.get(command.command_id, ()))
             tables.readonly.update(declaration_attributes[command.command_id][1])
             continue
         stdin = _strip_one_trailing_newline(
@@ -4748,6 +4873,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         )
         commands.append(routed)
         record_effects(command, routed, exact_values, unknown_values, tables)
+        withdrawn_names.update(command_rebindings.get(command.command_id, ()))
         tables.readonly.update(declaration_attributes[command.command_id][1])
     return replace(evidence, commands=tuple(commands))
 
@@ -11264,6 +11390,11 @@ def _static_variable_name(value: str) -> bool:
 
 _DECLARATION_BUILTIN_NAMES = ("declare", "typeset", "local", "export", "readonly")
 _VALUE_TRANSFORMING_DECLARATION_FLAGS = frozenset("ulci")
+# "-f" and "-F" select shell functions, so a declaration carrying either names no variable at all.
+_FUNCTION_SELECTING_DECLARATION_FLAGS = frozenset("fF")
+# The builtins whose "-r" binds in the current scope rather than globally. "readonly" itself marks
+# the caller's variable even from a body, and "export" has no "-r" to read.
+_SCOPED_DECLARATION_BUILTIN_NAMES = frozenset({"declare", "typeset", "local"})
 
 
 def _declaration_attributes_apply(
@@ -11299,6 +11430,74 @@ def _declaration_attributes_apply(
     return context is None or context in called_contexts
 
 
+@dataclass(frozen=True, slots=True)
+class _DeclarationWords:
+    """One declaration builtin's readable option letters and name operands.
+
+    ``dynamic_word`` records that some word of the command is an expansion this scan cannot read,
+    which matters for both readers: an option there may spell an attribute, and a *name* there is
+    an attribute attached to a name nobody can see.
+    """
+
+    builtin: str
+    flags: frozenset[str]
+    names: tuple[str, ...]
+    dynamic_word: bool
+
+
+def _declaration_words(command: _CommandEvidence) -> _DeclarationWords | None:
+    """Return the option letters and name operands one declaration builtin spells.
+
+    Only the setting spelling of an option is read. A ``+u`` removes the attribute, and not
+    reading it keeps the name withdrawn where Bash has restored it, which is the direction that
+    leaves an operand dynamic rather than naming a file on a guess.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        The words of that declaration, or ``None`` when the command spells no declaration builtin.
+    """
+    if not command.argv:
+        return None
+    index: int | None = None
+    builtin = ""
+    for candidate in _DECLARATION_BUILTIN_NAMES:
+        index = _builtin_executable_index(command, candidate)
+        if index is not None:
+            builtin = candidate
+            break
+    if index is None:
+        return None
+    letters: set[str] = set()
+    names: list[str] = []
+    dynamic_word = False
+    options_enabled = True
+    for argument in command.argv[index + 1 :]:
+        if argument.dynamic:
+            dynamic_word = True
+            continue
+        literal = argument.literal
+        if options_enabled and literal == "--":
+            options_enabled = False
+            continue
+        if options_enabled and literal.startswith(("-", "+")) and literal not in {"-", "+"}:
+            if literal.startswith("-"):
+                letters.update(literal[1:])
+            continue
+        name = literal.split("=", 1)[0].removesuffix("+")
+        if _static_variable_name(name):
+            names.append(name)
+    # An option word may follow an operand, so the letters cover the whole command rather than the
+    # words after the flag that spells the attribute.
+    return _DeclarationWords(
+        builtin=builtin,
+        flags=frozenset(letters),
+        names=tuple(dict.fromkeys(names)),
+        dynamic_word=dynamic_word,
+    )
+
+
 def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
     """Return the names a declaration attributes, split by what the attribute does to a write.
 
@@ -11315,9 +11514,22 @@ def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, 
     from its declaration onward and the second only from a write Bash rejects, which is what keeps
     ``readonly P=task.sh; printf ... > "$P"`` naming the file the marker reaches.
 
+    Which scope a ``-r`` binds in is measured under Bash 5.2 rather than assumed, because reading
+    it too widely stops a *real* later assignment from being applied and leaves the table holding a
+    value the run replaced: ``f(){ local -r Q=zz; }; f; Q=task.sh; printf ... > "$Q"`` certified a
+    body whose marker Bash writes into ``task.sh`` and runs. ``local -r``, and ``declare -r`` or
+    ``typeset -r`` inside a body without ``-g``, restore the caller's variable on return, so none
+    of them is read as readonly. ``readonly`` itself marks the caller's variable even from a body,
+    and ``export`` has no ``-r`` at all: ``export -r`` is an invalid option Bash refuses outright.
+
+    ``-f`` and ``-F`` select shell *functions*, so a declaration carrying either attributes no
+    variable. Reading ``readonly -f g`` as a readonly variable froze the like-named variable and
+    disabled this resolution for it, which is the certification issue #151 exists to remove.
+
     An option this scan cannot read needs no reading here: the scanner records it as unknown
     builtin content, and ``record_effects`` already drops every exact value the table holds when a
-    command carries one.
+    command carries one. A *name* this scan cannot read is a different question, and
+    ``_declaration_names_unreadable`` owns it.
 
     Args:
         command: The command whose argv may spell a declaration builtin.
@@ -11325,46 +11537,54 @@ def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, 
     Returns:
         The names given a value-transforming attribute, and the names made readonly.
     """
-    if not command.argv:
+    words = _declaration_words(command)
+    if words is None or words.flags & _FUNCTION_SELECTING_DECLARATION_FLAGS or not words.names:
         return (), ()
-    index: int | None = None
-    builtin = ""
-    for candidate in _DECLARATION_BUILTIN_NAMES:
-        index = _builtin_executable_index(command, candidate)
-        if index is not None:
-            builtin = candidate
-            break
-    if index is None:
+    transforms = bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS)
+    readonly = _declaration_is_readonly(words, command.function_context_id)
+    if not (transforms or readonly):
         return (), ()
-    transforms = False
-    readonly = builtin == "readonly"
-    names: list[str] = []
-    options_enabled = True
-    for argument in command.argv[index + 1 :]:
-        if argument.dynamic:
-            continue
-        literal = argument.literal
-        if options_enabled and literal == "--":
-            options_enabled = False
-            continue
-        if options_enabled and literal.startswith(("-", "+")) and literal not in {"-", "+"}:
-            # Only the setting spelling is read. A ``+u`` removes the attribute, and not reading
-            # it keeps the name withdrawn where Bash has restored it, which is the direction that
-            # leaves an operand dynamic rather than naming a file on a guess.
-            if literal.startswith("-"):
-                flags = set(literal[1:])
-                transforms = transforms or bool(flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS)
-                readonly = readonly or "r" in flags
-            continue
-        name = literal.split("=", 1)[0].removesuffix("+")
-        if _static_variable_name(name):
-            names.append(name)
-    if not names or not (transforms or readonly):
-        return (), ()
-    # An option word may follow an operand, so the decision covers every name the command spells
-    # rather than the ones after the flag that spells the attribute.
-    attributed = tuple(dict.fromkeys(names))
-    return (attributed if transforms else (), attributed if readonly else ())
+    return (words.names if transforms else (), words.names if readonly else ())
+
+
+def _declaration_is_readonly(words: _DeclarationWords, function_context_id: int | None) -> bool:
+    """Return whether this declaration makes its names readonly for the caller's variable space."""
+    if words.builtin == "readonly":
+        return True
+    if "r" not in words.flags or words.builtin not in _SCOPED_DECLARATION_BUILTIN_NAMES:
+        return False
+    if function_context_id is None:
+        return True
+    return words.builtin != "local" and "g" in words.flags
+
+
+def _declaration_names_unreadable(command: _CommandEvidence) -> bool:
+    """Return whether a declaration attributes a name this scan cannot see.
+
+    ``N=P; declare -gu "$N"; P=task.sh; printf ... > "$P"`` attaches the attribute to a name no
+    word of this command spells, so the readable operands carry none of it and the value table
+    keeps the assignment's own text. The command carries no unknown builtin content either, so
+    nothing else clears that table, and the operand below resolved to ``task.sh`` while Bash wrote
+    the marker into ``TASK.SH``.
+
+    Only a declaration whose readable words already establish an attribute is reported. A
+    ``declare "$F" P`` whose *option* is the expansion spells no attribute here and is the same
+    residue as every other word this scan cannot read.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        Whether an attribute this command sets may reach a name this scan cannot name.
+    """
+    words = _declaration_words(command)
+    if words is None or not words.dynamic_word:
+        return False
+    if words.flags & _FUNCTION_SELECTING_DECLARATION_FLAGS:
+        return False
+    return bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS) or _declaration_is_readonly(
+        words, command.function_context_id
+    )
 
 
 def _unset_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:
