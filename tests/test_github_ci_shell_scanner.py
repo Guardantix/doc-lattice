@@ -8981,6 +8981,22 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
         {},
     ),
+    # The operand resolution has to reach the evidence the pipe inputs are built from, not just
+    # the evidence after them: an output process substitution anywhere in the body sends every
+    # writer's output descriptors through a guarded replay, which reads an unresolved operand as
+    # a direct binding and guarded the descriptor a resolved one names. The pair below isolates
+    # that from the descriptor shape itself, since the literal spelling certified throughout.
+    (
+        "exec-bound-descriptor-through-a-variable-beside-a-substitution",
+        "P=/dev/stdout; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash;"
+        " true > >(cat)",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-literal-beside-a-substitution",
+        "exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash; true > >(cat)",
+        {},
+    ),
     (
         "stderr-does-not-carry-stdout-payload",
         "printf '%s%s\\n' doc- 'lattice reconcile' 2> task.sh; bash task.sh",
@@ -9336,6 +9352,38 @@ def test_unresolved_redirection_operand_gap_executes_the_marker_under_real_bash(
     executed, stderr = _marker_executes_under_bash(script, extra_environment, tmp_path)
 
     assert executed, stderr
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        (
+            "read -r P; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+            "shell descriptor source cannot be represented",
+        ),
+        (
+            "read -r Z; exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+            None,
+        ),
+    ],
+    ids=("read-supplied-operand", "literal-control"),
+)
+def test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs(script, expected):
+    """The residue of resolving operands before the pipe inputs, pinned in both directions.
+
+    The pass that names the operands ``_pipe_inputs`` replays builds no stdin, because building
+    stdin is what needs those inputs. A name a ``read`` supplies is therefore unknown in that pass
+    alone, so the descriptor an ``exec`` binds through it stays guarded and a later ``>&3`` refuses
+    where every other spelling now certifies. This is the over-refusing direction and it is the
+    last slice of the literal-versus-variable asymmetry issue #151 reports; AD-18 discloses it.
+
+    The control carries the same ``read`` and the same descriptor with the operand spelled
+    literally, which isolates the withheld value rather than the ``read`` or the descriptor shape.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == expected
 
 
 @pytest.mark.parametrize(

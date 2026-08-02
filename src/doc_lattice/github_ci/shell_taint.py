@@ -3789,15 +3789,46 @@ def _function_rebound_names(
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
+    *,
+    project_inputs: bool = True,
 ) -> _ShellTaintEvidence:
-    """Attach finalized stdin and exact bounded read-field projections."""
+    """Attach finalized stdin and exact bounded read-field projections.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        limits: The bounds this scan enforces.
+        project_inputs: Whether to build each command's stdin. The pass that projects the
+            redirection operands feeding ``_pipe_inputs`` runs with this false, which is what
+            keeps the two passes from depending on each other.
+
+    Returns:
+        The evidence with every command's redirections resolved and, when ``project_inputs``,
+        its stdin and read-field projections attached.
+    """
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
     command_scope_paths = _command_scope_paths(evidence)
     input_descriptors = _InputDescriptorContext(
         scope_bindings=_scope_inherited_input_bindings(evidence, process_resources),
         guarded=_guarded_input_descriptors(evidence),
     )
-    pipe_inputs = _pipe_inputs(evidence, input_descriptors)
+    # Resolve the redirection operands before the pipe inputs read them, for the same reason the
+    # walk below resolves them before the input projection: ``_pipe_inputs`` replays each writer's
+    # output descriptors against ``_guarded_output_descriptors``, which reads an unresolved operand
+    # as a direct binding and so guards a descriptor a resolved one names. ``P=/dev/stdout;
+    # exec 3> "$P"`` then refused a later ``>&3`` as an unresolved alias while the literal spelling
+    # of the same body certified, which is the asymmetry issue #151 exists to remove.
+    #
+    # The projecting pass builds no stdin, so a name a ``read`` supplies is unknown there and an
+    # operand spelling it keeps its dynamic target. That is the only value this pass cannot carry,
+    # and leaving the operand dynamic is the fail-closed direction; AD-18 records it.
+    pipe_inputs = (
+        _pipe_inputs(
+            _resolve_builtin_writer_evidence(evidence, limits, project_inputs=False),
+            input_descriptors,
+        )
+        if project_inputs
+        else {}
+    )
     command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
@@ -3899,6 +3930,54 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             values[name] = value
             unknown_values.discard(name)
 
+    def record_effects(
+        command: _CommandEvidence,
+        routed: _CommandEvidence,
+        values: dict[str, str],
+        unknown_values: set[str],
+    ) -> None:
+        """Apply one command's assignments, unsets and unknown writes to its value table.
+
+        ``if``/``elif``/``else`` branch uncertainty lives in ``execution_status``, not in
+        ``conditionally_executed``. Without it an assignment inside an untaken branch replaced the
+        live value, and the exact ``read`` projection substituted that stale text as a literal.
+
+        A routed assignment always carries ``from_stdin`` false, so the extra term below is inert
+        for the pass that projects stdin and withdraws the name in the pass that does not, where
+        no stream was built to draw the value from.
+        """
+        conditional = command.conditionally_executed or command.execution_status is not True
+        assignment_only = not command.argv or command.executable.argv_index is None
+        if assignment_only:
+            for assignment in routed.definite_assignments:
+                apply_exact(
+                    assignment,
+                    values,
+                    unknown_values,
+                    conditional=conditional or assignment.from_stdin,
+                )
+        for assignment in routed.builtin_assignments:
+            apply_exact(
+                assignment,
+                values,
+                unknown_values,
+                conditional=conditional or assignment.from_stdin,
+            )
+        unset_names, unknown_unset = _unset_action(command)
+        for name in unset_names:
+            values.pop(name, None)
+            if conditional:
+                unknown_values.add(name)
+            else:
+                unknown_values.discard(name)
+        if unknown_unset:
+            values.clear()
+            unknown_values.add("IFS")
+        if routed.unknown_builtin_content is not None:
+            values.clear()
+            # The dynamic write may target IFS, so later reads must not assume the default.
+            unknown_values.add("IFS")
+
     for command in evidence.commands:
         context = command.function_context_id
         environment = command_environments[command.command_id]
@@ -3941,6 +4020,13 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 command.redirections, redirection_values, limits
             ),
         )
+        if not project_inputs:
+            # This pass exists to name the operands ``_pipe_inputs`` replays, so it stops here:
+            # building stdin is what needs those inputs, and a ``read`` therefore names no exact
+            # value below rather than one drawn from a stream this pass has not built.
+            commands.append(redirected)
+            record_effects(command, redirected, exact_values, unknown_values)
+            continue
         stdin = _strip_one_trailing_newline(
             _input_expression(
                 redirected,
@@ -4018,40 +4104,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             unsupported_builtin_write=(command.unsupported_builtin_write or read_ifs_unknown),
         )
         commands.append(routed)
-        # ``if``/``elif``/``else`` branch uncertainty lives in ``execution_status``, not in
-        # ``conditionally_executed``. Without it an assignment inside an untaken branch replaced
-        # the live value, and the exact ``read`` projection below substituted that stale text as a
-        # literal.
-        conditional = command.conditionally_executed or command.execution_status is not True
-        if assignment_only:
-            for assignment in routed.definite_assignments:
-                apply_exact(
-                    assignment,
-                    exact_values,
-                    unknown_values,
-                    conditional=conditional,
-                )
-        for assignment in routed.builtin_assignments:
-            apply_exact(
-                assignment,
-                exact_values,
-                unknown_values,
-                conditional=conditional,
-            )
-        unset_names, unknown_unset = _unset_action(command)
-        for name in unset_names:
-            exact_values.pop(name, None)
-            if conditional:
-                unknown_values.add(name)
-            else:
-                unknown_values.discard(name)
-        if unknown_unset:
-            exact_values.clear()
-            unknown_values.add("IFS")
-        if routed.unknown_builtin_content is not None:
-            exact_values.clear()
-            # The dynamic write may target IFS, so later reads must not assume the default.
-            unknown_values.add("IFS")
+        record_effects(command, routed, exact_values, unknown_values)
     return replace(evidence, commands=tuple(commands))
 
 

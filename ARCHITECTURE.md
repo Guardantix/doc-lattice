@@ -838,6 +838,19 @@ withdrawing a guard from a shape that had one on its own merits, and the fixture
 shape carry the real-Bash evidence that Bash runs no marker through it. A guard that refuses
 because a target is dynamic would have to be reconsidered against this decision before it is added.
 
+The resolution runs before each command's stdin is built and before the pipe inputs are, because
+both read the redirection evidence. An operand under `<` names the file a `read` draws its record
+from, and the descriptor replay that decides which writer reaches an output process substitution
+treats an unresolved operand as a direct binding, which guards the very descriptor a resolved one
+names. Without the second ordering, an output process substitution anywhere in the body brought the
+refusal back for `P=/dev/stdout; exec 3> "$P"` while the literal spelling certified. Naming the
+operands is therefore its own pass over the body, and that pass builds no stdin, since building
+stdin is what needs the inputs it feeds. One value cannot cross that line: a name a `read` supplies
+is unknown in the naming pass alone, so `read -r P; exec 3> "$P"` keeps a dynamic target there, the
+descriptor stays guarded, and a later `>&3` refuses where every other spelling now certifies. That
+is the over-refusing direction and the last slice of this asymmetry, pinned with the literal control
+that isolates the withheld value from the `read` and from the descriptor shape.
+
 The resolution reaches one simple command's own quoted operand. Four classes stay inside the
 dynamic resource alias boundary above, each pinned as certifying with the real-Bash differential
 attached so a change that closes or widens one is visible. A compound command's redirection word
