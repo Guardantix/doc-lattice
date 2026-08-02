@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- The CI shell scanner now gives a simple command's redirection operand the resource identity its
+  literal spelling would have had whenever every path reaching it fixes the operand to one literal,
+  so `P=task.sh; printf ... > "$P"; bash task.sh` fails closed instead of certifying. See
+  [AD-18](ARCHITECTURE.md#ad-18-ci-shell-certification-follows-authored-marker-flow-within-one-run-body).
 - The generated Linear workflow uses a dedicated environment-only credential, maps it only on the
   final trusted step, and never exposes it to the generated pull-request workflow.
 - Existing installations must migrate the repository-scoped `LINEAR_API_KEY` to the protected

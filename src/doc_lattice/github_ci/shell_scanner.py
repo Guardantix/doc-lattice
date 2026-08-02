@@ -28,6 +28,7 @@ from doc_lattice.github_ci.shell_taint import (
     ContentBuilder,
     ContentExpr,
     ContentTarget,
+    DynamicResourceTarget,
     LiteralTransfer,
     OutputExpr,
     OutsideGap,
@@ -2882,6 +2883,20 @@ class _ShellScanner:
             redirection_target = ContentTarget(concat(target.content, LiteralTransfer("\n")))
         else:
             redirection_target = self._redirection_target(target, redirection.operator)
+        # The word names no resource by its syntax alone. Carrying it lets the taint layer
+        # project it against the exact values in effect where Bash expands it, rather than
+        # leaving the file it names outside the model (issue #151). Only a simple command's own
+        # redirection is projected, so an event bound for a compound scope carries no word: the
+        # values that apply there are the ones at compound entry, which this evidence shape has
+        # no table for, and retaining the expression would imply a projection that never runs.
+        # An unquoted expansion carries no word either: Bash word-splits and pathname-expands it
+        # before opening anything, so ``> $P`` with ``P='a b.sh'`` is an ambiguous redirect that
+        # opens no file at all and ``P='ta*.sh'`` names a pattern. The projected text would name
+        # a file Bash never touches in either direction, which is the class AD-18 keeps dynamic
+        # as issue #189. Authored pattern syntax sitting outside the quotes is the same class one
+        # step over: ``> "$P"*.sh`` expands the quoted reference and then pathname-expands the
+        # result, so the projected text names the pattern rather than the file Bash opens.
+        scope_bound = state.pending_compound_scope_id is not None and self.taint_builder is not None
         self._append_redirection(
             state,
             _RedirectionEvent(
@@ -2889,6 +2904,14 @@ class _ShellScanner:
                 redirection.operator,
                 redirection.descriptor,
                 redirection_target,
+                target_word=(
+                    target.content
+                    if not scope_bound
+                    and not target.unquoted_dynamic
+                    and not target.active_argv_expansion
+                    and isinstance(redirection_target, DynamicResourceTarget)
+                    else None
+                ),
             ),
         )
         return index
@@ -3744,9 +3767,11 @@ def direct_doc_lattice_invocations(
     never as a claim that the content is inert.
 
     The scanner intentionally does not aggregate across run steps or resolve aliases, PATH
-    shadowing, external files or environment content, dynamic resource identity, arbitrary
-    encoding/transform programs, actions, or reusable workflows. Functions defined in the same
-    body and ``>&N`` descriptor aliasing are modeled; see AD-18 in ARCHITECTURE.md.
+    shadowing, external files or environment content, arbitrary encoding/transform programs,
+    actions, or reusable workflows. Functions defined in the same body, ``>&N`` descriptor
+    aliasing, and a simple command's redirection operand whose exact value every reaching path
+    fixes to one literal are modeled; every other dynamic resource identity is not. See AD-18 in
+    ARCHITECTURE.md for the boundary that sentence summarizes.
 
     Args:
         script: Literal Bash source to scan.

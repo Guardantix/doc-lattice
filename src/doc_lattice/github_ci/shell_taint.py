@@ -22,6 +22,7 @@ __all__ = ["TaintLimits", "analyze_marker_taint"]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
+    from collections.abc import Set as AbstractSet
 
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
@@ -358,12 +359,29 @@ RedirectionTarget: TypeAlias = (  # noqa: UP040
 
 @dataclass(frozen=True, slots=True)
 class _RedirectionEvent:
-    """One ordered descriptor mutation."""
+    """One ordered descriptor mutation.
+
+    ``target_word`` carries the operand's own content expression for a simple command's quoted
+    operand that named no static resource by its syntax alone. Resource identity used to stop at
+    that syntax, so ``P=task.sh; printf ... > "$P"`` wrote to a nameless target while
+    ``bash task.sh`` read a key nothing had written, and the body certified while Bash ran the
+    marker (issue #151). Keeping the word lets ``_resolve_dynamic_redirection_targets`` project it
+    against the same exact scalar values the eval replay already trusts, once those values exist.
+    An unquoted operand carries no word, because Bash word-splits and pathname-expands it before
+    opening anything.
+
+    The field is valid only between the scanner and that projection, which clears it on every
+    event it resolves and on every event it declines to resolve. Nothing downstream may read it:
+    ``_contextualize_evidence`` rewrites contents into scope-qualified expressions and never
+    visits this word, so a retained expression would carry unscoped names that no longer mean
+    what the evidence around them means.
+    """
 
     ordinal: int
     operator: str
     descriptor: int | None
     target: RedirectionTarget
+    target_word: ContentExpr | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1156,6 +1174,53 @@ _SHARED_ENVIRONMENT_SCOPE_KINDS = frozenset(
 # redefinition it contains may or may not take effect, and dropping/overwriting an existing
 # linkage on that uncertainty is fail-open.
 _AMBIGUOUS_DEFINITION_SCOPE_KINDS = frozenset({"case", "for", "if", "select", "until", "while"})
+# The scope kinds whose body repeats, so a name the body assigns reaches a use above that
+# assignment along a back edge this source-order walk has no shape for.
+_LOOP_SCOPE_KINDS = frozenset({"for", "select", "until", "while"})
+# The shell parameters Bash gives its own value to, so an assignment to one never leaves the name
+# holding the text the assignment spells. It is the "declare -u" mismatch with the attribute
+# already set and no declaration in the run body to read it from, and it runs in both directions:
+# "SECONDS=task.sh; printf ... > \"$SECONDS\"; bash 0" writes the marker into the file "0" and
+# runs it while an exact table reads "task.sh", and the same body sinking "bash task.sh" refuses
+# for a marker Bash leaves somewhere it never runs.
+#
+# Three families, measured under Bash 5.2 by assigning a name and expanding it. A counter or
+# generator replaces the value outright ("SECONDS", "LINENO", "RANDOM", "SRANDOM", "HISTCMD",
+# "BASHPID", "EPOCHSECONDS", "EPOCHREALTIME", "BASH_SUBSHELL", "BASH_COMMAND"); an integer
+# attribute Bash sets itself evaluates the operand arithmetically, and refuses a word that is not
+# an arithmetic expression ("OPTIND", and "PPID" and "EUID", which are readonly with it); and an
+# array Bash maintains is read back from its own elements ("GROUPS", "FUNCNAME", "BASH_SOURCE",
+# "BASH_LINENO", "BASH_ARGC", "BASH_ARGV", "DIRSTACK"). "_" belongs with them and is measured
+# separately: Bash overwrites it with the last argument of the command just run, so
+# "_=task.sh; printf ... > \"$_\"" expands to something the assignment never spelled. "UID" and
+# "BASH_ARGV0" are measured storing an assignment verbatim and are deliberately absent, since
+# withdrawing a name Bash does store is the direction that leaves an operand dynamic. What Bash
+# really stores is the residue issue #205 owns, exactly as it does for a declared attribute.
+_SELF_VALUED_SHELL_PARAMETERS = frozenset(
+    {
+        "_",
+        "BASHPID",
+        "BASH_ARGC",
+        "BASH_ARGV",
+        "BASH_COMMAND",
+        "BASH_LINENO",
+        "BASH_SOURCE",
+        "BASH_SUBSHELL",
+        "DIRSTACK",
+        "EPOCHREALTIME",
+        "EPOCHSECONDS",
+        "EUID",
+        "FUNCNAME",
+        "GROUPS",
+        "HISTCMD",
+        "LINENO",
+        "OPTIND",
+        "PPID",
+        "RANDOM",
+        "SECONDS",
+        "SRANDOM",
+    }
+)
 _PROCESS_RESOURCE_DIRECTIONS = frozenset({"input", "output"})
 
 
@@ -3596,21 +3661,851 @@ def _read_literal_fields(  # noqa: PLR0912
     return tuple(assigned)
 
 
+def _resolve_dynamic_redirection_targets(
+    events: tuple[_RedirectionEvent, ...],
+    values: Mapping[str, str],
+    limits: TaintLimits,
+) -> tuple[_RedirectionEvent, ...]:
+    """Name the resource an unnamed redirection operand resolves to under exact values.
+
+    A redirection operand spelled as a variable reference named no resource at all, however
+    provably constant the variable was, so a write through it landed on a target the model
+    discards while a later read of the same file saw a key nothing had written (issue #151).
+    Projecting the operand's own content expression against the exact scalar values already
+    resolved for this point gives the operand the identity its literal spelling would have had.
+
+    The projection is the same one the eval replay trusts, so an operand only resolves when
+    every path reaching it assigns the same literal. Anything else keeps the dynamic target it
+    already had, including the rebindings the source-order walk cannot order, which
+    ``_scope_rebound_names``, ``_function_call_rebindings`` and ``_nameref_rebindings`` withdraw
+    before the values reach here. A rebinding no evidence records at all is withdrawn nowhere: an
+    arithmetic assignment, an ``eval`` payload assignment, a sourced file and a ``getopts`` write
+    of its name operand among them; AD-18 records that residue in both of its directions, and
+    issue #205 tracks recording them.
+
+    Resolving an operand can name a descriptor rather than a file, because a variable holding
+    ``/dev/stdout``, a ``/dev/fd`` alias, or a digit under ``>&`` is exactly what its literal
+    spelling names. ``_guarded_output_descriptors`` reads a non-descriptor target as a direct
+    binding, so a descriptor an ``exec`` bound through such a word stops being guarded and a
+    later ``>&N`` through it is dropped rather than refused. That widening is deliberate and
+    measured: it makes the variable spelling agree with the literal spelling, which already
+    certified, and AD-18 records it with the fixtures that pin it.
+
+    ``target_word`` is consumed here and cleared on every event, resolved or not, so no later
+    stage can read an expression whose names are no longer scoped to the evidence around them.
+
+    Args:
+        events: The redirection events attached to one command.
+        values: The exact scalar values in effect where Bash expands these operands.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        The events with every resolvable dynamic resource target named.
+
+    Raises:
+        _TaintLimitExceeded: If a projected value or descriptor exceeds its bound.
+    """
+    if not any(event.target_word is not None for event in events):
+        return events
+    resolved: list[_RedirectionEvent] = []
+    for event in events:
+        literal = (
+            _exact_content_literal(event.target_word, values, limits)
+            if isinstance(event.target, DynamicResourceTarget) and event.target_word is not None
+            else None
+        )
+        target = (
+            event.target
+            if literal is None
+            else resolve_redirection_target(
+                literal,
+                event.operator,
+                dynamic=False,
+                # The descriptor bound this route needs is the one the eval payload route
+                # already spells, and its reason is the eval payload's. Giving the authored
+                # route its own origin would put that origin in a callback the guard inventory
+                # counts no call to, so it reports the guard as unreachable. A resolved operand
+                # spelling more descriptor digits than Bash accepts therefore still fails
+                # closed, in the payload route's words, tracked as issue #191.
+                parse_descriptor=_static_eval_descriptor,
+            )
+        )
+        resolved.append(replace(event, target=target, target_word=None))
+    return tuple(resolved)
+
+
+def _scope_rebound_names(
+    evidence: _ShellTaintEvidence,
+    command_scope_paths: Mapping[int, tuple[int, ...]],
+    command_rebindings: Mapping[int, frozenset[str]],
+) -> dict[int, tuple[str, ...]]:
+    """Return the names each scope can leave holding a value this walk never applied.
+
+    Two rebindings escape the source-order assignment walk. A ``for`` or ``select`` loop binds
+    its variable on entry and a compound's redirection word can assign through an expansion such
+    as ``${X=q}``; the scanner records both as the scope's ``loop_bindings``, and neither is an
+    assignment the walk applies. A loop body also has a back edge the walk has no shape for: a
+    name the body assigns after a use is already bound to that value when the next iteration
+    reaches the use again, so the value in the table at the use is the one only the first
+    iteration sees.
+
+    The ``${X=q}`` reading above is the compound's own redirection word, which the scanner records
+    as a ``loop_bindings`` entry. The same expansion in an ordinary command's word is recorded as
+    that command's ``assignments`` and applied to no value table, so the name keeps whatever it
+    held before rather than being withdrawn here; that is a rebinding no evidence records, and
+    AD-18 lists it with the arithmetic assignment it sits beside.
+
+    Both classes are collected per scope so that entering the scope withdraws them from the
+    redirection projection, which is the rule that resolution states: an operand resolves only
+    where every path reaching it fixes it to one literal, and neither a binding the walk never saw
+    nor a value that arrives along a back edge is one. Withdrawing rather than projecting keeps the
+    resolution from naming a file Bash never opens, which would be a write recorded on the wrong
+    resource in both directions.
+
+    ``command_rebindings`` carries the same back edge for the two rebindings a command performs
+    somewhere other than in its own assignments: a call into a function body that rebinds in the
+    caller's variable space, and a write through a nameref alias, which lands on the name the
+    alias stands for rather than the one the assignment spells. Each is withdrawn at the command
+    that performs it, so a use above it holds the value it really has on the first iteration; the
+    next iteration carries the rebinding back to that use along the same edge a body's own
+    assignment travels. ``f(){ P=other.sh; }; P=task.sh; for i in 1 2; do printf ... > "$P"; f;
+    done`` writes ``task.sh`` once and ``other.sh`` once under Bash, so projecting the operand
+    against either value alone names a file one of the two iterations never opens.
+
+    Args:
+        evidence: The scan evidence whose scopes and commands are being walked.
+        command_scope_paths: Each command's structured scope ancestry, outermost first.
+        command_rebindings: The names each command rebinds outside its own assignments.
+
+    Returns:
+        The names to withdraw on entry, by scope id, for every scope that rebinds any.
+    """
+    rebound: dict[int, set[str]] = {}
+    loop_scopes: set[int] = set()
+    for scope in evidence.scopes:
+        if scope.loop_bindings:
+            rebound.setdefault(scope.scope_id, set()).update(
+                _unscoped_variable_name(binding.name) for binding in scope.loop_bindings
+            )
+        if scope.kind in _LOOP_SCOPE_KINDS:
+            loop_scopes.add(scope.scope_id)
+    for command in evidence.commands:
+        # Only an assignment that outlives its command can reach a use above it on the next
+        # iteration. A prefix assignment on a command that runs an argv does not: Bash applies
+        # ``IFS=: true`` for the duration of ``true`` and restores the name after it, which is why
+        # ``record_effects`` applies ``definite_assignments`` to the value table only for an
+        # assignment-only command. Collecting it withdrew a name no iteration rebinds, and a body
+        # that never runs at all was enough: ``while false; do IFS=: true; done`` left ``IFS``
+        # unknown for every later ``read``.
+        assignment_only = not command.argv or command.executable.argv_index is None
+        assigned = {
+            _unscoped_variable_name(assignment.name)
+            for assignment in (
+                *command.assignments,
+                *(command.definite_assignments if assignment_only else ()),
+                *command.builtin_assignments,
+            )
+        }
+        assigned.update(command_rebindings.get(command.command_id, ()))
+        if not assigned:
+            continue
+        for scope_id in command_scope_paths[command.command_id]:
+            if scope_id in loop_scopes:
+                rebound.setdefault(scope_id, set()).update(assigned)
+    return {scope_id: tuple(sorted(names)) for scope_id, names in rebound.items()}
+
+
+def _function_call_targets(
+    evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
+) -> dict[int, frozenset[int]]:
+    """Return the function contexts each command can transfer control into.
+
+    ``_contextualize_evidence`` decides which call site reaches which definition, and it runs
+    after this pass, so the linkage it builds is not available here. What is available is the
+    notion of a called name it builds that linkage from: a command's resolved executable name and
+    the exact simple-command heads a bounded static ``eval`` input spells. These call sites are
+    that notion, over-approximated on every axis it can be, so a body is reached from nowhere here
+    only where the model that runs later reaches it from nowhere either.
+
+    Every over-approximation is the direction that keeps a name withdrawn. A called name matches
+    every definition of it rather than the one active at the call, order is ignored, and a call
+    behind a false condition still counts. A head this scan cannot read names nothing, exactly as
+    it does in the pass that resolves the call sites: were such a head able to reach a body, the
+    function effect model would be reading the wrong body's assignments already, so this is the
+    same assumption rather than a second one.
+
+    Args:
+        evidence: The scan evidence whose commands carry their definitions and executables.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        The function contexts each calling command can reach directly, by command id.
+
+    Raises:
+        _TaintLimitExceeded: If reading a static eval input exceeds its bound.
+    """
+    definitions_by_name: dict[str, set[int]] = {}
+    for command in evidence.commands:
+        if (
+            command.defines_function_name is not None
+            and command.defines_function_context_id is not None
+        ):
+            definitions_by_name.setdefault(command.defines_function_name, set()).add(
+                command.defines_function_context_id
+            )
+    if not definitions_by_name:
+        return {}
+    targets: dict[int, frozenset[int]] = {}
+    for command in evidence.commands:
+        if command.defines_function_context_id is not None:
+            continue
+        executables = (command.executable, *command.executable.alternates)
+        names = [executable.name for executable in executables if executable.name is not None]
+        names.extend(_static_eval_command_names(command, limits=limits))
+        called = {context for name in names for context in definitions_by_name.get(name, ())}
+        if called:
+            targets[command.command_id] = frozenset(called)
+    return targets
+
+
+def _called_function_contexts(
+    evidence: _ShellTaintEvidence,
+    call_targets: Mapping[int, frozenset[int]],
+) -> frozenset[int]:
+    """Return every function context a command in this run body can transfer control into.
+
+    A call inside a body only reaches that body's definition when the body is itself reached, so
+    the call sites ``_function_call_targets`` names are closed over the context each of them sits
+    in.
+
+    Args:
+        evidence: The scan evidence whose commands carry their function context.
+        call_targets: The contexts each calling command reaches directly, by command id.
+
+    Returns:
+        Every function context id reachable from a call in this run body.
+    """
+    calls: list[tuple[int | None, int]] = [
+        (command.function_context_id, context)
+        for command in evidence.commands
+        for context in call_targets.get(command.command_id, ())
+    ]
+    reached: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for caller, callee in calls:
+            if callee in reached or (caller is not None and caller not in reached):
+                continue
+            reached.add(callee)
+            changed = True
+    return frozenset(reached)
+
+
+def _called_declaration_attributes(
+    evidence: _ShellTaintEvidence,
+    call_targets: Mapping[int, frozenset[int]],
+) -> dict[int, tuple[tuple[str, ...], ...]]:
+    """Return the declaration attributes each call leaves set for its caller, by command id.
+
+    An attribute a called body binds in the caller's variable space takes effect where Bash runs
+    the call, not where the body is written. Reading it at the declaration bound the name over a
+    call Bash had not made yet, and one word inside one body was enough to disable the redirection
+    resolution for every operand below it in the text:
+    ``f(){ readonly P; }; P=task.sh; printf ... > "$P"; bash task.sh; f`` certified a body whose
+    marker Bash writes into ``task.sh`` and runs. ``_caller_declaration_attribute_names`` owns
+    which attributes survive the return; this owns where they land.
+
+    The collection is closed over the call graph before any call site reads it, exactly as
+    ``_function_call_rebindings`` closes the names a body rebinds, so a call reaches the attributes
+    of every body its own body can call in turn. The closure is iterated rather than recursed,
+    because a body may call itself and this module lowers every walk it owns.
+
+    A declaration a branch provably never takes sets nothing, which is the same reachability
+    ``_declaration_attributes_apply`` reads. The call edges themselves are left un-gated, since
+    ``_function_call_targets`` already over-approximates them on every axis it can.
+
+    Args:
+        evidence: The scan evidence whose commands carry their function context.
+        call_targets: The contexts each calling command reaches directly, by command id.
+
+    Returns:
+        The names each call leaves transformed and made readonly for its caller, by command id.
+    """
+    context_transformed: dict[int, set[str]] = {}
+    context_readonly: dict[int, set[str]] = {}
+    context_calls: dict[int, set[int]] = {}
+    for command in evidence.commands:
+        context = command.function_context_id
+        if context is None:
+            continue
+        called = call_targets.get(command.command_id, ())
+        context_calls.setdefault(context, set()).update(called)
+        if command.execution_status is False:
+            continue
+        transformed, readonly = _caller_declaration_attribute_names(command)
+        context_transformed.setdefault(context, set()).update(transformed)
+        context_readonly.setdefault(context, set()).update(readonly)
+    changed = True
+    while changed:
+        changed = False
+        for context, callees in context_calls.items():
+            for table in (context_transformed, context_readonly):
+                carried = table.setdefault(context, set())
+                for callee in callees:
+                    addition = table.get(callee)
+                    if addition is not None and not addition <= carried:
+                        carried |= addition
+                        changed = True
+    attributes: dict[int, tuple[tuple[str, ...], ...]] = {}
+    for command in evidence.commands:
+        called = call_targets.get(command.command_id, ())
+        if not called:
+            continue
+        transformed_names: set[str] = set()
+        readonly_names: set[str] = set()
+        for context in called:
+            transformed_names.update(context_transformed.get(context, ()))
+            readonly_names.update(context_readonly.get(context, ()))
+        if transformed_names or readonly_names:
+            attributes[command.command_id] = (
+                tuple(sorted(transformed_names)),
+                tuple(sorted(readonly_names)),
+            )
+    return attributes
+
+
+def _function_call_rebindings(
+    evidence: _ShellTaintEvidence,
+    command_scope_paths: Mapping[int, tuple[int, ...]],
+    scope_bound_names: Mapping[int, tuple[str, ...]],
+    nameref_rebindings: Mapping[int, frozenset[str]],
+    call_targets: Mapping[int, frozenset[int]],
+) -> tuple[dict[int, frozenset[str]], bool]:
+    """Return the names each call leaves rebound in the caller's variable space.
+
+    A Bash function body is not a scope for variables: ``f() { for P in task.sh; do :; done; }``
+    leaves ``P`` bound to ``task.sh`` in the caller once ``f`` runs. The exact walk keys its value
+    tables by function context, so a body's rebinding never reaches the caller's table and the
+    caller keeps whatever the name held before the call.
+
+    ``_contextualize_evidence`` decides which call site reaches which definition and runs after
+    this pass, so the withdrawal was first applied to the whole run body rather than from the call
+    onward. That reached two shapes no call reaches. A caller that assigns the name after the call
+    held an exact value the withdrawal never released, so ``f(){ P=other.sh; }; f; P=task.sh;
+    printf ... > "$P"`` certified a body whose marker Bash writes to ``task.sh`` and runs; and a
+    call a subshell contains rebinds nothing the parent shell can observe, so ``P=task.sh; (f)``
+    did the same. Both are the pre-#151 certification returning through the fix that closes it.
+    The names are therefore withdrawn at each call site instead, into the table of the function
+    context and execution environment the call runs in: a subshell's call reaches the subshell's
+    table alone, exactly as ``exact_values_for`` inherits values, and ``record_effects`` releases
+    the name again where a later assignment gives it a value the call cannot have changed.
+
+    Which definitions a call reaches is ``_function_call_targets``, closed over the calls each
+    body makes, so a call to a body that calls another withdraws both bodies' names. A body
+    nothing calls has no call site here and rebinds nothing, which is what keeps one uninvoked
+    helper from putting the whole fix back: ``f() { P=other.sh; }; P=task.sh; printf ... > "$P";
+    bash task.sh`` certified before that reachability was consulted.
+
+    A use above a call sees the call's rebinding on the next iteration of an enclosing loop, along
+    the same back edge a body's own assignment travels, so ``_scope_rebound_names`` is handed
+    these names as well and withdraws them from loop entry.
+
+    A name the body declares local is the one rebinding this shape can order, so it is not
+    collected. ``local``, and ``declare`` or ``typeset`` inside a body, bind a new variable for the
+    duration of the call and restore the caller's on return, so no value they assign is one the
+    caller can be holding at an operand. Collecting it withdrew the caller's own exact value for
+    the whole run body, and the function did not even have to be called:
+    ``f() { local P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh`` left the operand
+    dynamic and certified a body whose marker Bash writes to ``task.sh`` and runs. The two spellings
+    that do reach the caller are excluded from the exclusion rather than reasoned about: ``declare
+    -g`` is already not ``builtin_local``, and options this scan cannot read may spell ``-g``, so a
+    command carrying them keeps its names withdrawn. A later plain assignment to a name the body
+    declared local is still collected, since this pass tracks no per-body declaration state; that
+    is the coarse direction, and it leaves the operand where every other unresolved operand sits.
+
+    A write through a nameref alias inside a body reaches the caller under the name the alias
+    stands for rather than the one the assignment spells, so ``_nameref_rebindings`` is read here
+    as well: ``f(){ R=other.sh; }; declare -n R=P; P=task.sh; f`` leaves the caller holding
+    ``other.sh`` in ``P``, which no assignment in the body names.
+
+    An ``unset`` reaches the caller's variable space the same way an assignment does, and it is
+    not a rebinding a declaration can order, so a body's unset names are collected too:
+    ``f(){ unset P; }; P=task.sh; f; ... > "$P"`` expands to the empty word under Bash and opens
+    nothing, while projecting the value ``P`` still held named a file the run never writes. An
+    unset whose target this scan cannot read, and a builtin write to a name it cannot read,
+    withdraw the whole table instead, for the whole run body rather than from the call: the name
+    it reaches is unknown, so there is no name for a later assignment to release and no table to
+    confine it to.
+
+    A caller-visible write no evidence records is not collected here, because there is no record to
+    collect it from: ``getopts`` writes its name operand in the caller's variable space and the
+    deterministic writer evidence recognizes ``printf -v`` and ``read`` rather than it, so
+    ``f(){ getopts x P; }`` leaves the caller's value exact and an operand spelling it resolves to
+    the file that value names. Reading the name out of the ``getopts`` argv and withdrawing it here
+    would take the caller's exact value away for the whole run body whether or not any call rebinds
+    it, which is the trade the declaration exclusion above rejects, and it would leave the
+    top-level spelling, which is no function rebinding at all, exactly where it is. AD-18 discloses
+    the class with the other rebindings no evidence carries, and issue #205 tracks recording them.
+
+    A redirection operand is therefore never projected against a name a call can rebind, from that
+    call onward in the environment it runs in. Where the withdrawal does apply it is the direction
+    that leaves the operand dynamic rather than resolved to a file Bash never opens; every other
+    consumer of the value table is unaffected, since only the projection reads the withdrawal set.
+
+    Args:
+        evidence: The scan evidence whose commands carry their function context.
+        command_scope_paths: Each command's structured scope ancestry, outermost first.
+        scope_bound_names: The names each scope rebinds on entry, by scope id.
+        nameref_rebindings: The names each command writes through a nameref alias, by command id.
+        call_targets: The contexts each calling command reaches directly, by command id.
+
+    Returns:
+        The names each call leaves rebound for its caller, by command id, and whether some body
+        rebinds a name this scan cannot read.
+    """
+    called_contexts = _called_function_contexts(evidence, call_targets)
+    context_names: dict[int, set[str]] = {}
+    context_calls: dict[int, set[int]] = {}
+    unreadable = False
+    for command in evidence.commands:
+        context = command.function_context_id
+        if context is None or context not in called_contexts:
+            continue
+        names = context_names.setdefault(context, set())
+        context_calls.setdefault(context, set()).update(call_targets.get(command.command_id, ()))
+        declares_local = command.builtin_local and not command.builtin_dynamic_options
+        # A prefix assignment on a command that runs an argv rebinds nothing its caller can be
+        # holding at an operand: Bash applies ``P=other.sh true`` for the duration of ``true`` and
+        # restores the name after it, which is why ``record_effects`` applies
+        # ``definite_assignments`` only for an assignment-only command and why
+        # ``_scope_rebound_names`` collects it only there. Collecting it here withdrew the
+        # caller's own exact value for the whole run body, and one command inside one called body
+        # was enough: ``f(){ P=other.sh /bin/true; }; P=task.sh; f; printf ... > "$P"``
+        # certified a body whose marker Bash writes to ``task.sh`` and runs.
+        assignment_only = not command.argv or command.executable.argv_index is None
+        names.update(
+            _unscoped_variable_name(assignment.name)
+            for assignment in (
+                *command.assignments,
+                *(command.definite_assignments if assignment_only else ()),
+                *(() if declares_local else command.builtin_assignments),
+            )
+        )
+        names.update(nameref_rebindings.get(command.command_id, ()))
+        unset_names, unknown_unset = _unset_action(command)
+        names.update(_unscoped_variable_name(name) for name in unset_names)
+        unreadable = unreadable or unknown_unset or command.unknown_builtin_content is not None
+        for scope_id in command_scope_paths[command.command_id]:
+            names.update(scope_bound_names.get(scope_id, ()))
+    # A call reaches the names of every body its own body can call in turn, so the collection is
+    # closed over the call graph before any call site reads it. The closure is iterated rather
+    # than recursed, because a body may call itself and this module lowers every walk it owns.
+    reachable_names: dict[int, set[str]] = {
+        context: set(names) for context, names in context_names.items()
+    }
+    changed = True
+    while changed:
+        changed = False
+        for context, callees in context_calls.items():
+            carried = reachable_names.setdefault(context, set())
+            for callee in callees:
+                addition = reachable_names.get(callee)
+                if addition is not None and not addition <= carried:
+                    carried |= addition
+                    changed = True
+    rebindings: dict[int, frozenset[str]] = {}
+    for command in evidence.commands:
+        called = call_targets.get(command.command_id)
+        if not called:
+            continue
+        called_names: set[str] = set()
+        for context in called:
+            called_names.update(reachable_names.get(context, ()))
+        if called_names:
+            rebindings[command.command_id] = frozenset(called_names)
+    return rebindings, unreadable
+
+
+def _nameref_rebindings(
+    evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
+) -> tuple[dict[int, frozenset[str]], bool]:
+    """Return the names each command leaves stale by writing through a Bash nameref alias.
+
+    ``_route_runtime_nameref_writes`` runs after this pass, so a write through an alias is still
+    recorded under the alias here rather than under the variable it stands for:
+    ``P=t1.sh; declare -n R=P; R=t2.sh`` leaves this table holding ``P=t1.sh`` while Bash leaves
+    ``P=t2.sh``. Projecting that value named a file the run never opens, in both directions at
+    once, so a name an alias is written through is withdrawn, as is every alias's own name, which
+    stands for no value of its own here.
+
+    The withdrawal is reported at the command that performs the write rather than for the whole
+    run body, because a name the alias stands for stops being stale the moment something gives it
+    a value directly, and because a write a subshell performs reaches no table the parent shell
+    reads. Withdrawing everywhere kept the pre-#151 certification alive in both shapes:
+    ``declare -n R=P; R=other.sh; P=task.sh; printf ... > "$P"`` and
+    ``P=task.sh; ( declare -n R=P; R=other.sh ); printf ... > "$P"`` certified bodies whose marker
+    Bash writes to ``task.sh`` and runs. The walk applies each entry to the table of the context
+    and environment the command runs in, ``record_effects`` releases the name where a later
+    assignment values it, and ``_scope_rebound_names`` carries the same names into an enclosing
+    loop, where the next iteration returns the alias write to a use above it.
+
+    Only a write through an alias makes its target stale, so binding one does not withdraw it:
+    ``declare -n R=P`` alone, and the ``declare -n R; R=P`` spelling whose first assignment binds
+    rather than writes, both leave the target exact and keep the refusal they carry. A first
+    assignment whose content this scan cannot read as a variable name withdraws the whole table
+    instead, for the whole run body, since the alias it binds may stand for the operand's own name
+    and no name is known for a later assignment to release.
+
+    The alias state itself is source-ordered and carries no environments, so an alias written
+    through above its own declaration, which a function body can spell, leaves its target
+    unwithdrawn, and an alias a subshell binds is still read as one after that subshell exits.
+    Both are where the revision before this projection left them, and are pinned with the other
+    alias gaps.
+
+    Args:
+        evidence: The scan evidence whose commands carry their nameref declarations.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        The names each command's alias write can leave stale, by command id, and whether some
+        alias binds a name this scan cannot read.
+
+    Raises:
+        _TaintLimitExceeded: If a projected binding exceeds its bound.
+    """
+    rebindings: dict[int, frozenset[str]] = {}
+    aliases: dict[str, str | None] = {}
+    unreadable = False
+
+    def stands_for(alias: str) -> str | None:
+        seen: set[str] = set()
+        current = alias
+        while current in aliases and current not in seen:
+            seen.add(current)
+            bound = aliases[current]
+            if bound is None:
+                return None
+            current = bound
+        return current
+
+    for command in evidence.commands:
+        # One assignment reaches this walk through more than one of the groups below, and each is
+        # a step in the alias state rather than a name to collect: counting the binding twice read
+        # the second sighting as a write through the alias it had just bound. It is the same
+        # object arriving twice, so identity is what the walk skips on. Equality would deep-compare
+        # two content expression trees per sighting, which is the recursion this module lowers
+        # iteratively everywhere else, and it would also fold two distinct assignments that happen
+        # to spell the same thing into one step of the alias state.
+        applied: set[int] = set()
+        names: set[str] = set()
+        for assignment in (
+            *command.assignments,
+            *command.definite_assignments,
+            *command.builtin_assignments,
+        ):
+            if id(assignment) in applied:
+                continue
+            applied.add(id(assignment))
+            name = _unscoped_variable_name(assignment.name)
+            if assignment.nameref_unset:
+                aliases.pop(name, None)
+                names.add(name)
+                continue
+            declaration_target = assignment.nameref_target
+            if declaration_target is not None:
+                names.add(name)
+                bound = (
+                    assignment.content.name
+                    if isinstance(assignment.content, VariableRef)
+                    else declaration_target
+                )
+                aliases[name] = _unscoped_variable_name(bound) if bound else None
+                continue
+            if name not in aliases:
+                continue
+            if aliases[name] is None:
+                binding = _exact_content_literal(assignment.content, {}, limits)
+                if binding is None or not _static_variable_name(binding):
+                    unreadable = True
+                else:
+                    aliases[name] = binding
+                continue
+            target = stands_for(name)
+            if target is None:
+                unreadable = True
+            else:
+                names.add(target)
+        if names:
+            rebindings[command.command_id] = frozenset(names)
+    return rebindings, unreadable
+
+
+@dataclass(frozen=True, slots=True)
+class _NameProjectionTables:
+    """The three name sets one value table's redirection projection is decided by.
+
+    They are carried together because reading the wrong one is a silent change of direction: a
+    name in ``readonly`` makes Bash refuse a write, while a name in ``transformed`` makes Bash
+    accept one and store something other than the text this evidence carries. Both are mutated in
+    place by the walk that owns them, so this holds the live sets rather than copies of them.
+    """
+
+    withdrawn: set[str]
+    transformed: set[str]
+    readonly: set[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _NameProjectionInputs:
+    """Every table the redirection operand projection derives from the evidence alone.
+
+    None of them depends on anything the walk that reads them produces, so both passes over one
+    run body read the same ones. Building them per pass walked every scope and every command of
+    the body a second time per scan and discarded the result.
+    """
+
+    command_scope_paths: dict[int, tuple[int, ...]]
+    command_environments: dict[int, int]
+    environment_parents: dict[int, int | None]
+    scope_bound_names: dict[int, tuple[str, ...]]
+    command_rebindings: dict[int, frozenset[str]]
+    declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
+    called_declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
+    withdraw_every_name: bool
+
+
+def _name_projection_inputs(
+    evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
+) -> _NameProjectionInputs:
+    """Build the evidence-derived tables the redirection operand projection is decided by.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        The scope, environment, rebinding and declaration-attribute tables of that run body.
+    """
+    command_scope_paths = _command_scope_paths(evidence)
+    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    # The two rebindings a command performs outside its own assignments are collected before the
+    # scopes are, because a loop returns each of them to a use above it on the next iteration and
+    # ``_scope_rebound_names`` is what withdraws along that back edge. The scope names it produces
+    # without them are what the call collection reads for a body's own rebindings, and adding a
+    # name there could only widen a call site that already carries every name its body's scopes
+    # bind, so the two passes need no fixpoint between them: a loop inside a body reaches the
+    # caller through the call graph below, not through this table.
+    nameref_rebindings, nameref_unreadable_rebinding = _nameref_rebindings(evidence, limits)
+    call_targets = _function_call_targets(evidence, limits)
+    called_contexts = _called_function_contexts(evidence, call_targets)
+    scope_bound_names = _scope_rebound_names(evidence, command_scope_paths, {})
+    call_rebindings, function_unreadable_rebinding = _function_call_rebindings(
+        evidence,
+        command_scope_paths,
+        scope_bound_names,
+        nameref_rebindings,
+        call_targets,
+    )
+    # A declaration attribute is the third rebinding a command performs outside the text of its
+    # assignments, so the name it names joins the two above: withdrawn at the declaration, and
+    # withdrawn from the entry of any loop the declaration sits in, since the next iteration
+    # reaches a use above it with the attribute already set.
+    declaration_attributes = {
+        command.command_id: (
+            _declaration_attribute_names(command)
+            if _declaration_attributes_apply(command, called_contexts)
+            else ((), ())
+        )
+        for command in evidence.commands
+    }
+    # An attribute attached to a name this scan cannot read may be attached to the operand's own
+    # name, and there is no name for a later assignment to release, so the whole body's projection
+    # is withdrawn exactly as it is for an unreadable nameref binding or unset target.
+    declaration_unreadable_names = any(
+        _declaration_names_unreadable(command)
+        for command in evidence.commands
+        if _declaration_attributes_apply(command, called_contexts)
+    )
+    # An attribute a called body leaves set for its caller lands at the call instead, so the
+    # declaration a body is walked at governs that body's own table alone.
+    called_declaration_attributes = _called_declaration_attributes(evidence, call_targets)
+    attribute_rebindings = {
+        command_id: frozenset(transformed)
+        for command_id, (transformed, _readonly) in declaration_attributes.items()
+        if transformed
+    }
+    command_rebindings = {
+        command_id: nameref_rebindings.get(command_id, frozenset())
+        | call_rebindings.get(command_id, frozenset())
+        | attribute_rebindings.get(command_id, frozenset())
+        for command_id in (*nameref_rebindings, *call_rebindings, *attribute_rebindings)
+    }
+    return _NameProjectionInputs(
+        command_scope_paths=command_scope_paths,
+        command_environments=command_environments,
+        environment_parents=environment_parents,
+        scope_bound_names=_scope_rebound_names(evidence, command_scope_paths, command_rebindings),
+        command_rebindings=command_rebindings,
+        declaration_attributes=declaration_attributes,
+        called_declaration_attributes=called_declaration_attributes,
+        withdraw_every_name=(
+            function_unreadable_rebinding
+            or nameref_unreadable_rebinding
+            or declaration_unreadable_names
+        ),
+    )
+
+
+def _projection_launders_withdrawn_value(
+    content: ContentExpr,
+    values: Mapping[str, str],
+    withdrawn: AbstractSet[str],
+    limits: TaintLimits,
+) -> bool:
+    """Return whether this content reads a name the redirection projection has withdrawn.
+
+    A withdrawal keeps one name out of the operand projection, but the stale value stays in the
+    table every other reader shares, so an ordinary copy republished it under a fresh name that
+    carried no withdrawal at all: ``f(){ P=other.sh; }; P=task.sh; f; Q=$P; printf ... > "$Q"``
+    resolved the operand to ``task.sh`` and certified a body whose marker Bash writes into
+    ``other.sh`` and runs. The copy is therefore withdrawn too, wherever taking the withdrawn
+    names away changes what the content resolves to, which is the same one-hop test applied at
+    every hop rather than a depth this walk has to bound.
+
+    Args:
+        content: The assignment content being applied to the table.
+        values: The exact scalar values the content is resolved against.
+        withdrawn: The names this table's operand projection has withdrawn.
+        limits: The bounds this scan enforces.
+
+    Returns:
+        Whether the value this content resolves to depends on a withdrawn name.
+    """
+    if not withdrawn:
+        return False
+    resolved = _exact_content_literal(content, values, limits)
+    if resolved is None:
+        return False
+    visible = {name: value for name, value in values.items() if name not in withdrawn}
+    return _exact_content_literal(content, visible, limits) != resolved
+
+
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
+    *,
+    project_inputs: bool = True,
+    inputs: _NameProjectionInputs | None = None,
 ) -> _ShellTaintEvidence:
-    """Attach finalized stdin and exact bounded read-field projections."""
+    """Attach finalized stdin and exact bounded read-field projections.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+        limits: The bounds this scan enforces.
+        project_inputs: Whether to build each command's stdin. The pass that projects the
+            redirection operands feeding ``_pipe_inputs`` runs with this false, which is what
+            keeps the two passes from depending on each other.
+        inputs: The evidence-derived projection tables, built here when the caller has none. Both
+            passes over one run body read the same ones, since neither depends on anything either
+            walk produces.
+
+    Returns:
+        The evidence with every command's redirections resolved and, when ``project_inputs``,
+        its stdin and read-field projections attached.
+    """
     process_resources = {resource.resource_id: resource for resource in evidence.process_resources}
-    command_scope_paths = _command_scope_paths(evidence)
-    input_descriptors = _InputDescriptorContext(
-        scope_bindings=_scope_inherited_input_bindings(evidence, process_resources),
-        guarded=_guarded_input_descriptors(evidence),
-    )
-    pipe_inputs = _pipe_inputs(evidence, input_descriptors)
-    command_environments, environment_parents, _lastpipe = _execution_environment_ids(evidence)
+    if inputs is None:
+        inputs = _name_projection_inputs(evidence, limits)
+    command_scope_paths = inputs.command_scope_paths
+    # Resolve the redirection operands before the pipe inputs read them, for the same reason the
+    # walk below resolves them before the input projection: ``_pipe_inputs`` replays each writer's
+    # output descriptors against ``_guarded_output_descriptors``, which reads an unresolved operand
+    # as a direct binding and so guards a descriptor a resolved one names. ``P=/dev/stdout;
+    # exec 3> "$P"`` then refused a later ``>&3`` as an unresolved alias while the literal spelling
+    # of the same body certified, which is the asymmetry issue #151 exists to remove.
+    #
+    # The input descriptor context is built from that same resolved evidence, because
+    # ``_guarded_input_descriptors`` classifies a target by the identical test its output twin
+    # uses: reading the unresolved events there left the two halves of one descriptor
+    # classification disagreeing about which operand names a descriptor, and left the input half
+    # disagreeing with ``_build_flow_definitions``, which rebuilds this context from the resolved
+    # evidence one stage later.
+    #
+    # The naming pass builds no stdin, so a name a ``read`` supplies is unknown there and an
+    # operand spelling it keeps its dynamic target. That residue runs in both directions rather
+    # than one, and AD-18 records both.
+    #
+    # Only the projecting pass has a reader for either of these: the naming pass stops at the
+    # resolution and neither builds stdin nor replays a pipe. Building them there anyway walked
+    # every scope and every command of the body twice per scan and discarded both results.
+    if project_inputs:
+        descriptor_evidence = _resolve_builtin_writer_evidence(
+            evidence, limits, project_inputs=False, inputs=inputs
+        )
+        input_descriptors = _InputDescriptorContext(
+            scope_bindings=_scope_inherited_input_bindings(descriptor_evidence, process_resources),
+            guarded=_guarded_input_descriptors(descriptor_evidence),
+        )
+        pipe_inputs = _pipe_inputs(descriptor_evidence, input_descriptors)
+    else:
+        input_descriptors = _InputDescriptorContext(scope_bindings={}, guarded=frozenset())
+        pipe_inputs = {}
+    command_environments = inputs.command_environments
+    environment_parents = inputs.environment_parents
+    command_rebindings = inputs.command_rebindings
+    declaration_attributes = inputs.declaration_attributes
+    called_declaration_attributes = inputs.called_declaration_attributes
+
+    def apply_called_attributes(command_id: int, tables: _NameProjectionTables) -> None:
+        """Set the attributes a body this command calls leaves bound in its caller.
+
+        Both are applied after the command rather than before it, because Bash expands a
+        redirection word before it runs the command, so a call's own operand reads the table the
+        call was reached with. Neither withdraws the name: applying an attribute leaves the value
+        already stored untouched under Bash 5.2, so the caller's exact value survives the call and
+        it is the writes below that ``note_write`` measures against the attribute.
+
+        Args:
+            command_id: The command whose calls may leave an attribute set.
+            tables: The attribute sets of the table this command runs against.
+        """
+        transformed, readonly = called_declaration_attributes.get(command_id, ((), ()))
+        tables.transformed.update(transformed)
+        tables.readonly.update(readonly)
+
+    scope_environments: dict[int, int] = {}
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    # Both attribute sets accumulate in source order: a declaration decides what every later write
+    # to the name stores, and a "readonly" declaration is what makes a later write one Bash
+    # refuses, so the declaring command's own operand still applies. Each is kept per execution
+    # environment, inherited exactly as the value tables are, because a declaration a subshell
+    # makes is gone when the subshell exits: "( readonly P ); P=task.sh" leaves the parent's "P"
+    # writable, and withdrawing it there returned the operand below to the certification issue
+    # #151 exists to remove.
+    #
+    # Each is kept per function context as well, for the same reason the value tables are: a body
+    # is walked where it is written, so an attribute recorded against the environment alone bound
+    # the name before Bash had run the call, and "f(){ readonly P; }; P=task.sh; printf ... >
+    # "$P"; bash task.sh; f" certified a body whose marker Bash writes into "task.sh" and runs. A
+    # function body is still not an execution environment, so an attribute a called body binds in
+    # the caller's variable space does reach the caller, which is what Bash does with one:
+    # "_called_declaration_attributes" carries exactly those to the call sites, and the walk
+    # applies them after the call rather than at the declaration.
+    transformed_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    readonly_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    scope_bound_names = inputs.scope_bound_names
+    withdraw_every_name = inputs.withdraw_every_name
+    entered_scopes: list[int] = []
+    entered_scope_ids: set[int] = set()
+    scope_contexts: dict[int, int | None] = {}
+    applied_scopes_by_environment: dict[tuple[int | None, int], int] = {}
+    withdrawn_by_environment: dict[tuple[int | None, int], set[str]] = {}
+    visible_environments: dict[int, frozenset[int]] = {}
     commands: list[_CommandEvidence] = []
 
     def exact_values_for(context: int | None, environment: int) -> dict[str, str]:
@@ -3633,19 +4528,150 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         unknown_values_by_environment[key] = inherited
         return inherited
 
+    def applied_scopes_for(context: int | None, environment: int) -> int:
+        key = (context, environment)
+        cached = applied_scopes_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = applied_scopes_for(context, parent) if parent is not None else 0
+        applied_scopes_by_environment[key] = inherited
+        return inherited
+
+    def withdrawn_names_for(context: int | None, environment: int) -> set[str]:
+        key = (context, environment)
+        cached = withdrawn_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = set(withdrawn_names_for(context, parent)) if parent is not None else set()
+        withdrawn_by_environment[key] = inherited
+        return inherited
+
+    def transformed_names_for(context: int | None, environment: int) -> set[str]:
+        key = (context, environment)
+        cached = transformed_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = set(transformed_names_for(context, parent)) if parent is not None else set()
+        transformed_by_environment[key] = inherited
+        return inherited
+
+    def readonly_names_for(context: int | None, environment: int) -> set[str]:
+        key = (context, environment)
+        cached = readonly_by_environment.get(key)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = set(readonly_names_for(context, parent)) if parent is not None else set()
+        readonly_by_environment[key] = inherited
+        return inherited
+
+    def environments_visible_to(environment: int) -> frozenset[int]:
+        cached = visible_environments.get(environment)
+        if cached is not None:
+            return cached
+        parent = environment_parents.get(environment)
+        inherited = environments_visible_to(parent) if parent is not None else frozenset()
+        visible = inherited | {environment}
+        visible_environments[environment] = visible
+        return visible
+
+    def withdraw_entered_scopes(
+        command: _CommandEvidence,
+        environment: int,
+        withdrawn: set[str],
+    ) -> None:
+        """Withdraw every name an already-entered scope rebinds from this table's projection.
+
+        The withdrawal is the redirection projection's alone, so it accumulates in a set of names
+        beside the value table rather than in the table. Popping the name and marking it unknown
+        reached every other reader of that table instead, and one of them fails the whole scan
+        closed: ``read_ifs_unknown`` reads ``IFS`` out of the same unknown set, so
+        ``for IFS in , ; do :; done`` ahead of any ``read`` raised
+        ``taint.builtin-writer.unsupported-before-context`` for a body carrying no marker flow at
+        all. ``record_effects`` restores a name here when it applies a value for it, which is the
+        same point the table itself stops being stale.
+
+        Entry is recorded once in source order, but the tables are per function context and per
+        execution environment, so applying the withdrawal only where entry is first seen left
+        every other table holding the shadowed value: a loop body whose first command runs in a
+        subshell or a pipeline stage withdrew nothing from the enclosing environment, and neither
+        the rest of the body nor anything after ``done`` saw the binding at all. Each table
+        therefore counts the entries it has already applied, seeded from its parent when the
+        environment is first reached, so no scope is applied to one table twice and no table
+        rescans an entry it has already read.
+
+        A scope binds in the environment it is entered in, not in every environment the run body
+        has. A loop a subshell or a command substitution contains rebinds nothing its parent shell
+        can observe, so withdrawing there erased a value the enclosing table provably keeps and
+        left the operand it names dynamic. Each entry is therefore applied only where the scope's
+        own environment is the table's or an ancestor of it, which is the same containment
+        ``exact_values_for`` inherits values along. That environment is the innermost scope on the
+        entering command's ancestry that owns one, which ``environment_parents`` already names as
+        a key; the environments a pipeline allocates are not scopes, so a loop a pipeline stage
+        contains is not separated this way and keeps the withdrawal it always had.
+
+        A function body is not an execution environment, so that containment does not separate a
+        loop inside one from its caller. The entry is applied only to the tables of the function
+        context the scope was entered in as well, since a body's rebinding never reaches the
+        caller's table by this route: ``_function_call_rebindings`` withdraws it at the call that
+        reaches the body, and applying it here too took the caller's own exact value away for a
+        loop inside a function nothing calls.
+        """
+        lexical_environment: int | None = None
+        for scope_id in command_scope_paths[command.command_id]:
+            if scope_id in environment_parents:
+                lexical_environment = scope_id
+            if scope_id not in entered_scope_ids:
+                entered_scope_ids.add(scope_id)
+                entered_scopes.append(scope_id)
+                scope_contexts[scope_id] = command.function_context_id
+                if lexical_environment is not None:
+                    scope_environments[scope_id] = lexical_environment
+        key = (command.function_context_id, environment)
+        applied = applied_scopes_for(command.function_context_id, environment)
+        if applied == len(entered_scopes):
+            return
+        visible = environments_visible_to(environment)
+        for scope_id in entered_scopes[applied:]:
+            if scope_contexts.get(scope_id) != command.function_context_id:
+                continue
+            scope_environment = scope_environments.get(scope_id)
+            if scope_environment is not None and scope_environment not in visible:
+                continue
+            withdrawn.update(scope_bound_names.get(scope_id, ()))
+        applied_scopes_by_environment[key] = len(entered_scopes)
+
     def apply_exact(
         assignment: _AssignmentEvidence,
         values: dict[str, str],
         unknown_values: set[str],
         *,
         conditional: bool,
+        expansion_values: Mapping[str, str] | None = None,
     ) -> None:
         name = _unscoped_variable_name(assignment.name)
-        if conditional:
+        # A shell parameter Bash gives its own value to never holds the text an assignment spells,
+        # which is the ``declare -u`` mismatch with the attribute already set and no declaration to
+        # read it from. The value is dropped rather than stored, so every reader of this table is
+        # covered rather than the redirection projection alone: the eval replay and the exact
+        # ``read`` projection substitute out of the same table.
+        if conditional or name in _SELF_VALUED_SHELL_PARAMETERS:
             values.pop(name, None)
             unknown_values.add(name)
             return
-        value = _exact_content_literal(assignment.content, values, limits)
+        # A declaration builtin's operands are expanded before the builtin applies any of them, so
+        # a later operand reading an earlier name reads the value the command started with:
+        # ``A=other.sh; declare A=task.sh B=$A`` leaves ``B=other.sh`` under Bash. The append
+        # spelling is the measured exception, since ``declare A=2 A+=3`` leaves ``23``: the text
+        # it appends to is the one the same command applied, so the prior value below stays the
+        # live one. A prefix assignment on an ordinary command applies left to right and passes no
+        # snapshot at all, which is why ``A=1; A=2 B=$A`` leaves ``B=2``.
+        value = _exact_content_literal(
+            assignment.content, values if expansion_values is None else expansion_values, limits
+        )
         if value is None:
             values.pop(name, None)
             unknown_values.add(name)
@@ -3661,11 +4687,176 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             values[name] = value
             unknown_values.discard(name)
 
+    def note_write(name: str, tables: _NameProjectionTables) -> bool:
+        """Record one write against the declaration attributes the name carries.
+
+        A declaration attribute decides what Bash stores rather than what the assignment spells,
+        so a name carrying one is withdrawn from the projection at every write instead of being
+        released by it: ``declare -u P; P=task.sh`` leaves ``TASK.SH`` in the variable while this
+        table reads the assignment's own text. Case conversion and arithmetic evaluation are that
+        class, and the value applied below is left where every other reader of this table already
+        had it, since the withdrawal is the projection's alone.
+
+        A ``readonly`` name is the same mismatch from the other side, and what Bash does with the
+        rejected write is measured under 5.2 rather than assumed. Only a plain assignment exits a
+        non-interactive shell. Every write a builtin performs reports the error and keeps running:
+        ``export``, ``declare``, ``readonly``, ``typeset``, ``read``, ``printf -v``, a prefix
+        assignment on a command that runs an argv, an arithmetic evaluation, an ``unset`` and a
+        ``for`` loop's own variable each leave the name holding exactly the value it already had.
+        The write is therefore not applied, and the name is *not* withdrawn: the table already
+        holds the value Bash kept, and discarding it returned the operand to the dynamic target
+        issue #151 exists to remove. ``readonly P=task.sh; export P=other.sh || :; printf ... >
+        "$P"; bash task.sh`` certified a body whose marker Bash writes into ``task.sh`` and runs.
+
+        Keeping the value is the sound reading of the exiting spelling too. Nothing after a plain
+        assignment runs, so an operand below it names a file the run never reaches, and resolving
+        it refuses a body Bash never runs the marker in rather than certifying one it does.
+
+        Args:
+            name: The variable this command writes.
+            tables: The withdrawal and attribute sets of the table being written.
+
+        Returns:
+            Whether the write is one Bash refuses, so the caller must not apply it.
+        """
+        if name in tables.readonly:
+            return True
+        if name in tables.transformed:
+            tables.withdrawn.add(name)
+        else:
+            tables.withdrawn.discard(name)
+        return False
+
+    def record_effects(
+        command: _CommandEvidence,
+        routed: _CommandEvidence,
+        values: dict[str, str],
+        unknown_values: set[str],
+        tables: _NameProjectionTables,
+    ) -> None:
+        """Apply one command's assignments, unsets and unknown writes to its value table.
+
+        ``if``/``elif``/``else`` branch uncertainty lives in ``execution_status``, not in
+        ``conditionally_executed``. Without it an assignment inside an untaken branch replaced the
+        live value, and the exact ``read`` projection substituted that stale text as a literal.
+
+        A routed assignment always carries ``from_stdin`` false, so the extra term below is inert
+        for the pass that projects stdin and withdraws the name in the pass that does not, where
+        no stream was built to draw the value from.
+
+        Every effect that names a variable also releases it from the projection's withdrawal set,
+        so an assignment after ``done`` makes an operand spelling that name exact again, which is
+        the point the value a loop left it holding stops being the one an operand would read. A
+        write whose own value is read out of a withdrawn name releases nothing, since the text it
+        stores here is the stale one the withdrawal exists to keep out of an operand.
+        """
+        conditional = command.conditionally_executed or command.execution_status is not True
+        assignment_only = not command.argv or command.executable.argv_index is None
+
+        def apply_write(
+            assignment: _AssignmentEvidence,
+            *,
+            expansion_values: dict[str, str] | None = None,
+        ) -> None:
+            name = _unscoped_variable_name(assignment.name)
+            # Read before the write, since ``note_write`` releases the name being written and an
+            # append extends the very text the withdrawal keeps out of an operand.
+            laundered = (assignment.append and name in tables.withdrawn) or (
+                _projection_launders_withdrawn_value(
+                    assignment.content,
+                    values if expansion_values is None else expansion_values,
+                    tables.withdrawn,
+                    limits,
+                )
+            )
+            if note_write(name, tables):
+                return
+            apply_exact(
+                assignment,
+                values,
+                unknown_values,
+                conditional=conditional or assignment.from_stdin,
+                expansion_values=expansion_values,
+            )
+            if laundered:
+                tables.withdrawn.add(name)
+
+        if assignment_only:
+            for assignment in routed.definite_assignments:
+                apply_write(assignment)
+        # One snapshot for the whole operand list, taken before any of them is applied.
+        expansion_values = dict(values)
+        for assignment in routed.builtin_assignments:
+            apply_write(assignment, expansion_values=expansion_values)
+        unset_names, unknown_unset = _unset_action(command)
+        for name in unset_names:
+            # Bash refuses to unset a readonly name, reports it, and keeps running, so the name
+            # still holds the value it had and every later expansion reads that value. Popping it
+            # here made the name unknown and left an operand spelling it dynamic, which is the
+            # certification issue #151 exists to remove: "readonly P=task.sh; unset P; printf ...
+            # > \"$P\"; bash task.sh" writes the marker into task.sh and runs it, while the same
+            # body without the unset already refused.
+            if name in tables.readonly:
+                continue
+            values.pop(name, None)
+            note_write(name, tables)
+            if conditional:
+                unknown_values.add(name)
+            else:
+                unknown_values.discard(name)
+        if unknown_unset:
+            values.clear()
+            unknown_values.add("IFS")
+            tables.withdrawn.clear()
+        if routed.unknown_builtin_content is not None:
+            values.clear()
+            # The dynamic write may target IFS, so later reads must not assume the default.
+            unknown_values.add("IFS")
+            tables.withdrawn.clear()
+
     for command in evidence.commands:
         context = command.function_context_id
         environment = command_environments[command.command_id]
         exact_values = exact_values_for(context, environment)
         unknown_values = unknown_values_for(context, environment)
+        withdrawn_names = withdrawn_names_for(context, environment)
+        tables = _NameProjectionTables(
+            withdrawn=withdrawn_names,
+            transformed=transformed_names_for(context, environment),
+            readonly=readonly_names_for(context, environment),
+        )
+        # Withdraw the names an entered scope rebinds from the projection below. An operand
+        # projected against a value the loop has replaced names a file Bash never opens, which the
+        # redirection resolution turns into a write on the wrong resource.
+        #
+        # A command Bash provably never runs enters no scope, so it records none here. Recording
+        # it withdrew the scope's bindings for the rest of the run body over a loop no iteration
+        # of which happens: ``P=task.sh; if false; then for P in x; do :; done; fi; printf ... >
+        # "$P"`` left the operand dynamic and certified a body whose marker Bash writes to
+        # ``task.sh`` and runs. A command that only may run still records its scopes, which is the
+        # over-approximation this withdrawal is built on.
+        if command.execution_status is not False:
+            withdraw_entered_scopes(command, environment, withdrawn_names)
+        # A call into a body that rebinds in its caller, and a write through a nameref alias,
+        # reach this table under a name no assignment on this command spells. Both are withdrawn
+        # here, into the table of the context and environment the command runs in, and released
+        # by ``record_effects`` where a later assignment gives the name a value again. The
+        # withdrawal covers this command's own operand as well, which is where the whole-body
+        # collection this replaced already left it: Bash expands a redirection word before it runs
+        # the command, so a call site's own operand could keep the value it reads, but a prefix
+        # assignment through an alias makes that ordering a second measurement rather than the one
+        # ``record_effects`` already pins.
+        #
+        # It is applied again after that call, because a rebinding this command performs is not
+        # something this command's own writes release: ``declare -n R=P`` records a write to ``R``,
+        # and releasing ``R`` there projected the operand in ``> "$R"`` against the value ``P`` held
+        # at the declaration, so ``P=other.sh; declare -n R=P; P=task.sh; printf ... > "$R"``
+        # certified a body whose marker Bash writes into ``task.sh`` and runs.
+        withdrawn_names.update(command_rebindings.get(command.command_id, ()))
+        # The attribute this command sets governs its own operands too, so it is read before the
+        # values below are projected. A "readonly" name is collected after the command instead,
+        # since the declaration's own assignment is the one write Bash does accept.
+        tables.transformed.update(declaration_attributes[command.command_id][0])
         command_values = dict(exact_values)
         command_unknown_values = set(unknown_values)
         for assignment in command.definite_assignments:
@@ -3675,9 +4866,53 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
                 command_unknown_values,
                 conditional=False,
             )
+        # Only an operand whose own syntax named no resource carries a word to project, and the
+        # resolution returns the events unchanged when none does, so the filtered value table and
+        # the command copy below are built only where something can read them. Building them for
+        # every command allocated a table copy and a fresh frozen dataclass per command, in both
+        # passes, and discarded almost all of them.
+        if any(event.target_word is not None for event in command.redirections):
+            assignment_only = not command.argv or command.executable.argv_index is None
+            # Bash expands a redirection word before it applies the prefix assignments of a command
+            # that runs one, so ``P=other.sh; P=task.sh printf ... > "$P"`` writes to ``other.sh``.
+            # An assignment-only command is the measured exception: its assignments land first, and
+            # ``P=task.sh > "$P"`` truncates the file the NEW value names. Reading the wrong table
+            # would name a file Bash never touches, which is a certification rather than a refusal
+            # whenever the file the marker really reaches stays unmodeled.
+            redirection_values = command_values if assignment_only else exact_values
+            if withdraw_every_name:
+                redirection_values = {}
+            elif withdrawn_names:
+                redirection_values = {
+                    name: value
+                    for name, value in redirection_values.items()
+                    if name not in withdrawn_names
+                }
+            # Resolve before the input projection reads the redirections, not after: an operand
+            # under ``<`` names the file a ``read`` draws its record from, so building stdin from
+            # the unresolved events left ``read -r X < "$P"`` reading a resource nothing had
+            # written while the literal spelling of the same body refused.
+            redirected = replace(
+                command,
+                redirections=_resolve_dynamic_redirection_targets(
+                    command.redirections, redirection_values, limits
+                ),
+            )
+        else:
+            redirected = command
+        if not project_inputs:
+            # This pass exists to name the operands ``_pipe_inputs`` replays, so it stops here:
+            # building stdin is what needs those inputs, and a ``read`` therefore names no exact
+            # value below rather than one drawn from a stream this pass has not built.
+            commands.append(redirected)
+            record_effects(command, redirected, exact_values, unknown_values, tables)
+            withdrawn_names.update(command_rebindings.get(command.command_id, ()))
+            tables.readonly.update(declaration_attributes[command.command_id][1])
+            apply_called_attributes(command.command_id, tables)
+            continue
         stdin = _strip_one_trailing_newline(
             _input_expression(
-                command,
+                redirected,
                 pipe_inputs,
                 process_resources,
                 command_scope_paths,
@@ -3741,7 +4976,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             )
 
         routed = replace(
-            command,
+            redirected,
             assignments=tuple(route(assignment) for assignment in command.assignments),
             definite_assignments=tuple(
                 route(assignment) for assignment in command.definite_assignments
@@ -3752,41 +4987,10 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             unsupported_builtin_write=(command.unsupported_builtin_write or read_ifs_unknown),
         )
         commands.append(routed)
-        # ``if``/``elif``/``else`` branch uncertainty lives in ``execution_status``, not in
-        # ``conditionally_executed``. Without it an assignment inside an untaken branch replaced
-        # the live value, and the exact ``read`` projection below substituted that stale text as a
-        # literal.
-        conditional = command.conditionally_executed or command.execution_status is not True
-        assignment_only = not command.argv or command.executable.argv_index is None
-        if assignment_only:
-            for assignment in routed.definite_assignments:
-                apply_exact(
-                    assignment,
-                    exact_values,
-                    unknown_values,
-                    conditional=conditional,
-                )
-        for assignment in routed.builtin_assignments:
-            apply_exact(
-                assignment,
-                exact_values,
-                unknown_values,
-                conditional=conditional,
-            )
-        unset_names, unknown_unset = _unset_action(command)
-        for name in unset_names:
-            exact_values.pop(name, None)
-            if conditional:
-                unknown_values.add(name)
-            else:
-                unknown_values.discard(name)
-        if unknown_unset:
-            exact_values.clear()
-            unknown_values.add("IFS")
-        if routed.unknown_builtin_content is not None:
-            exact_values.clear()
-            # The dynamic write may target IFS, so later reads must not assume the default.
-            unknown_values.add("IFS")
+        record_effects(command, routed, exact_values, unknown_values, tables)
+        withdrawn_names.update(command_rebindings.get(command.command_id, ()))
+        tables.readonly.update(declaration_attributes[command.command_id][1])
+        apply_called_attributes(command.command_id, tables)
     return replace(evidence, commands=tuple(commands))
 
 
@@ -5238,9 +6442,10 @@ def _static_eval_redirection_target(
 
     The operand is reparsed with the payload's own second-pass quote and parameter semantics, so
     a quoted ``'$LOG'`` names the literal file Bash names while an unquoted ``$LOG`` resolves to
-    no static key. The latter is the same dynamic target the authored path already declines to
-    write through, and stays tracked as issue #151 for both routes rather than being modeled
-    here.
+    no static key. Issue #151 gave the authored route the exact-value projection that names the
+    file behind such an operand, but this route reparses one payload word with no table of the
+    values in effect around it, so an unquoted reference here still resolves to the dynamic
+    target rather than being modeled.
 
     Args:
         source_word: The operand word exactly as the payload spells it.
@@ -10296,6 +11501,296 @@ def _static_variable_name(value: str) -> bool:
             character.isascii() and (character.isalnum() or character == "_")
             for character in value[1:]
         )
+    )
+
+
+_DECLARATION_BUILTIN_NAMES = ("declare", "typeset", "local", "export", "readonly")
+_VALUE_TRANSFORMING_DECLARATION_FLAGS = frozenset("ulci")
+# The option letters each declaration builtin accepts, measured under Bash 5.2 by offering every
+# letter to each builtin and reading back which ones it refuses. Bash refuses the whole command for
+# one letter outside its builtin's set, digits included, so a declaration spelling any of them
+# applies no attribute at all. "export" and "readonly" accept none of the value-transforming
+# letters and no "-r": "export -u P" and "readonly -r P" are both invalid options.
+_VALID_DECLARATION_FLAGS = {
+    "declare": frozenset("acfgilnprtuxAFGI"),
+    "typeset": frozenset("acfgilnprtuxAFGI"),
+    "local": frozenset("acfgilnprtuxAFGI"),
+    "export": frozenset("afnpA"),
+    "readonly": frozenset("afnpA"),
+}
+# "-f" and "-F" select shell functions, so a declaration carrying either names no variable at all.
+_FUNCTION_SELECTING_DECLARATION_FLAGS = frozenset("fF")
+# The builtins whose "-r" binds in the current scope rather than globally. "readonly" itself marks
+# the caller's variable even from a body, and "export" has no "-r" to read.
+_SCOPED_DECLARATION_BUILTIN_NAMES = frozenset({"declare", "typeset", "local"})
+
+
+def _declaration_attributes_apply(
+    command: _CommandEvidence,
+    called_contexts: frozenset[int],
+) -> bool:
+    """Return whether a declaration on this command sets an attribute the run body ever carries.
+
+    An attribute is what withdraws a name from the redirection operand projection, and a
+    withdrawal returns the operand to the dynamic target that certified before issue #151 closed
+    it. A declaration Bash never reaches sets nothing, so reading one withdrew a name over a
+    command that does not exist at runtime, and a single unreachable word disabled the resolution
+    for the rest of the run body: ``if false; then readonly P; fi`` and ``f(){ declare -u P; }``
+    each certified a body whose marker Bash writes through ``> "$P"`` and runs.
+
+    Two shapes are decided here and the third, a declaration a subshell makes, is decided by the
+    attribute tables that read this. A branch ``execution_status`` proves untaken runs nothing; a
+    function body no call reaches runs nothing either, which is the same reachability
+    ``_function_call_rebindings`` already withdraws a body's assignments by. A command that only
+    *may* run still counts, since the attribute may be set by the time an operand below expands,
+    and that is the direction this withdrawal is built on.
+
+    Reachability is all this decides. *Where* a reachable body's attribute lands is a separate
+    question those tables answer by keeping a set per function context, so what a body declares
+    governs the body's own table here and reaches its caller only through the call sites
+    ``_called_declaration_attributes`` carries it to.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+        called_contexts: Every function context a call in this run body can transfer control into.
+
+    Returns:
+        Whether an attribute this command declares can be in effect for a later write.
+    """
+    if command.execution_status is False:
+        return False
+    context = command.function_context_id
+    return context is None or context in called_contexts
+
+
+@dataclass(frozen=True, slots=True)
+class _DeclarationWords:
+    """One declaration builtin's readable option letters and name operands.
+
+    ``dynamic_word`` records that some word of the command is an expansion this scan cannot read,
+    which matters for both readers: an option there may spell an attribute, and a *name* there is
+    an attribute attached to a name nobody can see.
+    """
+
+    builtin: str
+    flags: frozenset[str]
+    names: tuple[str, ...]
+    dynamic_word: bool
+
+
+def _declaration_words(command: _CommandEvidence) -> _DeclarationWords | None:
+    """Return the option letters and name operands one declaration builtin spells.
+
+    Only the setting spelling of an option is read. A ``+u`` removes the attribute, and not
+    reading it keeps the name withdrawn where Bash has restored it, which is the direction that
+    leaves an operand dynamic rather than naming a file on a guess.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        The words of that declaration, or ``None`` when the command spells no declaration builtin.
+    """
+    if not command.argv:
+        return None
+    index: int | None = None
+    builtin = ""
+    for candidate in _DECLARATION_BUILTIN_NAMES:
+        index = _builtin_executable_index(command, candidate)
+        if index is not None:
+            builtin = candidate
+            break
+    if index is None:
+        return None
+    letters: set[str] = set()
+    names: list[str] = []
+    dynamic_word = False
+    options_enabled = True
+    for argument in command.argv[index + 1 :]:
+        if argument.dynamic:
+            dynamic_word = True
+            continue
+        literal = argument.literal
+        if options_enabled and literal == "--":
+            options_enabled = False
+            continue
+        if options_enabled and literal.startswith(("-", "+")) and literal not in {"-", "+"}:
+            if literal.startswith("-"):
+                letters.update(literal[1:])
+            continue
+        name = literal.split("=", 1)[0].removesuffix("+")
+        if _static_variable_name(name):
+            names.append(name)
+    # An option word may follow an operand, so the letters cover the whole command rather than the
+    # words after the flag that spells the attribute.
+    return _DeclarationWords(
+        builtin=builtin,
+        flags=frozenset(letters),
+        names=tuple(dict.fromkeys(names)),
+        dynamic_word=dynamic_word,
+    )
+
+
+def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
+    """Return the names a declaration attributes, split by what the attribute does to a write.
+
+    A declaration attribute decides what Bash stores rather than what an assignment spells, and
+    this evidence carries the assignment's own text. ``declare -u P; P=task.sh`` leaves ``TASK.SH``
+    in the variable while the exact table reads ``task.sh``, so an operand spelling the name
+    resolves to a resource the run never opens, in both directions at once. Case conversion
+    (``-u``, ``-l``, ``-c``) and arithmetic evaluation (``-i``) are that class.
+
+    ``readonly``, and ``-r`` on any of the scoped declaration builtins, is the same mismatch
+    reached from the other side: the declaration's own operand is stored exactly, and it is every
+    *later* assignment that Bash refuses, leaving the name holding what it already had. The two are
+    reported separately because the first withdraws the name from its declaration onward and the
+    second only decides that a write is one Bash rejects, which is what keeps
+    ``readonly P=task.sh; printf ... > "$P"`` naming the file the marker reaches.
+
+    What this reports is the attribute in the scope the declaration runs in: the caller's variable
+    space for a top-level command, and the body's own for one inside a function.
+    ``_caller_declaration_attribute_names`` owns the narrower question of what survives the return,
+    and the walk applies that at the call site rather than at this command, since a body Bash has
+    not called yet has set nothing.
+
+    ``-f`` and ``-F`` select shell *functions*, so a declaration carrying either attributes no
+    variable. Reading ``readonly -f g`` as a readonly variable froze the like-named variable and
+    disabled this resolution for it, which is the certification issue #151 exists to remove.
+
+    An option this scan cannot read needs no reading here: the scanner records it as unknown
+    builtin content, and ``record_effects`` already drops every exact value the table holds when a
+    command carries one. A *name* this scan cannot read is a different question, and
+    ``_declaration_names_unreadable`` owns it.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        The names given a value-transforming attribute, and the names made readonly.
+    """
+    words = _declaration_words(command)
+    if words is None or words.flags & _FUNCTION_SELECTING_DECLARATION_FLAGS or not words.names:
+        return (), ()
+    if not _declaration_flags_accepted(words):
+        return (), ()
+    transforms = bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS)
+    readonly = _declaration_marks_readonly(words)
+    return (words.names if transforms else (), words.names if readonly else ())
+
+
+def _caller_declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
+    """Return the names a declaration inside a function body leaves attributed for its caller.
+
+    A function body is not an execution environment, so an attribute it sets can outlive the call,
+    but only where Bash binds it in the caller's variable space rather than in the local one the
+    return discards. Which of them do is measured under Bash 5.2:
+    ``f(){ D P; }; P=task.sh; f; P=task2.sh`` leaves ``task2.sh`` untransformed for every ``D``
+    without ``-g`` and transformed for every one with it, ``declare``, ``typeset`` and ``local``
+    alike, and ``readonly`` marks the caller's variable from a body with no ``-g`` at all.
+
+    Reading this at the declaration instead of at the call is what
+    ``_declaration_attributes_apply`` could not fix by reachability alone. A body is walked where
+    it is written, so an attribute read there bound the name before Bash had run the call:
+    ``f(){ readonly P; }; P=task.sh; printf ... > "$P"; bash task.sh; f`` certified a body whose
+    marker Bash writes into ``task.sh`` and runs, and so did the same body with the call moved
+    ahead of the sink, since the withdrawal followed the text rather than the call.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        The names the caller sees transformed, and the names the caller sees made readonly.
+    """
+    if command.function_context_id is None:
+        return (), ()
+    words = _declaration_words(command)
+    if words is None or not _declaration_survives_return(words):
+        return (), ()
+    return _declaration_attribute_names(command)
+
+
+def _declaration_flags_accepted(words: _DeclarationWords) -> bool:
+    """Return whether the selected builtin accepts every option letter this declaration spells.
+
+    A declaration builtin refuses its whole command for one option it does not take, applying no
+    attribute and assigning nothing, so reading an attribute out of the letter regardless withdrew
+    a name over a command that sets nothing. The generic letter test read ``export -u P`` as a case
+    conversion, and ``P=task.sh; export -u P || :; printf ... > "$P"; bash task.sh`` certified a
+    body whose marker Bash writes into ``task.sh`` and runs, while Bash 5.2 reports ``-u: invalid
+    option``, continues through ``|| :`` and leaves ``P`` naming the file the marker reaches.
+
+    Only the setting spelling is read, exactly as ``_declaration_words`` collects it. A ``+u``
+    Bash also refuses spells no attribute here either, so nothing is withdrawn on its account and
+    the name keeps the exact value Bash left it holding.
+
+    Args:
+        words: The option letters and selected builtin of one declaration.
+
+    Returns:
+        Whether Bash runs this declaration rather than refusing it for an invalid option.
+    """
+    return not words.flags - _VALID_DECLARATION_FLAGS[words.builtin]
+
+
+def _declaration_marks_readonly(words: _DeclarationWords) -> bool:
+    """Return whether this declaration makes its names readonly in the scope it runs in.
+
+    Args:
+        words: The option letters and selected builtin of one declaration.
+
+    Returns:
+        Whether a later write to one of its names is one Bash refuses in that scope.
+    """
+    if words.builtin == "readonly":
+        return True
+    return "r" in words.flags and words.builtin in _SCOPED_DECLARATION_BUILTIN_NAMES
+
+
+def _declaration_survives_return(words: _DeclarationWords) -> bool:
+    """Return whether an attribute a function body declares still binds once the call returns.
+
+    ``-g`` is what binds a scoped builtin's attribute in the caller's variable space, and it is
+    read for ``local`` as well as ``declare`` and ``typeset``, because ``local -gr`` and
+    ``local -gu`` both reach the caller under Bash 5.2 while their spellings without ``-g`` do not.
+    ``readonly`` marks the caller's variable from a body with no ``-g`` at all.
+
+    Args:
+        words: The option letters and selected builtin of one declaration.
+
+    Returns:
+        Whether the attribute outlives the function body that declares it.
+    """
+    return words.builtin == "readonly" or "g" in words.flags
+
+
+def _declaration_names_unreadable(command: _CommandEvidence) -> bool:
+    """Return whether a declaration attributes a name this scan cannot see.
+
+    ``N=P; declare -gu "$N"; P=task.sh; printf ... > "$P"`` attaches the attribute to a name no
+    word of this command spells, so the readable operands carry none of it and the value table
+    keeps the assignment's own text. The command carries no unknown builtin content either, so
+    nothing else clears that table, and the operand below resolved to ``task.sh`` while Bash wrote
+    the marker into ``TASK.SH``.
+
+    Only a declaration whose readable words already establish an attribute is reported. A
+    ``declare "$F" P`` whose *option* is the expansion spells no attribute here and is the same
+    residue as every other word this scan cannot read.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        Whether an attribute this command sets may reach a name this scan cannot name.
+    """
+    words = _declaration_words(command)
+    if words is None or not words.dynamic_word:
+        return False
+    if words.flags & _FUNCTION_SELECTING_DECLARATION_FLAGS:
+        return False
+    if not _declaration_flags_accepted(words):
+        return False
+    return bool(words.flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS) or _declaration_marks_readonly(
+        words
     )
 
 

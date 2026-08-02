@@ -815,6 +815,359 @@ resource this body writes. Such an operand resolves to no static key, so the exa
 the glob target guard both skipped it and `F=t.sh; source "$F"` certified a file the body itself
 wrote the marker into.
 
+A simple command's redirection operand that names no resource by its syntax alone is projected
+against the exact scalar values in effect where Bash expands it, so `P=task.sh; printf ... > "$P"`
+writes to the key `bash task.sh` later reads. Resource identity used to follow literal syntax only,
+which left that write on a nameless target while the read saw a key nothing had written, and the
+body certified while Bash ran the marker (issue #151). The projection is the one the eval replay
+already trusts, so an operand resolves only when every path reaching it assigns the same literal,
+and anything else keeps the dynamic target it had. Which values apply is measured against Bash 5.2
+rather than assumed: a command that runs an argv expands the word before its own prefix assignments
+take effect, so `P=other.sh; P=task.sh printf ... > "$P"` writes to `other.sh`, while an
+assignment-only command applies its assignments first and `P=task.sh > "$P"` truncates the file the
+new value names. Reading the wrong table would name a file Bash never touches and leave the file the
+marker really reaches unmodeled, which is a certification rather than a refusal.
+
+Resolving an operand can name a descriptor rather than a file, because a variable holding
+`/dev/stdout`, a `/dev/fd` alias, or a digit under `>&` is exactly what its literal spelling names.
+That widens the analysis in one measured place: a non-descriptor target makes the descriptor an
+`exec` binds directly guarded, so `P=/dev/stdout; exec 3> "$P"` used to refuse a later `>&3` as an
+unresolved source and now drops it as a duplication of a standard stream. The literal spelling
+`exec 3> /dev/stdout` always certified, so the resolution makes the two spellings agree rather than
+withdrawing a guard from a shape that had one on its own merits, and the fixtures that pin the
+shape carry the real-Bash evidence that Bash runs no marker through it. A guard that refuses
+because a target is dynamic would have to be reconsidered against this decision before it is added.
+
+The resolution runs before each command's stdin is built and before the pipe inputs are, because
+both read the redirection evidence. An operand under `<` names the file a `read` draws its record
+from, and the descriptor replay that decides which writer reaches an output process substitution
+treats an unresolved operand as a direct binding, which guards the very descriptor a resolved one
+names. Without the second ordering, an output process substitution anywhere in the body brought the
+refusal back for `P=/dev/stdout; exec 3> "$P"` while the literal spelling certified. Naming the
+operands is therefore its own pass over the body, and that pass builds no stdin, since building
+stdin is what needs the inputs it feeds. The input descriptor context is built from that same
+named evidence, because the input half of the descriptor classification tests a target exactly as
+its output twin does, and reading unresolved events there left the two halves disagreeing with
+each other and with the flow definitions, which are built from the named evidence one stage later.
+Neither is built in the naming pass, which stops at the resolution and reads no stdin and no pipe.
+One value therefore cannot cross that line: a name a `read` supplies
+is unknown in the naming pass alone, so `read -r P; exec 3> "$P"` keeps a dynamic target there, the
+descriptor stays guarded, and a later `>&3` refuses where every other spelling now certifies. That
+residue runs in both directions rather than one. The refusing direction is pinned with the literal
+control that isolates the withheld value from the `read` and from the descriptor shape. The
+certifying direction is the same unknown name under a write: `echo task.sh | { read -r P; printf ...
+> "$P"; }; bash task.sh`, its process-substitution spelling, and the plain file spelling
+`read -r P < n.txt` all record the marker on a target the model discards. What separates them from
+the here-string and heredoc spellings, which refuse, is whether the record is inline literal text:
+those two carry theirs in the redirection itself, while a pipe, a process substitution and a file
+each draw it from a resource, which yields a deferred projection rather than an exact value in the
+naming pass. All three sit with the pinned gaps below.
+
+The resolution reaches one simple command's own quoted operand. Four classes stay inside the
+dynamic resource alias boundary above, each pinned as certifying with the real-Bash differential
+attached so a change that closes or widens one is visible. A compound command's redirection word
+is expanded at compound entry rather than at any command inside it, and this evidence shape
+carries no scope-entry value table, so `{ ...; } > "$P"` is not projected; a function body's and a
+loop body's own assignments are conditional in this model, so a name assigned there is unknown
+from that point and the same write in either place is not projected (issue #188). An unquoted
+operand is word-split and pathname-expanded by Bash before anything is opened, so `P='ta*.sh'`
+names a pattern and `P='a b.sh'` is an ambiguous redirect that opens nothing; the word is not
+carried for such an operand at all, which leaves the unquoted spelling exactly where the literal
+`> ta*.sh` spelling already sat (issue #189). Authored pattern syntax outside the quotes is the
+same class one step over, since the expansion is quoted and the pattern is not: `> "$P"*.sh` is
+pathname-expanded after the reference expands, and `> "$P"{1,2}.sh` is an ambiguous redirect, so
+neither carries a word either. A parameter expansion that transforms, indexes,
+defaults, or indirects its value lowers to no closed content expression, so `${P%.txt}` and its
+family keep a dynamic target (issue #190). The exact eval payload route reparses one payload word
+with no table of the values around it, so an unquoted reference inside a payload is not projected
+either.
+
+What a name the surrounding body assigned means where the walk cannot order the rebinding is a
+separate question from those gaps, because that value is exact and the operand would be projected
+against it. Three rebindings escape the source-order walk, and each withdraws the name rather than
+projecting it forward: a `for` or `select` binding, which is not one of the assignments the walk
+applies; a name a loop body assigns, which the next iteration carries back to a use above the
+assignment along an edge this walk has no shape for; and a name any function body assigns or
+binds, since a body rebinds in its caller's variable space while the walk keeps a separate value
+table per function context. Projecting instead named a file Bash never opens: `P=other.sh; for P
+in task.sh; do printf ... > "$P"; done; bash other.sh` recorded the write on `other.sh` and
+refused a body whose marker only ever reaches `task.sh`.
+
+The withdrawal is the projection's alone. It accumulates in a set of names beside each value table
+rather than in the table, because popping the name there and marking it unknown reached every other
+reader of that table, and one of them fails the whole scan closed: an unknown `IFS` makes a later
+`read` a builtin write the model cannot represent, so `for IFS in , ; do :; done` ahead of any
+`read` reported a marker-free body as unscannable. An effect that names the variable releases it
+again, which is the same point the table itself stops being stale.
+
+Two writes release nothing, because the value they leave is the stale one the withdrawal exists to
+keep out of an operand. A write whose own content reads a withdrawn name republished that value
+under a fresh name that carried no withdrawal at all: `f(){ P=other.sh; }; P=task.sh; f; Q=$P;
+printf ... > "$Q"; bash other.sh` recorded the marker on `task.sh` and certified a body Bash runs
+it in, and the same one-hop copy laundered a loop binding, a nameref alias and a declared attribute
+alike. The copy is therefore withdrawn wherever taking the withdrawn names away changes what its
+content resolves to, which is the one-hop test applied at every hop rather than a depth this walk
+has to bound, and an append to an already-withdrawn name extends that same text. A rebinding the
+*writing command itself* performs is the second: `declare -n R=P` records a write to `R`, and
+releasing `R` there projected `> "$R"` against the value `P` held at the declaration, so the
+withdrawal is reapplied after each command's own effects. What a loop binding leaves the
+read and eval projections holding is therefore exactly what it held before this decision, including
+the value a loop really replaces: `for IFS in , ; do :; done; read -r A B < f` splits on the IFS the
+table already had. That is a hole in this value table rather than in the operand resolution, it
+predates this decision, and closing it belongs with the rebindings issue #205 tracks rather than
+with a withdrawal that exists to keep one operand from naming the wrong file.
+
+Every withdrawal applies at a point in the walk rather than taking a name away from the body, so an
+assignment after the loop resolves the operand as it always did, and a subshell binding, which
+does not survive its scope, leaves the outer value naming the file the marker really reaches. Each
+value table counts the scope entries it has already applied, seeded from its parent when the
+environment is first reached, so a body whose first command runs in a subshell or a pipeline stage
+still withdraws from the enclosing environment. A scope entry reaches only the environment the
+scope binds in and the environments forked from it, which is the innermost scope on its ancestry
+that owns an environment: `( for P in task.sh; do :; done )` and its command substitution spelling
+rebind nothing the enclosing shell can observe, and withdrawing there erased a value that shell
+provably keeps. The environments a pipeline allocates are not scopes, so the pipeline spelling of
+that shape is not separated from the enclosing table and keeps the withdrawal, which leaves it
+where every other unresolved operand sits. A function body is not an execution environment either,
+so the entry is applied only within the function context the scope was entered in; the caller's
+table is covered by the third withdrawal instead of by this one.
+
+Only an assignment that outlives its command is a rebinding a back edge can carry. A prefix
+assignment on a command that runs an argv is not: Bash applies `P=other.sh true` for the duration
+of `true` and restores the name after it, which is why the value table applies a command's own
+assignments only when the command runs no argv. Counting it withdrew a name no iteration replaces,
+and a body that never runs at all was enough to do it.
+
+The third withdraws at each call rather than for the whole run body. Withdrawing everywhere was
+coarser in the direction that leaves an operand dynamic, and that direction is not safe here: a
+dynamic target is discarded, so the marker write goes unrecorded and the sink below certifies a
+flow Bash really runs. Two shapes no call reaches were certified that way, each of them the
+pre-#151 certification arriving back through the fix that closes it. A caller that assigns the name
+after the call holds a value no call can have changed, so `f(){ P=other.sh; }; f; P=task.sh; printf
+... > "$P"; bash task.sh` ran the marker Bash writes to `task.sh`; and a call an isolated
+environment contains rebinds nothing the parent shell reads, so the subshell, command substitution
+and pipeline stage spellings of `P=task.sh; (f)` did the same. The names are therefore withdrawn
+into the value table of the function context and execution environment the call runs in, along the
+containment values are already inherited by, and an effect that names the variable releases it
+exactly as it releases a scope withdrawal. A later call withdraws it again.
+
+Which definitions a call reaches is the same notion of a called name the later call-site resolution
+is built from, a command's resolved executable name and the exact heads a bounded static `eval`
+input spells, over-approximated on every axis it has: a name matches every definition of it rather
+than the active one, order is ignored, and a call behind a false condition counts. A head this scan
+cannot read names nothing, exactly as it does in that later pass, so this is the same assumption
+rather than a second one. The collection is closed over the calls each body makes, so a call to a
+body that calls another withdraws both bodies' names, and a body nothing calls has no call site and
+rebinds nothing: `f() { P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` certified a body
+whose marker Bash writes to `task.sh` and runs, on the strength of a helper the run never invokes.
+
+A prefix assignment inside a body is excluded for the reason the loop back edge excludes it: Bash
+restores it after the command it prefixes, so no call leaves it in the caller, and counting it took
+the caller's exact value away for the whole run body.
+
+A use above a call sees that call's rebinding on the next iteration of an enclosing loop, along the
+edge a body's own assignment travels, so a loop withdraws the names its calls rebind from loop
+entry as well. That withdrawal carries no environment, since a scope withdraws what every command
+under it rebinds, so a call an isolated environment contains inside a loop stays withdrawn for the
+whole loop where its unlooped spelling resolves. That is the coarse direction, and it leaves the
+operand where every other unresolved operand sits.
+
+Withdrawing in all these cases means the operand keeps the target it had before this decision, so
+what Bash leaves the name holding after `done`, on a second iteration, or after a call no assignment
+follows is a false certification of the same shape and size as every other unresolved operand,
+pinned in both directions alongside them.
+
+A name the body declares local is not one of the three. `local`, and `declare` or `typeset` inside
+a body, bind for the duration of the call and restore the caller's variable on return, so no value
+they assign is one the caller can be holding at an operand. Withdrawing it read a declaration as a
+rebinding and took the caller's own exact value away for the whole run body, without the function
+even being called: `f() { local P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` left the
+operand dynamic and certified a body whose marker Bash writes to `task.sh` and runs. The two
+spellings that do reach the caller keep the withdrawal rather than being reasoned about: a
+`declare -g` is a global write and never local to begin with, and options this scan cannot read
+may spell `-g`. A plain assignment after a declaration in the same body withdraws as well, since
+this pass carries no per-body declaration state; that is the coarse direction, and it leaves the
+operand where every other unresolved operand sits.
+
+An `unset` in a body is a rebinding of the same kind as an assignment, since Bash restores nothing
+on return, so a body's unset names are withdrawn too: `f(){ unset P; }; P=task.sh; f; ... > "$P"`
+opens no file at all under Bash, and projecting the value `P` still held named a file the run
+never writes. An unset whose target this scan cannot read, and a builtin write to a name it cannot
+read, withdraw the whole table rather than a name, and for the whole run body rather than from the
+call, since either may be the operand's own name and there is no name for a later assignment to
+release.
+
+A write through a Bash nameref is routed to the name its alias stands for only after this pass, so
+this table still holds the aliased name's pre-alias value: `P=t1.sh; declare -n R=P; R=t2.sh`
+leaves `P=t1.sh` here while Bash leaves `P=t2.sh`. A name an alias is written through is therefore
+withdrawn, as is every alias's own name, which stands for no value of its own here. Projecting
+instead recorded the marker on the resource the stale value names, which refuses a body whose
+marker only ever reaches the other file and leaves that file unmodeled in the same step.
+
+That withdrawal is at the write, on the same two edges the call withdrawal is, and for the same
+reason: a direct write to the referent ends the staleness the alias created, and an alias a
+subshell is written through reaches no table the parent shell reads. `declare -n R=P; R=other.sh;
+P=task.sh; printf ... > "$P"` and `P=task.sh; ( declare -n R=P; R=other.sh ); printf ... > "$P"`
+certified bodies whose marker Bash writes to `task.sh` and runs while the withdrawal covered the
+whole run body. A body's alias write reaches its caller under a name none of the body's assignments
+spells, so the call withdrawal reads these names as well, and an enclosing loop withdraws them from
+entry exactly as it does a call's.
+
+Binding an alias is not writing through one, and the difference is a refusal either way, so
+`declare -n R=P` alone and the `declare -n R; R=P` spelling whose first assignment binds rather
+than writes both leave the target exact. Only a first assignment whose content this scan cannot
+read as a variable name withdraws the whole table, for the whole run body, since the alias it binds
+may stand for the operand's own name. The alias state itself is source-ordered and carries no
+environments, so an alias written through above its own declaration, which a function body can
+spell, leaves its target unwithdrawn, and an alias a subshell binds is still read as one after that
+subshell exits. Both sit with the other alias gaps.
+
+Two orderings inside one command are measured rather than assumed, because reading either the wrong
+way names a file for the marker that Bash never opens. A declaration builtin's operands are all
+expanded before the builtin applies any of them, so `A=other.sh; declare A=task.sh B=$A` leaves
+`B=other.sh`: the operand list is projected against a snapshot of the table taken before the command
+rather than against the values its earlier operands assign. The append spelling is the exception the
+same measurement gives, since `declare A=task A+=.sh` leaves `task.sh`, so the text an append
+extends is the one that command already applied. A prefix assignment on an ordinary command carries
+no snapshot at all: those apply left to right, and `A=1; A=2 B=$A` leaves `B=2`.
+
+A declaration attribute is a rebinding of a third kind, one this evidence records the wrong value
+for rather than not at all. Case conversion (`declare -u`, `-l`, `-c`) and arithmetic evaluation
+(`-i`) decide what Bash stores rather than what the assignment spells, so `declare -u P; P=task.sh`
+leaves `TASK.SH` in the variable while this table reads the assignment's own text. The name is
+therefore withdrawn from the projection at its declaration and at every later write to it, rather
+than released by those writes the way an ordinary assignment releases a withdrawal. Both directions
+were reachable before that: the marker write landed on the lowercase file while Bash wrote the
+uppercase one, and a body whose marker Bash leaves somewhere it never runs was refused. What Bash
+really stores is the residue, and it sits with the rebindings issue #205 tracks.
+
+`readonly`, and `-r` on a declaration builtin that binds in the scope reading it, is the same
+mismatch reached from the other side.
+The declaration's own operand is stored exactly, and it is every later assignment that Bash refuses,
+leaving the name holding what it already had. What Bash then does with the run is measured rather
+than assumed: only a plain assignment exits a non-interactive shell, while every write a builtin
+performs reports the error and keeps running, `export`, `declare`, `readonly`, `typeset`, `read`,
+`printf -v`, a prefix assignment on a command that runs an argv, an arithmetic evaluation, an
+`unset` and a `for` loop's own variable alike. A write to an already-declared readonly name is
+therefore not applied, and the name is not withdrawn either, since the table already holds the value
+Bash kept. Withdrawing it discarded a still-correct value and returned the operand to the dynamic
+target this resolution exists to close:
+`readonly P=task.sh; export P=other.sh || :; printf ... > "$P"; bash task.sh` certified a body whose
+marker Bash writes into `task.sh` and runs, while `readonly P=task.sh; printf ... > "$P"` already
+named the file the marker reaches. Keeping the value is the sound reading of the exiting spelling
+too, since nothing after a plain assignment runs, so an operand below it names a file the run never
+reaches and resolving it refuses a body Bash never runs the marker in rather than certifying one it
+does. An `unset` of a readonly name is refused the same way, so the name is left holding the
+declaration's value rather than made unknown.
+
+Which scope a declaration binds in is measured rather than assumed, because reading it too widely
+stops a *real* later assignment from being applied and leaves this table holding a value the run
+replaced, which is the one direction a readonly name reaches a false certification from. The
+attribute in the scope the declaration runs in and the attribute that survives a function's return
+are read as two questions. Under Bash 5.2 a scoped builtin's attribute reaches the caller only with
+`-g`, `declare`, `typeset` and `local` alike, while `readonly` marks the caller's variable from a
+body with no `-g` at all. Reading `local -r` as the caller's readonly left one unrelated
+`f(){ local -r Q=zz; }` in a called helper disabling this resolution for `Q` for the whole run body,
+and `f(){ local -r IFS=,; }; f; IFS=:; read -r A B <<< ...` left the exact `read` projection
+splitting on the default separator while Bash split on the one the body really set.
+
+Which options the selected builtin accepts is measured the same way. A declaration builtin refuses
+its whole command for one option it does not take, applying no attribute and assigning nothing, so
+the letter alone does not spell one: `export` accepts none of the value-transforming letters and
+`readonly` accepts no `-r`, both being invalid options Bash refuses outright. Reading the letter
+regardless withdrew a name over a command that sets nothing, and
+`P=task.sh; export -u P || :; printf ... > "$P"; bash task.sh` certified a body whose marker Bash
+writes into `task.sh` and runs. `-f` and `-F` select shell functions rather than variables, so
+`readonly -f g` attributes nothing here; reading it as a readonly variable froze the like-named one
+and reopened the certification this resolution exists to close. Unlike the value-transforming
+attributes, none of this is a direction that merely leaves an operand dynamic, which is why the
+scope and the options are read rather than over-approximated.
+
+A declaration withdraws a name, and a withdrawal returns the operand to the dynamic target that
+certified before this resolution, so a declaration the shell never reaches is not read at all.
+Three shapes decide that. A branch `execution_status` proves untaken runs nothing, a function body
+no call reaches runs nothing, and a declaration a subshell makes dies with the subshell, which the
+attribute sets express by being kept per execution environment and inherited exactly as the value
+tables are. Reading any of them withdrew a name over a command that does not exist at runtime, and
+one unreachable word was enough to disable this resolution for the rest of the run body:
+`if false; then readonly P; fi`, `f(){ declare -u P; }` with no call to `f`, and `( readonly P )`
+each certified a body whose marker Bash writes through `> "$P"` and runs. The same reachability
+governs the scopes a command enters, so a loop inside an untaken branch binds nothing.
+
+Reachability decides whether an attribute is read at all; where it lands is decided by keeping the
+sets per function context as well, exactly as the value tables are keyed. A body is walked where it
+is written, so an attribute recorded against the environment alone bound the name before Bash had
+run the call: `f(){ readonly P; }; P=task.sh; printf ... > "$P"; bash task.sh; f` certified a body
+whose marker Bash writes into `task.sh` and runs, and so did the same body with the call moved ahead
+of the sink, since the withdrawal followed the text rather than the call. What a body declares
+therefore governs the body's own table, and only the attributes that survive the return are carried
+to the call sites, closed over the call graph the way a body's rebindings already are. They are
+applied after the call rather than at the declaration, because Bash expands a redirection word
+before it runs the command, and neither withdraws the name, since applying an attribute leaves the
+value already stored untouched.
+
+A declaration that only *may* run is still read, which is the direction that leaves an operand
+dynamic, and a `+u` that removes an attribute is not read at all. Both are the same direction, which
+is why the scope a declaration binds in and the options its builtin accepts are read where those are
+not.
+
+An attribute attached to a name this scan cannot read is not that direction. `N=P; declare -gu
+"$N"; P=task.sh; printf ... > "$P"` attaches the attribute to a name no word of the command spells,
+so the readable operands carry none of it and nothing else clears the table: the operand resolved
+to `task.sh` while Bash wrote the marker into `TASK.SH`. Such a declaration withdraws the whole
+body's projection instead, exactly as an unreadable nameref binding or unset target does, since the
+name it attributes may be the operand's own and there is no name for a later assignment to release.
+A declaration whose *option* is the expansion spells no attribute here and stays with every other
+word this scan cannot read.
+
+A shell parameter Bash gives its own value to is that mismatch with the attribute already set and
+no declaration in the run body to read it from, so an assignment to one stores nothing in this
+table at all rather than being withdrawn from the projection alone. The eval replay and the exact
+`read` projection substitute out of the same table, and dropping the value leaves them reading no
+text rather than the wrong text, which is a fail-closed refusal where they can no longer read a
+payload. Three families are measured under Bash 5.2 and named in `shell_taint.py`: a counter or generator
+that replaces the value outright, an integer attribute Bash sets itself, and an array Bash
+maintains and reads back from its own elements. Both directions were reachable, and only the
+milder one was reported: `SECONDS=task.sh; printf ... > "$SECONDS"; bash task.sh` was refused for a
+marker Bash writes to the file `0` and never runs, while the same body sinking `bash 0` certified
+for one Bash writes there and does run. `UID` and `BASH_ARGV0` store an assignment verbatim and are
+deliberately absent, since withdrawing a name Bash does store is the direction that leaves an
+operand dynamic. What Bash really stores is the residue issue #205 owns, as it is for a declared
+attribute.
+
+One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
+name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.
+An arithmetic assignment (`(( P = 1 ))`, `let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))`
+expansion) is one. An `eval` payload assignment is another, since the payload route lowers its
+assignments for its own replay and does not apply them to this table, and so is a `source` or `.`
+of another file, whose content this scan does not read. A `getopts` write of its name operand is
+the fourth: the deterministic writer evidence covers `printf -v` and `read` and does not recognize
+`getopts`, so `f(){ OPTIND=1; getopts x P; }; f -x` leaves this table holding the value `P` had
+before the call while Bash leaves it holding the option character. A `${P:=q}` or `${P=q}` in an
+ordinary command's word is the fifth, since it is recorded as that command's assignments and no
+value table applies those; the same expansion in a compound's own redirection word is recorded, as
+that scope's loop bindings, so only the plain-command spelling is residue. A trap handler is the
+sixth, a payload this scan does not read at all which Bash runs between the commands around it.
+All six are pre-existing holes in this value table, which the eval replay reads as well; the
+projection makes them reachable as over-refusals, `P=other.sh; (( P = 1 )); printf ... > "$P"; bash
+other.sh` and its `eval 'P=1'`, `source vars.sh`, `getopts x P` and `trap 'P=1' DEBUG` spellings
+being rejected for a marker flow they do not have, and reachable in the certify direction too,
+where the write lands on the resource the stale value names while the file the marker really
+reaches goes unmodeled. The `${P:=q}` member reaches only that second direction: a name it assigns
+was unset or empty before, so the operand is dynamic rather than resolved to another file.
+
+The remedy is to record the rebinding, not to withdraw the name where one might have happened.
+Withdrawing returns every body carrying one of these constructs to the certification it had before
+this resolution, including the far more common body whose `eval`, `source`, `getopts` or trap
+rebinds nothing the operand names, and that direction gives back a marker flow Bash really runs for
+an over-refusal it does not. A `getopts` write shows the second half of that trade as well: it
+reaches the current shell from the top level exactly as it does from a function body, so
+withdrawing it with the names a body rebinds would pay the price above and still leave the
+top-level spelling over-refusing. Recording an arithmetic rebinding, applying an exact `eval`
+payload's assignments, recording a `getopts` write, recording a conditional expansion's assignment,
+and reading a trap handler are each tracked as issue #205 rather than folded in here; a sourced
+file's content stays outside what this scan reads.
+
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
 shell scope for every later command, which the per-command `redirections` field cannot express. A

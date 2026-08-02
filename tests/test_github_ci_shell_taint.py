@@ -2034,6 +2034,159 @@ def test_static_normalization_collapses_parent_segments(literal: str, expected: 
     assert normalize_static_resource(literal, dynamic=False) == expected
 
 
+def _dynamic_redirection(operator: str, word: ContentExpr) -> _RedirectionEvent:
+    """Build one redirection event whose operand named no resource by its syntax."""
+    descriptor = 0 if operator in {"<", "<>"} else 1
+    return _RedirectionEvent(
+        0,
+        operator,
+        descriptor,
+        DynamicResourceTarget(),
+        target_word=word,
+    )
+
+
+@pytest.mark.parametrize(
+    ("operator", "word", "values", "expected"),
+    [
+        (">", VariableRef("P"), {"P": "task.sh"}, StaticResourceTarget("task.sh")),
+        ("<", VariableRef("P"), {"P": "dir/../task.sh"}, StaticResourceTarget("task.sh")),
+        (
+            ">",
+            concat(VariableRef("D"), LiteralTransfer("/task.sh")),
+            {"D": "build"},
+            StaticResourceTarget("build/task.sh"),
+        ),
+        (">", VariableRef("P"), {"P": "/dev/null"}, NullTarget()),
+        (">", VariableRef("P"), {"P": "/dev/fd/2"}, DescriptorTarget(2)),
+        (">&", VariableRef("N"), {"N": "2"}, DescriptorTarget(2)),
+    ],
+    ids=(
+        "output-resource",
+        "input-resource",
+        "composed-resource",
+        "null-device",
+        "device-descriptor",
+        "descriptor-duplication",
+    ),
+)
+def test_dynamic_redirection_operand_resolves_to_its_exact_value(
+    operator: str,
+    word: ContentExpr,
+    values: dict[str, str],
+    expected: object,
+) -> None:
+    """Issue #151: a resolvable operand names the resource its literal spelling would name."""
+    events = (_dynamic_redirection(operator, word),)
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(events, values, TaintLimits())
+
+    assert resolved[0].target == expected
+    assert resolved[0].ordinal == events[0].ordinal
+    assert resolved[0].descriptor == events[0].descriptor
+    assert resolved[0].target_word is None
+
+
+@pytest.mark.parametrize(
+    ("word", "values"),
+    [
+        (VariableRef("P"), {}),
+        (VariableRef("P"), {"Q": "task.sh"}),
+        (Choice((LiteralTransfer("task.sh"), LiteralTransfer("other.sh"))), {}),
+        (concat(VariableRef("D"), LiteralTransfer("/task.sh")), {}),
+    ],
+    ids=("absent", "unrelated", "two-alternatives", "partially-known"),
+)
+def test_unresolvable_redirection_operand_keeps_its_dynamic_target(
+    word: ContentExpr,
+    values: dict[str, str],
+) -> None:
+    """A word without one exact value stays as unnamed as its syntax left it.
+
+    The word is consumed either way. It is valid only between the scanner and this projection,
+    so a declined event carries no expression forward for a later stage to read as if it were
+    still scoped to the evidence around it.
+    """
+    events = (_dynamic_redirection(">", word),)
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(events, values, TaintLimits())
+
+    assert resolved[0].target == DynamicResourceTarget()
+    assert resolved[0].target_word is None
+    assert resolved[0].ordinal == events[0].ordinal
+    assert resolved[0].descriptor == events[0].descriptor
+
+
+def test_redirection_events_without_an_unnamed_operand_are_returned_unchanged() -> None:
+    """A target the syntax already named carries no operand word and is left alone."""
+    events = (
+        _RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),
+        _RedirectionEvent(1, "<<<", 0, ContentTarget(LiteralTransfer("doc-lattice\n"))),
+        _RedirectionEvent(2, ">", 1, DynamicResourceTarget()),
+    )
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(
+        events, {"P": "task.sh"}, TaintLimits()
+    )
+
+    assert resolved is events
+
+
+def test_resolved_redirection_operand_respects_the_exact_value_length_limit() -> None:
+    """The projection is bounded by the same cap every other exact projection answers to."""
+    events = (_dynamic_redirection(">", VariableRef("P")),)
+
+    with pytest.raises(_TaintLimitExceeded) as error:
+        shell_taint._resolve_dynamic_redirection_targets(
+            events,
+            {"P": "task.sh"},
+            TaintLimits(max_exact_value_chars=3),
+        )
+
+    assert error.value.refusal.origin_id == "taint.exact-value.length-limit"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "P=other.sh; for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        "P=other.sh; for P in task.sh; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=other.sh; select P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; break; done < /dev/null; bash other.sh",
+    ],
+    ids=("inside-the-body", "after-done", "select"),
+)
+def test_a_loop_binding_withdraws_the_exact_value_its_name_held_outside(body: str) -> None:
+    """Issue #151 review: an operand is never projected against a value the loop has replaced.
+
+    A ``for`` or ``select`` binding is not one of the assignments the exact walk applies, so the
+    table would otherwise still hold whatever the name meant outside the loop. Bash writes the
+    marker to the file the binding names and runs the untouched one, so projecting the outer
+    value put the write on a file bash never opens and refused a body with no flow in it.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_an_assignment_after_a_loop_makes_its_name_exact_again() -> None:
+    """The withdrawal above is a point in the walk, not a name the whole body gives up.
+
+    Withholding every name a body loops over would spell the same over-refusal fix while
+    reopening issue #151 for that name, so the assignment after ``done`` has to resolve the
+    operand and the write has to reach the script sink.
+    """
+    body = "for P in a; do :; done; P=task.sh"
+    body += "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
 def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
     output: OutputExpr = CommandOutput(1)
     for _ in range(1_200):
