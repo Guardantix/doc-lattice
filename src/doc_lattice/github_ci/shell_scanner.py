@@ -2893,7 +2893,9 @@ class _ShellScanner:
         # before opening anything, so ``> $P`` with ``P='a b.sh'`` is an ambiguous redirect that
         # opens no file at all and ``P='ta*.sh'`` names a pattern. The projected text would name
         # a file Bash never touches in either direction, which is the class AD-18 keeps dynamic
-        # as issue #189.
+        # as issue #189. Authored pattern syntax sitting outside the quotes is the same class one
+        # step over: ``> "$P"*.sh`` expands the quoted reference and then pathname-expands the
+        # result, so the projected text names the pattern rather than the file Bash opens.
         scope_bound = state.pending_compound_scope_id is not None and self.taint_builder is not None
         self._append_redirection(
             state,
@@ -2906,6 +2908,7 @@ class _ShellScanner:
                     target.content
                     if not scope_bound
                     and not target.unquoted_dynamic
+                    and not target.active_argv_expansion
                     and isinstance(redirection_target, DynamicResourceTarget)
                     else None
                 ),

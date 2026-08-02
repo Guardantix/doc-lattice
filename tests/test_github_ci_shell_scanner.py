@@ -361,6 +361,23 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # A loop binds in the environment it is entered in, and a subshell or a command substitution
+    # is not the shell the operand below is expanded in. Withdrawing the name from every table
+    # erased a value the enclosing shell provably keeps, so both certified a body whose marker
+    # bash writes to other.sh and runs. The pipeline spelling of the same shape is not separated
+    # this way and stays in KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS.
+    (
+        "subshell-loop-binding-does-not-retarget-the-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; ( for P in task.sh; do :; done )"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "command-substitution-loop-binding-does-not-retarget-the-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; X=$(for P in task.sh; do :; done)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
     (
         "loop-binding-leaves-another-name-exact",
         "P=task.sh; for Q in a; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
@@ -8968,6 +8985,43 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
+    # The over-refusal guard for scoping that withdrawal to the environment the loop binds in.
+    # A loop a subshell contains still shadows the write target inside its own body, so narrowing
+    # the withdrawal to the binding environment must not be spelled as withdrawing nothing there.
+    (
+        "loop-binding-shadows-inside-its-own-subshell",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; ( for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done )"
+        "; bash other.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guard for a name a function body unsets. Bash restores nothing on
+    # return, so the caller's own value is gone and the operand names no file at all: the
+    # redirection fails, task.sh is never created, and the marker never runs.
+    (
+        "function-body-unset-withdraws-its-caller-write-target",
+        "f(){ unset P; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guard for a write through a Bash nameref. The alias routing runs
+    # after this projection, so this table still holds the value the aliased name had before the
+    # write; projecting it recorded the marker on t1.sh and refused a body whose marker only ever
+    # reaches t2.sh. Bash writes t2.sh and runs the untouched t1.sh.
+    (
+        "nameref-declared-target-leaves-the-word-unresolved",
+        "printf 'echo safe\\n' > t1.sh; P=t1.sh; declare -n R=P; R=t2.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash t1.sh",
+        {},
+    ),
+    # Issue #189 is the operand Bash expands into a different word, and an authored brace
+    # expansion outside the quotes is one: the redirection is ambiguous and opens nothing at all.
+    (
+        "brace-suffixed-operand-opens-nothing",
+        "printf 'echo safe\\n' > task1.sh; P=task"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"{1,2}.sh; bash task1.sh",
+        {},
+    ),
     # The over-refusal guard for excluding a declared local from that withdrawal. Leaving the
     # caller's name exact has to stay a resource identity rather than a refusal of every body a
     # function declares a local in: bash writes the marker to task.sh here and runs the untouched
@@ -9291,6 +9345,16 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         {},
     ),
     (
+        # A loop a pipeline stage contains binds in that stage and in nothing the operand below
+        # can observe, but the environment a pipeline allocates is not a scope, so the withdrawal
+        # cannot be separated from the enclosing shell's table the way the subshell and command
+        # substitution spellings of this shape are.
+        "pipeline-loop-binding-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do :; done | cat"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
         "loop-header-word",
         "P=task.sh"
         "; for P in $(printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; echo a); do :; done"
@@ -9317,6 +9381,15 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "P='task.sh '; printf '%s%s\\n' doc- 'lattice reconcile' > $P; bash task.sh",
         {},
     ),
+    (
+        # The same class one step over: the reference is quoted and the pattern is not, so bash
+        # expands the reference and then pathname-expands the result. The word is not carried for
+        # that reason either, which leaves this spelling where "glob-literal-operand" above sits.
+        "glob-suffixed-operand",
+        "printf 'echo safe\\n' > task1.sh; P=task"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"*.sh; bash task1.sh",
+        {},
+    ),
     # Issue #190: the word lowering builds a closed content expression for a plain reference and
     # not for a parameter expansion that transforms, indexes, defaults, or indirects its value,
     # so the exact projection returns nothing to name the operand with.
@@ -9340,6 +9413,16 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "P=; printf '%s%s\\n' doc- 'lattice reconcile' > \"${P:-task.sh}\"; bash task.sh",
         {},
     ),
+    # A write through a Bash nameref is routed to the name the alias stands for only after this
+    # projection runs, so the aliased name still holds its pre-alias value here and no operand is
+    # projected against it. That withdrawal reaches the caller-visible spelling below as well as
+    # the function-local one, and it leaves both where every unresolved operand sits.
+    (
+        "nameref-alias-target-word",
+        "P=t1.sh; declare -n R=P; R=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
     # Issue #188, the residue of excluding a declared local from the function-body withdrawal. A
     # name a body assigns plainly still withdraws, and so do the three spellings that reach the
     # caller through a declaration builtin: a nameref alias, whose later write is recorded under
@@ -9352,6 +9435,14 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "function-plain-assignment-word",
         "f(){ P=other.sh; }; P=task.sh; f"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        # The body-wide half of the same coarseness: the withdrawal has no call site to apply at,
+        # so a body that unsets a name withdraws it whether or not the function is ever called.
+        "uncalled-function-unset-word",
+        "f(){ unset P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
     (

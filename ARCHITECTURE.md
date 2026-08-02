@@ -845,7 +845,10 @@ treats an unresolved operand as a direct binding, which guards the very descript
 names. Without the second ordering, an output process substitution anywhere in the body brought the
 refusal back for `P=/dev/stdout; exec 3> "$P"` while the literal spelling certified. Naming the
 operands is therefore its own pass over the body, and that pass builds no stdin, since building
-stdin is what needs the inputs it feeds. One value cannot cross that line: a name a `read` supplies
+stdin is what needs the inputs it feeds. The input descriptor context is built from that same
+named evidence, because the input half of the descriptor classification tests a target exactly as
+its output twin does, and reading unresolved events there left the two halves disagreeing with
+each other and with the flow definitions, which are built from the named evidence one stage later. One value cannot cross that line: a name a `read` supplies
 is unknown in the naming pass alone, so `read -r P; exec 3> "$P"` keeps a dynamic target there, the
 descriptor stays guarded, and a later `>&3` refuses where every other spelling now certifies. That
 is the over-refusing direction and the last slice of this asymmetry, pinned with the literal control
@@ -861,7 +864,10 @@ from that point and the same write in either place is not projected (issue #188)
 operand is word-split and pathname-expanded by Bash before anything is opened, so `P='ta*.sh'`
 names a pattern and `P='a b.sh'` is an ambiguous redirect that opens nothing; the word is not
 carried for such an operand at all, which leaves the unquoted spelling exactly where the literal
-`> ta*.sh` spelling already sat (issue #189). A parameter expansion that transforms, indexes,
+`> ta*.sh` spelling already sat (issue #189). Authored pattern syntax outside the quotes is the
+same class one step over, since the expansion is quoted and the pattern is not: `> "$P"*.sh` is
+pathname-expanded after the reference expands, and `> "$P"{1,2}.sh` is an ambiguous redirect, so
+neither carries a word either. A parameter expansion that transforms, indexes,
 defaults, or indirects its value lowers to no closed content expression, so `${P%.txt}` and its
 family keep a dynamic target (issue #190). The exact eval payload route reparses one payload word
 with no table of the values around it, so an unquoted reference inside a payload is not projected
@@ -881,9 +887,15 @@ refused a body whose marker only ever reaches `task.sh`.
 The first two withdraw at a point in the walk rather than taking a name away from the body, so an
 assignment after the loop resolves the operand as it always did, and a subshell binding, which
 does not survive its scope, leaves the outer value naming the file the marker really reaches. Each
-value table records which scopes it has already applied, seeded from its parent when the
+value table counts the scope entries it has already applied, seeded from its parent when the
 environment is first reached, so a body whose first command runs in a subshell or a pipeline stage
-still withdraws from the enclosing environment. The third withdraws for the whole run body,
+still withdraws from the enclosing environment. A scope entry reaches only the environment the
+scope binds in and the environments forked from it, which is the innermost scope on its ancestry
+that owns an environment: `( for P in task.sh; do :; done )` and its command substitution spelling
+rebind nothing the enclosing shell can observe, and withdrawing there erased a value that shell
+provably keeps. The environments a pipeline allocates are not scopes, so the pipeline spelling of
+that shape is not separated from the enclosing table and keeps the withdrawal, which leaves it
+where every other unresolved operand sits. The third withdraws for the whole run body,
 because which call reaches which definition is resolved after this pass and there is no call site
 here to withdraw at; that is coarser in the direction that leaves an operand dynamic. Withdrawing
 in all three cases means the operand keeps the target it had before this decision, so what Bash
@@ -896,13 +908,26 @@ a body, bind for the duration of the call and restore the caller's variable on r
 they assign is one the caller can be holding at an operand. Withdrawing it read a declaration as a
 rebinding and took the caller's own exact value away for the whole run body, without the function
 even being called: `f() { local P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` left the
-operand dynamic and certified a body whose marker Bash writes to `task.sh` and runs. The three
+operand dynamic and certified a body whose marker Bash writes to `task.sh` and runs. The two
 spellings that do reach the caller keep the withdrawal rather than being reasoned about: a
-`declare -g` is a global write and never local to begin with, options this scan cannot read may
-spell `-g`, and a `local -n` alias records its later write under the alias rather than under the
-name it stands for. A plain assignment after a declaration in the same body withdraws as well,
-since this pass carries no per-body declaration state; that is the coarse direction, and it leaves
-the operand where every other unresolved operand sits.
+`declare -g` is a global write and never local to begin with, and options this scan cannot read
+may spell `-g`. A plain assignment after a declaration in the same body withdraws as well, since
+this pass carries no per-body declaration state; that is the coarse direction, and it leaves the
+operand where every other unresolved operand sits.
+
+An `unset` in a body is a rebinding of the same kind as an assignment, since Bash restores nothing
+on return, so a body's unset names are withdrawn too: `f(){ unset P; }; P=task.sh; f; ... > "$P"`
+opens no file at all under Bash, and projecting the value `P` still held named a file the run
+never writes. An unset whose target this scan cannot read, and a builtin write to a name it cannot
+read, withdraw the whole table rather than a name, since either may be the operand's own.
+
+A write through a Bash nameref is routed to the name its alias stands for only after this pass, so
+this table still holds the aliased name's pre-alias value: `P=t1.sh; declare -n R=P; R=t2.sh`
+leaves `P=t1.sh` here while Bash leaves `P=t2.sh`. Every name an alias declaration names, and
+every alias's own name, is therefore withdrawn for the whole run body, and a declaration whose
+target this scan cannot read withdraws the whole table. Projecting instead recorded the marker on
+the resource the stale value names, which refuses a body whose marker only ever reaches the other
+file and leaves that file unmodeled in the same step.
 
 One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
 name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.
