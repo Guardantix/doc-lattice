@@ -923,11 +923,19 @@ read, withdraw the whole table rather than a name, since either may be the opera
 
 A write through a Bash nameref is routed to the name its alias stands for only after this pass, so
 this table still holds the aliased name's pre-alias value: `P=t1.sh; declare -n R=P; R=t2.sh`
-leaves `P=t1.sh` here while Bash leaves `P=t2.sh`. Every name an alias declaration names, and
-every alias's own name, is therefore withdrawn for the whole run body, and a declaration whose
-target this scan cannot read withdraws the whole table. Projecting instead recorded the marker on
-the resource the stale value names, which refuses a body whose marker only ever reaches the other
-file and leaves that file unmodeled in the same step.
+leaves `P=t1.sh` here while Bash leaves `P=t2.sh`. A name an alias is written through is therefore
+withdrawn for the whole run body, as is every alias's own name, which stands for no value of its
+own here. Projecting instead recorded the marker on the resource the stale value names, which
+refuses a body whose marker only ever reaches the other file and leaves that file unmodeled in the
+same step.
+
+Binding an alias is not writing through one, and the difference is a refusal either way, so
+`declare -n R=P` alone and the `declare -n R; R=P` spelling whose first assignment binds rather
+than writes both leave the target exact. Only a first assignment whose content this scan cannot
+read as a variable name withdraws the whole table, since the alias it binds may stand for the
+operand's own name. This walk is source-ordered and carries no environments, so an alias written
+through above its own declaration, which a function body can spell, leaves its target unwithdrawn
+and sits with the other alias gaps.
 
 One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
 name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.

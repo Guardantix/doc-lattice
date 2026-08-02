@@ -3813,51 +3813,96 @@ def _function_rebound_names(
     return frozenset(names), unreadable
 
 
-def _nameref_rebound_names(evidence: _ShellTaintEvidence) -> tuple[frozenset[str], bool]:
-    """Return every name a Bash nameref alias can leave holding a value this table misses.
+def _nameref_rebound_names(
+    evidence: _ShellTaintEvidence,
+    limits: TaintLimits,
+) -> tuple[frozenset[str], bool]:
+    """Return every name a Bash nameref alias leaves holding a value this table misses.
 
     ``_route_runtime_nameref_writes`` runs after this pass, so a write through an alias is still
     recorded under the alias here rather than under the variable it stands for:
     ``P=t1.sh; declare -n R=P; R=t2.sh`` leaves this table holding ``P=t1.sh`` while Bash leaves
     ``P=t2.sh``. Projecting that value named a file the run never opens, in both directions at
-    once, so an operand is never projected against a name any alias declaration names, nor against
-    an alias's own name, for the whole run body.
+    once, so a name an alias is written through is withdrawn for the whole run body, as is every
+    alias's own name, which stands for no value of its own here.
 
-    A declaration whose target this scan cannot read withdraws the whole table instead, since the
-    alias may stand for the operand's own name. That includes ``declare -n R`` with no value,
-    whose target only arrives with a later assignment this pass has no alias map to route.
+    Only a write through an alias makes its target stale, so binding one does not withdraw it:
+    ``declare -n R=P`` alone, and the ``declare -n R; R=P`` spelling whose first assignment binds
+    rather than writes, both leave the target exact and keep the refusal they carry. A first
+    assignment whose content this scan cannot read as a variable name withdraws the whole table
+    instead, since the alias it binds may stand for the operand's own name.
+
+    The pass is source-ordered and carries no environments, so an alias written through above its
+    own declaration, which a function body can spell, leaves its target unwithdrawn; that shape is
+    where the revision before this projection left it, and is pinned with the other alias gaps.
 
     Args:
         evidence: The scan evidence whose commands carry their nameref declarations.
+        limits: The bounds this scan enforces.
 
     Returns:
-        Every name an alias declaration names, and whether some declaration names an unreadable
-        one.
+        Every name an alias write can leave stale, and whether some alias binds an unreadable one.
+
+    Raises:
+        _TaintLimitExceeded: If a projected binding exceeds its bound.
     """
     names: set[str] = set()
+    aliases: dict[str, str | None] = {}
     unreadable = False
+
+    def stands_for(alias: str) -> str | None:
+        seen: set[str] = set()
+        current = alias
+        while current in aliases and current not in seen:
+            seen.add(current)
+            bound = aliases[current]
+            if bound is None:
+                return None
+            current = bound
+        return current
+
     for command in evidence.commands:
+        # One assignment reaches this walk through more than one of the groups below, and each is
+        # a step in the alias state rather than a name to collect: counting the binding twice read
+        # the second sighting as a write through the alias it had just bound.
+        applied: list[_AssignmentEvidence] = []
         for assignment in (
             *command.assignments,
             *command.definite_assignments,
             *command.builtin_assignments,
         ):
+            if assignment in applied:
+                continue
+            applied.append(assignment)
+            name = _unscoped_variable_name(assignment.name)
             if assignment.nameref_unset:
-                names.add(_unscoped_variable_name(assignment.name))
+                aliases.pop(name, None)
+                names.add(name)
                 continue
             declaration_target = assignment.nameref_target
-            if declaration_target is None:
+            if declaration_target is not None:
+                names.add(name)
+                bound = (
+                    assignment.content.name
+                    if isinstance(assignment.content, VariableRef)
+                    else declaration_target
+                )
+                aliases[name] = _unscoped_variable_name(bound) if bound else None
                 continue
-            names.add(_unscoped_variable_name(assignment.name))
-            target = (
-                assignment.content.name
-                if isinstance(assignment.content, VariableRef)
-                else declaration_target
-            )
-            if target:
-                names.add(_unscoped_variable_name(target))
-            else:
+            if name not in aliases:
+                continue
+            if aliases[name] is None:
+                binding = _exact_content_literal(assignment.content, {}, limits)
+                if binding is None or not _static_variable_name(binding):
+                    unreadable = True
+                else:
+                    aliases[name] = binding
+                continue
+            target = stands_for(name)
+            if target is None:
                 unreadable = True
+            else:
+                names.add(target)
     return frozenset(names), unreadable
 
 
@@ -3917,7 +3962,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     function_rebound_names, function_unreadable_rebinding = _function_rebound_names(
         evidence, command_scope_paths, scope_bound_names
     )
-    nameref_rebound_names, nameref_unreadable_rebinding = _nameref_rebound_names(evidence)
+    nameref_rebound_names, nameref_unreadable_rebinding = _nameref_rebound_names(evidence, limits)
     projection_rebound_names = function_rebound_names | nameref_rebound_names
     withdraw_every_name = function_unreadable_rebinding or nameref_unreadable_rebinding
     entered_scopes: list[int] = []

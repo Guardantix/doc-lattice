@@ -379,6 +379,14 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         {},
     ),
     (
+        # Only a write through an alias makes its target stale, so binding one withdraws nothing:
+        # the second assignment here is what would write through R, and there is none.
+        "binding-a-nameref-leaves-its-target-exact",
+        "P=task.sh; declare -n R; R=P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
         "loop-binding-leaves-another-name-exact",
         "P=task.sh; for Q in a; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
         "; bash task.sh",
@@ -9011,6 +9019,14 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
     (
         "nameref-declared-target-leaves-the-word-unresolved",
         "printf 'echo safe\\n' > t1.sh; P=t1.sh; declare -n R=P; R=t2.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash t1.sh",
+        {},
+    ),
+    (
+        # The same guard for the spelling that binds the alias in two steps, where the write is
+        # the second assignment to it rather than the first.
+        "unbound-nameref-write-leaves-the-word-unresolved",
+        "printf 'echo safe\\n' > t1.sh; P=t1.sh; declare -n R; R=P; R=t2.sh"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash t1.sh",
         {},
     ),
