@@ -436,6 +436,66 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    (
+        # The same restoration one construct over: a prefix assignment inside a called body is
+        # applied for the duration of the command it prefixes and restored after it, so no call
+        # leaves it in the caller. Counting it withdrew the caller's exact value for the whole
+        # run body, which returned this marker flow to the certification issue #151 closed.
+        "called-body-prefix-assignment-does-not-retarget-the-word",
+        "f(){ P=other.sh /bin/true; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A call rebinds from the call onward, in the environment the call runs in, so a withdrawal
+    # covering the whole run body reached two shapes no call reaches. Both certified before the
+    # withdrawal moved to the call site, which is the pre-#151 certification arriving through the
+    # fix that closes it: the caller's later assignment gives the name a value no call can have
+    # changed, and a call an isolated environment contains rebinds nothing the parent shell reads.
+    (
+        "caller-assignment-after-a-call-restores-the-word",
+        "f(){ P=other.sh; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "assignment-after-a-loop-of-calls-restores-the-word",
+        "f(){ P=other.sh; }; P=task.sh; for i in 1 2; do f; done; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "subshell-call-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh; (f)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "command-substitution-call-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh; X=$(f)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "pipeline-stage-call-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh; f | cat"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A write through a nameref alias is the same rebinding at the same two edges: a direct write
+    # to the referent ends the staleness the alias created, and an alias a subshell writes through
+    # reaches no table the parent shell reads.
+    (
+        "direct-write-after-an-alias-write-restores-the-word",
+        "declare -n R=P; R=other.sh; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "subshell-alias-write-leaves-the-referent-exact",
+        "P=task.sh; ( declare -n R=P; R=other.sh )"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -9215,6 +9275,74 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "printf 'a b\\n' > f; while false; do IFS=: true; done; read -r A B < f; echo \"$A\"",
         {},
     ),
+    # Issue #151 over-refusal guards for withdrawing a call's rebinding at the call rather than
+    # for the whole run body. Bash writes the marker to the file the call named and runs an
+    # untouched one, so a withdrawal that stopped reaching one of these shapes would name
+    # "task.sh" as the marker's resource and refuse a body whose marker never runs. The prefix
+    # assignment is the exception the same rows measure from the other side: it is restored after
+    # the command it prefixes, so "task.sh" IS the file bash writes and "other.sh" the untouched
+    # one.
+    (
+        "marker-free-called-body-prefix-assignment-runs-an-untouched-file",
+        "f(){ P=other.sh /bin/true; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-caller-assignment-after-a-call-runs-an-untouched-file",
+        "f(){ P=other.sh; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-subshell-call-runs-an-untouched-file",
+        "f(){ P=other.sh; }; P=task.sh; (f)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-subshell-alias-write-runs-an-untouched-file",
+        "P=task.sh; ( declare -n R=P; R=other.sh )"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-direct-write-after-an-alias-write-runs-an-untouched-file",
+        "declare -n R=P; R=other.sh; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # The shapes the call-site withdrawal has to keep reaching, beside the plain, unset and
+    # "eval" spellings already above. A call reaches the bodies its own body calls, and a loop
+    # header inside a body binds in the caller, so each still withdraws and leaves the operand
+    # dynamic; bash writes the marker to "other.sh" and runs an untouched "task.sh", so a
+    # withdrawal that stopped reaching one of them would resolve the operand to "task.sh" and
+    # refuse a body whose marker never runs. The last two are the release running the other way:
+    # a call or an alias write after one restores the withdrawal the assignment released.
+    (
+        "marker-free-nested-call-withdraws-through-the-call-graph",
+        "g(){ f; }; f(){ P=other.sh; }; P=task.sh; g"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-loop-binding-in-a-called-body-withdraws-the-caller-word",
+        "f(){ for P in other.sh; do :; done; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-call-after-a-release-withdraws-again",
+        "f(){ P=other.sh; }; f; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-alias-write-after-a-release-withdraws-again",
+        "declare -n R=P; R=x.sh; P=task.sh; R=other.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 
@@ -9619,6 +9747,73 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "process-substitution-read-supplied-word",
         "read -r P < <(echo task.sh)"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #188, the loop back edge under the two rebindings a command performs outside its own
+    # assignments. A call into a body that assigns in its caller, and a write through a nameref
+    # alias, both reach a use above them on the next iteration along the edge a source-order walk
+    # has no shape for, so the name is withdrawn from loop entry exactly as a body's own
+    # assignment is. Each spelling is pinned at both files, because bash writes the marker to
+    # "task.sh" on the first iteration and to "other.sh" on the second and the operand models
+    # neither: projecting either value alone would name the file the other iteration opens, which
+    # is the write on the wrong resource the withdrawal exists to prevent.
+    (
+        "loop-call-rebinding-word",
+        "f(){ P=other.sh; }; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; f; done"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "loop-call-rebinding-later-file-word",
+        "f(){ P=other.sh; }; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; f; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        "loop-alias-write-word",
+        "declare -n R=P; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; R=other.sh; done"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "loop-alias-write-later-file-word",
+        "declare -n R=P; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; R=other.sh; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        # The coarse side of that back edge. A call an isolated environment contains rebinds
+        # nothing the enclosing shell reads, and the withdrawal at the call already says so, but
+        # the loop entry it also feeds carries no environment: a scope withdraws the names every
+        # command under it rebinds, so the operand above stays dynamic for the whole loop. The
+        # unlooped spelling of this body is "subshell-call-leaves-the-caller-word-exact", which
+        # refuses.
+        "subshell-call-in-a-loop-word",
+        "f(){ P=other.sh; }; P=task.sh; for i in 1 2; do (f); done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # A call withdraws the names of every body it can reach, so the operand below is dynamic
+        # rather than resolved to the file the call left the name naming. This is the plain
+        # withdrawal of "function-plain-assignment-word" reached through the call graph.
+        "nested-call-rebinding-word",
+        "g(){ f; }; f(){ P=other.sh; }; P=task.sh; g"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        # A body's write through a nameref alias lands on the name the alias stands for, which no
+        # assignment in the body spells, so the call withdraws it through the alias record rather
+        # than through the body's assignments. The operand is left where every withdrawn operand
+        # sits.
+        "alias-write-in-a-called-body-word",
+        "f(){ R=other.sh; }; declare -n R=P; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
 ]

@@ -902,7 +902,7 @@ table already had. That is a hole in this value table rather than in the operand
 predates this decision, and closing it belongs with the rebindings issue #205 tracks rather than
 with a withdrawal that exists to keep one operand from naming the wrong file.
 
-The first two withdraw at a point in the walk rather than taking a name away from the body, so an
+Every withdrawal applies at a point in the walk rather than taking a name away from the body, so an
 assignment after the loop resolves the operand as it always did, and a subshell binding, which
 does not survive its scope, leaves the outer value naming the file the marker really reaches. Each
 value table counts the scope entries it has already applied, seeded from its parent when the
@@ -923,23 +923,44 @@ of `true` and restores the name after it, which is why the value table applies a
 assignments only when the command runs no argv. Counting it withdrew a name no iteration replaces,
 and a body that never runs at all was enough to do it.
 
-The third withdraws for the whole run body rather than from the call onward, because which call
-reaches which definition is resolved after this pass and there is no call site here to withdraw
-at; that is coarser in the direction that leaves an operand dynamic. It is scoped to the bodies a
-call can reach, because a body nothing calls rebinds nothing and the withdrawal is what returns an
-operand to the target it had before this decision: `f() { P=other.sh; }; P=task.sh; printf ... >
-"$P"; bash task.sh` certified a body whose marker Bash writes to `task.sh` and runs, on the
-strength of a helper the run never invokes. Reachability here is the same notion of a called name
-the later call-site resolution is built from, a command's resolved executable name and the exact
-heads a bounded static `eval` input spells, over-approximated on every axis it has: a name matches
-every definition of it rather than the active one, order is ignored, and a call behind a false
-condition counts. A head this scan cannot read names nothing, exactly as it does in that later
-pass, so this is the same assumption rather than a second one.
+The third withdraws at each call rather than for the whole run body. Withdrawing everywhere was
+coarser in the direction that leaves an operand dynamic, and that direction is not safe here: a
+dynamic target is discarded, so the marker write goes unrecorded and the sink below certifies a
+flow Bash really runs. Two shapes no call reaches were certified that way, each of them the
+pre-#151 certification arriving back through the fix that closes it. A caller that assigns the name
+after the call holds a value no call can have changed, so `f(){ P=other.sh; }; f; P=task.sh; printf
+... > "$P"; bash task.sh` ran the marker Bash writes to `task.sh`; and a call an isolated
+environment contains rebinds nothing the parent shell reads, so the subshell, command substitution
+and pipeline stage spellings of `P=task.sh; (f)` did the same. The names are therefore withdrawn
+into the value table of the function context and execution environment the call runs in, along the
+containment values are already inherited by, and an effect that names the variable releases it
+exactly as it releases a scope withdrawal. A later call withdraws it again.
 
-Withdrawing in all three cases means the operand keeps the target it had before this decision, so
-what Bash leaves the name holding after `done`, on a second iteration, or after a call is a false
-certification of the same shape and size as every other unresolved operand, pinned in both
-directions alongside them.
+Which definitions a call reaches is the same notion of a called name the later call-site resolution
+is built from, a command's resolved executable name and the exact heads a bounded static `eval`
+input spells, over-approximated on every axis it has: a name matches every definition of it rather
+than the active one, order is ignored, and a call behind a false condition counts. A head this scan
+cannot read names nothing, exactly as it does in that later pass, so this is the same assumption
+rather than a second one. The collection is closed over the calls each body makes, so a call to a
+body that calls another withdraws both bodies' names, and a body nothing calls has no call site and
+rebinds nothing: `f() { P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` certified a body
+whose marker Bash writes to `task.sh` and runs, on the strength of a helper the run never invokes.
+
+A prefix assignment inside a body is excluded for the reason the loop back edge excludes it: Bash
+restores it after the command it prefixes, so no call leaves it in the caller, and counting it took
+the caller's exact value away for the whole run body.
+
+A use above a call sees that call's rebinding on the next iteration of an enclosing loop, along the
+edge a body's own assignment travels, so a loop withdraws the names its calls rebind from loop
+entry as well. That withdrawal carries no environment, since a scope withdraws what every command
+under it rebinds, so a call an isolated environment contains inside a loop stays withdrawn for the
+whole loop where its unlooped spelling resolves. That is the coarse direction, and it leaves the
+operand where every other unresolved operand sits.
+
+Withdrawing in all these cases means the operand keeps the target it had before this decision, so
+what Bash leaves the name holding after `done`, on a second iteration, or after a call no assignment
+follows is a false certification of the same shape and size as every other unresolved operand,
+pinned in both directions alongside them.
 
 A name the body declares local is not one of the three. `local`, and `declare` or `typeset` inside
 a body, bind for the duration of the call and restore the caller's variable on return, so no value
@@ -957,23 +978,34 @@ An `unset` in a body is a rebinding of the same kind as an assignment, since Bas
 on return, so a body's unset names are withdrawn too: `f(){ unset P; }; P=task.sh; f; ... > "$P"`
 opens no file at all under Bash, and projecting the value `P` still held named a file the run
 never writes. An unset whose target this scan cannot read, and a builtin write to a name it cannot
-read, withdraw the whole table rather than a name, since either may be the operand's own.
+read, withdraw the whole table rather than a name, and for the whole run body rather than from the
+call, since either may be the operand's own name and there is no name for a later assignment to
+release.
 
 A write through a Bash nameref is routed to the name its alias stands for only after this pass, so
 this table still holds the aliased name's pre-alias value: `P=t1.sh; declare -n R=P; R=t2.sh`
 leaves `P=t1.sh` here while Bash leaves `P=t2.sh`. A name an alias is written through is therefore
-withdrawn for the whole run body, as is every alias's own name, which stands for no value of its
-own here. Projecting instead recorded the marker on the resource the stale value names, which
-refuses a body whose marker only ever reaches the other file and leaves that file unmodeled in the
-same step.
+withdrawn, as is every alias's own name, which stands for no value of its own here. Projecting
+instead recorded the marker on the resource the stale value names, which refuses a body whose
+marker only ever reaches the other file and leaves that file unmodeled in the same step.
+
+That withdrawal is at the write, on the same two edges the call withdrawal is, and for the same
+reason: a direct write to the referent ends the staleness the alias created, and an alias a
+subshell is written through reaches no table the parent shell reads. `declare -n R=P; R=other.sh;
+P=task.sh; printf ... > "$P"` and `P=task.sh; ( declare -n R=P; R=other.sh ); printf ... > "$P"`
+certified bodies whose marker Bash writes to `task.sh` and runs while the withdrawal covered the
+whole run body. A body's alias write reaches its caller under a name none of the body's assignments
+spells, so the call withdrawal reads these names as well, and an enclosing loop withdraws them from
+entry exactly as it does a call's.
 
 Binding an alias is not writing through one, and the difference is a refusal either way, so
 `declare -n R=P` alone and the `declare -n R; R=P` spelling whose first assignment binds rather
 than writes both leave the target exact. Only a first assignment whose content this scan cannot
-read as a variable name withdraws the whole table, since the alias it binds may stand for the
-operand's own name. This walk is source-ordered and carries no environments, so an alias written
-through above its own declaration, which a function body can spell, leaves its target unwithdrawn
-and sits with the other alias gaps.
+read as a variable name withdraws the whole table, for the whole run body, since the alias it binds
+may stand for the operand's own name. The alias state itself is source-ordered and carries no
+environments, so an alias written through above its own declaration, which a function body can
+spell, leaves its target unwithdrawn, and an alias a subshell binds is still read as one after that
+subshell exits. Both sit with the other alias gaps.
 
 One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
 name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.

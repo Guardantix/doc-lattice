@@ -3632,11 +3632,11 @@ def _resolve_dynamic_redirection_targets(
     The projection is the same one the eval replay trusts, so an operand only resolves when
     every path reaching it assigns the same literal. Anything else keeps the dynamic target it
     already had, including the rebindings the source-order walk cannot order, which
-    ``_scope_rebound_names`` and ``_function_rebound_names`` withdraw before the values reach
-    here. A rebinding no evidence records at all is withdrawn nowhere, an arithmetic assignment,
-    an ``eval`` payload assignment, a sourced file and a ``getopts`` write of its name operand
-    among them; AD-18 records that residue in both of its directions, and issue #205 tracks
-    recording them.
+    ``_scope_rebound_names``, ``_function_call_rebindings`` and ``_nameref_rebindings`` withdraw
+    before the values reach here. A rebinding no evidence records at all is withdrawn nowhere: an
+    arithmetic assignment, an ``eval`` payload assignment, a sourced file and a ``getopts`` write
+    of its name operand among them; AD-18 records that residue in both of its directions, and
+    issue #205 tracks recording them.
 
     Resolving an operand can name a descriptor rather than a file, because a variable holding
     ``/dev/stdout``, a ``/dev/fd`` alias, or a digit under ``>&`` is exactly what its literal
@@ -3692,6 +3692,7 @@ def _resolve_dynamic_redirection_targets(
 def _scope_rebound_names(
     evidence: _ShellTaintEvidence,
     command_scope_paths: Mapping[int, tuple[int, ...]],
+    command_rebindings: Mapping[int, frozenset[str]],
 ) -> dict[int, tuple[str, ...]]:
     """Return the names each scope can leave holding a value this walk never applied.
 
@@ -3716,9 +3717,20 @@ def _scope_rebound_names(
     resolution from naming a file Bash never opens, which would be a write recorded on the wrong
     resource in both directions.
 
+    ``command_rebindings`` carries the same back edge for the two rebindings a command performs
+    somewhere other than in its own assignments: a call into a function body that rebinds in the
+    caller's variable space, and a write through a nameref alias, which lands on the name the
+    alias stands for rather than the one the assignment spells. Each is withdrawn at the command
+    that performs it, so a use above it holds the value it really has on the first iteration; the
+    next iteration carries the rebinding back to that use along the same edge a body's own
+    assignment travels. ``f(){ P=other.sh; }; P=task.sh; for i in 1 2; do printf ... > "$P"; f;
+    done`` writes ``task.sh`` once and ``other.sh`` once under Bash, so projecting the operand
+    against either value alone names a file one of the two iterations never opens.
+
     Args:
         evidence: The scan evidence whose scopes and commands are being walked.
         command_scope_paths: Each command's structured scope ancestry, outermost first.
+        command_rebindings: The names each command rebinds outside its own assignments.
 
     Returns:
         The names to withdraw on entry, by scope id, for every scope that rebinds any.
@@ -3749,6 +3761,7 @@ def _scope_rebound_names(
                 *command.builtin_assignments,
             )
         }
+        assigned.update(command_rebindings.get(command.command_id, ()))
         if not assigned:
             continue
         for scope_id in command_scope_paths[command.command_id]:
@@ -3757,18 +3770,18 @@ def _scope_rebound_names(
     return {scope_id: tuple(sorted(names)) for scope_id, names in rebound.items()}
 
 
-def _called_function_contexts(
+def _function_call_targets(
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
-) -> frozenset[int]:
-    """Return every function context a command in this run body can transfer control into.
+) -> dict[int, frozenset[int]]:
+    """Return the function contexts each command can transfer control into.
 
     ``_contextualize_evidence`` decides which call site reaches which definition, and it runs
     after this pass, so the linkage it builds is not available here. What is available is the
     notion of a called name it builds that linkage from: a command's resolved executable name and
-    the exact simple-command heads a bounded static ``eval`` input spells. This reachability is
-    that notion, over-approximated on every axis it can be, so a body is reported unreached only
-    where the model that runs later reaches it from nowhere either.
+    the exact simple-command heads a bounded static ``eval`` input spells. These call sites are
+    that notion, over-approximated on every axis it can be, so a body is reached from nowhere here
+    only where the model that runs later reaches it from nowhere either.
 
     Every over-approximation is the direction that keeps a name withdrawn. A called name matches
     every definition of it rather than the one active at the call, order is ignored, and a call
@@ -3782,7 +3795,7 @@ def _called_function_contexts(
         limits: The bounds this scan enforces.
 
     Returns:
-        Every function context id reachable from a call in this run body.
+        The function contexts each calling command can reach directly, by command id.
 
     Raises:
         _TaintLimitExceeded: If reading a static eval input exceeds its bound.
@@ -3797,19 +3810,42 @@ def _called_function_contexts(
                 command.defines_function_context_id
             )
     if not definitions_by_name:
-        return frozenset()
-    calls: list[tuple[int | None, int]] = []
+        return {}
+    targets: dict[int, frozenset[int]] = {}
     for command in evidence.commands:
         if command.defines_function_context_id is not None:
             continue
         executables = (command.executable, *command.executable.alternates)
         names = [executable.name for executable in executables if executable.name is not None]
         names.extend(_static_eval_command_names(command, limits=limits))
-        for name in names:
-            calls.extend(
-                (command.function_context_id, context)
-                for context in definitions_by_name.get(name, ())
-            )
+        called = {context for name in names for context in definitions_by_name.get(name, ())}
+        if called:
+            targets[command.command_id] = frozenset(called)
+    return targets
+
+
+def _called_function_contexts(
+    evidence: _ShellTaintEvidence,
+    call_targets: Mapping[int, frozenset[int]],
+) -> frozenset[int]:
+    """Return every function context a command in this run body can transfer control into.
+
+    A call inside a body only reaches that body's definition when the body is itself reached, so
+    the call sites ``_function_call_targets`` names are closed over the context each of them sits
+    in.
+
+    Args:
+        evidence: The scan evidence whose commands carry their function context.
+        call_targets: The contexts each calling command reaches directly, by command id.
+
+    Returns:
+        Every function context id reachable from a call in this run body.
+    """
+    calls: list[tuple[int | None, int]] = [
+        (command.function_context_id, context)
+        for command in evidence.commands
+        for context in call_targets.get(command.command_id, ())
+    ]
     reached: set[int] = set()
     changed = True
     while changed:
@@ -3822,30 +3858,41 @@ def _called_function_contexts(
     return frozenset(reached)
 
 
-def _function_rebound_names(
+def _function_call_rebindings(
     evidence: _ShellTaintEvidence,
     command_scope_paths: Mapping[int, tuple[int, ...]],
     scope_bound_names: Mapping[int, tuple[str, ...]],
-    called_contexts: frozenset[int],
-) -> tuple[frozenset[str], bool]:
-    """Return every name some function body assigns or binds in the caller's variable space.
+    nameref_rebindings: Mapping[int, frozenset[str]],
+    call_targets: Mapping[int, frozenset[int]],
+) -> tuple[dict[int, frozenset[str]], bool]:
+    """Return the names each call leaves rebound in the caller's variable space.
 
     A Bash function body is not a scope for variables: ``f() { for P in task.sh; do :; done; }``
     leaves ``P`` bound to ``task.sh`` in the caller once ``f`` runs. The exact walk keys its value
     tables by function context, so a body's rebinding never reaches the caller's table and the
-    caller keeps whatever the name held before the call. Which call reaches which definition is
-    resolved by ``_contextualize_evidence``, which runs after this pass, so there is no call site
-    here to withdraw the name at and a body that is called withdraws its names for the whole run
-    body.
+    caller keeps whatever the name held before the call.
 
-    A body nothing calls rebinds nothing, and the difference matters because the withdrawal is
-    what returns an operand to the target it had before issue #151 closed the gap. Collecting from
-    a definition alone let one uninvoked helper put the whole fix back:
-    ``f() { P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh`` certified a body whose
-    marker Bash writes to ``task.sh`` and runs, which is the same shape the declaration exclusion
-    below rejects one construct at a time. ``called_contexts`` is therefore consulted first, and
-    it over-approximates reachability everywhere it can so that this narrowing only ever drops a
-    body the later model reaches from nowhere either.
+    ``_contextualize_evidence`` decides which call site reaches which definition and runs after
+    this pass, so the withdrawal was first applied to the whole run body rather than from the call
+    onward. That reached two shapes no call reaches. A caller that assigns the name after the call
+    held an exact value the withdrawal never released, so ``f(){ P=other.sh; }; f; P=task.sh;
+    printf ... > "$P"`` certified a body whose marker Bash writes to ``task.sh`` and runs; and a
+    call a subshell contains rebinds nothing the parent shell can observe, so ``P=task.sh; (f)``
+    did the same. Both are the pre-#151 certification returning through the fix that closes it.
+    The names are therefore withdrawn at each call site instead, into the table of the function
+    context and execution environment the call runs in: a subshell's call reaches the subshell's
+    table alone, exactly as ``exact_values_for`` inherits values, and ``record_effects`` releases
+    the name again where a later assignment gives it a value the call cannot have changed.
+
+    Which definitions a call reaches is ``_function_call_targets``, closed over the calls each
+    body makes, so a call to a body that calls another withdraws both bodies' names. A body
+    nothing calls has no call site here and rebinds nothing, which is what keeps one uninvoked
+    helper from putting the whole fix back: ``f() { P=other.sh; }; P=task.sh; printf ... > "$P";
+    bash task.sh`` certified before that reachability was consulted.
+
+    A use above a call sees the call's rebinding on the next iteration of an enclosing loop, along
+    the same back edge a body's own assignment travels, so ``_scope_rebound_names`` is handed
+    these names as well and withdraws them from loop entry.
 
     A name the body declares local is the one rebinding this shape can order, so it is not
     collected. ``local``, and ``declare`` or ``typeset`` inside a body, bind a new variable for the
@@ -3860,12 +3907,19 @@ def _function_rebound_names(
     declared local is still collected, since this pass tracks no per-body declaration state; that
     is the coarse direction, and it leaves the operand where every other unresolved operand sits.
 
+    A write through a nameref alias inside a body reaches the caller under the name the alias
+    stands for rather than the one the assignment spells, so ``_nameref_rebindings`` is read here
+    as well: ``f(){ R=other.sh; }; declare -n R=P; P=task.sh; f`` leaves the caller holding
+    ``other.sh`` in ``P``, which no assignment in the body names.
+
     An ``unset`` reaches the caller's variable space the same way an assignment does, and it is
     not a rebinding a declaration can order, so a body's unset names are collected too:
     ``f(){ unset P; }; P=task.sh; f; ... > "$P"`` expands to the empty word under Bash and opens
     nothing, while projecting the value ``P`` still held named a file the run never writes. An
     unset whose target this scan cannot read, and a builtin write to a name it cannot read,
-    withdraw the whole table instead, since either may be the operand's own name.
+    withdraw the whole table instead, for the whole run body rather than from the call: the name
+    it reaches is unknown, so there is no name for a later assignment to release and no table to
+    confine it to.
 
     A caller-visible write no evidence records is not collected here, because there is no record to
     collect it from: ``getopts`` writes its name operand in the caller's variable space and the
@@ -3877,79 +3931,134 @@ def _function_rebound_names(
     top-level spelling, which is no function rebinding at all, exactly where it is. AD-18 discloses
     the class with the other rebindings no evidence carries, and issue #205 tracks recording them.
 
-    A redirection operand is therefore never projected against a name a called body rebinds, for
-    the whole run body rather than from the call onward. That is coarser than a withdrawal at the
-    call, and it is the direction that leaves the operand dynamic rather than resolved to a file
-    Bash never opens; every other consumer of the value table is unaffected, since only the
-    projection reads the filtered table.
+    A redirection operand is therefore never projected against a name a call can rebind, from that
+    call onward in the environment it runs in. Where the withdrawal does apply it is the direction
+    that leaves the operand dynamic rather than resolved to a file Bash never opens; every other
+    consumer of the value table is unaffected, since only the projection reads the withdrawal set.
 
     Args:
         evidence: The scan evidence whose commands carry their function context.
         command_scope_paths: Each command's structured scope ancestry, outermost first.
         scope_bound_names: The names each scope rebinds on entry, by scope id.
-        called_contexts: The function contexts some command in this run body can reach.
+        nameref_rebindings: The names each command writes through a nameref alias, by command id.
+        call_targets: The contexts each calling command reaches directly, by command id.
 
     Returns:
-        Every name a function body can leave rebound for its caller, and whether some body
+        The names each call leaves rebound for its caller, by command id, and whether some body
         rebinds a name this scan cannot read.
     """
-    names: set[str] = set()
+    called_contexts = _called_function_contexts(evidence, call_targets)
+    context_names: dict[int, set[str]] = {}
+    context_calls: dict[int, set[int]] = {}
     unreadable = False
     for command in evidence.commands:
         context = command.function_context_id
         if context is None or context not in called_contexts:
             continue
+        names = context_names.setdefault(context, set())
+        context_calls.setdefault(context, set()).update(call_targets.get(command.command_id, ()))
         declares_local = command.builtin_local and not command.builtin_dynamic_options
+        # A prefix assignment on a command that runs an argv rebinds nothing its caller can be
+        # holding at an operand: Bash applies ``P=other.sh true`` for the duration of ``true`` and
+        # restores the name after it, which is why ``record_effects`` applies
+        # ``definite_assignments`` only for an assignment-only command and why
+        # ``_scope_rebound_names`` collects it only there. Collecting it here withdrew the
+        # caller's own exact value for the whole run body, and one command inside one called body
+        # was enough: ``f(){ P=other.sh /bin/true; }; P=task.sh; f; printf ... > "$P"``
+        # certified a body whose marker Bash writes to ``task.sh`` and runs.
+        assignment_only = not command.argv or command.executable.argv_index is None
         names.update(
             _unscoped_variable_name(assignment.name)
             for assignment in (
                 *command.assignments,
-                *command.definite_assignments,
+                *(command.definite_assignments if assignment_only else ()),
                 *(() if declares_local else command.builtin_assignments),
             )
         )
+        names.update(nameref_rebindings.get(command.command_id, ()))
         unset_names, unknown_unset = _unset_action(command)
         names.update(_unscoped_variable_name(name) for name in unset_names)
         unreadable = unreadable or unknown_unset or command.unknown_builtin_content is not None
         for scope_id in command_scope_paths[command.command_id]:
             names.update(scope_bound_names.get(scope_id, ()))
-    return frozenset(names), unreadable
+    # A call reaches the names of every body its own body can call in turn, so the collection is
+    # closed over the call graph before any call site reads it. The closure is iterated rather
+    # than recursed, because a body may call itself and this module lowers every walk it owns.
+    reachable_names: dict[int, set[str]] = {
+        context: set(names) for context, names in context_names.items()
+    }
+    changed = True
+    while changed:
+        changed = False
+        for context, callees in context_calls.items():
+            carried = reachable_names.setdefault(context, set())
+            for callee in callees:
+                addition = reachable_names.get(callee)
+                if addition is not None and not addition <= carried:
+                    carried |= addition
+                    changed = True
+    rebindings: dict[int, frozenset[str]] = {}
+    for command in evidence.commands:
+        called = call_targets.get(command.command_id)
+        if not called:
+            continue
+        called_names: set[str] = set()
+        for context in called:
+            called_names.update(reachable_names.get(context, ()))
+        if called_names:
+            rebindings[command.command_id] = frozenset(called_names)
+    return rebindings, unreadable
 
 
-def _nameref_rebound_names(
+def _nameref_rebindings(
     evidence: _ShellTaintEvidence,
     limits: TaintLimits,
-) -> tuple[frozenset[str], bool]:
-    """Return every name a Bash nameref alias leaves holding a value this table misses.
+) -> tuple[dict[int, frozenset[str]], bool]:
+    """Return the names each command leaves stale by writing through a Bash nameref alias.
 
     ``_route_runtime_nameref_writes`` runs after this pass, so a write through an alias is still
     recorded under the alias here rather than under the variable it stands for:
     ``P=t1.sh; declare -n R=P; R=t2.sh`` leaves this table holding ``P=t1.sh`` while Bash leaves
     ``P=t2.sh``. Projecting that value named a file the run never opens, in both directions at
-    once, so a name an alias is written through is withdrawn for the whole run body, as is every
-    alias's own name, which stands for no value of its own here.
+    once, so a name an alias is written through is withdrawn, as is every alias's own name, which
+    stands for no value of its own here.
+
+    The withdrawal is reported at the command that performs the write rather than for the whole
+    run body, because a name the alias stands for stops being stale the moment something gives it
+    a value directly, and because a write a subshell performs reaches no table the parent shell
+    reads. Withdrawing everywhere kept the pre-#151 certification alive in both shapes:
+    ``declare -n R=P; R=other.sh; P=task.sh; printf ... > "$P"`` and
+    ``P=task.sh; ( declare -n R=P; R=other.sh ); printf ... > "$P"`` certified bodies whose marker
+    Bash writes to ``task.sh`` and runs. The walk applies each entry to the table of the context
+    and environment the command runs in, ``record_effects`` releases the name where a later
+    assignment values it, and ``_scope_rebound_names`` carries the same names into an enclosing
+    loop, where the next iteration returns the alias write to a use above it.
 
     Only a write through an alias makes its target stale, so binding one does not withdraw it:
     ``declare -n R=P`` alone, and the ``declare -n R; R=P`` spelling whose first assignment binds
     rather than writes, both leave the target exact and keep the refusal they carry. A first
     assignment whose content this scan cannot read as a variable name withdraws the whole table
-    instead, since the alias it binds may stand for the operand's own name.
+    instead, for the whole run body, since the alias it binds may stand for the operand's own name
+    and no name is known for a later assignment to release.
 
-    The pass is source-ordered and carries no environments, so an alias written through above its
-    own declaration, which a function body can spell, leaves its target unwithdrawn; that shape is
-    where the revision before this projection left it, and is pinned with the other alias gaps.
+    The alias state itself is source-ordered and carries no environments, so an alias written
+    through above its own declaration, which a function body can spell, leaves its target
+    unwithdrawn, and an alias a subshell binds is still read as one after that subshell exits.
+    Both are where the revision before this projection left them, and are pinned with the other
+    alias gaps.
 
     Args:
         evidence: The scan evidence whose commands carry their nameref declarations.
         limits: The bounds this scan enforces.
 
     Returns:
-        Every name an alias write can leave stale, and whether some alias binds an unreadable one.
+        The names each command's alias write can leave stale, by command id, and whether some
+        alias binds a name this scan cannot read.
 
     Raises:
         _TaintLimitExceeded: If a projected binding exceeds its bound.
     """
-    names: set[str] = set()
+    rebindings: dict[int, frozenset[str]] = {}
     aliases: dict[str, str | None] = {}
     unreadable = False
 
@@ -3973,6 +4082,7 @@ def _nameref_rebound_names(
         # iteratively everywhere else, and it would also fold two distinct assignments that happen
         # to spell the same thing into one step of the alias state.
         applied: set[int] = set()
+        names: set[str] = set()
         for assignment in (
             *command.assignments,
             *command.definite_assignments,
@@ -4010,7 +4120,9 @@ def _nameref_rebound_names(
                 unreadable = True
             else:
                 names.add(target)
-    return frozenset(names), unreadable
+        if names:
+            rebindings[command.command_id] = frozenset(names)
+    return rebindings, unreadable
 
 
 def _resolve_builtin_writer_evidence(  # noqa: PLR0915
@@ -4071,15 +4183,29 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
     scope_environments: dict[int, int] = {}
     exact_values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     unknown_values_by_environment: dict[tuple[int | None, int], set[str]] = {}
-    scope_bound_names = _scope_rebound_names(evidence, command_scope_paths)
-    function_rebound_names, function_unreadable_rebinding = _function_rebound_names(
+    # The two rebindings a command performs outside its own assignments are collected before the
+    # scopes are, because a loop returns each of them to a use above it on the next iteration and
+    # ``_scope_rebound_names`` is what withdraws along that back edge. The scope names it produces
+    # without them are what the call collection reads for a body's own rebindings, and adding a
+    # name there could only widen a call site that already carries every name its body's scopes
+    # bind, so the two passes need no fixpoint between them: a loop inside a body reaches the
+    # caller through the call graph below, not through this table.
+    nameref_rebindings, nameref_unreadable_rebinding = _nameref_rebindings(evidence, limits)
+    call_targets = _function_call_targets(evidence, limits)
+    scope_bound_names = _scope_rebound_names(evidence, command_scope_paths, {})
+    call_rebindings, function_unreadable_rebinding = _function_call_rebindings(
         evidence,
         command_scope_paths,
         scope_bound_names,
-        _called_function_contexts(evidence, limits),
+        nameref_rebindings,
+        call_targets,
     )
-    nameref_rebound_names, nameref_unreadable_rebinding = _nameref_rebound_names(evidence, limits)
-    projection_rebound_names = function_rebound_names | nameref_rebound_names
+    command_rebindings = {
+        command_id: nameref_rebindings.get(command_id, frozenset())
+        | call_rebindings.get(command_id, frozenset())
+        for command_id in (*nameref_rebindings, *call_rebindings)
+    }
+    scope_bound_names = _scope_rebound_names(evidence, command_scope_paths, command_rebindings)
     withdraw_every_name = function_unreadable_rebinding or nameref_unreadable_rebinding
     entered_scopes: list[int] = []
     entered_scope_ids: set[int] = set()
@@ -4177,9 +4303,9 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         A function body is not an execution environment, so that containment does not separate a
         loop inside one from its caller. The entry is applied only to the tables of the function
         context the scope was entered in as well, since a body's rebinding never reaches the
-        caller's table by this route: ``_function_rebound_names`` withdraws it for the whole run
-        body, and applying it here too took the caller's own exact value away for a loop inside a
-        function nothing calls.
+        caller's table by this route: ``_function_call_rebindings`` withdraws it at the call that
+        reaches the body, and applying it here too took the caller's own exact value away for a
+        loop inside a function nothing calls.
         """
         lexical_environment: int | None = None
         for scope_id in command_scope_paths[command.command_id]:
@@ -4301,6 +4427,16 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         # projected against a value the loop has replaced names a file Bash never opens, which the
         # redirection resolution turns into a write on the wrong resource.
         withdraw_entered_scopes(command, environment, withdrawn_names)
+        # A call into a body that rebinds in its caller, and a write through a nameref alias,
+        # reach this table under a name no assignment on this command spells. Both are withdrawn
+        # here, into the table of the context and environment the command runs in, and released
+        # by ``record_effects`` where a later assignment gives the name a value again. The
+        # withdrawal covers this command's own operand as well, which is where the whole-body
+        # collection this replaced already left it: Bash expands a redirection word before it runs
+        # the command, so a call site's own operand could keep the value it reads, but a prefix
+        # assignment through an alias makes that ordering a second measurement rather than the one
+        # ``record_effects`` already pins.
+        withdrawn_names.update(command_rebindings.get(command.command_id, ()))
         command_values = dict(exact_values)
         command_unknown_values = set(unknown_values)
         for assignment in command.definite_assignments:
@@ -4320,11 +4456,11 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         redirection_values = command_values if assignment_only else exact_values
         if withdraw_every_name:
             redirection_values = {}
-        elif projection_rebound_names or withdrawn_names:
+        elif withdrawn_names:
             redirection_values = {
                 name: value
                 for name, value in redirection_values.items()
-                if name not in projection_rebound_names and name not in withdrawn_names
+                if name not in withdrawn_names
             }
         # Resolve before the input projection reads the redirections, not after: an operand under
         # ``<`` names the file a ``read`` draws its record from, so building stdin from the
