@@ -4200,11 +4200,31 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         nameref_rebindings,
         call_targets,
     )
+    # A declaration attribute is the third rebinding a command performs outside the text of its
+    # assignments, so the name it names joins the two above: withdrawn at the declaration, and
+    # withdrawn from the entry of any loop the declaration sits in, since the next iteration
+    # reaches a use above it with the attribute already set.
+    declaration_attributes = {
+        command.command_id: _declaration_attribute_names(command) for command in evidence.commands
+    }
+    attribute_rebindings = {
+        command_id: frozenset(transformed)
+        for command_id, (transformed, _readonly) in declaration_attributes.items()
+        if transformed
+    }
     command_rebindings = {
         command_id: nameref_rebindings.get(command_id, frozenset())
         | call_rebindings.get(command_id, frozenset())
-        for command_id in (*nameref_rebindings, *call_rebindings)
+        | attribute_rebindings.get(command_id, frozenset())
+        for command_id in (*nameref_rebindings, *call_rebindings, *attribute_rebindings)
     }
+    # Both attribute sets accumulate in source order: a declaration decides what every later write
+    # to the name stores, and a "readonly" declaration is what makes a later write one Bash
+    # refuses, so the declaring command's own operand still applies. Neither is kept per table,
+    # which over-approximates a "local -u" to the whole run body in the direction that leaves an
+    # operand dynamic.
+    transformed_names: set[str] = set()
+    readonly_names: set[str] = set()
     scope_bound_names = _scope_rebound_names(evidence, command_scope_paths, command_rebindings)
     withdraw_every_name = function_unreadable_rebinding or nameref_unreadable_rebinding
     entered_scopes: list[int] = []
@@ -4337,13 +4357,23 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         unknown_values: set[str],
         *,
         conditional: bool,
+        expansion_values: Mapping[str, str] | None = None,
     ) -> None:
         name = _unscoped_variable_name(assignment.name)
         if conditional:
             values.pop(name, None)
             unknown_values.add(name)
             return
-        value = _exact_content_literal(assignment.content, values, limits)
+        # A declaration builtin's operands are expanded before the builtin applies any of them, so
+        # a later operand reading an earlier name reads the value the command started with:
+        # ``A=other.sh; declare A=task.sh B=$A`` leaves ``B=other.sh`` under Bash. The append
+        # spelling is the measured exception, since ``declare A=2 A+=3`` leaves ``23``: the text
+        # it appends to is the one the same command applied, so the prior value below stays the
+        # live one. A prefix assignment on an ordinary command applies left to right and passes no
+        # snapshot at all, which is why ``A=1; A=2 B=$A`` leaves ``B=2``.
+        value = _exact_content_literal(
+            assignment.content, values if expansion_values is None else expansion_values, limits
+        )
         if value is None:
             values.pop(name, None)
             unknown_values.add(name)
@@ -4358,6 +4388,37 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         else:
             values[name] = value
             unknown_values.discard(name)
+
+    def note_write(name: str, withdrawn: set[str]) -> bool:
+        """Record one write against the declaration attributes the name carries.
+
+        A declaration attribute decides what Bash stores rather than what the assignment spells,
+        so a name carrying one is withdrawn from the projection at every write instead of being
+        released by it: ``declare -u P; P=task.sh`` leaves ``TASK.SH`` in the variable while this
+        table reads the assignment's own text. Case conversion and arithmetic evaluation are that
+        class, and the value applied below is left where every other reader of this table already
+        had it, since the withdrawal is the projection's alone.
+
+        A ``readonly`` name is the same mismatch from the other side. Bash rejects the write and a
+        non-interactive shell exits, so the name keeps the value it already had and nothing after
+        the write runs at all. The assignment is therefore not applied, and the name is withdrawn
+        rather than left naming a file the run never opens.
+
+        Args:
+            name: The variable this command writes.
+            withdrawn: The projection's withdrawal set for the table being written.
+
+        Returns:
+            Whether the write is one Bash refuses, so the caller must not apply it.
+        """
+        if name in readonly_names:
+            withdrawn.add(name)
+            return True
+        if name in transformed_names:
+            withdrawn.add(name)
+        else:
+            withdrawn.discard(name)
+        return False
 
     def record_effects(
         command: _CommandEvidence,
@@ -4384,25 +4445,30 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         assignment_only = not command.argv or command.executable.argv_index is None
         if assignment_only:
             for assignment in routed.definite_assignments:
+                if note_write(_unscoped_variable_name(assignment.name), withdrawn):
+                    continue
                 apply_exact(
                     assignment,
                     values,
                     unknown_values,
                     conditional=conditional or assignment.from_stdin,
                 )
-                withdrawn.discard(_unscoped_variable_name(assignment.name))
+        # One snapshot for the whole operand list, taken before any of them is applied.
+        expansion_values = dict(values)
         for assignment in routed.builtin_assignments:
+            if note_write(_unscoped_variable_name(assignment.name), withdrawn):
+                continue
             apply_exact(
                 assignment,
                 values,
                 unknown_values,
                 conditional=conditional or assignment.from_stdin,
+                expansion_values=expansion_values,
             )
-            withdrawn.discard(_unscoped_variable_name(assignment.name))
         unset_names, unknown_unset = _unset_action(command)
         for name in unset_names:
             values.pop(name, None)
-            withdrawn.discard(name)
+            note_write(name, withdrawn)
             if conditional:
                 unknown_values.add(name)
             else:
@@ -4437,6 +4503,10 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         # assignment through an alias makes that ordering a second measurement rather than the one
         # ``record_effects`` already pins.
         withdrawn_names.update(command_rebindings.get(command.command_id, ()))
+        # The attribute this command sets governs its own operands too, so it is read before the
+        # values below are projected. A "readonly" name is collected after the command instead,
+        # since the declaration's own assignment is the one write Bash does accept.
+        transformed_names.update(declaration_attributes[command.command_id][0])
         command_values = dict(exact_values)
         command_unknown_values = set(unknown_values)
         for assignment in command.definite_assignments:
@@ -4478,6 +4548,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             # value below rather than one drawn from a stream this pass has not built.
             commands.append(redirected)
             record_effects(command, redirected, exact_values, unknown_values, withdrawn_names)
+            readonly_names.update(declaration_attributes[command.command_id][1])
             continue
         stdin = _strip_one_trailing_newline(
             _input_expression(
@@ -4557,6 +4628,7 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
         )
         commands.append(routed)
         record_effects(command, routed, exact_values, unknown_values, withdrawn_names)
+        readonly_names.update(declaration_attributes[command.command_id][1])
     return replace(evidence, commands=tuple(commands))
 
 
@@ -11068,6 +11140,78 @@ def _static_variable_name(value: str) -> bool:
             for character in value[1:]
         )
     )
+
+
+_DECLARATION_BUILTIN_NAMES = ("declare", "typeset", "local", "export", "readonly")
+_VALUE_TRANSFORMING_DECLARATION_FLAGS = frozenset("ulci")
+
+
+def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
+    """Return the names a declaration attributes, split by what the attribute does to a write.
+
+    A declaration attribute decides what Bash stores rather than what an assignment spells, and
+    this evidence carries the assignment's own text. ``declare -u P; P=task.sh`` leaves ``TASK.SH``
+    in the variable while the exact table reads ``task.sh``, so an operand spelling the name
+    resolves to a resource the run never opens, in both directions at once. Case conversion
+    (``-u``, ``-l``, ``-c``) and arithmetic evaluation (``-i``) are that class.
+
+    ``readonly``, and ``-r`` on any of the declaration builtins, is the same mismatch reached from
+    the other side: the declaration's own operand is stored exactly, and it is every *later*
+    assignment that Bash refuses, leaving the name holding what it already had and exiting a
+    non-interactive shell. The two are reported separately because the first withdraws the name
+    from its declaration onward and the second only from a write Bash rejects, which is what keeps
+    ``readonly P=task.sh; printf ... > "$P"`` naming the file the marker reaches.
+
+    An option this scan cannot read needs no reading here: the scanner records it as unknown
+    builtin content, and ``record_effects`` already drops every exact value the table holds when a
+    command carries one.
+
+    Args:
+        command: The command whose argv may spell a declaration builtin.
+
+    Returns:
+        The names given a value-transforming attribute, and the names made readonly.
+    """
+    if not command.argv:
+        return (), ()
+    index: int | None = None
+    builtin = ""
+    for candidate in _DECLARATION_BUILTIN_NAMES:
+        index = _builtin_executable_index(command, candidate)
+        if index is not None:
+            builtin = candidate
+            break
+    if index is None:
+        return (), ()
+    transforms = False
+    readonly = builtin == "readonly"
+    names: list[str] = []
+    options_enabled = True
+    for argument in command.argv[index + 1 :]:
+        if argument.dynamic:
+            continue
+        literal = argument.literal
+        if options_enabled and literal == "--":
+            options_enabled = False
+            continue
+        if options_enabled and literal.startswith(("-", "+")) and literal not in {"-", "+"}:
+            # Only the setting spelling is read. A ``+u`` removes the attribute, and not reading
+            # it keeps the name withdrawn where Bash has restored it, which is the direction that
+            # leaves an operand dynamic rather than naming a file on a guess.
+            if literal.startswith("-"):
+                flags = set(literal[1:])
+                transforms = transforms or bool(flags & _VALUE_TRANSFORMING_DECLARATION_FLAGS)
+                readonly = readonly or "r" in flags
+            continue
+        name = literal.split("=", 1)[0].removesuffix("+")
+        if _static_variable_name(name):
+            names.append(name)
+    if not names or not (transforms or readonly):
+        return (), ()
+    # An option word may follow an operand, so the decision covers every name the command spells
+    # rather than the ones after the flag that spells the attribute.
+    attributed = tuple(dict.fromkeys(names))
+    return (attributed if transforms else (), attributed if readonly else ())
 
 
 def _unset_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:

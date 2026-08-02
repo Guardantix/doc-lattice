@@ -1007,6 +1007,35 @@ environments, so an alias written through above its own declaration, which a fun
 spell, leaves its target unwithdrawn, and an alias a subshell binds is still read as one after that
 subshell exits. Both sit with the other alias gaps.
 
+Two orderings inside one command are measured rather than assumed, because reading either the wrong
+way names a file for the marker that Bash never opens. A declaration builtin's operands are all
+expanded before the builtin applies any of them, so `A=other.sh; declare A=task.sh B=$A` leaves
+`B=other.sh`: the operand list is projected against a snapshot of the table taken before the command
+rather than against the values its earlier operands assign. The append spelling is the exception the
+same measurement gives, since `declare A=task A+=.sh` leaves `task.sh`, so the text an append
+extends is the one that command already applied. A prefix assignment on an ordinary command carries
+no snapshot at all: those apply left to right, and `A=1; A=2 B=$A` leaves `B=2`.
+
+A declaration attribute is a rebinding of a third kind, one this evidence records the wrong value
+for rather than not at all. Case conversion (`declare -u`, `-l`, `-c`) and arithmetic evaluation
+(`-i`) decide what Bash stores rather than what the assignment spells, so `declare -u P; P=task.sh`
+leaves `TASK.SH` in the variable while this table reads the assignment's own text. The name is
+therefore withdrawn from the projection at its declaration and at every later write to it, rather
+than released by those writes the way an ordinary assignment releases a withdrawal. Both directions
+were reachable before that: the marker write landed on the lowercase file while Bash wrote the
+uppercase one, and a body whose marker Bash leaves somewhere it never runs was refused. What Bash
+really stores is the residue, and it sits with the rebindings issue #205 tracks.
+
+`readonly`, and `-r` on any declaration builtin, is the same mismatch reached from the other side.
+The declaration's own operand is stored exactly, and it is every later assignment that Bash refuses,
+leaving the name holding what it already had and exiting a non-interactive shell. Only a write to an
+already-declared readonly name is therefore withdrawn, and it is not applied at all, which keeps
+`readonly P=task.sh; printf ... > "$P"` naming the file the marker reaches while
+`readonly P=task.sh; P=other.sh; printf ... > "$P"` stops naming a file the run never opens. The
+attribute sets are not kept per value table, which over-approximates a `local -u` to the whole run
+body in the direction that leaves an operand dynamic, and a `+u` that removes an attribute is not
+read at all, which is the same direction.
+
 One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
 name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.
 An arithmetic assignment (`(( P = 1 ))`, `let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))`

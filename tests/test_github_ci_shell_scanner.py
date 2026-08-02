@@ -496,6 +496,45 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # A declaration builtin's operands are expanded before the builtin applies any of them, so a
+    # later operand reading an earlier name reads the value the command started with. Applying
+    # them left to right named the file the first operand assigns, which is a write recorded on a
+    # resource bash never opens while the one the marker reaches goes unmodeled. The append
+    # spelling is the measured exception: "declare A=task A+=.sh" leaves "task.sh", because the
+    # text it appends to is the one the same command applied.
+    (
+        "declaration-operand-reads-the-pre-command-value",
+        "printf 'echo safe\\n' > other.sh; A=task.sh; declare A=other.sh B=$A"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\"; bash task.sh",
+        {},
+    ),
+    (
+        "declaration-append-reads-the-applied-value",
+        "A=zz; declare A=task A+=.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$A\"; bash task.sh",
+        {},
+    ),
+    (
+        # A prefix assignment on an ordinary command is the control for the same ordering: those
+        # apply left to right, so "A=task.sh B=$A" leaves "B=task.sh" and the snapshot above must
+        # not reach them.
+        "prefix-assignments-apply-in-order",
+        "A=other.sh; A=task.sh B=$A"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\"; bash task.sh",
+        {},
+    ),
+    # A "readonly" declaration stores its own operand exactly, and it is every later assignment
+    # bash refuses, so the value the name carries here is the file the marker really reaches.
+    (
+        "readonly-declaration-names-its-own-value",
+        "readonly P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "declared-readonly-names-its-own-value",
+        "declare -r P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -9343,6 +9382,35 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
+    # Issue #151 over-refusal guards for the values a declaration builtin does not store as the
+    # assignment spells them. Each of these writes the marker somewhere bash never runs it, so
+    # reading the table as exact refused a body whose marker stays where it was written: the
+    # operand list is expanded before the builtin applies it, a case-converting attribute stores
+    # a name this table cannot spell, and a write bash refuses leaves the name where it was.
+    (
+        "marker-free-declaration-operand-reads-the-pre-command-value",
+        "printf 'echo safe\\n' > task.sh; printf 'echo safe\\n' > other.sh; A=other.sh"
+        "; declare A=task.sh B=$A; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\""
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-declaration-operand-with-an-unset-source",
+        "declare A=task.sh B=$A; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-case-converting-attribute",
+        "printf 'echo safe\\n' > task.sh; declare -u P; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-write-a-readonly-name-refuses",
+        "printf 'echo safe\\n' > other.sh; readonly P=task.sh; P=other.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
 ]
 
 
@@ -9814,6 +9882,32 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "alias-write-in-a-called-body-word",
         "f(){ R=other.sh; }; declare -n R=P; P=task.sh; f"
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # A declaration attribute decides what bash stores rather than what the assignment spells, and
+    # this evidence carries the assignment's own text, so the name is withdrawn from the
+    # projection and the operand keeps the dynamic target every withdrawn operand has. Recording
+    # the assignment's text instead named a resource the run never opens, which is the refusing
+    # half these rows' guards in PHASE_TWO_MANDATORY_CERTIFICATIONS pin. Tracking what bash really
+    # stores is the residue, and it sits with the rebindings issue #205 tracks.
+    (
+        "uppercase-attribute-word",
+        "declare -u P; P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
+        {},
+    ),
+    (
+        "lowercase-attribute-word",
+        "declare -l P; P=TASK.SH; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "integer-attribute-word",
+        "declare -i P; P=1+1; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash 2",
+        {},
+    ),
+    (
+        "attribute-and-value-in-one-declaration-word",
+        "declare -u P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
         {},
     ),
 ]
