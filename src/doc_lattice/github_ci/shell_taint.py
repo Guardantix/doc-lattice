@@ -3633,8 +3633,9 @@ def _resolve_dynamic_redirection_targets(
     every path reaching it assigns the same literal. Anything else keeps the dynamic target it
     already had, including the rebindings the source-order walk cannot order, which
     ``_scope_rebound_names`` and ``_function_rebound_names`` withdraw before the values reach
-    here. An arithmetic assignment is recorded nowhere and so is withdrawn nowhere; AD-18 records
-    that residue and the over-refusal it leaves.
+    here. A rebinding no evidence records at all is withdrawn nowhere, an arithmetic assignment,
+    an ``eval`` payload assignment and a sourced file among them; AD-18 records that residue in
+    both of its directions, and issue #205 tracks recording them.
 
     Resolving an operand can name a descriptor rather than a file, because a variable holding
     ``/dev/stdout``, a ``/dev/fd`` alias, or a digit under ``>&`` is exactly what its literal
@@ -3755,6 +3756,19 @@ def _function_rebound_names(
     resolved by ``_contextualize_evidence``, which runs after this pass, so there is no call
     linkage here to withdraw the name at.
 
+    A name the body declares local is the one rebinding this shape can order, so it is not
+    collected. ``local``, and ``declare`` or ``typeset`` inside a body, bind a new variable for the
+    duration of the call and restore the caller's on return, so no value they assign is one the
+    caller can be holding at an operand. Collecting it withdrew the caller's own exact value for
+    the whole run body, and the function did not even have to be called:
+    ``f() { local P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh`` left the operand
+    dynamic and certified a body whose marker Bash writes to ``task.sh`` and runs. The two spellings
+    that do reach the caller are excluded from the exclusion rather than reasoned about: ``declare
+    -g`` is already not ``builtin_local``, and options this scan cannot read may spell ``-g``, so a
+    command carrying them keeps its names withdrawn. A later plain assignment to a name the body
+    declared local is still collected, since this pass tracks no per-body declaration state; that
+    is the coarse direction, and it leaves the operand where every other unresolved operand sits.
+
     A redirection operand is therefore never projected against a name any body rebinds, for the
     whole run body rather than from the call onward. That is coarser than a withdrawal at the
     call, and it is the direction that leaves the operand dynamic rather than resolved to a file
@@ -3773,12 +3787,13 @@ def _function_rebound_names(
     for command in evidence.commands:
         if command.function_context_id is None:
             continue
+        declares_local = command.builtin_local and not command.builtin_dynamic_options
         names.update(
             _unscoped_variable_name(assignment.name)
             for assignment in (
                 *command.assignments,
                 *command.definite_assignments,
-                *command.builtin_assignments,
+                *(() if declares_local else command.builtin_assignments),
             )
         )
         for scope_id in command_scope_paths[command.command_id]:

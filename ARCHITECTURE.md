@@ -891,14 +891,38 @@ leaves the name holding after `done`, on a second iteration, or after a call is 
 certification of the same shape and size as every other unresolved operand, pinned in both
 directions alongside them.
 
-One shape is refused rather than left unresolved. An arithmetic assignment (`(( P = 1 ))`,
-`let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))` expansion) is recorded nowhere, so the
-name keeps the value it held before and an operand spelling it resolves to a file Bash never
-opens. That is a pre-existing hole in this value table, which the eval replay reads as well; the
-projection makes it reachable as an over-refusal, `P=other.sh; (( P = 1 )); printf ... > "$P";
-bash other.sh` being rejected for a marker flow it does not have. Closing it means giving the
-scanner an arithmetic rebinding to record, which is tracked separately rather than folded in
-here.
+A name the body declares local is not one of the three. `local`, and `declare` or `typeset` inside
+a body, bind for the duration of the call and restore the caller's variable on return, so no value
+they assign is one the caller can be holding at an operand. Withdrawing it read a declaration as a
+rebinding and took the caller's own exact value away for the whole run body, without the function
+even being called: `f() { local P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` left the
+operand dynamic and certified a body whose marker Bash writes to `task.sh` and runs. The three
+spellings that do reach the caller keep the withdrawal rather than being reasoned about: a
+`declare -g` is a global write and never local to begin with, options this scan cannot read may
+spell `-g`, and a `local -n` alias records its later write under the alias rather than under the
+name it stands for. A plain assignment after a declaration in the same body withdraws as well,
+since this pass carries no per-body declaration state; that is the coarse direction, and it leaves
+the operand where every other unresolved operand sits.
+
+One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
+name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.
+An arithmetic assignment (`(( P = 1 ))`, `let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))`
+expansion) is one. An `eval` payload assignment is another, since the payload route lowers its
+assignments for its own replay and does not apply them to this table, and so is a `source` or `.`
+of another file, whose content this scan does not read. All three are pre-existing holes in this
+value table, which the eval replay reads as well; the projection makes them reachable as
+over-refusals, `P=other.sh; (( P = 1 )); printf ... > "$P"; bash other.sh` and its `eval 'P=1'` and
+`source vars.sh` spellings being rejected for a marker flow they do not have, and reachable in the
+certify direction too, where the write lands on the resource the stale value names while the file
+the marker really reaches goes unmodeled.
+
+The remedy is to record the rebinding, not to clear the table where one might have happened.
+Clearing returns every body carrying one of these constructs to the certification it had before
+this resolution, including the far more common body whose `eval` or `source` rebinds nothing the
+operand names, and that direction gives back a marker flow Bash really runs for an over-refusal it
+does not. Recording an arithmetic rebinding and applying an exact `eval` payload's assignments are
+each tracked as issue #205 rather than folded in here; a sourced file's content stays outside what
+this scan reads.
 
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing

@@ -367,6 +367,23 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "; bash task.sh",
         {},
     ),
+    # A name a function body declares local is not a name it rebinds for its caller, so it is not
+    # one of the three rebindings the walk cannot order. Collecting it withdrew the caller's own
+    # exact value for the whole run body, and the function did not even have to be called.
+    (
+        "local-declaration-leaves-the-caller-word-exact",
+        "f(){ local P=other.sh; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # The declaration is reached here rather than merely parsed, and the body writes through
+        # its own local, so the caller's later operand still names the file the marker reaches.
+        "called-local-declaration-leaves-the-caller-word-exact",
+        'f(){ local P=other.sh; printf x > "$P"; }; f; P=task.sh'
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -8951,6 +8968,21 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
         {},
     ),
+    # The over-refusal guard for excluding a declared local from that withdrawal. Leaving the
+    # caller's name exact has to stay a resource identity rather than a refusal of every body a
+    # function declares a local in: bash writes the marker to task.sh here and runs the untouched
+    # other.sh, and a local declaration of an unrelated name touches nothing at all.
+    (
+        "marker-free-local-declaration-write-target",
+        "f(){ local P=other.sh; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "local-declaration-of-another-name-leaves-the-word-exact",
+        "f(){ local Q=other.sh; }; P=task.sh; printf 'make build\\n' > \"$P\"; bash task.sh",
+        {},
+    ),
     # Issue #151 measured widening. Resolving an operand can name a descriptor rather than a
     # file, because a variable holding "/dev/stdout", a "/dev/fd" alias, or a digit under ">&" is
     # exactly what its literal spelling names. "_guarded_output_descriptors" reads a
@@ -9308,6 +9340,63 @@ KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
         "P=; printf '%s%s\\n' doc- 'lattice reconcile' > \"${P:-task.sh}\"; bash task.sh",
         {},
     ),
+    # Issue #188, the residue of excluding a declared local from the function-body withdrawal. A
+    # name a body assigns plainly still withdraws, and so do the three spellings that reach the
+    # caller through a declaration builtin: a nameref alias, whose later write is recorded under
+    # the alias rather than the name it stands for; "declare -g", which is a global write and so
+    # is not "builtin_local" at all; and options this scan cannot read, which may spell "-g". A
+    # plain assignment after a declaration in the same body withdraws too, since this pass tracks
+    # no per-body declaration state. Each keeps the operand where every unresolved operand sits,
+    # which is what these rows record.
+    (
+        "function-plain-assignment-word",
+        "f(){ P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "local-nameref-alias-word",
+        "f(){ local -n r=P; r=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "declare-global-in-a-body-word",
+        "f(){ declare -g P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "unreadable-declaration-options-word",
+        "O=-g; f(){ local $O P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "assignment-after-a-local-declaration-word",
+        "f(){ local P; P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #205: the certify-direction half of the residue AD-18 discloses for a rebinding no
+    # evidence carries. These two are resolved rather than unresolved, and resolved to the value
+    # the name held before an "eval" payload or a sourced file replaced it, so the marker write
+    # lands on a resource bash never opens while the file it really reaches goes unmodeled. The
+    # refusing half of the same residue is pinned by
+    # "test_rebinding_this_table_does_not_record_keeps_the_prior_value", which is also where the
+    # reason not to clear the table at these commands is recorded.
+    (
+        "eval-payload-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; eval 'P=task.sh'"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "sourced-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; printf 'P=task.sh\\n' > vars.sh"
+        "; source vars.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 
@@ -9384,6 +9473,45 @@ def test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs(scr
 
     assert result.invocations == NONE
     assert result.incomplete_reason == expected
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf 'echo safe\\n' > other.sh; P=other.sh; eval 'P=task.sh'"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; printf 'P=task.sh\\n' > vars.sh"
+        "; source vars.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=task.sh; eval 'Q=1'; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "printf 'Q=1\\n' > vars.sh; P=task.sh; source vars.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+    ],
+    ids=(
+        "eval-payload-rebinding",
+        "sourced-rebinding",
+        "eval-that-rebinds-another-name",
+        "source-that-rebinds-another-name",
+    ),
+)
+def test_rebinding_this_table_does_not_record_keeps_the_prior_value(script):
+    """The residue AD-18 discloses for a rebinding no evidence carries, pinned in both directions.
+
+    An ``eval`` payload assignment and a ``source`` of another file both rebind in the current
+    shell, and neither is recorded in the value table this projection reads. The name therefore
+    keeps the value it held before, exactly as an arithmetic assignment leaves it, so the first two
+    rows resolve the operand to a file bash never opens and refuse a body whose marker only ever
+    reaches the other file.
+
+    That is the over-refusing direction, and the last two rows are why the remedy is not to clear
+    the table at these commands: the same construct that rebinds nothing at all is far more common,
+    and withdrawing there would return a body whose marker bash really does write and run to the
+    certification it had before issue #151. Recording the rebinding is what closes this, tracked as
+    issue #205 rather than folded into the projection.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
 @pytest.mark.parametrize(
