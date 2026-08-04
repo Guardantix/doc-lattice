@@ -6,6 +6,11 @@ refusal shape the scanner's exceptions and results accept. Transports (exception
 deferred fields, result projections) carry that same object rather than re-deriving one from
 text, so a refusal observed at the public boundary still names the guard that produced it.
 
+This module is also where the scan's deterministic caps and its result vocabulary are declared.
+`TaintLimits`, `ScannerLimits` and `ScanLimits` hold the default bounds every guard enforces, and
+`Certified`, `MarkerDetected` and `GuardRefusal` are the three outcomes `ScanVerdict` admits. They
+live beside the refusal shape because a cap and the guard that refuses on it are one decision.
+
 See AD-20 in ARCHITECTURE.md for the durable decision this module implements.
 """
 
@@ -42,6 +47,12 @@ class ScannerLimits:
     max_invocations: int = 10_000
     max_launcher_nesting_depth: int = 64
     max_case_arms: int = 256
+    # Bounds the alternative width the taint solver explores per case statement (how many arms
+    # whose match against the subject cannot be resolved statically it will retain), not the
+    # total arm count; every exhaustion still fails closed. 32 comfortably covers a real
+    # subcommand or job-matrix dispatch table (#124) without materially widening the solver's
+    # search space; see scripts/bench_sections.py and the seeded fuzz run in
+    # scripts/fuzz_shell_taint.py.
     max_case_dynamic_branches: int = 32
 
 

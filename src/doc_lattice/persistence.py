@@ -61,6 +61,13 @@ def _sync_directory_fd(directory_fd: int) -> None:
         os.fsync(directory_fd)
 
 
+def _regular_file_mode(destination_stat: os.stat_result) -> int | None:
+    """Return a regular destination's permission bits, or None for any other entry type."""
+    if not stat.S_ISREG(destination_stat.st_mode):
+        return None
+    return stat.S_IMODE(destination_stat.st_mode)
+
+
 def _require_directory_entry_name(name: str, *, description: str) -> None:
     """Require one basename so a dirfd operation cannot escape its directory."""
     separators = (os.sep, os.altsep)
@@ -85,17 +92,22 @@ def _open_stage_at(directory_fd: int, prefix: str) -> tuple[int, str]:
     raise FileExistsError("could not allocate a unique durable staging file")
 
 
+def _unpublished_stage_cleanup_note(staged: str | Path, cleanup_error: OSError) -> str:
+    """Render the manual remediation note for an orphaned helper-owned stage."""
+    return (
+        f"durable cleanup failed for helper-owned stage {staged}: {cleanup_error}; "
+        "it is not governed by a recovery journal, so inspect and remove it manually "
+        "when safe"
+    )
+
+
 def _add_unpublished_stage_cleanup_note_at(
     primary: OSError,
     staged_name: str,
     cleanup_error: OSError,
 ) -> None:
     """Attach manual remediation for an unpublished descriptor-relative stage orphan."""
-    primary.add_note(
-        f"durable cleanup failed for helper-owned stage {staged_name}: {cleanup_error}; "
-        "it is not governed by a recovery journal, so inspect and remove it manually "
-        "when safe"
-    )
+    primary.add_note(_unpublished_stage_cleanup_note(staged_name, cleanup_error))
 
 
 def _durable_unlink_at(directory_fd: int, name: str) -> None:
@@ -126,7 +138,13 @@ def _stage_bytes_at(
     *,
     prefix: str,
 ) -> str:
-    """Write and synchronize one private staging file under an open directory."""
+    """Write and synchronize one private staging file under an open directory.
+
+    On POSIX, when ``destination_name`` already exists as a regular file the stage is
+    chmodded to that destination's permission bits so publication preserves them. Otherwise
+    the stage keeps the private mode it was created with, which then becomes the new file's
+    mode.
+    """
     _require_directory_entry_name(destination_name, description="destination name")
     try:
         destination_stat = os.stat(
@@ -137,11 +155,7 @@ def _stage_bytes_at(
     except FileNotFoundError:
         destination_mode = None
     else:
-        destination_mode = (
-            stat.S_IMODE(destination_stat.st_mode)
-            if stat.S_ISREG(destination_stat.st_mode)
-            else None
-        )
+        destination_mode = _regular_file_mode(destination_stat)
     fd, staged_name = _open_stage_at(directory_fd, prefix)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -163,11 +177,7 @@ def _add_unpublished_stage_cleanup_note(
     cleanup_error: OSError,
 ) -> None:
     """Attach exact manual remediation for a helper-owned stage orphan."""
-    primary.add_note(
-        f"durable cleanup failed for helper-owned stage {staged}: {cleanup_error}; "
-        "it is not governed by a recovery journal, so inspect and remove it manually "
-        "when safe"
-    )
+    primary.add_note(_unpublished_stage_cleanup_note(staged, cleanup_error))
 
 
 def _durable_unlink_preserving_error(staged: Path, primary: OSError) -> None:
@@ -180,6 +190,10 @@ def _durable_unlink_preserving_error(staged: Path, primary: OSError) -> None:
 
 def stage_bytes(destination: Path, data: bytes, *, prefix: str) -> Path:
     """Write and synchronize bytes to a unique file beside a destination.
+
+    On POSIX, when ``destination`` already exists as a regular file the stage is chmodded to
+    the destination's permission bits so publication preserves them. Otherwise the stage keeps
+    the private mode ``mkstemp`` created it with, which then becomes the new file's mode.
 
     Args:
         destination: The eventual destination used to select the staging directory.
@@ -197,11 +211,7 @@ def stage_bytes(destination: Path, data: bytes, *, prefix: str) -> Path:
     except FileNotFoundError:
         destination_mode = None
     else:
-        destination_mode = (
-            stat.S_IMODE(destination_stat.st_mode)
-            if stat.S_ISREG(destination_stat.st_mode)
-            else None
-        )
+        destination_mode = _regular_file_mode(destination_stat)
     fd, tmp_name = tempfile.mkstemp(
         dir=destination.parent,
         prefix=prefix,
@@ -271,6 +281,16 @@ def atomic_replace_bytes_at(
     The staging file, atomic rename, and directory synchronization all remain relative to
     ``directory_fd``. This lets a caller retain publication ownership after the directory's
     pathname is renamed or recreated.
+
+    Args:
+        directory_fd: Open descriptor for the directory owning the destination.
+        destination_name: One basename inside ``directory_fd`` to create or replace.
+        data: The exact replacement bytes.
+        prefix: The caller-owned temporary filename prefix, itself one basename.
+
+    Raises:
+        ValueError: If ``destination_name`` or ``prefix`` does not name one directory entry.
+        OSError: If staging, replacement, cleanup, or synchronization fails.
     """
     staged_name = _stage_bytes_at(
         directory_fd,
@@ -312,6 +332,9 @@ def atomic_create_bytes(path: Path, data: bytes, *, prefix: str) -> None:
     try:
         durable_unlink(staged)
     except OSError as cleanup_error:
+        # Publication already succeeded, so the failed stage cleanup is itself the error the
+        # caller sees. It is passed as both the note carrier and the described cause on
+        # purpose, so the raised OSError still names the orphan and its remediation.
         _add_unpublished_stage_cleanup_note(cleanup_error, staged, cleanup_error)
         raise
 
@@ -323,7 +346,19 @@ def atomic_create_bytes_at(
     *,
     prefix: str,
 ) -> None:
-    """Durably create one descriptor-relative destination without replacing a winner."""
+    """Durably create one descriptor-relative destination without replacing a winner.
+
+    Args:
+        directory_fd: Open descriptor for the directory owning the destination.
+        destination_name: One basename inside ``directory_fd`` to create.
+        data: The exact bytes to publish.
+        prefix: The caller-owned temporary filename prefix, itself one basename.
+
+    Raises:
+        ValueError: If ``destination_name`` or ``prefix`` does not name one directory entry.
+        OSError: If staging, linking, cleanup, or synchronization fails. A FileExistsError
+            raised by linking means another writer published the destination first.
+    """
     staged_name = _stage_bytes_at(
         directory_fd,
         destination_name,
@@ -345,6 +380,9 @@ def atomic_create_bytes_at(
     try:
         _durable_unlink_at(directory_fd, staged_name)
     except OSError as cleanup_error:
+        # Publication already succeeded, so the failed stage cleanup is itself the error the
+        # caller sees. It is passed as both the note carrier and the described cause on
+        # purpose, so the raised OSError still names the orphan and its remediation.
         _add_unpublished_stage_cleanup_note_at(cleanup_error, staged_name, cleanup_error)
         raise
 

@@ -147,6 +147,11 @@ def _validate_syntax_tree(node: Node | None, workflow_path: Path, budget: _Trave
     if node is None:
         return
 
+    # The ReusedAnchorWarning promoted to an error above fires only when one anchor name is
+    # defined twice. A node that aliases its own anchor, such as `&a [*a]`, defines that anchor
+    # once, and composition registers it before visiting the children, so the composed node
+    # refers to itself. This active-path set, which holds an id() only while that node's own
+    # descendants are still being visited, is what rejects the self-referential case.
     active_nodes: set[int] = set()
     budget.reserve_visits(1, depth=1)
     stack: list[tuple[Node, tuple[str, ...], int, bool]] = [(node, (), 1, False)]
@@ -426,6 +431,8 @@ def _collect_structure(
 ) -> tuple[list[WorkflowScalar], list[WorkflowStructureEntry]]:
     scalars: list[WorkflowScalar] = []
     structure: list[WorkflowStructureEntry] = []
+    # Second traversal, over the loaded objects rather than the composed nodes, so it carries
+    # its own active-path set for the self-referential alias graph the syntax pass rejects.
     active_containers: set[int] = set()
     budget.reserve_visits(1, depth=1)
     stack: list[tuple[Any, tuple[str, ...], int, bool]] = [(raw, (), 1, False)]

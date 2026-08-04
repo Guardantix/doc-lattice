@@ -24,6 +24,7 @@ from doc_lattice.error_types import (
     ReconcileInProgressError,
     ReconcilePersistenceError,
 )
+from doc_lattice.reconcile import Rewrite
 from doc_lattice.reconcile_transaction import (
     Journal,
     JournalEntry,
@@ -31,6 +32,9 @@ from doc_lattice.reconcile_transaction import (
     RecoveryResult,
     ensure_dry_run_safe,
     reconcile_lock,
+)
+from doc_lattice.reconcile_transaction import (
+    commit_rewrites as _commit_rewrites_unlocked,
 )
 from doc_lattice.reconcile_transaction import (
     recover_transaction as _recover_transaction_unlocked,
@@ -1692,3 +1696,50 @@ def test_journal_restoration_read_failure_is_reported_without_overwrite(
     assert "secondary journal resync failure" in message
     assert "remains for retry" not in message
     assert real_read_bytes(transaction.journal) == journal_bytes
+
+
+def _commit_rewrites_through_lock(
+    project_root: Path,
+    rewrites: list[Rewrite],
+    write_paths: dict[Path, Path],
+) -> None:
+    """Run one commit through the required project-bound lock capability."""
+    with reconcile_lock(project_root) as lock:
+        _commit_rewrites_unlocked(project_root, rewrites, write_paths, lock=lock)
+
+
+def test_lost_journal_create_race_reports_the_preflight_remediation(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = Rewrite(
+        path=destination,
+        before=b"old bytes",
+        after=b"new bytes",
+        applied=frozenset({"up#x"}),
+    )
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    real_create = reconcile_transaction.atomic_create_bytes
+    races_lost = 0
+
+    def _lose_the_create_race(path: Path, data: bytes, *, prefix: str) -> None:
+        nonlocal races_lost
+        if path == journal:
+            races_lost += 1
+            path.write_bytes(b"another process published first\n")
+            raise FileExistsError(f"journal {path} was created concurrently")
+        real_create(path, data, prefix=prefix)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _lose_the_create_race)
+
+    with pytest.raises(ReconcilePersistenceError) as racing:
+        _commit_rewrites_through_lock(tmp_path, [rewrite], {destination: destination})
+
+    monkeypatch.undo()
+
+    with pytest.raises(ReconcilePersistenceError) as preflight:
+        _commit_rewrites_through_lock(tmp_path, [rewrite], {destination: destination})
+
+    assert races_lost == 1
+    assert str(racing.value) == str(preflight.value)
+    assert "already exists" in str(racing.value)
+    assert destination.read_bytes() == b"old bytes"

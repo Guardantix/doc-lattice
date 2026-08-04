@@ -75,7 +75,9 @@ def _prepare_github_init(root: Path, repository: str) -> _GithubInitPlan:
 
     The renderer validates the pinned final-release version internally, so no separate
     caller-side version check is needed. The full preflight result is stored unfiltered
-    because ``apply_changes`` skips already-current artifacts on its own.
+    because ``apply_changes`` re-validates every already-current artifact under the
+    publication lock whenever the batch has anything to write, and refuses when one
+    drifted, so filtering them out here would drop that check.
     """
     identity = parse_repository(repository)
     artifacts = render_managed_artifacts(identity.display, __version__)
@@ -138,6 +140,10 @@ def register_init(app: typer.Typer) -> None:
                     scaffold.config_text.encode("utf-8"),
                     prefix=f"{target.name}.",
                 )
+            # A bare FileExistsError means the destination already existed and the staged file
+            # was cleaned up normally, which is the benign already-exists case. Notes are
+            # attached only when that cleanup also failed and left stray staged evidence, so
+            # treat a noted error as a real failure.
             except FileExistsError as exc:
                 if not getattr(exc, "__notes__", ()):
                     runtime.stderr.print(

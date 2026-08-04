@@ -64,6 +64,9 @@ _SECRETS_TOKEN_RE = re.compile(
 )
 _STATIC_SECRET_DOT_RE = re.compile(r"\s*\.\s*[A-Za-z_][A-Za-z0-9_]*")
 _STATIC_SECRET_INDEX_RE = re.compile(r"\s*\[\s*'[A-Za-z_][A-Za-z0-9_]*'\s*\]")
+# A static single-secret selection followed by any of these continues the access, so the
+# expression is no longer proven to reach exactly one name.
+_CHAINED_SECRET_ACCESS_CHARACTERS = ".[*"  # noqa: S105
 _STATIC_SHELL_TEMPLATE_RE = re.compile(r"[A-Za-z0-9_./{} \t-]+")
 _BASH_SHELL_EXECUTABLES = frozenset(
     {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
@@ -111,7 +114,7 @@ _COMMAND_BEHAVIOR_FIELDS = frozenset(
     }
 )
 _JOB_FIELD_PATH_LENGTH = 3
-_JOB_ENV_PATH_LENGTH = 4
+_MIN_STEP_PATH_LENGTH = 4
 _STEP_FIELD_PATH_LENGTH = 5
 _MANAGED_MESSAGES = {
     "MANAGED_TRIGGERS": "managed workflow triggers differ from the canonical installation",
@@ -200,6 +203,10 @@ def audit_global_workflows(
 
     Returns:
         Deterministically sorted unique repository-global findings.
+
+    Raises:
+        ConfigError: If a pull-request run step uses shell semantics the audit cannot
+            interpret, or if a shell scan of a run body cannot complete.
     """
     findings: list[AuditFinding] = []
     for document in documents:
@@ -252,14 +259,14 @@ def _pr_step_invocations(
     step: WorkflowStep,
 ) -> tuple[tuple[str, bool], ...]:
     """Return direct invocations under the effective shell for one PR run step."""
-    context = (
+    unsupported_shell_error = (
         f"{display_path(document.path)} job {job.job_id!r} step {step.index}: "
         "unsupported shell semantics for pull-request run step"
     )
     shell = step.shell or job.default_shell or document.default_shell
     if shell is None:
         if not _default_run_shell_is_bash(job.runs_on):
-            raise ConfigError(context)
+            raise ConfigError(unsupported_shell_error)
         return direct_doc_lattice_invocations(
             step.run or "",
             context=display_path(document.path),
@@ -278,9 +285,13 @@ def _pr_step_invocations(
                 context=display_path(document.path),
             ),
         )
+    # A custom shell template that does not hand the run body to bash leaves that body
+    # uninterpretable here, so only the template itself is scanned. A template that already
+    # invokes doc-lattice is reported from the template alone; one that does not is refused as
+    # unsupported shell semantics rather than certified by omission.
     if template_invocations:
         return template_invocations
-    raise ConfigError(context)
+    raise ConfigError(unsupported_shell_error)
 
 
 def _default_run_shell_is_bash(runs_on: str | None) -> bool:
@@ -290,6 +301,13 @@ def _default_run_shell_is_bash(runs_on: str | None) -> bool:
 
 
 def _supports_bash_run_body(shell: str) -> bool:
+    """Return whether a custom ``shell:`` value still executes the run body as bash.
+
+    Accepts the bare ``bash`` and ``sh`` keywords, or a template drawn from the restricted
+    character set ``_STATIC_SHELL_TEMPLATE_RE`` allows whose first word is a known shell
+    executable, whose last and only placeholder is ``{0}``, and whose remaining words are
+    supported option clusters.
+    """
     stripped = shell.strip()
     if stripped in {"bash", "sh"}:
         return True
@@ -307,11 +325,17 @@ def _supports_bash_run_body(shell: str) -> bool:
 
 
 def _supports_bash_options(executable: str, options: list[str]) -> bool:
-    bash = executable.endswith("bash")
+    """Return whether every option word is one this audit knows leaves run-body semantics intact.
+
+    Accepts ``--noprofile`` and ``--norc`` for bash only, short clusters drawn from ``enuvx``,
+    and a cluster ending in ``o`` for bash only when the next word is a supported ``set -o``
+    option name. Anything else, including a lone ``-`` or an unrecognized long flag, is refused.
+    """
+    is_bash = executable.endswith("bash")
     index = 0
     while index < len(options):
         option = options[index]
-        if bash and option in _BASH_LONG_FLAGS:
+        if is_bash and option in _BASH_LONG_FLAGS:
             index += 1
             continue
         if not option.startswith("-") or option.startswith("--") or option == "-":
@@ -322,7 +346,7 @@ def _supports_bash_options(executable: str, options: list[str]) -> bool:
                 return False
             index += 1
             continue
-        if not bash or cluster.count("o") != 1 or not cluster.endswith("o"):
+        if not is_bash or cluster.count("o") != 1 or not cluster.endswith("o"):
             return False
         if not set(cluster[:-1]) <= _BASH_SHORT_FLAGS or index + 1 >= len(options):
             return False
@@ -350,7 +374,8 @@ def audit_managed_installation(
         Deterministically sorted unique managed-installation findings.
 
     Raises:
-        ConfigError: If inspection results do not use the canonical four-slot order.
+        ConfigError: If inspection results do not use the canonical four-slot order, or if an
+            inspected managed workflow's text is not parseable as the audited YAML subset.
     """
     inspected_discovery = _bind_inspected_workflow_snapshot(discovery, installed)
     return _audit_managed_installation(
@@ -708,8 +733,12 @@ def _managed_structure_codes(
             codes.add(_structure_code(path, current, desired))
 
     for job, expected_job, drift in zip(document.jobs, expected.jobs, step_drift, strict=True):
-        drift_codes = drift[0]
+        drift_codes, _ = drift
         if len(job.steps) != len(expected_job.steps):
+            # Misaligned step counts make a positional structure comparison meaningless, so
+            # report the action, command and cache drift already classified for this job. When
+            # that classified nothing, the count itself is still drift and is reported as job
+            # structure.
             codes.update(drift_codes)
             if not drift_codes:
                 codes.add("MANAGED_JOB")
@@ -717,6 +746,9 @@ def _managed_structure_codes(
         if tuple(_step_kind(step) for step in job.steps) != tuple(
             _step_kind(step) for step in expected_job.steps
         ):
+            # Step kinds differ, so position N is not the same step on both sides. Comparing
+            # their subtrees would emit drift for every field of two unrelated steps, and the
+            # kind change is already reported through `drift_codes` or by `_managed_step_codes`.
             continue
         for step in job.steps:
             base = ("jobs", job.job_id, "steps", str(step.index))
@@ -751,7 +783,7 @@ def _subtree_map(
 
 
 def _is_step_path(path: tuple[str, ...]) -> bool:
-    return len(path) >= _JOB_ENV_PATH_LENGTH and path[0] == "jobs" and path[2] == "steps"
+    return len(path) >= _MIN_STEP_PATH_LENGTH and path[0] == "jobs" and path[2] == "steps"
 
 
 def _is_display_name_path(path: tuple[str, ...]) -> bool:
@@ -772,6 +804,21 @@ def _structure_code(
     current: dict[tuple[str, ...], tuple[str, str | None]],
     desired: dict[tuple[str, ...], tuple[str, str | None]],
 ) -> str:
+    """Classify one drifted structure path into a single managed finding code.
+
+    The arms are checked in priority order and the first match wins. That ordering is
+    load-bearing: an ``env`` path holding a secret reference must be classified as
+    ``MANAGED_SECRET`` before ``_is_command_behavior_path`` claims it, because ``env`` is itself
+    a command behavior field.
+
+    Args:
+        path: Structure path whose installed and expected values differ.
+        current: Installed structure values keyed by path.
+        desired: Expected structure values keyed by path.
+
+    Returns:
+        The one managed finding code this drift is reported under.
+    """
     if path and path[0] == "on":
         code = "MANAGED_TRIGGERS"
     elif "permissions" in path:
@@ -860,7 +907,9 @@ def _is_reusable_workflow_secret_inheritance(path: tuple[str, ...], value: str) 
 
 
 def _has_unsafe_secret_context_access(value: str) -> bool:
-    """Return whether an expression can access more than one static unrelated secret."""
+    """Return whether an expression reaches the ``secrets`` context other than through one
+    static literal secret name.
+    """
     cursor = 0
     while True:
         expression_start = value.find("${{", cursor)
@@ -884,14 +933,23 @@ def _has_unsafe_secret_context_access(value: str) -> bool:
             trailing = access_end
             while trailing < len(value) and value[trailing].isspace():
                 trailing += 1
-            if trailing < len(value) and value[trailing] in ".[*":
+            if trailing < len(value) and value[trailing] in _CHAINED_SECRET_ACCESS_CHARACTERS:
                 return True
             index = access_end
+        # The inner loop only falls through when this `${{` is never closed. Everything after
+        # it has already been inspected for a secrets token, so there is no unscanned text
+        # left and no later expression can start: report no unsafe access rather than
+        # resuming the outer search at a cursor that never advanced.
         else:
             return False
 
 
 def _quoted_expression_string_end(value: str, start: int) -> int:
+    """Return the index just past a single-quoted string inside a GitHub expression.
+
+    A quote inside such a string is escaped by doubling it, so ``''`` continues the string
+    rather than ending it. An unterminated string ends at the end of the value.
+    """
     index = start + 1
     while index < len(value):
         if value[index] != "'":

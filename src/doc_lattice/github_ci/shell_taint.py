@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 TAINT_REFUSAL_REASON = "authored marker flow reaches an execution sink"
 _RANGE_PARTS_WITH_STEP = 3
 _MAX_BRACE_INTEGER_DIGITS = 256
+# The variable-table key standing for ``"$*"``, the double-quoted positional star. Its value is
+# the positionals joined by the first character of ``IFS`` rather than split into fields the way
+# ``$@`` is. The leading NUL keeps the key out of the namespace of every real shell variable, so
+# it can never collide with a name the run body assigns.
 _QUOTED_FUNCTION_POSITIONAL_STAR = "\0quoted-function-positional-star"
 _STATIC_EVAL_SHADOW_NAMES = frozenset({"builtin", "command", "eval", "false", "true"})
 _UNICODE_MAX = 0x10FFFF
@@ -911,7 +915,11 @@ class _EvidenceBuilder:
         raise ValueError("pipe producer command is missing")
 
     def attach_scope_parent(self, scope_id: int, command_id: int) -> None:
-        """Record the command whose word expansion references one scope."""
+        """Record the command whose word expansion references one scope.
+
+        A scope id this builder does not hold is ignored, unlike the attachments above, which
+        treat a missing target as malformed evidence.
+        """
         for index, scope in enumerate(self.scopes):
             if scope.scope_id == scope_id:
                 self.scopes[index] = replace(scope, parent_command_id=command_id)
@@ -943,9 +951,21 @@ class _EvidenceBuilder:
 
 
 def normalize_static_resource(literal: str, *, dynamic: bool) -> str | None:
-    """Return a lexical static resource key without resolving filesystem state."""
+    """Return a lexical static resource key without resolving filesystem state.
+
+    Args:
+        literal: The operand word's literal text.
+        dynamic: Whether the operand's value is unknowable to this analysis.
+
+    Returns:
+        The normalized key, or None when the operand names no static resource.
+    """
     if dynamic or not literal:
         return None
+    # A backslash folds to a separator before splitting, so ``a\\b`` keys the same resource as
+    # ``a/b``. A backslash is a legal Linux filename character, so two genuinely distinct paths
+    # can share one key here. Sharing merges their content onto one entry, since writes join
+    # rather than overwrite, so it cannot drop a write.
     normalized = literal.replace("\\", "/")
     absolute = normalized.startswith("/")
     parts: list[str] = []
@@ -1450,6 +1470,17 @@ def choice(*parts: ContentExpr) -> ContentExpr:
     return Choice(tuple(flattened))
 
 
+# The authored-marker recognizer. It accepts exactly the language
+# ``shell_scanner._DISPATCHER_MARKER_RE`` matches: ``doc``, one or more of ``-``, ``_`` or ``.``,
+# then ``lattice``, ASCII case-insensitive. States 1 and 2 consume "o" and "c"; state 3 requires
+# at least one separator; state 4 absorbs any further separators before "l"; states 5 through 10
+# consume "attice". The empty entries of ``_DFA_EXPECTED_CHARACTERS`` are the states 0, 3 and 4
+# that ``_dfa_step`` handles in dedicated branches. A mismatch restarts at state 1 on a "d" so an
+# overlapping start such as "dodoc-lattice" is not lost.
+#
+# The two encodings must accept the same strings. The scanner decides which authored words carry a
+# marker and this decides whether a solved value can still spell one, so a divergence moves
+# verdicts silently and in one direction only. Change both together.
 _DFA_STATE_COUNT = 11
 _DFA_START = 0
 _SEPARATORS = frozenset("-_.")
@@ -1715,6 +1746,11 @@ def _project_read_value(
     for alternative in value:
         if alternative.projection_incomplete:
             if target_count == 1 and alternative.first_record.entries[_DFA_START][1]:
+                # A single target receives the whole record, so a record that accepts leaves the
+                # target accepting too. Standing in with one canonical accepting literal keeps an
+                # exact, composable value here rather than widening to ``_UNKNOWN_VALUE``, which
+                # the branch below is for. The literal is load bearing: it is the one spelling
+                # the DFA above must keep accepting.
                 projected.add(_TransferSummary.literal("doc-lattice"))
                 continue
             # The exact field split is gone, so the target could hold any substring of the
@@ -1756,6 +1792,10 @@ def _project_read_value(
                         sole_field[0],
                     )
                 )
+        # Reached for opaque alternatives as well, on purpose. An opaque alternative still
+        # carries the literal text it is known to contain, and that text can land at the exact
+        # target index just as it can be relocated by the loop above, so both projections are
+        # kept.
         for literal_text in alternative.literal_texts:
             fields = _read_literal_fields(
                 literal_text,
@@ -1905,6 +1945,24 @@ def _definition_counts(definitions: _FlowDefinitions) -> tuple[int, int, int]:
 
 
 def _evaluate_closed(expression: ContentExpr) -> _ContentValue:
+    """Evaluate one expression that carries no table references.
+
+    The tables-free twin of `_evaluate_with_tables`: it fails loudly on any reference rather than
+    defaulting one, and applies no alternative cap, so it can only be used where the expression's
+    width is already known to be representable. The module's own closed evaluations go through
+    `_evaluate_with_tables` instead, so an unrepresentable width refuses rather than narrows; see
+    `_substituted_text_composes_marker`. Today only the test suite calls this. The two walks share
+    their node handling, so a change to one belongs in the other.
+
+    Args:
+        expression: A content expression with no variable, resource, or stream reference.
+
+    Returns:
+        The content value the expression denotes.
+
+    Raises:
+        ValueError: If the expression contains any table reference.
+    """
     pending: list[tuple[ContentExpr, bool]] = [(expression, False)]
     values: list[_ContentValue] = []
     while pending:
@@ -1947,6 +2005,10 @@ def _evaluate_with_tables(
             values.append(frozenset({_TransferSummary.literal(current.text)}))
         elif isinstance(current, OutsideGap):
             values.append(_OUTSIDE_VALUE)
+        # A key absent from these tables resolves to the inert ``_OUTSIDE_VALUE`` rather than to
+        # ``_UNKNOWN_VALUE``, the top of the lattice. AD-21 in ARCHITECTURE.md owns that default
+        # and carries the measurement that rejected widening it, per table and for all three
+        # together.
         elif isinstance(current, VariableRef | _SecondPassVariableRef):
             values.append(variables.get(current.name, _OUTSIDE_VALUE))
         elif isinstance(current, ResourceRef):
@@ -2364,6 +2426,10 @@ def _validated_output_scope_refs(
     active: set[int] = set()
     while pending:
         current, expanded = pending.pop()
+        # Memo keys are object identities, not structural ones, so a shared subtree is validated
+        # once. That is sound only while every node stays alive: the evidence tuple owns them all
+        # for the whole pass. Never memoize a node this walk constructs itself; its id can be
+        # recycled after it is dropped and the entry would then answer for a different node.
         current_id = id(current)
         if current_id in state.memo:
             continue
@@ -2643,6 +2709,8 @@ def _scope_input_commands(
         for scope_id, scope in scopes.items()
     }
     memo: dict[int, tuple[int, ...]] = {}
+    # ``state`` marks a scope as on this walk's stack (1) or finished (2), so a malformed
+    # dependency cycle stops instead of looping forever. Only the in-progress mark is read.
     state: dict[int, int] = {}
     for root in scopes:
         if root in memo:
@@ -2806,20 +2874,22 @@ def _output_bindings(
     return bindings
 
 
-def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]:
-    """Return the non-standard output descriptors some command or compound in this body binds.
-
-    A descriptor that only ever appears as a duplication of another (``exec 3>&4``) is guarded
-    transitively when the descriptor it duplicates is, so a duplication chain cannot walk an
-    unresolved reference out from under the guard by hopping through an intermediate descriptor
-    ``_guarded_output_descriptors`` previously did not track.
+def _guarded_descriptors(
+    evidence: _ShellTaintEvidence,
+    *,
+    inherited: AbstractSet[int],
+    operators: AbstractSet[str],
+) -> frozenset[int]:
+    """Return the descriptors one redirection direction binds, closed over duplication chains.
 
     Args:
         evidence: The typed shell execution evidence for one run body.
+        inherited: The descriptors this direction inherits from the enclosing shell.
+        operators: The redirection operators that bind a descriptor in this direction.
 
     Returns:
-        The descriptors a ``>&N`` source may legitimately refer to, so an unresolved reference to
-        one of them is missing evidence rather than a Bash runtime error.
+        Every descriptor bound directly, plus every descriptor reachable from one of those
+        through a duplication (``N>&M`` or ``N<&M``) chain.
     """
     direct: set[int] = set()
     dependents: dict[int, list[int]] = {}
@@ -2830,8 +2900,8 @@ def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]
         for event in events:
             if (
                 event.descriptor is None
-                or event.descriptor in _INHERITED_OUTPUT_DESCRIPTORS
-                or event.operator not in _OUTPUT_REDIRECTION_OPERATORS
+                or event.descriptor in inherited
+                or event.operator not in operators
             ):
                 continue
             if isinstance(event.target, DescriptorTarget):
@@ -2849,6 +2919,26 @@ def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]
     return frozenset(guarded)
 
 
+def _guarded_output_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]:
+    """Return the non-standard output descriptors some command or compound in this body binds.
+
+    A descriptor that only ever appears as a duplication of another (``exec 3>&4``) is guarded
+    transitively when the descriptor it duplicates is, so a duplication chain cannot walk an
+    unresolved reference out from under the guard by hopping through an intermediate descriptor
+    ``_guarded_output_descriptors`` previously did not track.
+
+    Args:
+        evidence: The typed shell execution evidence for one run body.
+
+    Returns:
+        The descriptors a ``>&N`` source may legitimately refer to, so an unresolved reference to
+        one of them is missing evidence rather than a Bash runtime error.
+    """
+    return _guarded_descriptors(
+        evidence, inherited=_INHERITED_OUTPUT_DESCRIPTORS, operators=_OUTPUT_REDIRECTION_OPERATORS
+    )
+
+
 def _scope_inherited_bindings(
     evidence: _ShellTaintEvidence,
 ) -> dict[int, _DescriptorBindings]:
@@ -2864,9 +2954,9 @@ def _scope_inherited_bindings(
     scopes = {scope.scope_id: scope for scope in evidence.scopes}
     resolved: dict[int, _DescriptorBindings] = {}
     # An explicit stack keeps a deep or reverse-ordered scope chain within Python's recursion
-    # budget; ``state`` marks a scope as in-progress so a malformed parent cycle stops instead of
-    # looping forever.
-    state: dict[int, int] = {}
+    # budget; ``walking`` marks a scope as on this walk's stack so a malformed parent cycle stops
+    # instead of looping forever.
+    walking: set[int] = set()
     for root in scopes:
         if root in resolved:
             continue
@@ -2878,16 +2968,20 @@ def _scope_inherited_bindings(
             scope = scopes[scope_id]
             parent_id = scope.parent_scope_id
             parent = resolved.get(parent_id, {}) if parent_id is not None else {}
-            resolved_parent = (
-                parent_id is None or parent_id not in scopes or state.get(parent_id) == 1
+            # Settled means nothing more to walk: no parent, a parent outside this evidence, or
+            # a parent already on this walk's stack, which is the malformed-cycle case. A parent
+            # that resolved normally is not settled here; it is picked up on the second visit
+            # below, through ``expanded``.
+            parent_walk_settled = (
+                parent_id is None or parent_id not in scopes or parent_id in walking
             )
-            if expanded or resolved_parent:
+            if expanded or parent_walk_settled:
                 bindings = dict(parent)
                 bindings.update(_output_bindings(scope.redirections, inherited=parent))
                 resolved[scope_id] = bindings
-                state[scope_id] = 2
+                walking.discard(scope_id)
                 continue
-            state[scope_id] = 1
+            walking.add(scope_id)
             pending.append((scope_id, True))
             pending.append((parent_id, False))
     return resolved
@@ -2922,32 +3016,9 @@ def _guarded_input_descriptors(evidence: _ShellTaintEvidence) -> frozenset[int]:
         The descriptors a ``<&N`` source may legitimately refer to, so an unresolved reference
         to one of them is missing evidence rather than a Bash runtime error.
     """
-    direct: set[int] = set()
-    dependents: dict[int, list[int]] = {}
-    for events in (
-        *(command.redirections for command in evidence.commands),
-        *(scope.redirections for scope in evidence.scopes),
-    ):
-        for event in events:
-            if (
-                event.descriptor is None
-                or event.descriptor in _INHERITED_INPUT_DESCRIPTORS
-                or event.operator not in _INPUT_REDIRECTION_OPERATORS
-            ):
-                continue
-            if isinstance(event.target, DescriptorTarget):
-                dependents.setdefault(event.target.descriptor, []).append(event.descriptor)
-            else:
-                direct.add(event.descriptor)
-    guarded = set(direct)
-    pending = list(direct)
-    while pending:
-        current = pending.pop()
-        for dependent in dependents.get(current, ()):
-            if dependent not in guarded:
-                guarded.add(dependent)
-                pending.append(dependent)
-    return frozenset(guarded)
+    return _guarded_descriptors(
+        evidence, inherited=_INHERITED_INPUT_DESCRIPTORS, operators=_INPUT_REDIRECTION_OPERATORS
+    )
 
 
 def _resolve_input_descriptor_source(
@@ -3104,7 +3175,9 @@ def _scope_inherited_input_bindings(
     """
     scopes = {scope.scope_id: scope for scope in evidence.scopes}
     resolved: dict[int, _InputDescriptorBindings] = {}
-    state: dict[int, int] = {}
+    # ``walking`` marks a scope as on this walk's stack so a malformed parent cycle stops instead
+    # of looping forever.
+    walking: set[int] = set()
     for root in scopes:
         if root in resolved:
             continue
@@ -3116,10 +3189,14 @@ def _scope_inherited_input_bindings(
             scope = scopes[scope_id]
             parent_id = scope.parent_scope_id
             parent = resolved.get(parent_id, {}) if parent_id is not None else {}
-            resolved_parent = (
-                parent_id is None or parent_id not in scopes or state.get(parent_id) == 1
+            # Settled means nothing more to walk: no parent, a parent outside this evidence, or
+            # a parent already on this walk's stack, which is the malformed-cycle case. A parent
+            # that resolved normally is not settled here; it is picked up on the second visit
+            # below, through ``expanded``.
+            parent_walk_settled = (
+                parent_id is None or parent_id not in scopes or parent_id in walking
             )
-            if expanded or resolved_parent:
+            if expanded or parent_walk_settled:
                 bindings: _InputDescriptorBindings = dict(parent)
                 bindings.update(
                     _input_descriptor_bindings(
@@ -3127,9 +3204,9 @@ def _scope_inherited_input_bindings(
                     )
                 )
                 resolved[scope_id] = bindings
-                state[scope_id] = 2
+                walking.discard(scope_id)
                 continue
-            state[scope_id] = 1
+            walking.add(scope_id)
             pending.append((scope_id, True))
             pending.append((parent_id, False))
     return resolved
@@ -3641,6 +3718,9 @@ def _read_literal_fields(  # noqa: PLR0912
         assigned.append("".join(character for character, _escaped in record[start:cursor]))
         if cursor >= len(record):
             continue
+        # A run of IFS whitespace is one separator, but a single non-whitespace IFS character
+        # following that run closes the field on its own, and any IFS whitespace after it is
+        # absorbed with it.
         if is_ifs_whitespace(cursor):
             cursor = skip_ifs_whitespace(cursor)
             if (
@@ -4272,7 +4352,7 @@ class _NameProjectionInputs:
     environment_parents: dict[int, int | None]
     scope_bound_names: dict[int, tuple[str, ...]]
     command_rebindings: dict[int, frozenset[str]]
-    declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
+    declaration_attributes: dict[int, tuple[tuple[str, ...], tuple[str, ...]]]
     called_declaration_attributes: dict[int, tuple[tuple[str, ...], ...]]
     withdraw_every_name: bool
 
@@ -4920,22 +5000,14 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             )
         )
         exact_stdin = _exact_content_literal(stdin, command_values, limits)
-        read_target_count = next(
-            (
-                assignment.read_target_count
-                for assignment in command.builtin_assignments
-                if assignment.from_stdin
-            ),
+        stdin_assignment = next(
+            (assignment for assignment in command.builtin_assignments if assignment.from_stdin),
             None,
         )
-        read_raw = next(
-            (
-                assignment.read_raw
-                for assignment in command.builtin_assignments
-                if assignment.from_stdin
-            ),
-            False,
+        read_target_count = (
+            stdin_assignment.read_target_count if stdin_assignment is not None else None
         )
+        read_raw = stdin_assignment.read_raw if stdin_assignment is not None else False
         read_ifs_unknown = read_target_count is not None and "IFS" in command_unknown_values
         read_fields = (
             _read_literal_fields(
@@ -4948,6 +5020,9 @@ def _resolve_builtin_writer_evidence(  # noqa: PLR0915
             else None
         )
 
+        # The three defaults bind this iteration's values at definition time. The closure is
+        # defined inside the command loop and every caller takes the defaults; passing them as
+        # parameters is what keeps the late-binding capture ruff's B023 flags out of the walk.
         def route(
             assignment: _AssignmentEvidence,
             *,
@@ -5038,10 +5113,12 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
         aliases = aliases_for(environment)
         unsupported = command.unsupported_builtin_write
 
+        # ``environment_id`` and ``alias_map`` are parameters rather than closed-over names for
+        # the same reason ``route`` binds its inputs as defaults: this closure is defined inside
+        # the command loop, and every caller takes the defaults.
         def route_assignment(  # noqa: PLR0911, PLR0912
             assignment: _AssignmentEvidence,
             *,
-            activate_declaration: bool = True,
             environment_id: int = environment,
             alias_map: dict[str, str | None] = aliases,
         ) -> _AssignmentEvidence:
@@ -5062,8 +5139,6 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
             declaration_target = assignment.nameref_target
             if declaration_target is not None:
                 saw_nameref = True
-                if not activate_declaration:
-                    return assignment
                 alias_names = {
                     assignment.name,
                     scoped_binding_target(
@@ -5148,21 +5223,16 @@ def _route_runtime_nameref_writes(  # noqa: PLR0915
             )
         routed_assignments = tuple(routed_assignments_list)
         # ``-g`` makes a nameref declaration MORE visible, not less: it outlives the function
-        # body. Suppressing alias registration for it left a later ``ref=...`` write recorded
-        # against ``ref`` rather than the aliased target, so
-        # ``f() { declare -g -n ref=cmd; ref="$A$B"; }; f; $cmd`` certified while the spelling
-        # without ``-g`` refused. The declaration is registered in the declaring environment;
-        # its persistence past the function's return stays the narrower disclosed gap.
-        activate_builtin_declarations = True
+        # body, so a builtin declaration is registered here like any other. Suppressing
+        # registration for it left a later ``ref=...`` write recorded against ``ref`` rather than
+        # the aliased target, so ``f() { declare -g -n ref=cmd; ref="$A$B"; }; f; $cmd`` certified
+        # while the spelling without ``-g`` refused. The declaration is registered in the
+        # declaring environment; its persistence past the function's return stays the narrower
+        # disclosed gap.
         routed_builtin = tuple(
             routed
             for assignment in command.builtin_assignments
-            for routed in (
-                route_assignment(
-                    assignment,
-                    activate_declaration=activate_builtin_declarations,
-                ),
-            )
+            for routed in (route_assignment(assignment),)
             if not routed.nameref_unset
         )
         eval_assignments, _eval_unsets = _static_eval_mutations(command, limits=limits)
@@ -5222,7 +5292,11 @@ def _refresh_runtime_eval_programs(
     environment_parents: Mapping[int, int | None],
     limits: TaintLimits,
 ) -> tuple[_CommandEvidence, ...]:
-    """Replay routed exact writes before refreshing eval programs."""
+    """Refresh each eval program against the writes the commands before it performed.
+
+    Each command's program is resolved against the table as the command finds it, and that
+    command's own writes are replayed afterwards, which is the order Bash expands and assigns in.
+    """
     values_by_environment: dict[tuple[int | None, int], dict[str, str]] = {}
     refreshed: list[_CommandEvidence] = []
 
@@ -5350,6 +5424,11 @@ def _literal_printf_arguments(command: _CommandEvidence) -> tuple[_ArgPort, ...]
 
 def _decode_printf_b_literal(text: str) -> tuple[str, bool] | None:
     """Decode one bounded Bash ``printf %b`` literal and whether ``\\c`` stopped output."""
+    # Deliberately not ``_ANSI_C_SIMPLE_ESCAPES``. That table is the ``$'...'`` set the scanner,
+    # the eval replay and the reparser must agree on byte for byte; ``printf %b`` recognizes a
+    # different one. It has no ``\'``, ``\"`` or ``\?`` (those bytes pass through as a backslash
+    # plus the character), and it adds ``\c``, which stops output and is handled below rather
+    # than by a table lookup. Sharing one table would change what one of the two decodes.
     simple_escapes = {
         "\\": "\\",
         "a": "\a",
@@ -5449,28 +5528,42 @@ def _printf_conversion_at(
     return format_text[cursor], cursor + 1, star_arguments
 
 
+def _printf_format_and_values(
+    command: _CommandEvidence,
+) -> tuple[str, tuple[_ArgPort, ...]] | None:
+    """Return one literal builtin ``printf`` format word and its value arguments.
+
+    Args:
+        command: The command whose argv may spell a builtin ``printf``.
+
+    Returns:
+        The format text and the arguments following it, or None when the head is not a builtin
+        ``printf``, the format word is dynamic, or the command writes into a variable with ``-v``.
+    """
+    arguments = _literal_printf_arguments(command)
+    if not arguments or arguments[0].dynamic or arguments[0].literal.startswith("-v"):
+        return None
+    return arguments[0].literal, arguments[1:]
+
+
 def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
     command: _CommandEvidence,
     limits: TaintLimits,
 ) -> ContentExpr | None:
     """Return one bounded exact builtin ``printf`` output."""
-    arguments = _literal_printf_arguments(command)
-    if (
-        arguments is None
-        or not arguments
-        or arguments[0].dynamic
-        or arguments[0].literal == "-v"
-        or arguments[0].literal.startswith("-v")
-    ):
+    parsed_command = _printf_format_and_values(command)
+    if parsed_command is None:
         return None
-    format_text = arguments[0].literal
-    values = arguments[1:]
+    format_text, values = parsed_command
     rendered: list[ContentExpr] = []
     rendered_literal_chars = 0
     value_index = 0
     first_pass = True
     saw_conversion = False
     saw_escape = False
+    # Bash reuses the whole format string until the value arguments are consumed, so this walks
+    # the format once per pass rather than once. A format that consumes no argument would repeat
+    # forever, which is what the no-progress break at the bottom of the pass stops.
     while first_pass or value_index < len(values):
         first_pass = False
         pass_start = value_index
@@ -5540,19 +5633,14 @@ def _literal_printf_stdout(  # noqa: PLR0911, PLR0912, PLR0915
 
 def _printf_b_unrepresentable(command: _CommandEvidence, limits: TaintLimits) -> bool:
     """Return whether dynamic ``%b`` escape decoding remains after exact rendering."""
-    arguments = _literal_printf_arguments(command)
-    if (
-        arguments is None
-        or not arguments
-        or arguments[0].dynamic
-        or arguments[0].literal == "-v"
-        or arguments[0].literal.startswith("-v")
-    ):
+    parsed_command = _printf_format_and_values(command)
+    if parsed_command is None:
         return False
-    format_text = arguments[0].literal
-    values = arguments[1:]
+    format_text, values = parsed_command
     value_index = 0
     first_pass = True
+    # Same format recycling as ``_literal_printf_stdout``: reapply the format until the values
+    # run out, and stop when a pass consumes none.
     while first_pass or value_index < len(values):
         first_pass = False
         pass_start = value_index
@@ -5829,7 +5917,21 @@ def _is_second_pass_positional_parameter(name: str) -> bool:
 
 
 def _function_positional_index(name: str, argument_count: int) -> int | None:
-    """Return a bounded zero-based call-argument index, or None when absent."""
+    """Return a bounded zero-based call-argument index, or None when absent.
+
+    The bound is checked by comparing decimal spellings rather than by converting to int, so an
+    arbitrarily long run of digits in a payload costs nothing to reject and never reaches Python's
+    integer conversion limit. ``name`` must be a decimal spelling that is not all zeros, which is
+    what ``_is_function_positional_parameter`` admits once its ``@``/``*`` cases are handled by
+    the caller; ``lstrip`` would otherwise leave an empty string for ``int``.
+
+    Args:
+        name: The positional parameter's decimal spelling.
+        argument_count: How many call arguments are bound.
+
+    Returns:
+        The zero-based index into the call arguments, or None when the name names none.
+    """
     digits = name.lstrip("0")
     maximum = str(argument_count)
     if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
@@ -6408,6 +6510,10 @@ def _decode_ansi_c_eval_word(body: str) -> str:
         if escaped == "c" and index + 2 < len(body):
             controlled = body[index + 2]
             uppercased = controlled.upper()
+            # Bash maps ``\cX`` to the ASCII control character by clearing bit 6 of the uppercased
+            # letter, which is the same as XOR 0x40 over the letters this can reach. ``str.upper()``
+            # is not length preserving for every character, so a multi-character uppercasing falls
+            # back to the byte as written rather than crashing ``ord()``.
             decoded.append(chr(ord(uppercased if len(uppercased) == 1 else controlled) ^ 0x40))
             index += 3
             continue
@@ -6658,6 +6764,8 @@ def _static_status_not(status: bool | None) -> bool | None:
 # against that text, but it silently drops the mutation instead of raising, which reopens a false
 # certification: the `eval-brace-group-assignment` and `eval-loop-body-assignment` fixtures in
 # tests/test_github_ci_shell_scanner.py pin both cases refusing.
+# `_static_eval_executable` carries a second copy of exactly these members as its own
+# `control_prefixes`; the two lists must be edited together.
 _STATIC_EVAL_MUTATION_PREFIXES = frozenset(
     {"coproc", "do", "elif", "else", "if", "then", "time", "until", "while", "{"}
 )
@@ -6717,10 +6825,12 @@ def _static_eval_executable(
     index = 0
     negated = False
     literal_status_available = True
-    # ``{`` belongs here for the same reason ``_STATIC_EVAL_MUTATION_PREFIXES`` carries it: a brace
-    # group runs its body in the current shell. Omitting it resolved ``{ eval "$Y"; }`` to the head
-    # ``{``, so the nested-eval guard and the call-graph name collection both looked past the real
-    # command and ``eval '{ eval "$Y"; }'`` certified where the subshell spelling refused.
+    # This set must hold exactly the members of ``_STATIC_EVAL_MUTATION_PREFIXES``; the two are
+    # spelled separately only because sharing one name here moves guard fingerprints. ``{`` is in
+    # both because a brace group runs its body in the current shell: omitting it resolved
+    # ``{ eval "$Y"; }`` to the head ``{``, so the nested-eval guard and the call-graph name
+    # collection both looked past the real command and ``eval '{ eval "$Y"; }'`` certified where
+    # the subshell spelling refused. Edit the two together.
     control_prefixes = {
         "coproc",
         "do",
@@ -7404,6 +7514,13 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
         return inherited
 
     def exact_literal(expression: ContentExpr, values: Mapping[str, str]) -> str | None:
+        """Resolve one content expression against exact values on this pass's edge budget.
+
+        This mirrors ``_exact_content_literal`` node for node with two differences: every node
+        scheduled here is charged against ``limits.max_edges``, and no
+        ``limits.max_exact_value_chars`` bound is applied. A change to the node semantics of one
+        walk belongs in the other.
+        """
         memo: dict[int, str | None] = {}
         scheduled: set[int] = set()
         pending = [(expression, False)]
@@ -8009,6 +8126,11 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                         "dynamic function positional mutation",
                     )
                 )
+            # Compare the shift count against the argument count as normalized decimal strings.
+            # An authored `shift 999...9` can spell thousands of digits, and `int()` on it before
+            # the overflow test is the cost this avoids. Leading zeros are stripped first so
+            # length-then-lexicographic ordering is numeric ordering. An overflowing count is a
+            # shift Bash refuses, which leaves the positionals untouched, hence the bare return.
             digits = amount_text.lstrip("0") or "0"
             maximum = str(len(arguments))
             if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
@@ -8147,6 +8269,9 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                 *,
                 effect_context: int = context,
             ) -> None:
+                # `effect_context` is never passed: it binds this iteration's `context` as a
+                # default so the closure does not read the loop variable directly, which is what
+                # ruff B023 rejects. Do not add a caller that overrides it.
                 nonlocal effect_positional_arguments, effect_shift_offset
                 kind = positional_mutation_kind(command)
                 if kind is None:
@@ -8537,6 +8662,10 @@ def _contextualize_evidence(  # noqa: PLR0912, PLR0915
                     *(mutation.assignment for mutation in eval_assignments),
                 ):
                     apply_exact_assignment(assignment, updated, conditional=status is None)
+                # `local IFS` shadows the caller's IFS with an unset local, so `"$*"` joins with
+                # the default from here on. A non-local declaration of IFS leaves whatever value
+                # the name already held, which is why the restore is conditioned on the local flag
+                # here and unconditional for a real `unset` below.
                 for name in command.builtin_unsets:
                     updated.pop(name, None)
                     if (
@@ -9717,6 +9846,9 @@ def _eval_arguments_raw(command: _CommandEvidence, executable: _ExecutableEviden
 
 _EVAL_QUOTE_STATES = (None, "'", '"')
 _EVAL_ANSI_OCTAL_BASE = 8
+# These three hold the same Unicode scalar range as `_UNICODE_MAX`, `_SURROGATE_MIN` and
+# `_SURROGATE_MAX` above. They are spelled twice rather than shared because collapsing them moves
+# guard fingerprints, so edit the two sets together.
 _EVAL_UNICODE_MAX = 0x10FFFF
 _EVAL_SURROGATE_MIN = 0xD800
 _EVAL_SURROGATE_MAX = 0xDFFF
@@ -9731,6 +9863,10 @@ class _EvalSyntaxState:
     quote: str | None
     brace_tokens: tuple[_ContentToken, ...] = ()
     brace_depth: int = 0
+    # Bitmask over write indices, not a count: bit N records that the append write at index N has
+    # already been folded into this derivation, so a fixed-point replay applies each append at
+    # most once per path. Joins combine two paths with `|`, so an append either side applied stays
+    # applied.
     applied_appends: int = 0
     local_variables: tuple[tuple[str, _ContentValue], ...] = ()
     environment_variables: tuple[tuple[str, _ContentValue], ...] = ()
@@ -10351,6 +10487,10 @@ def _eval_ansi_c_escape(text: str, start: int) -> tuple[str, int]:  # noqa: PLR0
     if character == "c" and start + 1 < len(text):
         controlled = text[start + 1]
         uppercased = controlled.upper()
+        # Bash maps `\cX` to the control character for X: uppercase it, then keep the low
+        # five bits. `\c?` is the one special case and yields DEL. A few characters
+        # uppercase to more than one character, "ß" to "SS" among them, and `ord` needs
+        # exactly one, so those fall back to the authored character unchanged.
         value = (
             127
             if controlled == "?"
@@ -11631,7 +11771,9 @@ def _declaration_words(command: _CommandEvidence) -> _DeclarationWords | None:
     )
 
 
-def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
+def _declaration_attribute_names(
+    command: _CommandEvidence,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return the names a declaration attributes, split by what the attribute does to a write.
 
     A declaration attribute decides what Bash stores rather than what an assignment spells, and
@@ -11678,7 +11820,9 @@ def _declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, 
     return (words.names if transforms else (), words.names if readonly else ())
 
 
-def _caller_declaration_attribute_names(command: _CommandEvidence) -> tuple[tuple[str, ...], ...]:
+def _caller_declaration_attribute_names(
+    command: _CommandEvidence,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return the names a declaration inside a function body leaves attributed for its caller.
 
     A function body is not an execution environment, so an attribute it sets can outlive the call,
@@ -11794,6 +11938,11 @@ def _declaration_names_unreadable(command: _CommandEvidence) -> bool:
     )
 
 
+# Twin of ``_unset_nameref_action``, which walks the same option grammar selecting ``-n`` rather
+# than ``-f``. Keep the two in step when the option surface changes. They diverge in four places:
+# the twin's unknown test also rejects ``-f`` beside ``-n``, its ``nameref_only`` accumulates
+# across option words while ``function_only`` here is reassigned per word, only this walk skips
+# names while ``function_only`` holds, and the twin returns no names at all unless it read ``-n``.
 def _unset_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:
     """Return exact variable unsets plus whether an unknown target may be unset."""
     executable_index = _builtin_executable_index(command, "unset")
@@ -11825,6 +11974,8 @@ def _unset_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:
     return tuple(names), unknown
 
 
+# Twin of ``_unset_action`` over the same option grammar, selecting ``-n`` rather than ``-f``.
+# The note there lists the four places the two diverge.
 def _unset_nameref_action(command: _CommandEvidence) -> tuple[tuple[str, ...], bool]:
     """Return exact ``unset -n`` aliases plus whether their removal is ambiguous."""
     executable_index = _builtin_executable_index(command, "unset")
@@ -11857,7 +12008,20 @@ def _unset_nameref_action(command: _CommandEvidence) -> tuple[tuple[str, ...], b
 
 
 def _shopt_lastpipe_action(command: _CommandEvidence) -> bool | None:  # noqa: PLR0912
-    """Return one authored transition that may change Bash ``lastpipe``."""
+    """Return one authored transition that may change Bash ``lastpipe``.
+
+    Args:
+        command: The command whose argv may spell a ``shopt`` invocation.
+
+    Returns:
+        ``True`` when this command may enable ``lastpipe``, ``False`` when it readably
+        disables it, and ``None`` when it carries no readable transition. ``None`` covers
+        four shapes, because each one leaves the prior state standing: the command is not a
+        ``shopt``, it spells both ``-s`` and ``-u`` so no single direction can be read, it
+        disables ``lastpipe`` beside a name this scan cannot read, or it names nothing this
+        scan reads as touching ``lastpipe``. Both callers treat ``None`` as the absence of a
+        transition rather than as a disable.
+    """
     executable_index = _shopt_executable_index(command)
     if executable_index is None:
         return None
@@ -12210,12 +12374,6 @@ def _execution_environment_ids(  # noqa: PLR0912, PLR0915
     return command_environments, environment_parents, lastpipe_states
 
 
-def _lastpipe_states(evidence: _ShellTaintEvidence) -> dict[int, bool]:
-    """Return whether authored option state may enable ``lastpipe`` per command."""
-    _command_environments, _environment_parents, states = _execution_environment_ids(evidence)
-    return states
-
-
 def _control_conditional_commands(evidence: _ShellTaintEvidence) -> frozenset[int]:
     """Return commands whose surrounding shell control body may not execute."""
     conditional: set[int] = set()
@@ -12332,6 +12490,11 @@ class _EvalDiscoveryBudget:
     updates: int = 0
 
     def charge_work(self, amount: int = 1) -> None:
+        """Charge expression-node work, refusing once the node bound is passed.
+
+        Args:
+            amount: The nodes this step inspected, defaulting to one for a single visit.
+        """
         self.work += amount
         if self.work > self.limits.max_expression_nodes:
             raise _TaintLimitExceeded(
@@ -12341,6 +12504,11 @@ class _EvalDiscoveryBudget:
             )
 
     def charge_update(self, amount: int = 1) -> None:
+        """Charge fixed-point updates, refusing once the update bound is passed.
+
+        Args:
+            amount: The new writes this round discovered, defaulting to one.
+        """
         self.updates += amount
         if self.updates > self.limits.max_fixed_point_updates:
             raise _TaintLimitExceeded(
@@ -12368,7 +12536,31 @@ def _eval_command_environments(  # noqa: PLR0912, PLR0913, PLR0915
     environment_parents: dict[int, int | None],
     limits: TaintLimits,
 ) -> dict[int, _EvalCommandEnvironment]:
-    """Replay definite authored writes in source order without importing future values."""
+    """Replay definite authored writes in source order without importing future values.
+
+    Each command gets a snapshot of what an eval in that command would see, built by one forward
+    walk over the body. Nothing later than the command contributes, which is what makes this a
+    replay rather than a second reading of the solved fixed point.
+
+    Three parallel state families carry that walk. ``values`` and ``definitely_set`` hold each
+    execution environment's persistent variables and the subset known to be set on every path.
+    ``evaluation_layers`` holds the same values keyed both bare and scoped, and is the table an
+    assignment's own content is evaluated against. ``function_values``, ``function_set`` and
+    ``function_shadows`` hold those facts for a function context's locals, which shadow the
+    persistent tables while that function runs. ``ensure`` materializes an environment's tables
+    from its parent's on first use.
+
+    Args:
+        evidence: Frozen structured evidence for one run body.
+        raw_variables: The solved variable table, read as the fallback under every layer.
+        assignments_by_command: Eval-time assignments already discovered for each command.
+        command_environments: Each command's execution environment id.
+        environment_parents: Each environment's parent id, or None at the top.
+        limits: Deterministic caps for this pass.
+
+    Returns:
+        One `_EvalCommandEnvironment` per command id.
+    """
     values: dict[int, dict[str, _ContentValue]] = {}
     definitely_set: dict[int, set[str]] = {}
     evaluation_layers: dict[int, dict[str | int, _ContentValue]] = {}
@@ -13254,7 +13446,8 @@ def _source_operand_index(command: _CommandEvidence, argv_index: int) -> int:
     ``source -- ./task.sh`` is ordinary Bash: ``--`` ends option parsing for the builtin and
     ``./task.sh`` is the file named. Without skipping it, the word immediately after the
     executable is ``--`` itself, so the operand lookup misses the real target entirely and the
-    sourced file's content never reaches either sink check below.
+    sourced file's content never reaches any of the sink and state-unrepresentable checks that
+    resolve the operand through this function.
 
     Args:
         command: The command evidence being inspected.
@@ -13393,7 +13586,7 @@ def _candidate_sink_expressions(  # noqa: PLR0911, PLR0912
         if action_index is None:
             return direct_sinks
         return (command.argv[action_index].content, *direct_sinks)
-    if name in {"source", "."} and literal == name and not executable.external_lookup:
+    if _is_source_builtin(executable):
         operand_index = _source_operand_index(command, executable.argv_index)
         if operand_index >= len(command.argv):
             return ()
@@ -13743,6 +13936,8 @@ def _child_shell_assignment_environment(
         payload_index: The argv index of the interpreted payload word.
         context: The eval-syntax context holding the solved variable tables.
         environment: The payload environment with positional parameters already bound.
+        limits: The bounds this scan runs under; recovering the payload's own assignments raises
+            ``_TaintLimitExceeded`` when the payload's state cannot be represented within them.
 
     Returns:
         The environment the payload's own assignments produce, or None when it assigns nothing.
@@ -13848,6 +14043,8 @@ def _shell_command_payload_marker_capable(
             candidate selects a stdin program.
         context: The eval-syntax context holding the solved variable tables.
         environment: The per-command execution environment for this body.
+        limits: The bounds this scan runs under; recovering the payload's own assignments raises
+            ``_TaintLimitExceeded`` when the payload's state cannot be represented within them.
 
     Returns:
         Whether any shell ``-c`` or stdin payload's second parse can accept the marker.
@@ -14102,6 +14299,22 @@ def _glob_ports_reach_tracked_marker(
     return False
 
 
+def _is_source_builtin(executable: _ExecutableEvidence) -> bool:
+    """Return whether one candidate is the exact ``source``/``.`` builtin.
+
+    Args:
+        executable: One resolved executable candidate.
+
+    Returns:
+        Whether the candidate names the builtin, spelled literally, with no external lookup.
+    """
+    return (
+        executable.name in {"source", "."}
+        and executable.literal == executable.name
+        and not executable.external_lookup
+    )
+
+
 def _shell_source_head_index(  # noqa: PLR0911
     command: _CommandEvidence, executable: _ExecutableEvidence
 ) -> int | None:
@@ -14130,7 +14343,7 @@ def _shell_source_head_index(  # noqa: PLR0911
     literal = executable.literal
     if name == "eval" and literal == "eval" and not executable.external_lookup:
         return None
-    if name in {"source", "."} and literal == name and not executable.external_lookup:
+    if _is_source_builtin(executable):
         return None
     if _normalized_shell_head(name) in _SHELL_HEADS:
         return executable.argv_index
@@ -14181,9 +14394,7 @@ def _source_payload_state_unrepresentable(
     for executable in _iter_executable_evidence(command.executable):
         if executable.argv_index is None or executable.name is None:
             continue
-        if executable.name not in {"source", "."} or executable.literal != executable.name:
-            continue
-        if executable.external_lookup:
+        if not _is_source_builtin(executable):
             continue
         operand_index = _source_operand_index(command, executable.argv_index)
         if operand_index >= len(command.argv):
@@ -14242,12 +14453,14 @@ def _port_tracked_resource_keys(
 ) -> tuple[str, ...]:
     """Return every script-tracked resource key one operand word could name.
 
-    This is the resolution half of ``_port_reads_tracked_marker_content`` and
-    ``_glob_ports_reach_tracked_marker`` put in one place, so a guard that has to ask a question
+    This is the resolution half of ``_port_reads_tracked_marker_content``, extended to the three
+    spellings ``_glob_ports_reach_tracked_marker`` reaches, so a guard that has to ask a question
     ABOUT the named file, rather than only about its content, reaches every spelling both of those
     reach between them. The content half arrived at that union across two guards, one exact and one
     glob; the positional half was written into the exact one alone and so recognized only the
-    directly spelled operand (issue #175).
+    directly spelled operand (issue #175). ``_glob_ports_reach_tracked_marker`` still carries its
+    own match loop rather than calling this, and the two do not answer alike: this resolves a
+    process substitution operand to nothing, which that one does not exclude.
 
     The three spellings resolve exactly as the content half resolves them. An exactly spelled word
     normalizes to a single key. A word carrying ``active_argv_expansion`` matches by its own
@@ -14321,9 +14534,7 @@ def _source_glob_operand_state_unrepresentable(
     for executable in _iter_executable_evidence(command.executable):
         if executable.argv_index is None or executable.name is None:
             continue
-        if executable.name not in {"source", "."} or executable.literal != executable.name:
-            continue
-        if executable.external_lookup:
+        if not _is_source_builtin(executable):
             continue
         operand_index = _source_operand_index(command, executable.argv_index)
         if operand_index >= len(command.argv):
@@ -14795,12 +15006,7 @@ def _shell_positional_reads(
     argv = command.argv
     environment_keys: tuple[str, ...] | None = None
     for executable in _iter_executable_evidence(command.executable):
-        if (
-            executable.argv_index is not None
-            and executable.name in {"source", "."}
-            and executable.literal == executable.name
-            and not executable.external_lookup
-        ):
+        if executable.argv_index is not None and _is_source_builtin(executable):
             operand_index = _source_operand_index(command, executable.argv_index)
             if operand_index < len(argv):
                 yield _PositionalRead(
@@ -15093,18 +15299,11 @@ def _launcher_shell_head_index(
     Returns:
         The launcher-reached shell's argv index, or None when this candidate reaches none.
     """
-    if executable.argv_index is None or executable.name is None:
+    # The direct and ambiguous routes return an index in the delegate, so they are excluded here
+    # before delegating; every remaining branch of the ladder is shared.
+    if _normalized_shell_head(executable.name) in _SHELL_HEADS or executable.ambiguous:
         return None
-    name = executable.name
-    if name == "eval" and executable.literal == "eval" and not executable.external_lookup:
-        return None
-    if name in {"source", "."} and executable.literal == name and not executable.external_lookup:
-        return None
-    if _normalized_shell_head(name) in _SHELL_HEADS or executable.ambiguous:
-        return None
-    if executable.external_lookup and name in _EXTERNAL_WRAPPER_SHADOW_NAMES:
-        return None
-    return _nested_shell_index(command, executable.argv_index)
+    return _shell_source_head_index(command, executable)
 
 
 def _launcher_input_marker_fragment_capable(summary: _TransferSummary) -> bool:
@@ -15373,7 +15572,20 @@ def _sink_expressions(
     *,
     skip_builtin_eval: bool = False,
 ) -> tuple[ContentExpr, ...]:
-    """Return every conservative execution sink expression for all candidates."""
+    """Return every conservative execution sink expression for all candidates.
+
+    Args:
+        command: The command evidence being inspected.
+        stdin: The command's finalized standard input expression.
+        process_resources: Process substitution evidence for operand resolution.
+        skip_builtin_eval: Whether to omit the exact ``eval`` builtin candidates. Their raw
+            argument content is a sound sink only while it is also the text the eval runs, so a
+            caller that has already scored those candidates against the exact program passes True
+            rather than refusing here on text the second parse never executes.
+
+    Returns:
+        The sink expressions every candidate of this command can execute.
+    """
     expressions: list[ContentExpr] = []
     for executable in _iter_executable_evidence(command.executable):
         if (
@@ -15500,6 +15712,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
         eval_commands = tuple(
             command for command in evidence.commands if _builtin_eval_candidates(command)
         )
+        eval_command_ids = {command.command_id for command in eval_commands}
         if eval_commands:
             (
                 definitions,
@@ -15536,6 +15749,12 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
             limits,
             _eval_syntax_programs(eval_writes),
         )
+        # Every eval sink is scored under both syntax tables. ``ordered_eval_syntax_variables``
+        # applies each write once in source order, while ``eval_syntax_variables`` is the table
+        # ``_solve_eval_syntax_variables`` reaches; see ``_ordered_eval_syntax_variables`` for why
+        # the two are kept apart. This sweep covers all eval commands ahead of the per-command
+        # loop, so a marker it finds is reported before any guard refusal that loop would raise on
+        # a later command.
         if any(
             _eval_sink_marker_capable(
                 command,
@@ -15556,7 +15775,7 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
             resource.resource_id: resource for resource in evidence.process_resources
         }
         for command in evidence.commands:
-            if command in eval_commands and _eval_sink_marker_capable(
+            if command.command_id in eval_command_ids and _eval_sink_marker_capable(
                 command, eval_context, command_environments[command.command_id], limits=limits
             ):
                 return MarkerDetected()
@@ -15573,17 +15792,15 @@ def analyze_marker_taint(  # noqa: PLR0911, PLR0912, PLR0915
                 dict(command_environments[command.command_id].fixed_point_overrides),
                 solved.variables,
             )
+            eval_program_supersedes_arguments = command.runtime_eval_program_authoritative or any(
+                _strip_active_shell_comments(program) != program
+                for program in _static_eval_programs(command)
+            )
             for expression in _sink_expressions(
                 command,
                 stdin,
                 process_resources,
-                skip_builtin_eval=(
-                    command.runtime_eval_program_authoritative
-                    or any(
-                        _strip_active_shell_comments(program) != program
-                        for program in _static_eval_programs(command)
-                    )
-                ),
+                skip_builtin_eval=eval_program_supersedes_arguments,
             ):
                 if _marker_capable(
                     _evaluate_with_tables(

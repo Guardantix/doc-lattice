@@ -97,6 +97,11 @@ edge from a more-authoritative doc to a less-authoritative one is an **inversion
 spec should not derive from an exploratory sketch), and `lint` fails on it. `lint` is pure
 structure, independent of drift, and exits 1 on a violation just like `check`.
 
+An edge whose source or target declares no `authority` cannot be ranked. `lint` reports it as
+unranked rather than as a violation, so it never fails the gate. Every human run ends with a
+coverage line counting violations and unranked edges, and `--format json` carries the same edges
+in a `skipped` array with a `source-unannotated` or `target-unannotated` reason.
+
 ## A worked example
 
 Two docs. The upstream owns a decision; the downstream depends on it.
@@ -167,7 +172,7 @@ only command that writes to your docs, and it only ever rewrites the `seen` scal
 
 ### Prerequisites
 
-- Python 3.13+
+- Python 3.13+ (the floor is load bearing; see [AD-24](ARCHITECTURE.md))
 - [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 
 ### Install and run
@@ -196,13 +201,7 @@ uv sync --group dev
 uv run doc-lattice --help
 ```
 
-### Test
-
-```bash
-uv run --group dev pytest          # full suite (enforces coverage >= 80%)
-uv run --group dev ruff check src tests
-uv run --group dev ty check src
-```
+Contributor commands, gates, and the full verification set live in [CLAUDE.md](CLAUDE.md).
 
 ## Commands
 
@@ -231,8 +230,7 @@ The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, an
 GitHub-mode `init` and both `ci` commands require a Git working tree and resolve its top-level
 before inspecting or writing managed files, even when invoked from a subdirectory. Ordinary
 `init` retains its current-directory behavior and does not require Git.
-`check`, `lint`, `impact`, `reconcile`, and `linear` accept `--format json` for machine-readable
-output. Run `uv run doc-lattice <command> --help` for the full flag list.
+Run `uv run doc-lattice <command> --help` for the full flag list.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
@@ -248,10 +246,8 @@ emits one escaped GitHub Actions `::error` workflow command per drift finding or
 violation, each with a repo-relative file path, so findings attach inline to the offending doc
 in the pull-request diff. Output selection never changes gate exit codes.
 
-Structured output is always selected with `--format`; only the accepted values vary by command.
-`check` and `lint` accept `--format human|json|github`, `graph` accepts `--format
-mermaid|dot|json`, `impact`, `reconcile`, and `linear` accept `--format human|json`, and `init`
-is deliberately excluded from structured-output selection. Where supported, `--indent` requires an effective `--format json`.
+Structured output is always selected with `--format`; the accepted values per command are in the
+table above, and `init` is deliberately excluded from structured-output selection.
 The 1.x silent `--json` alias was removed in 2.0; see [CHANGELOG.md](CHANGELOG.md) for the
 migration.
 
@@ -473,6 +469,9 @@ keep the exact PyPI version pin.
 
 ### Managed GitHub and Linear setup
 
+The managed artifacts and the `ci` commands are not in the published release yet, so the pinned
+`uvx` snippets below are forward-looking; see [CHANGELOG.md](CHANGELOG.md) for their status.
+
 To add protected Linear reporting, a human maintainer generates and reviews four committed,
 create-only artifacts:
 
@@ -565,7 +564,7 @@ Every initial and every later `plan`, `apply`, or `verify` execution must use a 
 from reviewed trusted project state. Its ownership marker is useful installation metadata, not a
 substitute for reviewing the executable shell content before running it.
 
-The secret-setting command is not ready before `apply` re-reads and proves the exact `main`-only
+Do not run the secret-setting command until `apply` has re-read and proved the exact `main`-only
 environment policy. `apply` never receives the Linear key. `gh secret set` prompts for the value or
 reads it from stdin, so the value is not part of the command arguments. This ordering is a
 maintainer procedure; the server-side GitHub environment scope is the authorization control.
@@ -607,9 +606,21 @@ only marked canonical artifacts or creates a missing one.
 Before publishing a missing artifact, both an initial create and a retry synchronize every
 validated ancestor directory entry. Mixed versions after an interruption are safe to preview and
 resume. Use this flow for generator upgrades and repository renames, then review and commit the
-resulting diff. GitHub generation and refresh accept only final-version syntax such as `2.0.0`:
+resulting diff. Refresh moves a managed artifact forward only. When an installed ownership marker
+pins a version newer than the one being generated, the preview refuses rather than rewriting the
+artifact backward, so running an older doc-lattice against a newer installation cannot silently
+downgrade it. GitHub generation and refresh accept only final-version syntax such as `2.0.0`:
 this rejects pins that can never resolve as final releases, but it does not prove the release is
 already published or that an unreleased source checkout matches that release.
+Publication holds a nonblocking advisory lock on the repository root for its whole run, so
+`init --github` and `ci refresh --apply` never write over each other. A competing run refuses with
+`managed artifact refresh is in progress; retry after it exits` and leaves every managed artifact
+unchanged. The guarantee covers the four managed artifacts, not the whole `init --github` run:
+that command scaffolds `.doc-lattice.yml` before publication, so a run refused the lock, or
+refused for want of locking, can still have created the config. Rerunning after the competing run
+exits leaves that config untouched and publishes the artifacts. Publication requires POSIX
+advisory locking and refuses on a platform without it; preview, `ci audit`, and every other
+read-only path take no lock.
 
 When `ci audit` omits `--repository`, it resolves the local `origin` only from GitHub.com SCP
 (`git@github.com:OWNER/REPO.git`), `ssh://git@github.com/OWNER/REPO.git`, or
@@ -816,6 +827,8 @@ doc-lattice/
 │   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
 │   ├── persistence.py          # shared durable single-path filesystem primitives
 │   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery
+│   ├── cli/                    # per-invocation runtime and one adapter per command
+│   ├── github_ci/              # offline workflow audit, managed artifact generation, shell scanner
 │   └── cache/               # phase-separated incremental load cache
 │       ├── schema.py        # filesystem-free models and codec
 │       ├── state.py         # filesystem-free run-local state

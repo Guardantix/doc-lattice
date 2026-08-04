@@ -88,6 +88,9 @@ def main() -> int:
                 print(f"Tag {tag} already exists at version {version}; ordinary no-op.")
                 _write_decision(github_output, proceed=False, create_tag=False)
             return 0
+        # `git rev-parse --verify --quiet` exits 1 when the ref does not resolve to a
+        # commit, which is the ordinary "tag absent" case handled below. Any other
+        # nonzero code is an unexpected git failure.
         if tag_check.returncode != 1:
             detail = tag_check.stderr.strip() or "unknown error"
             raise GateError(f"could not inspect tag {tag}: {detail}")

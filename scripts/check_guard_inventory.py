@@ -5,27 +5,38 @@ Every fail-closed guard below the CI scanner's guard package has one *origin*: t
 detects the condition and constructs a `GuardRefusal`. This module reads that package as inert
 source text, never importing it, and produces one canonical record per origin.
 
-It enforces six separable properties:
+It enforces eight separable properties:
 
 1. **Canonical refusal shapes.** A refusal may only reach an exception, a `ShellScanResult`, or a
    verdict return as a `GuardRefusal` construction with a literal identifier and literal reason,
    or as one of the explicitly declared transports. Raw text, executable reason expressions and
    arbitrary verdict expressions are rejected, and every call must name its target directly, so a
    future change cannot bypass construction of the discriminated value.
-2. **Tree-local closure.** Source origin identifiers must partition exactly into the classified
+2. **Production limits provenance.** A guarded module may not mint a fresh resource budget away
+   from the small set of declared boundaries. The scan-level limits value those boundaries build is
+   threaded through instead, so a shrunk test budget reaches every bound rather than being replaced
+   by a default constructor call.
+3. **Threshold provenance.** Every magnitude a guard compares against is either a field of that
+   limits value or an inventoried fixed semantic bound, so a cap cannot ship as an unattributed
+   literal.
+4. **Tree-local closure.** Source origin identifiers must partition exactly into the classified
    inventory and the frozen rollout debt set, with the two disjoint.
-3. **Guard reachability.** Every origin must sit in a function some public entry point of its own
+5. **Guard reachability.** Every origin must sit in a function some public entry point of its own
    module can reach. Orphaning the function holding a guard withdraws it as completely as
    inverting its condition, and leaves every shape in its record untouched.
-4. **Statement reachability.** No statement in a guarded module may sit after a statement that
+6. **Statement reachability.** No statement in a guarded module may sit after a statement that
    leaves its block, because dead code above a guard withdraws it while every record stays frozen.
    The rule is syntactic; a condition that is constantly false is out of scope.
-5. **Invariant evidence relevance.** A guard classified as unreachable by an invariant witness must
+7. **Invariant evidence relevance.** A guard classified as unreachable by an invariant witness must
    carry a boundary-evidence predicate that reads something the guard's own condition reads. Every
    other assertion about such a row holds for a predicate about unrelated data.
-6. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
+8. **Debt monotonicity.** Compared against a base revision, every guard the candidate freezes must
    re-derive to a record the base already carried. Freezing *records* rather than bare identifiers
    means an unclassified guard cannot be moved or semantically edited while keeping its debt entry.
+
+Three narrower rules ride alongside them: discovered guarded modules must appear in
+`GUARDED_MODULES`, the debt snapshot and witness registry must be well formed, and every guarded
+module must defer its annotations, each checked by the correspondingly named gate in `main`.
 
 Because the monotonicity check runs from the base revision's copy of this script against the
 candidate's source, the candidate is only ever parsed as data. `--compare-base` therefore runs the
@@ -161,7 +172,14 @@ not guard origins and never appear in the inventory."""
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
+_MODULE_BODY_OWNER = 0
+"""Graph key standing for the module body, which owns the calls no function encloses.
+
+Every other key is the `id()` of a live AST node, and CPython never hands one of those out as 0, so
+the sentinel cannot collide with a definition."""
+
 _Function = ast.FunctionDef | ast.AsyncFunctionDef
+"""A function definition, whichever way it is spelled."""
 
 _Definition = _Function | ast.ClassDef
 """Any definition `_SCOPES` matches, which is what a qualified name is built from."""
@@ -172,7 +190,6 @@ _CONSTRUCTION_HOOKS = frozenset({"__init__", "__post_init__"})
 `taint.eval-syntax.cleared-projection-without-widening` lives in a dataclass `__post_init__`, which
 no call in either module spells. Reading a construction as an edge to these is what keeps the
 reachability rule from reporting it as orphaned."""
-"""A function definition, whichever way it is spelled."""
 
 _RECEIVERLESS_DECORATORS = frozenset({"staticmethod"})
 """Decorators that leave a method's first parameter an ordinary argument rather than a receiver.
@@ -1054,6 +1071,29 @@ class _DerivationCache:
     The threshold gate runs the whole writer fixpoint once per comparison operand, so the closure
     itself and the two scope-wide traversals it depends on are memoized as well. Every one is a
     pure function of nodes this parse owns.
+
+    Attributes:
+        shapes: `_normalized_shape` per statement.
+        written: `_written_spellings` per statement.
+        configured: `_configured_receivers` per statement.
+        statements: `_scope_statements` per scope.
+        parents: `_cached_scope_parents` per scope, stopping at a nested scope.
+        bindings: `_local_binding_names` per scope.
+        paths: read and whole-value path scores per (root, nested-statement flag), the memo behind
+            `_cached_reference_path_scores` that the limits and threshold provenance rules read.
+        closures: `_writer_derivation` per (origin, scope, read seed, value seed).
+        functions: module-level functions by bound name, per module.
+        scope_definitions: functions a scope binds by a `def`, per scope.
+        qualnames: `_definition_qualname` per definition.
+        callee_shapes: `_cached_callee_shapes` per callee.
+        callee_callees: `_cached_callee_callees` per callee.
+        module_parents: module-wide parent map, per module.
+        definitions: every function definition by name, in source order, per module.
+        calls: every call by spelled callee name, per module.
+        reachability: `_reachability_shapes` per (origin, scope).
+        reads: `_statement_reads` per statement.
+        value_reads: `_statement_value_reads` per statement.
+        module: the parse this cache belongs to, or `None` for a fragment.
     """
 
     shapes: dict[int, str] = field(default_factory=dict)
@@ -1098,7 +1138,10 @@ class OriginRecord:
             its refusal to, the control flow that decides whether it is reached and the writers
             feeding that flow, any `try` body whose handler contains the origin, and the
             return-deciding statements of every module-level callee whose value that dataflow
-            reads, and the controls at every resolvable call site of the guard's own function.
+            reads, and the controls at every resolvable call site of the guard's own function, and
+            the decorators of the guard's own definition and of every definition holding it,
+            followed into their return-deciding statements when they resolve, since a decorator
+            decides whether the guard's function is what a caller reaches at all.
     """
 
     origin_id: str
@@ -1550,7 +1593,10 @@ def _free_reference_nodes(
             visit(node.value, shadowed)
             return
         if isinstance(node, ast.Lambda):
-            defaults = (*node.args.defaults, *(d for d in node.args.kw_defaults if d is not None))
+            defaults = (
+                *node.args.defaults,
+                *(default for default in node.args.kw_defaults if default is not None),
+            )
             for default in defaults:
                 visit(default, shadowed)
             visit(node.body, shadowed | _argument_names(node.args))
@@ -1585,7 +1631,7 @@ def _read_spellings(nodes: tuple[ast.expr, ...]) -> frozenset[str]:
     return frozenset(ast.unparse(node) for root in nodes for node in _free_reference_nodes(root))
 
 
-def _value_spellings(nodes: list[ast.AST], *, loads_only: bool) -> frozenset[str]:
+def _value_spellings(nodes: list[ast.AST], *, skip_nested_statements: bool) -> frozenset[str]:
     """Return the spellings these nodes read as a value in their own right.
 
     A name reached only as the base of a longer path is excluded: `self.work > cap` reads
@@ -1594,7 +1640,8 @@ def _value_spellings(nodes: list[ast.AST], *, loads_only: bool) -> frozenset[str
 
     Args:
         nodes: Expression roots to inspect.
-        loads_only: Whether to keep only `Load` occurrences, as a statement's reads require.
+        skip_nested_statements: Whether to stop at a nested statement, as a statement's own reads
+            require. Load filtering is unconditional in `_free_reference_nodes` either way.
 
     Returns:
         Whole-value spellings, empty when nothing is read that way.
@@ -1606,7 +1653,7 @@ def _value_spellings(nodes: list[ast.AST], *, loads_only: bool) -> frozenset[str
                 bases.add(id(node.value))
     found: set[str] = set()
     for root in nodes:
-        for node in _free_reference_nodes(root, skip_nested_statements=loads_only):
+        for node in _free_reference_nodes(root, skip_nested_statements=skip_nested_statements):
             if id(node) in bases:
                 continue
             found.add(ast.unparse(node))
@@ -1615,12 +1662,12 @@ def _value_spellings(nodes: list[ast.AST], *, loads_only: bool) -> frozenset[str
 
 def _read_value_spellings(nodes: tuple[ast.expr, ...]) -> frozenset[str]:
     """Return the spellings these expressions read as whole values."""
-    return _value_spellings(list(nodes), loads_only=False)
+    return _value_spellings(list(nodes), skip_nested_statements=False)
 
 
 def _statement_value_reads(statement: ast.stmt) -> frozenset[str]:
     """Return the spellings this statement loads as whole values, ignoring nested statements."""
-    return _value_spellings([statement], loads_only=True)
+    return _value_spellings([statement], skip_nested_statements=True)
 
 
 def _statement_reads(statement: ast.stmt) -> frozenset[str]:
@@ -1654,6 +1701,24 @@ def _cached_statement_value_reads(statement: ast.stmt, cache: _DerivationCache) 
     return memo
 
 
+def _mutating_call_receivers(statement: ast.stmt) -> Iterator[ast.expr]:
+    """Yield the receiver expression of every in-place mutation this statement drives.
+
+    Args:
+        statement: The statement to inspect, ignoring any nested statement's expressions.
+
+    Yields:
+        The receiver of each mutating method call, in traversal order.
+    """
+    for node in _executed_expressions(statement):
+        # `_called_name` already answers `None` for a non-call, so the `isinstance` narrows the
+        # type for `node.func` rather than excluding anything the name test admitted.
+        if _called_name(node) not in _MUTATING_METHODS or not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            yield node.func.value
+
+
 def _mutated_spellings(statement: ast.stmt) -> set[str]:
     """Return the receivers this statement mutates in place, ignoring any nested statement's.
 
@@ -1666,10 +1731,7 @@ def _mutated_spellings(statement: ast.stmt) -> set[str]:
     `_executed_expressions` follows a consumed generator's body.
     """
     spellings: set[str] = set()
-    for node in _executed_expressions(statement):
-        if _called_name(node) not in _MUTATING_METHODS or not isinstance(node, ast.Call):
-            continue
-        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+    for receiver in _mutating_call_receivers(statement):
         if isinstance(receiver, ast.Name | ast.Attribute | ast.Subscript):
             spellings.add(ast.unparse(receiver))
             if isinstance(receiver, ast.Subscript):
@@ -1782,10 +1844,7 @@ def _configured_receivers(statement: ast.stmt) -> frozenset[str]:
     for target in _write_targets(statement):
         if isinstance(target, ast.Attribute):
             receivers.add(ast.unparse(target.value))
-    for node in _executed_expressions(statement):
-        if _called_name(node) not in _MUTATING_METHODS or not isinstance(node, ast.Call):
-            continue
-        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+    for receiver in _mutating_call_receivers(statement):
         if isinstance(receiver, ast.Attribute):
             receivers.add(ast.unparse(receiver.value))
     return frozenset(receivers)
@@ -2248,7 +2307,22 @@ def _select_writer_statements(
     values: set[str],
     cache: _DerivationCache,
 ) -> tuple[ast.stmt, ...]:
-    """Run one transitive writer fixpoint over the supplied lexical scope."""
+    """Run one transitive writer fixpoint over the supplied lexical scope.
+
+    A statement qualifies by binding a spelling in `read`, or by configuring a receiver in
+    `values`. What it reads then joins both sets, so the statements feeding it are selected on the
+    next pass, and the scope bounds the fixpoint.
+
+    Args:
+        candidates: The scope's own statements, in any order.
+        read: Seed spellings, grown in place as the fixpoint runs. Callers read the grown set back
+            out to seed the module and class fixpoints.
+        values: The subset read as whole values, grown in place alongside `read`.
+        cache: Per-parse derivation memo.
+
+    Returns:
+        The selected statements in source order.
+    """
     selected: dict[int, ast.stmt] = {}
     grew = True
     while grew:
@@ -3346,9 +3420,9 @@ def _call_site_shapes(
         elif _is_unresolved_call_site_of(call, scope, cache):
             candidates.append(statement)
 
-    def controls(statements: list[ast.stmt], heading: str) -> list[str]:
+    def controls(statements: list[ast.stmt], label: str) -> list[str]:
         ordered = sorted(dict.fromkeys(statements), key=lambda node: (node.lineno, node.col_offset))
-        shapes = [heading.format(count=len(ordered))]
+        shapes = [f"{label}: {len(ordered)} for {scope.name}"]
         for statement in ordered:
             caller = annotations.scopes.get(id(statement))
             shapes.append(annotations.names.get(id(statement), ""))
@@ -3358,17 +3432,13 @@ def _call_site_shapes(
         return shapes
 
     resolved = (
-        controls(sites, f"call sites: {{count}} for {scope.name}")
+        controls(sites, "call sites")
         if sites
         else [f"call sites: none resolvable for {scope.name}"]
     )
     # A function with no ambiguous candidate records nothing about them, so the many records with
     # no name collision at all are unaffected, and acquiring a collision moves the record.
-    unresolved = (
-        controls(candidates, f"unresolved call sites: {{count}} for {scope.name}")
-        if candidates
-        else []
-    )
+    unresolved = controls(candidates, "unresolved call sites") if candidates else []
     return (*resolved, *unresolved)
 
 
@@ -3440,7 +3510,7 @@ def _reachable_functions(module: ast.Module, cache: _DerivationCache) -> set[int
         if name is None:
             continue
         owner = owners.get(id(node))
-        targets = edges.setdefault(id(owner) if owner is not None else 0, set())
+        targets = edges.setdefault(id(owner) if owner is not None else _MODULE_BODY_OWNER, set())
         targets.update(id(definition) for definition in definitions.get(name, ()))
         constructed = classes.get(name)
         if constructed is not None:
@@ -3452,7 +3522,7 @@ def _reachable_functions(module: ast.Module, cache: _DerivationCache) -> set[int
             )
     # The module body runs on import, so a function it calls is entered exactly as one an entry
     # point calls is.
-    pending = [0, *(id(function) for function in _module_entry_points(module))]
+    pending = [_MODULE_BODY_OWNER, *(id(function) for function in _module_entry_points(module))]
     reached: set[int] = set()
     while pending:
         current = pending.pop()
@@ -4483,6 +4553,44 @@ def _local_numeric_names(scope: ast.AST | None) -> frozenset[str]:
     return frozenset(names)
 
 
+def _call_target_ids(roots: tuple[ast.AST, ...]) -> set[int]:
+    """Return the identities of every node inside a call's callee subtree.
+
+    A callee names an operation rather than data, so the threshold, scoring and relevance rules
+    all exclude these nodes from what a guard or a predicate is read as inspecting.
+
+    Args:
+        roots: Roots to search.
+
+    Returns:
+        The excluded node identities.
+    """
+    return {
+        id(target)
+        for root in roots
+        for call in ast.walk(root)
+        if isinstance(call, ast.Call)
+        for target in ast.walk(call.func)
+    }
+
+
+def _attribute_base_ids(roots: tuple[ast.AST, ...]) -> set[int]:
+    """Return the identities of the values an attribute or subscript is taken off.
+
+    Args:
+        roots: Roots to search.
+
+    Returns:
+        The base node identities, which spell an incomplete value rather than a compared one.
+    """
+    return {
+        id(node.value)
+        for root in roots
+        for node in ast.walk(root)
+        if isinstance(node, ast.Attribute | ast.Subscript)
+    }
+
+
 def _threshold_names(
     nodes: tuple[ast.AST, ...], bound: frozenset[str], numeric: frozenset[str]
 ) -> set[str]:
@@ -4497,13 +4605,7 @@ def _threshold_names(
     does, and excluding the whole `call.func` subtree let a threshold ship uninventoried by being
     reached through an accessor.
     """
-    call_targets = {
-        id(target)
-        for root in nodes
-        for call in ast.walk(root)
-        if isinstance(call, ast.Call)
-        for target in ast.walk(call.func)
-    }
+    call_targets = _call_target_ids(nodes)
     return {
         node.id
         for root in nodes
@@ -4518,17 +4620,17 @@ def _cached_reference_path_scores(
     root: ast.AST,
     cache: _DerivationCache,
     *,
-    loads_only: bool = False,
+    skip_nested_statements: bool = False,
 ) -> tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]:
     """Return the scored spellings of one root, traversing it at most once per parse.
 
     Callers extend the returned mappings while following writers, so each hit hands back its own
     copy rather than the memo.
     """
-    key = (id(root), loads_only)
+    key = (id(root), skip_nested_statements)
     scores = cache.paths.get(key)
     if scores is None:
-        scores = _reference_path_scores(root, loads_only=loads_only)
+        scores = _reference_path_scores(root, skip_nested_statements=skip_nested_statements)
         cache.paths[key] = scores
     read, values = scores
     return dict(read), dict(values)
@@ -4537,7 +4639,7 @@ def _cached_reference_path_scores(
 def _reference_path_scores(
     root: ast.AST,
     *,
-    loads_only: bool = False,
+    skip_nested_statements: bool = False,
 ) -> tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]:
     """Return read and whole-value spellings scored from this root.
 
@@ -4549,18 +4651,11 @@ def _reference_path_scores(
     for parent in ast.walk(root):
         for child in ast.iter_child_nodes(parent):
             parents[id(child)] = parent
-    call_targets = {
-        id(target)
-        for call in ast.walk(root)
-        if isinstance(call, ast.Call)
-        for target in ast.walk(call.func)
-    }
-    attribute_bases = {
-        id(node.value) for node in ast.walk(root) if isinstance(node, ast.Attribute | ast.Subscript)
-    }
+    call_targets = _call_target_ids((root,))
+    attribute_bases = _attribute_base_ids((root,))
     read: dict[str, tuple[int, int]] = {}
     values: dict[str, tuple[int, int]] = {}
-    for node in _free_reference_nodes(root, skip_nested_statements=loads_only):
+    for node in _free_reference_nodes(root, skip_nested_statements=skip_nested_statements):
         if id(node) in call_targets:
             continue
         call_nesting = 0
@@ -4571,13 +4666,9 @@ def _reference_path_scores(
             current = parent
         spelling = ast.unparse(node)
         score = (call_nesting, 0)
-        previous = read.get(spelling)
-        if previous is None or score < previous:
-            read[spelling] = score
+        _keep_shortest(read, spelling, score)
         if id(node) not in attribute_bases:
-            previous = values.get(spelling)
-            if previous is None or score < previous:
-                values[spelling] = score
+            _keep_shortest(values, spelling, score)
     return read, values
 
 
@@ -4587,6 +4678,21 @@ def _combined_path_score(
 ) -> tuple[int, int]:
     """Return one dependency path followed by another."""
     return (prefix[0] + suffix[0], prefix[1] + suffix[1])
+
+
+def _keep_shortest[Score: tuple[int, ...]](
+    scores: dict[str, Score], spelling: str, score: Score
+) -> None:
+    """Record a spelling's dependency path when it is shorter than any already recorded.
+
+    Args:
+        scores: Shortest path recorded so far per spelling, updated in place.
+        spelling: The spelling this path reaches.
+        score: The path to record.
+    """
+    previous = scores.get(spelling)
+    if previous is None or score < previous:
+        scores[spelling] = score
 
 
 def _import_reference_evidence(
@@ -4610,9 +4716,7 @@ def _import_reference_evidence(
             continue
         call_nesting, writer_hops = _combined_path_score(prefix, local_score)
         score = (call_nesting, writer_hops, call_nesting + writer_hops)
-        previous = evidence.get(spelling)
-        if previous is None or score < previous:
-            evidence[spelling] = score
+        _keep_shortest(evidence, spelling, score)
     return evidence
 
 
@@ -4620,19 +4724,8 @@ def _expression_value_reads(
     expressions: tuple[ast.expr, ...],
 ) -> tuple[set[str], set[str]]:
     """Return expression data reads, excluding callees used only to measure a value."""
-    call_targets = {
-        id(target)
-        for expression in expressions
-        for call in ast.walk(expression)
-        if isinstance(call, ast.Call)
-        for target in ast.walk(call.func)
-    }
-    attribute_bases = {
-        id(node.value)
-        for expression in expressions
-        for node in ast.walk(expression)
-        if isinstance(node, ast.Attribute | ast.Subscript)
-    }
+    call_targets = _call_target_ids(expressions)
+    attribute_bases = _attribute_base_ids(expressions)
     read: set[str] = set()
     values: set[str] = set()
     for expression in expressions:
@@ -4814,25 +4907,18 @@ def _operand_import_evidence(
                 for spelling, score in _import_reference_evidence(
                     root, imported, cache, writer_path
                 ).items():
-                    previous = evidence.get(spelling)
-                    if previous is None or score < previous:
-                        evidence[spelling] = score
+                    _keep_shortest(evidence, spelling, score)
             statement_reads, statement_values = _cached_reference_path_scores(
-                statement, cache, loads_only=True
+                statement, cache, skip_nested_statements=True
             )
             for paths, additions in (
                 (read_paths, statement_reads),
                 (value_paths, statement_values),
             ):
                 for spelling, local_score in additions.items():
-                    score = _combined_path_score(writer_path, local_score)
-                    previous = paths.get(spelling)
-                    if previous is None or score < previous:
-                        paths[spelling] = score
+                    _keep_shortest(paths, spelling, _combined_path_score(writer_path, local_score))
     for spelling, score in _default_import_evidence(scope, read_paths, imported, cache).items():
-        previous = evidence.get(spelling)
-        if previous is None or score < previous:
-            evidence[spelling] = score
+        _keep_shortest(evidence, spelling, score)
     return evidence
 
 
@@ -4864,9 +4950,7 @@ def _default_import_evidence(
         for spelling, score in _import_reference_evidence(
             default, imported, cache, (shortest[0], shortest[1] + 1)
         ).items():
-            previous = evidence.get(spelling)
-            if previous is None or score < previous:
-                evidence[spelling] = score
+            _keep_shortest(evidence, spelling, score)
     return evidence
 
 
@@ -4903,9 +4987,7 @@ def _pair_imported_thresholds(
     imported = names.imported
     evidence = _operand_import_evidence(origin, scope, left, imported, cache)
     for spelling, score in _operand_import_evidence(origin, scope, right, imported, cache).items():
-        previous = evidence.get(spelling)
-        if previous is None or score < previous:
-            evidence[spelling] = score
+        _keep_shortest(evidence, spelling, score)
     if not evidence:
         return set()
     strongest = min(evidence.values())
@@ -5466,6 +5548,9 @@ def find_threshold_violations(
     Args:
         source: Module source text, parsed but never executed.
         path: Module file name, used in messages.
+        seeds: Names the refusal constructor resolves from, defaulting to its canonical spelling.
+            Repository-level checking passes the package closure so that a guard whose refusal is
+            built through an imported re-export has its thresholds read like any other.
 
     Returns:
         Human-readable violations, empty when every guard threshold has declared provenance.
@@ -5501,7 +5586,7 @@ def find_threshold_violations(
             *control_expressions,
             *reachability_writers,
         )
-        local = _local_numeric_names(annotations.scopes.get(id(statement)))
+        local = _local_numeric_names(scope)
         compared: tuple[ast.AST, ...] = (
             statement,
             *tests,
@@ -5549,13 +5634,7 @@ def _attribute_nodes(nodes: tuple[ast.AST, ...]) -> tuple[ast.Attribute, ...]:
     Returns:
         The attribute accesses, in walk order and with a node repeated when the roots overlap.
     """
-    targets = {
-        id(target)
-        for root in nodes
-        for call in ast.walk(root)
-        if isinstance(call, ast.Call)
-        for target in ast.walk(call.func)
-    }
+    targets = _call_target_ids(nodes)
     return tuple(
         node
         for root in nodes
@@ -5682,6 +5761,11 @@ def _receiving_transport_call(
     while current is not None:
         holder = parents.get(id(current))
         if isinstance(holder, ast.Call):
+            # Only a bare-name callee is read. The one resolvable transport is a module-level
+            # function called by bare name, and `_transport_parameters` keys its result on that
+            # bare name; reading an attribute callee here would key a method call to a same-named
+            # function elsewhere in the module. If a transport becomes a method, resolve it
+            # against its qualified name rather than widening this to `_called_name`.
             name = holder.func.id if isinstance(holder.func, ast.Name) else None
             resolved = transports.get(name) if name is not None else None
             return None if resolved is None else (*resolved, holder)
@@ -6347,6 +6431,24 @@ def classified_origin_ids(root: Path) -> frozenset[str]:
 
 
 def _classification_registry_tuples(tree: ast.Module) -> dict[str, ast.Tuple]:
+    """Return each classification registry's tuple literal, keyed by the name that binds it.
+
+    A registry must be one direct module-level tuple binding, and that binding must be the only
+    place the module writes the name. The count is taken over every `Store` and `Del` context in
+    the tree rather than the module body alone, so a later rebinding or deletion cannot leave the
+    module-level literal this parse reads standing in for the registry the import actually
+    produces.
+
+    Args:
+        tree: Parsed witness registry.
+
+    Returns:
+        The tuple literal bound to each name in `CLASSIFICATION_REGISTRIES`.
+
+    Raises:
+        ValueError: If a registry has no single direct module-level binding, or is bound to
+            something other than a tuple literal.
+    """
     bindings = Counter(
         node.id
         for node in ast.walk(tree)
@@ -6391,6 +6493,22 @@ def _classification_identifier(
     fields: tuple[str, ...],
     required_count: int,
 ) -> str:
+    """Return the guard identifier one registry entry constructs.
+
+    Args:
+        entry: The registry element, which must directly call `constructor`.
+        registry_name: The registry the entry belongs to, used in messages.
+        constructor: The witness constructor the entry must name.
+        fields: The constructor's positional field order, used to bind positional arguments.
+        required_count: How many leading fields the entry must supply.
+
+    Returns:
+        The literal identifier the entry carries.
+
+    Raises:
+        ValueError: If the entry is not a canonical construction, supplies a field twice or an
+            unknown one, omits a required evidence field, or carries a non-literal identifier.
+    """
     if not isinstance(entry, ast.Call) or _called_name(entry) != constructor:
         raise ValueError(
             f"{REGISTRY_PATH}: {registry_name} entries must directly call {constructor}"
@@ -6594,6 +6712,23 @@ def load_debt_records(root: Path) -> tuple[OriginRecord, ...]:
 
 
 def _decode_records(payload: dict[str, object], origin: str) -> tuple[OriginRecord, ...]:
+    """Return the origin records a snapshot carries, decoded under this copy's record schema.
+
+    This is the strict counterpart to `_decode_identifiers`. It reads a snapshot this copy of the
+    checker owns the schema of, either this tree's own debt file or the base revision's emitted
+    output, so a schema mismatch is a failure rather than something to tolerate. Row values are
+    coerced to `str` because the payload is untrusted JSON and every record field is text.
+
+    Args:
+        payload: Decoded snapshot JSON.
+        origin: Snapshot name, used in messages.
+
+    Returns:
+        The decoded records, in snapshot order.
+
+    Raises:
+        ValueError: If the schema does not match, or the records are not a list of objects.
+    """
     schema = payload.get("schema")
     if schema != SCHEMA_VERSION:
         raise ValueError(f"{origin}: record schema {schema!r} is not {SCHEMA_VERSION}")
@@ -6796,7 +6931,11 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--emit-debt", action="store_true", help="write the debt snapshot JSON")
+    parser.add_argument(
+        "--emit-debt",
+        action="store_true",
+        help=f"print the debt snapshot JSON to stdout; redirect it over {DEBT_PATH} to regenerate",
+    )
     parser.add_argument(
         "--compare-base",
         type=Path,

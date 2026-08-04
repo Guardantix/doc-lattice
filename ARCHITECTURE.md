@@ -18,7 +18,8 @@ Typer to the engine. Shared output policy lives in `cli/output.py`;
 `cli/errors.py` supplies diagnostics and command-level error conversion, while
 `cli/__init__.py` owns entry-point exception mapping.
 `orchestrate.load_lattice(project)` is the single wiring point that runs the pipeline;
-`init` is a separate scaffolding command that never loads the lattice. The central
+`init` and the `ci` commands are separate: they never load the lattice, and `ci` reads
+and refreshes the managed GitHub artifacts AD-16 describes. The central
 structure is the `Lattice` (model.py), which every lattice-reading command reads.
 This file owns the durable module boundaries and load-bearing decisions. CLAUDE.md
 routes contributors and agents to those decisions and lists enforced repository rules.
@@ -50,30 +51,40 @@ edges.
 shared low-level durable staging, replace, create-if-absent, fingerprint, sync, and
 cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capability and
 mechanics, independent live destination preflight for commits, durable commit and
-rollback, journal and artifact recovery containment and validation, and cleanup. The
-`doc_lattice.cli` package owns the application boundary. Its
-`cli/commands/reconcile.py` adapter resolves document identity paths before fresh
-reads and orchestrates lock acquisition and lifetime, recovery, loading, planning,
-and the transaction commit call. Final outcome reporting, including success output,
-occurs only after clean lock release; an automatic-recovery notice may be emitted on
-stderr while the lock is held. Within the cache package, `cache/schema.py` and
+rollback, journal and artifact recovery containment and validation, and cleanup.
+`github_ci/filesystem.py` owns managed-artifact filesystem work over those primitives: a
+separate nonblocking advisory lock on the repository root, and a descriptor-relative
+parent walk that opens every ancestor with no-follow flags and hands `persistence.py` a
+directory descriptor rather than a pathname, so publication keeps writing into the
+directory it validated even if that directory's pathname is renamed or recreated mid-run.
+The `ci` command adapters together with `cli/git_repository.py` own the package's only
+subprocess use, bounded `git` invocations that resolve the working-tree top level and read
+the local origin. The rest of `github_ci`, its render, audit, identity, parser, and scanner
+modules, is filesystem-free; see AD-16 for the policy those adapters enforce. The
+`doc_lattice.cli` package owns the application boundary; AD-5 owns the split between its
+`cli/commands/reconcile.py` adapter and `reconcile_transaction.py`.
+Within the cache package, `cache/schema.py` and
 `cache/state.py` are filesystem-free, `cache/store.py` owns cache-file I/O, and
 `cache/lookup.py` reads and stats documents to select the verify or stat tier.
 `linear_fetch` is impure wiring and `linear_client` is the only module that touches
 the network.
 **Consequences:** Every command's logic is unit-tested with no I/O; the network slice
-is quarantined to one module.
+is quarantined to one module. Two lock capabilities exist and never nest, since neither
+publication path acquires the reconcile lock; reconcile and managed-artifact publication
+do not coordinate with each other.
 
 ### AD-3: Untyped-to-typed boundary policy
 
 **Date:** 2026-06-27
 **Status:** Accepted
-**Context:** Raw YAML and Linear JSON arrive untyped.
+**Context:** Document frontmatter YAML, workflow YAML, and Linear JSON arrive untyped.
 **Decision:** `typing.Any`/`typing.cast` are allowed only in boundary modules
 (`scripts/check_typing_boundaries.py`); the real boundaries are `frontmatter_parser`
-and `linear_parser`, which validate into typed models. Everywhere else passes typed
-values.
-**Consequences:** Untyped data cannot leak past two named files; CI enforces it.
+(document frontmatter YAML), `linear_parser` (Linear JSON), and
+`github_ci/workflow_parser` (workflow YAML), which validate into typed models.
+Everywhere else passes typed values.
+**Consequences:** Untyped data cannot leak past the named boundary modules; CI enforces
+it.
 
 ### AD-4: Canonicalized, truncated content hash
 
@@ -117,7 +128,8 @@ durable and the journal is durably marked `committed`; recovery then preserves t
 destinations and only cleans staged evidence. Success output is emitted only after
 committed cleanup and clean lock release.
 
-Normal real startup recovers a valid outstanding journal before lattice loading.
+Normal real startup recovers a valid outstanding journal before lattice loading, and an
+automatic-recovery notice may be emitted on stderr while the lock is held.
 `reconcile --recover` performs only that recovery, while dry-run never recovers or
 persists anything and refuses an outstanding journal. Invalid or unauthenticated
 recovery evidence is retained for explicit manual remediation rather than guessed at
@@ -194,8 +206,10 @@ moving durable reconcile mutation into the CLI.
 **Decision:** `doc_lattice.cli` is a package. `cli/application.py` constructs and
 registers Typer; `cli/runtime.py` creates a frozen runtime for each invocation with
 stdout, stderr, cwd, and config and lattice loaders; and `cli/output.py` centralizes
-format validation, the JSON alias, indentation, exact output, and GitHub annotations.
-The seven modules under `cli/commands/` are narrow command adapters. There are no
+format validation, indentation, exact output, and GitHub annotations. The package also
+holds `options.py` (shared Typer option types) and `git_repository.py` (Git top-level
+resolution for the `ci` and GitHub-mode `init` adapters). Each module under
+`cli/commands/` is a narrow command adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
 
 `cli/errors.py` owns diagnostic rendering, exit constants, and command-level
@@ -204,13 +218,9 @@ mutable module-level consoles and no mutations of Typer color globals.
 entry-point exception mapping: `ProjectError` and the supported unexpected errors map
 to exit 2, while intended `SystemExit` values propagate unchanged.
 
-`cli/commands/reconcile.py` resolves selected document identity paths before fresh
-reads and orchestrates lock acquisition and lifetime, recovery, lattice loading,
-planning, the transaction commit call, and final outcome reporting after lock release.
-An automatic-recovery notice may be emitted on stderr while the lock is held. Lock
-capability and mechanics, independent live commit destination preflight, durable
-mutation and rollback, recovery containment and validation, and cleanup remain in
-`reconcile_transaction.py`.
+AD-5 owns the split between `cli/commands/reconcile.py` and
+`reconcile_transaction.py`; this package refactor moved no durable reconcile mutation
+into the CLI.
 **Consequences:** Invocation state and diagnostics can be tested without shared
 console state. Tests under `tests/cli/` mirror the command adapters and add focused
 runtime, output, and cross-command contract coverage. Durable reconcile safety keeps
@@ -492,7 +502,8 @@ lexical chain cannot supply, is missing evidence rather than an inherited stream
 so a later `>&3` fails closed. A descriptor nothing in the body binds is a Bash runtime error
 rather than a flow, so it keeps routing nowhere.
 
-Execution sinks are `eval`, shell `-c`, selected shell stdin, a registered `trap` action, and
+**Sink positions.** Execution sinks are `eval`, shell `-c`, selected shell stdin, a
+registered `trap` action, and
 static script execution through a shell operand, direct path, `source`, or `.`. A `trap` action is
 shell source the shell reads and executes when the signal arrives, so deferring its expansion to
 that moment is what hid it rather than any difference in what it runs: as a value the ordinary
@@ -523,6 +534,7 @@ modeled, since recognizing it would mean narrowing a refusal on `-i` evidence th
 supplies, which AD-17's founding principle rules out. `--emulate` stays excluded because its value
 is a mode name rather than a path.
 
+**Eval payload replay.**
 Exact eval payload interpretation is a bounded sub-analysis, not a shell interpreter. When an
 `eval` payload resolves to exact literal text, that text is tokenized and its state effects are
 replayed so a later sink observes them. This is what refuses
@@ -787,14 +799,11 @@ two output process substitutions keeps only the last binding, so the earlier con
 behind it, as in `producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the
 first record of a shared stream is projected as record one, so a marker split across later records
 is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it
-interacts with is issue #119.
-**Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
-that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
-required character comes only from external content continue to certify with the boundary
-disclosed. `audit.py` still invokes the scanner independently for each step; future job-level
-aggregation can consume the evidence shape without changing the parser/analysis ownership
-boundary.
+interacts with is issue #119. AD-23 later froze this scope: the issue numbers cited above name
+the report that produced each disclosure, not open work, and most were closed under that record.
+A gap outside AD-23's three classes is accepted behavior rather than a tracked issue.
 
+**Further sink positions.**
 Execution sinks are recognized in three further positions, none of which requires an allowlist of
 command names. A command name composed across a variable boundary is itself a sink, because Bash
 executes the head after expansion; a head that already resolves to a marker name stays outside this
@@ -815,6 +824,7 @@ resource this body writes. Such an operand resolves to no static key, so the exa
 the glob target guard both skipped it and `F=t.sh; source "$F"` certified a file the body itself
 wrote the marker into.
 
+**Redirection operand resolution.**
 A simple command's redirection operand that names no resource by its syntax alone is projected
 against the exact scalar values in effect where Bash expands it, so `P=task.sh; printf ... > "$P"`
 writes to the key `bash task.sh` later reads. Resource identity used to follow literal syntax only,
@@ -882,6 +892,7 @@ family keep a dynamic target (issue #190). The exact eval payload route reparses
 with no table of the values around it, so an unquoted reference inside a payload is not projected
 either.
 
+**Value-table withdrawals.**
 What a name the surrounding body assigned means where the walk cannot order the rebinding is a
 separate question from those gaps, because that value is exact and the operand would be projected
 against it. Three rebindings escape the source-order walk, and each withdraws the name rather than
@@ -1031,6 +1042,7 @@ same measurement gives, since `declare A=task A+=.sh` leaves `task.sh`, so the t
 extends is the one that command already applied. A prefix assignment on an ordinary command carries
 no snapshot at all: those apply left to right, and `A=1; A=2 B=$A` leaves `B=2`.
 
+**Declaration attributes.**
 A declaration attribute is a rebinding of a third kind, one this evidence records the wrong value
 for rather than not at all. Case conversion (`declare -u`, `-l`, `-c`) and arithmetic evaluation
 (`-i`) decide what Bash stores rather than what the assignment spells, so `declare -u P; P=task.sh`
@@ -1168,6 +1180,7 @@ payload's assignments, recording a `getopts` write, recording a conditional expa
 and reading a trap handler are each tracked as issue #205 rather than folded in here; a sourced
 file's content stays outside what this scan reads.
 
+**Constructs that fail closed.**
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
 shell scope for every later command, which the per-command `redirections` field cannot express. A
@@ -1182,6 +1195,12 @@ module. Where an exact projection is merely lost rather than absent, the solver
 instead widens to the top of the content lattice, an alternative that accepts from every DFA
 entry state, so the value stays visible at each sink and only a body that actually reaches one
 is refused.
+**Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
+that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
+required character comes only from external content continue to certify with the boundary
+disclosed. `audit.py` still invokes the scanner independently for each step; future job-level
+aggregation can consume the evidence shape without changing the parser/analysis ownership
+boundary.
 
 ### AD-19: A reported false certification is triaged, not automatically fixed
 
@@ -1332,7 +1351,7 @@ rejects it by the same rule rather than by a case of its own. Only a value read 
 registers, so the verdict union `type ScanVerdict = Certified | MarkerDetected | GuardRefusal` binds
 no constructor spelling and stays the ordinary type alias it is. Neither rule carries an allowance:
 across the three guarded modules, no call spells a tracked constructor in a non-final callee
-position, and the shipped tree's 194 fingerprints stay byte-identical.
+position, and the 194 fingerprints the tree carried when this was measured stay byte-identical.
 
 Closing the computed callee left the same construction spelled across two named calls, which is why
 a guarded module resolves no name at runtime at all. `factory = getattr(shell_guards,
@@ -1356,7 +1375,8 @@ frozen guard exactly as `setattr` does while spelling neither builtin.
 Rejecting those spellings left the plainest one open, so a write that replaces a definition is
 rejected whether or not it resolves a name at runtime. `_EvalDiscoveryBudget.charge_work = stub`
 withdraws the same guard while resolving every name statically, and all three spellings passed every
-gate with the shipped tree's 194 fingerprints byte-identical, because a record describes the source
+gate with the 194 fingerprints the tree carried when this was measured byte-identical, because a
+record describes the source
 of the definition it was extracted from rather than what that definition's name holds when a caller
 reaches it. Following the write instead would mean deciding what the replacement computes, which is
 the value-provenance problem the computed-callee boundary already declines. The base is resolved
@@ -1381,8 +1401,8 @@ shadow the name of some unrelated nested helper. Every binding form counts, sinc
 a later call reaches: an assignment or deletion, an import alias, an `except` clause, a match
 capture, a parameter, and a second `def` or `class` of a name already defined. A `global` or
 `nonlocal` declaration naming a definition is rejected on sight, since it is what would carry a
-rebinding out of the scope that otherwise contains it; the five the guarded modules declare name
-ordinary closure variables. The attribute half now reads the attribute name as well as the base,
+rebinding out of the scope that otherwise contains it; the ones the guarded modules declare all
+name ordinary closure variables. The attribute half now reads the attribute name as well as the base,
 which is the only thing left when a receiver is unresolvable by construction. Every one of these
 carries no allowance: the guarded modules spell no collision in any scope, no declaration naming a
 definition, and 165 attribute writes of which none names a definition. `self.work += amount` remains
@@ -1496,7 +1516,7 @@ those as caps reported `state = "body"` as an unprovenanced bound. No shipped gu
 value, so the rule carries no allowance.
 The search covers the writers feeding a guard's condition as well as the
 condition itself, and the preceding controls that decide whether the origin is reached plus their
-writers—the same closures the fingerprint records. A comparison computed one statement
+writers, which are the same closures the fingerprint records. A comparison computed one statement
 earlier caps the scan exactly as an inline one does: `too_many = len(items) > 100` followed by
 `if too_many` leaves
 the magnitude nowhere the condition can see it; likewise, `if len(items) <= 100: return` makes that
@@ -1660,7 +1680,8 @@ A `with` is one of those controls, reduced to its items on the same terms a `try
 handlers. The context manager decides what becomes of an exception raised in the body, so
 `with suppress(Exception):` wrapped around an origin swallows the refusal it raises exactly as a
 bare handler would. Recognizing every compound statement except this one left that spelling
-withdrawing `taint.eval-discovery.work-limit` with all 194 fingerprints in the tree byte-identical
+withdrawing `taint.eval-discovery.work-limit` with all 194 fingerprints the tree carried when this
+was measured byte-identical
 and every other gate silent. The item is taken whole rather than only its context expression, so a
 name rebound through `as` moves the record too, and the statement reaches the callee closure like
 any other control, so `with quiet():` is not withdrawable by editing what `quiet` returns while its
@@ -1708,7 +1729,8 @@ the module fixpoint, so a field defaulted to a module constant reaches that cons
 attributes the guard's dataflow reads are followed, never the receiver itself, for the reason object
 configuration is matched that way: folding in every sibling's write to an unrelated attribute would
 churn the record of every guard in the class on any edit inside it. Measured across both modules the
-widened closure moves 35 of the 194 records and leaves an unrelated edit to a scanner method, a new
+widened closure moves 35 of the 194 records the tree carried when this was measured and leaves an
+unrelated edit to a scanner method, a new
 field or a new constructor attribute moving none. The boundary is the class the method is written
 in: a field inherited from a base class, one a caller assigns onto the instance from outside, and a
 write reached through a second name aliasing the same instance are all outside it, and no shipped
@@ -1846,7 +1868,8 @@ classification: a reachable witness proves dynamic reachability by executing the
 Withdrawal by dead code above the guard's function belongs to that family, and its crude form is
 closed syntactically rather than left to classification. An unconditional `return None` at the top
 of `_ShellScanner.scan` makes every scanner guard dead; measured against a candidate tree it kept
-all 194 origins, moved no fingerprint and passed every other gate. That edit is visible in the
+all 194 origins the tree carried when this was measured, moved no fingerprint and passed every
+other gate. That edit is visible in the
 syntax alone, as a statement sitting after one that leaves its own block, so no statement in a
 guarded module may be unreachable in that sense. The rule reads blocks structurally rather than
 naming the constructs that carry them, so a module body, an `if` arm, a loop body and its `else`, a
@@ -2042,8 +2065,9 @@ over-refusals. A later attempt has to supply the discriminator this experiment l
 knowing whether the body itself should have defined a key, rather than inferring that from the key's
 shape.
 **Consequences:** The inert missing-key default is the pinned behavior of an unresolved content
-reference, and the false certifications AD-18 discloses stay open under their individual
-issues rather than behind one pending global fix. This rejects one widening, not fail-closed
+reference, and the false certifications AD-18 discloses stay open as behavior pinned in the suite
+rather than behind one pending global fix; AD-23 records that they are accepted within the
+scanner's frozen scope. This rejects one widening, not fail-closed
 defaults in general: AD-18's rule that a projection which is merely lost widens to the top of the
 lattice is unchanged, because there the solver knows it lost track, while a table miss does not say
 whether the key was ever meant to exist. The residual cost is explicit. An evidence-construction gap
@@ -2247,3 +2271,20 @@ the audit contract. This is a scope freeze, not a teardown: no guard, gate, or m
 removed, and the scanner keeps its claim to what the freeze protects, deterministic fail-closed
 linting of the invocations a careless author actually writes, held to its recorded behavior by the
 corpus, the baseline, and the guard inventory.
+
+### AD-24: The supported Python floor is 3.13
+
+**Date:** 2026-08-04
+**Status:** Accepted
+**Context:** `requires-python = ">=3.13"` reads as an ordinary packaging choice, but two shipped
+behaviors depend on that exact floor and neither is visible from the packaging metadata.
+**Decision:** The supported floor is Python 3.13, and it is load bearing rather than incidental.
+`discovery.py` matches `ignore_globs` with `Path.full_match`, which exists only from 3.13. AD-13's
+generated slug data bridges the Unicode table the minimum supported runtime ships to the
+`github-slugger@2.0.0` JavaScript target, so the floor selects the baseline that generation is
+verified against. Changing the floor in either direction therefore requires regenerating that data
+and re-running the parity and benchmark verification AD-13 prescribes. README owns the user-facing
+`Python 3.13+` requirement.
+**Consequences:** A request to lower the floor is a compatibility review rather than a metadata
+edit, since section identity is measured against the minimum runtime's Unicode table. Raising it
+is equally reviewable, and neither move lands without regenerated, re-verified generated data.
