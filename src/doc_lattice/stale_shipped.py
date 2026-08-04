@@ -8,6 +8,10 @@ from .impact import expand_targets, impact
 from .model import Lattice, TargetId
 from .tickets import Finding, Ticket
 
+# The three Linear state types absent here (triage, canceled, duplicate) carry no
+# severity: canceled and duplicate closed without delivery, and triage has not been
+# accepted into the workflow, so none of them claim work shipped against the spec.
+# stale_shipped() skips any ticket whose state maps to None here.
 _STATE_SEVERITY: dict[str, Severity] = {
     "completed": "DANGER",
     "started": "WARNING",
@@ -100,7 +104,8 @@ def stale_shipped(
 
     Returns:
         Findings ordered by severity rank (DANGER, BLOCKED, WARNING, INFO), then node id,
-        then ticket ref. A node with no tickets, or only terminal-state tickets, yields none.
+        then ticket ref. A node with no tickets, or only tickets in an ungraded state
+        (triage, canceled, duplicate), yields none.
     """
     findings: list[Finding] = []
     for node_id, drifted_refs in trigger.items():

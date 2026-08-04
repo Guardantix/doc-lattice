@@ -24,7 +24,7 @@ import sys
 import tempfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from doc_lattice.github_ci.shell_scanner import scan_doc_lattice_invocations
@@ -37,6 +37,10 @@ _DEFAULT_TIMEOUT_SECONDS = 10
 _DEFAULT_JOBS = 8
 _TRACE_BYTE_LIMIT = 512_000
 _SHRINK_DIMENSIONS = ("wrapper", "carrier", "producer", "sink")
+# Position of each grammar dimension in Recipe.signature(), which is what the baseline file
+# records and what report() breaks down. Mirrored by signature() itself; a reorder there has
+# to be a reorder here.
+_SIGNATURE_DIMENSIONS = ("producer", "carrier", "sink", "wrapper")
 # Separators the generated fragment pairs can compose, so a stub exists for every reachable name.
 _MARKER_SEPARATORS = ("-", "_", ".", "--")
 
@@ -145,6 +149,7 @@ class Recipe:
 
     def signature(self) -> tuple[str, ...]:
         """Return the dimension tuple used for deduplication and shrinking."""
+        # Explicit field access for speed; `_SIGNATURE_DIMENSIONS` mirrors this order by name.
         return (self.producer, self.carrier, self.sink, self.wrapper)
 
 
@@ -426,18 +431,7 @@ def shrink(outcome: Outcome, bash: str, timeout: float) -> Outcome:
 
 def _replace_dimension(recipe: Recipe, dimension: str, value: str) -> Recipe:
     """Return a recipe with one grammar dimension replaced."""
-    fields = {
-        "producer": recipe.producer,
-        "carrier": recipe.carrier,
-        "sink": recipe.sink,
-        "wrapper": recipe.wrapper,
-    }
-    fields[dimension] = value
-    return Recipe(
-        **fields,
-        fragments=recipe.fragments,
-        marker_bearing=recipe.marker_bearing,
-    )
+    return replace(recipe, **{dimension: value})
 
 
 def load_baseline(path: Path | None) -> set[tuple[str, ...]]:
@@ -453,8 +447,21 @@ def load_baseline(path: Path | None) -> set[tuple[str, ...]]:
 
 
 def write_baseline(path: Path, signatures: set[tuple[str, ...]]) -> None:
-    """Record failing signatures so later runs can gate on regressions only."""
-    lines = ["# doc-lattice shell taint fuzzer baseline", "# producer\tcarrier\tsink\twrapper"]
+    """Record failing signatures so later runs can gate on regressions only.
+
+    The file is replaced, not merged: it ends up holding exactly the signatures this run
+    reproduced, so a regeneration at a different seed or iteration count drops every accepted
+    signature the previous capture found and this one did not draw. Regenerate at the seed and
+    scale the baseline was captured at, which CLAUDE.md names.
+
+    Args:
+        path: Baseline file to overwrite.
+        signatures: The dimension tuples this run found to certify falsely.
+    """
+    lines = [
+        "# doc-lattice shell taint fuzzer baseline",
+        "# " + "\t".join(_SIGNATURE_DIMENSIONS),
+    ]
     lines.extend("\t".join(signature) for signature in sorted(signatures))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -491,7 +498,7 @@ def report(outcomes: list[Outcome], baseline: set[tuple[str, ...]], *, verbose: 
     print(f"FALSE CERTIFICATIONS    {len(failures)} cases, {len(unique)} distinct recipes")
     print(f"  new vs baseline       {len(new)}")
     if unique:
-        for dimension, index in (("producer", 0), ("carrier", 1), ("sink", 2), ("wrapper", 3)):
+        for index, dimension in enumerate(_SIGNATURE_DIMENSIONS):
             counts = Counter(signature[index] for signature in unique)
             ranked = ", ".join(f"{name}={count}" for name, count in counts.most_common(5))
             print(f"  by {dimension:9} {ranked}")
@@ -562,15 +569,49 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Differentially test CI shell taint verdicts against real Bash execution."
     )
-    parser.add_argument("--iterations", type=int, default=_DEFAULT_ITERATIONS)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--jobs", type=int, default=_DEFAULT_JOBS)
-    parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--baseline", type=Path, default=None)
-    parser.add_argument("--write-baseline", action="store_true")
-    parser.add_argument("--no-shrink", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--self-check", action="store_true")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=_DEFAULT_ITERATIONS,
+        help="cases to request from the grammar",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed for the grammar; a baseline is specific to the seed it was captured at",
+    )
+    parser.add_argument("--jobs", type=int, default=_DEFAULT_JOBS, help="parallel Bash executions")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=_DEFAULT_TIMEOUT_SECONDS,
+        help="seconds allowed per generated body",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="TSV of known-failing signatures to exclude from the failure count, and the file "
+        "--write-baseline rewrites",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help="replace the --baseline file with this run's failing signatures; without --baseline "
+        "there is no file to write and the flag does nothing",
+    )
+    parser.add_argument(
+        "--no-shrink",
+        action="store_true",
+        help="report full recipes instead of shrinking each false certification",
+    )
+    parser.add_argument("--verbose", action="store_true", help="list over-refusals as well")
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="validate the execution oracle and exit",
+    )
     arguments = parser.parse_args()
 
     bash = shutil.which("bash", path=os.defpath)

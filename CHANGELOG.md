@@ -20,6 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Read-only `ci audit` policy checks and interactive `ci refresh` support for managed upgrades,
   repository renames, and transfers.
 
+### Changed
+
+- The CI shell scanner is documented as a best-effort accident lint rather than a security
+  boundary; known certify-anyway cases inside its disclosed model are accepted behavior. See
+  [AD-23](ARCHITECTURE.md#ad-23-the-ci-shell-scanner-is-an-accident-lint-with-a-frozen-scope-not-a-security-boundary).
+- A pull request touching the CI shell guard package, the differential tool, the fuzzer grammar,
+  or the frozen replay inventory now replays one fixed corpus against both revisions and reports
+  every script whose verdict differs. See
+  [AD-22](ARCHITECTURE.md#ad-22-a-scanner-change-replays-the-frozen-corpus-against-the-revision-it-is-proposed-on).
+
 ### Security
 
 - The CI shell scanner now gives a simple command's redirection operand the resource identity its

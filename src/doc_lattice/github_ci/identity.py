@@ -72,6 +72,9 @@ def parse_origin_repository(url: str) -> RepositoryIdentity:
 
     if hostname is None or hostname.lower() != "github.com":
         raise ConfigError(_origin_error())
+    # `.port` returns None both when no port is present and when a colon is followed by an
+    # empty port (e.g. "github.com:"), so port alone cannot detect that anomalous form;
+    # checking the netloc's host:port segment for a literal ":" catches it too.
     if port is not None or ":" in parsed.netloc.rsplit("@", 1)[-1]:
         raise ConfigError(_origin_error())
 

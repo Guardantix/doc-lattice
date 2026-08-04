@@ -217,13 +217,14 @@ def read_document(path: Path) -> dict[str, object]:
     return document
 
 
-def read_entries(document: dict[str, object], key: str, path: Path) -> list[object]:
+def read_entries(document: dict[str, object], key: str, path: Path | str) -> list[object]:
     """Read a named list out of one document.
 
     Args:
         document: The parsed document.
         key: Name of the list.
-        path: Path the document came from, named in a refusal.
+        path: Path the document came from, or a phrase naming the record in hand, interpolated
+            into a refusal.
 
     Returns:
         The entries, each read through `read_text`.
@@ -243,13 +244,14 @@ def read_entries(document: dict[str, object], key: str, path: Path) -> list[obje
     return list(entries)
 
 
-def read_text(entry: object, key: str, path: Path) -> str:
+def read_text(entry: object, key: str, path: Path | str) -> str:
     """Read a named text field out of one object.
 
     Args:
         entry: The object carrying the field.
         key: Name of the field.
-        path: Path the document came from, named in a refusal.
+        path: Path the document came from, or a phrase naming the record in hand, interpolated
+            into a refusal.
 
     Returns:
         The field's text.
@@ -260,6 +262,9 @@ def read_text(entry: object, key: str, path: Path) -> str:
     if not isinstance(entry, dict):
         message = f"{path} records a {type(entry).__name__} where an object carrying {key} belongs"
         raise ValueError(message)
+    # Re-keyed rather than read off `entry` directly because the isinstance narrowing leaves the
+    # dict as `dict[Unknown, Unknown]`, and ty rejects a `str` subscript against an unknown key
+    # type. The conversion is a no-op on JSON, whose object keys are always text.
     fields = {str(name): value for name, value in entry.items()}
     if key not in fields:
         message = f"{path} records an entry carrying no {key}"
@@ -780,7 +785,7 @@ def check_corpus_scale(base: dict[str, object], candidate: dict[str, object]) ->
             )
             raise ValueError(message)
         count = document.get("count")
-        scored = len(read_entries(document, "cases", Path(f"the {name} record")))
+        scored = len(read_entries(document, "cases", f"the {name} record"))
         if count != scored:
             message = (
                 f"the {name} record declares {count} script(s) and carries {scored}, so the count "
@@ -833,7 +838,12 @@ def divergences(base: dict[str, object], candidate: dict[str, object]) -> list[D
     found: list[Divergence] = []
     for case in candidate["cases"]:  # ty: ignore[not-iterable]
         scored = base_by_digest.get(case["sha256"])
-        if scored is None or scored["verdict"] == case["verdict"]:
+        if scored is None:
+            # Unreachable through the command line: `align` refuses two records whose corpus
+            # digests differ, and that digest binds every case id and script digest in order, so a
+            # candidate case with no base row means the two records did not score one corpus.
+            continue
+        if scored["verdict"] == case["verdict"]:
             continue
         found.append(
             Divergence(
@@ -1192,8 +1202,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(_ROOT / REPLAY_INVENTORY),
         help="frozen replay inventory to score",
     )
-    recorder.add_argument("--seeds", default=",".join(str(seed) for seed in SEEDS))
-    recorder.add_argument("--iterations", type=int, default=ITERATIONS)
+    recorder.add_argument(
+        "--seeds",
+        default=",".join(str(seed) for seed in SEEDS),
+        help="comma-separated fuzzer seeds to draw the generated half with; compare refuses any "
+        f"list other than the pinned {','.join(str(seed) for seed in SEEDS)} unless "
+        "--allow-shrunk-corpus is given",
+    )
+    recorder.add_argument(
+        "--iterations",
+        type=int,
+        default=ITERATIONS,
+        help=f"bodies to request per seed (pinned at {ITERATIONS}; fewer needs "
+        "--allow-shrunk-corpus at compare time)",
+    )
     recorder.set_defaults(handler=_record_command)
 
     comparer = modes.add_parser("compare", help="report divergence between two verdict records")
@@ -1225,7 +1247,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="write the acknowledgements this comparison would need, with the reasons left empty",
     )
-    comparer.add_argument("--report-limit", type=int, default=REPORT_LIMIT)
+    comparer.add_argument(
+        "--report-limit",
+        type=int,
+        default=REPORT_LIMIT,
+        help="how many individual rows to print per section",
+    )
     comparer.set_defaults(handler=_compare_command)
     return parser
 

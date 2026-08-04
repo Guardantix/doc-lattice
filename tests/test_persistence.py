@@ -272,6 +272,63 @@ def test_atomic_replace_bytes_keeps_absent_destination_private(tmp_path: Path):
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
+def test_atomic_replace_bytes_keeps_non_regular_destination_private(tmp_path: Path):
+    target = tmp_path / "target.md"
+    target.write_bytes(b"target")
+    target.chmod(0o754)
+    destination = tmp_path / "link.md"
+    destination.symlink_to(target)
+
+    atomic_replace_bytes(destination, b"new", prefix=".link.md.replace.")
+
+    assert destination.read_bytes() == b"new"
+    assert stat.S_IMODE(destination.stat(follow_symlinks=False).st_mode) == 0o600
+    assert target.read_bytes() == b"target"
+
+
+def test_atomic_replace_bytes_at_preserves_existing_destination_mode(tmp_path: Path):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old")
+    destination.chmod(0o754)
+
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        persistence.atomic_replace_bytes_at(
+            fd,
+            destination.name,
+            b"new",
+            prefix=".doc.md.replace.",
+        )
+    finally:
+        os.close(fd)
+
+    assert destination.read_bytes() == b"new"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o754
+
+
+def test_atomic_replace_bytes_at_keeps_non_regular_destination_private(tmp_path: Path):
+    target = tmp_path / "target.md"
+    target.write_bytes(b"target")
+    target.chmod(0o754)
+    destination = tmp_path / "link.md"
+    destination.symlink_to(target)
+
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        persistence.atomic_replace_bytes_at(
+            fd,
+            destination.name,
+            b"new",
+            prefix=".link.md.replace.",
+        )
+    finally:
+        os.close(fd)
+
+    assert destination.read_bytes() == b"new"
+    assert stat.S_IMODE(destination.stat(follow_symlinks=False).st_mode) == 0o600
+    assert target.read_bytes() == b"target"
+
+
 def test_atomic_replace_bytes_supports_relative_destination(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     destination = Path("doc.md")

@@ -166,6 +166,12 @@ def test_apply_reconcile_non_mapping_entry_raises():
         apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
 
 
+def test_apply_reconcile_non_string_ref_raises():
+    text = "---\nid: d\nderives_from:\n  - ref: [a, b]\n    seen: deadbeef\n---\nbody\n"
+    with pytest.raises(UnreadableDocError):
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
+
+
 def test_reconcile_clears_drift_for_node(lattice_dir: Path):
     project = load_config(None, lattice_dir)
     lat = load_lattice(project)
