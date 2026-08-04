@@ -614,9 +614,13 @@ this rejects pins that can never resolve as final releases, but it does not prov
 already published or that an unreleased source checkout matches that release.
 Publication holds a nonblocking advisory lock on the repository root for its whole run, so
 `init --github` and `ci refresh --apply` never write over each other. A competing run refuses with
-`managed artifact refresh is in progress; retry after it exits` and changes nothing. Publication
-requires POSIX advisory locking and refuses on a platform without it; preview, `ci audit`, and
-every other read-only path take no lock.
+`managed artifact refresh is in progress; retry after it exits` and leaves every managed artifact
+unchanged. The guarantee covers the four managed artifacts, not the whole `init --github` run:
+that command scaffolds `.doc-lattice.yml` before publication, so a run refused the lock, or
+refused for want of locking, can still have created the config. Rerunning after the competing run
+exits leaves that config untouched and publishes the artifacts. Publication requires POSIX
+advisory locking and refuses on a platform without it; preview, `ci audit`, and every other
+read-only path take no lock.
 
 When `ci audit` omits `--repository`, it resolves the local `origin` only from GitHub.com SCP
 (`git@github.com:OWNER/REPO.git`), `ssh://git@github.com/OWNER/REPO.git`, or
