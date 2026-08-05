@@ -65,17 +65,21 @@ import hashlib
 import importlib
 import json
 import multiprocessing
-import os
 import random
+import signal
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "scripts"))
+
+from worker_pool import positive_jobs, resolve_jobs, start_method  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from types import ModuleType
-
-_ROOT = Path(__file__).resolve().parents[1]
 
 SUMMARY = "Replay the checkpoint corpus against two revisions and report every verdict divergence."
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
@@ -89,15 +93,6 @@ SEEDS = (1, 2, 3, 4)
 ITERATIONS = 5000
 REPORT_LIMIT = 25
 REPLAY_CHUNK = 64
-FRESH_START_METHODS = ("forkserver", "spawn")
-"""Start methods that give a worker a fresh interpreter, cheapest first.
-
-Named rather than left to the platform default, which is `fork` through 3.13 and `forkserver` from
-3.14: the gate runs on one of those and contributors on the other, and a corpus scored under two
-process models is a difference between runs that has nothing to do with the scanner. `fork` is not
-among them for the reason `scripts/guard_witness_sweep.py` gives at its own copy of this list: it
-deprecates once a process has threads, which a pool has by the time it starts its second worker.
-"""
 
 EXIT_OK = 0
 EXIT_DIVERGED = 1
@@ -633,6 +628,14 @@ def _bind_worker(root_text: str) -> None:
     Args:
         root_text: Repository root whose guard package is scored.
     """
+    # Ctrl-C reaches every process in the terminal's group, and a worker that takes it dies wherever
+    # it happened to be. Dying part way through writing a chunk of labels back leaves the parent
+    # reading a result that never finishes arriving, which is a run that has to be killed rather
+    # than one that stopped. Ignored here, which leaves the interrupt to the parent alone: it stops
+    # handing out chunks, drops the ones no worker had started, and each worker exits through the
+    # pool's own shutdown. `scripts/guard_witness_sweep.py` protects its workers the same way, and
+    # so does CPython's own forkserver.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER["scan"] = getattr(load_scanner(Path(root_text)), SCANNER_ENTRY_POINT)
 
 
@@ -684,6 +687,14 @@ def replay_parallel(
 
     Raises:
         ValueError: If the corpus is empty, for the reason `replay` gives.
+        BrokenProcessPool: If a worker process died holding a chunk, or never bound a scanner at
+            all. Raised rather than waited on, which is the whole reason the pool is a
+            `ProcessPoolExecutor`: `multiprocessing.Pool` answers a worker that exits abnormally by
+            starting a replacement and never re-queueing the chunk the dead one held, so `map`
+            blocks on a result nothing will produce. This runs under a CI job with two recordings
+            and two pools on one runner, where a worker lost to the kernel's OOM killer would turn
+            the refusal this gate exists to print into a job that hangs until the workflow times
+            out with no diagnostic at all.
     """
     if not cases:
         message = "the corpus holds no scripts, so this revision was not replayed against anything"
@@ -691,13 +702,22 @@ def replay_parallel(
     check_projection(scan(cases[0].source))
     if jobs <= 1:
         return replay(cases, scan)
-    context = multiprocessing.get_context(start_method())
-    with context.Pool(jobs, initializer=_bind_worker, initargs=(str(root),)) as pool:
-        labels = pool.map(
-            _worker_label,
-            [case.source for case in cases],
-            chunksize=REPLAY_CHUNK,
+    pool = ProcessPoolExecutor(
+        max_workers=jobs,
+        mp_context=multiprocessing.get_context(start_method()),
+        initializer=_bind_worker,
+        initargs=(str(root),),
+    )
+    try:
+        labels = list(
+            pool.map(_worker_label, [case.source for case in cases], chunksize=REPLAY_CHUNK)
         )
+    finally:
+        # Cancelled rather than drained, so a Ctrl-C or a broken pool stops the run where it landed.
+        # Every chunk is submitted by the `map` above, so a plain shutdown would wait for the whole
+        # corpus to be scored by workers nobody is reading any more. On the ordinary path every
+        # chunk is already done and there is nothing left to cancel.
+        pool.shutdown(wait=True, cancel_futures=True)
     return [
         {
             "id": case.case_id,
@@ -723,60 +743,6 @@ def unit_count(cases: Sequence[CorpusCase]) -> int:
         One per chunk of the corpus, and none for an empty one.
     """
     return (len(cases) + REPLAY_CHUNK - 1) // REPLAY_CHUNK
-
-
-def start_method() -> str:
-    """Return the process start method a pooled replay runs its workers under.
-
-    Returns:
-        The cheapest start method this platform offers that gives a worker a fresh interpreter.
-    """
-    available = multiprocessing.get_all_start_methods()
-    return next(
-        (method for method in FRESH_START_METHODS if method in available),
-        FRESH_START_METHODS[-1],
-    )
-
-
-def default_jobs(units: int) -> int:
-    """Return how many units of work a replay scores at a time when nobody says.
-
-    Args:
-        units: How many units of work the run is split into, as `unit_count` counts them.
-
-    Returns:
-        Worker count, at least one and never more than there is work for. Derived from the CPUs
-        this process may actually run on rather than from the machine's count, so a run under a
-        CPU affinity mask or a container quota does not oversubscribe what it was given.
-    """
-    return max(1, min(units, os.process_cpu_count() or 1))
-
-
-def positive_jobs(text: str) -> int:
-    """Return `text` as a count of worker processes, refusing a non-positive one.
-
-    Kept apart from the corpus converters because zero means something here that it does not mean
-    there: an empty corpus is a replay of nothing, which `replay` refuses on its own terms, while
-    zero workers is not a smaller replay but a run with nobody to score a script.
-
-    Args:
-        text: The value as spelled on the command line.
-
-    Returns:
-        The value as a worker count.
-
-    Raises:
-        ArgumentTypeError: If the value is below one, since a replay is run by at least one process.
-    """
-    try:
-        value = int(text)
-    except ValueError as error:
-        message = f"{text!r} is not a whole number of worker processes"
-        raise argparse.ArgumentTypeError(message) from error
-    if value < 1:
-        message = f"{text!r} is not a worker count; a replay is run by at least one process"
-        raise argparse.ArgumentTypeError(message)
-    return value
 
 
 def parse_seeds(text: str) -> tuple[int, ...]:
@@ -826,8 +792,7 @@ def record(
         iterations=iterations,
     )
     check_corpus_drawn(corpus, seeds, iterations)
-    units = unit_count(corpus)
-    workers = max(1, min(units, default_jobs(units) if jobs is None else jobs))
+    workers = resolve_jobs(unit_count(corpus), jobs)
     return {
         "schema": SCHEMA,
         "scanner_source": str(Path(scanner.__file__ or "").resolve()),

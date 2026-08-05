@@ -179,6 +179,17 @@ def test_the_concurrent_recordings_split_the_runner_rather_than_each_claiming_it
     assert replay.count('--jobs "$jobs"') == 2
 
 
+def test_each_recording_is_labelled_in_the_log_the_two_of_them_share() -> None:
+    # Two steps attributed a line to a revision for free. Interleaved into one stream they do not,
+    # and a refusal is several lines of prose that read as the other revision's just as well.
+    # `pipefail` is what keeps the label from swallowing the exit status the waits below collect.
+    replay = _step("Replay the corpus against both revisions")["run"]
+
+    assert "set -euo pipefail" in replay
+    assert "2>&1 | sed -u 's/^/[base] /'" in replay
+    assert "2>&1 | sed -u 's/^/[candidate] /'" in replay
+
+
 def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_floor() -> None:
     # The tool and the corpus are both candidate-owned, so the base's own inventory is what stops
     # a candidate from shrinking the corpus until the divergence disappears.
@@ -195,8 +206,8 @@ def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_flo
 def test_neither_replay_step_shrinks_the_corpus_on_the_command_line() -> None:
     # The pinned scale is the tool's default and `check_corpus_scale` reads what the record names,
     # so a scale spelled here overrides both. Pinning the module constants does not reach it, which
-    # is why the absence of the flags is what this holds rather than their value. `--workers` is
-    # not one of them: it splits the same corpus across processes rather than drawing less of it.
+    # is why the absence of the flags is what this holds rather than their value. `--jobs` is not
+    # one of them: it splits the same corpus across processes rather than drawing less of it.
     script = _step("Replay the corpus against both revisions")["run"]
 
     assert "--seeds" not in script

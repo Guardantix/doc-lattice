@@ -257,6 +257,12 @@ jobs:
         # so a run where both revisions refused would report one and abandon the other. Waited
         # rather than left to the comparison, which would otherwise read a missing record as its own
         # input error rather than as the recording that failed.
+        #
+        # Each recording is labelled on its way into the log the two now share. Two separate steps
+        # attributed a line to a revision for free; interleaved into one stream they no longer do,
+        # and a refusal is several lines of prose whose revision the reader cannot otherwise name.
+        # `pipefail` is what keeps the label from swallowing the status: `wait` on a background
+        # pipeline answers with the leftmost failure rather than with the labeller's own exit.
         run: |
           set -euo pipefail
           jobs="$(( $(nproc) / 2 ))"
@@ -266,12 +272,12 @@ jobs:
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root "$RUNNER_TEMP/base" \
             --out "$RUNNER_TEMP/base-verdicts.json" \
-            --jobs "$jobs" &
+            --jobs "$jobs" 2>&1 | sed -u 's/^/[base] /' &
           base=$!
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root . \
             --out "$RUNNER_TEMP/candidate-verdicts.json" \
-            --jobs "$jobs" &
+            --jobs "$jobs" 2>&1 | sed -u 's/^/[candidate] /' &
           candidate=$!
           base_status=0
           wait "$base" || base_status=$?

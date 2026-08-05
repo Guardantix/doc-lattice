@@ -135,6 +135,10 @@ configuration, which is a couple of minutes on an eight-core machine, and printi
 the corpus reached nothing new rather than that anything failed. Configurations are independent, so
 the grid is split across one worker process per available CPU; `--jobs` sizes that split and does
 not change which reach the merge prefers, with `--jobs 1` running the whole grid in one process.
+The split is not quite free of the result: a worker enters the scan from the pool's own call stack,
+so a script that only just fits within the interpreter's recursion limit can be scanned under one
+split and counted as unparseable under another. A guard you expected a row for and did not get is
+worth one `--jobs 1` pass before concluding the corpus cannot reach it.
 Ctrl-C stops a split run within a second or two wherever in the run it lands, including while the
 grid is still being handed to the workers, and still prints the rows it had. Shrink `--seeds`
 and `--iterations` for a quick pass, and use `--all-guards` to see what the corpus reaches at all.
