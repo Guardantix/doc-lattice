@@ -151,6 +151,22 @@ def test_a_refusal_from_either_revision_fails_the_replay_step() -> None:
     assert "candidate=$!" in replay
     assert 'wait "$base"' in replay
     assert 'wait "$candidate"' in replay
+    assert 'exit "$base_status"' in replay
+    assert 'exit "$candidate_status"' in replay
+
+
+def test_neither_recording_is_abandoned_by_the_other_one_failing() -> None:
+    # `wait` returns the status it waited for, so under `set -e` an unguarded first wait ends the
+    # step with the second recording still running: it holds half the runner until the job is
+    # cleaned up, and whatever it was refusing over never reaches the log. Both statuses are
+    # therefore collected before either is acted on, which is what the guards on the waits are for.
+    replay = _step("Replay the corpus against both revisions")["run"]
+    waits = replay.index('wait "$base"'), replay.index('wait "$candidate"')
+
+    assert 'wait "$base" || base_status=$?' in replay
+    assert 'wait "$candidate" || candidate_status=$?' in replay
+    # Nothing may exit between the two waits, or the second one is unreachable again.
+    assert "exit" not in replay[waits[0] : waits[1]]
 
 
 def test_the_concurrent_recordings_split_the_runner_rather_than_each_claiming_it() -> None:

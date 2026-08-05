@@ -249,8 +249,14 @@ jobs:
         # a verdict does not depend on when it was scored. The runner's cores are split between
         # them, since each `record` replays across a worker pool of its own and two pools each
         # sized to the whole machine would oversubscribe it and give back what running them
-        # together buys. Both statuses are waited on, so a refusal from either revision fails here
-        # rather than surfacing later as the comparison's missing input.
+        # together buys.
+        #
+        # Both recordings are waited for before either status is acted on. Failing at the first
+        # `wait` would end the step with the other recording still running, holding half the runner
+        # until the job is cleaned up and never reaching the log with whatever it was refusing over,
+        # so a run where both revisions refused would report one and abandon the other. Waited
+        # rather than left to the comparison, which would otherwise read a missing record as its own
+        # input error rather than as the recording that failed.
         run: |
           set -euo pipefail
           jobs="$(( $(nproc) / 2 ))"
@@ -267,8 +273,20 @@ jobs:
             --out "$RUNNER_TEMP/candidate-verdicts.json" \
             --jobs "$jobs" &
           candidate=$!
-          wait "$base"
-          wait "$candidate"
+          base_status=0
+          wait "$base" || base_status=$?
+          candidate_status=0
+          wait "$candidate" || candidate_status=$?
+          if [ "$base_status" -ne 0 ]; then
+            echo "the protected base refused to record (exit $base_status)" >&2
+          fi
+          if [ "$candidate_status" -ne 0 ]; then
+            echo "the candidate refused to record (exit $candidate_status)" >&2
+          fi
+          if [ "$base_status" -ne 0 ]; then
+            exit "$base_status"
+          fi
+          exit "$candidate_status"
       - name: Report verdict divergence the pull request has not acknowledged
         if: steps.scope.outputs.in-scope == 'true'
         # The base's own copy of the frozen inventory is the corpus floor: without it a candidate
