@@ -11,7 +11,9 @@ It works in two modes, and the second is what unsticks the first.
 which guard origin each combination reports. Shrinking one cap at a time keeps the attribution
 unambiguous: the reported origin is the guard that cap governs. The corpus is the recorded replay
 inventory plus bodies from the fuzzer's compositional grammar, which between them cover the
-shapes the scanner was built against.
+shapes the scanner was built against. Configurations are independent of each other, so the grid is
+scanned across worker processes and merged on each configuration's own rank; `--jobs 1` runs the
+whole grid in this process instead.
 
 **Trace.** For one candidate script, report which guard-holding *functions* it executes at all. A
 sweep that finds nothing says only that the corpus never reached the machinery; the trace says how
@@ -35,8 +37,12 @@ import argparse
 import dataclasses
 import importlib
 import json
+import multiprocessing
+import os
 import random
+import signal
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,7 +57,12 @@ from doc_lattice.github_ci.shell_guards import GuardRefusal, ScanLimits  # noqa:
 from doc_lattice.github_ci.shell_scanner import scan_doc_lattice_invocations  # noqa: E402
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Generator, Iterable, Sequence
+    from types import FrameType
+
+    InterruptHandler = Callable[[int, FrameType | None], object] | int | None
+    """What `signal.signal` takes for SIGINT and answers with, including the None it answers
+    for a disposition Python did not install."""
 
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 RECORDER_SCRIPT = "scripts/checkpoint_record_scanner_inputs.py"
@@ -63,6 +74,17 @@ SEED_COUNT = 4
 ITERATIONS = 400
 MAX_LENGTH = 600
 SHRINK = (0, 1, 2, 3)
+TASK_SCRIPTS = 128
+"""Scripts one pooled unit of work covers, as a slice of the corpus under one configuration.
+
+Not the whole corpus, though a configuration is what the grid is indexed by. A unit is what an
+interrupted run has to wait for, since a worker is stopped by letting it finish rather than by
+killing it part way through writing a result back, and a whole configuration of the default corpus
+averages five seconds of that wait. It is also what the pool balances with, and the configurations
+cost wildly different amounts, so whole ones leave the dearest running alone while the rest of the
+grid is done. Small enough that both are a fraction of a second on the default corpus, and large
+enough that the per-unit round trip stays noise against the scanning it carries.
+"""
 LINE_LIMIT = 100
 ROW_INDENT = "        "
 BMP_MAX = 0xFFFF
@@ -78,8 +100,76 @@ declaration raises ValueError. Named rather than caught as `Exception`, which th
 forbid, and kept here so the reason the tuple is this wide is written once.
 """
 
+FRESH_START_METHODS = ("forkserver", "spawn")
+"""Start methods that give a worker its own interpreter, cheapest first.
+
+`fork` is not among them, though it is the cheapest and was the Linux default until 3.14. A forked
+worker inherits the parent's memory, so what a pooled run reports would depend on the platform it
+ran on: a scanner replaced in this module's namespace would be searched by the workers where fork
+is the default and by none of the workers anywhere else. It is also the start method CPython
+deprecates once a process has threads, which a pool has by the time it spawns its second worker.
+Both fresh methods re-import this module in the worker instead, once per worker against a grid the
+sweep splits dozens of ways.
+"""
+
 Reach = dict[str, tuple[str, str]]
 """Guard origin identifier -> (limits label, the shortest script that reached it)."""
+
+
+@dataclasses.dataclass(frozen=True)
+class EntryReach:
+    """What one grid configuration reached over the scripts one unit of work covered.
+
+    Attributes:
+        rank: Index of the configuration in the grid, which is the preference order a merge
+            resolves ties on. Carried with the result rather than read off completion order, since
+            workers finish in whatever order the scheduler hands back.
+        label: Caps label the grid minted for the configuration.
+        best: Guard origin identifier mapped to the shortest script that reached it here.
+        scanned: Scripts this configuration scanned to a verdict.
+        skipped: Scripts this configuration could not parse within the recursion limit.
+    """
+
+    rank: int
+    label: str
+    best: dict[str, str]
+    scanned: frozenset[str]
+    skipped: frozenset[str]
+
+
+@dataclasses.dataclass
+class SweepTotals:
+    """The cross-configuration state a merge carries, owned by whoever runs the sweep.
+
+    Attributes:
+        best: Guard origin identifier mapped to the `(rank, script length, script)` its recorded
+            row won with, which is what any further reach is scored against. The script itself is
+            part of the key rather than a tie nobody breaks, since a unit of work covers a slice of
+            the corpus and two equally short witnesses would otherwise be settled on which slice
+            came back first.
+        scanned: Every script some configuration scanned to a verdict.
+        skipped: Every script some configuration could not parse.
+    """
+
+    best: dict[str, tuple[int, int, str]]
+    scanned: set[str]
+    skipped: set[str]
+
+
+@dataclasses.dataclass
+class WorkerCorpus:
+    """The scripts and filter a pooled worker scans every configuration against.
+
+    Sent once per worker by the pool's initializer rather than with each unit of work, since the
+    corpus is the same for every configuration and a grid is split dozens of ways.
+
+    Attributes:
+        scripts: Scripts to drive through the public scan path.
+        wanted: Restrict recorded reach to these identifiers, or None for every guard reached.
+    """
+
+    scripts: list[str] = dataclasses.field(default_factory=list)
+    wanted: frozenset[str] | None = None
 
 
 def caps_slots(limits: type) -> dict[str, str]:
@@ -352,12 +442,487 @@ def load_corpus(
     )
 
 
+_WORKER = WorkerCorpus()
+"""Per-process corpus a pooled worker reads, filled by the initializer in each worker."""
+
+
+def _configure_worker(scripts: list[str], wanted: frozenset[str] | None) -> None:
+    """Record the corpus this worker process scans, and take it out of the interrupt's reach.
+
+    Args:
+        scripts: Scripts to drive through the public scan path.
+        wanted: Restrict recorded reach to these identifiers, or None for every guard reached.
+    """
+    # Ctrl-C reaches every process in the terminal's group, and a worker that takes it dies
+    # wherever it happened to be. Dying part way through writing a result back leaves the parent
+    # reading a message that never finishes arriving, which is a run that has to be killed rather
+    # than one that stopped, so the interrupt an operator reaches for is the one thing the pool
+    # cannot survive. Ignored here, which leaves it to the parent alone: it stops submitting, drops
+    # every unit that had not started, and each worker exits through the pool's own shutdown with
+    # its result queue intact. CPython's own forkserver protects itself from ^C the same way.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _WORKER.scripts = scripts
+    _WORKER.wanted = wanted
+
+
+def _scan_in_worker(task: tuple[int, str, ScanLimits, int, int]) -> EntryReach:
+    """Scan one slice of the worker's corpus under one configuration.
+
+    Args:
+        task: The configuration's grid rank, label and caps, and the half-open bounds of the slice
+            of this worker's corpus the unit covers.
+
+    Returns:
+        What that configuration reached over that slice.
+    """
+    rank, label, limits, start, stop = task
+    return scan_configuration(
+        _WORKER.scripts[start:stop], rank, label, limits, wanted=_WORKER.wanted
+    )
+
+
+def worker_tasks(
+    scripts: Sequence[str],
+    grid: Sequence[tuple[str, ScanLimits]],
+) -> list[tuple[int, str, ScanLimits, int, int]]:
+    """Return the units of work a pooled sweep of `grid` over `scripts` is split into.
+
+    Bounds rather than scripts, because the corpus reaches a worker once through the pool's
+    initializer instead of once per unit.
+
+    Args:
+        scripts: Scripts the sweep drives through the public scan path.
+        grid: Labelled scan-limits configurations the sweep runs.
+
+    Returns:
+        One `(rank, label, limits, start, stop)` unit per slice of the corpus per configuration.
+    """
+    return [
+        (rank, label, limits, start, min(start + TASK_SCRIPTS, len(scripts)))
+        for rank, (label, limits) in enumerate(grid)
+        for start in range(0, len(scripts), TASK_SCRIPTS)
+    ]
+
+
+def unit_count(scripts: Sequence[str], grid: Sequence[tuple[str, ScanLimits]]) -> int:
+    """Return how many units of work a pooled sweep of `grid` over `scripts` is split into.
+
+    The bound on what a pool can be doing at once, and therefore on how many workers are worth
+    starting. Counted rather than measured off `worker_tasks`, so a caller sizing a pool before it
+    has a pool does not mint the units to count them.
+
+    Args:
+        scripts: Scripts the sweep drives through the public scan path.
+        grid: Labelled scan-limits configurations the sweep runs.
+
+    Returns:
+        One per slice of the corpus per configuration.
+    """
+    return len(grid) * ((len(scripts) + TASK_SCRIPTS - 1) // TASK_SCRIPTS)
+
+
+def start_method() -> str:
+    """Return the process start method a pooled sweep runs its workers under.
+
+    Returns:
+        The cheapest start method this platform offers that gives a worker a fresh interpreter.
+    """
+    available = multiprocessing.get_all_start_methods()
+    return next(
+        (method for method in FRESH_START_METHODS if method in available),
+        FRESH_START_METHODS[-1],
+    )
+
+
+def default_jobs(units: int) -> int:
+    """Return how many units of work a sweep scans at a time when nobody says.
+
+    Args:
+        units: How many units of work the run is split into, as `unit_count` counts them.
+
+    Returns:
+        Worker count, at least one and never more than there is work for. Derived from the CPUs
+        this process may actually run on rather than from the machine's count, so a run under a
+        CPU affinity mask or a container quota does not oversubscribe what it was given.
+    """
+    return max(1, min(units, os.process_cpu_count() or 1))
+
+
+def scan_configuration(
+    scripts: Sequence[str],
+    rank: int,
+    label: str,
+    limits: ScanLimits,
+    *,
+    wanted: frozenset[str] | None = None,
+) -> EntryReach:
+    """Return what one configuration reaches over one batch of scripts.
+
+    The whole unit of work a pooled sweep hands a worker, and the same scan a serial sweep runs one
+    script at a time, so the two paths cannot disagree about what a configuration reached.
+
+    Args:
+        scripts: Scripts to drive through the public scan path.
+        rank: Index of this configuration in the grid.
+        label: Caps label the grid minted for it.
+        limits: The caps themselves.
+        wanted: Restrict recorded reach to these identifiers, or None for every guard reached.
+
+    Returns:
+        The configuration's reach, with the scripts it scanned and the ones it could not parse.
+    """
+    best: dict[str, str] = {}
+    scanned: set[str] = set()
+    skipped: set[str] = set()
+    for script in scripts:
+        try:
+            result = scan_doc_lattice_invocations(script, limits=limits)
+        except RecursionError:
+            # Counted rather than dropped: a candidate no configuration can parse is scored by
+            # none of them, and silence about it reads as a candidate that reached nothing, which
+            # is the opposite conclusion about the same shape.
+            skipped.add(script)
+            continue
+        scanned.add(script)
+        verdict = result.verdict
+        if not isinstance(verdict, GuardRefusal):
+            continue
+        if wanted is not None and verdict.origin_id not in wanted:
+            continue
+        # Within one configuration the rank is fixed, so the shortest script wins and two equally
+        # short ones are settled on the text. Settled that way rather than on which the batch held
+        # first, because a unit of work covers a slice of the corpus and which slice holds a script
+        # is an artifact of how the run was split: keyed on arrival, the same corpus reports one of
+        # two equally short witnesses under one --jobs value and the other under another.
+        recorded = best.get(verdict.origin_id)
+        if recorded is None or (len(script), script) < (len(recorded), recorded):
+            best[verdict.origin_id] = script
+    return EntryReach(
+        rank=rank,
+        label=label,
+        best=best,
+        scanned=frozenset(scanned),
+        skipped=frozenset(skipped),
+    )
+
+
+def initial_totals(grid: Sequence[tuple[str, ScanLimits]], found: Reach) -> SweepTotals:
+    """Return the merge state a sweep over `grid` starts from, scored against `found`.
+
+    Scored from the rows the accumulator already holds rather than from an empty map, since it is
+    documented as caller-owned: a caller sweeping a corpus in chunks into one accumulator would
+    otherwise let the first reach of the second call overwrite a better row from the first with no
+    comparison at all. A label this grid does not mint came from a grid this call cannot score, and
+    ranking it last is not neutrality but a verdict: the first entry this grid mints then displaces
+    it, so a production reach recorded by an earlier call loses to a shrunk-cap reach here and the
+    registry pins the weaker claim, which is the inversion the ordering exists to prevent. Kept
+    instead, since a row nothing here can compare against is evidence the caller already holds; a
+    caller that wants it re-scored sweeps into a fresh accumulator.
+
+    Args:
+        grid: Labelled scan-limits configurations the sweep will run.
+        found: Accumulator whose rows the sweep is about to score further reach against.
+
+    Returns:
+        Merge state holding one key per row the accumulator carries.
+    """
+    ranks: dict[str, int] = {}
+    for rank, (label, _limits) in enumerate(grid):
+        ranks.setdefault(label, rank)
+    return SweepTotals(
+        best={
+            origin_id: (ranks.get(label, -1), len(script), script)
+            for origin_id, (label, script) in found.items()
+        },
+        scanned=set(),
+        skipped=set(),
+    )
+
+
+def merge_entry(entry: EntryReach, totals: SweepTotals, found: Reach) -> None:
+    """Merge one configuration's reach into the accumulator.
+
+    Keyed on the configuration's own rank rather than on when it arrived, so the result of a run
+    does not depend on the order workers finish in.
+
+    Args:
+        entry: What one configuration reached.
+        totals: Merge state the comparison is scored against, updated in place.
+        found: Accumulator to record the winning rows into.
+    """
+    totals.scanned.update(entry.scanned)
+    totals.skipped.update(entry.skipped)
+    for origin_id, script in entry.best.items():
+        # Prefer the earliest grid entry, then the shortest script, so a witness says as little
+        # about the caps as it can get away with and stays readable within that: the grid puts
+        # production first and orders each cap's values least-shrunk first, and a guard authored
+        # input reaches under production caps is strictly stronger evidence than the same guard
+        # reached under a shrunk one. Keyed the other way round, a short script under a shrunk cap
+        # discards a production reach the run had, and the registry then pins the weaker claim,
+        # which is a resource bound rather than a reachable shape. The script closes the key, so
+        # two equally short reaches under one configuration are settled on the text rather than on
+        # which slice of the corpus its unit of work came back from.
+        key = (entry.rank, len(script), script)
+        if origin_id not in totals.best or key < totals.best[origin_id]:
+            totals.best[origin_id] = key
+            found[origin_id] = (entry.label, script)
+
+
+def merge_reach(entries: Iterable[EntryReach], totals: SweepTotals, found: Reach) -> None:
+    """Merge every configuration's reach into the accumulator as it arrives.
+
+    Consumed lazily and merged one entry at a time, which is what keeps a run's rows when the
+    source of entries raises part way through: the accumulator is caller-owned, so a scan that
+    raises what no configuration was expected to raise, or a worker that dies holding one
+    configuration, costs that configuration rather than every origin the run had already reached.
+
+    Args:
+        entries: Per-configuration reach, in any order.
+        totals: Merge state the comparisons are scored against, updated in place.
+        found: Accumulator to record the winning rows into.
+    """
+    for entry in entries:
+        merge_entry(entry, totals, found)
+
+
+def report_unscanned(totals: SweepTotals) -> None:
+    """Report the scripts no configuration in the run could parse.
+
+    Only the bodies no configuration scanned: recursion depth is a property of the script and the
+    caps together, so a body one configuration cannot parse is still scored by the rest, and
+    counting it here sends the operator after coverage the sweep already had. Taken once over the
+    union both sets carry, because the difference a worker could take alone is the whole
+    per-configuration overcount.
+
+    Args:
+        totals: Merge state holding every configuration's scanned and skipped scripts.
+    """
+    unscanned = totals.skipped - totals.scanned
+    if unscanned:
+        sys.stderr.write(
+            f"skipped {len(unscanned)} scripts no configuration could parse within the "
+            "interpreter's recursion limit\n"
+        )
+
+
+def serial_entries(
+    scripts: Sequence[str],
+    grid: Sequence[tuple[str, ScanLimits]],
+    *,
+    wanted: frozenset[str] | None = None,
+) -> Generator[EntryReach]:
+    """Yield the reach of each script under each configuration, in grid order.
+
+    One script at a time rather than one configuration at a time, so a scan that raises what no
+    configuration was expected to raise leaves the caller holding every row the run had merged down
+    to the script before it. The pooled path cannot be finer than the slice a worker that dies takes
+    with it, and this path is not made coarser to match.
+
+    Args:
+        scripts: Scripts to drive through the public scan path.
+        grid: Labelled scan-limits configurations to try.
+        wanted: Restrict recorded reach to these identifiers, or None for every guard reached.
+
+    Yields:
+        One script's reach under one configuration.
+    """
+    for rank, (label, limits) in enumerate(grid):
+        for script in scripts:
+            yield scan_configuration([script], rank, label, limits, wanted=wanted)
+
+
+def swap_interrupt(handler: InterruptHandler) -> tuple[bool, InterruptHandler]:
+    """Install `handler` for SIGINT, reporting whether this caller was allowed to install one.
+
+    Only the main thread of the main interpreter may install a handler. `threading.main_thread()`
+    answers for the thread alone and reports the calling subinterpreter's own main thread, so a
+    sweep driven from a subinterpreter passes that test and `signal.signal` raises anyway. Refused
+    here rather than raised, because these swaps run inside teardowns: a ValueError out of one
+    replaces the failure being propagated and leaves the pool unshut, which is the deadlock the
+    teardown exists to avoid.
+
+    Args:
+        handler: What SIGINT should reach while the swap holds.
+
+    Returns:
+        Whether the swap happened, and the handler it replaced.
+    """
+    try:
+        return True, signal.signal(signal.SIGINT, handler)
+    except ValueError:
+        return False, None
+
+
+def restore_interrupt(previous: InterruptHandler) -> None:
+    """Put SIGINT back to what `swap_interrupt` replaced.
+
+    Args:
+        previous: The handler the swap reported, which is None when the disposition it replaced was
+            not installed from Python. Answered as Python's own handler rather than passed back,
+            since `signal.signal` refuses None: handed it, a process whose SIGINT a launcher or an
+            extension had installed would be left permanently deaf to Ctrl-C by its first sweep.
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler if previous is None else previous)
+
+
+def stop_once(_signum: int, _frame: FrameType | None) -> None:
+    """Raise on this interrupt and take SIGINT out of reach of the teardown that follows.
+
+    Args:
+        _signum: The signal delivered, which is always SIGINT here.
+        _frame: The frame it was delivered into.
+
+    Raises:
+        KeyboardInterrupt: Always, which is what the default handler does with the first Ctrl-C.
+    """
+    # Ignored from here rather than from inside `drain_pool`, because the deadlock is reachable
+    # between the two. The first interrupt raises from wherever the run happened to be, and the
+    # teardown is entered several frames later: a shield installed only once it is entered leaves
+    # every bytecode in between open to the second interrupt one Ctrl-C sends this process, and an
+    # interrupt landing there abandons the drain exactly where leaving it to the interpreter would
+    # have. Swapped inside the handler, the window closes as the first interrupt is delivered.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
+def drain_pool(executor: ProcessPoolExecutor) -> None:
+    """Stop `executor` and wait for its workers to go, with this process deaf to Ctrl-C meanwhile.
+
+    Waited for rather than left to the interpreter, because a pool torn down as the interpreter
+    finalizes deadlocks the run: the daemon thread that feeds its call queue is gone by then, so the
+    stop-work sentinels it queues never reach the workers. They sit in `call_queue.get()` for ever,
+    the pool's own thread sits in `join()` waiting for them to exit, and a Ctrl-C the operator meant
+    as stop leaves a run that has to be killed instead. Measured before this waited: a run of a
+    quarter of the default grid, interrupted eight seconds in, was still alive with all eight
+    workers idle a minute later.
+
+    Waited for with the interrupt held off, because Ctrl-C reaches this process more than once in
+    practice. The terminal signals every process in the group and the documented `uv run` command
+    forwards its own copy, and an interrupt landing inside the wait abandons it exactly where
+    leaving the teardown to the interpreter would have. Unprotected, repeated interrupts reached
+    that state in every run measured, and the run survived on how far the teardown had got; deaf to
+    them it takes exactly one interrupt and the teardown always finishes.
+
+    The wait is bounded by the units already running, which is why one unit is a slice of the corpus
+    rather than a whole configuration: 0.6s to 2.5s from Ctrl-C to exit, against a hang.
+
+    A second Ctrl-C during that second cannot hurry it along, which is the price of the pool going
+    quietly. Nothing in a unit is unbounded, and the operator still holds SIGTERM.
+
+    Args:
+        executor: The pool to stop. Units that have not started are dropped rather than run.
+    """
+    # A caller driving a sweep from a worker thread, or from a subinterpreter, is refused the swap
+    # rather than the shutdown. Restored on `swapped` rather than on the handler that came back,
+    # since `signal.signal` answers None for a disposition Python did not install and a restore
+    # skipped on that answer would leave this process ignoring SIGINT for good.
+    swapped, previous = swap_interrupt(signal.SIG_IGN)
+    try:
+        executor.shutdown(wait=True, cancel_futures=True)
+    finally:
+        if swapped:
+            restore_interrupt(previous)
+
+
+def pooled_entries(
+    scripts: Sequence[str],
+    grid: Sequence[tuple[str, ScanLimits]],
+    *,
+    wanted: frozenset[str] | None = None,
+    jobs: int,
+) -> Generator[EntryReach]:
+    """Yield each unit of work's reach as the worker process scanning it finishes.
+
+    One unit of work is one configuration over one slice of the corpus. The scan is pure Python, so
+    the interpreter lock makes threads worth nothing here and the split has to be across processes.
+    Everything a worker needs is picklable: the corpus is strings, the caps are frozen dataclasses,
+    and the scanner is imported by the worker rather than sent to it.
+
+    Nothing a run reports is decided here. The refusals belong to the reads that configure a run and
+    to the filter the parent resolves once, so no worker repeats a diagnostic, and the merge the
+    caller drives keys on each configuration's rank and each reach's script rather than on the order
+    results arrive in.
+
+    Args:
+        scripts: Scripts to drive through the public scan path.
+        grid: Labelled scan-limits configurations to try.
+        wanted: Restrict recorded reach to these identifiers, or None for every guard reached.
+        jobs: How many units of work to scan at a time.
+
+    Yields:
+        One configuration's reach over one slice of the corpus.
+    """
+    # Installed above everything a pooled run does, so the first Ctrl-C raises where the run
+    # happened to be and every later one is ignored until the pool is down. Held for the whole
+    # region rather than for the teardown alone, because the frames between the raise and the drain
+    # are where the second interrupt of a single Ctrl-C lands: the terminal signals every process in
+    # the group and the documented `uv run` command forwards its own copy.
+    swapped, previous = swap_interrupt(stop_once)
+    try:
+        executor = ProcessPoolExecutor(
+            max_workers=jobs,
+            mp_context=multiprocessing.get_context(start_method()),
+            initializer=_configure_worker,
+            initargs=(list(scripts), wanted),
+        )
+        # Constructed above the drain because a pool that failed to construct is not one to shut
+        # down, and under the fresh start methods this runs nothing yet: the manager thread and the
+        # first workers are started by the submits below rather than here.
+        yield from _pooled_units(executor, scripts, grid)
+    finally:
+        if swapped:
+            restore_interrupt(previous)
+
+
+def _pooled_units(
+    executor: ProcessPoolExecutor,
+    scripts: Sequence[str],
+    grid: Sequence[tuple[str, ScanLimits]],
+) -> Generator[EntryReach]:
+    """Yield each unit's reach as `executor` finishes it, stopping the pool on the way out.
+
+    Args:
+        executor: The pool to submit the units to and to drain when this generator is closed.
+        scripts: Scripts to drive through the public scan path.
+        grid: Labelled scan-limits configurations to try.
+
+    Yields:
+        One configuration's reach over one slice of the corpus.
+    """
+    try:
+        # Submitted under the drain rather than above it, because submission is not instant. The
+        # pool starts a worker on each of the first `jobs` submits, so this window is where a run
+        # spends its first tenth of a second: 0.133s to submit the default grid's 1386 units, all of
+        # it outside the teardown while this sat above the `try`. An interrupt landing there took
+        # the generator's frame with it before the drain was armed, leaving the pool to the
+        # interpreter, which is the deadlock `drain_pool` exists to avoid rather than a slower
+        # version of it.
+        #
+        # Submitted into the call itself rather than into a list this frame keeps, since
+        # `as_completed` drops each future as it hands it over: held here instead, every unit's
+        # scripts would stay reachable until the whole grid was done, and the parent's memory would
+        # grow with the grid rather than with the corpus.
+        arriving = as_completed(
+            [executor.submit(_scan_in_worker, task) for task in worker_tasks(scripts, grid)]
+        )
+        for future in arriving:
+            yield future.result()
+    finally:
+        # Every unit that had not started is dropped, so an interrupted run stops where the operator
+        # stopped it rather than finishing a grid nobody is waiting for, and the caller still holds
+        # and renders every row the merge had taken by then. The caller closes this generator on the
+        # way out, so this runs where the interrupt landed rather than whenever the traceback that
+        # pins this frame is released.
+        drain_pool(executor)
+
+
 def sweep(
     corpus: Iterable[str],
     grid: Sequence[tuple[str, ScanLimits]],
     *,
     wanted: frozenset[str] | None = None,
     found: Reach | None = None,
+    jobs: int = 1,
 ) -> Reach:
     """Return the shortest script that reaches each guard origin the corpus can reach.
 
@@ -366,8 +931,18 @@ def sweep(
         grid: Labelled scan-limits configurations to try.
         wanted: Restrict the result to these identifiers, or None for every guard reached.
         found: Accumulator to record reach into. A caller that owns it still holds every origin
-            reached so far when a scan raises something no configuration was expected to raise,
-            rather than losing a multi-minute run's rows to the traceback.
+            reached so far when a scan raises something no configuration was expected to raise, or
+            a worker dies holding one configuration, rather than losing a whole run's rows to the
+            traceback.
+        jobs: How many units of work to scan at a time, capped at the number of units there are, so
+            a run with one unit of work is scanned in this process whatever is asked for. One runs
+            the whole grid in this process, which is what a caller replacing the scanner in this
+            module's namespace needs, since a worker imports its own. More than one splits the work
+            across worker processes, which changes how long a run takes and not which reach the
+            merge prefers. It is not quite nothing: a worker enters the scan from the pool's own
+            call stack rather than from this one, so a script that only just fits within the
+            interpreter's recursion limit can be scanned under one split and counted as unparseable
+            under another.
 
     Returns:
         Guard identifier mapped to the labelled configuration and script that reached it. Scripts
@@ -375,60 +950,27 @@ def sweep(
     """
     scripts = list(corpus)
     found = {} if found is None else found
-    # Scored from the rows the accumulator already holds rather than from an empty map, since it is
-    # documented as caller-owned: a caller sweeping a corpus in chunks into one accumulator would
-    # otherwise let the first reach of the second call overwrite a better row from the first with
-    # no comparison at all. A label this grid does not mint came from a grid this call cannot
-    # score, and ranking it last is not neutrality but a verdict: the first entry this grid mints
-    # then displaces it, so a production reach recorded by an earlier call loses to a shrunk-cap
-    # reach here and the registry pins the weaker claim, which is the inversion the ordering below
-    # exists to prevent. Kept instead, since a row nothing here can compare against is evidence the
-    # caller already holds; a caller that wants it re-scored sweeps into a fresh accumulator.
-    ranks: dict[str, int] = {}
-    for rank, (label, _limits) in enumerate(grid):
-        ranks.setdefault(label, rank)
-    best: dict[str, tuple[int, int]] = {
-        origin_id: (ranks.get(label, -1), len(script))
-        for origin_id, (label, script) in found.items()
-    }
-    scanned: set[str] = set()
-    skipped: set[str] = set()
-    for rank, (label, limits) in enumerate(grid):
-        for script in scripts:
-            try:
-                result = scan_doc_lattice_invocations(script, limits=limits)
-            except RecursionError:
-                # Counted rather than dropped: a candidate no configuration can parse is scored by
-                # none of them, and silence about it reads as a candidate that reached nothing,
-                # which is the opposite conclusion about the same shape.
-                skipped.add(script)
-                continue
-            scanned.add(script)
-            verdict = result.verdict
-            if not isinstance(verdict, GuardRefusal):
-                continue
-            if wanted is not None and verdict.origin_id not in wanted:
-                continue
-            # Prefer the earliest grid entry, then the shortest script, so a witness says as
-            # little about the caps as it can get away with and stays readable within that: the
-            # grid puts production first and orders each cap's values least-shrunk first, and a
-            # guard authored input reaches under production caps is strictly stronger evidence
-            # than the same guard reached under a shrunk one. Keyed the other way round, a short
-            # script under a shrunk cap discards a production reach the run had, and the registry
-            # then pins the weaker claim, which is a resource bound rather than a reachable shape.
-            key = (rank, len(script))
-            if verdict.origin_id not in best or key < best[verdict.origin_id]:
-                best[verdict.origin_id] = key
-                found[verdict.origin_id] = (label, script)
-    # Only the bodies no configuration scanned: recursion depth is a property of the script and
-    # the caps together, so a body one shrunk entry cannot parse is still scored by the rest, and
-    # counting it here sends the operator after coverage the sweep already had.
-    unscanned = skipped - scanned
-    if unscanned:
-        sys.stderr.write(
-            f"skipped {len(unscanned)} scripts no configuration could parse within the "
-            "interpreter's recursion limit\n"
-        )
+    totals = initial_totals(grid, found)
+    # Never more workers than there are units of work, however many were asked for: a pool sized
+    # past that starts interpreters that pay for their own copy of the corpus and scan nothing at
+    # all. Counted in units rather than in configurations, because a unit is a slice of the corpus
+    # under one configuration: capped at the grid, a run of twenty configurations over the default
+    # corpus scanned its three hundred and sixty units through twenty workers on a host with three
+    # times that many CPUs, and said nothing about having reduced what was asked for.
+    workers = min(jobs, unit_count(scripts, grid))
+    entries = (
+        pooled_entries(scripts, grid, wanted=wanted, jobs=workers)
+        if workers > 1
+        else serial_entries(scripts, grid, wanted=wanted)
+    )
+    # Closed here rather than left to the traceback that pins this frame: an interrupt lands
+    # wherever the run happened to be, and a pool shut down only once the exception it interrupted
+    # has been handled leaves the operator waiting on workers nobody is reading any more.
+    try:
+        merge_reach(entries, totals, found)
+    finally:
+        entries.close()
+    report_unscanned(totals)
     return found
 
 
@@ -770,21 +1312,22 @@ def render_rows(found: Reach) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def _nonnegative(text: str, reason: str) -> int:
-    """Return `text` as an integer, refusing a negative one.
+def _at_least(text: str, minimum: int, reason: str) -> int:
+    """Return `text` as an integer, refusing one below `minimum`.
 
     Args:
         text: The value as spelled on the command line.
-        reason: What a negative value would mean here, completing the refusal after the value.
+        minimum: The smallest value this option has a meaning for.
+        reason: What a value below it would mean here, completing the refusal after the value.
 
     Returns:
         The value.
 
     Raises:
-        ArgumentTypeError: If the value is negative.
+        ArgumentTypeError: If the value is below the minimum.
     """
     value = int(text)
-    if value < 0:
+    if value < minimum:
         raise argparse.ArgumentTypeError(f"{value} {reason}")
     return value
 
@@ -806,7 +1349,7 @@ def nonnegative_count(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no corpus has a negative size.
     """
-    return _nonnegative(text, "is not a count of scripts; a corpus cannot be smaller than empty")
+    return _at_least(text, 0, "is not a count of scripts; a corpus cannot be smaller than empty")
 
 
 def nonnegative_length(text: str) -> int:
@@ -826,7 +1369,7 @@ def nonnegative_length(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no script is shorter than empty.
     """
-    return _nonnegative(text, "is not a length in characters; no script is shorter than empty")
+    return _at_least(text, 0, "is not a length in characters; no script is shorter than empty")
 
 
 def nonnegative_cap(text: str) -> int:
@@ -849,7 +1392,30 @@ def nonnegative_cap(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no scan counts fewer than none.
     """
-    return _nonnegative(text, "is not a cap; a scan cannot count fewer than none")
+    return _at_least(text, 0, "is not a cap; a scan cannot count fewer than none")
+
+
+def positive_jobs(text: str) -> int:
+    """Return `text` as a count of worker processes, refusing a non-positive one.
+
+    Kept apart from the corpus converters because zero means something here that it does not mean
+    there: an empty corpus is a sweep of nothing, which is a strange run but an honest one, while
+    zero workers is not a smaller sweep but a run with nobody to scan a configuration. Left to
+    argparse's `int`, `ProcessPoolExecutor` refuses it several layers down, out of a traceback that
+    names the pool rather than the option that sized it.
+
+    Args:
+        text: The value as spelled on the command line.
+
+    Returns:
+        The value as a worker count.
+
+    Raises:
+        ArgumentTypeError: If the value is below one, since a sweep is run by at least one process.
+    """
+    return _at_least(
+        text, 1, "is not a count of workers; a sweep is scanned by at least one process"
+    )
 
 
 def _deliver(text: str, described: str) -> int:
@@ -903,14 +1469,11 @@ def _resolved_checkout(parser: argparse.ArgumentParser) -> Path:
         parser.error(str(error))
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Search for witnesses, or trace one candidate script.
-
-    Args:
-        argv: Command-line arguments, defaulting to `sys.argv[1:]`.
+def build_parser() -> argparse.ArgumentParser:
+    """Return the command-line surface both modes are configured through.
 
     Returns:
-        Process exit status.
+        Parser for the sweep and trace options.
     """
     # No option selects the tree to search: `scanner_checkout` decides it, because a run only
     # means anything against the revision whose scanner, corpus grammar and inventory checker this
@@ -964,12 +1527,35 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="report every guard reached, not only the still-unclassified ones",
     )
+    parser.add_argument(
+        "--jobs",
+        type=positive_jobs,
+        help=(
+            "units of work to scan at a time, one worker process each, capped at the number of "
+            "units there are; which reach the merge prefers does not depend on it, though a script "
+            "that only just fits within the interpreter's recursion limit can be scanned under one "
+            "split and counted as unparseable under another (default: one per available CPU)"
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Search for witnesses, or trace one candidate script.
+
+    Args:
+        argv: Command-line arguments, defaulting to `sys.argv[1:]`.
+
+    Returns:
+        Process exit status.
+    """
+    parser = build_parser()
     arguments = parser.parse_args(argv)
     # An option the selected mode does not read is refused rather than ignored: accepted and
     # dropped, `--shrink` reports the reach under production caps for a run the operator believes
-    # was shrunk, and `--trace-all` alone runs the multi-minute sweep instead of the trace asked
-    # for. Both are answers about something other than the question.
-    sweep_only = ("seeds", "iterations", "max_length", "extra", "shrink", "all_guards")
+    # was shrunk, and `--trace-all` alone runs the whole sweep instead of the trace asked for.
+    # Both are answers about something other than the question.
+    sweep_only = ("seeds", "iterations", "max_length", "extra", "shrink", "all_guards", "jobs")
     if arguments.trace is None:
         if arguments.trace_all is not None:
             parser.error("--trace-all describes a trace, and --trace was not given")
@@ -1021,15 +1607,23 @@ def main(argv: list[str] | None = None) -> int:
         # toward, and an unreadable --extra file is something the operator wrote a moment ago.
         parser.error(str(error))
     grid = limits_grid(SHRINK if arguments.shrink is None else tuple(arguments.shrink))
-    sys.stderr.write(f"sweeping {len(corpus)} scripts over {len(grid)} configurations\n")
+    # Capped the way the sweep caps it, so the count reported is the one the run is about to use
+    # rather than the one that was asked for. Never below one, since a corpus with no units of work
+    # is still swept by this process rather than by nobody.
+    units = unit_count(corpus, grid)
+    jobs = max(1, min(units, default_jobs(units) if arguments.jobs is None else arguments.jobs))
+    sys.stderr.write(
+        f"sweeping {len(corpus)} scripts over {len(grid)} configurations in {jobs} process(es)\n"
+    )
     # Rows are buffered until the sweep ends, so the accumulator is owned here and rendered even
-    # when a scan raises something no configuration was expected to raise. The failure still
-    # propagates; what it no longer takes with it is every origin the run had already reached,
-    # which is a multi-minute search and exactly the shape a witness hunt exists to find.
+    # when a scan raises something no configuration was expected to raise, or a worker holding one
+    # configuration dies. The failure still propagates; what it no longer takes with it is every
+    # origin the run had already reached, which is the whole search and exactly the shape a witness
+    # hunt exists to find.
     found: Reach = {}
     status = 1
     try:
-        sweep(corpus, grid, wanted=wanted, found=found)
+        sweep(corpus, grid, wanted=wanted, found=found, jobs=jobs)
         sys.stderr.write(f"reached {len(found)} guard origins\n")
     finally:
         # Rendering is fallible too, and from inside this block: a cap value wider than a line

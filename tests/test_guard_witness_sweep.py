@@ -6,11 +6,17 @@ import ast
 import dataclasses
 import importlib.util
 import json
+import multiprocessing
+import os
+import select
 import shutil
+import signal
+import subprocess
 import sys
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import pytest
 
@@ -18,6 +24,7 @@ from doc_lattice.github_ci import shell_guards, shell_scanner, shell_taint
 from doc_lattice.github_ci.shell_guards import ScanLimits, ScannerLimits
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import ModuleType
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -177,6 +184,396 @@ def test_sweep_can_restrict_itself_to_still_unclassified_guards() -> None:
     )
 
     assert "scanner.budget.step-limit" not in found
+
+
+def _entry(rank: int, label: str, origin: str, script: str) -> object:
+    return tool.EntryReach(
+        rank=rank,
+        label=label,
+        best={origin: script},
+        scanned=frozenset({script}),
+        skipped=frozenset(),
+    )
+
+
+_PRODUCTION_ENTRY = ("production", ScanLimits())
+_SHRUNK_ENTRY = (
+    "ScannerLimits(max_source_chars=4)",
+    ScanLimits(scanner=ScannerLimits(max_source_chars=4)),
+)
+_ORIGIN = "scanner.source.character-limit"
+
+
+def test_a_parallel_sweep_reports_what_the_serial_one_reports() -> None:
+    # The whole closure criterion: splitting the grid across processes changes how long a run
+    # takes and nothing about what it prints.
+    corpus = ["echo one; echo two", "a" * 40, "eval 'X=${Y=q}'; eval \"$X\"lattice"]
+    grid = tool.limits_grid((0, 2))
+
+    assert tool.sweep(corpus, grid, jobs=4) == tool.sweep(corpus, grid)
+
+
+def test_a_merge_prefers_the_least_shrunk_reach_whatever_order_workers_finish_in() -> None:
+    # Workers finish in whatever order the scheduler hands back, so a merge keyed on arrival prints
+    # different rows for the same corpus run to run, and half of them pin the weaker claim.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    entries = [
+        _entry(0, _PRODUCTION_ENTRY[0], _ORIGIN, "a" * 40),
+        _entry(1, _SHRUNK_ENTRY[0], _ORIGIN, "a" * 8),
+    ]
+    rows = []
+    for arrival in (entries, list(reversed(entries))):
+        found: dict[str, tuple[str, str]] = {}
+        tool.merge_reach(arrival, tool.initial_totals(grid, found), found)
+        rows.append(found)
+
+    assert rows[0] == rows[1] == {_ORIGIN: (_PRODUCTION_ENTRY[0], "a" * 40)}
+
+
+def test_a_merge_counts_no_script_another_configuration_scanned(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Each worker sees only its own configuration, so a difference taken per worker reports every
+    # body one shrunk configuration could not parse, which is the overcount the union avoids.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    totals = tool.initial_totals(grid, {})
+
+    tool.merge_reach(
+        [
+            tool.EntryReach(0, grid[0][0], {}, frozenset({"deep"}), frozenset()),
+            tool.EntryReach(1, grid[1][0], {}, frozenset(), frozenset({"deep"})),
+        ],
+        totals,
+        {},
+    )
+    tool.report_unscanned(totals)
+
+    assert "skipped" not in capsys.readouterr().err
+
+
+def test_a_merge_counts_a_script_no_configuration_scanned(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The other half of the union: a body every configuration refused is coverage the run does not
+    # have, and silence about it reads as a candidate that reached nothing.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    totals = tool.initial_totals(grid, {})
+
+    tool.merge_reach(
+        [
+            tool.EntryReach(0, grid[0][0], {}, frozenset(), frozenset({"deep"})),
+            tool.EntryReach(1, grid[1][0], {}, frozenset(), frozenset({"deep"})),
+        ],
+        totals,
+        {},
+    )
+    tool.report_unscanned(totals)
+
+    assert "skipped 1" in capsys.readouterr().err
+
+
+def test_a_merge_keeps_what_the_configurations_before_a_failure_found() -> None:
+    # A pool collects results as its workers finish, so a merge that waited for the whole grid
+    # would lose every completed configuration's reach to the one worker that died.
+    grid = [_PRODUCTION_ENTRY, _SHRUNK_ENTRY]
+    found: dict[str, tuple[str, str]] = {}
+
+    def arriving() -> Iterator[object]:
+        yield _entry(0, _PRODUCTION_ENTRY[0], _ORIGIN, "a" * 40)
+        raise ValueError("a worker died holding a configuration")
+
+    with pytest.raises(ValueError, match="died holding"):
+        tool.merge_reach(arriving(), tool.initial_totals(grid, found), found)
+
+    assert found == {_ORIGIN: (_PRODUCTION_ENTRY[0], "a" * 40)}
+
+
+def test_a_pooled_sweep_keeps_the_rows_the_worker_that_died_was_not_holding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same guarantee through real processes. One worker runs the two configurations in
+    # submission order, so the reach of the first is merged before the second one raises what no
+    # configuration was expected to raise.
+    #
+    # Scored against what arrived rather than against the row the good configuration reaches,
+    # because `as_completed` hands back whatever is already finished in an order nobody promises:
+    # on a host that leaves this frame off a core long enough for the worker to run both units, the
+    # failure is handed back first and no row was ever there to keep. The guarantee is that what
+    # arrived is still held, and that is what this asserts either way.
+    grid = [_SHRUNK_ENTRY, ("no caps at all", object())]
+    found: dict[str, tuple[str, str]] = {}
+    arrived: list[object] = []
+    merge_entry = tool.merge_entry
+
+    def recording(entry: object, totals: object, rows: object) -> None:
+        arrived.append(entry)
+        merge_entry(entry, totals, rows)
+
+    monkeypatch.setattr(tool, "merge_entry", recording)
+    entries = tool.pooled_entries(["a" * 40], grid, jobs=1)
+
+    with pytest.raises(AttributeError):
+        tool.merge_reach(entries, tool.initial_totals(grid, found), found)
+
+    assert found == ({_ORIGIN: (_SHRUNK_ENTRY[0], "a" * 40)} if arrived else {})
+
+
+def test_a_pooled_run_resolves_its_filter_and_prints_its_rows_once(
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reads that configure a run and the filter it restricts reach with belong to the parent.
+    # Repeated per worker they become N copies of one diagnostic, and N copies of one row.
+    resolved: list[Path] = []
+
+    def record_debt(root: Path) -> frozenset[str]:
+        resolved.append(root)
+        return frozenset({_ORIGIN})
+
+    monkeypatch.setattr(tool, "unclassified_ids", record_debt)
+    monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["a" * 40])
+
+    assert tool.main(["--shrink", "0", "--jobs", "2"]) == 0
+
+    assert len(resolved) == 1
+    assert capsys.readouterr().out.count(_ORIGIN) == 1
+
+
+def test_a_pooled_run_reports_the_recorded_scripts_it_dropped_once(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The corpus is read once by the parent and handed to the workers, so the count of recorded
+    # bodies the length filter dropped is written once however many ways the grid is split.
+    status = tool.main(
+        ["--seeds", "0", "--iterations", "0", "--max-length", "12", "--shrink", "0", "--jobs", "2"]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().err.count("dropped") == 1
+
+
+def test_an_interrupt_while_units_are_being_submitted_still_drains_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Submitting the grid is not instant, since the pool starts a worker on each of the first
+    # `jobs` submits: the default grid spends 0.133s there. Submitted above the drain, an interrupt
+    # in that window takes the generator's frame before the `try` is entered, so the teardown never
+    # runs and the pool is left to the interpreter. That is the deadlock the drain exists to avoid,
+    # reached through the one part of a pooled run that was still outside it.
+    drained: list[tuple[bool, bool]] = []
+
+    class StoppedPool:
+        """A pool interrupted part way through being handed its units."""
+
+        def __init__(self, **_configuration: object) -> None:
+            self.submitted = 0
+
+        def submit(self, _work: object, _task: object) -> object:
+            self.submitted += 1
+            if self.submitted == 2:
+                raise KeyboardInterrupt
+            return Future()
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            drained.append((wait, cancel_futures))
+
+    monkeypatch.setattr(tool, "ProcessPoolExecutor", StoppedPool)
+    entries = tool.pooled_entries(["a" * 40] * 400, tool.limits_grid((0, 1)), jobs=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        next(entries)
+
+    assert drained == [(True, True)]
+
+
+def test_the_first_interrupt_of_a_pooled_run_puts_sigint_out_of_the_teardowns_reach() -> None:
+    # The drain is entered several frames after the interrupt that causes it, and one Ctrl-C reaches
+    # this process more than once. Shielded only once the drain is entered, those frames are open,
+    # and an interrupt landing in them abandons the teardown exactly where leaving it to the
+    # interpreter would have. Swapped as the first interrupt is delivered, the window closes too.
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tool.stop_once(signal.SIGINT, None)
+
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_a_pooled_run_installs_its_own_interrupt_and_puts_the_old_one_back() -> None:
+    # Held for the whole pooled region rather than for the teardown alone, and given back at the end
+    # of it: a sweep that kept the handler would leave every later Ctrl-C in this process raising
+    # from a frame that has no pool to drain.
+    before = signal.getsignal(signal.SIGINT)
+    entries = tool.pooled_entries(["a" * 40], [_SHRUNK_ENTRY], jobs=1)
+    try:
+        next(entries)
+        during = signal.getsignal(signal.SIGINT)
+    finally:
+        entries.close()
+
+    assert during is tool.stop_once
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_restore_puts_back_pythons_handler_when_the_one_it_replaced_was_not_pythons() -> None:
+    # `signal.signal` answers None for a disposition Python did not install, and refuses None as a
+    # handler. Restored by passing that answer straight back, a process whose SIGINT a launcher or
+    # an extension had installed would be left ignoring Ctrl-C for the rest of its life by its first
+    # pooled sweep, rather than for the length of one teardown.
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        tool.restore_interrupt(None)
+
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_pooled_workers_do_not_inherit_this_process() -> None:
+    # A forked worker inherits a scanner a caller has replaced here, so the same run reports reach
+    # through one scanner on Linux and another everywhere else. It is also what CPython deprecates
+    # once a process has threads, which a pool has by its second worker.
+    assert tool.start_method() != "fork"
+    assert tool.start_method() in multiprocessing.get_all_start_methods()
+
+
+_INTERRUPT_DRIVER = '''\
+"""Run a pooled sweep long enough to be interrupted, announcing when it is under way.
+
+Driven as its own process because the behavior under test is what a Ctrl-C does to a process
+group: this one is signalled along with every worker it started. The work is guarded, since a
+worker re-imports this module to reach the sweep it was told to run.
+"""
+
+import importlib.util
+import sys
+
+
+def load_tool(path):
+    """Return the sweep tool loaded from a path, the way the suite loads it."""
+    spec = importlib.util.spec_from_file_location("guard_witness_sweep", path)
+    tool = importlib.util.module_from_spec(spec)
+    sys.modules["guard_witness_sweep"] = tool
+    spec.loader.exec_module(tool)
+    return tool
+
+
+def main():
+    """Sweep a corpus that outlasts the interrupt, announcing the first unit of work merged."""
+    tool = load_tool(sys.argv[1])
+    merge_entry = tool.merge_entry
+    merged = []
+
+    def announce(entry, totals, found):
+        merge_entry(entry, totals, found)
+        if not merged:
+            merged.append(entry)
+            print("under way", flush=True)
+
+    tool.merge_entry = announce
+    corpus = ["echo %d; eval 'X=${Y=q}'" % index for index in range(int(sys.argv[2]))]
+    tool.sweep(corpus, tool.limits_grid((0, 1, 2)), jobs=2)
+    print("finished", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+_INTERRUPT_CORPUS = 3000
+"""Scripts the interrupted run sweeps, sized so a grid of them outlasts the interrupt by far.
+
+Far enough that the run cannot finish inside the patience below, which is the difference between
+this test and one that passes on a fast host by the sweep simply ending. Nine hundred scripts
+measured 61.1s uninterrupted against a patience of 60s, a margin of one percent; this measures 210s
+on the same machine, and the cost of the larger corpus falls on the run that is never allowed to
+finish rather than on the suite.
+"""
+
+_INTERRUPT_PATIENCE = 60.0
+"""Seconds a stopped run is given to be gone. Measured at 0.6s to 2.5s; a regression never ends."""
+
+
+def _await_line(stream: IO[str], patience: float) -> str:
+    """Return the next line `stream` produces, or the empty string if it produces none in time."""
+    ready, _writable, _failed = select.select([stream], [], [], patience)
+    return stream.readline() if ready else ""
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are a POSIX signal contract")
+def test_an_interrupted_pooled_run_stops_rather_than_having_to_be_killed(tmp_path: Path) -> None:
+    # A search tool that cannot be interrupted is worse than a slow one, and this is the one thing a
+    # pool takes away by default: torn down as the interpreter finalizes, its stop-work sentinels
+    # never reach workers already blocked waiting for them, and the run hangs until it is killed.
+    # Signalled twice, because that is what an operator's single Ctrl-C amounts to under the
+    # documented `uv run` command, which forwards a copy of the one the terminal sent the group, and
+    # because a second interrupt landing inside the teardown is what makes the deadlock reachable.
+    driver = tmp_path / "interruptible_sweep.py"
+    driver.write_text(_INTERRUPT_DRIVER, encoding="utf-8")
+    process = subprocess.Popen(  # noqa: S603 - this interpreter, and a driver written just above
+        [sys.executable, str(driver), str(_TOOL), str(_INTERRUPT_CORPUS)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    try:
+        assert _await_line(process.stdout, _INTERRUPT_PATIENCE).strip() == "under way"
+        os.killpg(process.pid, signal.SIGINT)
+        os.killpg(process.pid, signal.SIGINT)
+        process.wait(timeout=_INTERRUPT_PATIENCE)
+        # Read after the wait, so what is asserted on is everything the run ever said. Exiting in
+        # time is not on its own evidence that the interrupt did anything: a corpus the host gets
+        # through inside the patience exits in time by finishing, and reports a teardown that works
+        # while the run hangs for whoever sweeps a real corpus. What the interrupt is asked for is
+        # a run that stopped, so the run must not have announced that it finished, and it must not
+        # have exited as though nothing had happened.
+        assert "finished" not in process.stdout.read()
+        assert process.returncode != 0
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"the run was still alive {_INTERRUPT_PATIENCE}s after being interrupted")
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def test_the_default_worker_count_fits_the_work_there_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A default derived from the machine rather than from the grid starts workers with nothing to
+    # scan, and one that can reach zero leaves the sweep with nobody to run it. Bounds rather than
+    # the machine's count, which restates the expression: read off a host whose affinity the
+    # interpreter cannot see, `os.process_cpu_count()` is None, and the count that has to come back
+    # from that is one.
+    assert tool.default_jobs(1) == 1
+    assert tool.default_jobs(0) == 1
+    assert 1 <= tool.default_jobs(1000) <= 1000
+
+    monkeypatch.setattr(tool.os, "process_cpu_count", lambda: None)
+
+    assert tool.default_jobs(1000) == 1
+
+
+def test_a_sweep_with_no_workers_is_refused_rather_than_run_by_nobody() -> None:
+    # Zero workers is not a smaller sweep, and left to argparse it is refused several layers down
+    # in a traceback naming the pool rather than the option that sized it.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--jobs", "0"])
+
+    assert raised.value.code == 2
+
+
+def test_a_trace_refuses_the_worker_count_only_a_sweep_reads() -> None:
+    # A trace runs one script in this process. Accepted and ignored, `--jobs` reports on a run the
+    # operator believes was split.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["--trace", "echo hello", "--jobs", "2"])
+
+    assert raised.value.code == 2
 
 
 def test_trace_reports_the_guarded_functions_a_script_executes() -> None:
@@ -798,8 +1195,10 @@ def test_a_sweep_prints_the_rows_it_found_before_a_scan_it_could_not_finish(
     monkeypatch.setattr(tool, "unclassified_ids", lambda _root: None)
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one; echo two"])
 
+    # Serial, because this pins the finest granularity the guarantee has: a worker that dies takes
+    # its whole configuration with it, and a scanner replaced here is not the one a worker imports.
     with pytest.raises(ValueError, match="nothing pinned"):
-        tool.main(["--shrink", "0"])
+        tool.main(["--shrink", "0", "--jobs", "1"])
 
     assert "scanner.source.character-limit" in capsys.readouterr().out
 
@@ -1031,7 +1430,7 @@ def test_a_sweep_that_cannot_write_its_rows_reports_it_and_fails(
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
     monkeypatch.setattr(sys, "stdout", Closed())
 
-    assert tool.main([]) == 1
+    assert tool.main(["--jobs", "1"]) == 1
 
     assert "could not write" in capsys.readouterr().err
 
@@ -1064,7 +1463,7 @@ def test_a_sweep_searches_the_checkout_whose_scanner_it_executes(
     monkeypatch.setattr(tool, "unclassified_ids", record_debt)
     monkeypatch.setattr(tool, "load_corpus", record_corpus)
 
-    assert tool.main([]) == 0
+    assert tool.main(["--jobs", "1"]) == 0
 
     checkout = Path(shell_scanner.__file__).resolve().parents[3]
     assert searched == [checkout, checkout]
@@ -1179,7 +1578,7 @@ def test_a_sweep_that_cannot_flush_its_rows_reports_it_and_fails(
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
     monkeypatch.setattr(sys, "stdout", Buffered())
 
-    assert tool.main([]) == 1
+    assert tool.main(["--jobs", "1"]) == 1
 
     assert "could not write" in capsys.readouterr().err
 
@@ -1197,7 +1596,7 @@ def test_a_sweep_that_cannot_render_its_rows_reports_it_and_fails(
     monkeypatch.setattr(tool, "load_corpus", lambda _root, **_kwargs: ["echo one"])
     monkeypatch.setattr(tool, "render_rows", refuse)
 
-    assert tool.main([]) == 1
+    assert tool.main(["--jobs", "1"]) == 1
 
     assert "could not render" in capsys.readouterr().err
 
@@ -1224,7 +1623,7 @@ def test_a_sweep_that_cannot_render_its_rows_keeps_the_failure_it_was_propagatin
     monkeypatch.setattr(tool, "render_rows", refuse)
 
     with pytest.raises(ValueError, match="nothing pinned"):
-        tool.main(["--shrink", "0"])
+        tool.main(["--shrink", "0", "--jobs", "1"])
 
 
 def test_a_sweep_reports_a_debt_snapshot_it_cannot_read_as_a_usage_error(

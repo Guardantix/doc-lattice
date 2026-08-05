@@ -131,12 +131,16 @@ record from `tests/fixtures/shell_guard_debt.json`. Leave the record and the gat
 guard as both classified and frozen.
 
 It is a search, not a gate. The default sweep drives thousands of scripts through every
-configuration and takes several minutes, and printing no rows means the corpus reached nothing new
-rather than that anything failed. Shrink `--seeds` and `--iterations` for a quick pass, and use
-`--all-guards` to see what the corpus reaches at all. Hand-authored candidates go through
-`--extra FILE`, a JSON list of scripts added to the corpus, which refuses rather than drops a
-candidate longer than `--max-length`, so a shape you aimed with `--trace` can be swept for the
-identifier it actually returns.
+configuration, which is a couple of minutes on an eight-core machine, and printing no rows means
+the corpus reached nothing new rather than that anything failed. Configurations are independent, so
+the grid is split across one worker process per available CPU; `--jobs` sizes that split and does
+not change which reach the merge prefers, with `--jobs 1` running the whole grid in one process.
+Ctrl-C stops a split run within a second or two wherever in the run it lands, including while the
+grid is still being handed to the workers, and still prints the rows it had. Shrink `--seeds`
+and `--iterations` for a quick pass, and use `--all-guards` to see what the corpus reaches at all.
+Hand-authored candidates go through `--extra FILE`, a JSON list of scripts added to the corpus,
+which refuses rather than drops a candidate longer than `--max-length`, so a shape you aimed with
+`--trace` can be swept for the identifier it actually returns.
 
 `scripts/corpus_differential.py` replays one fixed corpus through the public scan path once per
 revision and reports every script whose verdict differs, in either direction. It is the dynamic
