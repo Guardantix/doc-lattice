@@ -2876,6 +2876,12 @@ class _ShellScanner:
                 for scope_id in stream_ref_ids(word.content):
                     self.taint_builder.attach_scope_parent(scope_id, command_id)
             for heredoc in state.heredocs[state.owned_heredoc_count :]:
+                if heredoc.owner_scope_id is not None:
+                    # A compound stage claimed this heredoc when its redirection was parsed, and
+                    # its ordinal counts that scope's redirections. Handing it to the pipeline
+                    # consumer flushed afterwards would look for an ordinal the consumer never
+                    # recorded, so the authored body would reach no modeled reader at all.
+                    continue
                 heredoc.owner_id = command_id
                 heredoc.assignments_persist = redirection_assignments_persist
             state.owned_heredoc_count = len(state.heredocs)
@@ -3161,19 +3167,30 @@ class _ShellScanner:
                     if heredoc.expand
                     else (LiteralTransfer(raw_body), ())
                 )
-                if heredoc.owner_id is not None:
-                    self.taint_builder.attach_redirection_content(
+                if heredoc.owner_scope_id is not None:
+                    attached = self.taint_builder.attach_scope_redirection_content(
+                        heredoc.owner_scope_id,
+                        heredoc.ordinal,
+                        content,
+                        assignments,
+                    )
+                elif heredoc.owner_id is not None:
+                    attached = self.taint_builder.attach_redirection_content(
                         heredoc.owner_id,
                         heredoc.ordinal,
                         content,
                         assignments if heredoc.assignments_persist else (),
                     )
-                elif heredoc.owner_scope_id is not None:
-                    self.taint_builder.attach_scope_redirection_content(
-                        heredoc.owner_scope_id,
-                        heredoc.ordinal,
-                        content,
-                        assignments,
+                else:
+                    attached = False
+                if not attached:
+                    # The body is authored input that some reader consumes, so leaving its
+                    # placeholder empty would model the reader as reading nothing at all.
+                    raise _ShellScanIncomplete(
+                        GuardRefusal(
+                            "scanner.heredoc.unattributed-body",
+                            "shell heredoc body reaches no modeled reader",
+                        )
                     )
             if heredoc.expand and self.taint_builder is None:
                 child = self._child_scanner(

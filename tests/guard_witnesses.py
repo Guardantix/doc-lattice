@@ -649,6 +649,22 @@ REACHABLE_WITNESSES: tuple[ReachableWitness, ...] = (
         "bash",
         limits=ScanLimits(taint=TaintLimits(max_alternatives=0)),
     ),
+    ReachableWitness(
+        "scanner.heredoc.unattributed-body",
+        # A loop header is discarded before any command evidence exists, so a heredoc parsed
+        # inside it reaches no command and no compound scope that could read its body. Bash
+        # rejects this header outright, so nothing that runs is refused by reaching here.
+        # Stated as a limitation rather than only as a saving: every input found to reach the
+        # guard, across a default witness sweep and both fuzz seeds, is a header of this shape
+        # that Bash rejects. A discarded `case` header reaches it the same way, as in
+        # `case a <<EOF in`. None of them is a script that can execute, so the guard's
+        # over-refusal cost is measured at zero while its true-positive value stays unwitnessed.
+        # It is a fail-closed backstop for the silent discard issue #167 fixed, not a recognizer
+        # with a demonstrated runnable trigger.
+        "for i in a <<EOF\ndoc-lattice reconcile\nEOF\ndo\n:\ndone\n",
+        control_script="for i in a\ndo\ncat <<EOF\ndoc-lattice reconcile\nEOF\ndone\n",
+        control_guard_id=None,
+    ),
 )
 
 INVARIANT_WITNESSES: tuple[InvariantWitness, ...] = (

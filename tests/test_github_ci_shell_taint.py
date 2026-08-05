@@ -58,6 +58,7 @@ from doc_lattice.github_ci.shell_taint import (
     _EvalSyntaxTransition,
     _evaluate_closed,
     _evaluate_with_tables,
+    _EvidenceBuilder,
     _ExecutableEvidence,
     _expression_variable_names,
     _flow_dependency_graph,
@@ -5714,3 +5715,82 @@ def test_bash_env_over_refusal_guards(body: str) -> None:
 
     assert result.invocations == ()
     assert result.incomplete_reason is None
+
+
+def _redirection_builder() -> tuple[_EvidenceBuilder, _CommandEvidence, _StreamScopeEvidence]:
+    """Return a builder holding one command and one scope, each redirected at ordinal 0."""
+    builder = _EvidenceBuilder.empty()
+    command = _command(
+        1,
+        _arg("cat"),
+        name="cat",
+        redirections=(_RedirectionEvent(0, "<<", 0, ContentTarget(LiteralTransfer(""))),),
+    )
+    scope = _StreamScopeEvidence(
+        100,
+        "brace_group",
+        None,
+        None,
+        SequenceOutput(()),
+        redirections=(_RedirectionEvent(0, "<<", 0, ContentTarget(LiteralTransfer(""))),),
+    )
+    builder.commands.append(command)
+    builder.scopes.append(scope)
+    return builder, command, scope
+
+
+def test_attach_redirection_content_replaces_the_placeholder_at_a_matching_ordinal() -> None:
+    builder, _command_evidence, _scope = _redirection_builder()
+    assignments = (_AssignmentEvidence("A", LiteralTransfer("doc-"), True),)
+
+    attached = builder.attach_redirection_content(1, 0, LiteralTransfer("body"), assignments)
+
+    assert attached is True
+    assert builder.commands[0].redirections[0].target == ContentTarget(LiteralTransfer("body"))
+    assert builder.commands[0].assignments == assignments
+
+
+def test_attach_redirection_content_reports_an_ordinal_its_owner_never_recorded() -> None:
+    """The False direction the caller refuses on, and the mutation it must not leave behind.
+
+    This is the shape issue #167 produced by reassigning a compound stage's heredoc to a pipeline
+    consumer: the owner exists, so nothing raises, but it carries no redirection at that ordinal,
+    so the authored body would replace nothing and vanish from the model.
+    """
+    builder, command, _scope = _redirection_builder()
+
+    attached = builder.attach_redirection_content(
+        1,
+        3,
+        LiteralTransfer("body"),
+        (_AssignmentEvidence("A", LiteralTransfer("doc-"), True),),
+    )
+
+    assert attached is False
+    assert builder.commands[0] == command
+
+
+def test_attach_scope_redirection_content_replaces_the_placeholder_at_a_matching_ordinal() -> None:
+    builder, _command_evidence, _scope = _redirection_builder()
+    bindings = (_AssignmentEvidence("A", LiteralTransfer("doc-"), True),)
+
+    attached = builder.attach_scope_redirection_content(100, 0, LiteralTransfer("body"), bindings)
+
+    assert attached is True
+    assert builder.scopes[0].redirections[0].target == ContentTarget(LiteralTransfer("body"))
+    assert builder.scopes[0].loop_bindings == bindings
+
+
+def test_attach_scope_redirection_content_reports_an_ordinal_its_owner_never_recorded() -> None:
+    """The scope-side False direction, with the same no-mutation requirement."""
+    builder, _command_evidence, scope = _redirection_builder()
+
+    attached = builder.attach_scope_redirection_content(
+        100,
+        3,
+        LiteralTransfer("body"),
+        (_AssignmentEvidence("A", LiteralTransfer("doc-"), True),),
+    )
+
+    assert attached is False
+    assert builder.scopes[0] == scope

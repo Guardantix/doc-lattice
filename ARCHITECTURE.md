@@ -799,7 +799,12 @@ two output process substitutions keeps only the last binding, so the earlier con
 behind it, as in `producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the
 first record of a shared stream is projected as record one, so a marker split across later records
 is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it
-interacts with is issue #119. AD-23 later froze this scope: the issue numbers cited above name
+interacts with is issue #119. A heredoc or here-string redirected onto a compound scope keeps its
+content for the reader inside that scope, but a variable reference in that content resolves to
+nothing when the scope is a pipeline producer and its environment is a subshell environment, so
+`( cat ) <<<"${A}lattice reconcile" | bash` certifies while the brace-group, no-pipe,
+command-owned, and literal-content spellings of the same body all refuse; that is issue #192,
+pinned as certifying. AD-23 later froze this scope: the issue numbers cited above name
 the report that produced each disclosure, not open work, and most were closed under that record.
 A gap outside AD-23's three classes is accepted behavior rather than a tracked issue.
 

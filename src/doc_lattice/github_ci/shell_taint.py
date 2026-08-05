@@ -850,11 +850,20 @@ class _EvidenceBuilder:
         ordinal: int,
         content: ContentExpr,
         assignments: tuple[_AssignmentEvidence, ...] = (),
-    ) -> None:
-        """Replace one command redirection's placeholder with authored content."""
+    ) -> bool:
+        """Replace one command redirection's placeholder with authored content.
+
+        Returns:
+            True when the owner carried a redirection at that ordinal and the placeholder was
+            replaced, and False when it did not, which leaves the authored body unmodeled. The
+            caller refuses on False rather than continuing, and no evidence is mutated on that
+            path, so a body this builder cannot model never leaves its assignments behind.
+        """
         for index, command in enumerate(self.commands):
             if command.command_id != command_id:
                 continue
+            if not any(event.ordinal == ordinal for event in command.redirections):
+                return False
             redirections = tuple(
                 replace(event, target=ContentTarget(content)) if event.ordinal == ordinal else event
                 for event in command.redirections
@@ -864,7 +873,7 @@ class _EvidenceBuilder:
                 assignments=(*command.assignments, *assignments),
                 redirections=redirections,
             )
-            return
+            return True
         raise ValueError("heredoc owner command is missing")
 
     def attach_scope_redirection_content(
@@ -873,11 +882,20 @@ class _EvidenceBuilder:
         ordinal: int,
         content: ContentExpr,
         assignments: tuple[_AssignmentEvidence, ...] = (),
-    ) -> None:
-        """Replace one compound-scope heredoc placeholder with authored content."""
+    ) -> bool:
+        """Replace one compound-scope heredoc placeholder with authored content.
+
+        Returns:
+            True when the owning scope carried a redirection at that ordinal and the placeholder
+            was replaced, and False when it did not, which leaves the authored body unmodeled. The
+            caller refuses on False rather than continuing, and no evidence is mutated on that
+            path, so a body this builder cannot model never leaves its bindings behind.
+        """
         for index, scope in enumerate(self.scopes):
             if scope.scope_id != scope_id:
                 continue
+            if not any(event.ordinal == ordinal for event in scope.redirections):
+                return False
             redirections = tuple(
                 replace(event, target=ContentTarget(content)) if event.ordinal == ordinal else event
                 for event in scope.redirections
@@ -887,7 +905,7 @@ class _EvidenceBuilder:
                 redirections=redirections,
                 loop_bindings=(*scope.loop_bindings, *assignments),
             )
-            return
+            return True
         raise ValueError("heredoc owner scope is missing")
 
     def attach_scope_assignments(
