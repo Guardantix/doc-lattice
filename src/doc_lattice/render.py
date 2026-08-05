@@ -38,7 +38,7 @@ def _graph_edges(
 
     A ``derives_from`` target is often a section anchor, which is not itself a graph node.
     Each edge is drawn from the file that owns its target to the downstream source, so only
-    tracked nodes appear (spec 6.4). Multiple section edges between the same two files
+    tracked nodes appear. Multiple section edges between the same two files
     collapse to one edge, marked stale if any contributing edge is stale.
 
     Args:

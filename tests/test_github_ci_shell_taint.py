@@ -2,12 +2,13 @@
 
 import time
 from dataclasses import replace
+from itertools import product
 
 import pytest
 
 from doc_lattice.error_types import ProjectError
 from doc_lattice.github_ci import shell_taint
-from doc_lattice.github_ci.shell_guards import GuardRefusal, MarkerDetected
+from doc_lattice.github_ci.shell_guards import GuardRefusal, MarkerDetected, ScanLimits
 from doc_lattice.github_ci.shell_scanner import (
     _effective_executable_evidence,
     _ScanBudget,
@@ -41,10 +42,12 @@ from doc_lattice.github_ci.shell_taint import (
     _ArgPort,
     _AssignmentEvidence,
     _build_flow_definitions,
+    _carrier_borne_cycle_keys,
     _CommandEvidence,
     _ContentToken,
     _ContentValue,
     _contextualize_evidence,
+    _cyclic_write_keys,
     _eval_assignment_transfers,
     _eval_command_substitution_closing,
     _eval_reparse_content,
@@ -58,7 +61,9 @@ from doc_lattice.github_ci.shell_taint import (
     _EvidenceBuilder,
     _ExecutableEvidence,
     _expression_variable_names,
+    _flow_dependency_graph,
     _FlowDefinitions,
+    _FlowNode,
     _FlowWrite,
     _is_function_positional_parameter,
     _marker_capable,
@@ -67,8 +72,11 @@ from doc_lattice.github_ci.shell_taint import (
     _PipeEvidence,
     _PositionalBinding,
     _ProcessResourceEvidence,
+    _reachable_eval_variable_writes,
     _RedirectionEvent,
     _scoped_variable_name,
+    _SecondPassConditionalAssignment,
+    _self_reaching_nodes,
     _ShellTaintEvidence,
     _solve_eval_syntax_variables,
     _solve_flow_definitions,
@@ -82,6 +90,7 @@ from doc_lattice.github_ci.shell_taint import (
     _strip_trailing_newlines,
     _substitute_local_contents,
     _substituted_text_composes_marker,
+    _synthesized_cycle_write,
     _TaintLimitExceeded,
     analyze_marker_taint,
     choice,
@@ -2026,6 +2035,159 @@ def test_static_normalization_collapses_parent_segments(literal: str, expected: 
     assert normalize_static_resource(literal, dynamic=False) == expected
 
 
+def _dynamic_redirection(operator: str, word: ContentExpr) -> _RedirectionEvent:
+    """Build one redirection event whose operand named no resource by its syntax."""
+    descriptor = 0 if operator in {"<", "<>"} else 1
+    return _RedirectionEvent(
+        0,
+        operator,
+        descriptor,
+        DynamicResourceTarget(),
+        target_word=word,
+    )
+
+
+@pytest.mark.parametrize(
+    ("operator", "word", "values", "expected"),
+    [
+        (">", VariableRef("P"), {"P": "task.sh"}, StaticResourceTarget("task.sh")),
+        ("<", VariableRef("P"), {"P": "dir/../task.sh"}, StaticResourceTarget("task.sh")),
+        (
+            ">",
+            concat(VariableRef("D"), LiteralTransfer("/task.sh")),
+            {"D": "build"},
+            StaticResourceTarget("build/task.sh"),
+        ),
+        (">", VariableRef("P"), {"P": "/dev/null"}, NullTarget()),
+        (">", VariableRef("P"), {"P": "/dev/fd/2"}, DescriptorTarget(2)),
+        (">&", VariableRef("N"), {"N": "2"}, DescriptorTarget(2)),
+    ],
+    ids=(
+        "output-resource",
+        "input-resource",
+        "composed-resource",
+        "null-device",
+        "device-descriptor",
+        "descriptor-duplication",
+    ),
+)
+def test_dynamic_redirection_operand_resolves_to_its_exact_value(
+    operator: str,
+    word: ContentExpr,
+    values: dict[str, str],
+    expected: object,
+) -> None:
+    """Issue #151: a resolvable operand names the resource its literal spelling would name."""
+    events = (_dynamic_redirection(operator, word),)
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(events, values, TaintLimits())
+
+    assert resolved[0].target == expected
+    assert resolved[0].ordinal == events[0].ordinal
+    assert resolved[0].descriptor == events[0].descriptor
+    assert resolved[0].target_word is None
+
+
+@pytest.mark.parametrize(
+    ("word", "values"),
+    [
+        (VariableRef("P"), {}),
+        (VariableRef("P"), {"Q": "task.sh"}),
+        (Choice((LiteralTransfer("task.sh"), LiteralTransfer("other.sh"))), {}),
+        (concat(VariableRef("D"), LiteralTransfer("/task.sh")), {}),
+    ],
+    ids=("absent", "unrelated", "two-alternatives", "partially-known"),
+)
+def test_unresolvable_redirection_operand_keeps_its_dynamic_target(
+    word: ContentExpr,
+    values: dict[str, str],
+) -> None:
+    """A word without one exact value stays as unnamed as its syntax left it.
+
+    The word is consumed either way. It is valid only between the scanner and this projection,
+    so a declined event carries no expression forward for a later stage to read as if it were
+    still scoped to the evidence around it.
+    """
+    events = (_dynamic_redirection(">", word),)
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(events, values, TaintLimits())
+
+    assert resolved[0].target == DynamicResourceTarget()
+    assert resolved[0].target_word is None
+    assert resolved[0].ordinal == events[0].ordinal
+    assert resolved[0].descriptor == events[0].descriptor
+
+
+def test_redirection_events_without_an_unnamed_operand_are_returned_unchanged() -> None:
+    """A target the syntax already named carries no operand word and is left alone."""
+    events = (
+        _RedirectionEvent(0, ">", 1, StaticResourceTarget("task.sh")),
+        _RedirectionEvent(1, "<<<", 0, ContentTarget(LiteralTransfer("doc-lattice\n"))),
+        _RedirectionEvent(2, ">", 1, DynamicResourceTarget()),
+    )
+
+    resolved = shell_taint._resolve_dynamic_redirection_targets(
+        events, {"P": "task.sh"}, TaintLimits()
+    )
+
+    assert resolved is events
+
+
+def test_resolved_redirection_operand_respects_the_exact_value_length_limit() -> None:
+    """The projection is bounded by the same cap every other exact projection answers to."""
+    events = (_dynamic_redirection(">", VariableRef("P")),)
+
+    with pytest.raises(_TaintLimitExceeded) as error:
+        shell_taint._resolve_dynamic_redirection_targets(
+            events,
+            {"P": "task.sh"},
+            TaintLimits(max_exact_value_chars=3),
+        )
+
+    assert error.value.refusal.origin_id == "taint.exact-value.length-limit"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "P=other.sh; for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        "P=other.sh; for P in task.sh; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=other.sh; select P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; break; done < /dev/null; bash other.sh",
+    ],
+    ids=("inside-the-body", "after-done", "select"),
+)
+def test_a_loop_binding_withdraws_the_exact_value_its_name_held_outside(body: str) -> None:
+    """Issue #151 review: an operand is never projected against a value the loop has replaced.
+
+    A ``for`` or ``select`` binding is not one of the assignments the exact walk applies, so the
+    table would otherwise still hold whatever the name meant outside the loop. Bash writes the
+    marker to the file the binding names and runs the untouched one, so projecting the outer
+    value put the write on a file bash never opens and refused a body with no flow in it.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason is None
+
+
+def test_an_assignment_after_a_loop_makes_its_name_exact_again() -> None:
+    """The withdrawal above is a point in the walk, not a name the whole body gives up.
+
+    Withholding every name a body loops over would spell the same over-refusal fix while
+    reopening issue #151 for that name, so the assignment after ``done`` has to resolve the
+    operand and the write has to reach the script sink.
+    """
+    body = "for P in a; do :; done; P=task.sh"
+    body += "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh"
+
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason == "authored marker flow reaches an execution sink"
+
+
 def test_deep_structured_output_is_lowered_without_recursion_error() -> None:
     output: OutputExpr = CommandOutput(1)
     for _ in range(1_200):
@@ -2354,6 +2516,416 @@ def test_mutually_referential_variables_converge_by_least_fixed_point() -> None:
         _marker_capable(solved.evaluate(Concat((VariableRef("Y"), LiteralTransfer("lattice")))))
         is True
     )
+
+
+def _record_definition_cycles(definitions: _FlowDefinitions) -> _FlowDefinitions:
+    """Record every carrier-borne definition cycle the way `_build_flow_definitions` does.
+
+    Production appends one `_synthesized_cycle_write` per key `_carrier_borne_cycle_keys` returns,
+    through the closure that charges the build-stage budget. These cases drive that same
+    composition over a hand-built flow, where there is no budget to charge.
+    """
+    keys = _carrier_borne_cycle_keys(definitions)
+    if not keys:
+        return definitions
+    recorded = tuple(_synthesized_cycle_write(key) for key in keys)
+    return replace(definitions, variable_writes=(*definitions.variable_writes, *recorded))
+
+
+def _stream_carrier_cycle_definitions() -> _FlowDefinitions:
+    """Return the flow whose only cycle runs from ``X`` through a command substitution.
+
+    ``X=$(printf "doc-%slattice reconcile" "$X")``: the variable reads the stream and the stream
+    reads the variable back, so no cycle is visible in the variable writes alone.
+    """
+    return _FlowDefinitions(
+        variable_writes=(_FlowWrite("X", StreamRef(3)),),
+        stream_writes=(
+            _FlowWrite(
+                3,
+                Concat(
+                    (
+                        LiteralTransfer("doc-"),
+                        VariableRef("X"),
+                        LiteralTransfer("lattice reconcile"),
+                    )
+                ),
+            ),
+        ),
+    )
+
+
+def test_definition_cycle_through_a_stream_is_recorded_and_epsilon_seeded() -> None:
+    """Issue #163: a cycle through a command substitution reaches the same seed as a direct one.
+
+    ``X=$(printf "doc-%slattice reconcile" "$X")`` writes ``X`` from a stream whose own write
+    reads ``X`` back. `_cyclic_write_keys` reads the variable writes alone and so cannot see that
+    cycle; without the recorded self-reference the key keeps the lattice bottom and
+    ``_compose_values`` annihilates the authored marker composed around it, which is the failure
+    #115 recorded for the direct spelling.
+    """
+    definitions = _stream_carrier_cycle_definitions()
+
+    unrecorded = _solve_flow_definitions(definitions, limits=TaintLimits())
+    recorded = _solve_flow_definitions(_record_definition_cycles(definitions), limits=TaintLimits())
+
+    assert _marker_capable(unrecorded.evaluate(VariableRef("X"))) is False
+    assert _marker_capable(recorded.evaluate(VariableRef("X"))) is True
+
+
+def test_definition_cycle_through_a_resource_is_recorded_and_epsilon_seeded() -> None:
+    """The file carrier reaches the same seed as the command-substitution carrier."""
+    definitions = _FlowDefinitions(
+        variable_writes=(_FlowWrite("X", ResourceRef("task.sh")),),
+        resource_writes=(
+            _FlowWrite(
+                "task.sh",
+                Concat(
+                    (
+                        LiteralTransfer("doc-"),
+                        VariableRef("X"),
+                        LiteralTransfer("lattice reconcile"),
+                    )
+                ),
+            ),
+        ),
+    )
+
+    solved = _solve_flow_definitions(_record_definition_cycles(definitions), limits=TaintLimits())
+
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is True
+
+
+def test_recording_a_definition_cycle_leaves_an_acyclic_flow_untouched() -> None:
+    """Over-refusal control for issue #163: reaching a carrier is not the same as cycling to it.
+
+    ``X`` reads a stream that reads ``Y``, and nothing reads ``X`` back, so no key here lies on a
+    cycle and none may be recorded. Seeding this flow with epsilon because the walk now reaches
+    the stream would let the first fixed-point round compose ``doc-`` with the empty string and
+    ``lattice``, which is the declared-forward-reference over-refusal the bottom seed prevents.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(
+            _FlowWrite(
+                "X",
+                Concat((LiteralTransfer("doc-"), StreamRef(3), LiteralTransfer("lattice"))),
+            ),
+            _FlowWrite("Y", LiteralTransfer("x")),
+        ),
+        stream_writes=(_FlowWrite(3, VariableRef("Y")),),
+    )
+
+    recorded = _record_definition_cycles(definitions)
+    solved = _solve_flow_definitions(recorded, limits=TaintLimits())
+
+    assert recorded == definitions
+    assert _marker_capable(solved.evaluate(VariableRef("X"))) is False
+
+
+def test_recording_a_definition_cycle_records_nothing_a_direct_cycle_already_shows() -> None:
+    """A direct cycle is already visible to the seeder, so nothing may be recorded for it."""
+    definitions = _FlowDefinitions(
+        variable_writes=(
+            _FlowWrite("X", LiteralTransfer("doc-")),
+            _FlowWrite("X", VariableRef("Y")),
+            _FlowWrite("Y", VariableRef("X")),
+        )
+    )
+
+    assert _record_definition_cycles(definitions) == definitions
+
+
+def test_recording_a_definition_cycle_does_not_widen_a_solved_value() -> None:
+    """The recorded write only exposes the cycle; joining a key with itself never widens it.
+
+    Built on the carrier-borne cycle, which is the only case where a write is actually appended.
+    The recorded shape is pinned first, then a second copy of that same self-reference write is
+    appended by hand: both flows are epsilon-seeded, so the solved tables may differ only if
+    joining a key's value with itself widens it, which is the property the design rests on.
+    """
+    definitions = _stream_carrier_cycle_definitions()
+
+    recorded = _record_definition_cycles(definitions)
+    doubled = replace(
+        recorded,
+        variable_writes=(*recorded.variable_writes, _synthesized_cycle_write("X")),
+    )
+
+    assert recorded.variable_writes == (
+        *definitions.variable_writes,
+        _synthesized_cycle_write("X"),
+    )
+    assert (
+        _solve_flow_definitions(doubled, limits=TaintLimits()).variables
+        == _solve_flow_definitions(recorded, limits=TaintLimits()).variables
+    )
+
+
+def test_recording_a_definition_cycle_narrows_an_appending_key() -> None:
+    """Recording is not a fixed-point no-op on a key that also carries an appending write.
+
+    ``_solve_flow_definitions`` reads an appending write's base as ``prior or _OUTSIDE_VALUE``, so
+    moving the seed from bottom to epsilon substitutes epsilon for the conservative outside
+    barrier and drops the alternative the barrier carried. That narrowing is the intended #115 and
+    #163 behavior, since the direct cycle spelling already narrows the same way without any
+    recording, and this pins the direction so the docstring claim and the code cannot drift apart
+    silently.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(
+            _FlowWrite("X", StreamRef(3)),
+            _FlowWrite("X", LiteralTransfer("tail"), append=True),
+        ),
+        stream_writes=(_FlowWrite(3, VariableRef("X")),),
+    )
+
+    unrecorded = _solve_flow_definitions(definitions, limits=TaintLimits())
+    recorded = _solve_flow_definitions(_record_definition_cycles(definitions), limits=TaintLimits())
+
+    assert any(transfer.projection_opaque for transfer in unrecorded.variables["X"]) is True
+    assert any(transfer.projection_opaque for transfer in recorded.variables["X"]) is False
+
+
+def test_carrier_borne_cycle_keys_agree_with_the_variable_reachability_walk() -> None:
+    """The graph projection selects exactly the keys the per-key reachability walk did.
+
+    `_carrier_borne_cycle_keys` reads the directly cyclic set off the variable-restricted
+    projection of the dependency graph rather than calling `_cyclic_write_keys` a second time.
+    The two are the same relation, and this drives every flow over a two-variable, one-carrier
+    alphabet through both rather than asserting the equality on one hand-built shape.
+    """
+    expressions: tuple[ContentExpr | None, ...] = (
+        None,
+        LiteralTransfer("t"),
+        VariableRef("A"),
+        VariableRef("B"),
+        StreamRef(3),
+        Concat((VariableRef("A"), StreamRef(3))),
+        Concat((VariableRef("B"), LiteralTransfer("t"))),
+    )
+
+    def reference(definitions: _FlowDefinitions) -> tuple[str, ...]:
+        direct = _cyclic_write_keys(definitions.variable_writes)
+        return tuple(
+            sorted(
+                {
+                    key
+                    for kind, key in _self_reaching_nodes(_flow_dependency_graph(definitions))
+                    if kind == "variable" and isinstance(key, str) and key not in direct
+                }
+            )
+        )
+
+    checked = 0
+    for first, second, third, fourth in product(expressions, repeat=4):
+        definitions = _FlowDefinitions(
+            variable_writes=tuple(
+                _FlowWrite(key, expression)
+                for key, expression in (("A", first), ("A", second), ("B", third))
+                if expression is not None
+            ),
+            stream_writes=tuple(
+                _FlowWrite(3, expression) for expression in (fourth,) if expression is not None
+            ),
+        )
+        checked += 1
+
+        assert _carrier_borne_cycle_keys(definitions) == reference(definitions)
+
+    assert checked == len(expressions) ** 4
+
+
+def test_reachable_eval_variable_writes_withhold_a_synthesized_cycle_write() -> None:
+    """A fabricated self-reference write never reaches the eval layer's streaming reparse.
+
+    Its only dependency is its own key, so it survives the reachability filter whenever that key
+    is eval-reachable at all. The reparse downstream is quote-sensitive and streaming rather than
+    a join lattice, so handing it a write nobody authored can refuse a body that has no eval-time
+    cycle. Only the authored write may reach it.
+    """
+    authored = _FlowWrite("X", LiteralTransfer("doc-"))
+    writes = (authored, _synthesized_cycle_write("X"))
+
+    command = _command(1, _arg("eval"), _arg("$X", VariableRef("X")), name="eval")
+    reachable = _reachable_eval_variable_writes((command,), writes, TaintLimits())
+
+    assert reachable == (authored,)
+
+
+def test_a_recorded_cycle_write_is_charged_to_the_build_stage_edge_budget() -> None:
+    """The recorded write is charged where it is created, not recounted at solve time.
+
+    Appending it straight into the tuple left `_definition_counts` to find the overrun and refuse
+    from `taint.flow-solve.edge-limit`, a guard that never saw the write created. Routing it
+    through the same closure every authored variable write takes puts the refusal on the build
+    stage guard that owns the budget.
+    """
+    body = 'for f in a b c d e f g h i j; do Z=$f; done\nX=$(printf "p-%s" "$X")\necho "$X"'
+
+    result = scan_doc_lattice_invocations(body, limits=ScanLimits(taint=TaintLimits(max_edges=6)))
+
+    assert result.verdict == GuardRefusal(
+        "taint.flow-build.variable-write-edge-limit", "shell taint edge limit exceeded"
+    )
+
+
+def test_recording_a_definition_cycle_follows_a_conditional_assignment_operand() -> None:
+    """An eval-time ``${name=word}`` expansion both reads and writes, so it can close a cycle.
+
+    `_expression_reference_keys` reports the assigned name and walks the default operand, which is
+    what lets a cycle whose only edge runs through that expansion reach the epsilon seed. Without
+    the operand walk the stream would look like a leaf and ``X`` would keep the bottom seed.
+    """
+    definitions = _FlowDefinitions(
+        variable_writes=(_FlowWrite("X", StreamRef(3)),),
+        stream_writes=(
+            _FlowWrite(
+                3,
+                Concat(
+                    (
+                        LiteralTransfer("doc-"),
+                        _SecondPassConditionalAssignment("Q", VariableRef("X"), True),
+                        LiteralTransfer("lattice reconcile"),
+                    )
+                ),
+            ),
+        ),
+    )
+
+    recorded = _record_definition_cycles(definitions)
+
+    assert recorded.variable_writes == (
+        *definitions.variable_writes,
+        _synthesized_cycle_write("X"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("graph", "expected"),
+    [
+        ({("variable", "A"): set()}, set()),
+        (
+            {("variable", "A"): {("variable", "A")}},
+            {("variable", "A")},
+        ),
+        (
+            {
+                ("variable", "A"): {("variable", "B")},
+                ("variable", "B"): {("variable", "C")},
+                ("variable", "C"): set(),
+            },
+            set(),
+        ),
+        (
+            {
+                ("variable", "ENTRY"): {("variable", "A")},
+                ("variable", "A"): {("variable", "B")},
+                ("variable", "B"): {("variable", "C")},
+                ("variable", "C"): {("variable", "A")},
+            },
+            {("variable", "A"), ("variable", "B"), ("variable", "C")},
+        ),
+        (
+            {
+                ("variable", "ROOT"): {("variable", "LEFT"), ("variable", "RIGHT")},
+                ("variable", "LEFT"): {("variable", "SHARED")},
+                ("variable", "RIGHT"): {("variable", "SHARED")},
+                ("variable", "SHARED"): {("variable", "LEFT")},
+            },
+            {("variable", "LEFT"), ("variable", "SHARED")},
+        ),
+    ],
+    ids=("isolated", "self-loop", "acyclic-chain", "entered-three-cycle", "sibling-subtree"),
+)
+def test_self_reaching_nodes_reports_exactly_the_nodes_on_a_cycle(
+    graph: dict[_FlowNode, set[_FlowNode]],
+    expected: set[_FlowNode],
+) -> None:
+    """Direct pin for the SCC pass the carrier-borne cycle detection rests on.
+
+    The entered-three-cycle row is the one that needs the low-link value to propagate back to a
+    parent frame, and it is verified to catch that: deleting the propagation drops ``A`` from the
+    component while every flow-level test in this module stays green, which would silently stop
+    multi-hop cycles from being detected and reopen half of the issue #163 class. The other rows
+    hold the boundaries the flow-level tests never reach, which only ever build one- and two-node
+    cycles: an isolated node, a bare self loop, a chain that never closes, and a cycle reachable
+    only through a sibling subtree.
+    """
+    assert _self_reaching_nodes(graph) == expected
+
+
+def test_issue_163_indirect_definition_cycle_exploit_becomes_refused() -> None:
+    """Verified false certification from issue #163, reproduced under real Bash 5.2.
+
+    Bash expands the not-yet-assigned ``$X`` inside the substitution to the empty string, so the
+    surrounding literals reconstitute the marker and the shim runs. This body certified before
+    the fix. The control spells the same cycle without the substitution carrier and already
+    refused, which isolates the carrier the cycle detection could not follow rather than the
+    cycle seeding itself. Both reasons are pinned exactly, so a limit guard or a parse refusal
+    arriving on this body cannot keep the test green while the taint flow is lost again. The
+    control refuses on the retained-word rule instead, because it spells the marker's own
+    characters in the run body, which is what makes it a control rather than a second exploit.
+    """
+    exploit = 'X=$(printf "doc-%slattice reconcile" "$X"); $X'
+    control = 'X="doc-${X}lattice reconcile"; $X'
+
+    exploit_result = scan_doc_lattice_invocations(exploit)
+    control_result = scan_doc_lattice_invocations(control)
+
+    assert exploit_result.invocations == ()
+    assert exploit_result.incomplete_reason == TAINT_REFUSAL_REASON
+    assert control_result.invocations == ()
+    assert (
+        control_result.incomplete_reason
+        == "marker-bearing command is not a certified doc-lattice invocation"
+    )
+
+
+def test_issue_163_marker_free_command_substitution_still_certifies() -> None:
+    """Over-refusal control: an ordinary self-accumulating variable carries no marker."""
+    result = scan_doc_lattice_invocations('X=$(printf "%s-more" "$X"); echo "$X"')
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'printf "doc-%slattice reconcile" "$X" > s.sh; Y=$(cat s.sh); eval \'X=$Y\'; $X',
+        'A=doc-; printf "%slattice reconcile" "$A" > s.sh; Y=$(cat s.sh); eval \'X=$Y\'; $X',
+    ],
+    ids=("cyclic", "acyclic"),
+)
+def test_issue_159_keeps_a_carrier_out_of_an_eval_assignment_after_the_163_fix(body: str) -> None:
+    """The issue #163 seed does not reach across the eval layer's carrier opacity.
+
+    An eval-lowered assignment resolves its value against empty resource and stream tables, so a
+    value arriving through a file or a command substitution becomes an outside gap before any
+    seed matters. Verified under real Bash 5.2 with a ``doc-lattice`` shim on ``PATH``: both
+    certify and execute the marker. The acyclic row is the control that isolates the cause: it
+    carries no definition cycle at all and still certifies, so the loss is issue #159 rather than
+    a residue of #163, and the two controls below complete the isolation by varying only the
+    ``eval`` and only the carrier.
+    """
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'A=doc-; printf "%slattice reconcile" "$A" > s.sh; Y=$(cat s.sh); X=$Y; $X',
+        "A=doc-; Y=\"${A}lattice reconcile\"; eval 'X=$Y'; $X",
+    ],
+    ids=("carrier-without-eval", "eval-without-carrier"),
+)
+def test_issue_159_controls_isolate_the_eval_carrier_pair(body: str) -> None:
+    """Controls for the row above: dropping either the eval or the carrier restores the refusal."""
+    result = scan_doc_lattice_invocations(body)
+
+    assert result.invocations == ()
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
 @pytest.mark.parametrize(

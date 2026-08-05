@@ -168,6 +168,10 @@ def _render_wrapped_pattern(pattern: str) -> str:
     offset = 0
     while offset < len(pattern):
         end = min(offset + 80, len(pattern))
+        # Back the chunk boundary off a lone trailing backslash: each chunk is emitted as a raw
+        # string literal (r"..."), and a raw string cannot end in a backslash without escaping
+        # the closing quote. Every escape in `pattern` is \uXXXX or \UXXXXXXXX, so at most one
+        # trailing backslash can occur at any boundary.
         if pattern[end - 1] == "\\":
             end -= 1
         chunks.append(pattern[offset:end])

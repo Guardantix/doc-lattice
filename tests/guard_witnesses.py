@@ -606,6 +606,16 @@ REACHABLE_WITNESSES: tuple[ReachableWitness, ...] = (
         limits=ScanLimits(taint=TaintLimits(max_local_substitution_depth=0)),
     ),
     ReachableWitness(
+        # Two commands resolve ``>&3`` to the substitution the compound bound, and neither one's
+        # stream is carried by the other's, so neither subsumes the other. The control keeps one
+        # writer and is detected as marker flow, which isolates the collision from the descriptor
+        # chain that carries both writers to the consumer.
+        "taint.output-substitution.unordered-writers",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; printf x >&3; } 3> >(bash)",
+        control_script="{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        control_guard_id=None,
+    ),
+    ReachableWitness(
         # %b decodes escapes, so it can synthesize the marker from bytes no port shows
         # literally. The control spells a representable escape and is detected as marker flow,
         # which proves the fixture isolates the unrepresentable case rather than %b itself.

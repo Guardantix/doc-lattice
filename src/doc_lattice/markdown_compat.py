@@ -29,6 +29,12 @@ MARKDOWN_COMPAT_VERSION = "markdown-it-py==4.2.0"
 SLUG_COMPAT_VERSION = "github-slugger@2.0.0"
 SLUG_UNICODE_VERSION = JAVASCRIPT_UNICODE_VERSION
 
+# Two trailing alternatives because the marker can sit at end of line or immediately before an
+# ATX closing sequence. extract_headings searches markdown-it's parsed inline content, where the
+# closing sequence has already been stripped, so the first branch applies there.
+# strip_heading_anchor runs on the raw source line, which may still carry a closing "##"; the
+# lookahead in the second branch matches the whitespace before it without consuming the "#"
+# characters, so substitution removes only the marker and leaves the closing sequence intact.
 _ANCHOR_RE = re.compile(r"(?:^|\s+)\{#([A-Za-z0-9][A-Za-z0-9_-]*)\}(?:\s*$|\s+(?=#+\s*$))")
 _CASED_RE = re.compile(CASED_PATTERN)
 _CASE_IGNORABLE_RE = re.compile(CASE_IGNORABLE_PATTERN)
@@ -132,6 +138,10 @@ def extract_headings(body: str) -> list[Heading]:
     state = _SourceMapState(normalized, _PARSER, {}, tokens)
     headings: list[Heading] = []
     line = 0
+    # parse_fence and parse_heading append to the shared `tokens` list through StateBlock.push
+    # rather than replacing it, so each branch clears the list once it has consumed the block.
+    # Without that, tokens from earlier blocks accumulate and the exact-length check below stops
+    # matching, so a second heading in the document would raise instead of being extracted.
     while line < state.lineMax:
         position = state.bMarks[line] + state.tShift[line]
         if position >= state.eMarks[line]:

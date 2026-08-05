@@ -39,7 +39,7 @@ def test_dot_is_digraph():
 
 def test_section_edge_drawn_from_owning_file_not_bare_anchor():
     # 'down' derives from section anchor 'u', which lives in file 'up'. The edge must
-    # connect the generated ids for the tracked files, not a third id for anchor 'u' (spec 6.4).
+    # connect the generated ids for the tracked files, not a third id for anchor 'u'.
     lines = to_mermaid(_lattice(), set()).splitlines()
     assert "    n1 --> n0" in lines
     assert len([line for line in lines if "-->" in line]) == 1

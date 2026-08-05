@@ -11,12 +11,6 @@ os.environ.pop("FORCE_COLOR", None)
 
 
 @pytest.fixture
-def work_dir(tmp_path: Path) -> Path:
-    """Provide a clean working directory."""
-    return tmp_path
-
-
-@pytest.fixture
 def lattice_dir(tmp_path: Path) -> Path:
     """Write a small synthetic lattice and return the project root.
 

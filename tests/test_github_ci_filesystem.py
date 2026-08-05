@@ -896,15 +896,14 @@ def test_apply_replace_publishes_to_locked_root_when_path_root_replaced_at_mutat
     real_resolve_change = filesystem._resolve_change
     replaced = False
 
-    def _replace_root_after_first_resolution(change: ArtifactChange) -> tuple[Path, Path]:
+    def _replace_root_after_first_resolution(change: ArtifactChange) -> None:
         nonlocal replaced
-        resolved = real_resolve_change(change)
+        real_resolve_change(change)
         if not replaced:
             replaced = True
             root.rename(displaced_root)
             root.mkdir()
             _write_artifacts(root, (old_artifact,))
-        return resolved
 
     monkeypatch.setattr(filesystem, "_resolve_change", _replace_root_after_first_resolution)
 
@@ -927,14 +926,13 @@ def test_apply_create_publishes_to_locked_root_when_path_root_replaced_at_mutati
     real_resolve_change = filesystem._resolve_change
     replaced = False
 
-    def _replace_root_after_first_resolution(change: ArtifactChange) -> tuple[Path, Path]:
+    def _replace_root_after_first_resolution(change: ArtifactChange) -> None:
         nonlocal replaced
-        resolved = real_resolve_change(change)
+        real_resolve_change(change)
         if not replaced:
             replaced = True
             root.rename(displaced_root)
             root.mkdir()
-        return resolved
 
     monkeypatch.setattr(filesystem, "_resolve_change", _replace_root_after_first_resolution)
 

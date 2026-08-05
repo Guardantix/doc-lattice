@@ -42,8 +42,13 @@ from .reconcile import Rewrite
 JournalState = Literal["prepared", "committed"]
 RecoveryAction = Literal["none", "rolled_back", "cleaned_committed"]
 Sha256Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_JournalStatus = Literal["absent", "invalid", "exact"]
 _LOCK_FACTORY_TOKEN = object()
 _LOCKING_SUPPORTED = os.name != "nt"
+_JOURNAL_STAGE_PREFIX = f"{RECONCILE_JOURNAL_NAME}."
+_PREPARE_VALIDATING = "validating transaction destinations"
+_PREPARE_STAGING = "staging transaction image"
+_PREPARE_PUBLISHING_JOURNAL = "publishing prepared journal"
 
 
 class JournalEntry(BaseModel):
@@ -179,6 +184,14 @@ def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistence
     return ReconcilePersistenceError(message)
 
 
+def _journal_already_exists_message(journal_path: Path) -> str:
+    """Render the identical diagnostic for a pre-existing or racing journal."""
+    return (
+        f"reconcile journal {journal_path} already exists; preserve it and run "
+        "'doc-lattice reconcile --recover'"
+    )
+
+
 def _journal_is_present(journal: Path) -> bool:
     """Inspect the canonical journal entry without following symlinks.
 
@@ -218,11 +231,15 @@ def _validate_artifact_path(
     project_root: Path,
     destination: Path,
     artifact: Path,
-    role: str,
+    role: Literal["before", "after"],
     raw_path: str,
 ) -> None:
     """Validate the location, name, and existing type of one staged artifact."""
     field = f"{role}_path"
+    # artifact is the safe_resolve'd path, so it is the right subject for containment and
+    # directory-membership checks. The symlink and file-type checks below must run on the
+    # unresolved recorded path instead: resolving would follow a symlink planted at that
+    # name and report the target's type, hiding exactly the substitution being rejected.
     candidate = project_root / Path(raw_path)
     if artifact.parent != destination.parent:
         message = (
@@ -268,24 +285,24 @@ def _validate_path_roles(entries: tuple[_ResolvedEntry, ...], journal_path: Path
 
     artifacts: dict[Path, tuple[int, str]] = {}
     for index, entry in enumerate(entries):
-        for role, artifact in (
+        for role_field, artifact in (
             ("before_path", entry.before_path),
             ("after_path", entry.after_path),
         ):
             if artifact == canonical_journal:
-                message = f"entry {index} {role} aliases journal path {journal_path}"
+                message = f"entry {index} {role_field} aliases journal path {journal_path}"
                 raise ValueError(message)
             if artifact in destinations:
-                message = f"entry {index} {role} artifact {artifact} aliases destination path"
+                message = f"entry {index} {role_field} artifact {artifact} aliases destination path"
                 raise ValueError(message)
             if artifact in artifacts:
-                first_index, first_role = artifacts[artifact]
+                first_index, first_field = artifacts[artifact]
                 message = (
-                    f"artifact alias between entry {first_index} {first_role} and "
-                    f"entry {index} {role}: {artifact}"
+                    f"artifact alias between entry {first_index} {first_field} and "
+                    f"entry {index} {role_field}: {artifact}"
                 )
                 raise ValueError(message)
-            artifacts[artifact] = (index, role)
+            artifacts[artifact] = (index, role_field)
 
 
 def _load_journal(
@@ -325,15 +342,15 @@ def _load_journal(
                 project_root,
                 entry.destination,
                 entry.before_path,
-                "before",
-                raw_entry.before_path,
+                role="before",
+                raw_path=raw_entry.before_path,
             )
             _validate_artifact_path(
                 project_root,
                 entry.destination,
                 entry.after_path,
-                "after",
-                raw_entry.after_path,
+                role="after",
+                raw_path=raw_entry.after_path,
             )
     except ValueError as cause:
         raise _invalid_journal_error(journal_path, cause) from cause
@@ -365,7 +382,7 @@ def _cause_details(cause: object) -> str:
     return "; ".join(details)
 
 
-def _exact_journal_status(journal: Path, journal_bytes: bytes) -> tuple[str, str]:
+def _exact_journal_status(journal: Path, journal_bytes: bytes) -> tuple[_JournalStatus, str]:
     """Classify whether the canonical journal is a regular exact-byte copy."""
     try:
         mode = journal.lstat().st_mode
@@ -583,7 +600,7 @@ def _restore_journal(journal: Path, journal_bytes: bytes, primary: OSError) -> b
         atomic_create_bytes(
             journal,
             journal_bytes,
-            prefix=f"{RECONCILE_JOURNAL_NAME}.",
+            prefix=_JOURNAL_STAGE_PREFIX,
         )
     except OSError as restore_error:
         primary.add_note(f"journal restoration failed for {journal}: {restore_error}")
@@ -637,7 +654,7 @@ def _cleanup_transaction_artifacts(
 def _staged_artifacts(
     entries: tuple[_ResolvedEntry, ...],
 ) -> tuple[tuple[Path, str, Path], ...]:
-    """Return every journal stage paired with its role-specific digest."""
+    """Return every journal stage with its role-specific digest and owning destination."""
     return tuple(
         staged
         for entry in entries
@@ -823,11 +840,6 @@ def _preflight_rewrite_destinations(
     return tuple(pending)
 
 
-def _copy_notes(target: BaseException, source: BaseException) -> None:
-    """Copy diagnostic notes from a lower-level failure to its typed wrapper."""
-    copy_exception_notes(target, source)
-
-
 def _prepare_transaction(
     project_root: Path,
     rewrites: list[Rewrite],
@@ -836,14 +848,10 @@ def _prepare_transaction(
     """Stage exact images and durably publish an ordered prepared journal."""
     journal_path = _journal_path(project_root)
     if _journal_is_present(journal_path):
-        message = (
-            f"reconcile journal {journal_path} already exists; preserve it and run "
-            "'doc-lattice reconcile --recover'"
-        )
-        raise ReconcilePersistenceError(message)
+        raise ReconcilePersistenceError(_journal_already_exists_message(journal_path))
     staged_paths: list[Path] = []
     journal_entries: list[JournalEntry] = []
-    operation = "validating transaction destinations"
+    operation = _PREPARE_VALIDATING
     operation_path = project_root
     prepared_bytes = b""
     try:
@@ -853,7 +861,7 @@ def _prepare_transaction(
             rewrites,
             write_paths,
         )
-        operation = "staging transaction image"
+        operation = _PREPARE_STAGING
         for pending in pending_rewrites:
             rewrite = pending.rewrite
             destination = pending.destination
@@ -885,15 +893,15 @@ def _prepare_transaction(
             entries=tuple(journal_entries),
         )
         prepared_bytes = prepared.model_dump_json().encode("utf-8")
-        operation = "publishing prepared journal"
+        operation = _PREPARE_PUBLISHING_JOURNAL
         operation_path = journal_path
         atomic_create_bytes(
             journal_path,
             prepared_bytes,
-            prefix=f"{RECONCILE_JOURNAL_NAME}.",
+            prefix=_JOURNAL_STAGE_PREFIX,
         )
     except (KeyError, OSError, RuntimeError, ValueError) as primary:
-        if operation == "publishing prepared journal" and isinstance(primary, OSError):
+        if operation == _PREPARE_PUBLISHING_JOURNAL and isinstance(primary, OSError):
             _cleanup_failed_journal_publication(
                 project_root,
                 journal_path,
@@ -904,17 +912,14 @@ def _prepare_transaction(
         else:
             _cleanup_unpublished_stages(staged_paths, primary)
         if isinstance(primary, FileExistsError):
-            message = (
-                f"reconcile journal {journal_path} already exists; preserve it and run "
-                "'doc-lattice reconcile --recover'"
-            )
+            message = _journal_already_exists_message(journal_path)
         else:
             message = (
                 f"reconcile preparation failed while {operation} {operation_path}: "
                 f"{_cause_details(primary)}; no destination was changed"
             )
         error = ReconcilePersistenceError(message)
-        _copy_notes(error, primary)
+        copy_exception_notes(error, primary)
         raise error from primary
     loaded, entries, journal_bytes = _load_journal(project_root, journal_path)
     return _PreparedTransaction(loaded, entries, journal_path, journal_bytes)
@@ -929,7 +934,7 @@ def _commit_operation_error(
     error = ReconcilePersistenceError(
         f"reconcile commit failed while {operation} {path}: {_cause_details(cause)}"
     )
-    _copy_notes(error, cause)
+    copy_exception_notes(error, cause)
     return error
 
 
@@ -965,7 +970,7 @@ def _abort_prepared(
         error = ReconcileConflictError(message)
     else:
         error = ReconcilePersistenceError(message)
-    _copy_notes(error, primary)
+    copy_exception_notes(error, primary)
     raise error from primary
 
 
@@ -982,7 +987,7 @@ def _reset_prepared_journal(
             atomic_create_bytes(
                 journal_path,
                 prepared.journal_bytes,
-                prefix=f"{RECONCILE_JOURNAL_NAME}.",
+                prefix=_JOURNAL_STAGE_PREFIX,
             )
         except OSError as cause:
             raise _commit_operation_error(
@@ -1003,7 +1008,7 @@ def _reset_prepared_journal(
             atomic_replace_bytes(
                 journal_path,
                 prepared.journal_bytes,
-                prefix=f"{RECONCILE_JOURNAL_NAME}.",
+                prefix=_JOURNAL_STAGE_PREFIX,
             )
         except OSError as cause:
             raise _commit_operation_error(
@@ -1108,23 +1113,23 @@ def _commit_rewrites_locked(
         entries=prepared.journal.entries,
     )
     committed_bytes = committed.model_dump_json().encode("utf-8")
-    committed_durably = False
     try:
         atomic_replace_bytes(
             prepared.journal_path,
             committed_bytes,
-            prefix=f"{RECONCILE_JOURNAL_NAME}.",
+            prefix=_JOURNAL_STAGE_PREFIX,
         )
     except OSError as cause:
         primary = _commit_operation_error("marking journal committed", prepared.journal_path, cause)
         _abort_failed_marker(prepared, committed_bytes, primary)
-    committed_durably = True
-    if committed_durably:
-        _cleanup_transaction_artifacts(
-            prepared.entries,
-            prepared.journal_path,
-            committed_bytes,
-        )
+    # _abort_failed_marker never returns, so reaching this line is AD-5's point of no return:
+    # every destination is durable and the journal is durably marked committed. From here on
+    # recovery only cleans staged evidence, it never rolls a destination back.
+    _cleanup_transaction_artifacts(
+        prepared.entries,
+        prepared.journal_path,
+        committed_bytes,
+    )
 
 
 def _open_reconcile_lock_directory(project_root: Path) -> int:
@@ -1203,6 +1208,10 @@ def reconcile_lock(project_root: Path) -> Iterator[ReconcileLock]:
         capability = _new_reconcile_lock(project_root, directory_stat)
         yield capability
     finally:
+        # sys.exception() reports the exception propagating out of the with body, if any.
+        # A lock release or close failure must never replace that exception, since it is the
+        # reconcile failure the operator has to act on, so it is attached as a note instead
+        # and only surfaces as its own error on an otherwise clean exit.
         active_error = sys.exception()
         cleanup_errors: list[tuple[str, OSError]] = []
         if capability is not None:

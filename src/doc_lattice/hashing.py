@@ -3,8 +3,8 @@
 import hashlib
 
 # 128 bits (32 hex chars): collision-safe for any realistic doc corpus while keeping the
-# stored ``seen`` scalar short and readable in frontmatter. See the local-core design spec
-# section 5 for why the full SHA-256 digest is truncated rather than stored whole.
+# stored ``seen`` scalar short and readable in frontmatter. See ARCHITECTURE.md AD-4 for
+# why the full SHA-256 digest is truncated rather than stored whole.
 _HASH_HEX_LEN = 32
 
 

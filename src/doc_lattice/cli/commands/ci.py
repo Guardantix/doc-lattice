@@ -37,7 +37,11 @@ _GIT_TIMEOUT_SECONDS = 5
 
 
 def register_ci(app: typer.Typer) -> None:
-    """Register offline GitHub CI audit and managed refresh commands."""
+    """Register offline GitHub CI audit and managed refresh commands.
+
+    Args:
+        app: Typer application receiving the ``ci`` command group.
+    """
     ci_app = typer.Typer(no_args_is_help=True)
     app.add_typer(
         ci_app,
@@ -67,8 +71,8 @@ def register_ci(app: typer.Typer) -> None:
             findings = audit_repository(discovery, installed, identity, __version__)
             if findings:
                 for finding in findings:
-                    display_path = _display_finding_path(finding.path)
-                    runtime.write_stdout(f"{display_path}: {finding.code}: {finding.message}")
+                    finding_path = _display_finding_path(finding.path)
+                    runtime.write_stdout(f"{finding_path}: {finding.code}: {finding.message}")
                 exit_code = EXIT_FINDING
             else:
                 runtime.write_stdout("doc-lattice ci audit: ok")
@@ -193,6 +197,9 @@ def _repository_local_origin_urls(stdout: bytes) -> tuple[str, ...]:
     origins: list[str] = []
     for index in range(0, len(fields), 2):
         scope = fields[index]
+        # Only local and worktree scope records are read: a global or system gitconfig is
+        # ambient user or machine state rather than part of the reviewed repository, so it
+        # must not supply the repository identity this audit reports on.
         if scope not in {b"local", b"worktree"}:
             continue
         value = fields[index + 1]

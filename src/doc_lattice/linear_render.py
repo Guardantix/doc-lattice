@@ -40,8 +40,10 @@ def findings_json(findings: Sequence[Finding]) -> dict:
         findings: The ordered findings.
 
     Returns:
-        An object with a single ``findings`` key, each entry matching the spec 4.1
-        shape.
+        An object with a single ``findings`` key whose entries carry ``severity``,
+        ``node_id``, ``node_title``, ``node_path``, ``drifted_refs``, ``ticket_ref``,
+        ``reason``, and ``ticket`` (the ticket's JSON dump, or null when it was not
+        resolved).
     """
     return {
         "findings": [

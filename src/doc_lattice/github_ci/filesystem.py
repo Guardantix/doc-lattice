@@ -1,4 +1,4 @@
-"""Local filesystem operations for fixed managed GitHub CI artifacts."""
+"""Local filesystem operations for GitHub workflow discovery and fixed managed CI artifacts."""
 
 import difflib
 import os
@@ -16,10 +16,13 @@ from doc_lattice.persistence import atomic_create_bytes_at, atomic_replace_bytes
 
 from .identity import parse_repository, validate_final_release_version
 from .model import (
+    ARTIFACT_MARKER_PREFIX,
     BOOTSTRAP_SHEBANG,
     MANAGED_SCHEMA_LINE,
     MARKER_PREFIXES,
+    REPOSITORY_MARKER_PREFIX,
     VALID_ARTIFACT_ROLES,
+    VERSION_MARKER_PREFIX,
     ArtifactChange,
     ArtifactRole,
     InstalledArtifact,
@@ -39,6 +42,8 @@ _CANONICAL_PATHS: dict[ArtifactRole, PurePosixPath] = {
 _WORKFLOWS_DIRECTORY = PurePosixPath(".github/workflows")
 _WORKFLOW_SUFFIXES = (".yml", ".yaml")
 MAX_WORKFLOW_FILES = 256
+# Per-file read bound. Managed artifact reads share this bound with workflow discovery, so
+# one limit governs every file this module reads into memory.
 MAX_WORKFLOW_BYTES = 1_048_576
 MAX_CUMULATIVE_WORKFLOW_BYTES = 8_388_608
 _NONSTANDARD_LINE_SEPARATORS = ("\v", "\f", "\x85", "\u2028", "\u2029")
@@ -57,6 +62,12 @@ _NO_DESCRIPTOR = -1
 
 @dataclass(frozen=True, slots=True)
 class _WorkflowCandidate:
+    """One direct workflow file that passed pre-parse validation.
+
+    ``relative_path`` is repository-relative for display and parsing, ``logical_path`` is the
+    unresolved path used for re-stat, and ``resolved_path`` is the root-contained path to open.
+    """
+
     relative_path: Path
     logical_path: Path
     resolved_path: Path
@@ -151,6 +162,9 @@ def discover_workflows(root: Path) -> WorkflowDiscovery:
             display_directory,
             "GitHub workflow directory",
         )
+        # Called only for its refusals: the parent is restated after the absent-directory
+        # re-resolution so a parent that became a symlink in that window fails closed instead of
+        # being reported as "no workflows". A parent that is merely absent still means absence.
         _workflow_parent_exists(root, display_directory)
         return WorkflowDiscovery(directory_exists=False, documents=())
     directory = _resolve_repository_path(
@@ -196,6 +210,10 @@ def discover_workflows(root: Path) -> WorkflowDiscovery:
 
 
 def _bounded_workflow_names(directory: Path, display_directory: str) -> tuple[str, ...]:
+    """List direct workflow filenames in sorted order, refusing more than the file bound.
+
+    Accepts exactly ``MAX_WORKFLOW_FILES`` entries and refuses the first one past it.
+    """
     names: list[str] = []
     for entry in directory.iterdir():
         if not entry.name.endswith(_WORKFLOW_SUFFIXES):
@@ -229,7 +247,7 @@ def inspect_installed_artifacts(
     for artifact in expected:
         _validate_artifact_path(artifact)
         logical_destination = root / artifact.relative_path
-        destination = _resolve_destination(logical_destination, root, artifact, "inspect")
+        destination = _resolve_destination(logical_destination, root, artifact, operation="inspect")
         _require_real_artifact_ancestors(root, artifact.relative_path)
         data = _read_bounded_artifact_bytes(
             logical_destination,
@@ -371,6 +389,10 @@ def apply_changes(changes: tuple[ArtifactChange, ...]) -> None:
         return
     with _managed_artifact_lock(root) as lock:
         try:
+            # Validate every artifact reported current before mutating anything. The context
+            # manager refuses when a current destination no longer matches its preflight
+            # bytes, so drift in an artifact this batch will not write still stops publication
+            # before the first write lands.
             for change in changes:
                 if change.action != "current":
                     continue
@@ -417,6 +439,9 @@ def _managed_artifact_lock(root: Path) -> Iterator[_ManagedArtifactLock]:
         _require_managed_artifact_lock(lock, root)
         yield lock
     finally:
+        # sys.exception() is the exception currently propagating, or None on the clean path. A
+        # cleanup failure is attached as a note when something is already propagating, so cleanup
+        # never masks the primary refusal, and is raised on its own otherwise.
         active_error = sys.exception()
         cleanup_errors: list[tuple[str, BaseException]] = []
         try:
@@ -613,7 +638,7 @@ def _read_bounded_with_recheck(
         wording: Exact error strings for this call site.
 
     Returns:
-        The file bytes bounded to the per-file workflow limit.
+        The file bytes bounded to the shared per-file limit.
 
     Raises:
         ConfigError: If the read fails, exceeds the byte bound, or containment, identity, type,
@@ -701,14 +726,14 @@ def _read_workflow_candidate(root: Path, candidate: _WorkflowCandidate) -> bytes
     )
 
 
-def _workflow_parent_exists(root: Path, display_path: str) -> bool:
+def _workflow_parent_exists(root: Path, display: str) -> bool:
     """Validate the real ``.github`` parent before classifying workflows as absent."""
     logical_parent = root / _WORKFLOWS_DIRECTORY.parent
     return _real_directory_exists(
         logical_parent,
-        inspect_context=f"cannot inspect GitHub workflow parent for {display_path}",
-        symlink_message=f"symlink is not allowed in GitHub workflow path {display_path}",
-        directory_message=f"GitHub workflow parent must be a real directory: {display_path}",
+        inspect_context=f"cannot inspect GitHub workflow parent for {display}",
+        symlink_message=f"symlink is not allowed in GitHub workflow path {display}",
+        directory_message=f"GitHub workflow parent must be a real directory: {display}",
     )
 
 
@@ -776,15 +801,15 @@ def _resolve_within_root(
 def _resolve_repository_path(
     logical_path: Path,
     root: Path,
-    display_path: str,
+    display: str,
     kind: str,
 ) -> Path:
     """Resolve one read-only repository path without leaking an absolute display path."""
     return _resolve_within_root(
         logical_path,
         root,
-        outside_message=f"{kind} resolves outside the repository root: {display_path}",
-        resolve_context=f"cannot resolve {kind} {display_path}",
+        outside_message=f"{kind} resolves outside the repository root: {display}",
+        resolve_context=f"cannot resolve {kind} {display}",
     )
 
 
@@ -834,7 +859,7 @@ def _preflight(
     for artifact in artifacts:
         _validate_artifact_path(artifact)
         logical_destination = root / artifact.relative_path
-        destination = _resolve_destination(logical_destination, root, artifact, "inspect")
+        destination = _resolve_destination(logical_destination, root, artifact, operation="inspect")
         _require_real_artifact_ancestors(root, artifact.relative_path)
         before = _read_bounded_artifact_bytes(
             logical_destination,
@@ -897,6 +922,7 @@ def _resolve_destination(
     logical_destination: Path,
     root: Path,
     artifact: ManagedArtifactTarget,
+    *,
     operation: str,
 ) -> Path:
     """Resolve one fixed destination with typed path context."""
@@ -928,7 +954,7 @@ def _read_bounded_artifact_bytes(
         phase: Human word ("preflight" or "inspection") used in change diagnostics.
 
     Returns:
-        The existing bytes bounded to the per-file workflow limit, or ``None`` when the
+        The existing bytes bounded to the shared per-file limit, or ``None`` when the
         destination is absent.
 
     Raises:
@@ -959,7 +985,7 @@ def _read_bounded_artifact_bytes(
         destination,
         logical_destination,
         target_stat,
-        lambda: _resolve_destination(logical_destination, root, artifact, "recheck"),
+        lambda: _resolve_destination(logical_destination, root, artifact, operation="recheck"),
         wording,
     )
 
@@ -1001,7 +1027,7 @@ def _parse_managed_marker(
     if header[0] != MANAGED_SCHEMA_LINE:
         raise _marker_error(path, "managed schema must be exactly github-ci-v1")
 
-    role_prefix = f"{MARKER_PREFIXES[1]} "
+    role_prefix = f"{ARTIFACT_MARKER_PREFIX} "
     if not header[1].startswith(role_prefix):
         raise _marker_error(path, "artifact role line is missing or malformed")
     role = _parse_artifact_role(header[1][len(role_prefix) :], path)
@@ -1011,7 +1037,7 @@ def _parse_managed_marker(
             f"artifact role {role!r} does not match canonical role {artifact.role!r}",
         )
 
-    version_prefix = f"{MARKER_PREFIXES[2]} "
+    version_prefix = f"{VERSION_MARKER_PREFIX} "
     if not header[2].startswith(version_prefix):
         raise _marker_error(path, "version line is missing or malformed")
     version = header[2][len(version_prefix) :]
@@ -1020,7 +1046,7 @@ def _parse_managed_marker(
     except ConfigError as exc:
         raise _marker_error(path, str(exc)) from exc
 
-    repository_prefix = f"{MARKER_PREFIXES[3]} "
+    repository_prefix = f"{REPOSITORY_MARKER_PREFIX} "
     if not header[3].startswith(repository_prefix):
         raise _marker_error(path, "repository line is missing or malformed")
     repository_text = header[3][len(repository_prefix) :]
@@ -1118,6 +1144,9 @@ def _ensure_locked_artifact_ancestor(
     create: bool,
 ) -> None:
     """Require one descriptor-relative artifact ancestor to be a real directory."""
+    # The create path fsyncs every validated ancestor, not just one this call created: a retry
+    # after an interrupted run finds the directory already present and must still make that
+    # directory entry durable before the artifact is published into it.
     synchronize_parent = create
     try:
         ancestor_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
@@ -1274,6 +1303,9 @@ def _open_locked_artifact_parent(
                 )
                 _close_unowned_artifact_descriptor(child_fd, error, phase="child")
                 raise error
+            # The transfer closes the old parent itself, so park the sentinel across the call: the
+            # finally below must not close a descriptor the transfer already closed, and it must
+            # still close the new parent once the transfer has returned it.
             old_parent_fd = parent_fd
             parent_fd = _NO_DESCRIPTOR
             parent_fd = _transfer_locked_artifact_parent(
@@ -1390,20 +1422,19 @@ def _unchanged_artifact_parent(
         yield parent_fd
 
 
-def _resolve_change(change: ArtifactChange) -> tuple[Path, Path]:
-    """Re-resolve and authenticate one preflight destination before mutation."""
+def _resolve_change(change: ArtifactChange) -> None:
+    """Re-resolve one preflight destination before mutation and refuse a changed path."""
     artifact = change.artifact
     logical_destination = change.root / artifact.relative_path
     destination = _resolve_destination(
         logical_destination,
         change.root,
         artifact,
-        "resolve",
+        operation="resolve",
     )
     if destination != change.destination:
         path = artifact.relative_path.as_posix()
         raise ConfigError(f"managed artifact path changed after preflight: {path}")
-    return logical_destination, destination
 
 
 def _read_apply_bytes_at(parent_fd: int, artifact: ManagedArtifact) -> bytes:

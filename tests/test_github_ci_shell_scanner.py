@@ -304,6 +304,409 @@ PHASE_TWO_RUNTIME_REFUSALS = [
         "printf 'doc-' > s.sh; eval \"printf 'lattice reconcile' >> s.sh\"; bash s.sh",
         {},
     ),
+    # Issue #151: a redirection target spelled as a variable reference resolved to no resource
+    # identity at all, even when the variable holds a literal every reaching path assigns
+    # unconditionally. The write landed on a dynamic target the model discards, so the later
+    # script sink read a key nothing had written and the body certified while real bash ran the
+    # marker. The first row is the fixture issue #139 verified and excluded from the
+    # certify-direction differential; it now belongs on this side of the ledger.
+    (
+        "dynamic-resource-identity",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "literal-variable-input-target",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; P=task.sh; bash < \"$P\"",
+        {},
+    ),
+    (
+        # The record a ``read`` draws comes from the operand under ``<``, so the resolution has
+        # to reach the events before the input projection consumes them. Building stdin from the
+        # unresolved events read a resource nothing had written, and the identical body spelled
+        # ``read -r X < f.txt`` refused, so the two spellings disagreed on a flow real bash runs.
+        "literal-variable-read-source",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > f.txt; P=f.txt; read -r X < \"$P\""
+        "; printf '%s\\n' \"$X\" > task.sh; bash task.sh",
+        {},
+    ),
+    (
+        "literal-variable-append-target",
+        "P=task.sh; printf doc- > task.sh; printf 'lattice reconcile\\n' >> \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # Bash expands a redirection word BEFORE it applies the command's own prefix assignment,
+        # so this writes the marker to ``other.sh``. Resolving the word against the values the
+        # prefix assignment leaves behind would name ``task.sh`` and certify a body real bash
+        # runs the marker in, which is why the resolution reads the pre-command values.
+        "prefix-assignment-does-not-retarget-the-word",
+        "P=other.sh; P=task.sh printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # A loop entry invalidates the name it binds, and only an assignment can make it exact again.
+    # These three hold that invalidation to the name and the moment it applies, so restoring the
+    # over-refusal it removes cannot be spelled as withholding every name a body loops over.
+    (
+        # A subshell binding does not survive its scope, so the outer value still names the file
+        # the marker reaches. Invalidating a name because some scope assigns it would lose this.
+        "subshell-binding-does-not-retarget-the-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; (P=task.sh)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "assignment-after-a-loop-restores-the-word",
+        "for P in a; do :; done; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A loop binds in the environment it is entered in, and a subshell or a command substitution
+    # is not the shell the operand below is expanded in. Withdrawing the name from every table
+    # erased a value the enclosing shell provably keeps, so both certified a body whose marker
+    # bash writes to other.sh and runs. The pipeline spelling of the same shape is not separated
+    # this way and stays in KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS.
+    (
+        "subshell-loop-binding-does-not-retarget-the-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; ( for P in task.sh; do :; done )"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "command-substitution-loop-binding-does-not-retarget-the-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; X=$(for P in task.sh; do :; done)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        # Only a write through an alias makes its target stale, so binding one withdraws nothing:
+        # the second assignment here is what would write through R, and there is none.
+        "binding-a-nameref-leaves-its-target-exact",
+        "P=task.sh; declare -n R; R=P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "loop-binding-leaves-another-name-exact",
+        "P=task.sh; for Q in a; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash task.sh",
+        {},
+    ),
+    # A name a function body declares local is not a name it rebinds for its caller, so it is not
+    # one of the three rebindings the walk cannot order. Collecting it withdrew the caller's own
+    # exact value for the whole run body, and the function did not even have to be called.
+    (
+        "local-declaration-leaves-the-caller-word-exact",
+        "f(){ local P=other.sh; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # The declaration is reached here rather than merely parsed, and the body writes through
+        # its own local, so the caller's later operand still names the file the marker reaches.
+        "called-local-declaration-leaves-the-caller-word-exact",
+        'f(){ local P=other.sh; printf x > "$P"; }; f; P=task.sh'
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A body nothing calls rebinds nothing, and the withdrawal is what puts an operand back where
+    # issue #151 found it, so collecting from a definition alone let one uninvoked helper return
+    # the whole resolution to the certification it replaced. These two are the same shape the
+    # declaration rows above reject one construct at a time, in the two spellings a declaration
+    # does not cover: a plain assignment and an unset.
+    (
+        "uncalled-function-assignment-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "uncalled-function-unset-leaves-the-caller-word-exact",
+        "f(){ unset P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # Bash applies a prefix assignment for the duration of the command it prefixes and
+        # restores the name after it, so no iteration of this loop carries "other.sh" back to the
+        # operand below. Counting it as a name the body rebinds withdrew a value the loop never
+        # replaces, and the marker write landed on a target the model discards.
+        "loop-prefix-assignment-does-not-retarget-the-word",
+        "P=task.sh; for i in 1 2; do P=other.sh true; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # The same restoration one construct over: a prefix assignment inside a called body is
+        # applied for the duration of the command it prefixes and restored after it, so no call
+        # leaves it in the caller. Counting it withdrew the caller's exact value for the whole
+        # run body, which returned this marker flow to the certification issue #151 closed.
+        "called-body-prefix-assignment-does-not-retarget-the-word",
+        "f(){ P=other.sh /bin/true; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A call rebinds from the call onward, in the environment the call runs in, so a withdrawal
+    # covering the whole run body reached two shapes no call reaches. Both certified before the
+    # withdrawal moved to the call site, which is the pre-#151 certification arriving through the
+    # fix that closes it: the caller's later assignment gives the name a value no call can have
+    # changed, and a call an isolated environment contains rebinds nothing the parent shell reads.
+    (
+        "caller-assignment-after-a-call-restores-the-word",
+        "f(){ P=other.sh; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "assignment-after-a-loop-of-calls-restores-the-word",
+        "f(){ P=other.sh; }; P=task.sh; for i in 1 2; do f; done; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "subshell-call-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh; (f)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "command-substitution-call-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh; X=$(f)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "pipeline-stage-call-leaves-the-caller-word-exact",
+        "f(){ P=other.sh; }; P=task.sh; f | cat"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A write through a nameref alias is the same rebinding at the same two edges: a direct write
+    # to the referent ends the staleness the alias created, and an alias a subshell writes through
+    # reaches no table the parent shell reads.
+    (
+        "direct-write-after-an-alias-write-restores-the-word",
+        "declare -n R=P; R=other.sh; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "subshell-alias-write-leaves-the-referent-exact",
+        "P=task.sh; ( declare -n R=P; R=other.sh )"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A declaration builtin's operands are expanded before the builtin applies any of them, so a
+    # later operand reading an earlier name reads the value the command started with. Applying
+    # them left to right named the file the first operand assigns, which is a write recorded on a
+    # resource bash never opens while the one the marker reaches goes unmodeled. The append
+    # spelling is the measured exception: "declare A=task A+=.sh" leaves "task.sh", because the
+    # text it appends to is the one the same command applied.
+    (
+        "declaration-operand-reads-the-pre-command-value",
+        "printf 'echo safe\\n' > other.sh; A=task.sh; declare A=other.sh B=$A"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\"; bash task.sh",
+        {},
+    ),
+    (
+        "declaration-append-reads-the-applied-value",
+        "A=zz; declare A=task A+=.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$A\"; bash task.sh",
+        {},
+    ),
+    (
+        # A prefix assignment on an ordinary command is the control for the same ordering: those
+        # apply left to right, so "A=task.sh B=$A" leaves "B=task.sh" and the snapshot above must
+        # not reach them.
+        "prefix-assignments-apply-in-order",
+        "A=other.sh; A=task.sh B=$A"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\"; bash task.sh",
+        {},
+    ),
+    # A "readonly" declaration stores its own operand exactly, and it is every later assignment
+    # bash refuses, so the value the name carries here is the file the marker really reaches.
+    (
+        "readonly-declaration-names-its-own-value",
+        "readonly P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "declared-readonly-names-its-own-value",
+        "declare -r P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Bash refuses to unset a readonly name, reports it and keeps running, so the name still holds
+    # the value the declaration stored. Honouring the unset made the name unknown and returned the
+    # operand to the dynamic target it had before issue #151, so one added line disabled the
+    # resolution for a body the row above already refuses.
+    (
+        "unset-of-a-readonly-name-keeps-its-value",
+        "readonly P=task.sh; unset P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A declaration attribute withdraws the name it names from the projection, so a declaration
+    # bash never reaches withdrew a name over a command that does not exist at runtime and one
+    # unreachable word disabled the resolution for the rest of the run body. A branch
+    # "execution_status" proves untaken, a function body no call reaches, and a subshell whose
+    # declaration dies with it are the three shapes, each pinned for a "readonly" and for a value
+    # transforming attribute since the two withdraw through different halves of the same record.
+    (
+        "readonly-in-an-untaken-branch-sets-nothing",
+        "if false; then readonly P; fi; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "uppercase-attribute-in-an-untaken-branch-sets-nothing",
+        "if false; then declare -u P; fi; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-in-an-uncalled-body-sets-nothing",
+        "f(){ readonly P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "uppercase-attribute-in-an-uncalled-body-sets-nothing",
+        "f(){ declare -u P; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-a-subshell-makes-leaves-the-parent-writable",
+        "( readonly P ); P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "integer-attribute-a-subshell-makes-leaves-the-parent-exact",
+        "( declare -i P ); P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Which scope a "-r" binds in is the fourth shape, and it is the one that reaches a false
+    # certification through a declaration bash DOES reach. "local -r", and "declare -r" or
+    # "typeset -r" inside a body without "-g", restore the caller's variable on return, so reading
+    # any of them as readonly refused the later top-level assignment and left the table holding a
+    # value the run replaced: one unrelated declaration in a called helper disabled this
+    # resolution for the name for the rest of the run body.
+    (
+        "local-readonly-in-a-body-leaves-the-caller-writable",
+        "f(){ local -r P=zz; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "declared-readonly-in-a-body-leaves-the-caller-writable",
+        "f(){ declare -r P=zz; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "typeset-readonly-in-a-body-leaves-the-caller-writable",
+        "f(){ typeset -r P=zz; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The same wrong reading reaching the exact "read" projection rather than the operand: a
+    # function-scoped readonly IFS suppressed the top-level "IFS=:" that bash accepts, so the
+    # fields were split on the default separator and the composed marker went unmodeled.
+    (
+        "local-readonly-ifs-in-a-body-leaves-the-caller-splitting",
+        'f(){ local -r IFS=,; }; f; IFS=:; read -r A B <<< "doc-:lattice reconcile"'
+        '; printf \'%s%s\\n\' "$A" "$B" > r.sh; bash r.sh',
+        {},
+    ),
+    # "-f" and "-F" select shell functions, so a declaration carrying either attributes no
+    # variable at all. Reading "readonly -f" as a readonly variable froze the like-named one and
+    # returned its operand to the dynamic target that certified before issue #151 closed it.
+    (
+        "readonly-f-freezes-a-function-not-a-variable",
+        "g(){ :; }; readonly -f g; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "declare-rf-freezes-a-function-not-a-variable",
+        "g(){ :; }; declare -rf g; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-f-names-the-like-named-variable-nothing",
+        "P(){ :; }; readonly -f P; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A command bash never runs enters no scope either, so a loop inside an untaken branch binds
+    # nothing and the name an operand below spells is not withdrawn from the enclosing table.
+    (
+        "loop-in-an-untaken-branch-binds-nothing",
+        "P=task.sh; if false; then for P in x; do :; done; fi"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # What bash does with a write it refuses is measured rather than assumed. Only a plain
+    # assignment to a readonly name exits a non-interactive shell; every write a builtin performs
+    # reports the error and keeps running, leaving the name holding exactly the value it had.
+    # Withdrawing the name there discarded a value the run provably keeps and returned the operand
+    # to the dynamic target issue #151 exists to remove.
+    (
+        "rejected-readonly-builtin-write-keeps-the-value",
+        "readonly P=task.sh; export P=other.sh || :"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "rejected-readonly-read-write-keeps-the-value",
+        "readonly P=task.sh; read P <<< other.sh || :"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # A declaration builtin refuses its whole command for one option it does not take, applying no
+    # attribute and assigning nothing, so the letter alone does not spell one. "export" takes none
+    # of the value transforming letters and "readonly" takes no "-r": reading either as an
+    # attribute withdrew a name over a command bash rejects outright.
+    (
+        "export-u-is-an-invalid-option-and-attributes-nothing",
+        "P=task.sh; export -u P || :"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "readonly-r-is-an-invalid-option-and-attributes-nothing",
+        "readonly -r P || :; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # An attribute a called body binds for its caller takes effect where bash runs the call, not
+    # where the body is written. Reading it at the declaration bound the name before the call had
+    # happened, and one word inside one body disabled this resolution for every operand below it
+    # in the text, whichever side of the sink the call itself falls on.
+    (
+        "readonly-in-a-called-body-binds-at-the-call-not-the-definition",
+        "f(){ readonly P; }; P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; bash task.sh; f",
+        {},
+    ),
+    (
+        "readonly-in-a-called-body-leaves-an-earlier-assignment-applied",
+        "f(){ readonly P; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The same ordering read from the value transforming half, and the scope that decides it: a
+    # body's "-l" without "-g" is restored on return, so the caller's later assignment is stored
+    # exactly as it is spelled and its operand still names the file the marker reaches.
+    (
+        "lowercase-attribute-in-a-body-leaves-the-caller-untransformed",
+        "f(){ declare -l P; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
 ]
 
 # Fixtures whose marker reaches a real doc-lattice execution but whose refusal comes from a
@@ -487,6 +890,16 @@ PHASE_TWO_FAIL_CLOSED_REFUSALS = [
         "eval 'printf X=doc- > /dev/fd/1' > s.sh; source s.sh; eval \"${X}lattice reconcile\"",
         {},
         "shell source payload state cannot be represented",
+    ),
+    # Issue #151: the write target resolves to ``task.sh``, which puts the marker into the
+    # resource table the content-gated dynamic script operand guard consults. The operand itself
+    # is still a word this analysis does not resolve to a file, so the guard that already covers
+    # that shape reaches the body it could not see while the write stayed nameless.
+    (
+        "literal-variable-write-target-then-dynamic-operand",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash \"$P\"",
+        {},
+        "shell glob script operand state cannot be represented",
     ),
 ]
 
@@ -1050,6 +1463,417 @@ def test_process_substitution_read_by_non_sink_is_not_overconnected():
 
 def test_output_process_substitution_routes_writer_to_consumer_stdin():
     assert_taint_refusal("printf '%s%s\\n' doc- 'lattice reconcile' > >(bash)")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash)",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' ) > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } 1> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat | bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile'; } ; } > >(bash)",
+        "{ printf doc-; printf '%s\\n' 'lattice reconcile'; } > >(bash)",
+        "if :; then printf '%s%s\\n' doc- 'lattice reconcile'; fi > >(bash)",
+        "for word in x; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+        "while :; do printf '%s%s\\n' doc- 'lattice reconcile'; break; done > >(bash)",
+        "until :; do printf '%s%s\\n' doc- 'lattice reconcile'; done > >(bash)",
+        "case x in x) printf '%s%s\\n' doc- 'lattice reconcile';; esac > >(bash)",
+    ],
+    ids=(
+        "brace-group",
+        "subshell",
+        "explicit-descriptor",
+        "pipeline-consumer",
+        "nested-brace-group",
+        "multi-command-group",
+        "if-compound",
+        "for-compound",
+        "while-compound",
+        "until-compound",
+        "case-compound",
+    ),
+)
+def test_compound_scope_stdout_process_substitution_reaches_consumer_stdin(script: str):
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' >&3 ) 3> >(bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&2; } 2> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+    ],
+    ids=(
+        "brace-group-descriptor-3",
+        "subshell-descriptor-3",
+        "nested-brace-group-descriptor-3",
+        "brace-group-descriptor-2",
+        "brace-group-self-duplication",
+    ),
+)
+def test_compound_descriptor_binding_routes_writer_into_process_substitution(script: str):
+    # A ``>&N`` inside the compound resolves against the descriptor that compound bound, so a
+    # writer reaches the substitution's consumer through any descriptor, not only stdout. Each
+    # body below executes the shim under bash 5.2, and the ungrouped ``printf ... >&3 3> >(bash)``
+    # already failed closed, so leaving these unlinked was the same grouped-versus-ungrouped
+    # asymmetry issue #116 reports.
+    assert_taint_refusal(script)
+
+
+def test_compound_scope_stdout_file_redirect_does_not_feed_process_substitution():
+    result = scan_doc_lattice_invocations(
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } >out 2> >(bash)"
+    )
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ doc-lattice check; } >out 2> >(bash)",
+        "{ doc-lattice check >&3; } 3> >(cat)",
+    ],
+    ids=("stdout-to-file", "descriptor-to-consumer"),
+)
+def test_compound_process_substitution_binding_preserves_invocations(script: str):
+    # Over-refusal control for the two bindings above: neither routes an authored marker into an
+    # execution sink, so the ordinary invocation each body carries must survive intact rather than
+    # being swallowed by a refusal.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == CHECK
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash) > >(cat)",
+        "printf '%s%s\\n' doc- 'lattice reconcile' > >(bash) > >(cat)",
+    ],
+    ids=("compound-writer", "simple-writer"),
+)
+def test_chained_output_process_substitutions_certify_until_issue_187(script: str):
+    """Disclosure pin for issue #187, per AD-19.
+
+    Bash forks the second substitution's child with its own stdout already bound to the first
+    substitution's pipe, so these chain producer to ``cat`` to ``bash`` and the shim executes 5
+    times out of 5 under bash 5.2. Ordered descriptor replay keeps only the last binding per
+    descriptor, so the earlier consumer is dropped and both bodies certify. The gap predates the
+    compound-writer fix and is symmetric between the two spellings above, which is why it is
+    disclosed rather than pinned as fixed. A change that starts refusing either body closes #187
+    and should delete this pin instead of updating it.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; printf x >&3; } 3> >(bash)",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; printf x >&3; } 3> >(bash)",
+        "{ printf a >&3; printf b >&3; } 3> >(tee log)",
+    ],
+    ids=("two-commands", "nested-scope-and-command", "marker-free"),
+)
+def test_unordered_writers_into_one_output_substitution_fail_closed(script: str):
+    """Two writers reach one substitution and the evidence shape carries no order between them.
+
+    Each body routes two independent writers into one consumer through the descriptor the
+    compound bound. Their streams are separate scopes rather than members of one output
+    expression, so nothing here carries the ``Choice`` and ``Repeat`` structure their real
+    positions have, and selecting one writer dropped the other: the first body ran the shim 5
+    times out of 5 under bash 5.2 while the scanner certified it. The third body carries no marker
+    at all and is the cost of failing closed instead, which AD-18 discloses.
+    """
+    assert (
+        scan_doc_lattice_invocations(script).guard_id
+        == "taint.output-substitution.unordered-writers"
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 3> >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; printf x >&1; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+    ],
+    ids=("single-writer", "scope-subsumes-both", "self-duplication"),
+)
+def test_enclosing_writer_subsumes_the_writers_inside_it(script: str):
+    # Control for the guard above, and the reason it is not simply "more than one writer". A
+    # scope that writes to the same substitution already aggregates every writer inside it in
+    # execution order, so these stay ordinary marker flow rather than reaching the guard. Bash
+    # runs the shim in all three, so a guard refusal here would hide a true positive behind a
+    # bound.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.guard_id is None
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; } > >(bash) 3>&1",
+        "( printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat ) > >(bash) 3>&1",
+        "if :; then printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; fi > >(bash) 3>&1",
+    ],
+    ids=("brace", "subshell", "if"),
+)
+def test_a_writer_the_enclosing_stream_does_not_carry_is_not_subsumed(script: str):
+    """Lexical nesting does not decide subsumption, and a pipeline producer is where they part.
+
+    The producer sits inside the compound and reaches the substitution through descriptor 3, but
+    the compound's stdout holds ``cat`` rather than the producer, so nothing in the surviving
+    writer's stream carries the marker. Subsuming by nesting dropped the producer and certified
+    each body while bash 5.2 ran the shim 5 times out of 5. Two writers remain once containment
+    decides it, and the evidence carries no order between them, so they fail closed at the guard
+    above.
+    """
+    assert (
+        scan_doc_lattice_invocations(script).guard_id
+        == "taint.output-substitution.unordered-writers"
+    )
+
+
+def test_a_pipeline_producer_reaching_a_substitution_alone_stays_marker_flow():
+    # Control for the three bodies above, isolating the subsumption from the descriptor chain that
+    # carries the producer to the consumer. The compound binds descriptor 4 rather than its own
+    # stdout, so it never writes to the substitution and subsumes nothing, leaving the producer as
+    # the only writer. Bash runs the shim here too, so this stays ordinary marker flow.
+    result = scan_doc_lattice_invocations(
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&3 | cat; } 4> >(bash) 3>&4"
+    )
+
+    assert result.guard_id is None
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } | bash",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; } > out.sh\nbash out.sh\n",
+        "eval \"$({ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/null; })\"",
+    ],
+    ids=("output-substitution", "pipe", "static-file", "command-substitution"),
+)
+def test_compound_stream_ignores_inner_stdout_redirect_until_issue_201(script: str):
+    """Disclosure pin for issue #201, per AD-19.
+
+    A scope's aggregated stdout carries an inner command's output whether or not that command's own
+    descriptor replay left it there, so each body above refuses while bash 5.2 runs the shim 0
+    times out of 5. The last three refuse on `main` and predate the compound-writer fix; the first
+    is the same stream reaching the substitution sink that fix links. They are pinned together
+    because the cause is the aggregation rather than any one sink, so a fix has to move all four at
+    once and a change that refuses only some of them is in the wrong place.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } > >(bash)",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >&1; } | bash",
+        "X=/dev/stdout\n{ printf '%s%s\\n' doc- 'lattice reconcile' >\"$X\"; } | bash\n",
+        "{ printf '%s%s\\n' doc- 'lattice reconcile' >/dev/fd/1; } | bash",
+    ],
+    ids=("self-duplication", "self-duplication-pipe", "dynamic-target", "descriptor-path"),
+)
+def test_inner_stdout_redirect_that_stays_on_the_stream_still_refuses(script: str):
+    # Control for issue #201, and the boundary any fix there has to hold. Each body redirects
+    # stdout inside the compound and still leaves the content on the scope's stream, and bash 5.2
+    # runs the shim in all four. A narrowing that drops an inner command whose replay it cannot
+    # resolve, rather than only one it resolves away from stdout, launders content out of the
+    # stream and turns these into false certifications.
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 4> >(bash); } 4>/dev/null 3>&4",
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&3; } 4> out.sh; } 4>/dev/null 3>&4\n"
+        "bash out.sh\n",
+    ],
+    ids=("output-substitution", "static-file"),
+)
+def test_descriptor_duplication_is_not_snapshotted_until_issue_202(script: str):
+    """Disclosure pin for issue #202, per AD-19.
+
+    ``3>&4`` copies fd 4's target where it stands, so the inner ``4>`` cannot retarget it and bash
+    5.2 runs the shim 0 times out of 5 in both bodies. The chain records the duplication as an
+    alias to fd 4 instead, so both refuse. The static-file spelling refuses on `main` and predates
+    the compound-writer fix, which places the defect in the shared descriptor lookup rather than in
+    the substitution sink that fix links.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'false && bash -c "$(printf %s doc-)lattice"',
+        'if false; then bash -c "$(printf %s doc-)lattice"; fi',
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } > >(bash)",
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } | bash",
+        "false && { printf '%s%s\\n' doc- 'lattice reconcile'; } > out.sh\nbash out.sh\n",
+        "false && eval \"$(printf '%s%s\\n' doc- 'lattice reconcile')\"",
+    ],
+    ids=("simple", "if-false", "output-substitution", "pipe", "static-file", "command-subst"),
+)
+def test_statically_unreachable_branch_still_refuses_until_issue_203(script: str):
+    """Disclosure pin for issue #203, per AD-19.
+
+    The authored route takes its union over every branch and never evaluates a command's exit
+    status, so a branch behind a literal `false` is analyzed as if it runs. Bash runs the shim 0
+    times out of 5 in all six bodies and every one refuses. The first two carry no compound and no
+    redirection, which places the property in the route rather than in any sink, and all but the
+    substitution spelling refuse on `main` as well.
+    """
+    assert_taint_refusal(script)
+
+
+def test_literal_status_reachability_applies_inside_an_eval_payload():
+    # Control for issue #203, and what makes it a scoped extension rather than a design property:
+    # the payload sub-analysis already reduces a branch by literal command status, so the same
+    # construct certifies there and refuses on the authored route. The `true` spellings pin that
+    # the difference is the status rather than the branch.
+    assert (
+        scan_doc_lattice_invocations(
+            "eval 'if false; then X=doc-; fi'; eval \"$X\"lattice"
+        ).incomplete_reason
+        is None
+    )
+    assert_taint_refusal("eval 'if true; then X=doc-; fi'; eval \"$X\"lattice")
+    assert_taint_refusal('if false; then X=doc-; fi; eval "$X"lattice')
+    assert_taint_refusal('if true; then X=doc-; fi; eval "$X"lattice')
+
+
+def test_descriptor_duplication_reaching_the_rebound_target_still_refuses():
+    # Control for issue #202: the same nesting with ``>&4`` really does reach the substitution, and
+    # bash runs the shim 5 times out of 5, so the pin above isolates the missing snapshot rather
+    # than the nesting or the marker.
+    assert_taint_refusal(
+        "{ { printf '%s%s\\n' doc- 'lattice reconcile' >&4; } 4> >(bash); } 4>/dev/null 3>&4"
+    )
+
+
+def test_reversed_chained_output_process_substitutions_still_refuse():
+    # Control for issue #187: the same two substitutions in the other order leave the sink as the
+    # final descriptor-1 binding, which isolates the last-wins replay as the mechanism rather than
+    # the marker or the compound.
+    assert_taint_refusal("{ printf '%s%s\\n' doc- 'lattice reconcile'; } > >(cat) > >(bash)")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>/dev/null\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>&1\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>&-\nf 3> >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; } 3>/dev/null\n"
+        "f 3> out.sh\nbash out.sh\n",
+    ],
+    ids=("null", "duplicate", "close", "static-file"),
+)
+def test_definition_site_binding_masks_the_alias_guard_until_issue_204(script: str):
+    """Disclosure pin for issue #204, per AD-19.
+
+    A function body is analyzed once where it is defined, carrying the definition scope's
+    descriptor bindings rather than the call site's. The enclosing compound resolves the body's
+    ``>&3`` to a concrete target, so `taint.descriptor.output-alias-unresolved` never fires and
+    each body certifies while bash 5.2 runs the shim 5 times out of 5. The target the definition
+    site binds is irrelevant, and the last body shows the static-file sink masking the same guard,
+    which places the defect in the shared lookup rather than in the substitution sink the
+    compound-writer fix links. All four certify identically on `main`, so this predates that fix.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.incomplete_reason is None
+    assert result.invocations == NONE
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }\nf 3> >(bash)\n",
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }\nf 3> out.sh\nbash out.sh\n",
+    ],
+    ids=("output-substitution", "static-file"),
+)
+def test_call_site_descriptor_without_a_definition_binding_still_refuses(script: str):
+    # Control for issue #204, and the half of the isolation that makes it a masked guard rather
+    # than an unmodeled construct. These are the pinned bodies above with the definition lifted out
+    # of the compound and nothing else changed, bash runs the shim 5 times out of 5 in both, and
+    # the guard fires on the source it cannot name.
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.guard_id == "taint.descriptor.output-alias-unresolved"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)\nf\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > >(bash)\nf >/dev/null\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; } > out.sh\nbash out.sh\n",
+        "if :; then f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; fi 3> >(bash)\n"
+        "f 3>/dev/null\n",
+        "if :; then f() { printf '%s%s\\n' doc- 'lattice reconcile' >&3; }; fi 3> out.sh\n"
+        "bash out.sh\n",
+    ],
+    ids=(
+        "uninvoked",
+        "invoked-bare",
+        "invoked-rebound",
+        "uninvoked-static-file",
+        "if-rebound",
+        "if-static-file",
+    ),
+)
+def test_definition_inside_a_redirected_compound_over_refuses_until_issue_204(script: str):
+    """Disclosure pin for issue #204's over-refusing direction, per AD-19.
+
+    The body is credited to the scope it is defined in, so a definition inside a redirected
+    compound contributes to that compound's stream whether or not the function is ever invoked and
+    whatever descriptors its call site installs. Bash runs the shim 0 times out of 5 in all six and
+    every one refuses. The `uninvoked` spellings are what place the property in the definition site
+    rather than in the call site's descriptors, and the static-file spellings refuse on `main`,
+    which makes this the same widening #201 describes: the compound-writer fix gives one modeling
+    property a fourth consumer rather than introducing it.
+    """
+    assert_taint_refusal(script)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile'; }\n{ f; } > >(bash)\n",
+        "{ f() { printf '%s%s\\n' doc- 'lattice reconcile'; }; f; } > >(bash)",
+    ],
+    ids=("call-inside-compound", "definition-and-call-inside-compound"),
+)
+def test_a_call_inside_the_redirected_compound_still_refuses(script: str):
+    # Control for issue #204, and the boundary any fix there has to hold. Both bodies really do
+    # route the marker into the substitution and bash runs the shim 5 times out of 5, and both
+    # certify on `main`, so they are part of what closing #116 fixes. A call-site-aware model that
+    # stopped crediting the definition site must keep refusing these.
+    assert_taint_refusal(script)
 
 
 def test_multi_command_substitution_scope_sequences_stdout():
@@ -8012,6 +8836,63 @@ def test_loop_evidence_routes_repetition_scopes_into_their_pipelines(
     assert any(pipe.producer_scope_id == scope.scope_id for pipe in builder.pipes)
 
 
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ('printf a > "$P"', True),
+        ("printf a > $P", False),
+        ("printf a > out.txt", False),
+        ("printf a > /dev/null", False),
+        ("printf a >&2", False),
+        ("cat <<<hello", False),
+        ("cat <<EOF\nhello\nEOF", False),
+        ("printf a > >(cat)", False),
+        ('{ printf a; } > "$P"', False),
+    ],
+    ids=(
+        "dynamic-operand",
+        "unquoted-dynamic-operand",
+        "literal-operand",
+        "null-operand",
+        "descriptor-operand",
+        "herestring",
+        "heredoc",
+        "process-substitution",
+        "compound-scope-operand",
+    ),
+)
+def test_redirection_event_carries_its_word_only_where_the_projection_runs(
+    script: str,
+    expected: bool,
+):
+    """The producer side of the invariant issue #151's projection relies on.
+
+    ``_resolve_dynamic_redirection_targets`` decides what to project by testing the event's
+    target and its word, so a word attached to any other event would be projected against a
+    value table that does not apply to it, or retained past the stage that rewrites content into
+    scope-qualified expressions. A compound scope's redirection is the case that matters most:
+    the values that apply to it are the ones at compound entry, which this evidence shape has no
+    table for, and that gap is tracked as issue #188. An unquoted operand carries no word either,
+    because bash word-splits and pathname-expands it before opening anything, so its projected
+    text would name a file bash never touches (issue #189).
+    """
+    scanner = _ShellScanner(script, classify_commands=False)
+    builder = scanner.taint_builder
+
+    assert scanner.scan() == NONE
+    assert builder is not None
+    events = [
+        event
+        for events in (
+            *(command.redirections for command in builder.commands),
+            *(scope.redirections for scope in builder.scopes),
+        )
+        for event in events
+    ]
+    assert events
+    assert any(event.target_word is not None for event in events) is expected
+
+
 def test_case_evidence_routes_a_choice_scope_into_its_pipeline():
     scanner = _ShellScanner(
         "case x in x) printf a;; y) printf b;; esac | cat",
@@ -8462,8 +9343,170 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         {},
     ),
     (
-        "dynamic-resource-identity",
-        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        # Issue #151 over-refusal guard: resolving a literal-valued word to the resource it
+        # names must stay a resource identity, not a reason to refuse every dynamic target. This
+        # body writes no marker to the file it names, so it stays certified.
+        "marker-free-literal-variable-write-target",
+        "P=task.sh; printf 'make build\\n' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guard for the value table the projection reads. A "for" or "select"
+    # loop binds its variable for the whole body and leaves it bound after "done", and that
+    # binding is not one of the assignments the exact walk applies. Projecting an operand against
+    # the value the name held OUTSIDE the loop therefore named a file bash never opens, and the
+    # write on it refused a body whose marker only ever reaches the file the binding names. Both
+    # rows are certified because bash writes the marker to task.sh and runs the untouched
+    # other.sh, and the corresponding loop-bound write stays an unresolved operand of issue #188.
+    (
+        "loop-binding-shadows-an-outer-write-target",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        "escaped-loop-binding-shadows-a-later-write-target",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # The same over-refusal guard for the tables the withdrawal has to reach. Scope entry is
+    # recorded once in source order, while the values live in one table per function context and
+    # execution environment, so applying the withdrawal only where entry is first seen left every
+    # other table holding the shadowed value. A body whose first command runs in a subshell or a
+    # pipeline stage withdrew nothing from the enclosing environment, and a loop inside a function
+    # body withdrew nothing from its caller's table. Real bash writes the marker to task.sh and
+    # runs the untouched other.sh in all four.
+    (
+        "loop-binding-shadows-past-a-subshell-first-body",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; for P in task.sh; do (:); printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        "loop-binding-shadows-past-a-pipeline-first-body",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; for P in task.sh; do echo x | cat"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done; bash other.sh",
+        {},
+    ),
+    (
+        "loop-binding-shadows-after-a-nested-body",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do (:); done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "function-body-binding-shadows-its-caller-write-target",
+        "printf 'echo safe\\n' > other.sh; f() { for P in task.sh; do :; done; }; P=other.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # The over-refusal guard for scoping that withdrawal to the environment the loop binds in.
+    # A loop a subshell contains still shadows the write target inside its own body, so narrowing
+    # the withdrawal to the binding environment must not be spelled as withdrawing nothing there.
+    (
+        "loop-binding-shadows-inside-its-own-subshell",
+        "printf 'echo safe\\n' > other.sh; P=other.sh"
+        "; ( for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done )"
+        "; bash other.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guard for a name a function body unsets. Bash restores nothing on
+    # return, so the caller's own value is gone and the operand names no file at all: the
+    # redirection fails, task.sh is never created, and the marker never runs.
+    (
+        "function-body-unset-withdraws-its-caller-write-target",
+        "f(){ unset P; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guard for a write through a Bash nameref. The alias routing runs
+    # after this projection, so this table still holds the value the aliased name had before the
+    # write; projecting it recorded the marker on t1.sh and refused a body whose marker only ever
+    # reaches t2.sh. Bash writes t2.sh and runs the untouched t1.sh.
+    (
+        "nameref-declared-target-leaves-the-word-unresolved",
+        "printf 'echo safe\\n' > t1.sh; P=t1.sh; declare -n R=P; R=t2.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash t1.sh",
+        {},
+    ),
+    (
+        # The same guard for the spelling that binds the alias in two steps, where the write is
+        # the second assignment to it rather than the first.
+        "unbound-nameref-write-leaves-the-word-unresolved",
+        "printf 'echo safe\\n' > t1.sh; P=t1.sh; declare -n R; R=P; R=t2.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash t1.sh",
+        {},
+    ),
+    # Issue #189 is the operand Bash expands into a different word, and an authored brace
+    # expansion outside the quotes is one: the redirection is ambiguous and opens nothing at all.
+    (
+        "brace-suffixed-operand-opens-nothing",
+        "printf 'echo safe\\n' > task1.sh; P=task"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"{1,2}.sh; bash task1.sh",
+        {},
+    ),
+    # The over-refusal guard for excluding a declared local from that withdrawal. Leaving the
+    # caller's name exact has to stay a resource identity rather than a refusal of every body a
+    # function declares a local in: bash writes the marker to task.sh here and runs the untouched
+    # other.sh, and a local declaration of an unrelated name touches nothing at all.
+    (
+        "marker-free-local-declaration-write-target",
+        "f(){ local P=other.sh; }; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "local-declaration-of-another-name-leaves-the-word-exact",
+        "f(){ local Q=other.sh; }; P=task.sh; printf 'make build\\n' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 measured widening. Resolving an operand can name a descriptor rather than a
+    # file, because a variable holding "/dev/stdout", a "/dev/fd" alias, or a digit under ">&" is
+    # exactly what its literal spelling names. "_guarded_output_descriptors" reads a
+    # non-descriptor target as a direct binding, so before the resolution these bodies refused
+    # with "shell descriptor source cannot be represented" and now they certify: descriptor 3 is
+    # a transitive dependent of a standard stream rather than an unresolved binding. Real bash
+    # runs the marker in none of them, because the descriptor "exec" bound points at the enclosing
+    # shell's stream and not at the pipe, and the literal spelling of each already certified on
+    # the revision before #151. These rows are what makes that widening measured rather than
+    # assumed, so a change that unguards a descriptor for any other reason has to move them.
+    (
+        "exec-bound-descriptor-through-a-dev-stdout-variable",
+        "P=/dev/stdout; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-dev-fd-variable",
+        "P=/dev/fd/1; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-digit-variable",
+        "P=1; exec 3>& \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-literal-dev-stdout",
+        "exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+        {},
+    ),
+    # The operand resolution has to reach the evidence the pipe inputs are built from, not just
+    # the evidence after them: an output process substitution anywhere in the body sends every
+    # writer's output descriptors through a guarded replay, which reads an unresolved operand as
+    # a direct binding and guarded the descriptor a resolved one names. The pair below isolates
+    # that from the descriptor shape itself, since the literal spelling certified throughout.
+    (
+        "exec-bound-descriptor-through-a-variable-beside-a-substitution",
+        "P=/dev/stdout; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash;"
+        " true > >(cat)",
+        {},
+    ),
+    (
+        "exec-bound-descriptor-through-a-literal-beside-a-substitution",
+        "exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash; true > >(cat)",
         {},
     ),
     (
@@ -8510,6 +9553,222 @@ PHASE_TWO_MANDATORY_CERTIFICATIONS = [
         # runs nothing.
         "script-operand-is-not-a-c-payload",
         "A=doc-; B='lattice reconcile'; export A B; timeout 60 bash '$A$B'",
+        {},
+    ),
+    # Issue #151 over-refusal guards for narrowing the function-body withdrawal to the bodies a
+    # call can reach. A body that IS called still withdraws, so the operand keeps the target it
+    # had, the marker write lands on the file the call names, and the sink below opens a file bash
+    # never wrote. The third row calls through a bounded static ``eval`` input, which is the other
+    # half of the called-name notion the later call-site resolution is built from.
+    (
+        "called-function-assignment-withdraws-the-caller-word",
+        "f(){ P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "called-function-unset-withdraws-the-caller-word",
+        "f(){ unset P; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "eval-called-function-withdraws-the-caller-word",
+        "f(){ P=other.sh; }; P=task.sh; eval f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guards for keeping the scope withdrawal inside the projection. It
+    # used to pop the name from the shared exact table and mark it unknown, which every other
+    # reader of that table saw: an unknown ``IFS`` makes a later ``read`` a builtin write the
+    # model cannot represent, so each of these marker-free bodies failed the whole scan closed
+    # rather than leaving one redirection operand dynamic.
+    (
+        "marker-free-loop-binding-leaves-a-later-read-scannable",
+        "for IFS in , ; do :; done; printf 'task.sh\\n' | { read -r X; bash \"$X\"; }",
+        {},
+    ),
+    (
+        "marker-free-uncalled-function-loop-leaves-a-later-read-scannable",
+        "printf 'a b\\n' > f; g(){ for i in 1 2; do IFS=:; done; }; read -r A B < f; echo \"$A\"",
+        {},
+    ),
+    (
+        "marker-free-loop-prefix-assignment-leaves-a-later-read-scannable",
+        "printf 'a b\\n' > f; while false; do IFS=: true; done; read -r A B < f; echo \"$A\"",
+        {},
+    ),
+    # Issue #151 over-refusal guards for withdrawing a call's rebinding at the call rather than
+    # for the whole run body. Bash writes the marker to the file the call named and runs an
+    # untouched one, so a withdrawal that stopped reaching one of these shapes would name
+    # "task.sh" as the marker's resource and refuse a body whose marker never runs. The prefix
+    # assignment is the exception the same rows measure from the other side: it is restored after
+    # the command it prefixes, so "task.sh" IS the file bash writes and "other.sh" the untouched
+    # one.
+    (
+        "marker-free-called-body-prefix-assignment-runs-an-untouched-file",
+        "f(){ P=other.sh /bin/true; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-caller-assignment-after-a-call-runs-an-untouched-file",
+        "f(){ P=other.sh; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-subshell-call-runs-an-untouched-file",
+        "f(){ P=other.sh; }; P=task.sh; (f)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-subshell-alias-write-runs-an-untouched-file",
+        "P=task.sh; ( declare -n R=P; R=other.sh )"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-direct-write-after-an-alias-write-runs-an-untouched-file",
+        "declare -n R=P; R=other.sh; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # The shapes the call-site withdrawal has to keep reaching, beside the plain, unset and
+    # "eval" spellings already above. A call reaches the bodies its own body calls, and a loop
+    # header inside a body binds in the caller, so each still withdraws and leaves the operand
+    # dynamic; bash writes the marker to "other.sh" and runs an untouched "task.sh", so a
+    # withdrawal that stopped reaching one of them would resolve the operand to "task.sh" and
+    # refuse a body whose marker never runs. The last two are the release running the other way:
+    # a call or an alias write after one restores the withdrawal the assignment released.
+    (
+        "marker-free-nested-call-withdraws-through-the-call-graph",
+        "g(){ f; }; f(){ P=other.sh; }; P=task.sh; g"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-loop-binding-in-a-called-body-withdraws-the-caller-word",
+        "f(){ for P in other.sh; do :; done; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-call-after-a-release-withdraws-again",
+        "f(){ P=other.sh; }; f; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-alias-write-after-a-release-withdraws-again",
+        "declare -n R=P; R=x.sh; P=task.sh; R=other.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guards for the values a declaration builtin does not store as the
+    # assignment spells them. Each of these writes the marker somewhere bash never runs it, so
+    # reading the table as exact refused a body whose marker stays where it was written: the
+    # operand list is expanded before the builtin applies it, a case-converting attribute stores
+    # a name this table cannot spell, and a write bash refuses leaves the name where it was.
+    (
+        "marker-free-declaration-operand-reads-the-pre-command-value",
+        "printf 'echo safe\\n' > task.sh; printf 'echo safe\\n' > other.sh; A=other.sh"
+        "; declare A=task.sh B=$A; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\""
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-declaration-operand-with-an-unset-source",
+        "declare A=task.sh B=$A; printf '%s%s\\n' doc- 'lattice reconcile' > \"$B\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-case-converting-attribute",
+        "printf 'echo safe\\n' > task.sh; declare -u P; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-write-a-readonly-name-refuses",
+        "printf 'echo safe\\n' > other.sh; readonly P=task.sh; P=other.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # A shell parameter bash gives its own value to is the case-converting attribute above with
+    # the attribute already set and no declaration in the run body to read it from, so an exact
+    # table reading the assignment's own text named a file bash never opens. A counter, an
+    # integer attribute bash sets itself, and an array bash maintains are the three families.
+    (
+        "marker-free-counter-parameter",
+        "printf 'echo safe\\n' > task.sh; SECONDS=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$SECONDS\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-line-number-parameter",
+        "printf 'echo safe\\n' > task.sh; LINENO=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$LINENO\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-array-parameter",
+        "printf 'echo safe\\n' > task.sh; GROUPS=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$GROUPS\"; bash task.sh",
+        {},
+    ),
+    (
+        # "DIRSTACK" is read back from its own elements exactly as "GROUPS" is, so the operand
+        # expands to a directory path and the redirect opens nothing named "task.sh".
+        "marker-free-directory-stack-parameter",
+        "printf 'echo safe\\n' > task.sh; DIRSTACK=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$DIRSTACK\"; bash task.sh",
+        {},
+    ),
+    (
+        # Bash overwrites "_" with the last argument of the command just run, so the assignment's
+        # own text is never what the operand below expands to.
+        "marker-free-last-argument-parameter",
+        "printf 'echo safe\\n' > task.sh; _=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$_\"; bash task.sh",
+        {},
+    ),
+    # Issue #151 over-refusal guards for the withdrawal being transitive. A copy of a withdrawn
+    # name republishes the stale value under a fresh name, so projecting it named a file the run
+    # never opens in exactly the direction the withdrawal exists to prevent. The clean copy below
+    # is the control that keeps the transitive test from withdrawing every copy there is.
+    (
+        "marker-free-copy-of-a-call-rebound-name",
+        "printf 'echo safe\\n' > task.sh; f(){ P=other.sh; }; P=task.sh; f; Q=$P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$Q\"; bash task.sh",
+        {},
+    ),
+    (
+        "marker-free-copy-of-a-loop-bound-name",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do :; done; Q=$P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$Q\"; bash other.sh",
+        {},
+    ),
+    (
+        "marker-free-copy-of-an-attributed-name",
+        "printf 'echo safe\\n' > task.sh; declare -u P; P=task.sh; Q=$P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$Q\"; bash task.sh",
+        {},
+    ),
+    (
+        # A nameref stands for no value of its own here, so releasing the alias's own name at its
+        # declaration projected the operand against the value the referent held at that point.
+        "marker-free-alias-own-name-stays-withdrawn",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; declare -n R=P; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$R\"; bash other.sh",
+        {},
+    ),
+    (
+        # The attribute is attached to a name no word of the command spells, so the readable
+        # operands carry none of it and the table below kept the assignment's own text.
+        "marker-free-attribute-on-an-unreadable-name",
+        "printf 'echo safe\\n' > task.sh; N=P; declare -gu \"$N\"; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
         {},
     ),
 ]
@@ -8633,32 +9892,18 @@ def test_fail_closed_refusal_fixture_executes_marker_under_real_bash(
     assert executed, stderr
 
 
-# Issue #139: "dynamic-resource-identity" is a verified exception, not a fixture bug. Its write
-# target is spelled "$P", a variable reference, so the scanner classifies it as a
-# DynamicResourceTarget at the redirection site and never connects it to the literal "task.sh"
-# read target -- even though P is assigned the literal "task.sh" a line earlier and the two
-# resources are the same file at runtime. ARCHITECTURE.md documents "dynamic resource aliases" as
-# part of the designed absence-of-evidence boundary (not the fail-closed guarantee's scope), and
-# the open gaps in that boundary are tracked as separate issues (#125-#141) rather than folded
-# into this one. Confirmed under real bash: this fixture's doc-lattice stub DOES execute, so it
-# is intentionally excluded from the "never executes" assertion below and tracked instead as
-# issue #151, rather than silently dropped or asserted false.
-_DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP = "dynamic-resource-identity"
+# Issue #139 recorded "dynamic-resource-identity" here as the one verified exception to the
+# certify-direction differential: its write target was spelled "$P", so the scanner classified it
+# as a DynamicResourceTarget and never connected it to the literal "task.sh" read target, even
+# though P held that literal unconditionally. Issue #151 closed that gap, so the fixture moved
+# into PHASE_TWO_RUNTIME_REFUSALS and every row below is held to the assertion without exception.
 
 
 @pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
 @pytest.mark.parametrize(
     ("_description", "script", "extra_environment"),
-    [
-        row
-        for row in PHASE_TWO_MANDATORY_CERTIFICATIONS
-        if row[0] != _DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP
-    ],
-    ids=[
-        row[0]
-        for row in PHASE_TWO_MANDATORY_CERTIFICATIONS
-        if row[0] != _DYNAMIC_RESOURCE_ALIAS_ABSENCE_OF_EVIDENCE_GAP
-    ],
+    PHASE_TWO_MANDATORY_CERTIFICATIONS,
+    ids=[row[0] for row in PHASE_TWO_MANDATORY_CERTIFICATIONS],
 )
 def test_phase_two_mandatory_certification_fixture_does_not_execute_under_bash(
     _description,
@@ -8684,6 +9929,582 @@ def test_phase_two_mandatory_certification_fixture_does_not_execute_under_bash(
         f"certified fixture {_description!r} executed the doc-lattice stub under real bash: "
         f"{stderr}"
     )
+
+
+# (description, script, extra_environment) triples for the operand shapes issue #151's
+# resolution does NOT reach. Every one of them certifies while real bash runs the marker, so they
+# are characterized false certifications rather than true negatives, and they must never join
+# PHASE_TWO_MANDATORY_CERTIFICATIONS. They are pinned in both directions below: the scan is held
+# to certifying, and the same differential the refusal fixtures use is held to the marker
+# executing. Closing the tracked issue flips both assertions at once, which is what stops the gap
+# from being closed or widened unnoticed. All of them predate #151 and behave identically on the
+# revision before it, so they are its siblings, not its regressions.
+KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS = [
+    # Issue #188: the projection runs per simple command, against the exact table in effect
+    # there. A compound command's redirections belong to the scope and apply from compound entry,
+    # which this evidence shape carries no value table for, and a function body's or loop body's
+    # assignments are conditional in this model, so the exact table inside them is empty.
+    (
+        "compound-scope-word",
+        "P=task.sh; { printf doc-; printf 'lattice reconcile'; } > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "function-body-word",
+        "f() { P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; }; f; bash task.sh",
+        {},
+    ),
+    (
+        "loop-binding-word",
+        "for P in task.sh; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; done"
+        "; bash task.sh",
+        {},
+    ),
+    # Issue #188, the same conditional status reached through the two other constructs that set
+    # it. A "case" arm and a "&&"/"||" operand are conditionally executed exactly as a function
+    # body and a loop body are, so an assignment inside one is unknown from that point and the
+    # operand below keeps the dynamic target every unresolved operand has. They are pinned
+    # separately from the two rows above because the same rule reaches them through a different
+    # construct, so a narrowing of that rule that leaves the rows above passing would turn either
+    # of these into a live regression with the whole suite green.
+    (
+        "case-arm-word",
+        "P=other.sh; case a in a) P=task.sh;; esac"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "and-list-word",
+        "P=other.sh; true && P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "or-list-word",
+        "P=other.sh; false || P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #188, the other side of the same withdrawal. A name a loop binds is withdrawn for the
+    # body and for everything after "done", because this walk has no value for what the binding
+    # left it holding; a name the body assigns is withdrawn from loop entry, because the next
+    # iteration carries that value back to a use above the assignment along an edge a
+    # source-order walk has no shape for. Both leave the operand where the revision before #151
+    # left every operand, so they are that resolution's edge rather than its regression. The
+    # loop header is the same withdrawal reaching one command too early: bash expands the header
+    # before it binds anything, so the value there is the one the body never sees.
+    (
+        "loop-binding-after-done-word",
+        "for P in task.sh; do :; done; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "empty-loop-list-binding-word",
+        "P=task.sh; for P in $Q; do :; done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "loop-body-reassigned-word",
+        "P=safe.sh; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\""
+        "; P=task.sh; done; bash task.sh",
+        {},
+    ),
+    (
+        # A loop a pipeline stage contains binds in that stage and in nothing the operand below
+        # can observe, but the environment a pipeline allocates is not a scope, so the withdrawal
+        # cannot be separated from the enclosing shell's table the way the subshell and command
+        # substitution spellings of this shape are.
+        "pipeline-loop-binding-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; for P in task.sh; do :; done | cat"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "loop-header-word",
+        "P=task.sh"
+        "; for P in $(printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; echo a); do :; done"
+        "; bash task.sh",
+        {},
+    ),
+    # Issue #189: bash word-splits and pathname-expands an unquoted operand before opening
+    # anything, so the text is a pattern or a field list rather than the name of the file the
+    # marker reaches. The word is not projected at all for that reason, which leaves the unquoted
+    # spelling exactly where the literal spelling already sat.
+    (
+        "glob-valued-operand",
+        "printf x > task.sh; P='ta*.sh'; printf '%s%s\\n' doc- 'lattice reconcile' > $P"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "glob-literal-operand",
+        "printf x > task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > ta*.sh; bash task.sh",
+        {},
+    ),
+    (
+        "word-split-valued-operand",
+        "P='task.sh '; printf '%s%s\\n' doc- 'lattice reconcile' > $P; bash task.sh",
+        {},
+    ),
+    (
+        # The same class one step over: the reference is quoted and the pattern is not, so bash
+        # expands the reference and then pathname-expands the result. The word is not carried for
+        # that reason either, which leaves this spelling where "glob-literal-operand" above sits.
+        "glob-suffixed-operand",
+        "printf 'echo safe\\n' > task1.sh; P=task"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"*.sh; bash task1.sh",
+        {},
+    ),
+    # Issue #190: the word lowering builds a closed content expression for a plain reference and
+    # not for a parameter expansion that transforms, indexes, defaults, or indirects its value,
+    # so the exact projection returns nothing to name the operand with.
+    (
+        "suffix-strip-operand",
+        "P=task.sh.txt; printf '%s%s\\n' doc- 'lattice reconcile' > \"${P%.txt}\"; bash task.sh",
+        {},
+    ),
+    (
+        "indirect-operand",
+        "T=task.sh; P=T; printf '%s%s\\n' doc- 'lattice reconcile' > \"${!P}\"; bash task.sh",
+        {},
+    ),
+    (
+        "array-element-operand",
+        "A=(task.sh); printf '%s%s\\n' doc- 'lattice reconcile' > \"${A[0]}\"; bash task.sh",
+        {},
+    ),
+    (
+        "default-value-operand",
+        "P=; printf '%s%s\\n' doc- 'lattice reconcile' > \"${P:-task.sh}\"; bash task.sh",
+        {},
+    ),
+    # A write through a Bash nameref is routed to the name the alias stands for only after this
+    # projection runs, so the aliased name still holds its pre-alias value here and no operand is
+    # projected against it. That withdrawal reaches the caller-visible spelling below as well as
+    # the function-local one, and it leaves both where every unresolved operand sits.
+    (
+        "nameref-alias-target-word",
+        "P=t1.sh; declare -n R=P; R=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #188, the residue of excluding a declared local from the function-body withdrawal. A
+    # name a body assigns plainly still withdraws, and so do the three spellings that reach the
+    # caller through a declaration builtin: a nameref alias, whose later write is recorded under
+    # the alias rather than the name it stands for; "declare -g", which is a global write and so
+    # is not "builtin_local" at all; and options this scan cannot read, which may spell "-g". A
+    # plain assignment after a declaration in the same body withdraws too, since this pass tracks
+    # no per-body declaration state. Each keeps the operand where every unresolved operand sits,
+    # which is what these rows record.
+    (
+        "function-plain-assignment-word",
+        "f(){ P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "local-nameref-alias-word",
+        "f(){ local -n r=P; r=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "declare-global-in-a-body-word",
+        "f(){ declare -g P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "unreadable-declaration-options-word",
+        "O=-g; f(){ local $O P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        "assignment-after-a-local-declaration-word",
+        "f(){ local P; P=other.sh; }; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #205: the certify-direction half of the residue AD-18 discloses for a rebinding no
+    # evidence carries. These two are resolved rather than unresolved, and resolved to the value
+    # the name held before an "eval" payload or a sourced file replaced it, so the marker write
+    # lands on a resource bash never opens while the file it really reaches goes unmodeled. The
+    # refusing half of the same residue is pinned by
+    # "test_rebinding_this_table_does_not_record_keeps_the_prior_value", which is also where the
+    # reason not to clear the table at these commands is recorded.
+    (
+        "eval-payload-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; eval 'P=task.sh'"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "sourced-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; printf 'P=task.sh\\n' > vars.sh"
+        "; source vars.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The same residue in a third construct: "getopts" writes its name operand in the current
+    # shell, and no evidence records that write, so the name keeps the value it held before. Both
+    # spellings are pinned because the write reaches the caller from a function body and from the
+    # top level alike, which is why withdrawing the name where a body rebinds it would not even
+    # reach the second row.
+    (
+        "getopts-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; f(){ OPTIND=1; getopts x P; }; f -x"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash x",
+        {},
+    ),
+    (
+        "top-level-getopts-rebound-word",
+        "printf 'echo safe\\n' > safe.sh; P=safe.sh; OPTIND=1; getopts x P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash '?'",
+        {},
+    ),
+    # The same residue in two further constructs. A "${P:=q}" or "${P=q}" in an ordinary command's
+    # word assigns in the current shell and is recorded as that command's assignments, which no
+    # value table applies, so the name keeps whatever it held before; the compound-redirection
+    # spelling of the same expansion IS recorded, as the scope's loop bindings. A trap handler is
+    # a payload this scan does not read at all, and bash runs it between the commands around it.
+    # Neither has an over-refusing spelling of its own here: an unset name leaves the operand
+    # dynamic rather than resolved, which is why only the certify direction appears in this table
+    # for the first, while the second's refusing direction is pinned with the "eval" rows.
+    (
+        "conditional-expansion-rebound-word",
+        'unset P; : "${P:=task.sh}"'
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "trap-rebound-word",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; trap 'P=task.sh' DEBUG"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # The certify-direction half of the value the operand-naming pass cannot carry. That pass
+    # builds no stdin, because building stdin is what needs the pipe inputs it feeds, so a name a
+    # "read" supplies is unknown there and the operand keeps its dynamic target.
+    # "test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs" pins the
+    # over-refusing half of the same residue.
+    #
+    # What separates this family from the here-string and heredoc spellings, which refuse, is
+    # whether the record is inline literal text: those two carry theirs in the redirection itself,
+    # while a pipe, a process substitution and a plain file all draw it from a resource, which
+    # yields a deferred projection rather than an exact value here. The file spelling is pinned
+    # with the other two for that reason, since reading the discriminator as "a redirection the
+    # naming pass does read" puts it on the refusing side, where it does not sit.
+    (
+        "pipe-read-supplied-word",
+        "echo task.sh | { read -r P; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; }"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "process-substitution-read-supplied-word",
+        "read -r P < <(echo task.sh)"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "file-read-supplied-word",
+        "printf 'task.sh\\n' > n.txt; read -r P < n.txt"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    # Issue #188, the loop back edge under the two rebindings a command performs outside its own
+    # assignments. A call into a body that assigns in its caller, and a write through a nameref
+    # alias, both reach a use above them on the next iteration along the edge a source-order walk
+    # has no shape for, so the name is withdrawn from loop entry exactly as a body's own
+    # assignment is. Each spelling is pinned at both files, because bash writes the marker to
+    # "task.sh" on the first iteration and to "other.sh" on the second and the operand models
+    # neither: projecting either value alone would name the file the other iteration opens, which
+    # is the write on the wrong resource the withdrawal exists to prevent.
+    (
+        "loop-call-rebinding-word",
+        "f(){ P=other.sh; }; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; f; done"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "loop-call-rebinding-later-file-word",
+        "f(){ P=other.sh; }; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; f; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        "loop-alias-write-word",
+        "declare -n R=P; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; R=other.sh; done"
+        "; bash task.sh",
+        {},
+    ),
+    (
+        "loop-alias-write-later-file-word",
+        "declare -n R=P; P=task.sh"
+        "; for i in 1 2; do printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; R=other.sh; done"
+        "; bash other.sh",
+        {},
+    ),
+    (
+        # The coarse side of that back edge. A call an isolated environment contains rebinds
+        # nothing the enclosing shell reads, and the withdrawal at the call already says so, but
+        # the loop entry it also feeds carries no environment: a scope withdraws the names every
+        # command under it rebinds, so the operand above stays dynamic for the whole loop. The
+        # unlooped spelling of this body is "subshell-call-leaves-the-caller-word-exact", which
+        # refuses.
+        "subshell-call-in-a-loop-word",
+        "f(){ P=other.sh; }; P=task.sh; for i in 1 2; do (f); done"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        # A call withdraws the names of every body it can reach, so the operand below is dynamic
+        # rather than resolved to the file the call left the name naming. This is the plain
+        # withdrawal of "function-plain-assignment-word" reached through the call graph.
+        "nested-call-rebinding-word",
+        "g(){ f; }; f(){ P=other.sh; }; P=task.sh; g"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    (
+        # A body's write through a nameref alias lands on the name the alias stands for, which no
+        # assignment in the body spells, so the call withdraws it through the alias record rather
+        # than through the body's assignments. The operand is left where every withdrawn operand
+        # sits.
+        "alias-write-in-a-called-body-word",
+        "f(){ R=other.sh; }; declare -n R=P; P=task.sh; f"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        {},
+    ),
+    # Issue #206: a declaration attribute decides what bash stores rather than what the assignment
+    # spells, and this evidence carries the assignment's own text, so the name is withdrawn from
+    # the projection and the operand keeps the dynamic target every withdrawn operand has.
+    # Recording the assignment's text instead named a resource the run never opens, which is the
+    # refusing half these rows' guards in PHASE_TWO_MANDATORY_CERTIFICATIONS pin. Tracking what
+    # bash really stores is the residue: #206 owns the three conversions whose result is a pure
+    # function of the text, and an "-i" needs the arithmetic evaluator issue #205 tracks.
+    (
+        "uppercase-attribute-word",
+        "declare -u P; P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
+        {},
+    ),
+    (
+        "lowercase-attribute-word",
+        "declare -l P; P=TASK.SH; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "integer-attribute-word",
+        "declare -i P; P=1+1; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash 2",
+        {},
+    ),
+    (
+        "attribute-and-value-in-one-declaration-word",
+        "declare -u P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
+        {},
+    ),
+    # The controls for the three shapes a declaration is not read in at all, which
+    # PHASE_TWO_RUNTIME_REFUSALS pins as refusing. Each of these is a declaration bash does reach,
+    # so the withdrawal still applies and the operand keeps the dynamic target every withdrawn
+    # operand has. Without them the gate that skips an unreachable declaration could be widened
+    # into one that skips every declaration and no row would notice.
+    (
+        "attribute-a-called-body-sets-globally-word",
+        "f(){ declare -gu P; }; f; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash TASK.SH",
+        {},
+    ),
+    (
+        "conditional-attribute-word",
+        '[ -n "$Q" ] && declare -u P; P=task.sh'
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        {},
+    ),
+    (
+        "attribute-a-subshell-inherits-word",
+        "declare -u P; ( P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\" )"
+        "; bash TASK.SH",
+        {},
+    ),
+    # The certify half of the same mismatch for a shell parameter bash gives its own value to.
+    # "SECONDS=task.sh" stores 0 and "LINENO=task.sh" stores the line number, so bash writes the
+    # marker into a numeric file and runs it while the operand keeps the dynamic target the
+    # withdrawal leaves it. This is "integer-attribute-word" reached without a declaration to
+    # read, and what bash really stores is the residue issue #205 tracks.
+    (
+        "counter-parameter-word",
+        "SECONDS=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$SECONDS\"; bash 0",
+        {},
+    ),
+    (
+        "line-number-parameter-word",
+        "LINENO=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$LINENO\"; bash 1",
+        {},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("_description", "script", "_environment"),
+    KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS,
+    ids=[row[0] for row in KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS],
+)
+def test_unresolved_redirection_operand_gap_certifies(_description, script, _environment):
+    """The edge of issue #151's resolution, pinned as certifying per AD-19.
+
+    These are not true negatives. The companion test below runs the same real-bash differential
+    the refusal fixtures use and requires the marker to execute, so the pin records a known false
+    certification with its evidence attached rather than a claim that the flow is safe. Each row
+    stays inside the dynamic resource alias boundary AD-18 discloses and cites the issue tracking
+    it.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason is None
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash is required for differential execution")
+@pytest.mark.parametrize(
+    ("_description", "script", "extra_environment"),
+    KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS,
+    ids=[row[0] for row in KNOWN_UNRESOLVED_REDIRECTION_OPERAND_GAPS],
+)
+def test_unresolved_redirection_operand_gap_executes_the_marker_under_real_bash(
+    _description,
+    script,
+    extra_environment,
+    tmp_path: Path,
+):
+    """Executable evidence that every pinned gap above is a false certification.
+
+    Issue #139's ledger recorded its one excluded row in prose. A prose exclusion cannot tell a
+    gap that closed from a gap that widened, so the exclusion is executable here: the marker must
+    still run under real bash for the certification above to be the known gap it claims to be.
+    """
+    executed, stderr = _marker_executes_under_bash(script, extra_environment, tmp_path)
+
+    assert executed, stderr
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        (
+            "read -r P; exec 3> \"$P\"; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+            "shell descriptor source cannot be represented",
+        ),
+        (
+            "read -r Z; exec 3> /dev/stdout; printf '%s%s\\n' doc- 'lattice reconcile' >&3 | bash",
+            None,
+        ),
+    ],
+    ids=("read-supplied-operand", "literal-control"),
+)
+def test_read_supplied_redirection_operand_stays_dynamic_for_the_pipe_inputs(script, expected):
+    """The residue of resolving operands before the pipe inputs, pinned in both directions.
+
+    The pass that names the operands ``_pipe_inputs`` replays builds no stdin, because building
+    stdin is what needs those inputs. A name a ``read`` supplies is therefore unknown in that pass
+    alone, so the descriptor an ``exec`` binds through it stays guarded and a later ``>&3`` refuses
+    where every other spelling now certifies. This is the over-refusing direction and it is the
+    last slice of the literal-versus-variable asymmetry issue #151 reports; AD-18 discloses it.
+
+    The control carries the same ``read`` and the same descriptor with the operand spelled
+    literally, which isolates the withheld value rather than the ``read`` or the descriptor shape.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == expected
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "printf 'echo safe\\n' > other.sh; P=other.sh; eval 'P=task.sh'"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; printf 'P=task.sh\\n' > vars.sh"
+        "; source vars.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=task.sh; eval 'Q=1'; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "printf 'Q=1\\n' > vars.sh; P=task.sh; source vars.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; f(){ OPTIND=1; getopts x P; }; f -x"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "printf 'echo safe\\n' > other.sh; P=other.sh; OPTIND=1; getopts x P"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash other.sh",
+        "P=task.sh; f(){ OPTIND=1; getopts x Q; }; f -x"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "P=task.sh; f(){ OPTIND=1; getopts x P; }"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "trap 'P=other.sh' DEBUG; P=task.sh"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+        "P=task.sh; trap 'Q=1' DEBUG"
+        "; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+    ],
+    ids=(
+        "eval-payload-rebinding",
+        "sourced-rebinding",
+        "eval-that-rebinds-another-name",
+        "source-that-rebinds-another-name",
+        "getopts-rebinding",
+        "top-level-getopts-rebinding",
+        "getopts-that-rebinds-another-name",
+        "uncalled-getopts-body",
+        "trap-handler-rebinding",
+        "trap-that-rebinds-another-name",
+    ),
+)
+def test_rebinding_this_table_does_not_record_keeps_the_prior_value(script):
+    """The residue AD-18 discloses for a rebinding no evidence carries, pinned in both directions.
+
+    An ``eval`` payload assignment, a ``source`` of another file, a ``getopts`` write of its name
+    operand and a trap handler bash runs between two commands all rebind in the current shell, and
+    none is recorded in the value table this projection reads. The name therefore keeps the value
+    it held before, exactly as an arithmetic assignment leaves it, so the rows that rebind the
+    operand's own name resolve it to a file bash never opens and refuse a body whose marker only
+    ever reaches the other file.
+
+    That is the over-refusing direction, and the rows that rebind another name, or no name at all
+    because the body is never called, are why the remedy is not to withdraw at these commands: the
+    same construct that leaves the operand's name alone is far more common, and withdrawing there
+    would return a body whose marker bash really does write and run to the certification it had
+    before issue #151. A ``getopts`` write reaches the current shell from the top level as well as
+    from a function body, so withdrawing it as a function rebinding would pay that price and still
+    leave the second row over-refusing. Recording the rebinding is what closes this, tracked as
+    issue #205 rather than folded into the projection.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "{ printf doc-; printf 'lattice reconcile'; } > task.sh; bash task.sh",
+        "f() { printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; }; f; bash task.sh",
+        "for i in 1; do printf '%s%s\\n' doc- 'lattice reconcile' > task.sh; done; bash task.sh",
+        "P=task.sh; printf '%s%s\\n' doc- 'lattice reconcile' > \"$P\"; bash task.sh",
+    ],
+    ids=("compound-scope", "function-body", "loop-body", "simple-command"),
+)
+def test_literal_redirection_target_refuses_in_every_shape_above(script):
+    """The control for the pinned gaps: the same flow refuses once the operand names its file.
+
+    The last row is the operand form issue #151 resolved, which isolates the operand rather than
+    the scope for the parameter-expansion rows above.
+    """
+    result = scan_doc_lattice_invocations(script)
+
+    assert result.invocations == NONE
+    assert result.incomplete_reason == TAINT_REFUSAL_REASON
 
 
 def test_select_header_retaining_marker_fails_closed():
