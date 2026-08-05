@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import IO, TYPE_CHECKING
@@ -336,6 +337,40 @@ def test_a_pooled_run_reports_the_recorded_scripts_it_dropped_once(
 
     assert status == 0
     assert capsys.readouterr().err.count("dropped") == 1
+
+
+def test_an_interrupt_while_units_are_being_submitted_still_drains_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Submitting the grid is not instant, since the pool starts a worker on each of the first
+    # `jobs` submits: the default grid spends 0.133s there. Submitted above the drain, an interrupt
+    # in that window takes the generator's frame before the `try` is entered, so the teardown never
+    # runs and the pool is left to the interpreter. That is the deadlock the drain exists to avoid,
+    # reached through the one part of a pooled run that was still outside it.
+    drained: list[tuple[bool, bool]] = []
+
+    class StoppedPool:
+        """A pool interrupted part way through being handed its units."""
+
+        def __init__(self, **_configuration: object) -> None:
+            self.submitted = 0
+
+        def submit(self, _work: object, _task: object) -> object:
+            self.submitted += 1
+            if self.submitted == 2:
+                raise KeyboardInterrupt
+            return Future()
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            drained.append((wait, cancel_futures))
+
+    monkeypatch.setattr(tool, "ProcessPoolExecutor", StoppedPool)
+    entries = tool.pooled_entries(["a" * 40] * 400, tool.limits_grid((0, 1)), jobs=2)
+
+    with pytest.raises(KeyboardInterrupt):
+        next(entries)
+
+    assert drained == [(True, True)]
 
 
 def test_pooled_workers_do_not_inherit_this_process() -> None:

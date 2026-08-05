@@ -135,7 +135,8 @@ configuration, which is a couple of minutes on an eight-core machine, and printi
 the corpus reached nothing new rather than that anything failed. Configurations are independent, so
 the grid is split across one worker process per available CPU; `--jobs` sizes that split and does
 not change which reach the merge prefers, with `--jobs 1` running the whole grid in one process.
-Ctrl-C stops a split run within a second or two and still prints the rows it had. Shrink `--seeds`
+Ctrl-C stops a split run within a second or two wherever in the run it lands, including while the
+grid is still being handed to the workers, and still prints the rows it had. Shrink `--seeds`
 and `--iterations` for a quick pass, and use `--all-guards` to see what the corpus reaches at all.
 Hand-authored candidates go through `--extra FILE`, a JSON list of scripts added to the corpus,
 which refuses rather than drops a candidate longer than `--max-length`, so a shape you aimed with

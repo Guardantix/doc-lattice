@@ -782,14 +782,25 @@ def pooled_entries(
         initializer=_configure_worker,
         initargs=(list(scripts), wanted),
     )
-    # Submitted into the call itself rather than into a list this frame keeps, since `as_completed`
-    # drops each future as it hands it over: held here instead, every unit's scripts would stay
-    # reachable until the whole grid was done, and the parent's memory would grow with the grid
-    # rather than with the corpus.
-    arriving = as_completed(
-        [executor.submit(_scan_in_worker, task) for task in worker_tasks(scripts, grid)]
-    )
+    # Constructed above the drain because a pool that failed to construct is not one to shut down,
+    # and under the fresh start methods this runs nothing yet: the manager thread and the first
+    # workers are started by the submits below rather than here.
     try:
+        # Submitted under the drain rather than above it, because submission is not instant. The
+        # pool starts a worker on each of the first `jobs` submits, so this window is where a run
+        # spends its first tenth of a second: 0.133s to submit the default grid's 1386 units, all of
+        # it outside the teardown while this sat above the `try`. An interrupt landing there took
+        # the generator's frame with it before the drain was armed, leaving the pool to the
+        # interpreter, which is the deadlock `drain_pool` exists to avoid rather than a slower
+        # version of it.
+        #
+        # Submitted into the call itself rather than into a list this frame keeps, since
+        # `as_completed` drops each future as it hands it over: held here instead, every unit's
+        # scripts would stay reachable until the whole grid was done, and the parent's memory would
+        # grow with the grid rather than with the corpus.
+        arriving = as_completed(
+            [executor.submit(_scan_in_worker, task) for task in worker_tasks(scripts, grid)]
+        )
         for future in arriving:
             yield future.result()
     finally:
