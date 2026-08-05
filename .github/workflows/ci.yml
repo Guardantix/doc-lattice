@@ -239,22 +239,36 @@ jobs:
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-      - name: Replay the corpus against the protected base
+      - name: Replay the corpus against both revisions
         if: steps.scope.outputs.in-scope == 'true'
         # The tool and the corpus are the candidate's in both runs, so the two records score the
         # same scripts and the guard package is the only thing that differs between them.
+        #
+        # One step rather than two because a background process does not outlive the step that
+        # started it, and the two recordings are independent: neither reads the other's record, and
+        # a verdict does not depend on when it was scored. The runner's cores are split between
+        # them, since each `record` replays across a worker pool of its own and two pools each
+        # sized to the whole machine would oversubscribe it and give back what running them
+        # together buys. Both statuses are waited on, so a refusal from either revision fails here
+        # rather than surfacing later as the comparison's missing input.
         run: |
           set -euo pipefail
+          workers="$(( $(nproc) / 2 ))"
+          if [ "$workers" -lt 1 ]; then
+            workers=1
+          fi
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root "$RUNNER_TEMP/base" \
-            --out "$RUNNER_TEMP/base-verdicts.json"
-      - name: Replay the corpus against the candidate
-        if: steps.scope.outputs.in-scope == 'true'
-        run: |
-          set -euo pipefail
+            --out "$RUNNER_TEMP/base-verdicts.json" \
+            --workers "$workers" &
+          base=$!
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root . \
-            --out "$RUNNER_TEMP/candidate-verdicts.json"
+            --out "$RUNNER_TEMP/candidate-verdicts.json" \
+            --workers "$workers" &
+          candidate=$!
+          wait "$base"
+          wait "$candidate"
       - name: Report verdict divergence the pull request has not acknowledged
         if: steps.scope.outputs.in-scope == 'true'
         # The base's own copy of the frozen inventory is the corpus floor: without it a candidate

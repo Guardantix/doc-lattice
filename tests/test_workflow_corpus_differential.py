@@ -108,7 +108,7 @@ def test_a_pull_request_that_only_edits_an_acknowledgement_still_replays() -> No
 def test_every_replay_step_is_gated_on_the_scope_decision() -> None:
     replays = [step for step in _job()["steps"] if f"python {_TOOL}" in str(step.get("run", ""))]
 
-    assert len(replays) == 3
+    assert len(replays) == 2
     assert all(step["if"] == "steps.scope.outputs.in-scope == 'true'" for step in replays)
 
 
@@ -133,13 +133,34 @@ def test_the_base_revision_is_materialized_from_the_clone_rather_than_re_fetched
 
 
 def test_both_revisions_are_replayed_by_the_same_tool_over_the_same_corpus() -> None:
-    base = _step("Replay the corpus against the protected base")["run"]
-    candidate = _step("Replay the corpus against the candidate")["run"]
+    replay = _step("Replay the corpus against both revisions")["run"]
 
-    assert f"python {_TOOL} record" in base
-    assert '--scanner-root "$RUNNER_TEMP/base"' in base
-    assert f"python {_TOOL} record" in candidate
-    assert "--scanner-root ." in candidate
+    assert replay.count(f"python {_TOOL} record") == 2
+    assert '--scanner-root "$RUNNER_TEMP/base"' in replay
+    assert "--scanner-root ." in replay
+
+
+def test_a_refusal_from_either_revision_fails_the_replay_step() -> None:
+    # The two recordings run concurrently, so neither one's exit status reaches the step on its
+    # own. Dropping either wait would let a revision that refused to record be read later as the
+    # comparison's missing input, or worse be paired with a stale record from an earlier attempt.
+    replay = _step("Replay the corpus against both revisions")["run"]
+
+    assert "set -euo pipefail" in replay
+    assert "base=$!" in replay
+    assert "candidate=$!" in replay
+    assert 'wait "$base"' in replay
+    assert 'wait "$candidate"' in replay
+
+
+def test_the_concurrent_recordings_split_the_runner_rather_than_each_claiming_it() -> None:
+    # Each `record` replays across a pool sized to the cores it is given, so two runs that each
+    # default to the whole machine oversubscribe it. The split is what makes running them together
+    # faster than running them in sequence rather than merely more parallel on paper.
+    replay = _step("Replay the corpus against both revisions")["run"]
+
+    assert "$(nproc) / 2" in replay
+    assert replay.count('--workers "$workers"') == 2
 
 
 def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_floor() -> None:
@@ -158,15 +179,12 @@ def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_flo
 def test_neither_replay_step_shrinks_the_corpus_on_the_command_line() -> None:
     # The pinned scale is the tool's default and `check_corpus_scale` reads what the record names,
     # so a scale spelled here overrides both. Pinning the module constants does not reach it, which
-    # is why the absence of the flags is what this holds rather than their value.
-    for name in (
-        "Replay the corpus against the protected base",
-        "Replay the corpus against the candidate",
-    ):
-        script = _step(name)["run"]
+    # is why the absence of the flags is what this holds rather than their value. `--workers` is
+    # not one of them: it splits the same corpus across processes rather than drawing less of it.
+    script = _step("Replay the corpus against both revisions")["run"]
 
-        assert "--seeds" not in script
-        assert "--iterations" not in script
+    assert "--seeds" not in script
+    assert "--iterations" not in script
 
 
 def test_the_comparison_takes_neither_relaxation_the_tool_offers() -> None:
