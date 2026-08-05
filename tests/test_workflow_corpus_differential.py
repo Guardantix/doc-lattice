@@ -1,5 +1,6 @@
 """Contract for the recurring checkpoint corpus differential gate in CI."""
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,28 @@ def test_the_differential_is_scoped_to_changes_that_can_move_a_verdict() -> None
     assert "tests/fixtures/github_ci_checkpoint/replay_inventory.json" in replayed
     assert "$REPLAYED_PATHS" in step["run"]
     assert 'echo "in-scope=' in step["run"]
+
+
+def test_every_sibling_script_the_tool_imports_is_in_scope() -> None:
+    # The list is hand-written and the tool's imports are not, so a helper split out of the tool
+    # lands outside the scope it was inside a moment earlier: a pull request that only edits the
+    # helper reports green having replayed nothing, and the replay reads it all the same. Derived
+    # from the tool's own imports rather than named here, since naming it is what this is holding
+    # somebody to doing.
+    replayed = _step("Decide whether the differential has anything to compare")["env"][
+        "REPLAYED_PATHS"
+    ].split()
+    tree = ast.parse((_ROOT / _TOOL).read_text(encoding="utf-8"))
+    imported = {
+        alias.name if isinstance(node, ast.Import) else node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+    }
+    siblings = {name for name in imported if name and (_ROOT / "scripts" / f"{name}.py").is_file()}
+
+    assert siblings
+    assert {f"scripts/{name}.py" for name in siblings} <= set(replayed)
 
 
 def test_a_pull_request_that_only_weakens_the_differential_job_still_replays() -> None:

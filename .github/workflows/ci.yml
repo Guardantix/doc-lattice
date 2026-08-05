@@ -165,7 +165,11 @@ jobs:
           # scope exactly as a change to the guard package is, and an unrelated pull request pays
           # for a checkout and one diff rather than for twenty thousand scans. `error_types.py` is
           # named because it is the one module outside the guard package the scan path imports,
-          # and the refusals the labels carry are raised through it. The acknowledgements file is
+          # and the refusals the labels carry are raised through it. `worker_pool.py` is named
+          # because the replay imports it: it decides the start method a worker binds its scanner
+          # under, and a change returning `fork` there would have the workers inherit this process's
+          # scanner rather than importing the revision they were pointed at, which is a divergence
+          # the corpus can no longer see. The acknowledgements file is
           # named because an entry pre-authorizes a verdict transition: skipping the replay for a
           # pull request that only edits it would land the excuse detached from the change it
           # excuses, ready for a later diff to walk through. This workflow file is named for the
@@ -179,6 +183,7 @@ jobs:
             src/doc_lattice/error_types.py
             scripts/corpus_differential.py
             scripts/fuzz_shell_taint.py
+            scripts/worker_pool.py
             tests/fixtures/github_ci_checkpoint/replay_inventory.json
             tests/fixtures/corpus_differential_acknowledgements.json
             .github/workflows/ci.yml
