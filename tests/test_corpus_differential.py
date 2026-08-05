@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
+import multiprocessing
 import shutil
 import subprocess
 import sys
@@ -117,7 +119,14 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _replay(root: Path, out: Path, *, seeds: str = "", iterations: int = 0) -> Path:
+def _replay(
+    root: Path,
+    out: Path,
+    *,
+    seeds: str = "",
+    iterations: int = 0,
+    jobs: str = "1",
+) -> Path:
     completed = _run(
         "record",
         "--scanner-root",
@@ -130,6 +139,8 @@ def _replay(root: Path, out: Path, *, seeds: str = "", iterations: int = 0) -> P
         seeds,
         "--iterations",
         str(iterations),
+        "--jobs",
+        jobs,
     )
     assert completed.returncode == 0, completed.stderr
     return out
@@ -1196,3 +1207,99 @@ def test_a_record_run_scores_the_generated_half_of_the_corpus_too(tmp_path):
     assert document["count"] == len(tool.inventory_cases(_INVENTORY)) + 5
     assert any(case["id"].startswith("fuzz-") for case in document["cases"])
     assert document["scanner_source"].startswith(str(tmp_path))
+
+
+def test_pooled_workers_do_not_inherit_this_process() -> None:
+    # A forked worker inherits a scanner a caller has replaced here, so the same corpus is scored
+    # through one revision on Linux and another everywhere else, which is the one thing a
+    # differential cannot afford. It is also what CPython deprecates once a process has threads,
+    # which a pool has by its second worker.
+    assert tool.start_method() != "fork"
+    assert tool.start_method() in multiprocessing.get_all_start_methods()
+
+
+def test_the_default_worker_count_fits_the_work_there_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A default derived from the machine rather than from the corpus starts workers with nothing to
+    # score, and one that can reach zero leaves the replay with nobody to run it. Bounds rather than
+    # the machine's count, which restates the expression: read off a host whose affinity the
+    # interpreter cannot see, `os.process_cpu_count()` is None, and the count that has to come back
+    # from that is one.
+    assert tool.default_jobs(1) == 1
+    assert tool.default_jobs(0) == 1
+    assert 1 <= tool.default_jobs(1000) <= 1000
+
+    monkeypatch.setattr(tool.os, "process_cpu_count", lambda: None)
+
+    assert tool.default_jobs(1000) == 1
+
+
+def test_a_corpus_smaller_than_one_chunk_is_one_unit_of_work() -> None:
+    # The pool hands work out in chunks, so the bound on how many workers are worth starting is
+    # chunks rather than scripts. Counted from the corpus rather than measured off the pool, which
+    # is what lets the count be taken before there is a pool to measure.
+    case = tool.CorpusCase(case_id="c", digest="d", source="true")
+
+    assert tool.unit_count([]) == 0
+    assert tool.unit_count([case]) == 1
+    assert tool.unit_count([case] * tool.REPLAY_CHUNK) == 1
+    assert tool.unit_count([case] * (tool.REPLAY_CHUNK + 1)) == 2
+
+
+def test_a_replay_with_no_workers_is_refused_rather_than_run_by_nobody() -> None:
+    # Zero workers is not a smaller replay, and left to argparse's `int` it is refused several
+    # layers down in a traceback naming the pool rather than the option that sized it.
+    with pytest.raises(argparse.ArgumentTypeError):
+        tool.positive_jobs("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        tool.positive_jobs("-1")
+    with pytest.raises(argparse.ArgumentTypeError):
+        tool.positive_jobs("half")
+
+    assert tool.positive_jobs("3") == 3
+
+
+def test_a_pooled_record_scores_the_corpus_the_serial_one_does(tmp_path: Path) -> None:
+    # The whole gate rests on two records being comparable, so a split that moved a verdict, a row
+    # or an order would be indistinguishable from the scanner change the differential exists to
+    # report. Byte for byte rather than verdict by verdict, since the record is what is compared.
+    root = _revision(tmp_path, "base", mutate=False)
+    serial = _replay(root, tmp_path / "serial.json", seeds="1", iterations=40, jobs="1")
+    pooled = _replay(root, tmp_path / "pooled.json", seeds="1", iterations=40, jobs="4")
+
+    assert pooled.read_bytes() == serial.read_bytes()
+
+
+def test_a_short_run_starts_no_more_workers_than_it_has_work_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `default_jobs` bounds the count, but only against the corpus it is handed. Read off the call
+    # `record` makes rather than off the helper, so a run that sized its pool from the machine and
+    # never consulted the corpus it drew fails here.
+    source = "true"
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "count": 1,
+                "entries": [{"id": "only", "sha256": tool.digest_of(source), "source": source}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    def _capture(*call: object) -> list[dict[str, str]]:
+        # Positional, because what is under test is the fourth argument `record` passes rather than
+        # the name it happens to give it here.
+        jobs = call[3]
+        assert isinstance(jobs, int)
+        seen.append(jobs)
+        return []
+
+    monkeypatch.setattr(tool, "replay_parallel", _capture)
+    monkeypatch.setattr(tool.os, "process_cpu_count", lambda: 64)
+
+    tool.record(_ROOT, inventory, seeds=(), iterations=0, jobs=None)
+
+    assert seen == [1]

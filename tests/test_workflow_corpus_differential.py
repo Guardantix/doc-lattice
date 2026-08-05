@@ -160,7 +160,7 @@ def test_the_concurrent_recordings_split_the_runner_rather_than_each_claiming_it
     replay = _step("Replay the corpus against both revisions")["run"]
 
     assert "$(nproc) / 2" in replay
-    assert replay.count('--workers "$workers"') == 2
+    assert replay.count('--jobs "$jobs"') == 2
 
 
 def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_floor() -> None:

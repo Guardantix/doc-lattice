@@ -253,19 +253,19 @@ jobs:
         # rather than surfacing later as the comparison's missing input.
         run: |
           set -euo pipefail
-          workers="$(( $(nproc) / 2 ))"
-          if [ "$workers" -lt 1 ]; then
-            workers=1
+          jobs="$(( $(nproc) / 2 ))"
+          if [ "$jobs" -lt 1 ]; then
+            jobs=1
           fi
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root "$RUNNER_TEMP/base" \
             --out "$RUNNER_TEMP/base-verdicts.json" \
-            --workers "$workers" &
+            --jobs "$jobs" &
           base=$!
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root . \
             --out "$RUNNER_TEMP/candidate-verdicts.json" \
-            --workers "$workers" &
+            --jobs "$jobs" &
           candidate=$!
           wait "$base"
           wait "$candidate"

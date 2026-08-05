@@ -89,6 +89,15 @@ SEEDS = (1, 2, 3, 4)
 ITERATIONS = 5000
 REPORT_LIMIT = 25
 REPLAY_CHUNK = 64
+FRESH_START_METHODS = ("forkserver", "spawn")
+"""Start methods that give a worker a fresh interpreter, cheapest first.
+
+Named rather than left to the platform default, which is `fork` through 3.13 and `forkserver` from
+3.14: the gate runs on one of those and contributors on the other, and a corpus scored under two
+process models is a difference between runs that has nothing to do with the scanner. `fork` is not
+among them for the reason `scripts/guard_witness_sweep.py` gives at its own copy of this list: it
+deprecates once a process has threads, which a pool has by the time it starts its second worker.
+"""
 
 EXIT_OK = 0
 EXIT_DIVERGED = 1
@@ -651,7 +660,7 @@ def replay_parallel(
     cases: Sequence[CorpusCase],
     scan: Callable[[str], object],
     root: Path,
-    workers: int,
+    jobs: int,
 ) -> list[dict[str, str]]:
     """Score every corpus case across worker processes, in corpus order.
 
@@ -667,7 +676,8 @@ def replay_parallel(
         cases: The corpus in replay order.
         scan: The revision's public entry point, already bound in this process.
         root: Repository root the workers bind their own scan path from.
-        workers: Worker processes to score across. One replays in this process.
+        jobs: Units of work to score at a time, one worker process each, capped by the caller at
+            the number of units there are. One replays in this process.
 
     Returns:
         One record per case, carrying its name, digest, source and verdict label.
@@ -679,13 +689,10 @@ def replay_parallel(
         message = "the corpus holds no scripts, so this revision was not replayed against anything"
         raise ValueError(message)
     check_projection(scan(cases[0].source))
-    if workers <= 1:
+    if jobs <= 1:
         return replay(cases, scan)
-    # Named rather than left to the platform default, which is `fork` through 3.13 and `forkserver`
-    # from 3.14: the gate runs on one of those and contributors on the other, and a corpus scored
-    # under two process models is a difference between runs that has nothing to do with the scanner.
-    context = multiprocessing.get_context("forkserver")
-    with context.Pool(workers, initializer=_bind_worker, initargs=(str(root),)) as pool:
+    context = multiprocessing.get_context(start_method())
+    with context.Pool(jobs, initializer=_bind_worker, initargs=(str(root),)) as pool:
         labels = pool.map(
             _worker_label,
             [case.source for case in cases],
@@ -702,16 +709,74 @@ def replay_parallel(
     ]
 
 
-def default_workers() -> int:
-    """Return how many processes to replay across when the command line names none.
+def unit_count(cases: Sequence[CorpusCase]) -> int:
+    """Return how many units of work a pooled replay of `cases` is split into.
 
-    Read through the affinity mask rather than off the machine, so a run confined to a subset of
-    the cores replays across the cores it was given rather than oversubscribing the ones it was not.
+    The bound on what a pool can be doing at once, and therefore on how many workers are worth
+    starting. A unit is a chunk rather than a script because the pool hands work out in chunks, so
+    a corpus of fewer scripts than one chunk is one unit however many cases it holds.
+
+    Args:
+        cases: The corpus in replay order.
 
     Returns:
-        One process per usable core, and one when the count is unavailable.
+        One per chunk of the corpus, and none for an empty one.
     """
-    return os.process_cpu_count() or 1
+    return (len(cases) + REPLAY_CHUNK - 1) // REPLAY_CHUNK
+
+
+def start_method() -> str:
+    """Return the process start method a pooled replay runs its workers under.
+
+    Returns:
+        The cheapest start method this platform offers that gives a worker a fresh interpreter.
+    """
+    available = multiprocessing.get_all_start_methods()
+    return next(
+        (method for method in FRESH_START_METHODS if method in available),
+        FRESH_START_METHODS[-1],
+    )
+
+
+def default_jobs(units: int) -> int:
+    """Return how many units of work a replay scores at a time when nobody says.
+
+    Args:
+        units: How many units of work the run is split into, as `unit_count` counts them.
+
+    Returns:
+        Worker count, at least one and never more than there is work for. Derived from the CPUs
+        this process may actually run on rather than from the machine's count, so a run under a
+        CPU affinity mask or a container quota does not oversubscribe what it was given.
+    """
+    return max(1, min(units, os.process_cpu_count() or 1))
+
+
+def positive_jobs(text: str) -> int:
+    """Return `text` as a count of worker processes, refusing a non-positive one.
+
+    Kept apart from the corpus converters because zero means something here that it does not mean
+    there: an empty corpus is a replay of nothing, which `replay` refuses on its own terms, while
+    zero workers is not a smaller replay but a run with nobody to score a script.
+
+    Args:
+        text: The value as spelled on the command line.
+
+    Returns:
+        The value as a worker count.
+
+    Raises:
+        ArgumentTypeError: If the value is below one, since a replay is run by at least one process.
+    """
+    try:
+        value = int(text)
+    except ValueError as error:
+        message = f"{text!r} is not a whole number of worker processes"
+        raise argparse.ArgumentTypeError(message) from error
+    if value < 1:
+        message = f"{text!r} is not a worker count; a replay is run by at least one process"
+        raise argparse.ArgumentTypeError(message)
+    return value
 
 
 def parse_seeds(text: str) -> tuple[int, ...]:
@@ -732,7 +797,7 @@ def record(
     *,
     seeds: Sequence[int],
     iterations: int,
-    workers: int = 1,
+    jobs: int | None = 1,
 ) -> dict[str, object]:
     """Replay the corpus against one revision and return the record to write.
 
@@ -741,8 +806,10 @@ def record(
         inventory: Path to the frozen replay inventory.
         seeds: Seeds to draw generated bodies with.
         iterations: Cases requested per seed.
-        workers: Processes to score the corpus across. The record does not name it, because a
-            verdict does not depend on which process produced it.
+        jobs: Units of work to score at a time, one worker process each, or None for one per
+            available CPU. Capped here at the number of units the drawn corpus holds, so a short
+            run does not start workers there is no work for. The record does not name it, because
+            a verdict does not depend on which process produced it.
 
     Returns:
         The verdict record for that revision.
@@ -759,6 +826,8 @@ def record(
         iterations=iterations,
     )
     check_corpus_drawn(corpus, seeds, iterations)
+    units = unit_count(corpus)
+    workers = max(1, min(units, default_jobs(units) if jobs is None else jobs))
     return {
         "schema": SCHEMA,
         "scanner_source": str(Path(scanner.__file__ or "").resolve()),
@@ -1233,7 +1302,7 @@ def _record_command(args: argparse.Namespace) -> int:
         Path(args.inventory),
         seeds=parse_seeds(args.seeds),
         iterations=args.iterations,
-        workers=args.workers,
+        jobs=args.jobs,
     )
     Path(args.out).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     print(f"scored {document['count']} script(s) against {document['scanner_source']}")
@@ -1343,11 +1412,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-shrunk-corpus at compare time)",
     )
     recorder.add_argument(
-        "--workers",
-        type=int,
-        default=default_workers(),
-        help="processes to score the corpus across, defaulting to one per core; 1 replays in this "
-        "process, which is what a profile or a debugger wants",
+        "--jobs",
+        type=positive_jobs,
+        help="units of work to score at a time, one worker process each, capped at the number of "
+        "units the corpus holds; a verdict does not depend on it, and `--jobs 1` replays in this "
+        "process, which is what a profiler or a debugger wants (default: one per available CPU)",
     )
     recorder.set_defaults(handler=_record_command)
 

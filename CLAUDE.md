@@ -157,9 +157,10 @@ corpus floor. Pass `--base-inventory` with the base revision's replay inventory,
 `--no-corpus-floor` to say out loud that this run has none.
 Two records naming the same scanner file are refused as one revision replayed twice.
 
-`record` replays across one worker process per core, which does not change a verdict: the scored
-rows come back in corpus order and the record is byte for byte what a serial run writes. Pass
-`--workers 1` to replay in the calling process, which is what a profiler or a debugger wants.
+`record` splits the corpus across one worker process per available CPU, capped at the number of
+units it holds. `--jobs` sizes that split and does not change a verdict: the scored rows come back
+in corpus order and the record is byte for byte what a serial run writes. `--jobs 1` replays in the
+calling process, which is what a profiler or a debugger wants.
 
 The fuzzer builds the corpus for both recordings and imports the scanner at module scope, so a
 change that adds a scanner name and draws on it in the same pull request refuses rather than
