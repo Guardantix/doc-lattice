@@ -165,7 +165,11 @@ jobs:
           # scope exactly as a change to the guard package is, and an unrelated pull request pays
           # for a checkout and one diff rather than for twenty thousand scans. `error_types.py` is
           # named because it is the one module outside the guard package the scan path imports,
-          # and the refusals the labels carry are raised through it. The acknowledgements file is
+          # and the refusals the labels carry are raised through it. `worker_pool.py` is named
+          # because the replay imports it: it decides the start method a worker binds its scanner
+          # under, and a change returning `fork` there would have the workers inherit this process's
+          # scanner rather than importing the revision they were pointed at, which is a divergence
+          # the corpus can no longer see. The acknowledgements file is
           # named because an entry pre-authorizes a verdict transition: skipping the replay for a
           # pull request that only edits it would land the excuse detached from the change it
           # excuses, ready for a later diff to walk through. This workflow file is named for the
@@ -179,6 +183,7 @@ jobs:
             src/doc_lattice/error_types.py
             scripts/corpus_differential.py
             scripts/fuzz_shell_taint.py
+            scripts/worker_pool.py
             tests/fixtures/github_ci_checkpoint/replay_inventory.json
             tests/fixtures/corpus_differential_acknowledgements.json
             .github/workflows/ci.yml
@@ -239,22 +244,60 @@ jobs:
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-      - name: Replay the corpus against the protected base
+      - name: Replay the corpus against both revisions
         if: steps.scope.outputs.in-scope == 'true'
         # The tool and the corpus are the candidate's in both runs, so the two records score the
         # same scripts and the guard package is the only thing that differs between them.
+        #
+        # One step rather than two because a background process does not outlive the step that
+        # started it, and the two recordings are independent: neither reads the other's record, and
+        # a verdict does not depend on when it was scored. The runner's cores are split between
+        # them, since each `record` replays across a worker pool of its own and two pools each
+        # sized to the whole machine would oversubscribe it and give back what running them
+        # together buys.
+        #
+        # Both recordings are waited for before either status is acted on. Failing at the first
+        # `wait` would end the step with the other recording still running, holding half the runner
+        # until the job is cleaned up and never reaching the log with whatever it was refusing over,
+        # so a run where both revisions refused would report one and abandon the other. Waited
+        # rather than left to the comparison, which would otherwise read a missing record as its own
+        # input error rather than as the recording that failed.
+        #
+        # Each recording is labelled on its way into the log the two now share. Two separate steps
+        # attributed a line to a revision for free; interleaved into one stream they no longer do,
+        # and a refusal is several lines of prose whose revision the reader cannot otherwise name.
+        # `pipefail` is what keeps the label from swallowing the status: `wait` on a background
+        # pipeline answers with the leftmost failure rather than with the labeller's own exit.
         run: |
           set -euo pipefail
+          jobs="$(( $(nproc) / 2 ))"
+          if [ "$jobs" -lt 1 ]; then
+            jobs=1
+          fi
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root "$RUNNER_TEMP/base" \
-            --out "$RUNNER_TEMP/base-verdicts.json"
-      - name: Replay the corpus against the candidate
-        if: steps.scope.outputs.in-scope == 'true'
-        run: |
-          set -euo pipefail
+            --out "$RUNNER_TEMP/base-verdicts.json" \
+            --jobs "$jobs" 2>&1 | sed -u 's/^/[base] /' &
+          base=$!
           uv run --no-sync python scripts/corpus_differential.py record \
             --scanner-root . \
-            --out "$RUNNER_TEMP/candidate-verdicts.json"
+            --out "$RUNNER_TEMP/candidate-verdicts.json" \
+            --jobs "$jobs" 2>&1 | sed -u 's/^/[candidate] /' &
+          candidate=$!
+          base_status=0
+          wait "$base" || base_status=$?
+          candidate_status=0
+          wait "$candidate" || candidate_status=$?
+          if [ "$base_status" -ne 0 ]; then
+            echo "the protected base refused to record (exit $base_status)" >&2
+          fi
+          if [ "$candidate_status" -ne 0 ]; then
+            echo "the candidate refused to record (exit $candidate_status)" >&2
+          fi
+          if [ "$base_status" -ne 0 ]; then
+            exit "$base_status"
+          fi
+          exit "$candidate_status"
       - name: Report verdict divergence the pull request has not acknowledged
         if: steps.scope.outputs.in-scope == 'true'
         # The base's own copy of the frozen inventory is the corpus floor: without it a candidate

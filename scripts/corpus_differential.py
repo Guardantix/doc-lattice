@@ -64,16 +64,22 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import multiprocessing
 import random
+import signal
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "scripts"))
+
+from worker_pool import positive_jobs, resolve_jobs, start_method  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from types import ModuleType
-
-_ROOT = Path(__file__).resolve().parents[1]
 
 SUMMARY = "Replay the checkpoint corpus against two revisions and report every verdict divergence."
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
@@ -86,6 +92,7 @@ SCHEMA = 1
 SEEDS = (1, 2, 3, 4)
 ITERATIONS = 5000
 REPORT_LIMIT = 25
+REPLAY_CHUNK = 64
 
 EXIT_OK = 0
 EXIT_DIVERGED = 1
@@ -437,21 +444,25 @@ def check_corpus_drawn(
     """
     if not seeds or iterations <= 0:
         return
-    drawn = [case for case in cases if case.case_id.startswith("fuzz-")]
-    empty = [
-        seed
-        for seed in seeds
-        if not any(case.case_id.startswith(f"fuzz-{seed:04d}-") for case in drawn)
-    ]
+    # One pass rather than one per seed: the seeds are a command line argument, so rescanning the
+    # drawn half for each of them multiplies the corpus by a number the caller chooses.
+    drawn = 0
+    seeds_drawn: set[str] = set()
+    for case in cases:
+        if not case.case_id.startswith("fuzz-"):
+            continue
+        drawn += 1
+        seeds_drawn.add(case.case_id.rsplit("-", 1)[0])
+    empty = [seed for seed in seeds if f"fuzz-{seed:04d}" not in seeds_drawn]
     if empty:
         message = (
             f"seed(s) {', '.join(str(seed) for seed in empty)} drew no script, so the corpus does "
             f"not carry the {len(seeds)} seeds it was drawn at"
         )
         raise ValueError(message)
-    if len(drawn) < iterations:
+    if drawn < iterations:
         message = (
-            f"the generated half of the corpus holds {len(drawn)} script(s) for {len(seeds)} seeds "
+            f"the generated half of the corpus holds {drawn} script(s) for {len(seeds)} seeds "
             f"of {iterations} draws each, which is below one seed's worth; the corpus collapsed "
             "rather than being drawn at the scale this run names"
         )
@@ -597,6 +608,143 @@ def replay(cases: Sequence[CorpusCase], scan: Callable[[str], object]) -> list[d
     return scored
 
 
+_WORKER: dict[str, Callable[[str], object]] = {}
+"""The scan path one worker process is bound to, set by its initializer.
+
+A dict rather than a rebound module global because the repository lints `global` out, and the
+binding has to survive between one worker's tasks rather than be handed to each of them: the
+scanner is a six-thousand line import, so binding it per script would cost more than the scan.
+"""
+
+
+def _bind_worker(root_text: str) -> None:
+    """Bind one worker process to the revision under test.
+
+    `load_scanner` runs again in every worker rather than being inherited from the parent, so each
+    process proves for itself which file its scan path came from. An installed copy of the
+    distribution resolves ahead of a path entry under some layouts, and a worker that quietly scored
+    the installed revision would contribute verdicts for a revision nothing asked for.
+
+    Args:
+        root_text: Repository root whose guard package is scored.
+    """
+    # Ctrl-C reaches every process in the terminal's group, and a worker that takes it dies wherever
+    # it happened to be. Dying part way through writing a chunk of labels back leaves the parent
+    # reading a result that never finishes arriving, which is a run that has to be killed rather
+    # than one that stopped. Ignored here, which leaves the interrupt to the parent alone: it stops
+    # handing out chunks, drops the ones no worker had started, and each worker exits through the
+    # pool's own shutdown. `scripts/guard_witness_sweep.py` protects its workers the same way, and
+    # so does CPython's own forkserver.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _WORKER["scan"] = getattr(load_scanner(Path(root_text)), SCANNER_ENTRY_POINT)
+
+
+def _worker_label(source: str) -> str:
+    """Return one script's verdict label from inside a worker process.
+
+    Args:
+        source: Literal Bash body.
+
+    Returns:
+        The verdict label the bound revision scores it at.
+
+    Raises:
+        ValueError: If the worker never bound a scan path, which is the pool's initializer having
+            been skipped rather than anything about the script.
+    """
+    scan = _WORKER.get("scan")
+    if scan is None:
+        message = "a replay worker was handed a script before any scanner was bound to it"
+        raise ValueError(message)
+    return verdict_label(scan(source))
+
+
+def replay_parallel(
+    cases: Sequence[CorpusCase],
+    scan: Callable[[str], object],
+    root: Path,
+    jobs: int,
+) -> list[dict[str, str]]:
+    """Score every corpus case across worker processes, in corpus order.
+
+    A verdict is a pure function of the script, so scoring order is free and the scored rows come
+    back in corpus order regardless of which worker produced them. That is what keeps
+    `corpus_digest` and `align` describing the same corpus they described sequentially.
+
+    The projection check stays here, on the first case, before any worker starts. A revision whose
+    result surface moved is then one refusal line from the parent rather than the same refusal
+    raised in every worker at once.
+
+    Args:
+        cases: The corpus in replay order.
+        scan: The revision's public entry point, already bound in this process.
+        root: Repository root the workers bind their own scan path from.
+        jobs: Units of work to score at a time, one worker process each, capped by the caller at
+            the number of units there are. One replays in this process.
+
+    Returns:
+        One record per case, carrying its name, digest, source and verdict label.
+
+    Raises:
+        ValueError: If the corpus is empty, for the reason `replay` gives.
+        BrokenProcessPool: If a worker process died holding a chunk, or never bound a scanner at
+            all. Raised rather than waited on, which is the whole reason the pool is a
+            `ProcessPoolExecutor`: `multiprocessing.Pool` answers a worker that exits abnormally by
+            starting a replacement and never re-queueing the chunk the dead one held, so `map`
+            blocks on a result nothing will produce. This runs under a CI job with two recordings
+            and two pools on one runner, where a worker lost to the kernel's OOM killer would turn
+            the refusal this gate exists to print into a job that hangs until the workflow times
+            out with no diagnostic at all.
+    """
+    if not cases:
+        message = "the corpus holds no scripts, so this revision was not replayed against anything"
+        raise ValueError(message)
+    check_projection(scan(cases[0].source))
+    if jobs <= 1:
+        return replay(cases, scan)
+    pool = ProcessPoolExecutor(
+        max_workers=jobs,
+        mp_context=multiprocessing.get_context(start_method()),
+        initializer=_bind_worker,
+        initargs=(str(root),),
+    )
+    try:
+        labels = list(
+            pool.map(_worker_label, [case.source for case in cases], chunksize=REPLAY_CHUNK)
+        )
+    finally:
+        # Cancelled rather than drained, so a Ctrl-C or a broken pool stops the run where it landed.
+        # Every chunk is submitted by the `map` above, so a plain shutdown would wait for the whole
+        # corpus to be scored by workers nobody is reading any more. On the ordinary path every
+        # chunk is already done and there is nothing left to cancel.
+        pool.shutdown(wait=True, cancel_futures=True)
+    return [
+        {
+            "id": case.case_id,
+            "sha256": case.digest,
+            "source": case.source,
+            "verdict": label,
+        }
+        for case, label in zip(cases, labels, strict=True)
+    ]
+
+
+def unit_count(cases: Sequence[CorpusCase]) -> int:
+    """Return how many units of work a pooled replay of `cases` is split into.
+
+    The bound on what a pool can be doing at once, and therefore on how many workers are worth
+    starting. A unit is a chunk rather than a script because the pool hands work out in chunks, so
+    a corpus of fewer scripts than one chunk is one unit however many cases it holds.
+
+    Args:
+        cases: The corpus in replay order.
+
+    Returns:
+        One per chunk of the corpus, and none for an empty one.
+    """
+    return (len(cases) + REPLAY_CHUNK - 1) // REPLAY_CHUNK
+
+
 def parse_seeds(text: str) -> tuple[int, ...]:
     """Return the seed list a command line spells.
 
@@ -615,6 +763,7 @@ def record(
     *,
     seeds: Sequence[int],
     iterations: int,
+    jobs: int | None = 1,
 ) -> dict[str, object]:
     """Replay the corpus against one revision and return the record to write.
 
@@ -623,6 +772,10 @@ def record(
         inventory: Path to the frozen replay inventory.
         seeds: Seeds to draw generated bodies with.
         iterations: Cases requested per seed.
+        jobs: Units of work to score at a time, one worker process each, or None for one per
+            available CPU. Capped here at the number of units the drawn corpus holds, so a short
+            run does not start workers there is no work for. The record does not name it, because
+            a verdict does not depend on which process produced it.
 
     Returns:
         The verdict record for that revision.
@@ -639,6 +792,7 @@ def record(
         iterations=iterations,
     )
     check_corpus_drawn(corpus, seeds, iterations)
+    workers = resolve_jobs(unit_count(corpus), jobs)
     return {
         "schema": SCHEMA,
         "scanner_source": str(Path(scanner.__file__ or "").resolve()),
@@ -646,7 +800,12 @@ def record(
         "iterations": iterations,
         "corpus_sha256": corpus_digest(corpus),
         "count": len(corpus),
-        "cases": replay(corpus, getattr(scanner, SCANNER_ENTRY_POINT)),
+        "cases": replay_parallel(
+            corpus,
+            getattr(scanner, SCANNER_ENTRY_POINT),
+            scanner_root.resolve(),
+            workers,
+        ),
     }
 
 
@@ -1108,6 +1267,7 @@ def _record_command(args: argparse.Namespace) -> int:
         Path(args.inventory),
         seeds=parse_seeds(args.seeds),
         iterations=args.iterations,
+        jobs=args.jobs,
     )
     Path(args.out).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     print(f"scored {document['count']} script(s) against {document['scanner_source']}")
@@ -1215,6 +1375,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=ITERATIONS,
         help=f"bodies to request per seed (pinned at {ITERATIONS}; fewer needs "
         "--allow-shrunk-corpus at compare time)",
+    )
+    recorder.add_argument(
+        "--jobs",
+        type=positive_jobs,
+        help="units of work to score at a time, one worker process each, capped at the number of "
+        "units the corpus holds; a verdict does not depend on it, and `--jobs 1` replays in this "
+        "process, which is what a profiler or a debugger wants (default: one per available CPU)",
     )
     recorder.set_defaults(handler=_record_command)
 

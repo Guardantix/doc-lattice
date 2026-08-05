@@ -543,21 +543,6 @@ def test_an_interrupted_pooled_run_stops_rather_than_having_to_be_killed(tmp_pat
             process.wait()
 
 
-def test_the_default_worker_count_fits_the_work_there_is(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A default derived from the machine rather than from the grid starts workers with nothing to
-    # scan, and one that can reach zero leaves the sweep with nobody to run it. Bounds rather than
-    # the machine's count, which restates the expression: read off a host whose affinity the
-    # interpreter cannot see, `os.process_cpu_count()` is None, and the count that has to come back
-    # from that is one.
-    assert tool.default_jobs(1) == 1
-    assert tool.default_jobs(0) == 1
-    assert 1 <= tool.default_jobs(1000) <= 1000
-
-    monkeypatch.setattr(tool.os, "process_cpu_count", lambda: None)
-
-    assert tool.default_jobs(1000) == 1
-
-
 def test_a_sweep_with_no_workers_is_refused_rather_than_run_by_nobody() -> None:
     # Zero workers is not a smaller sweep, and left to argparse it is refused several layers down
     # in a traceback naming the pool rather than the option that sized it.

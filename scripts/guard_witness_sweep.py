@@ -38,7 +38,6 @@ import dataclasses
 import importlib
 import json
 import multiprocessing
-import os
 import random
 import signal
 import sys
@@ -52,6 +51,7 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 
 import check_guard_inventory  # noqa: E402
 import fuzz_shell_taint  # noqa: E402
+from worker_pool import positive_jobs, resolve_jobs, start_method  # noqa: E402
 
 from doc_lattice.github_ci.shell_guards import GuardRefusal, ScanLimits  # noqa: E402
 from doc_lattice.github_ci.shell_scanner import scan_doc_lattice_invocations  # noqa: E402
@@ -98,18 +98,6 @@ typo'd constant raises NameError, a not-yet-written helper referenced from a dec
 module-level call raises AttributeError or TypeError, and a dataclass or enum rejecting its own
 declaration raises ValueError. Named rather than caught as `Exception`, which the repository rules
 forbid, and kept here so the reason the tuple is this wide is written once.
-"""
-
-FRESH_START_METHODS = ("forkserver", "spawn")
-"""Start methods that give a worker its own interpreter, cheapest first.
-
-`fork` is not among them, though it is the cheapest and was the Linux default until 3.14. A forked
-worker inherits the parent's memory, so what a pooled run reports would depend on the platform it
-ran on: a scanner replaced in this module's namespace would be searched by the workers where fork
-is the default and by none of the workers anywhere else. It is also the start method CPython
-deprecates once a process has threads, which a pool has by the time it spawns its second worker.
-Both fresh methods re-import this module in the worker instead, once per worker against a grid the
-sweep splits dozens of ways.
 """
 
 Reach = dict[str, tuple[str, str]]
@@ -521,33 +509,6 @@ def unit_count(scripts: Sequence[str], grid: Sequence[tuple[str, ScanLimits]]) -
     return len(grid) * ((len(scripts) + TASK_SCRIPTS - 1) // TASK_SCRIPTS)
 
 
-def start_method() -> str:
-    """Return the process start method a pooled sweep runs its workers under.
-
-    Returns:
-        The cheapest start method this platform offers that gives a worker a fresh interpreter.
-    """
-    available = multiprocessing.get_all_start_methods()
-    return next(
-        (method for method in FRESH_START_METHODS if method in available),
-        FRESH_START_METHODS[-1],
-    )
-
-
-def default_jobs(units: int) -> int:
-    """Return how many units of work a sweep scans at a time when nobody says.
-
-    Args:
-        units: How many units of work the run is split into, as `unit_count` counts them.
-
-    Returns:
-        Worker count, at least one and never more than there is work for. Derived from the CPUs
-        this process may actually run on rather than from the machine's count, so a run under a
-        CPU affinity mask or a container quota does not oversubscribe what it was given.
-    """
-    return max(1, min(units, os.process_cpu_count() or 1))
-
-
 def scan_configuration(
     scripts: Sequence[str],
     rank: int,
@@ -951,13 +912,12 @@ def sweep(
     scripts = list(corpus)
     found = {} if found is None else found
     totals = initial_totals(grid, found)
-    # Never more workers than there are units of work, however many were asked for: a pool sized
-    # past that starts interpreters that pay for their own copy of the corpus and scan nothing at
-    # all. Counted in units rather than in configurations, because a unit is a slice of the corpus
-    # under one configuration: capped at the grid, a run of twenty configurations over the default
-    # corpus scanned its three hundred and sixty units through twenty workers on a host with three
-    # times that many CPUs, and said nothing about having reduced what was asked for.
-    workers = min(jobs, unit_count(scripts, grid))
+    # `resolve_jobs` is what holds the pool to the units there are, however many were asked for.
+    # Counted in units rather than in configurations, because a unit is a slice of the corpus under
+    # one configuration: capped at the grid, a run of twenty configurations over the default corpus
+    # scanned its three hundred and sixty units through twenty workers on a host with three times
+    # that many CPUs, and said nothing about having reduced what was asked for.
+    workers = resolve_jobs(unit_count(scripts, grid), jobs)
     entries = (
         pooled_entries(scripts, grid, wanted=wanted, jobs=workers)
         if workers > 1
@@ -1395,29 +1355,6 @@ def nonnegative_cap(text: str) -> int:
     return _at_least(text, 0, "is not a cap; a scan cannot count fewer than none")
 
 
-def positive_jobs(text: str) -> int:
-    """Return `text` as a count of worker processes, refusing a non-positive one.
-
-    Kept apart from the corpus converters because zero means something here that it does not mean
-    there: an empty corpus is a sweep of nothing, which is a strange run but an honest one, while
-    zero workers is not a smaller sweep but a run with nobody to scan a configuration. Left to
-    argparse's `int`, `ProcessPoolExecutor` refuses it several layers down, out of a traceback that
-    names the pool rather than the option that sized it.
-
-    Args:
-        text: The value as spelled on the command line.
-
-    Returns:
-        The value as a worker count.
-
-    Raises:
-        ArgumentTypeError: If the value is below one, since a sweep is run by at least one process.
-    """
-    return _at_least(
-        text, 1, "is not a count of workers; a sweep is scanned by at least one process"
-    )
-
-
 def _deliver(text: str, described: str) -> int:
     """Write a run's whole result to stdout, reporting a sink that could not take it.
 
@@ -1607,11 +1544,10 @@ def main(argv: list[str] | None = None) -> int:
         # toward, and an unreadable --extra file is something the operator wrote a moment ago.
         parser.error(str(error))
     grid = limits_grid(SHRINK if arguments.shrink is None else tuple(arguments.shrink))
-    # Capped the way the sweep caps it, so the count reported is the one the run is about to use
-    # rather than the one that was asked for. Never below one, since a corpus with no units of work
-    # is still swept by this process rather than by nobody.
-    units = unit_count(corpus, grid)
-    jobs = max(1, min(units, default_jobs(units) if arguments.jobs is None else arguments.jobs))
+    # Resolved through the same helper the sweep resolves it through, so the count reported is the
+    # one the run is about to use rather than the one that was asked for. Never below one, since a
+    # corpus with no units of work is still swept by this process rather than by nobody.
+    jobs = resolve_jobs(unit_count(corpus, grid), arguments.jobs)
     sys.stderr.write(
         f"sweeping {len(corpus)} scripts over {len(grid)} configurations in {jobs} process(es)\n"
     )

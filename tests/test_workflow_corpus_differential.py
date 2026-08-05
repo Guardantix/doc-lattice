@@ -1,5 +1,6 @@
 """Contract for the recurring checkpoint corpus differential gate in CI."""
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,28 @@ def test_the_differential_is_scoped_to_changes_that_can_move_a_verdict() -> None
     assert 'echo "in-scope=' in step["run"]
 
 
+def test_every_sibling_script_the_tool_imports_is_in_scope() -> None:
+    # The list is hand-written and the tool's imports are not, so a helper split out of the tool
+    # lands outside the scope it was inside a moment earlier: a pull request that only edits the
+    # helper reports green having replayed nothing, and the replay reads it all the same. Derived
+    # from the tool's own imports rather than named here, since naming it is what this is holding
+    # somebody to doing.
+    replayed = _step("Decide whether the differential has anything to compare")["env"][
+        "REPLAYED_PATHS"
+    ].split()
+    tree = ast.parse((_ROOT / _TOOL).read_text(encoding="utf-8"))
+    imported = {
+        alias.name if isinstance(node, ast.Import) else node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+    }
+    siblings = {name for name in imported if name and (_ROOT / "scripts" / f"{name}.py").is_file()}
+
+    assert siblings
+    assert {f"scripts/{name}.py" for name in siblings} <= set(replayed)
+
+
 def test_a_pull_request_that_only_weakens_the_differential_job_still_replays() -> None:
     # The scale, the relaxation flags and this very scope list all live in the workflow file. Left
     # out of scope, a pull request that only edits the job would skip the differential and report
@@ -108,7 +131,7 @@ def test_a_pull_request_that_only_edits_an_acknowledgement_still_replays() -> No
 def test_every_replay_step_is_gated_on_the_scope_decision() -> None:
     replays = [step for step in _job()["steps"] if f"python {_TOOL}" in str(step.get("run", ""))]
 
-    assert len(replays) == 3
+    assert len(replays) == 2
     assert all(step["if"] == "steps.scope.outputs.in-scope == 'true'" for step in replays)
 
 
@@ -133,13 +156,61 @@ def test_the_base_revision_is_materialized_from_the_clone_rather_than_re_fetched
 
 
 def test_both_revisions_are_replayed_by_the_same_tool_over_the_same_corpus() -> None:
-    base = _step("Replay the corpus against the protected base")["run"]
-    candidate = _step("Replay the corpus against the candidate")["run"]
+    replay = _step("Replay the corpus against both revisions")["run"]
 
-    assert f"python {_TOOL} record" in base
-    assert '--scanner-root "$RUNNER_TEMP/base"' in base
-    assert f"python {_TOOL} record" in candidate
-    assert "--scanner-root ." in candidate
+    assert replay.count(f"python {_TOOL} record") == 2
+    assert '--scanner-root "$RUNNER_TEMP/base"' in replay
+    assert "--scanner-root ." in replay
+
+
+def test_a_refusal_from_either_revision_fails_the_replay_step() -> None:
+    # The two recordings run concurrently, so neither one's exit status reaches the step on its
+    # own. Dropping either wait would let a revision that refused to record be read later as the
+    # comparison's missing input, or worse be paired with a stale record from an earlier attempt.
+    replay = _step("Replay the corpus against both revisions")["run"]
+
+    assert "set -euo pipefail" in replay
+    assert "base=$!" in replay
+    assert "candidate=$!" in replay
+    assert 'wait "$base"' in replay
+    assert 'wait "$candidate"' in replay
+    assert 'exit "$base_status"' in replay
+    assert 'exit "$candidate_status"' in replay
+
+
+def test_neither_recording_is_abandoned_by_the_other_one_failing() -> None:
+    # `wait` returns the status it waited for, so under `set -e` an unguarded first wait ends the
+    # step with the second recording still running: it holds half the runner until the job is
+    # cleaned up, and whatever it was refusing over never reaches the log. Both statuses are
+    # therefore collected before either is acted on, which is what the guards on the waits are for.
+    replay = _step("Replay the corpus against both revisions")["run"]
+    waits = replay.index('wait "$base"'), replay.index('wait "$candidate"')
+
+    assert 'wait "$base" || base_status=$?' in replay
+    assert 'wait "$candidate" || candidate_status=$?' in replay
+    # Nothing may exit between the two waits, or the second one is unreachable again.
+    assert "exit" not in replay[waits[0] : waits[1]]
+
+
+def test_the_concurrent_recordings_split_the_runner_rather_than_each_claiming_it() -> None:
+    # Each `record` replays across a pool sized to the cores it is given, so two runs that each
+    # default to the whole machine oversubscribe it. The split is what makes running them together
+    # faster than running them in sequence rather than merely more parallel on paper.
+    replay = _step("Replay the corpus against both revisions")["run"]
+
+    assert "$(nproc) / 2" in replay
+    assert replay.count('--jobs "$jobs"') == 2
+
+
+def test_each_recording_is_labelled_in_the_log_the_two_of_them_share() -> None:
+    # Two steps attributed a line to a revision for free. Interleaved into one stream they do not,
+    # and a refusal is several lines of prose that read as the other revision's just as well.
+    # `pipefail` is what keeps the label from swallowing the exit status the waits below collect.
+    replay = _step("Replay the corpus against both revisions")["run"]
+
+    assert "set -euo pipefail" in replay
+    assert "2>&1 | sed -u 's/^/[base] /'" in replay
+    assert "2>&1 | sed -u 's/^/[candidate] /'" in replay
 
 
 def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_floor() -> None:
@@ -158,15 +229,12 @@ def test_the_comparison_reads_the_acknowledgements_and_the_base_owned_corpus_flo
 def test_neither_replay_step_shrinks_the_corpus_on_the_command_line() -> None:
     # The pinned scale is the tool's default and `check_corpus_scale` reads what the record names,
     # so a scale spelled here overrides both. Pinning the module constants does not reach it, which
-    # is why the absence of the flags is what this holds rather than their value.
-    for name in (
-        "Replay the corpus against the protected base",
-        "Replay the corpus against the candidate",
-    ):
-        script = _step(name)["run"]
+    # is why the absence of the flags is what this holds rather than their value. `--jobs` is not
+    # one of them: it splits the same corpus across processes rather than drawing less of it.
+    script = _step("Replay the corpus against both revisions")["run"]
 
-        assert "--seeds" not in script
-        assert "--iterations" not in script
+    assert "--seeds" not in script
+    assert "--iterations" not in script
 
 
 def test_the_comparison_takes_neither_relaxation_the_tool_offers() -> None:

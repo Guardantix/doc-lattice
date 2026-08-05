@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import multiprocessing
+import os
 import shutil
 import subprocess
 import sys
@@ -117,7 +119,14 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _replay(root: Path, out: Path, *, seeds: str = "", iterations: int = 0) -> Path:
+def _replay(
+    root: Path,
+    out: Path,
+    *,
+    seeds: str = "",
+    iterations: int = 0,
+    jobs: str = "1",
+) -> Path:
     completed = _run(
         "record",
         "--scanner-root",
@@ -130,6 +139,8 @@ def _replay(root: Path, out: Path, *, seeds: str = "", iterations: int = 0) -> P
         seeds,
         "--iterations",
         str(iterations),
+        "--jobs",
+        jobs,
     )
     assert completed.returncode == 0, completed.stderr
     return out
@@ -1196,3 +1207,158 @@ def test_a_record_run_scores_the_generated_half_of_the_corpus_too(tmp_path):
     assert document["count"] == len(tool.inventory_cases(_INVENTORY)) + 5
     assert any(case["id"].startswith("fuzz-") for case in document["cases"])
     assert document["scanner_source"].startswith(str(tmp_path))
+
+
+def test_pooled_workers_do_not_inherit_this_process() -> None:
+    # A forked worker inherits a scanner a caller has replaced here, so the same corpus is scored
+    # through one revision on Linux and another everywhere else, which is the one thing a
+    # differential cannot afford. It is also what CPython deprecates once a process has threads,
+    # which a pool has by its second worker.
+    assert tool.start_method() != "fork"
+    assert tool.start_method() in multiprocessing.get_all_start_methods()
+
+
+_DEAD_WORKER_DRIVER = '''\
+"""Replay a corpus holding one script whose worker exits without answering for it.
+
+Driven as its own process because the failure under test is a worker dying, and the pool's answer
+to that is what the parent does next. The work is guarded, since a worker re-imports this module.
+"""
+
+import importlib.util
+import os
+import signal
+import sys
+from types import SimpleNamespace
+
+
+def load_tool(path):
+    """Return the differential loaded from a path, the way the suite loads it."""
+    spec = importlib.util.spec_from_file_location("corpus_differential", path)
+    tool = importlib.util.module_from_spec(spec)
+    sys.modules["corpus_differential"] = tool
+    spec.loader.exec_module(tool)
+    return tool
+
+
+def label(source):
+    """Score one script, leaving the worker holding the last one gone rather than answering."""
+    if source == "kill-me":
+        os.kill(os.getpid(), signal.SIGKILL)
+    return "certified"
+
+
+def main():
+    """Replay across workers, one of which dies holding a chunk, and report how that came back."""
+    tool = load_tool(sys.argv[1])
+    tool._worker_label = label
+    cases = [tool.CorpusCase(case_id=str(n), digest="d", source="true") for n in range(200)]
+    cases.append(tool.CorpusCase(case_id="boom", digest="d", source="kill-me"))
+    projected = SimpleNamespace(invocations=(), guard_id=None, incomplete_reason=None)
+    try:
+        tool.replay_parallel(cases, lambda source: projected, os.getcwd(), 4)
+    except BaseException as error:
+        print(type(error).__name__, flush=True)
+    else:
+        print("returned", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+_DEAD_WORKER_PATIENCE = 60.0
+"""Seconds a replay whose worker died is given to answer. It answered in under two, measured."""
+
+
+def test_a_replay_whose_worker_dies_reports_it_rather_than_waiting_for_it(tmp_path: Path) -> None:
+    # `multiprocessing.Pool` answers a worker that exits abnormally by starting a replacement and
+    # never re-queueing the chunk the dead one held, so its `map` blocks on a result nothing will
+    # produce. Under the CI job that is two recordings and two pools on one runner: a worker lost to
+    # the kernel's OOM killer would turn the refusal this gate exists to print into a job that hangs
+    # until the workflow times out saying nothing at all. `ProcessPoolExecutor` is what makes the
+    # death arrive as a failure, and this is the assertion that keeps the pool from being swapped
+    # back for one that hangs.
+    driver = tmp_path / "dying_replay.py"
+    driver.write_text(_DEAD_WORKER_DRIVER, encoding="utf-8")
+
+    try:
+        finished = subprocess.run(  # noqa: S603 - this interpreter, and a driver written just above
+            [sys.executable, str(driver), str(_TOOL)],
+            capture_output=True,
+            text=True,
+            timeout=_DEAD_WORKER_PATIENCE,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"the replay was still waiting {_DEAD_WORKER_PATIENCE}s after a worker died")
+
+    assert finished.stdout.strip() == "BrokenProcessPool"
+
+
+def test_a_corpus_smaller_than_one_chunk_is_one_unit_of_work() -> None:
+    # The pool hands work out in chunks, so the bound on how many workers are worth starting is
+    # chunks rather than scripts. Counted from the corpus rather than measured off the pool, which
+    # is what lets the count be taken before there is a pool to measure.
+    case = tool.CorpusCase(case_id="c", digest="d", source="true")
+
+    assert tool.unit_count([]) == 0
+    assert tool.unit_count([case]) == 1
+    assert tool.unit_count([case] * tool.REPLAY_CHUNK) == 1
+    assert tool.unit_count([case] * (tool.REPLAY_CHUNK + 1)) == 2
+
+
+def test_a_replay_with_no_workers_is_refused_rather_than_run_by_nobody() -> None:
+    # The converter is `worker_pool`'s, but what a mistyped `--jobs` costs is this tool's: a run
+    # sized by nobody would replay the whole corpus and refuse at the pool.
+    with pytest.raises(SystemExit) as raised:
+        tool.main(["record", "--scanner-root", ".", "--out", "/dev/null", "--jobs", "0"])
+
+    assert raised.value.code == 2
+
+
+def test_a_pooled_record_scores_the_corpus_the_serial_one_does(tmp_path: Path) -> None:
+    # The whole gate rests on two records being comparable, so a split that moved a verdict, a row
+    # or an order would be indistinguishable from the scanner change the differential exists to
+    # report. Byte for byte rather than verdict by verdict, since the record is what is compared.
+    root = _revision(tmp_path, "base", mutate=False)
+    serial = _replay(root, tmp_path / "serial.json", seeds="1", iterations=40, jobs="1")
+    pooled = _replay(root, tmp_path / "pooled.json", seeds="1", iterations=40, jobs="4")
+
+    assert pooled.read_bytes() == serial.read_bytes()
+
+
+def test_a_short_run_starts_no_more_workers_than_it_has_work_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `default_jobs` bounds the count, but only against the corpus it is handed. Read off the call
+    # `record` makes rather than off the helper, so a run that sized its pool from the machine and
+    # never consulted the corpus it drew fails here.
+    source = "true"
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "count": 1,
+                "entries": [{"id": "only", "sha256": tool.digest_of(source), "source": source}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen: list[int] = []
+
+    def _capture(*call: object) -> list[dict[str, str]]:
+        # Positional, because what is under test is the fourth argument `record` passes rather than
+        # the name it happens to give it here.
+        jobs = call[3]
+        assert isinstance(jobs, int)
+        seen.append(jobs)
+        return []
+
+    monkeypatch.setattr(tool, "replay_parallel", _capture)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: 64)
+
+    tool.record(_ROOT, inventory, seeds=(), iterations=0, jobs=None)
+
+    assert seen == [1]
