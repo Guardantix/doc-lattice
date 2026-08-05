@@ -288,21 +288,34 @@ def test_a_merge_keeps_what_the_configurations_before_a_failure_found() -> None:
     assert found == {_ORIGIN: (_PRODUCTION_ENTRY[0], "a" * 40)}
 
 
-def test_a_pooled_sweep_keeps_the_rows_the_worker_that_died_was_not_holding() -> None:
+def test_a_pooled_sweep_keeps_the_rows_the_worker_that_died_was_not_holding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The same guarantee through real processes. One worker runs the two configurations in
     # submission order, so the reach of the first is merged before the second one raises what no
-    # configuration was expected to raise. `as_completed` hands back whatever is already finished
-    # in an order nobody promises, but nothing can be: this frame reaches the waiter in microseconds
-    # and the pool has yet to start the interpreter that will scan the first unit, so the two
-    # results are yielded as they complete.
+    # configuration was expected to raise.
+    #
+    # Scored against what arrived rather than against the row the good configuration reaches,
+    # because `as_completed` hands back whatever is already finished in an order nobody promises:
+    # on a host that leaves this frame off a core long enough for the worker to run both units, the
+    # failure is handed back first and no row was ever there to keep. The guarantee is that what
+    # arrived is still held, and that is what this asserts either way.
     grid = [_SHRUNK_ENTRY, ("no caps at all", object())]
     found: dict[str, tuple[str, str]] = {}
+    arrived: list[object] = []
+    merge_entry = tool.merge_entry
+
+    def recording(entry: object, totals: object, rows: object) -> None:
+        arrived.append(entry)
+        merge_entry(entry, totals, rows)
+
+    monkeypatch.setattr(tool, "merge_entry", recording)
     entries = tool.pooled_entries(["a" * 40], grid, jobs=1)
 
     with pytest.raises(AttributeError):
         tool.merge_reach(entries, tool.initial_totals(grid, found), found)
 
-    assert found == {_ORIGIN: (_SHRUNK_ENTRY[0], "a" * 40)}
+    assert found == ({_ORIGIN: (_SHRUNK_ENTRY[0], "a" * 40)} if arrived else {})
 
 
 def test_a_pooled_run_resolves_its_filter_and_prints_its_rows_once(
@@ -373,6 +386,52 @@ def test_an_interrupt_while_units_are_being_submitted_still_drains_the_pool(
     assert drained == [(True, True)]
 
 
+def test_the_first_interrupt_of_a_pooled_run_puts_sigint_out_of_the_teardowns_reach() -> None:
+    # The drain is entered several frames after the interrupt that causes it, and one Ctrl-C reaches
+    # this process more than once. Shielded only once the drain is entered, those frames are open,
+    # and an interrupt landing in them abandons the teardown exactly where leaving it to the
+    # interpreter would have. Swapped as the first interrupt is delivered, the window closes too.
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tool.stop_once(signal.SIGINT, None)
+
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_a_pooled_run_installs_its_own_interrupt_and_puts_the_old_one_back() -> None:
+    # Held for the whole pooled region rather than for the teardown alone, and given back at the end
+    # of it: a sweep that kept the handler would leave every later Ctrl-C in this process raising
+    # from a frame that has no pool to drain.
+    before = signal.getsignal(signal.SIGINT)
+    entries = tool.pooled_entries(["a" * 40], [_SHRUNK_ENTRY], jobs=1)
+    try:
+        next(entries)
+        during = signal.getsignal(signal.SIGINT)
+    finally:
+        entries.close()
+
+    assert during is tool.stop_once
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_restore_puts_back_pythons_handler_when_the_one_it_replaced_was_not_pythons() -> None:
+    # `signal.signal` answers None for a disposition Python did not install, and refuses None as a
+    # handler. Restored by passing that answer straight back, a process whose SIGINT a launcher or
+    # an extension had installed would be left ignoring Ctrl-C for the rest of its life by its first
+    # pooled sweep, rather than for the length of one teardown.
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        tool.restore_interrupt(None)
+
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def test_pooled_workers_do_not_inherit_this_process() -> None:
     # A forked worker inherits a scanner a caller has replaced here, so the same run reports reach
     # through one scanner on Linux and another everywhere else. It is also what CPython deprecates
@@ -424,8 +483,15 @@ if __name__ == "__main__":
     main()
 '''
 
-_INTERRUPT_CORPUS = 900
-"""Scripts the interrupted run sweeps, sized so a grid of them outlasts the interrupt by far."""
+_INTERRUPT_CORPUS = 3000
+"""Scripts the interrupted run sweeps, sized so a grid of them outlasts the interrupt by far.
+
+Far enough that the run cannot finish inside the patience below, which is the difference between
+this test and one that passes on a fast host by the sweep simply ending. Nine hundred scripts
+measured 61.1s uninterrupted against a patience of 60s, a margin of one percent; this measures 210s
+on the same machine, and the cost of the larger corpus falls on the run that is never allowed to
+finish rather than on the suite.
+"""
 
 _INTERRUPT_PATIENCE = 60.0
 """Seconds a stopped run is given to be gone. Measured at 0.6s to 2.5s; a regression never ends."""
@@ -460,6 +526,14 @@ def test_an_interrupted_pooled_run_stops_rather_than_having_to_be_killed(tmp_pat
         os.killpg(process.pid, signal.SIGINT)
         os.killpg(process.pid, signal.SIGINT)
         process.wait(timeout=_INTERRUPT_PATIENCE)
+        # Read after the wait, so what is asserted on is everything the run ever said. Exiting in
+        # time is not on its own evidence that the interrupt did anything: a corpus the host gets
+        # through inside the patience exits in time by finishing, and reports a teardown that works
+        # while the run hangs for whoever sweeps a real corpus. What the interrupt is asked for is
+        # a run that stopped, so the run must not have announced that it finished, and it must not
+        # have exited as though nothing had happened.
+        assert "finished" not in process.stdout.read()
+        assert process.returncode != 0
     except subprocess.TimeoutExpired:
         pytest.fail(f"the run was still alive {_INTERRUPT_PATIENCE}s after being interrupted")
     finally:

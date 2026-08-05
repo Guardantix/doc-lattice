@@ -42,7 +42,6 @@ import os
 import random
 import signal
 import sys
-import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -58,7 +57,12 @@ from doc_lattice.github_ci.shell_guards import GuardRefusal, ScanLimits  # noqa:
 from doc_lattice.github_ci.shell_scanner import scan_doc_lattice_invocations  # noqa: E402
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Sequence
+    from collections.abc import Callable, Generator, Iterable, Sequence
+    from types import FrameType
+
+    InterruptHandler = Callable[[int, FrameType | None], object] | int | None
+    """What `signal.signal` takes for SIGINT and answers with, including the None it answers
+    for a disposition Python did not install."""
 
 REPLAY_INVENTORY = "tests/fixtures/github_ci_checkpoint/replay_inventory.json"
 RECORDER_SCRIPT = "scripts/checkpoint_record_scanner_inputs.py"
@@ -500,6 +504,23 @@ def worker_tasks(
     ]
 
 
+def unit_count(scripts: Sequence[str], grid: Sequence[tuple[str, ScanLimits]]) -> int:
+    """Return how many units of work a pooled sweep of `grid` over `scripts` is split into.
+
+    The bound on what a pool can be doing at once, and therefore on how many workers are worth
+    starting. Counted rather than measured off `worker_tasks`, so a caller sizing a pool before it
+    has a pool does not mint the units to count them.
+
+    Args:
+        scripts: Scripts the sweep drives through the public scan path.
+        grid: Labelled scan-limits configurations the sweep runs.
+
+    Returns:
+        One per slice of the corpus per configuration.
+    """
+    return len(grid) * ((len(scripts) + TASK_SCRIPTS - 1) // TASK_SCRIPTS)
+
+
 def start_method() -> str:
     """Return the process start method a pooled sweep runs its workers under.
 
@@ -513,18 +534,18 @@ def start_method() -> str:
     )
 
 
-def default_jobs(configurations: int) -> int:
-    """Return how many configurations a sweep scans at a time when nobody says.
+def default_jobs(units: int) -> int:
+    """Return how many units of work a sweep scans at a time when nobody says.
 
     Args:
-        configurations: How many configurations the grid holds.
+        units: How many units of work the run is split into, as `unit_count` counts them.
 
     Returns:
         Worker count, at least one and never more than there is work for. Derived from the CPUs
         this process may actually run on rather than from the machine's count, so a run under a
         CPU affinity mask or a container quota does not oversubscribe what it was given.
     """
-    return max(1, min(configurations, os.process_cpu_count() or 1))
+    return max(1, min(units, os.process_cpu_count() or 1))
 
 
 def scan_configuration(
@@ -710,6 +731,60 @@ def serial_entries(
             yield scan_configuration([script], rank, label, limits, wanted=wanted)
 
 
+def swap_interrupt(handler: InterruptHandler) -> tuple[bool, InterruptHandler]:
+    """Install `handler` for SIGINT, reporting whether this caller was allowed to install one.
+
+    Only the main thread of the main interpreter may install a handler. `threading.main_thread()`
+    answers for the thread alone and reports the calling subinterpreter's own main thread, so a
+    sweep driven from a subinterpreter passes that test and `signal.signal` raises anyway. Refused
+    here rather than raised, because these swaps run inside teardowns: a ValueError out of one
+    replaces the failure being propagated and leaves the pool unshut, which is the deadlock the
+    teardown exists to avoid.
+
+    Args:
+        handler: What SIGINT should reach while the swap holds.
+
+    Returns:
+        Whether the swap happened, and the handler it replaced.
+    """
+    try:
+        return True, signal.signal(signal.SIGINT, handler)
+    except ValueError:
+        return False, None
+
+
+def restore_interrupt(previous: InterruptHandler) -> None:
+    """Put SIGINT back to what `swap_interrupt` replaced.
+
+    Args:
+        previous: The handler the swap reported, which is None when the disposition it replaced was
+            not installed from Python. Answered as Python's own handler rather than passed back,
+            since `signal.signal` refuses None: handed it, a process whose SIGINT a launcher or an
+            extension had installed would be left permanently deaf to Ctrl-C by its first sweep.
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler if previous is None else previous)
+
+
+def stop_once(_signum: int, _frame: FrameType | None) -> None:
+    """Raise on this interrupt and take SIGINT out of reach of the teardown that follows.
+
+    Args:
+        _signum: The signal delivered, which is always SIGINT here.
+        _frame: The frame it was delivered into.
+
+    Raises:
+        KeyboardInterrupt: Always, which is what the default handler does with the first Ctrl-C.
+    """
+    # Ignored from here rather than from inside `drain_pool`, because the deadlock is reachable
+    # between the two. The first interrupt raises from wherever the run happened to be, and the
+    # teardown is entered several frames later: a shield installed only once it is entered leaves
+    # every bytecode in between open to the second interrupt one Ctrl-C sends this process, and an
+    # interrupt landing there abandons the drain exactly where leaving it to the interpreter would
+    # have. Swapped inside the handler, the window closes as the first interrupt is delivered.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
 def drain_pool(executor: ProcessPoolExecutor) -> None:
     """Stop `executor` and wait for its workers to go, with this process deaf to Ctrl-C meanwhile.
 
@@ -737,15 +812,16 @@ def drain_pool(executor: ProcessPoolExecutor) -> None:
     Args:
         executor: The pool to stop. Units that have not started are dropped rather than run.
     """
-    # Only the main thread of the main interpreter may install a handler, and a caller driving a
-    # sweep from a worker thread is refused the swap rather than the shutdown.
-    owns_signals = threading.current_thread() is threading.main_thread()
-    previous = signal.signal(signal.SIGINT, signal.SIG_IGN) if owns_signals else None
+    # A caller driving a sweep from a worker thread, or from a subinterpreter, is refused the swap
+    # rather than the shutdown. Restored on `swapped` rather than on the handler that came back,
+    # since `signal.signal` answers None for a disposition Python did not install and a restore
+    # skipped on that answer would leave this process ignoring SIGINT for good.
+    swapped, previous = swap_interrupt(signal.SIG_IGN)
     try:
         executor.shutdown(wait=True, cancel_futures=True)
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGINT, previous)
+        if swapped:
+            restore_interrupt(previous)
 
 
 def pooled_entries(
@@ -776,15 +852,43 @@ def pooled_entries(
     Yields:
         One configuration's reach over one slice of the corpus.
     """
-    executor = ProcessPoolExecutor(
-        max_workers=jobs,
-        mp_context=multiprocessing.get_context(start_method()),
-        initializer=_configure_worker,
-        initargs=(list(scripts), wanted),
-    )
-    # Constructed above the drain because a pool that failed to construct is not one to shut down,
-    # and under the fresh start methods this runs nothing yet: the manager thread and the first
-    # workers are started by the submits below rather than here.
+    # Installed above everything a pooled run does, so the first Ctrl-C raises where the run
+    # happened to be and every later one is ignored until the pool is down. Held for the whole
+    # region rather than for the teardown alone, because the frames between the raise and the drain
+    # are where the second interrupt of a single Ctrl-C lands: the terminal signals every process in
+    # the group and the documented `uv run` command forwards its own copy.
+    swapped, previous = swap_interrupt(stop_once)
+    try:
+        executor = ProcessPoolExecutor(
+            max_workers=jobs,
+            mp_context=multiprocessing.get_context(start_method()),
+            initializer=_configure_worker,
+            initargs=(list(scripts), wanted),
+        )
+        # Constructed above the drain because a pool that failed to construct is not one to shut
+        # down, and under the fresh start methods this runs nothing yet: the manager thread and the
+        # first workers are started by the submits below rather than here.
+        yield from _pooled_units(executor, scripts, grid)
+    finally:
+        if swapped:
+            restore_interrupt(previous)
+
+
+def _pooled_units(
+    executor: ProcessPoolExecutor,
+    scripts: Sequence[str],
+    grid: Sequence[tuple[str, ScanLimits]],
+) -> Generator[EntryReach]:
+    """Yield each unit's reach as `executor` finishes it, stopping the pool on the way out.
+
+    Args:
+        executor: The pool to submit the units to and to drain when this generator is closed.
+        scripts: Scripts to drive through the public scan path.
+        grid: Labelled scan-limits configurations to try.
+
+    Yields:
+        One configuration's reach over one slice of the corpus.
+    """
     try:
         # Submitted under the drain rather than above it, because submission is not instant. The
         # pool starts a worker on each of the first `jobs` submits, so this window is where a run
@@ -830,11 +934,11 @@ def sweep(
             reached so far when a scan raises something no configuration was expected to raise, or
             a worker dies holding one configuration, rather than losing a whole run's rows to the
             traceback.
-        jobs: How many units of work to scan at a time, capped at the number of configurations the
-            grid holds, so a one-configuration grid is run in this process whatever is asked for.
-            One runs the whole grid in this process, which is what a caller replacing the scanner in
-            this module's namespace needs, since a worker imports its own. More than one splits the
-            work across worker processes, which changes how long a run takes and not which reach the
+        jobs: How many units of work to scan at a time, capped at the number of units there are, so
+            a run with one unit of work is scanned in this process whatever is asked for. One runs
+            the whole grid in this process, which is what a caller replacing the scanner in this
+            module's namespace needs, since a worker imports its own. More than one splits the work
+            across worker processes, which changes how long a run takes and not which reach the
             merge prefers. It is not quite nothing: a worker enters the scan from the pool's own
             call stack rather than from this one, so a script that only just fits within the
             interpreter's recursion limit can be scanned under one split and counted as unparseable
@@ -847,11 +951,13 @@ def sweep(
     scripts = list(corpus)
     found = {} if found is None else found
     totals = initial_totals(grid, found)
-    # Never more workers than the grid holds configurations, however many were asked for: a pool
-    # sized past it starts interpreters that pay for their own copy of the corpus and scan under no
-    # configuration at all. A grid of one is therefore run here whatever was asked for, which is
-    # also what a caller replacing the scanner in this module's namespace needs.
-    workers = min(jobs, len(grid))
+    # Never more workers than there are units of work, however many were asked for: a pool sized
+    # past that starts interpreters that pay for their own copy of the corpus and scan nothing at
+    # all. Counted in units rather than in configurations, because a unit is a slice of the corpus
+    # under one configuration: capped at the grid, a run of twenty configurations over the default
+    # corpus scanned its three hundred and sixty units through twenty workers on a host with three
+    # times that many CPUs, and said nothing about having reduced what was asked for.
+    workers = min(jobs, unit_count(scripts, grid))
     entries = (
         pooled_entries(scripts, grid, wanted=wanted, jobs=workers)
         if workers > 1
@@ -1206,21 +1312,22 @@ def render_rows(found: Reach) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def _nonnegative(text: str, reason: str) -> int:
-    """Return `text` as an integer, refusing a negative one.
+def _at_least(text: str, minimum: int, reason: str) -> int:
+    """Return `text` as an integer, refusing one below `minimum`.
 
     Args:
         text: The value as spelled on the command line.
-        reason: What a negative value would mean here, completing the refusal after the value.
+        minimum: The smallest value this option has a meaning for.
+        reason: What a value below it would mean here, completing the refusal after the value.
 
     Returns:
         The value.
 
     Raises:
-        ArgumentTypeError: If the value is negative.
+        ArgumentTypeError: If the value is below the minimum.
     """
     value = int(text)
-    if value < 0:
+    if value < minimum:
         raise argparse.ArgumentTypeError(f"{value} {reason}")
     return value
 
@@ -1242,7 +1349,7 @@ def nonnegative_count(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no corpus has a negative size.
     """
-    return _nonnegative(text, "is not a count of scripts; a corpus cannot be smaller than empty")
+    return _at_least(text, 0, "is not a count of scripts; a corpus cannot be smaller than empty")
 
 
 def nonnegative_length(text: str) -> int:
@@ -1262,7 +1369,7 @@ def nonnegative_length(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no script is shorter than empty.
     """
-    return _nonnegative(text, "is not a length in characters; no script is shorter than empty")
+    return _at_least(text, 0, "is not a length in characters; no script is shorter than empty")
 
 
 def nonnegative_cap(text: str) -> int:
@@ -1285,7 +1392,7 @@ def nonnegative_cap(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is negative, since no scan counts fewer than none.
     """
-    return _nonnegative(text, "is not a cap; a scan cannot count fewer than none")
+    return _at_least(text, 0, "is not a cap; a scan cannot count fewer than none")
 
 
 def positive_jobs(text: str) -> int:
@@ -1306,12 +1413,9 @@ def positive_jobs(text: str) -> int:
     Raises:
         ArgumentTypeError: If the value is below one, since a sweep is run by at least one process.
     """
-    value = int(text)
-    if value < 1:
-        raise argparse.ArgumentTypeError(
-            f"{value} is not a count of workers; a sweep is scanned by at least one process"
-        )
-    return value
+    return _at_least(
+        text, 1, "is not a count of workers; a sweep is scanned by at least one process"
+    )
 
 
 def _deliver(text: str, described: str) -> int:
@@ -1428,8 +1532,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_jobs,
         help=(
             "units of work to scan at a time, one worker process each, capped at the number of "
-            "configurations the grid holds; the rows a run prints do not depend on it (default: "
-            "one per available CPU)"
+            "units there are; which reach the merge prefers does not depend on it, though a script "
+            "that only just fits within the interpreter's recursion limit can be scanned under one "
+            "split and counted as unparseable under another (default: one per available CPU)"
         ),
     )
     return parser
@@ -1503,8 +1608,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
     grid = limits_grid(SHRINK if arguments.shrink is None else tuple(arguments.shrink))
     # Capped the way the sweep caps it, so the count reported is the one the run is about to use
-    # rather than the one that was asked for.
-    jobs = min(len(grid), default_jobs(len(grid)) if arguments.jobs is None else arguments.jobs)
+    # rather than the one that was asked for. Never below one, since a corpus with no units of work
+    # is still swept by this process rather than by nobody.
+    units = unit_count(corpus, grid)
+    jobs = max(1, min(units, default_jobs(units) if arguments.jobs is None else arguments.jobs))
     sys.stderr.write(
         f"sweeping {len(corpus)} scripts over {len(grid)} configurations in {jobs} process(es)\n"
     )
