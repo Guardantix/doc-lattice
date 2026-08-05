@@ -13,6 +13,9 @@ doc-lattice is a deterministic traceability engine for dependencies between Mark
 When behavior or policy changes, update its owner and link to it. Do not restate the same contract
 in another maintained document.
 
+`docs/` holds dated research artifacts and completed specs and plans. Nothing under it is
+authoritative or maintained; update the owner documents above instead.
+
 ## Contributor commands
 
 Use Python 3.13 or later and run dependency management and project commands through `uv`.
@@ -34,14 +37,25 @@ uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
 
 uv run --group dev python scripts/check_guard_inventory.py
+uv run --group dev python scripts/check_guard_inventory.py --emit-debt \
+  > tests/fixtures/shell_guard_debt.json
 uv run --group dev python scripts/guard_witness_sweep.py
 uv run --group dev python scripts/guard_witness_sweep.py \
   --trace "eval 'X=\${Y=q}'; eval \"\$X\"lattice"
+
+uv run --group dev python scripts/corpus_differential.py record \
+  --scanner-root . --out /tmp/candidate-verdicts.json
+uv run --group dev python scripts/corpus_differential.py compare \
+  --base /tmp/base-verdicts.json --candidate /tmp/candidate-verdicts.json \
+  --base-inventory /tmp/base-revision/tests/fixtures/github_ci_checkpoint/replay_inventory.json \
+  --acknowledged tests/fixtures/corpus_differential_acknowledgements.json
 
 uv run python scripts/fuzz_shell_taint.py --self-check
 uv run python scripts/fuzz_shell_taint.py \
   --iterations 1200 --seed 1 --baseline tests/fixtures/shell_taint_fuzz_baseline.tsv
 ```
+
+Unset `FORCE_COLOR` when your shell sets it, since forced color breaks human-output assertions.
 
 Pre-commit runs formatting, linting, type and boundary checks, version sync, secret detection,
 and repository hygiene checks. If a hook changes a file, re-stage it before committing.
@@ -50,19 +64,23 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 It generates run bodies from a compositional grammar, executes each one, and reports every body
 Bash runs the authored marker in that the scanner certified. Run `--self-check` first: it validates
 the execution oracle in both directions, and a fuzz result means nothing if that fails. The
-baseline records the known-failing recipes tracked in the open `security` issues, so a run exits
-non-zero only for a signature outside it.
+baseline records the known-failing recipes accepted as disclosed behavior under AD-23 in
+[ARCHITECTURE.md](ARCHITECTURE.md), so a run exits non-zero only for a signature outside it.
+Unlike the guard inventory and the corpus differential, no CI job or commit hook runs this tool;
+it is a contributor-run control, so a scanner or taint change is only checked against it if you
+run it.
 
 The baseline is specific to the seed and iteration count it was captured at, which is the seed 1
 run above. Other seeds surface further signatures, most of them the same known families, so a clean
 gate run is evidence about that seed rather than proof that no unbaselined signature exists. Widen
-the search with another seed when a change is broad, and triage what it finds against the open
-issues. Regenerate the baseline with `--write-baseline` only when those issues are fixed, never to
-silence a new finding and never to absorb another seed's signatures.
+the search with another seed when a change is broad, and triage what it finds against AD-23's
+scope classes. Regenerate the baseline with `--write-baseline` only after that triage, either
+because a recorded behavior legitimately changed or because a new signature was accepted as out of
+scope; never to silence an untriaged finding and never to absorb another seed's signatures.
 
 To score a hand-written body instead of a generated one, import `Case`, `Recipe`, and `execute`
 from that script and pair `execute` with `scan_doc_lattice_invocations`. That is how a suspected
-false certification and its control get confirmed before an issue is filed.
+false certification and its control get confirmed before AD-23 triage.
 
 Changes to the taint analysis or the scanner should be checked against this tool as well as
 pytest, since the suite pins known behavior while the fuzzer searches for behavior nobody has
@@ -85,12 +103,17 @@ attributes those are from the guarded module, so a predicate over unrelated evid
 however plausible it reads.
 
 When you add or move a guard, add its classification to `tests/guard_witnesses.py`; when adding its
-module, add that module to `GUARDED_MODULES` too and give it `from __future__ import annotations`,
-which is what keeps a constructor named as a type from being handed back as the class. The base-owned comparison discovers guarded
+module, add that module to `GUARDED_MODULES` too, and give it
+`from __future__ import annotations`. Deferring annotations stores a constructor named as a type
+as text, so it cannot be read back out of `__annotations__` or `dataclasses.fields(...)` and
+called without naming it. The base-owned comparison discovers guarded
 modules recursively from the candidate tree, so an older base checker can validate the new origin.
 Regenerate the debt snapshot only when a guard legitimately moves, never to silence a new one: CI
 runs the base revision's copy of the checker against your tree and rejects any record the base did
-not carry. When you remove a guard, record the identifier and the reason in
+not carry. Regenerate it with `check_guard_inventory.py --emit-debt`, redirected over
+`tests/fixtures/shell_guard_debt.json` as the command block above shows; that derives the snapshot
+from source rather than editing it, and the suite pins the checked-in file to that output byte for
+byte. When you remove a guard, record the identifier and the reason in
 `tests/fixtures/shell_guard_retirements.json`; that same base-owned run rejects an origin the base
 classified or froze that your tree no longer constructs.
 
@@ -114,6 +137,41 @@ the grid is split across one worker process per available CPU; `--jobs` sizes th
 not change which reach the merge prefers, with `--jobs 1` running the whole grid in one process.
 Ctrl-C stops a split run within a second or two and still prints the rows it had. Shrink `--seeds`
 and `--iterations` for a quick pass, and use `--all-guards` to see what the corpus reaches at all.
+Hand-authored candidates go through `--extra FILE`, a JSON list of scripts added to the corpus,
+which refuses rather than drops a candidate longer than `--max-length`, so a shape you aimed with
+`--trace` can be swept for the identifier it actually returns.
+
+`scripts/corpus_differential.py` replays one fixed corpus through the public scan path once per
+revision and reports every script whose verdict differs, in either direction. It is the dynamic
+control for the residual AD-20 leaves open, and AD-22 in [ARCHITECTURE.md](ARCHITECTURE.md) owns
+what it gates, what a verdict label carries and the four limits it discloses.
+
+Two revisions of one package cannot be imported side by side, so a run is two `record` processes
+and one `compare`. The CI job replays the base from a worktree of the protected base revision and
+the candidate from the checkout; locally, materialize the other revision anywhere and point
+`--scanner-root` at it. Shrink `--seeds` and `--iterations` while iterating, since a full run
+replays roughly twenty thousand scripts per side, and pass `--allow-shrunk-corpus` to `compare`,
+which otherwise refuses records drawn below the pinned scale. `compare` refuses to run without a
+corpus floor. Pass `--base-inventory` with the base revision's replay inventory, or
+`--no-corpus-floor` to say out loud that this run has none.
+Two records naming the same scanner file are refused as one revision replayed twice.
+
+The fuzzer builds the corpus for both recordings and imports the scanner at module scope, so a
+change that adds a scanner name and draws on it in the same pull request refuses rather than
+reports: the base does not carry the name. Land the scanner name first and draw on it in a later
+pull request, whose base then carries it. No acknowledgement covers this, since no records were
+produced to compare.
+
+Acknowledge an intentional change in `tests/fixtures/corpus_differential_acknowledgements.json`
+rather than restoring a verdict you meant to move: an entry names the script digest, both verdicts
+and a reason a reviewer can read. Run `compare --acknowledged FILE --write-acknowledgements FILE`
+to have the entries written for you, then write each reason, since an entry with an empty reason is
+refused. Name the same file on both flags: the written document carries only the reasons the
+comparison was handed, so a rewrite of a file the run did not read blanks every reason on it, and
+`compare` refuses that rather than doing it.
+
+AD-22 in [ARCHITECTURE.md](ARCHITECTURE.md) owns when an entry is spent, standing, or
+unjudgeable, and what each state does to the run.
 
 ## Enforced repository rules
 
@@ -157,4 +215,6 @@ and `--iterations` for a quick pass, and use `--all-guards` to see what the corp
 For Markdown-only changes, at minimum run the version-sync guard, a relative-link check, and
 `git diff --check`. Run the full suite when commit hooks do not execute it. For production changes,
 the complete handoff verification is pytest, Ruff check and format check, `ty`, typing boundaries,
-version sync, and any generator or benchmark gate affected by the change.
+version sync, `scripts/check_guard_inventory.py` for any change under `src/doc_lattice/github_ci/`
+or to `tests/guard_witnesses.py` and the guard debt and retirement fixtures, and any generator or
+benchmark gate affected by the change.

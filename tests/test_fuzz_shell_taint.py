@@ -152,6 +152,40 @@ def test_baseline_round_trips(tmp_path: Path) -> None:
     assert load_baseline(path) == signatures
 
 
+def test_baseline_header_names_the_signature_dimensions_in_order(tmp_path: Path) -> None:
+    path = tmp_path / "baseline.tsv"
+    recipe = Recipe(
+        producer="plain",
+        carrier="braced",
+        sink="eval",
+        wrapper="none",
+        fragments="doc-|lattice",
+        marker_bearing=True,
+    )
+
+    write_baseline(path, {recipe.signature()})
+
+    header = path.read_text(encoding="utf-8").splitlines()[1]
+    assert header == "# producer\tcarrier\tsink\twrapper"
+    columns = tuple(header.removeprefix("# ").split("\t"))
+    assert columns == ("producer", "carrier", "sink", "wrapper")
+    assert recipe.signature() == (
+        recipe.producer,
+        recipe.carrier,
+        recipe.sink,
+        recipe.wrapper,
+    )
+
+
+def test_write_baseline_replaces_the_file_rather_than_merging(tmp_path: Path) -> None:
+    path = tmp_path / "baseline.tsv"
+    write_baseline(path, {("plain", "braced", "eval", "none")})
+
+    write_baseline(path, {("declare", "direct", "bash-c", "function")})
+
+    assert load_baseline(path) == {("declare", "direct", "bash-c", "function")}
+
+
 def test_baseline_ignores_comments_and_returns_empty_for_a_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "absent.tsv"
     commented = tmp_path / "commented.tsv"

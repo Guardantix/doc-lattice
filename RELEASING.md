@@ -6,8 +6,10 @@ distributions. PyPI Trusted Publishing trusts the `Guardantix/doc-lattice` repos
 
 ## Release checklist
 
-1. Bump the version in `src/doc_lattice/__init__.py`, `pyproject.toml`, the newest
-   `CHANGELOG.md` heading, and every released-version pin in `README.md`.
+1. Bump the version in `src/doc_lattice/__init__.py`, `pyproject.toml`, and every
+   released-version pin in `README.md`, and promote `## [Unreleased]` in `CHANGELOG.md` to
+   `## [X.Y.Z] - YYYY-MM-DD` so it becomes the first versioned heading, which is the heading
+   the version-sync guard reads.
 2. Run `uv lock` and commit the refreshed `uv.lock`.
 3. Confirm the new changelog section is nonempty.
 4. Run the full verification suite, open a pull request, and wait for every CI check to pass.
@@ -50,15 +52,13 @@ the next version.
 
 ## Local verification
 
-Run the full local verification suite, including release-script checks:
+Run the full verification set from [CLAUDE.md](CLAUDE.md), adding `--locked` to every `uv run`,
+then:
 
 ```bash
-env -u FORCE_COLOR uv run --locked --group dev pytest
-uv run --locked --group dev ruff check src tests scripts/release_gate.py
-uv run --locked --group dev ruff format --check src tests scripts/release_gate.py
-uv run --locked --group dev ty check src scripts/release_gate.py
-uv run --locked --group dev python scripts/check_typing_boundaries.py src
-uv run --locked --group dev python scripts/check_version_sync.py
+uv run --locked --group dev ruff check scripts/release_gate.py
+uv run --locked --group dev ruff format --check scripts/release_gate.py
+uv run --locked --group dev ty check scripts/release_gate.py
 ```
 
 Build and validate exactly the expected artifacts, then smoke-test the wheel in a fresh Python

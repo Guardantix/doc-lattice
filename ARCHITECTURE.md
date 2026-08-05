@@ -18,7 +18,8 @@ Typer to the engine. Shared output policy lives in `cli/output.py`;
 `cli/errors.py` supplies diagnostics and command-level error conversion, while
 `cli/__init__.py` owns entry-point exception mapping.
 `orchestrate.load_lattice(project)` is the single wiring point that runs the pipeline;
-`init` is a separate scaffolding command that never loads the lattice. The central
+`init` and the `ci` commands are separate: they never load the lattice, and `ci` reads
+and refreshes the managed GitHub artifacts AD-16 describes. The central
 structure is the `Lattice` (model.py), which every lattice-reading command reads.
 This file owns the durable module boundaries and load-bearing decisions. CLAUDE.md
 routes contributors and agents to those decisions and lists enforced repository rules.
@@ -50,30 +51,40 @@ edges.
 shared low-level durable staging, replace, create-if-absent, fingerprint, sync, and
 cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capability and
 mechanics, independent live destination preflight for commits, durable commit and
-rollback, journal and artifact recovery containment and validation, and cleanup. The
-`doc_lattice.cli` package owns the application boundary. Its
-`cli/commands/reconcile.py` adapter resolves document identity paths before fresh
-reads and orchestrates lock acquisition and lifetime, recovery, loading, planning,
-and the transaction commit call. Final outcome reporting, including success output,
-occurs only after clean lock release; an automatic-recovery notice may be emitted on
-stderr while the lock is held. Within the cache package, `cache/schema.py` and
+rollback, journal and artifact recovery containment and validation, and cleanup.
+`github_ci/filesystem.py` owns managed-artifact filesystem work over those primitives: a
+separate nonblocking advisory lock on the repository root, and a descriptor-relative
+parent walk that opens every ancestor with no-follow flags and hands `persistence.py` a
+directory descriptor rather than a pathname, so publication keeps writing into the
+directory it validated even if that directory's pathname is renamed or recreated mid-run.
+The `ci` command adapters together with `cli/git_repository.py` own the package's only
+subprocess use, bounded `git` invocations that resolve the working-tree top level and read
+the local origin. The rest of `github_ci`, its render, audit, identity, parser, and scanner
+modules, is filesystem-free; see AD-16 for the policy those adapters enforce. The
+`doc_lattice.cli` package owns the application boundary; AD-5 owns the split between its
+`cli/commands/reconcile.py` adapter and `reconcile_transaction.py`.
+Within the cache package, `cache/schema.py` and
 `cache/state.py` are filesystem-free, `cache/store.py` owns cache-file I/O, and
 `cache/lookup.py` reads and stats documents to select the verify or stat tier.
 `linear_fetch` is impure wiring and `linear_client` is the only module that touches
 the network.
 **Consequences:** Every command's logic is unit-tested with no I/O; the network slice
-is quarantined to one module.
+is quarantined to one module. Two lock capabilities exist and never nest, since neither
+publication path acquires the reconcile lock; reconcile and managed-artifact publication
+do not coordinate with each other.
 
 ### AD-3: Untyped-to-typed boundary policy
 
 **Date:** 2026-06-27
 **Status:** Accepted
-**Context:** Raw YAML and Linear JSON arrive untyped.
+**Context:** Document frontmatter YAML, workflow YAML, and Linear JSON arrive untyped.
 **Decision:** `typing.Any`/`typing.cast` are allowed only in boundary modules
 (`scripts/check_typing_boundaries.py`); the real boundaries are `frontmatter_parser`
-and `linear_parser`, which validate into typed models. Everywhere else passes typed
-values.
-**Consequences:** Untyped data cannot leak past two named files; CI enforces it.
+(document frontmatter YAML), `linear_parser` (Linear JSON), and
+`github_ci/workflow_parser` (workflow YAML), which validate into typed models.
+Everywhere else passes typed values.
+**Consequences:** Untyped data cannot leak past the named boundary modules; CI enforces
+it.
 
 ### AD-4: Canonicalized, truncated content hash
 
@@ -117,7 +128,8 @@ durable and the journal is durably marked `committed`; recovery then preserves t
 destinations and only cleans staged evidence. Success output is emitted only after
 committed cleanup and clean lock release.
 
-Normal real startup recovers a valid outstanding journal before lattice loading.
+Normal real startup recovers a valid outstanding journal before lattice loading, and an
+automatic-recovery notice may be emitted on stderr while the lock is held.
 `reconcile --recover` performs only that recovery, while dry-run never recovers or
 persists anything and refuses an outstanding journal. Invalid or unauthenticated
 recovery evidence is retained for explicit manual remediation rather than guessed at
@@ -194,8 +206,10 @@ moving durable reconcile mutation into the CLI.
 **Decision:** `doc_lattice.cli` is a package. `cli/application.py` constructs and
 registers Typer; `cli/runtime.py` creates a frozen runtime for each invocation with
 stdout, stderr, cwd, and config and lattice loaders; and `cli/output.py` centralizes
-format validation, the JSON alias, indentation, exact output, and GitHub annotations.
-The seven modules under `cli/commands/` are narrow command adapters. There are no
+format validation, indentation, exact output, and GitHub annotations. The package also
+holds `options.py` (shared Typer option types) and `git_repository.py` (Git top-level
+resolution for the `ci` and GitHub-mode `init` adapters). Each module under
+`cli/commands/` is a narrow command adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
 
 `cli/errors.py` owns diagnostic rendering, exit constants, and command-level
@@ -204,13 +218,9 @@ mutable module-level consoles and no mutations of Typer color globals.
 entry-point exception mapping: `ProjectError` and the supported unexpected errors map
 to exit 2, while intended `SystemExit` values propagate unchanged.
 
-`cli/commands/reconcile.py` resolves selected document identity paths before fresh
-reads and orchestrates lock acquisition and lifetime, recovery, lattice loading,
-planning, the transaction commit call, and final outcome reporting after lock release.
-An automatic-recovery notice may be emitted on stderr while the lock is held. Lock
-capability and mechanics, independent live commit destination preflight, durable
-mutation and rollback, recovery containment and validation, and cleanup remain in
-`reconcile_transaction.py`.
+AD-5 owns the split between `cli/commands/reconcile.py` and
+`reconcile_transaction.py`; this package refactor moved no durable reconcile mutation
+into the CLI.
 **Consequences:** Invocation state and diagnostics can be tested without shared
 console state. Tests under `tests/cli/` mirror the command adapters and add focused
 runtime, output, and cross-command contract coverage. Durable reconcile safety keeps
@@ -395,14 +405,35 @@ stream-scope evidence with monotonic IDs. Typed ports keep argv, assignments, st
 static-resource content separate. A pure taint module builds `LiteralTransfer`, variable, stream,
 resource, `Choice`, `Concat`, and `OutsideGap` expressions, then evaluates them with a fixed marker
 DFA. Sequential adjacency uses relational composition; competing definitions, truncating writes,
-and mutually exclusive alternatives use set union, so unrelated fragments never concatenate.
+and mutually exclusive alternatives use set union, so unrelated fragments never concatenate. That
+union is taken over every branch, because the authored route does not evaluate a command's exit
+status: a branch behind a literal `false` is analyzed as if it runs, and refusing it over-refuses.
+The eval payload sub-analysis below does reduce a branch by literal command status, so the two
+routes disagree on the same construct, and closing that asymmetry for `true`, `false`, and `:`
+alone is issue #203.
 `OutsideGap` contributes epsilon and an opaque non-authored barrier, which permits only
 authored-only marker paths.
 
 Stream scopes aggregate command stdout with `Sequence`, `Choice`, and reflexive-transitive
 `Repeat`; command substitution alone strips trailing newlines with a finite suffix-aware transfer
-summary. A call to a function defined in the same body reproduces that function scope's aggregated
-stdout, so wrapping a producer in a function preserves the handoff. A pipeline keeps its
+summary. That aggregation takes an inner command's output whether or not the command's own
+descriptor replay left it on the scope's stdout, so `{ producer >/dev/null; }` still contributes
+its output to the scope stream. This over-refuses in the fail-closed direction rather than leaving
+a hole, and it is one property of the aggregation rather than one per sink: every consumer of the
+scope stream reads the same unfiltered content, so the pipe, static-file, command-substitution, and
+output-process-substitution spellings of the same body all refuse together. It is issue #201, and a
+fix belongs at the aggregation so those consumers keep moving together. A call to a function
+defined in the same body reproduces that function scope's aggregated
+stdout, so wrapping a producer in a function preserves the handoff. The function body is analyzed
+once where it is DEFINED, though, carrying the definition scope's stream and descriptor bindings
+rather than the call site's, and it contributes to that scope whether or not the function is ever
+invoked. That cuts both ways and is issue #204. A definition-site binding resolves a body's `>&N`
+to a concrete target, which masks the unresolved-alias guard the same body refuses on without it,
+so `{ f() { producer >&3; }; } 3>/dev/null; f 3> >(bash)` certifies while its no-compound control
+refuses and Bash runs the marker in both. In the other direction a definition placed inside a
+redirected compound is credited with that compound's stream, which over-refuses on every sink the
+same way #201 does. A fix instantiates the body per call site with the descriptors that call
+installs, moving both directions at once. A pipeline keeps its
 producer-to-consumer edge across the newline that follows `|` and when its consumer is a simple
 command inside a control body, while a compound consumer still binds the compound scope. A command
 naming a static resource operand this body writes, such as `cat s.sh`, or reading a process
@@ -444,14 +475,35 @@ sequence. Ordered descriptor replay installs pipeline endpoints first and then a
 left to right, so only final descriptor bindings route bytes while earlier truncations retain their
 empty-file side effect. A `>&N` source resolves first against the command's own events and then
 against the bindings its enclosing compounds installed, innermost first, so
-`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. Descriptors 1 and 2 are
-always inherited from the enclosing shell and need no such binding. Any other descriptor that some
-part of the body binds, but that this command's lexical chain cannot supply, is missing evidence
-rather than an inherited stream: a bare `exec 3> out.sh` rebinds the shell scope, which the
-per-command `redirections` field cannot carry, so a later `>&3` fails closed. A descriptor nothing
-in the body binds is a Bash runtime error rather than a flow, so it keeps routing nowhere.
+`{ producer >&3; } 3> out.sh` routes the producer's stdout into `out.sh`. That chain records a
+`>&N` as an alias to `N` rather than as the target `N` held when the duplication ran, so a later
+compound that rebinds `N` retargets the earlier duplication, which Bash does not do. It is an
+over-refusal in the same shape as the aggregation above, one property of the shared lookup rather
+than one per sink, and it is issue #202. A stdout writer is a simple command or a compound, since a
+compound carries redirections and aggregated stdout of its own, so `{ producer; } > >(consumer)`
+binds the compound's stdout to the substitution's consumer exactly as the ungrouped
+`producer > >(consumer)` binds one command's. A process substitution is a descriptor target like
+any other on that chain, so `{ producer >&3; } 3> >(consumer)` reaches the consumer as well. Two
+writers reach one output substitution when a compound binds a descriptor that several commands
+inside it write to, and a writer's stream is a scope of its own rather than a member of one output
+expression, so nothing carries the order or the alternation between them. One writer subsumes
+another when its aggregated stdout holds that writer's stream, because it already holds it in
+execution order, which is the whole of `{ producer >&1; } > >(consumer)`. That relation is stream
+containment rather than lexical nesting, and the two part on a pipeline: in
+`{ producer >&3 | cat; } > >(consumer) 3>&1` the producer sits inside the compound and reaches the
+consumer through descriptor 3, while the compound's stdout holds `cat` rather than the producer, so
+subsuming by nesting would drop the only writer carrying the producer's content. Writers neither of
+which carries the other fail closed rather than being composed, since selecting one drops the rest
+and concatenating them asserts a sequence the evidence does not carry. Descriptors 1 and 2 are always
+inherited from the enclosing shell and need no
+such binding. Any other descriptor that some part of the body binds, but that this command's
+lexical chain cannot supply, is missing evidence rather than an inherited stream: a bare
+`exec 3> out.sh` rebinds the shell scope, which the per-command `redirections` field cannot carry,
+so a later `>&3` fails closed. A descriptor nothing in the body binds is a Bash runtime error
+rather than a flow, so it keeps routing nowhere.
 
-Execution sinks are `eval`, shell `-c`, selected shell stdin, a registered `trap` action, and
+**Sink positions.** Execution sinks are `eval`, shell `-c`, selected shell stdin, a
+registered `trap` action, and
 static script execution through a shell operand, direct path, `source`, or `.`. A `trap` action is
 shell source the shell reads and executes when the signal arrives, so deferring its expansion to
 that moment is what hid it rather than any difference in what it runs: as a value the ordinary
@@ -482,6 +534,7 @@ modeled, since recognizing it would mean narrowing a refusal on `-i` evidence th
 supplies, which AD-17's founding principle rules out. `--emulate` stays excluded because its value
 is a mode name rather than a path.
 
+**Eval payload replay.**
 Exact eval payload interpretation is a bounded sub-analysis, not a shell interpreter. When an
 `eval` payload resolves to exact literal text, that text is tokenized and its state effects are
 replayed so a later sink observes them. This is what refuses
@@ -699,28 +752,63 @@ exhaustion, so an eval payload that grows itself cannot exhaust time or memory. 
 projection caps are the exception: they widen to the top of the content lattice instead of
 refusing, as described at the end of this decision.
 
+A write key that lies on a definition cycle is seeded with epsilon rather than with the
+annihilating lattice bottom, because Bash expands a not-yet-assigned self-reference to the empty
+string and the literals around it reconstitute the marker. The seeder reads the variable writes
+alone, so a cycle that runs through a command substitution or a file was invisible to it and kept
+the bottom seed, which is issue #163. That cycle is now found over the variable, resource, and
+stream writes together and recorded in the spelling the seeder does see: one self-reference write
+per variable key that only reaches itself through a carrier. Those synthesized writes are the one
+sanctioned exception to the sentence above about canonicalizing write tuples. They are appended
+rather than inserted, they are created through the same build-stage closure every authored write
+passes so they are charged to the edge and table budgets where they are made, and they are labelled
+as synthesized so the eval-syntax reparse, which is a quote-sensitive stream rather than a join,
+never sees a write no command authored. A cycle confined to stream and resource keys with no
+variable on it still keeps the bottom seed, matching the seeder's own domain.
+
+Recording is a fixed-point no-op for a key whose writes all overwrite, since joining a key's value
+with itself never widens it. A key carrying an appending write is the exception and is not a no-op:
+moving that key's seed from bottom to epsilon gives the append branch epsilon as its base instead
+of the conservative outside barrier, so an alternative the barrier carried is dropped. That
+narrowing is intended rather than incidental. It is what the direct spelling already does on a
+cyclic key the seeder sees without any recording, and the carrier-borne spelling only reaches the
+same seed.
+
+The recording runs once, when the flow for a run body is built. The eval sub-analysis then
+discovers eval-time assignments, appends them to the write set and re-solves without re-recording,
+so a definition cycle that is closed only by an eval-lowered assignment keeps the bottom seed and
+still certifies: `Q=$(printf "doc-%slattice" "$W"); eval 'W=${W=$Q}'; $Q` certifies while Bash runs
+the marker, where the same body without the `eval` refuses. That residual is issue #163 one
+indirection further out and not issue #159's carrier opacity, because the marker literal never
+crosses the eval boundary; it is the seed, not the value, that fails to reach. It stays open here
+because every spelling of re-recording inside that loop moves the fingerprints of two guards the
+inventory freezes as debt, so closing it depends on classifying those guards first. It is tracked
+as issue #199 and must not be triaged onto #159.
+
 The absence-of-evidence boundary is cross-step/job/action/workflow flow, external values and files
 beyond generic may-output, arbitrary encoding/transforms, dynamic resource aliases, shell-scope
 descriptor state carried across commands by a bare `exec`, eval payload constructs outside the
 bounded exact-literal set above, and AD-17's alias, `PATH`, and dynamic-executable limitations.
 This list is the boundary as designed, not a complete inventory of what the engine currently
-misses; open gaps against this decision are tracked in issues #125 through #141, and this
-enumeration itself is not exhaustive. Two further gaps outside these categories: a compound
-command's stdout redirected into an output process substitution is not yet linked into that
-substitution's consumer, only a simple command's is (issue #116), and `lastpipe` state reached
-through a function call site or a loop back edge is widened only for a pipeline whose last stage is
-a `read` writing from stdin, not for every conditional-on-lastpipe context such as a trailing `eval`
-(issue #118). A `read` beyond
-the first record of a shared stream is projected as record one, so a marker split across later
-records is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u`
-over-refusal it interacts with is issue #119.
-**Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
-that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
-required character comes only from external content continue to certify with the boundary
-disclosed. `audit.py` still invokes the scanner independently for each step; future job-level
-aggregation can consume the evidence shape without changing the parser/analysis ownership
-boundary.
+misses; open gaps against this decision are tracked as individual issues rather than by a fixed
+range of issue numbers, and this enumeration itself is not exhaustive. Two further gaps outside
+these categories: `lastpipe` state reached through a function call site or a loop back edge is
+widened only for a pipeline whose last stage is a `read` writing from stdin, not for every
+conditional-on-lastpipe context such as a trailing `eval` (issue #118), and one descriptor bound to
+two output process substitutions keeps only the last binding, so the earlier consumer Bash chains
+behind it, as in `producer > >(first) > >(second)`, reads nothing (issue #187). A `read` beyond the
+first record of a shared stream is projected as record one, so a marker split across later records
+is not yet seen; that under-refusal is issue #121, and the `read -a/-d/-n/-N/-u` over-refusal it
+interacts with is issue #119. A heredoc or here-string redirected onto a compound scope keeps its
+content for the reader inside that scope, but a variable reference in that content resolves to
+nothing when the scope is a pipeline producer and its environment is a subshell environment, so
+`( cat ) <<<"${A}lattice reconcile" | bash` certifies while the brace-group, no-pipe,
+command-owned, and literal-content spellings of the same body all refuse; that is issue #192,
+pinned as certifying. AD-23 later froze this scope: the issue numbers cited above name
+the report that produced each disclosure, not open work, and most were closed under that record.
+A gap outside AD-23's three classes is accepted behavior rather than a tracked issue.
 
+**Further sink positions.**
 Execution sinks are recognized in three further positions, none of which requires an allowlist of
 command names. A command name composed across a variable boundary is itself a sink, because Bash
 executes the head after expansion; a head that already resolves to a marker name stays outside this
@@ -741,6 +829,363 @@ resource this body writes. Such an operand resolves to no static key, so the exa
 the glob target guard both skipped it and `F=t.sh; source "$F"` certified a file the body itself
 wrote the marker into.
 
+**Redirection operand resolution.**
+A simple command's redirection operand that names no resource by its syntax alone is projected
+against the exact scalar values in effect where Bash expands it, so `P=task.sh; printf ... > "$P"`
+writes to the key `bash task.sh` later reads. Resource identity used to follow literal syntax only,
+which left that write on a nameless target while the read saw a key nothing had written, and the
+body certified while Bash ran the marker (issue #151). The projection is the one the eval replay
+already trusts, so an operand resolves only when every path reaching it assigns the same literal,
+and anything else keeps the dynamic target it had. Which values apply is measured against Bash 5.2
+rather than assumed: a command that runs an argv expands the word before its own prefix assignments
+take effect, so `P=other.sh; P=task.sh printf ... > "$P"` writes to `other.sh`, while an
+assignment-only command applies its assignments first and `P=task.sh > "$P"` truncates the file the
+new value names. Reading the wrong table would name a file Bash never touches and leave the file the
+marker really reaches unmodeled, which is a certification rather than a refusal.
+
+Resolving an operand can name a descriptor rather than a file, because a variable holding
+`/dev/stdout`, a `/dev/fd` alias, or a digit under `>&` is exactly what its literal spelling names.
+That widens the analysis in one measured place: a non-descriptor target makes the descriptor an
+`exec` binds directly guarded, so `P=/dev/stdout; exec 3> "$P"` used to refuse a later `>&3` as an
+unresolved source and now drops it as a duplication of a standard stream. The literal spelling
+`exec 3> /dev/stdout` always certified, so the resolution makes the two spellings agree rather than
+withdrawing a guard from a shape that had one on its own merits, and the fixtures that pin the
+shape carry the real-Bash evidence that Bash runs no marker through it. A guard that refuses
+because a target is dynamic would have to be reconsidered against this decision before it is added.
+
+The resolution runs before each command's stdin is built and before the pipe inputs are, because
+both read the redirection evidence. An operand under `<` names the file a `read` draws its record
+from, and the descriptor replay that decides which writer reaches an output process substitution
+treats an unresolved operand as a direct binding, which guards the very descriptor a resolved one
+names. Without the second ordering, an output process substitution anywhere in the body brought the
+refusal back for `P=/dev/stdout; exec 3> "$P"` while the literal spelling certified. Naming the
+operands is therefore its own pass over the body, and that pass builds no stdin, since building
+stdin is what needs the inputs it feeds. The input descriptor context is built from that same
+named evidence, because the input half of the descriptor classification tests a target exactly as
+its output twin does, and reading unresolved events there left the two halves disagreeing with
+each other and with the flow definitions, which are built from the named evidence one stage later.
+Neither is built in the naming pass, which stops at the resolution and reads no stdin and no pipe.
+One value therefore cannot cross that line: a name a `read` supplies
+is unknown in the naming pass alone, so `read -r P; exec 3> "$P"` keeps a dynamic target there, the
+descriptor stays guarded, and a later `>&3` refuses where every other spelling now certifies. That
+residue runs in both directions rather than one. The refusing direction is pinned with the literal
+control that isolates the withheld value from the `read` and from the descriptor shape. The
+certifying direction is the same unknown name under a write: `echo task.sh | { read -r P; printf ...
+> "$P"; }; bash task.sh`, its process-substitution spelling, and the plain file spelling
+`read -r P < n.txt` all record the marker on a target the model discards. What separates them from
+the here-string and heredoc spellings, which refuse, is whether the record is inline literal text:
+those two carry theirs in the redirection itself, while a pipe, a process substitution and a file
+each draw it from a resource, which yields a deferred projection rather than an exact value in the
+naming pass. All three sit with the pinned gaps below.
+
+The resolution reaches one simple command's own quoted operand. Four classes stay inside the
+dynamic resource alias boundary above, each pinned as certifying with the real-Bash differential
+attached so a change that closes or widens one is visible. A compound command's redirection word
+is expanded at compound entry rather than at any command inside it, and this evidence shape
+carries no scope-entry value table, so `{ ...; } > "$P"` is not projected; a function body's and a
+loop body's own assignments are conditional in this model, so a name assigned there is unknown
+from that point and the same write in either place is not projected (issue #188). An unquoted
+operand is word-split and pathname-expanded by Bash before anything is opened, so `P='ta*.sh'`
+names a pattern and `P='a b.sh'` is an ambiguous redirect that opens nothing; the word is not
+carried for such an operand at all, which leaves the unquoted spelling exactly where the literal
+`> ta*.sh` spelling already sat (issue #189). Authored pattern syntax outside the quotes is the
+same class one step over, since the expansion is quoted and the pattern is not: `> "$P"*.sh` is
+pathname-expanded after the reference expands, and `> "$P"{1,2}.sh` is an ambiguous redirect, so
+neither carries a word either. A parameter expansion that transforms, indexes,
+defaults, or indirects its value lowers to no closed content expression, so `${P%.txt}` and its
+family keep a dynamic target (issue #190). The exact eval payload route reparses one payload word
+with no table of the values around it, so an unquoted reference inside a payload is not projected
+either.
+
+**Value-table withdrawals.**
+What a name the surrounding body assigned means where the walk cannot order the rebinding is a
+separate question from those gaps, because that value is exact and the operand would be projected
+against it. Three rebindings escape the source-order walk, and each withdraws the name rather than
+projecting it forward: a `for` or `select` binding, which is not one of the assignments the walk
+applies; a name a loop body assigns, which the next iteration carries back to a use above the
+assignment along an edge this walk has no shape for; and a name any function body assigns or
+binds, since a body rebinds in its caller's variable space while the walk keeps a separate value
+table per function context. Projecting instead named a file Bash never opens: `P=other.sh; for P
+in task.sh; do printf ... > "$P"; done; bash other.sh` recorded the write on `other.sh` and
+refused a body whose marker only ever reaches `task.sh`.
+
+The withdrawal is the projection's alone. It accumulates in a set of names beside each value table
+rather than in the table, because popping the name there and marking it unknown reached every other
+reader of that table, and one of them fails the whole scan closed: an unknown `IFS` makes a later
+`read` a builtin write the model cannot represent, so `for IFS in , ; do :; done` ahead of any
+`read` reported a marker-free body as unscannable. An effect that names the variable releases it
+again, which is the same point the table itself stops being stale.
+
+Two writes release nothing, because the value they leave is the stale one the withdrawal exists to
+keep out of an operand. A write whose own content reads a withdrawn name republished that value
+under a fresh name that carried no withdrawal at all: `f(){ P=other.sh; }; P=task.sh; f; Q=$P;
+printf ... > "$Q"; bash other.sh` recorded the marker on `task.sh` and certified a body Bash runs
+it in, and the same one-hop copy laundered a loop binding, a nameref alias and a declared attribute
+alike. The copy is therefore withdrawn wherever taking the withdrawn names away changes what its
+content resolves to, which is the one-hop test applied at every hop rather than a depth this walk
+has to bound, and an append to an already-withdrawn name extends that same text. A rebinding the
+*writing command itself* performs is the second: `declare -n R=P` records a write to `R`, and
+releasing `R` there projected `> "$R"` against the value `P` held at the declaration, so the
+withdrawal is reapplied after each command's own effects. What a loop binding leaves the
+read and eval projections holding is therefore exactly what it held before this decision, including
+the value a loop really replaces: `for IFS in , ; do :; done; read -r A B < f` splits on the IFS the
+table already had. That is a hole in this value table rather than in the operand resolution, it
+predates this decision, and closing it belongs with the rebindings issue #205 tracks rather than
+with a withdrawal that exists to keep one operand from naming the wrong file.
+
+Every withdrawal applies at a point in the walk rather than taking a name away from the body, so an
+assignment after the loop resolves the operand as it always did, and a subshell binding, which
+does not survive its scope, leaves the outer value naming the file the marker really reaches. Each
+value table counts the scope entries it has already applied, seeded from its parent when the
+environment is first reached, so a body whose first command runs in a subshell or a pipeline stage
+still withdraws from the enclosing environment. A scope entry reaches only the environment the
+scope binds in and the environments forked from it, which is the innermost scope on its ancestry
+that owns an environment: `( for P in task.sh; do :; done )` and its command substitution spelling
+rebind nothing the enclosing shell can observe, and withdrawing there erased a value that shell
+provably keeps. The environments a pipeline allocates are not scopes, so the pipeline spelling of
+that shape is not separated from the enclosing table and keeps the withdrawal, which leaves it
+where every other unresolved operand sits. A function body is not an execution environment either,
+so the entry is applied only within the function context the scope was entered in; the caller's
+table is covered by the third withdrawal instead of by this one.
+
+Only an assignment that outlives its command is a rebinding a back edge can carry. A prefix
+assignment on a command that runs an argv is not: Bash applies `P=other.sh true` for the duration
+of `true` and restores the name after it, which is why the value table applies a command's own
+assignments only when the command runs no argv. Counting it withdrew a name no iteration replaces,
+and a body that never runs at all was enough to do it.
+
+The third withdraws at each call rather than for the whole run body. Withdrawing everywhere was
+coarser in the direction that leaves an operand dynamic, and that direction is not safe here: a
+dynamic target is discarded, so the marker write goes unrecorded and the sink below certifies a
+flow Bash really runs. Two shapes no call reaches were certified that way, each of them the
+pre-#151 certification arriving back through the fix that closes it. A caller that assigns the name
+after the call holds a value no call can have changed, so `f(){ P=other.sh; }; f; P=task.sh; printf
+... > "$P"; bash task.sh` ran the marker Bash writes to `task.sh`; and a call an isolated
+environment contains rebinds nothing the parent shell reads, so the subshell, command substitution
+and pipeline stage spellings of `P=task.sh; (f)` did the same. The names are therefore withdrawn
+into the value table of the function context and execution environment the call runs in, along the
+containment values are already inherited by, and an effect that names the variable releases it
+exactly as it releases a scope withdrawal. A later call withdraws it again.
+
+Which definitions a call reaches is the same notion of a called name the later call-site resolution
+is built from, a command's resolved executable name and the exact heads a bounded static `eval`
+input spells, over-approximated on every axis it has: a name matches every definition of it rather
+than the active one, order is ignored, and a call behind a false condition counts. A head this scan
+cannot read names nothing, exactly as it does in that later pass, so this is the same assumption
+rather than a second one. The collection is closed over the calls each body makes, so a call to a
+body that calls another withdraws both bodies' names, and a body nothing calls has no call site and
+rebinds nothing: `f() { P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` certified a body
+whose marker Bash writes to `task.sh` and runs, on the strength of a helper the run never invokes.
+
+A prefix assignment inside a body is excluded for the reason the loop back edge excludes it: Bash
+restores it after the command it prefixes, so no call leaves it in the caller, and counting it took
+the caller's exact value away for the whole run body.
+
+A use above a call sees that call's rebinding on the next iteration of an enclosing loop, along the
+edge a body's own assignment travels, so a loop withdraws the names its calls rebind from loop
+entry as well. That withdrawal carries no environment, since a scope withdraws what every command
+under it rebinds, so a call an isolated environment contains inside a loop stays withdrawn for the
+whole loop where its unlooped spelling resolves. That is the coarse direction, and it leaves the
+operand where every other unresolved operand sits.
+
+Withdrawing in all these cases means the operand keeps the target it had before this decision, so
+what Bash leaves the name holding after `done`, on a second iteration, or after a call no assignment
+follows is a false certification of the same shape and size as every other unresolved operand,
+pinned in both directions alongside them.
+
+A name the body declares local is not one of the three. `local`, and `declare` or `typeset` inside
+a body, bind for the duration of the call and restore the caller's variable on return, so no value
+they assign is one the caller can be holding at an operand. Withdrawing it read a declaration as a
+rebinding and took the caller's own exact value away for the whole run body, without the function
+even being called: `f() { local P=other.sh; }; P=task.sh; printf ... > "$P"; bash task.sh` left the
+operand dynamic and certified a body whose marker Bash writes to `task.sh` and runs. The two
+spellings that do reach the caller keep the withdrawal rather than being reasoned about: a
+`declare -g` is a global write and never local to begin with, and options this scan cannot read
+may spell `-g`. A plain assignment after a declaration in the same body withdraws as well, since
+this pass carries no per-body declaration state; that is the coarse direction, and it leaves the
+operand where every other unresolved operand sits.
+
+An `unset` in a body is a rebinding of the same kind as an assignment, since Bash restores nothing
+on return, so a body's unset names are withdrawn too: `f(){ unset P; }; P=task.sh; f; ... > "$P"`
+opens no file at all under Bash, and projecting the value `P` still held named a file the run
+never writes. An unset whose target this scan cannot read, and a builtin write to a name it cannot
+read, withdraw the whole table rather than a name, and for the whole run body rather than from the
+call, since either may be the operand's own name and there is no name for a later assignment to
+release.
+
+A write through a Bash nameref is routed to the name its alias stands for only after this pass, so
+this table still holds the aliased name's pre-alias value: `P=t1.sh; declare -n R=P; R=t2.sh`
+leaves `P=t1.sh` here while Bash leaves `P=t2.sh`. A name an alias is written through is therefore
+withdrawn, as is every alias's own name, which stands for no value of its own here. Projecting
+instead recorded the marker on the resource the stale value names, which refuses a body whose
+marker only ever reaches the other file and leaves that file unmodeled in the same step.
+
+That withdrawal is at the write, on the same two edges the call withdrawal is, and for the same
+reason: a direct write to the referent ends the staleness the alias created, and an alias a
+subshell is written through reaches no table the parent shell reads. `declare -n R=P; R=other.sh;
+P=task.sh; printf ... > "$P"` and `P=task.sh; ( declare -n R=P; R=other.sh ); printf ... > "$P"`
+certified bodies whose marker Bash writes to `task.sh` and runs while the withdrawal covered the
+whole run body. A body's alias write reaches its caller under a name none of the body's assignments
+spells, so the call withdrawal reads these names as well, and an enclosing loop withdraws them from
+entry exactly as it does a call's.
+
+Binding an alias is not writing through one, and the difference is a refusal either way, so
+`declare -n R=P` alone and the `declare -n R; R=P` spelling whose first assignment binds rather
+than writes both leave the target exact. Only a first assignment whose content this scan cannot
+read as a variable name withdraws the whole table, for the whole run body, since the alias it binds
+may stand for the operand's own name. The alias state itself is source-ordered and carries no
+environments, so an alias written through above its own declaration, which a function body can
+spell, leaves its target unwithdrawn, and an alias a subshell binds is still read as one after that
+subshell exits. Both sit with the other alias gaps.
+
+Two orderings inside one command are measured rather than assumed, because reading either the wrong
+way names a file for the marker that Bash never opens. A declaration builtin's operands are all
+expanded before the builtin applies any of them, so `A=other.sh; declare A=task.sh B=$A` leaves
+`B=other.sh`: the operand list is projected against a snapshot of the table taken before the command
+rather than against the values its earlier operands assign. The append spelling is the exception the
+same measurement gives, since `declare A=task A+=.sh` leaves `task.sh`, so the text an append
+extends is the one that command already applied. A prefix assignment on an ordinary command carries
+no snapshot at all: those apply left to right, and `A=1; A=2 B=$A` leaves `B=2`.
+
+**Declaration attributes.**
+A declaration attribute is a rebinding of a third kind, one this evidence records the wrong value
+for rather than not at all. Case conversion (`declare -u`, `-l`, `-c`) and arithmetic evaluation
+(`-i`) decide what Bash stores rather than what the assignment spells, so `declare -u P; P=task.sh`
+leaves `TASK.SH` in the variable while this table reads the assignment's own text. The name is
+therefore withdrawn from the projection at its declaration and at every later write to it, rather
+than released by those writes the way an ordinary assignment releases a withdrawal. Both directions
+were reachable before that: the marker write landed on the lowercase file while Bash wrote the
+uppercase one, and a body whose marker Bash leaves somewhere it never runs was refused. What Bash
+really stores is the residue, and it sits with the rebindings issue #205 tracks.
+
+`readonly`, and `-r` on a declaration builtin that binds in the scope reading it, is the same
+mismatch reached from the other side.
+The declaration's own operand is stored exactly, and it is every later assignment that Bash refuses,
+leaving the name holding what it already had. What Bash then does with the run is measured rather
+than assumed: only a plain assignment exits a non-interactive shell, while every write a builtin
+performs reports the error and keeps running, `export`, `declare`, `readonly`, `typeset`, `read`,
+`printf -v`, a prefix assignment on a command that runs an argv, an arithmetic evaluation, an
+`unset` and a `for` loop's own variable alike. A write to an already-declared readonly name is
+therefore not applied, and the name is not withdrawn either, since the table already holds the value
+Bash kept. Withdrawing it discarded a still-correct value and returned the operand to the dynamic
+target this resolution exists to close:
+`readonly P=task.sh; export P=other.sh || :; printf ... > "$P"; bash task.sh` certified a body whose
+marker Bash writes into `task.sh` and runs, while `readonly P=task.sh; printf ... > "$P"` already
+named the file the marker reaches. Keeping the value is the sound reading of the exiting spelling
+too, since nothing after a plain assignment runs, so an operand below it names a file the run never
+reaches and resolving it refuses a body Bash never runs the marker in rather than certifying one it
+does. An `unset` of a readonly name is refused the same way, so the name is left holding the
+declaration's value rather than made unknown.
+
+Which scope a declaration binds in is measured rather than assumed, because reading it too widely
+stops a *real* later assignment from being applied and leaves this table holding a value the run
+replaced, which is the one direction a readonly name reaches a false certification from. The
+attribute in the scope the declaration runs in and the attribute that survives a function's return
+are read as two questions. Under Bash 5.2 a scoped builtin's attribute reaches the caller only with
+`-g`, `declare`, `typeset` and `local` alike, while `readonly` marks the caller's variable from a
+body with no `-g` at all. Reading `local -r` as the caller's readonly left one unrelated
+`f(){ local -r Q=zz; }` in a called helper disabling this resolution for `Q` for the whole run body,
+and `f(){ local -r IFS=,; }; f; IFS=:; read -r A B <<< ...` left the exact `read` projection
+splitting on the default separator while Bash split on the one the body really set.
+
+Which options the selected builtin accepts is measured the same way. A declaration builtin refuses
+its whole command for one option it does not take, applying no attribute and assigning nothing, so
+the letter alone does not spell one: `export` accepts none of the value-transforming letters and
+`readonly` accepts no `-r`, both being invalid options Bash refuses outright. Reading the letter
+regardless withdrew a name over a command that sets nothing, and
+`P=task.sh; export -u P || :; printf ... > "$P"; bash task.sh` certified a body whose marker Bash
+writes into `task.sh` and runs. `-f` and `-F` select shell functions rather than variables, so
+`readonly -f g` attributes nothing here; reading it as a readonly variable froze the like-named one
+and reopened the certification this resolution exists to close. Unlike the value-transforming
+attributes, none of this is a direction that merely leaves an operand dynamic, which is why the
+scope and the options are read rather than over-approximated.
+
+A declaration withdraws a name, and a withdrawal returns the operand to the dynamic target that
+certified before this resolution, so a declaration the shell never reaches is not read at all.
+Three shapes decide that. A branch `execution_status` proves untaken runs nothing, a function body
+no call reaches runs nothing, and a declaration a subshell makes dies with the subshell, which the
+attribute sets express by being kept per execution environment and inherited exactly as the value
+tables are. Reading any of them withdrew a name over a command that does not exist at runtime, and
+one unreachable word was enough to disable this resolution for the rest of the run body:
+`if false; then readonly P; fi`, `f(){ declare -u P; }` with no call to `f`, and `( readonly P )`
+each certified a body whose marker Bash writes through `> "$P"` and runs. The same reachability
+governs the scopes a command enters, so a loop inside an untaken branch binds nothing.
+
+Reachability decides whether an attribute is read at all; where it lands is decided by keeping the
+sets per function context as well, exactly as the value tables are keyed. A body is walked where it
+is written, so an attribute recorded against the environment alone bound the name before Bash had
+run the call: `f(){ readonly P; }; P=task.sh; printf ... > "$P"; bash task.sh; f` certified a body
+whose marker Bash writes into `task.sh` and runs, and so did the same body with the call moved ahead
+of the sink, since the withdrawal followed the text rather than the call. What a body declares
+therefore governs the body's own table, and only the attributes that survive the return are carried
+to the call sites, closed over the call graph the way a body's rebindings already are. They are
+applied after the call rather than at the declaration, because Bash expands a redirection word
+before it runs the command, and neither withdraws the name, since applying an attribute leaves the
+value already stored untouched.
+
+A declaration that only *may* run is still read, which is the direction that leaves an operand
+dynamic, and a `+u` that removes an attribute is not read at all. Both are the same direction, which
+is why the scope a declaration binds in and the options its builtin accepts are read where those are
+not.
+
+An attribute attached to a name this scan cannot read is not that direction. `N=P; declare -gu
+"$N"; P=task.sh; printf ... > "$P"` attaches the attribute to a name no word of the command spells,
+so the readable operands carry none of it and nothing else clears the table: the operand resolved
+to `task.sh` while Bash wrote the marker into `TASK.SH`. Such a declaration withdraws the whole
+body's projection instead, exactly as an unreadable nameref binding or unset target does, since the
+name it attributes may be the operand's own and there is no name for a later assignment to release.
+A declaration whose *option* is the expansion spells no attribute here and stays with every other
+word this scan cannot read.
+
+A shell parameter Bash gives its own value to is that mismatch with the attribute already set and
+no declaration in the run body to read it from, so an assignment to one stores nothing in this
+table at all rather than being withdrawn from the projection alone. The eval replay and the exact
+`read` projection substitute out of the same table, and dropping the value leaves them reading no
+text rather than the wrong text, which is a fail-closed refusal where they can no longer read a
+payload. Three families are measured under Bash 5.2 and named in `shell_taint.py`: a counter or generator
+that replaces the value outright, an integer attribute Bash sets itself, and an array Bash
+maintains and reads back from its own elements. Both directions were reachable, and only the
+milder one was reported: `SECONDS=task.sh; printf ... > "$SECONDS"; bash task.sh` was refused for a
+marker Bash writes to the file `0` and never runs, while the same body sinking `bash 0` certified
+for one Bash writes there and does run. `UID` and `BASH_ARGV0` store an assignment verbatim and are
+deliberately absent, since withdrawing a name Bash does store is the direction that leaves an
+operand dynamic. What Bash really stores is the residue issue #205 owns, as it is for a declared
+attribute.
+
+One class is refused rather than left unresolved: a rebinding no evidence records at all, where the
+name keeps the value it held before and an operand spelling it resolves to a file Bash never opens.
+An arithmetic assignment (`(( P = 1 ))`, `let P=1`, a `for ((P=0; ...))` header, or a `$(( P = 1 ))`
+expansion) is one. An `eval` payload assignment is another, since the payload route lowers its
+assignments for its own replay and does not apply them to this table, and so is a `source` or `.`
+of another file, whose content this scan does not read. A `getopts` write of its name operand is
+the fourth: the deterministic writer evidence covers `printf -v` and `read` and does not recognize
+`getopts`, so `f(){ OPTIND=1; getopts x P; }; f -x` leaves this table holding the value `P` had
+before the call while Bash leaves it holding the option character. A `${P:=q}` or `${P=q}` in an
+ordinary command's word is the fifth, since it is recorded as that command's assignments and no
+value table applies those; the same expansion in a compound's own redirection word is recorded, as
+that scope's loop bindings, so only the plain-command spelling is residue. A trap handler is the
+sixth, a payload this scan does not read at all which Bash runs between the commands around it.
+All six are pre-existing holes in this value table, which the eval replay reads as well; the
+projection makes them reachable as over-refusals, `P=other.sh; (( P = 1 )); printf ... > "$P"; bash
+other.sh` and its `eval 'P=1'`, `source vars.sh`, `getopts x P` and `trap 'P=1' DEBUG` spellings
+being rejected for a marker flow they do not have, and reachable in the certify direction too,
+where the write lands on the resource the stale value names while the file the marker really
+reaches goes unmodeled. The `${P:=q}` member reaches only that second direction: a name it assigns
+was unset or empty before, so the operand is dynamic rather than resolved to another file.
+
+The remedy is to record the rebinding, not to withdraw the name where one might have happened.
+Withdrawing returns every body carrying one of these constructs to the certification it had before
+this resolution, including the far more common body whose `eval`, `source`, `getopts` or trap
+rebinds nothing the operand names, and that direction gives back a marker flow Bash really runs for
+an over-refusal it does not. A `getopts` write shows the second half of that trade as well: it
+reaches the current shell from the top level exactly as it does from a function body, so
+withdrawing it with the names a body rebinds would pay the price above and still leave the
+top-level spelling over-refusing. Recording an arithmetic rebinding, applying an exact `eval`
+payload's assignments, recording a `getopts` write, recording a conditional expansion's assignment,
+and reading a trap handler are each tracked as issue #205 rather than folded in here; a sourced
+file's content stays outside what this scan reads.
+
+**Constructs that fail closed.**
 Three constructs rebind state the per-command evidence shape cannot carry, so they fail closed
 rather than being modeled. A bare `exec` that rebinds descriptor 0, 1, or 2 changes the enclosing
 shell scope for every later command, which the per-command `redirections` field cannot express. A
@@ -755,6 +1200,12 @@ module. Where an exact projection is merely lost rather than absent, the solver
 instead widens to the top of the content lattice, an alternative that accepts from every DFA
 entry state, so the value stays visible at each sink and only a body that actually reaches one
 is refused.
+**Consequences:** Split variable, pipe, heredoc/herestring, substitution, and static-file handoffs
+that execute authored marker content now exit 2. Marker-free dynamic execution and a marker whose
+required character comes only from external content continue to certify with the boundary
+disclosed. `audit.py` still invokes the scanner independently for each step; future job-level
+aggregation can consume the evidence shape without changing the parser/analysis ownership
+boundary.
 
 ### AD-19: A reported false certification is triaged, not automatically fixed
 
@@ -809,7 +1260,8 @@ each widening is known rather than assumed.
 loop terminates. The engine's disclosed boundary can grow deliberately instead of by whichever
 channel a reviewer happened to probe. The cost is explicit: pinned certifying bodies are known
 evasions that remain open, so the boundary AD-18 discloses is load bearing and this analysis stays
-defense in depth behind human review of workflow changes, never the sole control.
+defense in depth behind human review of workflow changes, never the sole control. AD-23 later
+narrows the boundary-extension default from file-and-pin to accept-and-disclose.
 
 ### AD-20: A fail-closed guard is identified by its origin, and classified by executable evidence
 
@@ -904,7 +1356,7 @@ rejects it by the same rule rather than by a case of its own. Only a value read 
 registers, so the verdict union `type ScanVerdict = Certified | MarkerDetected | GuardRefusal` binds
 no constructor spelling and stays the ordinary type alias it is. Neither rule carries an allowance:
 across the three guarded modules, no call spells a tracked constructor in a non-final callee
-position, and the shipped tree's 194 fingerprints stay byte-identical.
+position, and the 194 fingerprints the tree carried when this was measured stay byte-identical.
 
 Closing the computed callee left the same construction spelled across two named calls, which is why
 a guarded module resolves no name at runtime at all. `factory = getattr(shell_guards,
@@ -928,7 +1380,8 @@ frozen guard exactly as `setattr` does while spelling neither builtin.
 Rejecting those spellings left the plainest one open, so a write that replaces a definition is
 rejected whether or not it resolves a name at runtime. `_EvalDiscoveryBudget.charge_work = stub`
 withdraws the same guard while resolving every name statically, and all three spellings passed every
-gate with the shipped tree's 194 fingerprints byte-identical, because a record describes the source
+gate with the 194 fingerprints the tree carried when this was measured byte-identical, because a
+record describes the source
 of the definition it was extracted from rather than what that definition's name holds when a caller
 reaches it. Following the write instead would mean deciding what the replacement computes, which is
 the value-provenance problem the computed-callee boundary already declines. The base is resolved
@@ -953,8 +1406,8 @@ shadow the name of some unrelated nested helper. Every binding form counts, sinc
 a later call reaches: an assignment or deletion, an import alias, an `except` clause, a match
 capture, a parameter, and a second `def` or `class` of a name already defined. A `global` or
 `nonlocal` declaration naming a definition is rejected on sight, since it is what would carry a
-rebinding out of the scope that otherwise contains it; the five the guarded modules declare name
-ordinary closure variables. The attribute half now reads the attribute name as well as the base,
+rebinding out of the scope that otherwise contains it; the ones the guarded modules declare all
+name ordinary closure variables. The attribute half now reads the attribute name as well as the base,
 which is the only thing left when a receiver is unresolvable by construction. Every one of these
 carries no allowance: the guarded modules spell no collision in any scope, no declaration naming a
 definition, and 165 attribute writes of which none names a definition. `self.work += amount` remains
@@ -1068,7 +1521,7 @@ those as caps reported `state = "body"` as an unprovenanced bound. No shipped gu
 value, so the rule carries no allowance.
 The search covers the writers feeding a guard's condition as well as the
 condition itself, and the preceding controls that decide whether the origin is reached plus their
-writers—the same closures the fingerprint records. A comparison computed one statement
+writers, which are the same closures the fingerprint records. A comparison computed one statement
 earlier caps the scan exactly as an inline one does: `too_many = len(items) > 100` followed by
 `if too_many` leaves
 the magnitude nowhere the condition can see it; likewise, `if len(items) <= 100: return` makes that
@@ -1232,7 +1685,8 @@ A `with` is one of those controls, reduced to its items on the same terms a `try
 handlers. The context manager decides what becomes of an exception raised in the body, so
 `with suppress(Exception):` wrapped around an origin swallows the refusal it raises exactly as a
 bare handler would. Recognizing every compound statement except this one left that spelling
-withdrawing `taint.eval-discovery.work-limit` with all 194 fingerprints in the tree byte-identical
+withdrawing `taint.eval-discovery.work-limit` with all 194 fingerprints the tree carried when this
+was measured byte-identical
 and every other gate silent. The item is taken whole rather than only its context expression, so a
 name rebound through `as` moves the record too, and the statement reaches the callee closure like
 any other control, so `with quiet():` is not withdrawable by editing what `quiet` returns while its
@@ -1280,7 +1734,8 @@ the module fixpoint, so a field defaulted to a module constant reaches that cons
 attributes the guard's dataflow reads are followed, never the receiver itself, for the reason object
 configuration is matched that way: folding in every sibling's write to an unrelated attribute would
 churn the record of every guard in the class on any edit inside it. Measured across both modules the
-widened closure moves 35 of the 194 records and leaves an unrelated edit to a scanner method, a new
+widened closure moves 35 of the 194 records the tree carried when this was measured and leaves an
+unrelated edit to a scanner method, a new
 field or a new constructor attribute moving none. The boundary is the class the method is written
 in: a field inherited from a base class, one a caller assigns onto the instance from outside, and a
 write reached through a second name aliasing the same instance are all outside it, and no shipped
@@ -1418,7 +1873,8 @@ classification: a reachable witness proves dynamic reachability by executing the
 Withdrawal by dead code above the guard's function belongs to that family, and its crude form is
 closed syntactically rather than left to classification. An unconditional `return None` at the top
 of `_ShellScanner.scan` makes every scanner guard dead; measured against a candidate tree it kept
-all 194 origins, moved no fingerprint and passed every other gate. That edit is visible in the
+all 194 origins the tree carried when this was measured, moved no fingerprint and passed every
+other gate. That edit is visible in the
 syntax alone, as a statement sitting after one that leaves its own block, so no statement in a
 guarded module may be unreachable in that sense. The rule reads blocks structurally rather than
 naming the constructs that carry them, so a module body, an `if` arm, a loop body and its `else`, a
@@ -1433,7 +1889,7 @@ guard is not exposed to it, because its witness executes the guard through the p
 same edit becomes a failing test rather than a green gate. The residual therefore shrinks
 one-for-one as debt is classified, and vanishes when the debt snapshot is empty, which is the
 closure target this decision already names. The dynamic control while the window is open is the
-recurring checkpoint-corpus differential proposed in issue #182: it replays the authored corpus
+recurring checkpoint-corpus differential recorded in AD-22: it replays the authored corpus
 against base and candidate and reports every verdict divergence, so it sees an over-refusal as
 readily as a certification, which the taint fuzzer's seed-gated false-certification counter
 deliberately does not.
@@ -1526,3 +1982,314 @@ limits reach the bounds they name, so a resource guard is witnessed by a small s
 an enormous one. The cost is a second gate to maintain and a debt snapshot that must be regenerated
 whenever a guard legitimately moves; the closure target is an empty snapshot, which this decision
 does not by itself reach.
+
+### AD-21: A missing content-table key stays inert, and widening that default is rejected
+
+**Date:** 2026-07-31
+**Status:** Accepted
+**Context:** Three review passes over the false certifications open in July 2026 converged on one
+cross-cutting cause. When the taint solver resolves a `VariableRef`, `ResourceRef`, or `StreamRef`
+whose key is absent from the layered content tables, `shell_taint.py` yields `_OUTSIDE_VALUE`, which
+is inert and never marker-capable, rather than `_UNKNOWN_VALUE`, the top of the content lattice. The
+proposal was that inverting that default would turn every present and future evidence-construction
+gap from a silent certification into a refusal, closing the class instead of its instances. Issue
+#143 measured that proposal rather than reasoning about it, and it is recorded here with its numbers
+so the option is not re-proposed without them.
+
+The measurement was taken on 2026-07-26 at 85922d3, the revision on the cross-command marker taint
+branch that introduced `scripts/fuzz_shell_taint.py`. The numbers below describe that tree, not the
+current one, and the row for the unchanged default reproduces there. The method was that fuzzer at
+1200 generated recipes and seed 1, run with `--no-shrink` so failing recipe sets are directly
+comparable between variants. Shrinking has to be off for that comparison: a variant that refuses
+more also shrinks less, which inflates the distinct-recipe count and reads as a regression when it
+is not. The comparable quantities are the failing cases and the set difference between variants,
+never the shrunk count.
+
+The variants cover each of the three lookups alone, all three together, the stream and resource
+pair, and one narrowing of the stream case. The stream and scope-id rows were taken on 2026-07-26.
+The combined and variable rows, and the false-certification columns of the resource-only row, were
+scored on 2026-07-31 at the same revision, seed, and method. That later run reproduced the
+unchanged-default control at 191 false certifications, 112 over-refusals, and a clean suite before
+any variant ran, and reproduced the streams-only row exactly, which is what makes the two dates one
+table.
+
+Measured at 85922d3:
+
+| variant | false certifications | fixed | introduced | suite failures | fuzz over-refusals |
+|---|---|---|---|---|---|
+| current default | 191 | - | - | 0 | 112 |
+| all three tables widen | 156 | 35 | 0 | 112 | 439 |
+| variables only widen | 168 | 23 | 0 | 77 | 412 |
+| streams and resources widen | 175 | 16 | 0 | 41 | 180 |
+| streams only widen | 175 | 16 | 0 | 12 | 180 |
+| resources only widen | 191 | 0 | 0 | 30 | 112 |
+| synthetic negative scope ids only | 191 | 0 | 0 | 0 | 112 |
+
+**Decision:** A missing key in the variable, resource, or stream tables continues to resolve to the
+inert `_OUTSIDE_VALUE`. That default is not widened to the top of the content lattice, neither for
+all three tables together nor for any one of them. Reopening the proposal means re-running this
+comparison against the tree it targets and reporting the same columns for the table it proposes to
+widen, not matching the numbers above, which belong to a tree the fixes since have replaced.
+
+No measured variant introduced a new false certification, so the rejection was about yield against
+cost rather than about soundness risk. Widening all three lookups fixed 35 of the 191 failing
+bodies, at 439 over-refusals against the default's 112 and 112 suite failures. The variable lookup
+carried most of that yield and most of that cost: 23 fixes, 412 over-refusals, and 77 suite
+failures, about 13 extra over-refusals and three suite failures per fix, against roughly four and
+one for the 16 that stream lookups fixed. Four bodies are fixed by either widening, so the variable
+and stream fix sets union to exactly the 35 the combined row reports.
+
+Widening resource lookups is pure cost. It fixed nothing and moved no fuzz verdict in either
+direction, leaving the default's 191 false certifications and 112 over-refusals and reproducing its
+failing signature set exactly, and still failed 30 tests. Within the stream and resource pair the
+single-table rows sum to 42 suite failures against that pair's 41, so one failure was reached by
+either widening on its own. The 16 stream fixes carry two costs the table keeps in separate columns,
+and neither bounds the other. The suite fails 12, of which ten are clean-control assertions that a
+`read` from a non-literal stream still certifies, for example
+`shopt -s lastpipe; printf 'safe\ndoc-\n' | read X; eval "$X"lattice`, which certifies correctly
+because the `read` projects a record; the other two are a replay-inventory coverage check and a
+command-substitution unit test. The fuzz corpus separately adds 68 over-refusing cases on top of the
+default's 112, which is generated bodies that certify correctly today and would begin refusing.
+
+Restricting the widening to the synthetic negative scope ids minted by `_OutputLowering`, which are
+provably internal to the body, cost nothing and fixed nothing: the 16 stream fixes all came from
+non-negative scope ids, the same population those `read` certifications depend on.
+
+The default is therefore not separable at this granularity. In every table that yields fixes,
+internal solver gaps and legitimately external content share one lookup-miss population: an unset or
+inherited variable and a stream the body never wrote are indistinguishable from a key the solver
+failed to record. Scope-id sign, the most promising cheap discriminator, captured none of the
+benefit. The hypothesis that this default was the dominant cause of the false certifications open at
+the time was also wrong: widening all three lookups accounted for 35 of 191 failing bodies, about 18
+percent, and the rest came from evidence never being constructed at all, the class AD-18 discloses
+and tracks issue by issue. Closing the class was that issue-by-issue work, not one
+default change, and the work that followed this measurement bears that out. The branch it was
+measured on merged as 763f43d on 2026-07-27, closing the individual issues the remaining bodies were
+attributed to, and the same seed and method re-run at 1c7a6df report 2 false certifications and 167
+over-refusals. A later attempt has to supply the discriminator this experiment lacked, which is
+knowing whether the body itself should have defined a key, rather than inferring that from the key's
+shape.
+**Consequences:** The inert missing-key default is the pinned behavior of an unresolved content
+reference, and the false certifications AD-18 discloses stay open as behavior pinned in the suite
+rather than behind one pending global fix; AD-23 records that they are accepted within the
+scanner's frozen scope. This rejects one widening, not fail-closed
+defaults in general: AD-18's rule that a projection which is merely lost widens to the top of the
+lattice is unchanged, because there the solver knows it lost track, while a table miss does not say
+whether the key was ever meant to exist. The residual cost is explicit. An evidence-construction gap
+in a new lowering still certifies silently instead of refusing, so that risk is carried by the
+review and fuzz measurement of the lowering itself rather than by a lattice-wide backstop.
+
+### AD-22: A scanner change replays the frozen corpus against the revision it is proposed on
+
+**Date:** 2026-07-31
+**Status:** Accepted
+**Context:** AD-20 records one residual it does not close: a targeted early refusal above a frozen
+guard's function, such as refusing any body containing `--split-string=` at the top of
+`_ShellScanner.scan`, withdraws that guard while every static gate stays green. A fingerprint
+records the immediate call site's controls, the reachability rule follows syntactic call edges, and
+a frozen origin has no witness executing it. The one control that saw the round-6 demonstration on
+PR #179 was dynamic and ran once: a differential over the recorded corpus, comparing two revisions
+script by script. The taint fuzzer does not substitute for it. Its gate counts false
+certifications, so it is blind by construction to a change that refuses more than the base did, and
+withdrawal by early refusal is exactly that shape.
+**Decision:** A pull request that touches the guard package, the differential tool, the fuzzer
+grammar or the frozen replay inventory replays one fixed corpus against both revisions and reports
+every script whose verdict differs. The corpus is the in-tree frozen inventory recorded by
+`scripts/checkpoint_record_scanner_inputs.py` plus the bodies four fixed fuzzer seeds draw from the
+compositional grammar, roughly twenty thousand scripts, which is the scale of the one-off run. It
+is in-tree on purpose: the evaluation branch that carries the successor evidence is read-only
+history, and a gate that reads it would make a protected branch a build input.
+
+A verdict label is the refusing guard's origin identifier, the analysis's own marker verdict, or
+the certified invocations. Identity is what makes this catch the demonstration at all: the corpus
+carries one script spelling the targeted option, the base refuses it as
+`scanner.env-prefix.split-string-long-option`, and the early refusal refuses it as whatever origin
+it mints. A label that recorded only "refused" would report those two as the same verdict.
+
+Two revisions of one package cannot be imported side by side, so the gate is two recording
+processes and one comparison. The tool and the corpus are the candidate's in both recordings, so
+the two records score the same scripts and the guard package is the only thing that differs;
+the base revision's own copy of the inventory is then the floor the scored corpus may not fall
+below, since a candidate that shrank the corpus would make its own divergence disappear rather than
+report it.
+
+The comparison refuses outright, rather than reporting a count, whenever the protection it describes
+is not in place, because a count read off a comparison that could not have found anything is worse
+than no gate. It refuses when the two records did not score the same corpus; when both records name
+the same scanner file, which is one revision replayed twice and agrees with itself by construction;
+when either record was drawn below the pinned corpus scale, which is a command line argument and so
+out of reach of pinning the constants; when a record's case list does not match the count it
+declares; and when no base-owned inventory was named, since without one there is no floor under the
+corpus at all. Each relaxation is a flag spelled out in the diff that takes it, `--no-corpus-floor`
+and `--allow-shrunk-corpus`, rather than a default nobody sees not being exercised. A record also
+names the scanner file it scored and the scale it was drawn at, which is what makes the first two of
+those checkable at comparison time.
+
+The scale a record names is what the run was asked for rather than what it drew, so the recording
+refuses in turn when the generated half collapsed: when a requested seed drew no script, or when
+what survived deduplication is below a single seed's worth of draws. An edit to the generator, to
+the case builder or to the deduplication that shrinks the drawn half otherwise leaves both records
+declaring the pin over a corpus a fraction of that size, collapsing alike on both sides, so the
+comparison agrees with itself and reports nothing for the scripts nobody drew.
+
+The recording builds the corpus with the candidate's fuzzer against the base's scanner, so a pull
+request that adds a scanner name and draws on it in the same diff refuses rather than reports: the
+base does not carry the name the fuzzer resolves. There is no acknowledgement for that, because no
+records were produced to compare. The remedy is to land the scanner name first and draw on it in a
+later pull request, whose base then carries it, and the refusal says so.
+
+`--write-acknowledgements` writes only the reasons the comparison was handed, so it refuses a
+destination that already holds acknowledgements the run did not read; naming the file on both flags
+is what keeps the reasons on it. Under `--allow-shrunk-corpus` the write also keeps the entries this
+comparison matched nothing for, for the same reason it passes no judgment on them there.
+
+An intentional behavior change is acknowledged rather than silenced. An acknowledgement names the
+script digest, both verdicts and a reason, so it covers exactly the transition it was written for.
+It does not expire on its own; an entry matching no divergence is judged by what the base record
+says about the script it names. An entry whose script the base now scores at anything other than
+its base verdict is spent: it can only match a divergence that opens at that verdict, this base
+opens none, and no candidate edit changes what the base scores, so the entry authorizes nothing
+against this base. Spent entries are counted and reported rather than failed, and the next
+`--write-acknowledgements` run drops them. Failing them uniformly was tried first and moved the
+burden to the wrong author: the acknowledging pull request cannot remove its own entries, since
+its own comparison needs them to match, so they landed in the base and the next pull request
+touching a replayed input inherited a red check and a replay to delete someone else's line. An
+entry whose script the base still scores at exactly its base verdict is a standing authorization
+for a move nobody has made, and an entry naming a script the base record does not score can never
+be judged again, so the comparison fails on both until they are removed, because printing either
+into the log of a green job is not review. The dangerous state is refused earlier than the uniform
+staleness failure refused it: only a reversion landing in the base turns a spent entry back into a
+live one, that reversion is itself a divergence that had to be acknowledged under review, and the
+next comparison refuses the reactivated entry before it can excuse anything. A shrunken corpus
+proves nothing by absence, since the script an entry names may simply not have been drawn, so
+`--allow-shrunk-corpus` suspends the judgment along with the scale check it belongs to.
+
+Acknowledgements are a file in the diff, which is what makes them reviewable; a label or a phrase
+in a pull request body is neither versioned nor reviewable alongside the change it excuses. That
+only holds if the file is a replayed input: a pull request touching nothing else would otherwise
+skip the gate and land an excuse detached from the change it excuses, for a later diff to walk
+through. A change that legitimately moves thousands of verdicts is not transcribed by hand, so the
+comparison writes the file it would need on request, with every reason left empty and an empty
+reason refused on read. A gate that is impractical to satisfy for an intended change is a gate that
+gets switched off, and that is the failure mode the mode exists against.
+
+The gate runs on pull requests and stays out of the release job's `needs`, because a job skipped
+for push events skips every dependent with it. It is therefore enforced by the repository's
+required status checks rather than by a `needs` edge, and `Corpus differential` belongs in that
+list; nothing in the tree can assert that setting. Its scope step reads the diff against the base
+and exits early when no replayed input changed, so an unrelated pull request pays for a checkout
+and one `git diff`. The scoped paths are the guard package, `error_types.py` as the one module
+outside it the scan path imports, the tool, the fuzzer grammar, the frozen inventory, the
+acknowledgements file and the workflow file itself. The last of those is scoped for a stronger
+version of the acknowledgement's reason: the scale, the relaxation flags and the scope list all live
+in the workflow, so a pull request that only weakened the job would skip the differential and report
+green having replayed nothing, leaving the weakened job as what every later scanner change runs
+under. The workflow contract tests hold the job to taking neither relaxation and to naming no scale
+on either recording, since a flag's visibility in a diff gates nothing on its own.
+
+A base whose object cannot be read is a failure rather than a skip, for the reason AD-20's
+base-owned comparison gives. A base whose object reads but which carries neither the frozen
+inventory nor a guard package predates the gate and is skipped instead, as the guard-debt job skips
+a base predating its own inputs: the comparison would otherwise refuse on a floor that is not there
+and leave a required check red until the branch is rebased.
+**Consequences:** An over-refusal is visible to automation for the first time, in either direction
+and without a witness for the guard involved, which is what makes this the standing control while
+the frozen-debt window is open. The cost is roughly two minutes of replay per revision on a change
+that touches the scanner, and nothing on a change that does not. Four limits are disclosed rather
+than closed. A withdrawal that mints exactly the origin identifier the deeper guard would have
+returned, over exactly the corpus scripts that guard already refuses, moves no label and stays
+invisible; widening the corpus is what shrinks that, not a rule. The corpus is a fixed sample
+rather than a proof, so a clean differential is evidence about those scripts and not a statement
+about every input the scanner accepts; and its generated half saturates on distinct verdict labels
+within a few hundred draws, so the scale it is run at buys sensitivity per script rather than more
+kinds of verdict.
+
+The replay also scores every script at the scanner's default limits, and only at those. The
+budget-governed and cap-governed guards are the ones `scripts/guard_witness_sweep.py` drives the
+same corpus once per shrunk cap to reach at all, so a clean differential says nothing about a
+withdrawal of one of them: they are the larger part of what AD-20 still freezes as debt. Closing
+that means replaying the corpus once per cap tier, which multiplies a job that already scores
+roughly forty thousand scripts, and it is deliberately left for the sweep and for the witness rows
+it produces rather than paid for on every scanner pull request.
+
+And unlike AD-20's base-owned comparison, only the corpus floor here is base-owned: the tool that
+builds the corpus, labels a verdict and matches an acknowledgement is the candidate's in both
+recordings, so a pull request can shrink the drawn half or coarsen a label in the same diff that
+withdraws a guard. That is deliberate. Running the base's copy of the tool would hard-fail every
+pull request that legitimately moves the scanner module, with no acknowledgement path to declare
+the move, and the tool has to build one corpus for both revisions to compare them at all. What is
+left is a change that has to be spelled out in the diff of the pull request it protects, next to a
+pinned expectation on the corpus scale and on identity-carrying labels, which is where review sees
+it.
+
+### AD-23: The CI shell scanner is an accident lint with a frozen scope, not a security boundary
+
+**Date:** 2026-08-02
+**Status:** Accepted
+**Context:** AD-17 through AD-22 built the scanner's marker analysis, its finding-triage rule, its
+guard inventory, and its replay gates, and each one records disclosed limits: AD-18 names inputs
+that certify while Bash runs the marker, AD-19 pins verified evasions instead of chasing them, and
+AD-22 calls its corpus a sample rather than a proof. Practice still treated every disclosed limit
+as a backlog. Each fuzz signature, review round, and modeled-flow asymmetry became an open issue,
+most fixes surfaced further corner cases on the next fuzz run, and roughly forty scanner issues
+stood open with no terminating condition, because certifying non-execution over Bash plus
+everything on `PATH` is undecidable and the backlog regenerates from whatever depth the model
+reaches. The threat model never asked for that depth. An author who can add or edit a workflow
+already executes arbitrary code in CI, and steps around a shell-layer marker analysis trivially:
+through another interpreter, or by editing the audited state directly. No reachable amount of
+shell modeling turns this scanner into a boundary against that author. The controls that hold that
+line are the ones AD-16 and README's managed setup already own: human review of workflow changes,
+the create-only managed artifacts, and the environment protection scoping the Linear credential.
+**Decision:** The CI shell scanner is a best-effort lint that catches accidental or naive
+doc-lattice invocations in workflows that have not yet been reviewed. It is not a security
+boundary, and soundness against a deliberate adversary is a non-goal. The enforced boundary
+remains human review of workflow changes, enforced by the adopting repository's own branch
+governance per AD-16, together with the managed-artifact and environment-protection setup that
+README owns.
+
+Known certify-anyway and over-refusal corner cases inside the disclosed model are accepted
+behavior within this scope, not defects. New scanner work is limited to three classes: a false
+negative a non-adversarial author plausibly writes by accident; an over-refusal that blocks a
+legitimate real-world workflow; and a crash or regression the frozen corpus, the fuzz baseline, or
+the suite catches. Modeling deeper shell semantics for adversarial completeness is explicitly out
+of scope, whatever severity a report assigns.
+
+This narrows AD-19's default disposition for a boundary-extension finding from file-and-pin to
+accept-and-disclose: no issue is opened for an evasion outside the three classes above, and
+pinning the certifying body in the suite stays available where a pin is cheap. AD-19's
+model-integrity class is unchanged, since an analysis silently lacking coverage it claims is a
+defect at any scope, and its verification bar stands: an unreproduced report is still not triaged
+at all. AD-20's context calls the fail-closed guards the security contract of the scanner; within
+this scope that phrase reads as the scanner's own integrity contract, the guarantee that the tool
+does what it says at the scale it says, not as a claim that the scanner is a boundary.
+
+The standing gates keep their jobs unchanged, re-read as regression controls over the frozen model
+rather than as steps toward completeness: the guard inventory and its witnesses per AD-20, the
+corpus differential per AD-22, and the fuzz baseline, whose entries now record accepted disclosed
+behavior rather than fixes owed. A new fuzz signature is triaged against the three classes; one
+falling outside them is added to the baseline citing this record instead of being filed.
+**Consequences:** The scanner backlog terminates. Open issues describing adversarial corner cases
+are closed citing this record, and their pinned certifying bodies remain in the suite as
+disclosures rather than obligations. The cost is explicit: known evasions stay open behavior, and
+anyone reading a green audit must weigh it as the lint result it is, which README states next to
+the audit contract. This is a scope freeze, not a teardown: no guard, gate, or modeled flow is
+removed, and the scanner keeps its claim to what the freeze protects, deterministic fail-closed
+linting of the invocations a careless author actually writes, held to its recorded behavior by the
+corpus, the baseline, and the guard inventory.
+
+### AD-24: The supported Python floor is 3.13
+
+**Date:** 2026-08-04
+**Status:** Accepted
+**Context:** `requires-python = ">=3.13"` reads as an ordinary packaging choice, but two shipped
+behaviors depend on that exact floor and neither is visible from the packaging metadata.
+**Decision:** The supported floor is Python 3.13, and it is load bearing rather than incidental.
+`discovery.py` matches `ignore_globs` with `Path.full_match`, which exists only from 3.13. AD-13's
+generated slug data bridges the Unicode table the minimum supported runtime ships to the
+`github-slugger@2.0.0` JavaScript target, so the floor selects the baseline that generation is
+verified against. Changing the floor in either direction therefore requires regenerating that data
+and re-running the parity and benchmark verification AD-13 prescribes. README owns the user-facing
+`Python 3.13+` requirement.
+**Consequences:** A request to lower the floor is a compatibility review rather than a metadata
+edit, since section identity is measured against the minimum runtime's Unicode table. Raising it
+is equally reviewable, and neither move lands without regenerated, re-verified generated data.

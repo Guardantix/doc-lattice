@@ -66,7 +66,7 @@ DEBT_PATH = "tests/fixtures/shell_guard_debt.json"
 CHECKER_SCRIPT = "scripts/check_guard_inventory.py"
 SCANNER_MODULE = "src/doc_lattice/github_ci/shell_scanner.py"
 PRODUCTION = "production"
-SEEDS = 4
+SEED_COUNT = 4
 ITERATIONS = 400
 MAX_LENGTH = 600
 SHRINK = (0, 1, 2, 3)
@@ -331,7 +331,7 @@ def unclassified_ids(root: Path) -> frozenset[str]:
 def load_corpus(
     root: Path,
     *,
-    seeds: int = SEEDS,
+    seeds: int = SEED_COUNT,
     iterations: int = ITERATIONS,
     max_length: int = MAX_LENGTH,
     extra: Path | None = None,
@@ -1374,7 +1374,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seeds",
         type=nonnegative_count,
-        help=f"fuzzer seeds to generate bodies from, one grammar walk each (default {SEEDS})",
+        help=(
+            "how many fuzzer seeds to generate bodies from, walked from seed 0 upward, "
+            f"one grammar walk each (default {SEED_COUNT})"
+        ),
     )
     parser.add_argument(
         "--iterations",
@@ -1476,7 +1479,7 @@ def main(argv: list[str] | None = None) -> int:
         wanted = None if arguments.all_guards else unclassified_ids(root)
         corpus = load_corpus(
             root,
-            seeds=SEEDS if arguments.seeds is None else arguments.seeds,
+            seeds=SEED_COUNT if arguments.seeds is None else arguments.seeds,
             iterations=ITERATIONS if arguments.iterations is None else arguments.iterations,
             max_length=MAX_LENGTH if arguments.max_length is None else arguments.max_length,
             extra=arguments.extra,

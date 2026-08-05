@@ -22,6 +22,10 @@ BOOTSTRAP_PATH = PurePosixPath(".github/doc-lattice-bootstrap.sh")
 GIT_ATTRIBUTES_PATH = PurePosixPath(".github/.gitattributes")
 BOOTSTRAP_EOL_RULE = "doc-lattice-bootstrap.sh text eol=lf"
 
+# Order is a cross-module contract, not presentation. Read-only inspection results are aligned
+# with this tuple positionally, `render_managed_artifacts` returns its artifacts in this order,
+# and the audit refuses inspection results that do not use it. Reordering these entries changes
+# which artifact each audit slot describes.
 CANONICAL_ARTIFACT_TARGETS = (
     ManagedArtifactTarget("offline", OFFLINE_WORKFLOW_PATH),
     ManagedArtifactTarget("linear", LINEAR_WORKFLOW_PATH),
@@ -29,6 +33,9 @@ CANONICAL_ARTIFACT_TARGETS = (
     ManagedArtifactTarget("attributes", GIT_ATTRIBUTES_PATH),
 )
 
+# Commit pins for actions/checkout v4.3.1 and astral-sh/setup-uv v6.8.0. The `# v...` comments
+# beside the `uses:` lines in both templates below are rendered into the installed workflow, so
+# a bump edits the SHA here and the tag comment at every template site that names it.
 CHECKOUT_REF = "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
 SETUP_UV_REF = "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
 
@@ -41,6 +48,13 @@ LINEAR_SECRET_ENV_VALUE = "${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}"  # noqa: S
 
 _TOKEN_RE = re.compile(r"__(?:REPOSITORY|VERSION|CHECKOUT_REF|SETUP_UV_REF|PYTHON_PIN)__")
 
+# The run body disables errexit and collects each gate's status by hand because GitHub's default
+# shell is `bash -e {0}`: without `set +e` the first failing gate would abort the step and the
+# other two would never report. The trailing conjunction is what makes the step red.
+#
+# Adjacent string literals in this template and the next are source-only line wrapping for the
+# 100-character limit. They render as one continuous line, so a stray space between the pieces
+# changes the artifact.
 _OFFLINE_TEMPLATE = (
     """name: doc-lattice
 on:
@@ -115,6 +129,14 @@ jobs:
 """
 )
 
+# Authored as a non-raw string on purpose, so Python escape semantics apply before the shell
+# ever sees this text. A trailing backslash here is a Python line continuation, not a shell
+# one: the wrapped source lines below are joined into one long rendered line, which is how the
+# script stays under the 100-character source limit without changing what Bash reads. For the
+# same reason `\n` and `\t` are real characters in the artifact, so `printf 'error: %s\n'`
+# renders with an embedded newline inside its single quotes and `$'\t'` renders with a literal
+# tab. Do not make this a raw string and do not "repair" those escapes: the rendered bytes are
+# what `ci refresh` diffs and what the render and bootstrap tests pin.
 _BOOTSTRAP_TEMPLATE = """set -u
 EXPECTED_REPOSITORY='__REPOSITORY__'
 ENVIRONMENT='doc-lattice-linear'

@@ -1,8 +1,9 @@
 """Generate or verify the SHA-256 manifest for the issue #100 predeclaration checkpoint.
 
-The manifest freezes every checkpoint artifact. ``--write`` regenerates it during checkpoint
-authoring; ``--check`` (used by tests and CI) fails when any artifact drifts from the frozen
-hashes, enforcing the spec's immutability rule for the remainder of PR A.
+The manifest freezes every checkpoint artifact. ``--write`` regenerated it during checkpoint
+authoring; ``--check``, which the test suite and CI still run on every commit, fails when any
+artifact drifts from the frozen hashes. The issue #100 evaluation has concluded, so the check
+now preserves that frozen evaluation record as history rather than guarding an open evaluation.
 """
 
 import hashlib

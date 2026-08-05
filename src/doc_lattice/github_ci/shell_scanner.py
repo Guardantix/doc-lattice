@@ -28,6 +28,7 @@ from doc_lattice.github_ci.shell_taint import (
     ContentBuilder,
     ContentExpr,
     ContentTarget,
+    DynamicResourceTarget,
     LiteralTransfer,
     OutputExpr,
     OutsideGap,
@@ -58,9 +59,16 @@ from doc_lattice.github_ci.shell_taint import (
     stream_ref_ids,
 )
 
+# One classified invocation: the doc-lattice subcommand's literal, plus whether this call passed
+# ``--dry-run``, which classifies it as non-mutating. Callers in audit.py unpack the second
+# element as ``dry_run``; the two names mean the same thing.
 _Invocation = tuple[str, bool]
 _OCTAL_BASE = 8
+_HEX_BASE = 16
 _ANSI_C_OCTAL_BYTE_MASK = 0xFF
+# ``\c?`` decodes to DEL; every other ``\cX`` keeps the low five bits of the uppercased letter.
+_ANSI_C_DELETE = 127
+_ANSI_C_CONTROL_MASK = 0x1F
 _UNICODE_MAX = 0x10FFFF
 _SURROGATE_MIN = 0xD800
 _SURROGATE_MAX = 0xDFFF
@@ -70,11 +78,6 @@ _PRINTF_FIELD_LIMIT = 4096
 _LOOP_HEADER_NAME_WORDS = 2
 _CASE_HEADER_PATTERN_WORDS = 4
 _CASE_HEADER_SUBJECT_WORDS = 3
-# Bounds the alternative width the taint solver explores per case statement (how many arms whose
-# match against the subject cannot be resolved statically it will retain), not the total arm
-# count; every exhaustion still fails closed. 32 comfortably covers a real subcommand or
-# job-matrix dispatch table (#124) without materially widening the solver's search space; see
-# scripts/bench_sections.py and the seeded fuzz run in scripts/fuzz_shell_taint.py.
 
 _COMMAND_PREFIXES = frozenset(
     {
@@ -406,6 +409,8 @@ _MODELED_DESCRIPTORS = frozenset({0, 1, 2})
 # Retained-word certification marker. It follows Python distribution separator spelling and is
 # deliberately ASCII case-insensitive, so doc-lattice/doc_lattice/doc.lattice variants match
 # while Unicode case-fold lookalikes do not.
+# ``shell_taint._dfa_step`` recognizes this same language as a DFA over solved
+# content, so the two encodings change together.
 _DISPATCHER_MARKER_RE = re.compile(
     rf"doc{_PYTHON_DISTRIBUTION_SEPARATOR_RE.pattern}lattice", re.ASCII | re.IGNORECASE
 )
@@ -470,6 +475,35 @@ _UV_RUN_LAUNCHER = _LauncherOptions.build(
 
 @dataclass(frozen=True, slots=True)
 class _ShellWord:
+    """One decoded shell word plus the expansion provenance later passes depend on.
+
+    Attributes:
+        literal: The decoded text after quote removal, as the scanner reads it.
+        content: Structured content expression for the taint layer: the literal segments the
+            script authored, joined to the expansions that supply the rest, so a later pass can
+            ask which parts of the decoded text were written down and which were expanded in.
+        has_doc_lattice_marker: The decoded literal matches the certification marker.
+        dynamic: Some expansion contributed text this scan cannot fix to a literal.
+        locale_translated: The word used ``$"..."``, whose value the locale supplies.
+        unquoted_dynamic: An expansion appeared outside quotes, so Bash word-splits and
+            pathname-expands its value before the word becomes argv fields.
+        quoted_zero_field_expansion: Quoted syntax that can still yield no argv field, such as
+            ``"$@"`` with no positional parameters.
+        active_argv_expansion: Authored brace or glob syntax outside quotes, so the word can
+            become a different word, or several, at runtime.
+        shell_assignment: The word is spelled ``NAME=`` or ``NAME+=`` at a prefix position.
+        assignment_name: The assigned name when ``shell_assignment`` holds.
+        assignment_content: The assigned value's content expression.
+        assignment_append: The assignment used ``+=``.
+        conditional_assignments: Assignments a ``${NAME=value}`` style expansion may perform.
+        process_resource_id: The process-substitution resource this word names, if any.
+        keyword_eligible: Every character was authored unquoted and unescaped, so Bash may read
+            the word as a reserved word rather than as a literal.
+        argv_ports: Pre-split argv fields when one word yields several, or None for one field.
+        brace_expansion_error: A deferred brace-expansion refusal, raised only if the word is
+            not an assignment prefix.
+    """
+
     literal: str
     content: ContentExpr = field(default_factory=lambda: LiteralTransfer(""))
     has_doc_lattice_marker: bool = False
@@ -772,7 +806,12 @@ class _ScopeFrame:
 
 @dataclass(slots=True)
 class _ControlFrame:
-    """Structured output accumulated for one shell control compound."""
+    """Structured output accumulated for one shell control compound.
+
+    ``phase`` is the compound's position in its own grammar: ``header`` (for/select word list),
+    ``test`` (if/while/until condition), ``body``, ``else``, and for a case compound ``word``
+    (subject not yet read) then ``pattern`` (between arms).
+    """
 
     kind: str
     scope_id: int
@@ -810,6 +849,24 @@ class _PipelineFrame:
 
 @dataclass(slots=True)
 class _CommandScanState:
+    """The simple command presently being accumulated in one command-list scan.
+
+    ``prefix_mode`` is the incremental prefix-scan state machine described by
+    ``_advance_prefix_scan``. It takes exactly these values:
+
+    - ``normal``: still inside the prefix region, no wrapper is being followed.
+    - ``stopped``: the scan has left the prefix region for this command.
+    - ``time``, ``env``, ``command``, ``builtin``, ``exec``: that wrapper's own options are
+      being consumed.
+    - ``env_dashdash``, ``command_dashdash``, ``exec_dashdash``, ``builtin_target``: the
+      wrapper's ``--`` was seen, so what follows is its operand rather than an option.
+    - ``env_stop``, ``command_v``: the wrapper will print instead of executing, so no payload
+      follows.
+
+    ``prefix_pending`` counts the following words the active mode has claimed as an option
+    value, which the scan skips before reading the next prefix word.
+    """
+
     words: list[_ShellWord]
     heredocs: list[_Heredoc]
     cases: list[_CaseScanState]
@@ -845,6 +902,14 @@ class _CommandScanState:
 
 @dataclass(slots=True)
 class _CaseScanState:
+    """Lexical position inside one ``case`` compound, tracked independently of its control frame.
+
+    ``phase`` advances ``word`` (subject) to ``in`` to ``pattern`` to ``body``, and returns to
+    ``pattern`` at each arm terminator. It is not the same domain as ``_ControlFrame.phase``,
+    which tracks the enclosing control frame's own position and selects which output list
+    receives completed output.
+    """
+
     phase: str
     pattern_parentheses: int = 0
     at_pattern_start: bool = True
@@ -993,7 +1058,28 @@ class _LauncherResolutionState:
         self.evidence_suppressed = True
 
 
+def _absorb_expansion(content: ContentBuilder, expansion: _ShellExpansion) -> None:
+    """Append one expansion's content and carry its conditional assignments with it.
+
+    Args:
+        content: The builder receiving the expansion.
+        expansion: The consumed expansion whose content and conditional assignments transfer.
+    """
+    content.append_expression(expansion.content)
+    for assignment in expansion.conditional_assignments:
+        content.add_conditional_assignment(assignment)
+
+
 class _ShellScanner:
+    """One bounded, non-executing pass over a run body's literal Bash syntax.
+
+    The scan does two jobs at once: it classifies direct doc-lattice invocations into
+    ``invocations``, and, when ``collect_taint`` is set, it builds the typed evidence graph in
+    ``taint_builder`` that ``analyze_marker_taint`` later solves. A child scanner built for a
+    heredoc body, a heredoc delimiter, or a backquote substitution shares the parent's
+    ``budget``, so nesting cannot buy extra steps.
+    """
+
     def __init__(  # noqa: PLR0913
         self,
         source: str,
@@ -1861,66 +1947,67 @@ class _ShellScanner:
         finally:
             if function_body:
                 self.function_body_depth -= 1
-        if self.taint_builder is not None:
-            for scope_index, scope in enumerate(self.taint_builder.scopes):
+        builder = self.taint_builder
+        if builder is not None:
+            for scope_index, scope in enumerate(builder.scopes):
                 if scope.scope_id != scope_id:
                     continue
                 binding_command_id = (
-                    self.taint_builder.commands[command_start].command_id
-                    if command_start < len(self.taint_builder.commands)
+                    builder.commands[command_start].command_id
+                    if command_start < len(builder.commands)
                     else None
                 )
-                self.taint_builder.scopes[scope_index] = replace(
+                builder.scopes[scope_index] = replace(
                     scope,
                     binding_command_id=binding_command_id,
                 )
                 break
-            for command_index in range(command_start, len(self.taint_builder.commands)):
-                command = self.taint_builder.commands[command_index]
-                self.taint_builder.commands[command_index] = replace(
+            for command_index in range(command_start, len(builder.commands)):
+                command = builder.commands[command_index]
+                builder.commands[command_index] = replace(
                     command,
                     execution_status=self._and_status(
                         inherited_status,
                         command.execution_status,
                     ),
                 )
-        if self.taint_builder is not None and (state.conditionally_executed or function_body):
-            for command_index in range(command_start, len(self.taint_builder.commands)):
-                command = self.taint_builder.commands[command_index]
-                self.taint_builder.commands[command_index] = replace(
-                    command,
-                    conditionally_executed=True,
-                    function_effect_conditional=(
-                        command.function_effect_conditional or command.conditionally_executed
-                    ),
-                    function_context_id=(
-                        command.function_context_id
-                        if command.function_context_id is not None
-                        else scope_id
-                        if function_body
-                        else None
-                    ),
-                    function_name=command.function_name or function_name,
-                )
-        if self.taint_builder is not None and function_body and definition_command_id is not None:
-            for command_index, command in enumerate(self.taint_builder.commands):
-                if command.command_id != definition_command_id:
-                    continue
-                self.taint_builder.commands[command_index] = replace(
-                    command,
-                    defines_function_context_id=scope_id,
-                    defines_function_name=function_name,
-                )
-                break
-            if function_name is not None:
-                self.active_function_names.add(function_name)
-        if self.taint_builder is not None and coprocess_body:
-            for command_index in range(command_start, len(self.taint_builder.commands)):
-                self.taint_builder.commands[command_index] = replace(
-                    self.taint_builder.commands[command_index],
-                    isolated_execution=True,
-                    isolated_context_id=scope_id,
-                )
+            if state.conditionally_executed or function_body:
+                for command_index in range(command_start, len(builder.commands)):
+                    command = builder.commands[command_index]
+                    builder.commands[command_index] = replace(
+                        command,
+                        conditionally_executed=True,
+                        function_effect_conditional=(
+                            command.function_effect_conditional or command.conditionally_executed
+                        ),
+                        function_context_id=(
+                            command.function_context_id
+                            if command.function_context_id is not None
+                            else scope_id
+                            if function_body
+                            else None
+                        ),
+                        function_name=command.function_name or function_name,
+                    )
+            if function_body and definition_command_id is not None:
+                for command_index, command in enumerate(builder.commands):
+                    if command.command_id != definition_command_id:
+                        continue
+                    builder.commands[command_index] = replace(
+                        command,
+                        defines_function_context_id=scope_id,
+                        defines_function_name=function_name,
+                    )
+                    break
+                if function_name is not None:
+                    self.active_function_names.add(function_name)
+            if coprocess_body:
+                for command_index in range(command_start, len(builder.commands)):
+                    builder.commands[command_index] = replace(
+                        builder.commands[command_index],
+                        isolated_execution=True,
+                        isolated_context_id=scope_id,
+                    )
         if self.scope_stack:
             self._output_target().append(ScopeOutput(scope_id))
         state.pending_compound_scope_id = scope_id
@@ -1963,6 +2050,11 @@ class _ShellScanner:
         executable_index = command.executable.argv_index if command is not None else None
         if executable_index is None and command is not None and len(command.argv) == 1:
             executable_index = 0
+        # ``name () { ... }`` has no reserved word to key on. The scanner parses it as the word
+        # ``name``, then ``(`` ``)`` as a subshell group that produced no output at all, then
+        # this brace group, so an empty subshell group after a single-word command is read as
+        # that spelling. The ``function name { ... }`` form is handled above, where the
+        # reserved word makes the name explicit.
         if (
             pending is not None
             and pending.kind == "subshell_group"
@@ -2003,6 +2095,11 @@ class _ShellScanner:
         command_ids = {command_id} if command_id is not None else set()
         scope_id = state.pending_compound_scope_id
         if scope_id is not None:
+            # ``cmd &`` isolates the whole compound, not just its outermost scope: an assignment
+            # made in a nested subshell or loop inside the background job is equally invisible to
+            # the parent shell. ``scopes`` is in allocation order, not parent-before-child order,
+            # so one pass can miss a grandchild whose parent is added later; repeat until the set
+            # stops growing.
             isolated_scopes = {scope_id}
             changed = True
             while changed:
@@ -2517,6 +2614,21 @@ class _ShellScanner:
         state.pending_pipe_stderr = False
 
     def _flush_command(self, state: _CommandScanState) -> int | None:  # noqa: PLR0912, PLR0915
+        """Close the accumulated simple command and emit its invocation and taint evidence.
+
+        Loop headers, case headers and bare reserved-word commands are consumed without becoming
+        commands. Everything else resolves its executable position once, classifies an invocation
+        when ``classify_commands`` is set, and appends one ``_CommandEvidence`` when a taint
+        builder is present.
+
+        Args:
+            state: The command being accumulated, reset before returning.
+
+        Returns:
+            The last command id recorded on this command list: this command's id when it emitted
+            evidence, otherwise whatever the previous command left, and None when no command has
+            been recorded yet.
+        """
         if not state.words and not state.redirections:
             return None
         if self.taint_builder is not None and _bare_exec_rebinds_modeled_descriptor(
@@ -2764,6 +2876,12 @@ class _ShellScanner:
                 for scope_id in stream_ref_ids(word.content):
                     self.taint_builder.attach_scope_parent(scope_id, command_id)
             for heredoc in state.heredocs[state.owned_heredoc_count :]:
+                if heredoc.owner_scope_id is not None:
+                    # A compound stage claimed this heredoc when its redirection was parsed, and
+                    # its ordinal counts that scope's redirections. Handing it to the pipeline
+                    # consumer flushed afterwards would look for an ordinal the consumer never
+                    # recorded, so the authored body would reach no modeled reader at all.
+                    continue
                 heredoc.owner_id = command_id
                 heredoc.assignments_persist = redirection_assignments_persist
             state.owned_heredoc_count = len(state.heredocs)
@@ -2799,6 +2917,19 @@ class _ShellScanner:
         index: int,
         limit: int,
     ) -> _ParsedRedirection | None:
+        """Return the redirection starting at ``index``, or None when this is not one.
+
+        Accepts a leading numeric descriptor (``2>``) and Bash's ``{name}>`` form, which allocates
+        a descriptor into ``name`` and so has no static descriptor of its own. An operator with no
+        explicit descriptor takes the side-appropriate default.
+
+        Args:
+            index: Index of the first character of the candidate redirection.
+            limit: Exclusive scan limit.
+
+        Returns:
+            The parsed redirection, or None when no operator matches at this position.
+        """
         operator_index = index
         digits = False
         if self.source[index].isdigit():
@@ -2882,6 +3013,20 @@ class _ShellScanner:
             redirection_target = ContentTarget(concat(target.content, LiteralTransfer("\n")))
         else:
             redirection_target = self._redirection_target(target, redirection.operator)
+        # The word names no resource by its syntax alone. Carrying it lets the taint layer
+        # project it against the exact values in effect where Bash expands it, rather than
+        # leaving the file it names outside the model (issue #151). Only a simple command's own
+        # redirection is projected, so an event bound for a compound scope carries no word: the
+        # values that apply there are the ones at compound entry, which this evidence shape has
+        # no table for, and retaining the expression would imply a projection that never runs.
+        # An unquoted expansion carries no word either: Bash word-splits and pathname-expands it
+        # before opening anything, so ``> $P`` with ``P='a b.sh'`` is an ambiguous redirect that
+        # opens no file at all and ``P='ta*.sh'`` names a pattern. The projected text would name
+        # a file Bash never touches in either direction, which is the class AD-18 keeps dynamic
+        # as issue #189. Authored pattern syntax sitting outside the quotes is the same class one
+        # step over: ``> "$P"*.sh`` expands the quoted reference and then pathname-expands the
+        # result, so the projected text names the pattern rather than the file Bash opens.
+        scope_bound = state.pending_compound_scope_id is not None and self.taint_builder is not None
         self._append_redirection(
             state,
             _RedirectionEvent(
@@ -2889,6 +3034,14 @@ class _ShellScanner:
                 redirection.operator,
                 redirection.descriptor,
                 redirection_target,
+                target_word=(
+                    target.content
+                    if not scope_bound
+                    and not target.unquoted_dynamic
+                    and not target.active_argv_expansion
+                    and isinstance(redirection_target, DynamicResourceTarget)
+                    else None
+                ),
             ),
         )
         return index
@@ -3014,19 +3167,30 @@ class _ShellScanner:
                     if heredoc.expand
                     else (LiteralTransfer(raw_body), ())
                 )
-                if heredoc.owner_id is not None:
-                    self.taint_builder.attach_redirection_content(
+                if heredoc.owner_scope_id is not None:
+                    attached = self.taint_builder.attach_scope_redirection_content(
+                        heredoc.owner_scope_id,
+                        heredoc.ordinal,
+                        content,
+                        assignments,
+                    )
+                elif heredoc.owner_id is not None:
+                    attached = self.taint_builder.attach_redirection_content(
                         heredoc.owner_id,
                         heredoc.ordinal,
                         content,
                         assignments if heredoc.assignments_persist else (),
                     )
-                elif heredoc.owner_scope_id is not None:
-                    self.taint_builder.attach_scope_redirection_content(
-                        heredoc.owner_scope_id,
-                        heredoc.ordinal,
-                        content,
-                        assignments,
+                else:
+                    attached = False
+                if not attached:
+                    # The body is authored input that some reader consumes, so leaving its
+                    # placeholder empty would model the reader as reading nothing at all.
+                    raise _ShellScanIncomplete(
+                        GuardRefusal(
+                            "scanner.heredoc.unattributed-body",
+                            "shell heredoc body reaches no modeled reader",
+                        )
                     )
             if heredoc.expand and self.taint_builder is None:
                 child = self._child_scanner(
@@ -3066,9 +3230,7 @@ class _ShellScanner:
                     continue
             expansion = child._consume_active_expansion(index, limit, depth)
             if expansion is not None:
-                content.append_expression(expansion.content)
-                for assignment in expansion.conditional_assignments:
-                    content.add_conditional_assignment(assignment)
+                _absorb_expansion(content, expansion)
                 index = expansion.end
                 continue
             content.append_literal(body[index])
@@ -3124,7 +3286,7 @@ class _ShellScanner:
                 continue
             index += 1
 
-    def _parse_word(  # noqa: PLR0912, PLR0915
+    def _parse_word(  # noqa: PLR0915
         self,
         start: int,
         limit: int,
@@ -3158,6 +3320,9 @@ class _ShellScanner:
                     depth,
                     builder.content,
                 )
+                # A locale-translated word's runtime text comes from the message
+                # catalog rather than the authored body, so it is dynamic whatever
+                # the fragment's own flag says.
                 builder.append_protected(
                     "",
                     dynamic=True,
@@ -3202,9 +3367,7 @@ class _ShellScanner:
                 continue
             expansion_end = self._consume_active_expansion(index, limit, depth)
             if expansion_end is not None:
-                builder.content.append_expression(expansion_end.content)
-                for assignment in expansion_end.conditional_assignments:
-                    builder.content.add_conditional_assignment(assignment)
+                _absorb_expansion(builder.content, expansion_end)
                 builder.append_protected("", dynamic=True, unquoted_dynamic=True)
                 index = expansion_end.end
                 continue
@@ -3267,9 +3430,7 @@ class _ShellScanner:
                 double_quoted=True,
             )
             if expansion_end is not None:
-                content.append_expression(expansion_end.content)
-                for assignment in expansion_end.conditional_assignments:
-                    content.add_conditional_assignment(assignment)
+                _absorb_expansion(content, expansion_end)
                 dynamic = True
                 quoted_zero_field_expansion = (
                     quoted_zero_field_expansion or expansion_end.quoted_zero_field_expansion
@@ -3280,6 +3441,32 @@ class _ShellScanner:
             content.append_literal(character)
             index += 1
         return characters, index, dynamic, quoted_zero_field_expansion
+
+    def _parameter_operand_expansion(
+        self,
+        index: int,
+        closing: int,
+        depth: int,
+        *,
+        double_quoted: bool,
+    ) -> _ShellExpansion | None:
+        """Reuse a recorded operand expansion, or consume one that fits inside ``closing``.
+
+        Args:
+            index: Index of the candidate expansion inside the operand.
+            closing: Exclusive end of the operand, which a reused expansion may not pass.
+            depth: Current expansion recursion depth.
+            double_quoted: Whether the operand is being read inside double quotes.
+
+        Returns:
+            The expansion at ``index``, or None when no expansion starts there.
+        """
+        expansion = self._parameter_expansions.get(index)
+        if expansion is None or expansion.end > closing:
+            expansion = self._consume_active_expansion(
+                index, closing, depth, double_quoted=double_quoted
+            )
+        return expansion
 
     def _consume_active_expansion(
         self,
@@ -3338,15 +3525,14 @@ class _ShellScanner:
             reference_name = (
                 _QUOTED_FUNCTION_POSITIONAL_STAR if double_quoted and name == "*" else name
             )
+            named_parameter = _is_unbraced_named_parameter(self.source, index, limit)
             content = (
                 VariableRef(reference_name)
-                if _is_unbraced_named_parameter(self.source, index, limit)
-                or _is_function_positional_parameter(name)
+                if named_parameter or _is_function_positional_parameter(name)
                 else OutsideGap()
             )
             quoted_zero_field_expansion = double_quoted and (
-                _is_unbraced_named_parameter(self.source, index, limit)
-                or (index + 1 < limit and self.source[index + 1] == "@")
+                named_parameter or (index + 1 < limit and self.source[index + 1] == "@")
             )
         if end is None:
             return None
@@ -3460,7 +3646,7 @@ class _ShellScanner:
             index += 1
         return _ShellExpansion(index, quoted_zero_field_expansion)
 
-    def _parse_parameter_word_content(  # noqa: PLR0912, PLR0915
+    def _parse_parameter_word_content(
         self,
         start: int,
         closing: int,
@@ -3492,15 +3678,11 @@ class _ShellScanner:
                         content.append_literal(escaped)
                         index += 2
                         continue
-                expansion = self._parameter_expansions.get(index)
-                if expansion is None or expansion.end > closing:
-                    expansion = self._consume_active_expansion(
-                        index, closing, depth, double_quoted=True
-                    )
+                expansion = self._parameter_operand_expansion(
+                    index, closing, depth, double_quoted=True
+                )
                 if expansion is not None:
-                    content.append_expression(expansion.content)
-                    for assignment in expansion.conditional_assignments:
-                        content.add_conditional_assignment(assignment)
+                    _absorb_expansion(content, expansion)
                     index = expansion.end
                     continue
                 content.append_literal(character)
@@ -3514,15 +3696,11 @@ class _ShellScanner:
                 content.append_literal(self.source[index + 1])
                 index += 2
                 continue
-            expansion = self._parameter_expansions.get(index)
-            if expansion is None or expansion.end > closing:
-                expansion = self._consume_active_expansion(
-                    index, closing, depth, double_quoted=double_quoted
-                )
+            expansion = self._parameter_operand_expansion(
+                index, closing, depth, double_quoted=double_quoted
+            )
             if expansion is not None:
-                content.append_expression(expansion.content)
-                for assignment in expansion.conditional_assignments:
-                    content.add_conditional_assignment(assignment)
+                _absorb_expansion(content, expansion)
                 index = expansion.end
                 continue
             content.append_literal(character)
@@ -3679,7 +3857,7 @@ class _ShellScanner:
     def _standalone_brace_at(self, index: int, limit: int) -> bool:
         """Return whether a leading brace is a shell reserved word, not word text."""
         next_index = index + 1
-        return next_index == limit or self.source[next_index] in " \t\n;&|()<>"
+        return next_index == limit or self.source[next_index] in _WORD_BREAKS
 
     def _line_end(self, index: int, limit: int) -> int:
         line_end = self.source.find("\n", index, limit)
@@ -3744,9 +3922,13 @@ def direct_doc_lattice_invocations(
     never as a claim that the content is inert.
 
     The scanner intentionally does not aggregate across run steps or resolve aliases, PATH
-    shadowing, external files or environment content, dynamic resource identity, arbitrary
-    encoding/transform programs, actions, or reusable workflows. Functions defined in the same
-    body and ``>&N`` descriptor aliasing are modeled; see AD-18 in ARCHITECTURE.md.
+    shadowing, external files or environment content, arbitrary encoding/transform programs,
+    actions, or reusable workflows. Functions defined in the same body, ``>&N`` descriptor
+    aliasing, and a simple command's redirection operand whose exact value every reaching path
+    fixes to one literal are modeled; every other dynamic resource identity is not. See AD-18 in
+    ARCHITECTURE.md for the boundary that sentence summarizes. This analysis is a best-effort
+    lint for accidental or naive invocations, not a boundary against a deliberate author; AD-23
+    in ARCHITECTURE.md owns that scope and the three classes of scanner work it admits.
 
     Args:
         script: Literal Bash source to scan.
@@ -3774,6 +3956,26 @@ def _invocation_in_simple_command(  # noqa: PLR0913
     executable: _ResolvedIndex | None = None,
     defer_marker_refusal: bool = False,
 ) -> _Invocation | None:
+    """Classify one simple command as a doc-lattice invocation, or as no invocation.
+
+    Args:
+        words: The lexical words of one simple command, assignment prefixes included.
+        budget: The scan budget every speculative launcher step is charged to.
+        command_has_marker: Whether a retained word in this command carries the authored marker.
+        resolution: Launcher resolution state to reuse; a fresh one is built when omitted.
+        executable: An already-resolved executable position, when the caller has one.
+        defer_marker_refusal: Skip the marker-bearing non-invocation refusal because the taint
+            pass owns this marker instead, which holds when the marker sits on a port that pass
+            analyzes directly.
+
+    Returns:
+        The subcommand name paired with whether the invocation is non-mutating, or None when
+        this command is not a classified doc-lattice invocation.
+
+    Raises:
+        _ShellScanIncomplete: If command-position or subcommand-position syntax cannot be
+            resolved safely, or if a marker-bearing command resolves to no invocation.
+    """
     resolution = resolution if resolution is not None else _LauncherResolutionState(budget)
     executable = (
         executable if executable is not None else _doc_lattice_command_index(words, 0, resolution)
@@ -3847,6 +4049,9 @@ def _effective_executable_evidence(
 ) -> _ExecutableEvidence | None:
     """Resolve launcher-chain executable evidence for one simple command."""
     resolution = _LauncherResolutionState(budget)
+    # Called for its effect on ``resolution``: the walk records every executable position the
+    # launcher chain crosses, which is the evidence this function exports. The resolved index
+    # itself is the classifier's concern, not this one's.
     _doc_lattice_command_index(words, 0, resolution)
     return _executable_evidence_from_resolution(words, resolution)
 
@@ -3858,6 +4063,8 @@ def _executable_evidence_from_resolution(
     candidates = resolution.executable_positions
     if not candidates:
         return None
+    # ``exported`` is an insertion-ordered set: distinct candidates can flatten to identical
+    # evidence, and the dict collapses those while keeping the order resolution recorded them in.
     exported: dict[_ExecutableEvidence, None] = {}
     for candidate in candidates:
         evidence = _ExecutableEvidence(
@@ -3869,6 +4076,8 @@ def _executable_evidence_from_resolution(
         )
         exported.setdefault(evidence, None)
     converted = tuple(exported)
+    # Positions are recorded outermost first as the launcher chain descends, so the last entry is
+    # the innermost executable actually run; earlier launchers stay as its alternates.
     primary = converted[-1]
     return _ExecutableEvidence(
         argv_index=primary.argv_index,
@@ -3889,6 +4098,9 @@ def _redirection_assignments_persist(executable: _ExecutableEvidence | None) -> 
         candidate = pending.pop()
         if candidate.ambiguous:
             return True
+        # ``literal == name`` holds only for a word with no path separator, since ``name`` is that
+        # word's basename. A word containing ``/`` is a file lookup that can never reach a Bash
+        # builtin, so this equality is the builtin test the whole walk depends on.
         if (
             not candidate.external_lookup
             and candidate.literal == candidate.name
@@ -4074,6 +4286,9 @@ def _printf_v_format_content(  # noqa: PLR0911, PLR0912, PLR0915
     parts: list[ContentExpr] = []
     value_index = 0
     first_pass = True
+    # printf reapplies its format until the values are consumed, so each pass renders the whole
+    # format again. A pass that consumes no value would repeat forever, so the loop stops as soon
+    # as one pass leaves ``value_index`` where it started.
     while first_pass or value_index < len(values):
         first_pass = False
         pass_start = value_index
@@ -4110,12 +4325,16 @@ def _printf_v_format_content(  # noqa: PLR0911, PLR0912, PLR0915
             if match is None:
                 return None
             flags, width_text, precision_text = match.groups()
+            # A width or precision with more digits than the limit itself cannot
+            # be under it, and rejecting on digit count first keeps ``int()`` off
+            # an arbitrarily long authored digit run.
             if len(width_text) > len(str(_PRINTF_FIELD_LIMIT)) or (
                 precision_text is not None and len(precision_text) > len(str(_PRINTF_FIELD_LIMIT))
             ):
                 return None
             if width_text and int(width_text) > _PRINTF_FIELD_LIMIT:
                 return None
+            # ``%.s`` leaves ``precision_text`` empty, which printf reads as zero.
             if precision_text is not None and int(precision_text or "0") > _PRINTF_FIELD_LIMIT:
                 return None
             if width_text or precision_text is not None:
@@ -4546,6 +4765,10 @@ def _has_active_argv_expansion(syntax: str) -> bool:
     bracket_start = syntax.find("[")
     if bracket_start >= 0 and "]" in syntax[bracket_start + 1 :]:
         return True
+    # ``brace_separators`` is a stack with one entry per open brace, recording whether that brace
+    # has seen what makes it a real expansion: a comma, or the second period of a ``..`` range.
+    # A brace that closes without one, such as ``{}`` or ``{a}``, expands to itself and is not a
+    # shape change. ``previous_period`` is what turns two adjacent periods into that signal.
     brace_separators: list[bool] = []
     previous_period = False
     for character in syntax:
@@ -4656,15 +4879,14 @@ def _skip_shell_prefixes(
                 return _ResolvedIndex(None, ambiguous or wrapper.ambiguous, external_lookup)
             index = wrapper.index
             ambiguous = ambiguous or wrapper.ambiguous
+            command_reaches_external = (
+                wrapper_literal == "command"
+                and index < len(words)
+                and not _word_may_change_argv(words[index])
+                and words[index].literal not in _BASH_REDIRECTION_ASSIGNMENT_BUILTINS
+            )
             external_lookup = (
-                external_lookup
-                or wrapper_literal == "exec"
-                or (
-                    wrapper_literal == "command"
-                    and index < len(words)
-                    and not _word_may_change_argv(words[index])
-                    and words[index].literal not in _BASH_REDIRECTION_ASSIGNMENT_BUILTINS
-                )
+                external_lookup or wrapper_literal == "exec" or command_reaches_external
             )
             if (
                 wrapper_literal in {"command", "exec"}
@@ -4761,6 +4983,9 @@ def _skip_command_builtin(words: list[_ShellWord], start: int) -> _ResolvedIndex
             return _ResolvedIndex(index + 1, ambiguous)
         if not word.literal.startswith("-"):
             return _ResolvedIndex(index, ambiguous)
+        # ``command -v``/``-V`` print how the name would resolve instead of running it,
+        # so no later word executes. Returning the end of the list leaves the caller
+        # with no payload to classify.
         if "v" in word.literal[1:] or "V" in word.literal[1:]:
             return _ResolvedIndex(len(words), ambiguous)
         index += 1
@@ -4826,6 +5051,9 @@ def _exec_option_requires_separate_argv0(literal: str) -> bool:
     for offset, option in enumerate(literal[1:], start=1):
         if option in {"c", "l"}:
             continue
+        # ``-a`` takes the rest of the word as argv0, so a separate value word follows
+        # only when ``a`` ends the cluster: in ``-ca`` the value is the next word, in
+        # ``-ac`` it is the trailing ``c``.
         if option == "a":
             return offset == len(literal) - 1
         raise _ShellScanIncomplete(
@@ -4872,6 +5100,10 @@ def _resolve_env_long_option(literal: str) -> tuple[str, bool]:
         candidate for candidate in _ENV_LONG_OPTION_KINDS if candidate.startswith(option)
     )
     if len(candidates) != 1:
+        # Zero candidates is an option this table does not know, several is an
+        # abbreviation shared by more than one option, and neither can be scanned.
+        # The identifier names the abbreviation case and is pinned by the guard
+        # inventory, so the wider meaning is recorded here rather than by renaming it.
         raise _ShellScanIncomplete(
             GuardRefusal(
                 "scanner.env-option.ambiguous-long-option",
@@ -4945,10 +5177,23 @@ def _skip_static_env_option(words: list[_ShellWord], index: int) -> int:
                 "unsupported env option cannot be scanned safely",
             )
         )
+    # An ``optional`` long option takes its value only when attached with ``=``, so it never
+    # consumes the following word and needs no branch of its own; it lands here with the flags.
     return index + 1
 
 
 def _skip_env_prefix(words: list[_ShellWord], start: int) -> int:
+    """Skip a GNU ``env`` prefix to the word it executes.
+
+    Returns:
+        The index of the first word ``env`` executes, or the end of the word list when the
+        prefix consumes every word.
+
+    Raises:
+        _ShellScanIncomplete: If the prefix carries split-string syntax, a dynamic word, an
+            argv-changing word, or an option whose value cannot be located, since each can hide
+            the executed command.
+    """
     index = start
     options_enabled = True
     while index < len(words):
@@ -5109,6 +5354,16 @@ def _doc_lattice_payload_index(  # noqa: PLR0913
     ambiguous: bool = False,
     launcher_depth: int = 0,
 ) -> _ResolvedIndex:
+    """Resolve the doc-lattice payload one executable word can reach.
+
+    The word is recorded as launcher evidence first, then matched against the doc-lattice
+    executable and against the names that carry a payload: ``env`` and ``time`` as executable
+    prefixes, and ``uv``/``uvx`` as launchers whose own grammar is parsed.
+
+    Returns:
+        The resolved doc-lattice executable position, or a ``None`` index when this command
+        reaches none.
+    """
     if executable_index >= len(words):
         return _ResolvedIndex(None)
     executable_word = words[executable_index]
@@ -5871,22 +6126,22 @@ def _read_ansi_c_escape(
     if character in _ANSI_C_SIMPLE_ESCAPES:
         result = (_ANSI_C_SIMPLE_ESCAPES[character], start + 1)
     elif character in "01234567":
-        value, end = _read_ansi_c_digits(source, start, limit, _OCTAL_BASE, 3)
+        value, end = _read_ansi_c_digits(source, start, limit, _OCTAL_BASE, digit_limit=3)
         value &= _ANSI_C_OCTAL_BYTE_MASK
         result = (_valid_ansi_c_character(value, source[start:end]), end)
     elif character == "x":
-        result = _read_ansi_c_prefixed_escape(source, start, limit, 16, 2)
+        result = _read_ansi_c_prefixed_escape(source, start, limit, _HEX_BASE, digit_limit=2)
     elif character == "u":
-        result = _read_ansi_c_prefixed_escape(source, start, limit, 16, 4)
+        result = _read_ansi_c_prefixed_escape(source, start, limit, _HEX_BASE, digit_limit=4)
     elif character == "U":
-        result = _read_ansi_c_prefixed_escape(source, start, limit, 16, 8)
+        result = _read_ansi_c_prefixed_escape(source, start, limit, _HEX_BASE, digit_limit=8)
     elif character == "c" and start + 1 < limit:
         controlled = source[start + 1]
         uppercased = controlled.upper()
         value = (
-            127
+            _ANSI_C_DELETE
             if controlled == "?"
-            else ord(uppercased if len(uppercased) == 1 else controlled) & 0x1F
+            else ord(uppercased if len(uppercased) == 1 else controlled) & _ANSI_C_CONTROL_MASK
         )
         result = (_valid_ansi_c_character(value, source[start : start + 2]), start + 2)
     else:
@@ -5928,13 +6183,29 @@ def _read_ansi_c_digits(
     return value, index
 
 
-def _valid_ansi_c_character(value: int, source: str) -> str:
+def _valid_ansi_c_character(value: int, escape_text: str) -> str:
+    """Return the character one ANSI-C escape decodes to, or its authored spelling.
+
+    A value above the Unicode maximum or inside the surrogate range names no character, so the
+    escape is handed back as authored, behind its backslash, and no decoded text is claimed for
+    it.
+
+    Args:
+        value: The numeric value the escape decoded to.
+        escape_text: The authored escape body, without its leading backslash.
+
+    Returns:
+        The decoded character, or the backslash-prefixed authored text when none exists.
+
+    Raises:
+        _ShellScanIncomplete: If the escape decodes to NUL.
+    """
     if value == 0:
         raise _ShellScanIncomplete(
             GuardRefusal("scanner.ansi-c.nul-decode", "ANSI-C quoted word decodes to NUL")
         )
     if value > _UNICODE_MAX or _SURROGATE_MIN <= value <= _SURROGATE_MAX:
-        return f"\\{source}"
+        return f"\\{escape_text}"
     return chr(value)
 
 
@@ -6092,8 +6363,10 @@ def _uv_requirement_executable_name(value: str) -> str | None:
     the console script named ``bash``, so nested uv/uvx launcher identity derives from the
     stripped name rather than the raw requirement token. A wheel path resolves by its filename's
     distribution segment, because uv enforces filename/metadata name agreement for wheels. None
-    means a path requirement whose executable cannot be derived statically (a source archive, a
-    directory, or a URL).
+    means a path requirement this resolver declines to name: uv derives a path requirement's
+    console script from the installed package rather than from the path, so beyond a parseable
+    wheel filename only a basename that is already the doc-lattice executable is trusted. A path
+    such as ``./bin/uv`` therefore returns None instead of being read as a nested uv launcher.
     """
     value = value.strip()
     distribution_name = _uv_requirement_distribution_name(value)

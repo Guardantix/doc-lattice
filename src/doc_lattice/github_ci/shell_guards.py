@@ -6,6 +6,11 @@ refusal shape the scanner's exceptions and results accept. Transports (exception
 deferred fields, result projections) carry that same object rather than re-deriving one from
 text, so a refusal observed at the public boundary still names the guard that produced it.
 
+This module is also where the scan's deterministic caps and its result vocabulary are declared.
+`TaintLimits`, `ScannerLimits` and `ScanLimits` hold the default bounds every guard enforces, and
+`Certified`, `MarkerDetected` and `GuardRefusal` are the three outcomes `ScanVerdict` admits. They
+live beside the refusal shape because a cap and the guard that refuses on it are one decision.
+
 See AD-20 in ARCHITECTURE.md for the durable decision this module implements.
 """
 
@@ -42,6 +47,12 @@ class ScannerLimits:
     max_invocations: int = 10_000
     max_launcher_nesting_depth: int = 64
     max_case_arms: int = 256
+    # Bounds the alternative width the taint solver explores per case statement (how many arms
+    # whose match against the subject cannot be resolved statically it will retain), not the
+    # total arm count; every exhaustion still fails closed. 32 comfortably covers a real
+    # subcommand or job-matrix dispatch table (#124) without materially widening the solver's
+    # search space; see scripts/bench_sections.py and the seeded fuzz run in
+    # scripts/fuzz_shell_taint.py.
     max_case_dynamic_branches: int = 32
 
 
@@ -95,7 +106,8 @@ class MarkerDetected:
 # declaration it is. See AD-20.
 #
 # This spelling is therefore gate-required, not style: reverting it to `TypeAlias` fails
-# `scripts/check_guard_inventory.py`. The nine `TypeAlias` aliases in `shell_taint.py` predate the
-# rule and name no tracked constructor, so they are untouched by it; a future ruff UP040 cleanup
-# must carry that awareness rather than normalizing all ten in either direction.
+# `scripts/check_guard_inventory.py`. The `TypeAlias` aliases in `shell_taint.py` name no tracked
+# constructor and so are untouched by the rule, whether they predate it or not; a future ruff
+# UP040 cleanup must carry that awareness rather than normalizing every alias in the package in
+# either direction.
 type ScanVerdict = Certified | MarkerDetected | GuardRefusal

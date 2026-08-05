@@ -1,4 +1,9 @@
-"""Reconcile edges: recompute upstream hashes and rewrite seen scalars in place."""
+"""Plan reconcile updates: recompute upstream hashes and build exact-byte rewrites.
+
+Nothing here touches the filesystem: ``plan_rewrites`` reads only through a reader its
+caller injects, and ``reconcile_transaction`` owns durable publication of the rewrites
+planned here.
+"""
 
 import io
 from collections import defaultdict
@@ -39,14 +44,15 @@ def reconcile(
     """Plan the seen-scalar updates needed to clear drift for the selection.
 
     Selection: when ``reconcile_all`` is True, every STALE and UNRECONCILED edge across
-    the lattice is updated; BROKEN and already-OK edges are skipped.  When targeting a
-    specific node, all of that node's STALE or UNRECONCILED edges are updated (or just
-    the matching edge if ``ref`` is given); an already-OK edge is skipped in both modes,
-    since restamping it to the same hash is a no-op.  The match uses the parsed TargetId
-    so an identical ref selects the same edge.  A node's BROKEN edge is
-    skipped (it does not block the node's reconcilable edges); only a ``--ref`` aimed
-    directly at a broken edge is refused, and a ``--ref`` that matches no edge on the node
-    is reported rather than silently doing nothing.
+    the lattice is updated, narrowed to edges matching ``ref`` when one is given; BROKEN
+    and already-OK edges are skipped, and no match is a successful no-op rather than an
+    error.  When targeting a specific node, all of that node's STALE or UNRECONCILED
+    edges are updated (or just the matching edge if ``ref`` is given); an already-OK edge
+    is skipped in both modes, since restamping it to the same hash is a no-op.  The match
+    uses the parsed TargetId so an identical ref selects the same edge.  A node's BROKEN
+    edge is skipped (it does not block the node's reconcilable edges); only a single-node
+    ``--ref`` aimed directly at a broken edge is refused, and a single-node ``--ref`` that
+    matches no edge on the node is reported rather than silently doing nothing.
 
     Args:
         lattice: The built lattice (its upstream content is the reconcile snapshot).
@@ -75,6 +81,10 @@ def reconcile(
         node = lattice.nodes_by_id[node_id]
         for edge in node.derives_from:
             if requested_target_id is not None:
+                # A broken edge has no resolved target_id, so parse its raw ref to compare.
+                # Without this fallback a --ref aimed straight at a broken edge would match
+                # nothing and get the generic no-such-edge error instead of the
+                # BrokenRefError below.
                 edge_target_id = (
                     edge.target_id if edge.target_id is not None else parse_ref(edge.target_ref)
                 )
@@ -106,8 +116,8 @@ def apply_reconcile(
 
     The fresh read is parsed defensively: a concurrent edit that leaves the frontmatter
     unparseable or in an unexpected shape (not a mapping, a non-list ``derives_from``, a
-    non-mapping entry) raises ``UnreadableDocError`` (a ``ProjectError``) so the CLI exits
-    cleanly instead of crashing with a traceback.
+    non-mapping entry, a non-string entry ``ref``) raises ``UnreadableDocError`` (a
+    ``ProjectError``) so the CLI exits cleanly instead of crashing with a traceback.
 
     Args:
         current_file_text: A fresh read of the downstream file at write time.
@@ -150,6 +160,8 @@ def apply_reconcile(
         if not isinstance(entry, MutableMapping):
             raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
         ref = entry.get("ref")
+        if not isinstance(ref, str):
+            raise UnreadableDocError("frontmatter derives_from entry ref is not a string")
         if ref in updates:
             new_seen = updates[ref]
             if entry.get("seen") != new_seen:
