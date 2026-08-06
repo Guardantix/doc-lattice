@@ -27,10 +27,14 @@ The release pipeline then runs in this order:
 After publication, confirm the public index serves the release:
 
 ```bash
-uvx --refresh doc-lattice --version
+uvx doc-lattice@latest --version
 ```
 
-The command must print the released version.
+The command must print the released version. The explicit `@latest` request is required: when a
+machine carries an installed `uv tool` copy of doc-lattice, an unpinned `uvx doc-lattice`
+invocation runs that installed environment without consulting the index, and `--refresh` does
+not change this, so an unpinned check can report a stale version against a published release.
+After verifying, refresh any installed tool with `uv tool install doc-lattice@latest`.
 
 ## Release semantics and recovery
 
