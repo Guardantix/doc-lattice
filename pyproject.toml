@@ -15,7 +15,6 @@ include = [
 ]
 exclude = [
     "/tests/test_bench_sections.py",
-    "/tests/test_github_ci_checkpoint.py",
     "/tests/test_release_gate.py",
     "/tests/test_release_workflow.py",
     "/tests/test_slugger_generator.py",
@@ -49,7 +48,6 @@ dev = [
     "ty>=0.0.26",
     "pre-commit>=3.0",
     "hypothesis>=6.0",
-    "shfmt-py==4.0.0",
 ]
 
 [project.scripts]
