@@ -106,7 +106,6 @@ def parse_workflow(path: Path, text: str) -> WorkflowDocument:
             path=path,
             triggers=triggers,
             permissions=permissions,
-            default_shell=_parse_default_shell(root.get("defaults"), path, ("defaults",)),
             jobs=jobs,
             scalars=tuple(scalars),
             structure=tuple(structure),
@@ -317,9 +316,6 @@ def _parse_jobs(raw: Any, workflow_path: Path) -> tuple[WorkflowJob, ...]:
                 if isinstance(job.get("environment"), str)
                 else None,
                 runs_on=_parse_runs_on(job.get("runs-on")),
-                default_shell=_parse_default_shell(
-                    job.get("defaults"), workflow_path, (*job_path, "defaults")
-                ),
                 permissions=permissions,
                 env=env,
                 steps=steps,
@@ -358,32 +354,11 @@ def _parse_steps(
                     step.get("uses"), workflow_path, (*step_path, "uses")
                 ),
                 run=_optional_audited_string(step.get("run"), workflow_path, (*step_path, "run")),
-                shell=_optional_audited_string(
-                    step.get("shell"), workflow_path, (*step_path, "shell")
-                ),
                 env=env,
                 with_values=with_values,
             )
         )
     return tuple(parsed)
-
-
-def _parse_default_shell(
-    raw: Any,
-    workflow_path: Path,
-    yaml_path: tuple[str, ...],
-) -> str | None:
-    if raw is None:
-        return None
-    defaults = _require_mapping(raw, workflow_path, yaml_path)
-    if "run" not in defaults:
-        return None
-    run_defaults = _require_mapping(defaults["run"], workflow_path, (*yaml_path, "run"))
-    return _optional_audited_string(
-        run_defaults.get("shell"),
-        workflow_path,
-        (*yaml_path, "run", "shell"),
-    )
 
 
 def _parse_scalar_mapping(

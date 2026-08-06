@@ -6,12 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+## [3.0.0] - 2026-08-05
 
-- Fail-closed guards in the CI shell scanner now carry a stable origin identifier through both
-  layers, so a refusal names the guard that produced it. `scan_doc_lattice_invocations` accepts
-  an optional `ScanLimits` value and reports a discriminated verdict. See
-  [AD-20](ARCHITECTURE.md#ad-20-a-fail-closed-guard-is-identified-by-its-origin-and-classified-by-executable-evidence).
+### Added
 
 - Explicit `init --github --repository OWNER/REPO` generation for create-only managed offline,
   trusted Linear, and human-run GitHub bootstrap artifacts.
@@ -20,22 +17,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Read-only `ci audit` policy checks and interactive `ci refresh` support for managed upgrades,
   repository renames, and transfers.
 
-### Changed
+### Removed
 
-- The CI shell scanner is documented as a best-effort accident lint rather than a security
-  boundary; known certify-anyway cases inside its disclosed model are accepted behavior. See
-  [AD-23](ARCHITECTURE.md#ad-23-the-ci-shell-scanner-is-an-accident-lint-with-a-frozen-scope-not-a-security-boundary).
-- A pull request touching the CI shell guard package, the differential tool, the fuzzer grammar,
-  or the frozen replay inventory now replays one fixed corpus against both revisions and reports
-  every script whose verdict differs. See
-  [AD-22](ARCHITECTURE.md#ad-22-a-scanner-change-replays-the-frozen-corpus-against-the-revision-it-is-proposed-on).
+- **BREAKING (3.0):** Removed the CI shell scanner and its verification harness. The scanner moved
+  verbatim to [doc-lattice-shell-lint](https://github.com/Guardantix/doc-lattice-shell-lint), which
+  is released independently on PyPI. `ci audit` now performs no shell analysis: the
+  `PR_LINEAR_INVOCATION` and `PR_MUTATING_RECONCILE` finding codes are retired, as is the exit-2
+  unsupported-shell-semantics audit outcome. Migration: run `uvx doc-lattice-shell-lint` as its own
+  explicit workflow step to keep that lint. This is a major version because an audit reporting
+  fewer finding classes is a gate becoming more permissive, which a consumer could otherwise come
+  to depend on silently. See
+  [AD-25](ARCHITECTURE.md#ad-25-the-ci-shell-scanner-is-extracted-to-doc-lattice-shell-lint).
+- Internal: removed the scanner's contributor gates with it, including the guard inventory checker,
+  the frozen-corpus differential, the witness sweep, the differential fuzzer, their fixtures, and
+  the CI jobs that ran them. They are maintained in doc-lattice-shell-lint.
 
 ### Security
 
-- The CI shell scanner now gives a simple command's redirection operand the resource identity its
-  literal spelling would have had whenever every path reaching it fixes the operand to one literal,
-  so `P=task.sh; printf ... > "$P"; bash task.sh` fails closed instead of certifying. See
-  [AD-18](ARCHITECTURE.md#ad-18-ci-shell-certification-follows-authored-marker-flow-within-one-run-body).
 - The generated Linear workflow uses a dedicated environment-only credential, maps it only on the
   final trusted step, and never exposes it to the generated pull-request workflow.
 - Existing installations must migrate the repository-scoped `LINEAR_API_KEY` to the protected

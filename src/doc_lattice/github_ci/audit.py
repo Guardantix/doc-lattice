@@ -17,7 +17,6 @@ from .model import (
     WorkflowStep,
     WorkflowStructureEntry,
 )
-from .path_display import display_path
 from .render import (
     BOOTSTRAP_EOL_RULE,
     CANONICAL_ARTIFACT_TARGETS,
@@ -27,7 +26,6 @@ from .render import (
     LINEAR_WORKFLOW_PATH,
     render_workflows,
 )
-from .shell_scanner import direct_doc_lattice_invocations
 from .workflow_parser import parse_workflow
 
 __all__ = [
@@ -35,16 +33,8 @@ __all__ = [
     "audit_global_workflows",
     "audit_managed_installation",
     "audit_repository",
-    "direct_doc_lattice_invocations",
 ]
 
-PR_EVENTS = frozenset(
-    {
-        "pull_request",
-        "pull_request_review",
-        "pull_request_review_comment",
-    }
-)
 SECRET_NAMES = frozenset({"LINEAR_API_KEY", "DOC_LATTICE_LINEAR_API_KEY"})
 _SECRET_NAMES_CASEFOLDED = frozenset(name.casefold() for name in SECRET_NAMES)
 
@@ -67,37 +57,6 @@ _STATIC_SECRET_INDEX_RE = re.compile(r"\s*\[\s*'[A-Za-z_][A-Za-z0-9_]*'\s*\]")
 # A static single-secret selection followed by any of these continues the access, so the
 # expression is no longer proven to reach exactly one name.
 _CHAINED_SECRET_ACCESS_CHARACTERS = ".[*"  # noqa: S105
-_STATIC_SHELL_TEMPLATE_RE = re.compile(r"[A-Za-z0-9_./{} \t-]+")
-_BASH_SHELL_EXECUTABLES = frozenset(
-    {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
-)
-_BASH_LONG_FLAGS = frozenset({"--noprofile", "--norc"})
-_BASH_SHORT_FLAGS = frozenset({"e", "n", "u", "v", "x"})
-_BASH_O_OPTIONS = frozenset({"errexit", "nounset", "pipefail", "xtrace"})
-# Keep this exact and fail closed for labels outside GitHub's documented standard runners.
-_BASH_DEFAULT_RUNNERS = frozenset(
-    {
-        "ubuntu-slim",
-        "ubuntu-latest",
-        "ubuntu-22.04",
-        "ubuntu-24.04",
-        "ubuntu-26.04",
-        "ubuntu-22.04-arm",
-        "ubuntu-24.04-arm",
-        "ubuntu-26.04-arm",
-        "macos-latest",
-        "macos-14",
-        "macos-15",
-        "macos-26",
-        "macos-15-intel",
-        "macos-26-intel",
-    }
-)
-_SCRIPT_PLACEHOLDER = "{0}"
-# The run-body placeholder must be inert: it stands in for the ``{0}`` script argument when the
-# shell template is scanned, so it must not itself match the doc-lattice marker and make every
-# placeholder-bearing template fail the inverted unresolved-command certification rule.
-_SCRIPT_SENTINEL = "__run_body_script__"
 _CANONICAL_LINEAR_PATH = LINEAR_WORKFLOW_PATH.as_posix()
 _WORKFLOW_DIRECTORY = LINEAR_WORKFLOW_PATH.parent.as_posix()
 _COMMAND_BEHAVIOR_FIELDS = frozenset(
@@ -152,7 +111,7 @@ def audit_repository(
         Deterministically sorted unique findings across both audit layers.
 
     Raises:
-        ConfigError: If a shell scan cannot complete or inspection results are misaligned.
+        ConfigError: If inspection results are misaligned.
     """
     inspected_discovery = _bind_inspected_workflow_snapshot(discovery, installed)
     findings = [
@@ -203,10 +162,6 @@ def audit_global_workflows(
 
     Returns:
         Deterministically sorted unique repository-global findings.
-
-    Raises:
-        ConfigError: If a pull-request run step uses shell semantics the audit cannot
-            interpret, or if a shell scan of a run body cannot complete.
     """
     findings: list[AuditFinding] = []
     for document in documents:
@@ -219,29 +174,6 @@ def audit_global_workflows(
                     "pull_request_target is prohibited for repository workflows",
                 )
             )
-        if trigger_names & PR_EVENTS:
-            invocations: list[tuple[str, bool]] = []
-            for job in document.jobs:
-                for step in job.steps:
-                    if step.run is None:
-                        continue
-                    invocations.extend(_pr_step_invocations(document, job, step))
-            if any(command == "linear" for command, _dry_run in invocations):
-                findings.append(
-                    _finding(
-                        document,
-                        "PR_LINEAR_INVOCATION",
-                        "pull-request workflows must not invoke doc-lattice linear",
-                    )
-                )
-            if any(command == "reconcile" and not dry_run for command, dry_run in invocations):
-                findings.append(
-                    _finding(
-                        document,
-                        "PR_MUTATING_RECONCILE",
-                        "pull-request workflows must use --dry-run for doc-lattice reconcile",
-                    )
-                )
         if _has_linear_secret_reference(document):
             findings.append(
                 _finding(
@@ -251,109 +183,6 @@ def audit_global_workflows(
                 )
             )
     return _sorted_unique(findings)
-
-
-def _pr_step_invocations(
-    document: WorkflowDocument,
-    job: WorkflowJob,
-    step: WorkflowStep,
-) -> tuple[tuple[str, bool], ...]:
-    """Return direct invocations under the effective shell for one PR run step."""
-    unsupported_shell_error = (
-        f"{display_path(document.path)} job {job.job_id!r} step {step.index}: "
-        "unsupported shell semantics for pull-request run step"
-    )
-    shell = step.shell or job.default_shell or document.default_shell
-    if shell is None:
-        if not _default_run_shell_is_bash(job.runs_on):
-            raise ConfigError(unsupported_shell_error)
-        return direct_doc_lattice_invocations(
-            step.run or "",
-            context=display_path(document.path),
-        )
-
-    template = shell.replace(_SCRIPT_PLACEHOLDER, _SCRIPT_SENTINEL)
-    template_invocations = direct_doc_lattice_invocations(
-        template,
-        context=display_path(document.path),
-    )
-    if _supports_bash_run_body(shell):
-        return (
-            *template_invocations,
-            *direct_doc_lattice_invocations(
-                step.run or "",
-                context=display_path(document.path),
-            ),
-        )
-    # A custom shell template that does not hand the run body to bash leaves that body
-    # uninterpretable here, so only the template itself is scanned. A template that already
-    # invokes doc-lattice is reported from the template alone; one that does not is refused as
-    # unsupported shell semantics rather than certified by omission.
-    if template_invocations:
-        return template_invocations
-    raise ConfigError(unsupported_shell_error)
-
-
-def _default_run_shell_is_bash(runs_on: str | None) -> bool:
-    if runs_on is None:
-        return False
-    return runs_on.casefold() in _BASH_DEFAULT_RUNNERS
-
-
-def _supports_bash_run_body(shell: str) -> bool:
-    """Return whether a custom ``shell:`` value still executes the run body as bash.
-
-    Accepts the bare ``bash`` and ``sh`` keywords, or a template drawn from the restricted
-    character set ``_STATIC_SHELL_TEMPLATE_RE`` allows whose first word is a known shell
-    executable, whose last and only placeholder is ``{0}``, and whose remaining words are
-    supported option clusters.
-    """
-    stripped = shell.strip()
-    if stripped in {"bash", "sh"}:
-        return True
-    if _STATIC_SHELL_TEMPLATE_RE.fullmatch(stripped) is None:
-        return False
-    words = stripped.split()
-    if (
-        not words
-        or words[0] not in _BASH_SHELL_EXECUTABLES
-        or words[-1] != _SCRIPT_PLACEHOLDER
-        or words.count(_SCRIPT_PLACEHOLDER) != 1
-    ):
-        return False
-    return _supports_bash_options(words[0], words[1:-1])
-
-
-def _supports_bash_options(executable: str, options: list[str]) -> bool:
-    """Return whether every option word is one this audit knows leaves run-body semantics intact.
-
-    Accepts ``--noprofile`` and ``--norc`` for bash only, short clusters drawn from ``enuvx``,
-    and a cluster ending in ``o`` for bash only when the next word is a supported ``set -o``
-    option name. Anything else, including a lone ``-`` or an unrecognized long flag, is refused.
-    """
-    is_bash = executable.endswith("bash")
-    index = 0
-    while index < len(options):
-        option = options[index]
-        if is_bash and option in _BASH_LONG_FLAGS:
-            index += 1
-            continue
-        if not option.startswith("-") or option.startswith("--") or option == "-":
-            return False
-        cluster = option[1:]
-        if "o" not in cluster:
-            if not set(cluster) <= _BASH_SHORT_FLAGS:
-                return False
-            index += 1
-            continue
-        if not is_bash or cluster.count("o") != 1 or not cluster.endswith("o"):
-            return False
-        if not set(cluster[:-1]) <= _BASH_SHORT_FLAGS or index + 1 >= len(options):
-            return False
-        if options[index + 1] not in _BASH_O_OPTIONS:
-            return False
-        index += 2
-    return True
 
 
 def audit_managed_installation(

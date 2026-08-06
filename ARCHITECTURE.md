@@ -2293,3 +2293,45 @@ and re-running the parity and benchmark verification AD-13 prescribes. README ow
 **Consequences:** A request to lower the floor is a compatibility review rather than a metadata
 edit, since section identity is measured against the minimum runtime's Unicode table. Raising it
 is equally reviewable, and neither move lands without regenerated, re-verified generated data.
+
+### AD-25: The CI shell scanner is extracted to doc-lattice-shell-lint
+
+**Date:** 2026-08-05
+**Status:** Accepted
+**Context:** AD-23 froze the scanner as a best-effort accident lint with no remaining roadmap, so
+its release cadence is approximately never. What stayed was the cost. An eight-thousand-line
+traceability engine carried a fifty-thousand-line frozen subsystem plus its verification harness,
+and that harness taxed every contributor: the guard inventory gate, the frozen-corpus differential,
+the witness sweep, and the differential fuzzer all had to be understood, run, or reasoned about by
+someone whose change had nothing to do with shell parsing. The size and the gate surface also
+misstated the project's identity to anyone reading it for the first time. A frozen subsystem with
+its own complete verification story is a separable tool, not a feature of a document traceability
+engine.
+**Decision:** The scanner (`shell_taint`, `shell_scanner`, `shell_guards`) and its verification
+harness (the differential fuzzer, the frozen-corpus differential, the guard inventory gate, the
+witness sweep, and the evaluation checkpoint fixtures) move verbatim to
+`Guardantix/doc-lattice-shell-lint`, extracted at doc-lattice commit `38f00d6` and released
+independently on PyPI as `doc-lattice-shell-lint`. Parity at extraction is byte-identical modulo
+import-path renames. The two repositories are fully severed: neither has a runtime, build, or CI
+dependency on the other, in either direction.
+
+`ci audit` therefore performs no shell analysis at all. The `PR_LINEAR_INVOCATION` and
+`PR_MUTATING_RECONCILE` finding codes are retired, as is the exit-2 unsupported-shell-semantics
+outcome. An optional-import integration, where an installed scanner would add findings and an
+absent one would not, was rejected: an audit's contract must not vary with what happens to be
+installed on the runner, and a gate whose strictness depends on the environment is worse than a
+gate that states its scope. A hard dependency was rejected because it reimposes the cost the
+extraction removes, and deletion was rejected because the scanner works within its frozen scope
+and adopters who want that lint should keep being able to run it. Anyone who wants it runs
+`uvx doc-lattice-shell-lint` as its own explicit workflow step, which README owns.
+
+AD-17 through AD-23 stay in this document as the recorded history of the extracted subsystem, not
+as live contracts of this package. Their live successors are maintained in doc-lattice-shell-lint's
+own ARCHITECTURE, whose SL-1 records this extraction from the other side and points back here.
+**Consequences:** This package's audit reports structural workflow findings only, which is a gate
+becoming more permissive and therefore a major version. A consumer whose workflows passed a
+doc-lattice audit that included shell certification no longer receives those findings and must add
+the standalone step to keep them. The contributor gate set loses the guard inventory, corpus
+differential, witness sweep, and fuzz controls, so CLAUDE.md's handoff verification is
+correspondingly shorter. Shell-scanner work is now filed, reviewed, and released on the extracted
+repository at its own cadence, and a change there can no longer regress this engine.

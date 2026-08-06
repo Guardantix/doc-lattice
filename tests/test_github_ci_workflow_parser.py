@@ -118,31 +118,6 @@ jobs:
     assert parsed.jobs[0].runs_on == "ubuntu-latest"
 
 
-def test_parse_workflow_normalizes_effective_shell_fields():
-    parsed = parse_workflow(
-        Path(".github/workflows/shells.yml"),
-        """\
-on: pull_request
-defaults:
-  run:
-    shell: workflow-shell {0}
-jobs:
-  audit:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: job-shell {0}
-    steps:
-      - shell: step-shell {0}
-        run: safe configuration
-""",
-    )
-
-    assert parsed.default_shell == "workflow-shell {0}"
-    assert parsed.jobs[0].default_shell == "job-shell {0}"
-    assert parsed.jobs[0].steps[0].shell == "step-shell {0}"
-
-
 def test_parse_workflow_emits_deterministic_typed_structure():
     first = parse_workflow(
         Path(".github/workflows/structure.yml"),

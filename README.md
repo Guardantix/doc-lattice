@@ -452,7 +452,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice init
+uvx --python 3.13 --from doc-lattice==3.0.0 doc-lattice init
 ```
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
@@ -508,16 +508,15 @@ unmarked file and will fail closed instead of overwriting it.
 
 Canonical target cleanup is only collision handling. Also inventory the repository's workflows and
 remove every old hand-written Linear workflow, regardless of path or filename, in the same reviewed
-migration change. Do not rely on `ci audit` to discover all legacy workflow indirection: an
-arbitrarily named workflow may call a script, local action, reusable workflow, or wrapper that the
-direct-command heuristic cannot identify.
+migration change. `ci audit` cannot discover legacy workflow indirection at all, since it inspects
+no `run:` commands, so that inventory is a manual review step.
 
 Run this human-maintainer sequence from reviewed, trusted project state:
 
 1. Generate and review the local managed artifacts.
 
    ```bash
-   uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice init \
+   uvx --python 3.13 --from doc-lattice==3.0.0 doc-lattice init \
      --github --repository OWNER/REPO
    ```
 
@@ -556,7 +555,7 @@ Run this human-maintainer sequence from reviewed, trusted project state:
 
    ```bash
    bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO
-   uvx --python 3.13 --from doc-lattice==2.0.0 doc-lattice ci audit \
+   uvx --python 3.13 --from doc-lattice==3.0.0 doc-lattice ci audit \
      --repository OWNER/REPO
    ```
 
@@ -641,72 +640,16 @@ neither name is exposed to this repository, or have the owner remove or exclude 
 complete until bootstrap `verify` and local `ci audit` both pass.
 
 In short, ci audit is meaningful only after `init --github`: before adoption, the absent artifacts
-intentionally produce exit-1 findings. The audit checks every workflow for
-`pull_request_target`, Linear secret references, direct Linear invocations under pull-request
-events, and direct mutating reconcile invocations under those events. Least-privilege permissions,
-action pins, checkout credentials, caching, triggers, and exact command structure are scoped to the
-two canonical managed workflow paths, so an unrelated release workflow may legitimately use
-`contents: write`.
+intentionally produce exit-1 findings. The audit checks every workflow for `pull_request_target`
+and Linear secret references. Least-privilege permissions, action pins, checkout credentials,
+caching, triggers, and exact command structure are scoped to the two canonical managed workflow
+paths, so an unrelated release workflow may legitimately use `contents: write`.
 
-Audit recognizes direct Bash and `sh` invocations, including supported `uv run` and `uvx` forms.
-For pull-request steps it resolves step, job-default, and workflow-default shell configuration and
-scans the selected command template. Unsupported runner defaults or shell semantics exit 2 instead
-of being interpreted as Bash. Active brace or glob expansion in an executable or subcommand word,
-and unsupported active extglob syntax anywhere in a command, also exit 2 because the resulting argv
-cannot be certified statically. ANSI-C quoted words that decode to NUL after Bash's eight-bit octal
-conversion exit 2 because Bash discards the suffix after NUL instead of placing that byte in an
-argument. A resolved doc-lattice executable with no effective command, including bare `doc-lattice`,
-`doc-lattice --help`, and `doc-lattice --version`, produces no policy finding. Launcher
-help/version forms that leave a retained doc-lattice marker under an unresolved command instead
-exit 2.
-
-For each simple command, audit decodes retained assignment-prefix and argv words and applies the
-ASCII marker `doc[-_.]+lattice` case-insensitively. If the existing resolver classifies the
-effective executable as doc-lattice, its launcher, subcommand, and fail-closed checks continue
-unchanged. Otherwise any retained marker exits 2, regardless of the apparent command head or
-whether that concrete spelling would execute on one host. Consequently forms such as
-`echo doc-lattice reconcile`, `command -v doc-lattice`,
-`bash --help -c 'doc-lattice reconcile'`, `nohup bash ./doc-lattice-runner.sh`, and
-`cmds=(doc-lattice reconcile)` are not certified as non-invocations; array assignment element
-words are marker-checked like scalar assignment values. Comments and discarded redirection
-targets are not retained command words.
-
-Executable classification is syntactic basename resolution, not proof of runtime identity. Within
-each individual `run:` body, audit also evaluates authored marker flow after the command-local
-resolver pass. Certification means no authored fragments compose the ASCII
-`doc[-_.]+lattice` marker along a modeled content flow and reach an execution sink in that body.
-Modeled flows include variable assignment and append, producer stdout, pipes, heredocs,
-herestrings, command and process substitutions, static file writes and reads, shell script/stdin/
-`-c` source selection, `eval`, `source`/`.`, bounded parameter alternatives and brace argv
-fan-out, structured stream scopes, loop binding/repetition, and descriptor-aware final bindings.
-Resolved doc-lattice invocations and the phase-1 retained-word refusals keep their existing
-outcomes.
-
-This contract is step-local and marker-anchored, not a general proof that dynamic shell execution
-is safe. The shell analysis is a best-effort lint that catches accidental or naive doc-lattice
-invocations; it is not a security boundary, an author who can edit workflows can bypass it, and
-human review of workflow changes, which each repository must enforce through its own branch
-governance, remains the load-bearing control. Audit does not aggregate across
-steps, jobs, `uses:` actions, or reusable workflows.
-[AD-18](ARCHITECTURE.md) owns the modeled-flow boundary and records which shell constructs the
-analysis interprets, which it deliberately does not, and where the absence of evidence is a
-disclosed gap rather than a safety claim; [AD-23](ARCHITECTURE.md) owns that scope and the
-disposition of corner cases outside it.
-
-In practice this means marker-free dynamic execution still certifies. `curl ... | bash`,
-`eval "$EXTERNAL"`, a marker-free generated script, and `doc${EXTERNAL}lattice` are all clean,
-because no authored fragment composes the marker. Oversized or cap-exhausting input exits 2.
-
-Four constructs exit 2 for the whole step rather than being modeled. A bare `exec` that rebinds
-standard input, output, or error exits 2, because the descriptor belongs to the shell from that
-point on rather than to the `exec` itself; a redirection attached to a command or compound is
-modeled instead. A `read` that uses `-a`, `-d`, `-n`, `-N`, or `-u`, and every `mapfile` or
-`readarray`, exits 2, since a stream supplies no per-element content for an array target and a
-bounded prefix can compose a marker the full stream does not contain. An array literal element
-spelled `[subscript]=value` exits 2, because literal order is then no longer index order while a
-joined read concatenates by index; an array literal whose elements carry their content directly is
-modeled instead. A `set --` or `shift` that rewrites the positional parameters outside a function
-body exits 2, because positional binding is modeled for function contexts only.
+Shell run-body linting is not part of this contract. It was extracted to the standalone
+[doc-lattice-shell-lint](https://github.com/Guardantix/doc-lattice-shell-lint) tool, runnable as
+`uvx doc-lattice-shell-lint`. `doc-lattice ci audit` performs no shell analysis and reports the
+structural workflow findings above only; anyone who wants that lint runs the standalone tool as its
+own explicit workflow step. [AD-25](ARCHITECTURE.md) owns that extraction.
 
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
@@ -828,14 +771,14 @@ doc-lattice/
 │   ├── persistence.py          # shared durable single-path filesystem primitives
 │   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery
 │   ├── cli/                    # per-invocation runtime and one adapter per command
-│   ├── github_ci/              # offline workflow audit, managed artifact generation, shell scanner
+│   ├── github_ci/              # offline workflow audit and managed artifact generation
 │   └── cache/               # phase-separated incremental load cache
 │       ├── schema.py        # filesystem-free models and codec
 │       ├── state.py         # filesystem-free run-local state
 │       ├── lookup.py        # document reads and stats for cache-tier selection
 │       └── store.py         # cache-file reads and atomic writes
 ├── tests/                   # test suite (mirrors sources; property-based hashing invariants)
-├── scripts/                 # CI guards plus slug generation and section benchmark tools
+├── scripts/                 # slug generation, section benchmark, repository and release tools
 └── pyproject.toml           # project configuration
 ```
 
