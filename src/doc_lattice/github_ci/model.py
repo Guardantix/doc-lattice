@@ -126,7 +126,6 @@ class WorkflowStep:
     name: str | None
     uses: str | None
     run: str | None
-    shell: str | None
     env: tuple[tuple[str, str], ...]
     with_values: tuple[tuple[str, str], ...]
 
@@ -139,7 +138,6 @@ class WorkflowJob:
     if_condition: str | None
     environment: str | None
     runs_on: str | None
-    default_shell: str | None
     permissions: PermissionValue
     env: tuple[tuple[str, str], ...]
     steps: tuple[WorkflowStep, ...]
@@ -152,7 +150,6 @@ class WorkflowDocument:
     path: Path
     triggers: tuple[WorkflowTrigger, ...]
     permissions: PermissionValue
-    default_shell: str | None
     jobs: tuple[WorkflowJob, ...]
     scalars: tuple[WorkflowScalar, ...]
     structure: tuple[WorkflowStructureEntry, ...]

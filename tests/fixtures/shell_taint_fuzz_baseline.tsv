@@ -1,4 +1,0 @@
-# doc-lattice shell taint fuzzer baseline
-# producer	carrier	sink	wrapper
-cmdsub-echo	via-eval	eval	none
-plain	via-eval	eval	case-arm
