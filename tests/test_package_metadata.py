@@ -22,7 +22,10 @@ def _assert_sdist_members(members, expected_prefix):
     assert duplicates == [], f"duplicate sdist members: {duplicates}"
     repository_only_tests = {
         f"{expected_prefix}/tests/test_bench_sections.py",
+        f"{expected_prefix}/tests/test_check_version_sync.py",
+        f"{expected_prefix}/tests/test_extract_release_notes.py",
         f"{expected_prefix}/tests/test_release_gate.py",
+        f"{expected_prefix}/tests/test_release_target.py",
         f"{expected_prefix}/tests/test_release_workflow.py",
         f"{expected_prefix}/tests/test_slugger_generator.py",
         f"{expected_prefix}/tests/test_workflow_pinning.py",
@@ -86,7 +89,10 @@ def test_sdist_has_an_explicit_minimal_include_set():
     ]
     assert sdist["exclude"] == [
         "/tests/test_bench_sections.py",
+        "/tests/test_check_version_sync.py",
+        "/tests/test_extract_release_notes.py",
         "/tests/test_release_gate.py",
+        "/tests/test_release_target.py",
         "/tests/test_release_workflow.py",
         "/tests/test_slugger_generator.py",
         "/tests/test_workflow_pinning.py",
