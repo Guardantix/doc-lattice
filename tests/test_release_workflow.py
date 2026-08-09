@@ -76,9 +76,15 @@ def _out_dir(command: str) -> str | None:
 
 
 def _invokes(line: str, script: str) -> bool:
-    """Report whether a command line runs `script` rather than only naming it."""
+    """Report whether a command line runs `script` rather than only naming it.
+
+    `-c` and `-m` make the interpreter execute inline code or a module instead, which demotes
+    any path on the line to an ordinary argument the gate never runs.
+    """
     words = shlex.split(line)
-    return script in words[1:] and words[0] in {"uv", "uvx", "python", "python3"}
+    if not words or words[0] not in {"uv", "uvx", "python", "python3"}:
+        return False
+    return script in words[1:] and set(words).isdisjoint({"-c", "-m"})
 
 
 def _dev_dependencies() -> str:
@@ -144,13 +150,17 @@ def test_build_job_builds_validates_and_uploads_one_artifact():
     # RELEASING.md requires publishing a wheel and a source distribution and validating both.
     # Both commands cover both formats when given no format argument, so naming one format is
     # only acceptable when the other is named too, as RELEASING.md's own invocations do.
+    # Read the arguments off the build command itself. A step may legitimately run other
+    # commands, and their flags say nothing about how the distributions get built.
     build_run = _commands(_named_step(build, "Build distributions"))
-    assert any(line.startswith("uv build") for line in build_run.splitlines())
-    assert ("--wheel" in build_run) == ("--sdist" in build_run)
-    # The upload step below publishes `dist/` with `if-no-files-found: error`, so the build has
-    # to write there. Compare the whole argument: a prefix check accepts `--out-dir dist-old`
-    # and strands every distribution outside the uploaded directory.
-    assert _out_dir(build_run) in (None, "dist")
+    builds = [line for line in build_run.splitlines() if line.startswith("uv build")]
+    assert builds
+    for line in builds:
+        assert ("--wheel" in line) == ("--sdist" in line)
+        # The upload step below publishes `dist/` with `if-no-files-found: error`, so the build
+        # has to write there. Compare the whole argument: a prefix check accepts `--out-dir
+        # dist-old` and strands every distribution outside the uploaded directory.
+        assert _out_dir(line) in (None, "dist")
     validate = _named_step(build, "Validate distributions")
     validate_run = _commands(validate)
     assert "twine check" in validate_run
