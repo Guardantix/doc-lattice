@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- Internal: the `doc_lattice.version_check` module. It was maintainer tooling that no CLI command
+  or production module imported, yet it shipped as importable package API. Its two functions moved
+  into the only scripts that call them: `check_version_consistency` into
+  `scripts/check_version_sync.py` and `changelog_section` into `scripts/extract_release_notes.py`.
+  Behavior, messages, and the pre-commit and CI gates are unchanged.
+- Internal: the `doc_lattice.datetime_utils` module and its `utc_now` helper, which nothing called.
+  The convention that `datetime.now()` and `datetime.utcnow()` may appear only in
+  `datetime_utils.py` still stands and is still enforced by `tests/test_conventions.py`.
+
 ## [3.0.0] - 2026-08-05
 
 ### Added
