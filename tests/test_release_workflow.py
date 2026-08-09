@@ -47,8 +47,12 @@ def test_release_gate_invokes_testable_script_with_runner_environment():
         "TAG": "${{ steps.target.outputs.tag }}",
         "VERSION": "${{ steps.target.outputs.version }}",
     }
-    assert "git fetch --tags --force" in gate["run"]
-    assert "scripts/release_gate.py" in gate["run"]
+    run = gate["run"]
+    assert "git fetch --tags --force" in run
+    assert "scripts/release_gate.py" in run
+    # release_gate.py resolves refs/tags/<tag> from local state, so a tag created remotely
+    # since checkout is invisible unless the fetch runs first.
+    assert run.index("git fetch --tags --force") < run.index("scripts/release_gate.py")
 
 
 def test_tag_creation_and_github_release_are_idempotent():
@@ -73,8 +77,16 @@ def test_build_job_uses_exact_tag_without_oidc():
 
 def test_build_job_builds_validates_and_uploads_one_artifact():
     build = _WORKFLOW["jobs"]["build-release"]
-    assert "uv build" in _named_step(build, "Build distributions")["run"]
-    assert "twine check" in _named_step(build, "Validate distributions")["run"]
+    # RELEASING.md requires publishing a wheel and a source distribution and validating both,
+    # so neither the build nor the Twine check may be narrowed to one format.
+    build_run = _named_step(build, "Build distributions")["run"]
+    assert "uv build" in build_run
+    assert "--wheel" not in build_run
+    assert "--sdist" not in build_run
+    validate_run = _named_step(build, "Validate distributions")["run"]
+    assert "twine check" in validate_run
+    assert ".whl" not in validate_run
+    assert ".tar.gz" not in validate_run
     upload = _named_step(build, "Upload distributions")
     assert sum(_action(step) == _UPLOAD_ARTIFACT for step in build["steps"]) == 1
     assert _action(upload) == _UPLOAD_ARTIFACT
