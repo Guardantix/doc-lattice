@@ -230,31 +230,17 @@ its independent transaction boundary.
 
 **Date:** 2026-07-14
 **Status:** Accepted
-**Context:** The 1.x commands exposed structured output through different selectors.
-Removing `--json` during 1.x or warning on stderr would have broken scripts, but carrying
-both selectors indefinitely would have preserved an inconsistent interface.
-**Decision:** `--json` remained silent throughout 1.x and is removed in 2.0. Selector
-availability was fixed by command and release as follows:
-
-| Release | Commands | Structured-output selection |
-|---------|----------|-----------------------------|
-| 1.x | `check`, `lint` | `--format human\|json\|github`, plus silent `--json` alias |
-| 1.x | `graph` | `--format mermaid\|dot\|json`; no `--json` alias |
-| 1.x | `impact`, `reconcile`, `linear` | Human default; only silent `--json` selector |
-| 1.x | `init` | Deliberately no structured-output selector |
-| 2.0 | `check`, `lint` | `--format human\|json\|github`; no `--json` alias |
-| 2.0 | `graph` | `--format mermaid\|dot\|json`; no `--json` alias |
-| 2.0 | `impact`, `reconcile`, `linear` | `--format human\|json`; no `--json` alias |
-| 2.0 | `init` | Remains excluded from structured-output selection |
-
-In 2.0, `--json` is therefore removed from `check`, `lint`, `impact`, `reconcile`,
-and `linear`; `graph` never accepted that alias. Where supported, `--indent` is valid
-only when the effective format is JSON.
-**Consequences:** The CLI package refactor preserved current byte-exact output through
-1.x. The silent 1.x alias was behaviorally compatible and emitted no deprecation warning.
-The cost was that selector inconsistency persisted through 1.x, and the migration notice
-was documentation-only because stderr could not carry a compatibility-safe warning. This
-decision did not freeze every 1.x output schema.
+**Context:** The 1.x commands exposed structured output through inconsistent selectors: some took
+`--format`, some only a silent `--json` alias, and some both. Removing `--json` during 1.x or
+warning on stderr would have broken scripts, but carrying both selectors indefinitely would have
+preserved an inconsistent interface.
+**Decision:** `--json` remained silent and behaviorally compatible throughout 1.x, and 2.0 removed
+it everywhere in favor of `--format` alone. The migration notice was documentation-only, because
+stderr could not carry a compatibility-safe warning. README owns the current per-command selector
+values; CHANGELOG owns the 2.0 migration.
+**Consequences:** Selector inconsistency persisted through 1.x as the price of byte-exact
+compatibility, and the break waited for a major version. This decision did not freeze every 1.x
+output schema.
 
 ### AD-11: Linear is a read-only, opt-in network boundary
 
@@ -336,7 +322,7 @@ which implied a future contract without an approved requirement or defined behav
 configs migrate by deleting the key, with no replacement. Authority behavior remains
 `lint`'s fixed binding > derived > exploratory ladder, and strict configuration rejects
 the removed key.
-**Consequences:** This is a documented breaking change in the next major release. Future
+**Consequences:** This was a documented breaking change in 2.0. Future
 configuration keys are not reserved as inert surface without an approved requirement.
 
 ### AD-16: GitHub administration remains an external human boundary
