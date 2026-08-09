@@ -6,6 +6,7 @@ workflow resolves to a 40-character commit SHA, so restating individual pins her
 only force a lockstep edit on every routine pin refresh.
 """
 
+import shlex
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -38,6 +39,17 @@ def _commands(step: dict) -> str:
     )
 
 
+def _out_dir(command: str) -> str | None:
+    """Return a command's ``--out-dir`` value, or None when the flag is absent."""
+    words = shlex.split(command)
+    for index, word in enumerate(words):
+        if word.startswith("--out-dir="):
+            return word.split("=", 1)[1]
+        if word == "--out-dir":
+            return words[index + 1] if index + 1 < len(words) else ""
+    return None
+
+
 def test_release_exposes_publish_coordination_outputs():
     release = _WORKFLOW["jobs"]["release"]
     assert release["permissions"] == {"contents": "write"}
@@ -59,11 +71,15 @@ def test_release_gate_invokes_testable_script_with_runner_environment():
     }
     # release_gate.py resolves refs/tags/<tag> from local state, so a tag created remotely
     # since checkout is invisible unless the fetch runs first. Steps in a job run in order,
-    # so the fetch may live in the gate step or in any step before it.
-    commands = "\n".join(_commands(step) for step in steps[: gate_index + 1])
-    assert "scripts/release_gate.py" in commands
-    assert "git fetch --tags --force" in commands
-    assert commands.index("git fetch --tags --force") < commands.index("scripts/release_gate.py")
+    # so the fetch may live in the gate step or in any step before it. Anchor both matches to
+    # whole command lines: text quoted inside an echo would satisfy a bare substring search
+    # while neither command ever runs, leaving the gate step to skip publishing silently.
+    lines = [line for step in steps[: gate_index + 1] for line in _commands(step).splitlines()]
+    fetches = [i for i, line in enumerate(lines) if line.startswith("git fetch --tags --force")]
+    gates = [i for i, line in enumerate(lines) if line.endswith("scripts/release_gate.py")]
+    assert fetches
+    assert gates
+    assert fetches[0] < gates[0]
 
 
 def test_tag_creation_and_github_release_are_idempotent():
@@ -92,13 +108,25 @@ def test_build_job_builds_validates_and_uploads_one_artifact():
     # Both commands cover both formats when given no format argument, so naming one format is
     # only acceptable when the other is named too, as RELEASING.md's own invocations do.
     build_run = _commands(_named_step(build, "Build distributions"))
-    assert "uv build" in build_run
+    assert any(line.startswith("uv build") for line in build_run.splitlines())
     assert ("--wheel" in build_run) == ("--sdist" in build_run)
-    # The upload step below publishes `dist/`, so the build has to write there.
-    assert "--out-dir" not in build_run or "--out-dir dist" in build_run
-    validate_run = _commands(_named_step(build, "Validate distributions"))
+    # The upload step below publishes `dist/` with `if-no-files-found: error`, so the build has
+    # to write there. Compare the whole argument: a prefix check accepts `--out-dir dist-old`
+    # and strands every distribution outside the uploaded directory.
+    assert _out_dir(build_run) in (None, "dist")
+    validate = _named_step(build, "Validate distributions")
+    validate_run = _commands(validate)
     assert "twine check" in validate_run
     assert (".whl" in validate_run) == (".tar.gz" in validate_run)
+    # twine is neither a project dependency nor preinstalled, so a bare `twine check` fails on a
+    # clean runner. Any provisioning route satisfies this; running the unprovisioned binary does
+    # not. Adding twine to the dev group means switching the call to `uv run` here too.
+    twine_line = next(line for line in validate_run.splitlines() if "twine check" in line)
+    earlier = build["steps"][: build["steps"].index(validate)]
+    installs = "\n".join(_commands(step) for step in earlier)
+    assert twine_line.startswith(("uvx --from twine", "uv run", "uv tool run")) or (
+        "install twine" in installs
+    )
     upload = _named_step(build, "Upload distributions")
     assert sum(_action(step) == _UPLOAD_ARTIFACT for step in build["steps"]) == 1
     assert _action(upload) == _UPLOAD_ARTIFACT
