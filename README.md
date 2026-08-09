@@ -647,8 +647,8 @@ Shell run-body linting is not part of this contract. It was extracted to the sta
 `uvx doc-lattice-shell-lint`. `doc-lattice ci audit` performs no shell analysis and reports the
 structural workflow findings above only. Anyone who wants that lint adds it to a separate workflow
 file of their own, not to a managed workflow: audit compares the full action and command sequences
-of the two canonical managed paths, so an added step there reports `MANAGED_ACTION` and
-`MANAGED_COMMAND` drift. [AD-25](ARCHITECTURE.md) owns that extraction.
+of the two canonical managed paths, so an added `run:` step there reports `MANAGED_COMMAND` drift
+and an added `uses:` step reports `MANAGED_ACTION`. [AD-25](ARCHITECTURE.md) owns that extraction.
 
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
