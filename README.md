@@ -469,9 +469,6 @@ keep the exact PyPI version pin.
 
 ### Managed GitHub and Linear setup
 
-The managed artifacts and the `ci` commands are not in the published release yet, so the pinned
-`uvx` snippets below are forward-looking; see [CHANGELOG.md](CHANGELOG.md) for their status.
-
 To add protected Linear reporting, a human maintainer generates and reviews four committed,
 create-only artifacts:
 
@@ -648,8 +645,10 @@ paths, so an unrelated release workflow may legitimately use `contents: write`.
 Shell run-body linting is not part of this contract. It was extracted to the standalone
 [doc-lattice-shell-lint](https://github.com/Guardantix/doc-lattice-shell-lint) tool, runnable as
 `uvx doc-lattice-shell-lint`. `doc-lattice ci audit` performs no shell analysis and reports the
-structural workflow findings above only; anyone who wants that lint runs the standalone tool as its
-own explicit workflow step. [AD-25](ARCHITECTURE.md) owns that extraction.
+structural workflow findings above only. Anyone who wants that lint adds it to a separate workflow
+file of their own, not to a managed workflow: audit compares the full action and command sequences
+of the two canonical managed paths, so an added `run:` step there reports `MANAGED_COMMAND` drift
+and an added `uses:` step reports `MANAGED_ACTION`. [AD-25](ARCHITECTURE.md) owns that extraction.
 
 Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
 selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
