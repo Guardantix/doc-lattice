@@ -7,6 +7,7 @@ only force a lockstep edit on every routine pin refresh.
 """
 
 import shlex
+import tomllib
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -30,24 +31,60 @@ def _action(step: dict) -> str:
     return step.get("uses", "").split("@", 1)[0]
 
 
+def _uncommented(line: str) -> str:
+    """Return a command line with any shell comment removed, ignoring `#` inside quotes."""
+    quote = ""
+    for index, char in enumerate(line):
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+    return line
+
+
 def _commands(step: dict) -> str:
-    """Return a step's executable command lines, dropping blanks and commented-out text."""
+    """Return a step's executable command lines, dropping blanks and commented-out text.
+
+    Comments are stripped because the shell ignores them: a step reading `uv build --wheel
+    # --sdist` builds only a wheel, and leaving the comment in place would let it satisfy
+    assertions about the arguments the step actually passes.
+    """
     return "\n".join(
         stripped
         for line in step.get("run", "").splitlines()
-        if (stripped := line.strip()) and not stripped.startswith("#")
+        if (stripped := _uncommented(line.strip()))
     )
 
 
 def _out_dir(command: str) -> str | None:
-    """Return a command's ``--out-dir`` value, or None when the flag is absent."""
+    """Return a command's output-directory value, or None when the flag is absent.
+
+    `uv build` documents `-o` and `--out-dir` as equivalent, so both forms count, as do the
+    attached spellings a switch to the short option would introduce.
+    """
     words = shlex.split(command)
     for index, word in enumerate(words):
+        if word in {"--out-dir", "-o"}:
+            return words[index + 1] if index + 1 < len(words) else ""
         if word.startswith("--out-dir="):
             return word.split("=", 1)[1]
-        if word == "--out-dir":
-            return words[index + 1] if index + 1 < len(words) else ""
+        if word.startswith("-o") and not word.startswith("--"):
+            return word[2:].removeprefix("=")
     return None
+
+
+def _invokes(line: str, script: str) -> bool:
+    """Report whether a command line runs `script` rather than only naming it."""
+    words = shlex.split(line)
+    return script in words[1:] and words[0] in {"uv", "uvx", "python", "python3"}
+
+
+def _dev_dependencies() -> str:
+    """Return the project's declared dev dependencies as one searchable string."""
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return str(project.get("dependency-groups", {}))
 
 
 def test_release_exposes_publish_coordination_outputs():
@@ -71,12 +108,12 @@ def test_release_gate_invokes_testable_script_with_runner_environment():
     }
     # release_gate.py resolves refs/tags/<tag> from local state, so a tag created remotely
     # since checkout is invisible unless the fetch runs first. Steps in a job run in order,
-    # so the fetch may live in the gate step or in any step before it. Anchor both matches to
-    # whole command lines: text quoted inside an echo would satisfy a bare substring search
-    # while neither command ever runs, leaving the gate step to skip publishing silently.
+    # so the fetch may live in the gate step or in any step before it. Require both to occupy
+    # the executable position of a command line: a step that only prints the script name never
+    # writes the gate outputs, so build and publish would skip while the tests stayed green.
     lines = [line for step in steps[: gate_index + 1] for line in _commands(step).splitlines()]
     fetches = [i for i, line in enumerate(lines) if line.startswith("git fetch --tags --force")]
-    gates = [i for i, line in enumerate(lines) if line.endswith("scripts/release_gate.py")]
+    gates = [i for i, line in enumerate(lines) if _invokes(line, "scripts/release_gate.py")]
     assert fetches
     assert gates
     assert fetches[0] < gates[0]
@@ -118,15 +155,16 @@ def test_build_job_builds_validates_and_uploads_one_artifact():
     validate_run = _commands(validate)
     assert "twine check" in validate_run
     assert (".whl" in validate_run) == (".tar.gz" in validate_run)
-    # twine is neither a project dependency nor preinstalled, so a bare `twine check` fails on a
-    # clean runner. Any provisioning route satisfies this; running the unprovisioned binary does
-    # not. Adding twine to the dev group means switching the call to `uv run` here too.
+    # twine is not preinstalled on the runner, so `twine check` only resolves if the job supplies
+    # it. Naming twine inline (`--from`/`--with`) works, as does installing it in an earlier step,
+    # as does declaring it in the dev group and reaching it through `uv run`. A bare invocation,
+    # or `uv run twine` while the dev group omits twine, fails on a clean runner.
     twine_line = next(line for line in validate_run.splitlines() if "twine check" in line)
     earlier = build["steps"][: build["steps"].index(validate)]
     installs = "\n".join(_commands(step) for step in earlier)
-    assert twine_line.startswith(("uvx --from twine", "uv run", "uv tool run")) or (
-        "install twine" in installs
-    )
+    supplied_inline = "--from twine" in twine_line or "--with twine" in twine_line
+    from_dev_group = "twine" in _dev_dependencies() and twine_line.startswith("uv run")
+    assert supplied_inline or from_dev_group or "install twine" in installs
     upload = _named_step(build, "Upload distributions")
     assert sum(_action(step) == _UPLOAD_ARTIFACT for step in build["steps"]) == 1
     assert _action(upload) == _UPLOAD_ARTIFACT
