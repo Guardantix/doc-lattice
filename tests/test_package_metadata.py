@@ -25,6 +25,7 @@ def _assert_sdist_members(members, expected_prefix):
         f"{expected_prefix}/tests/test_release_gate.py",
         f"{expected_prefix}/tests/test_release_workflow.py",
         f"{expected_prefix}/tests/test_slugger_generator.py",
+        f"{expected_prefix}/tests/test_workflow_pinning.py",
     }
     assert repository_only_tests.isdisjoint(names), (
         f"repository-only tests included: {sorted(repository_only_tests.intersection(names))}"
@@ -88,6 +89,7 @@ def test_sdist_has_an_explicit_minimal_include_set():
         "/tests/test_release_gate.py",
         "/tests/test_release_workflow.py",
         "/tests/test_slugger_generator.py",
+        "/tests/test_workflow_pinning.py",
     ]
 
 

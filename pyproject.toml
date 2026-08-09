@@ -18,6 +18,7 @@ exclude = [
     "/tests/test_release_gate.py",
     "/tests/test_release_workflow.py",
     "/tests/test_slugger_generator.py",
+    "/tests/test_workflow_pinning.py",
 ]
 
 [project]

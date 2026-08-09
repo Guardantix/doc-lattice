@@ -29,6 +29,15 @@ def _action(step: dict) -> str:
     return step.get("uses", "").split("@", 1)[0]
 
 
+def _commands(step: dict) -> str:
+    """Return a step's executable command lines, dropping blanks and commented-out text."""
+    return "\n".join(
+        stripped
+        for line in step.get("run", "").splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    )
+
+
 def test_release_exposes_publish_coordination_outputs():
     release = _WORKFLOW["jobs"]["release"]
     assert release["permissions"] == {"contents": "write"}
@@ -41,18 +50,20 @@ def test_release_exposes_publish_coordination_outputs():
 
 
 def test_release_gate_invokes_testable_script_with_runner_environment():
-    gate = _named_step(_WORKFLOW["jobs"]["release"], "Tag-health gate")
-    assert gate["env"] == {
+    steps = _WORKFLOW["jobs"]["release"]["steps"]
+    gate_index = next(i for i, step in enumerate(steps) if step.get("name") == "Tag-health gate")
+    assert steps[gate_index]["env"] == {
         "GITHUB_BEFORE": "${{ github.event.before }}",
         "TAG": "${{ steps.target.outputs.tag }}",
         "VERSION": "${{ steps.target.outputs.version }}",
     }
-    run = gate["run"]
-    assert "git fetch --tags --force" in run
-    assert "scripts/release_gate.py" in run
     # release_gate.py resolves refs/tags/<tag> from local state, so a tag created remotely
-    # since checkout is invisible unless the fetch runs first.
-    assert run.index("git fetch --tags --force") < run.index("scripts/release_gate.py")
+    # since checkout is invisible unless the fetch runs first. Steps in a job run in order,
+    # so the fetch may live in the gate step or in any step before it.
+    commands = "\n".join(_commands(step) for step in steps[: gate_index + 1])
+    assert "scripts/release_gate.py" in commands
+    assert "git fetch --tags --force" in commands
+    assert commands.index("git fetch --tags --force") < commands.index("scripts/release_gate.py")
 
 
 def test_tag_creation_and_github_release_are_idempotent():
@@ -77,16 +88,17 @@ def test_build_job_uses_exact_tag_without_oidc():
 
 def test_build_job_builds_validates_and_uploads_one_artifact():
     build = _WORKFLOW["jobs"]["build-release"]
-    # RELEASING.md requires publishing a wheel and a source distribution and validating both,
-    # so neither the build nor the Twine check may be narrowed to one format.
-    build_run = _named_step(build, "Build distributions")["run"]
+    # RELEASING.md requires publishing a wheel and a source distribution and validating both.
+    # Both commands cover both formats when given no format argument, so naming one format is
+    # only acceptable when the other is named too, as RELEASING.md's own invocations do.
+    build_run = _commands(_named_step(build, "Build distributions"))
     assert "uv build" in build_run
-    assert "--wheel" not in build_run
-    assert "--sdist" not in build_run
-    validate_run = _named_step(build, "Validate distributions")["run"]
+    assert ("--wheel" in build_run) == ("--sdist" in build_run)
+    # The upload step below publishes `dist/`, so the build has to write there.
+    assert "--out-dir" not in build_run or "--out-dir dist" in build_run
+    validate_run = _commands(_named_step(build, "Validate distributions"))
     assert "twine check" in validate_run
-    assert ".whl" not in validate_run
-    assert ".tar.gz" not in validate_run
+    assert (".whl" in validate_run) == (".tar.gz" in validate_run)
     upload = _named_step(build, "Upload distributions")
     assert sum(_action(step) == _UPLOAD_ARTIFACT for step in build["steps"]) == 1
     assert _action(upload) == _UPLOAD_ARTIFACT
