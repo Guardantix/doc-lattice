@@ -50,6 +50,9 @@ def test_no_current_time_calls_outside_datetime_utils():
     assert _current_time_calls("datetime.now(tz=UTC)")  # positive control: arg'd form caught
     assert not _current_time_calls("x = obj.now")  # attribute access, not a call
     for py_file in _source_files():
+        # No datetime_utils.py exists today: the module was deleted once its last helper
+        # went unused. The exemption stays so that recreating that module is the sanctioned
+        # way to reintroduce a current-time call.
         if py_file.name == "datetime_utils.py":
             continue
         assert not _current_time_calls(py_file.read_text(encoding="utf-8")), py_file.name

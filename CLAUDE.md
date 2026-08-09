@@ -59,7 +59,8 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 - Resolve user-controlled paths with `path_utils.safe_resolve()` at the owning boundary and
   preserve project-root containment. Reconcile destinations and recovery evidence require the
   independent containment checks recorded in [ARCHITECTURE.md](ARCHITECTURE.md).
-- Do not call `datetime.now()` or `datetime.utcnow()` outside `datetime_utils.py`.
+- Do not call `datetime.now()` or `datetime.utcnow()` outside `datetime_utils.py`. No such module
+  exists today; recreate it if the engine ever needs the current time again.
 - Keep `src/doc_lattice/__init__.py`, `pyproject.toml`, the first versioned CHANGELOG heading,
   and exact README install pins synchronized. Run `scripts/check_version_sync.py` for every
   documentation or release change that can affect those values.
