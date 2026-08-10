@@ -195,6 +195,14 @@ symlink retargeted after load cannot redirect a reconcile write outside the proj
 Containment is enforced both before fresh reads and again at the durable transaction
 boundary.
 
+A `docs_roots` entry naming a single `.md` file directly is an exception to "retains the
+first unresolved path": its document identity is the fully resolved path, because
+`_resolve_roots` stores only resolved roots and a file root has no directory walk left to
+reintroduce an unresolved form. A path found by walking a directory root still retains the
+first unresolved path encountered during that walk, matching the Decision above. Both are
+deliberate: the file-entry case has no unresolved candidate to prefer, while the walked
+case keeps the reporting stability the Decision describes.
+
 ### AD-9: Per-invocation CLI package boundaries
 
 **Date:** 2026-07-14

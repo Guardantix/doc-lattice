@@ -61,6 +61,33 @@ def test_graph_json_edge_set_matches_mermaid(lattice_dir: Path, monkeypatch):
     assert json_edges == mermaid_edges
 
 
+def test_graph_json_includes_a_file_docs_root_node(tmp_path: Path, monkeypatch):
+    # GTX-1: a docs_roots entry naming a single .md file (ARCHITECTURE.md, not a directory)
+    # was silently dropped by discovery, so it never appeared in the graph. It must now be
+    # discovered like any other root and contribute its node and edge.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "spec.md").write_text(
+        "---\nid: spec\nauthority: binding\n---\n# Spec\nbody\n", encoding="utf-8"
+    )
+    (tmp_path / "ARCHITECTURE.md").write_text(
+        "---\nid: arch\nauthority: derived\nderives_from: [{ref: spec}]\n---\n"
+        "# Architecture\nbody\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["graph", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert {node["id"] for node in payload["nodes"]} == {"spec", "arch"}
+    assert payload["edges"] == [{"upstream": "spec", "downstream": "arch", "stale": False}]
+
+
 def test_graph_rejects_unknown_format(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["graph", "--format", "dott"])

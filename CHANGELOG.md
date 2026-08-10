@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - PyPI Trove classifiers and keywords in the package metadata.
+- `docs_roots` entries may name individual `.md` files, which are tracked as documents.
 
 ### Changed
 
@@ -17,6 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   documents.
 - The reconcile selector, dry-run, durability, and recovery deep dive moved from the README to
   [RECONCILE.md](RECONCILE.md).
+- **BREAKING:** an existing `docs_roots` entry that is neither a directory nor a regular `.md`
+  file now fails config load with a config error and exit 2. Previously such an entry was
+  silently ignored and contributed no documents. Migration: remove the entry, or point it at a
+  directory or `.md` file.
 
 ### Removed
 

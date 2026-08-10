@@ -75,8 +75,9 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
         A ProjectConfig with validated config, project root, and contained roots.
 
     Raises:
-        ConfigError: If the file is missing, invalid, has unknown keys, or names a
-            docs root that resolves outside the project root.
+        ConfigError: If the file is missing, invalid, has unknown keys, names a docs root
+            that resolves outside the project root, or names an existing docs root that is
+            neither a directory nor a regular ``.md`` file.
     """
     if config_path is not None:
         if not config_path.exists():
@@ -136,5 +137,18 @@ def _resolve_roots(roots: list[str], project_root: Path) -> tuple[Path, ...]:
                 f"{project_root}; roots must stay inside the project"
             )
             raise ConfigError(msg) from exc
+        # A missing entry stays tolerated: discovery skips it, so a docs root that is not
+        # checked out is not fatal. An entry that exists must be something discovery can turn
+        # into documents -- a directory to walk, or one regular ".md" file. Anything else (a
+        # non-".md" file, a FIFO, a socket, a device) would be dropped without a word and let
+        # a check pass over documents that were never read. safe_resolve already followed
+        # symlinks, so this classifies the link target.
+        usable = not safe.exists() or safe.is_dir() or (safe.is_file() and safe.suffix == ".md")
+        if not usable:
+            msg = (
+                f"docs_roots entry {entry!r} exists but is neither a directory nor a regular "
+                f"'.md' file ({safe}); an existing entry must be one or the other"
+            )
+            raise ConfigError(msg)
         resolved.append(safe)
     return tuple(resolved)

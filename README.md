@@ -324,7 +324,7 @@ from the current directory:
 ```yaml
 # doc-lattice configuration
 docs_roots:
-  - docs                  # roots to scan for tracked .md files (default: ["docs"])
+  - docs                  # directories to scan, or individual .md files (default: ["docs"])
 # ignore_globs:           # paths to skip within those roots
 #   - "**/archive/**"
 # cache_key: my-docs      # opt-in incremental load cache slot (see Load cache below)
@@ -336,6 +336,13 @@ The project root is the resolved parent of the selected config file, including a
 `--config PATH`, or the resolved current directory in zero-config mode. Relative `docs_roots`
 entries are interpreted from that project root. Every root must resolve inside it; an entry that
 escapes via `..`, an absolute path, or a symlink is rejected before any read.
+
+Each `docs_roots` entry names either a directory to scan recursively for `.md` files, or a single
+`.md` file to track directly. An entry that does not exist is tolerated and contributes no
+documents. An entry that exists but is neither a directory nor a regular `.md` file, such as a
+non-markdown file, a socket, or a device, fails config load with a config error and exit 2.
+`ignore_globs` patterns match a directory entry's files by their path relative to that root; a
+direct file entry has no root-relative path, so it is matched by its basename instead.
 
 Discovered document symlinks are resolved separately. A symlink whose target stays inside the
 project root is allowed, while one targeting anything outside is skipped with a warning. If

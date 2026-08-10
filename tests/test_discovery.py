@@ -91,6 +91,61 @@ def test_discovery_skips_directory_named_md(tmp_path: Path):
     assert [p.name for p in found] == ["real.md"]
 
 
+def test_discovers_file_root_as_single_candidate(tmp_path: Path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    spec = root / "spec.md"
+    spec.write_text("s", encoding="utf-8")
+    (root / "sibling.md").write_text("o", encoding="utf-8")
+    # the root IS the file: it contributes itself and nothing else from its directory
+    assert discover_doc_paths([spec], [], tmp_path) == [spec]
+
+
+def test_file_root_without_md_suffix_contributes_nothing(tmp_path: Path):
+    # Config rejects a non-.md file root at load time; this covers the TOCTOU window between
+    # config load and discovery, where such a file could still be reached as a root.
+    notes = tmp_path / "notes.txt"
+    notes.write_text("n", encoding="utf-8")
+    assert discover_doc_paths([notes], [], tmp_path) == []
+
+
+def test_discovers_union_of_directory_and_file_roots_sorted(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "b.md").write_text("b", encoding="utf-8")
+    top = tmp_path / "AGENTS.md"
+    top.write_text("a", encoding="utf-8")
+    # the file root is passed last, so a per-root concatenation would not be globally sorted
+    found = discover_doc_paths([docs, top], [], tmp_path)
+    assert found == sorted(found)
+    assert found == [top, docs / "b.md"]
+
+
+def test_discovers_dedups_file_root_against_directory_root(tmp_path: Path):
+    project_root = tmp_path / "repo"
+    docs = project_root / "docs"
+    docs.mkdir(parents=True)
+    spec = docs / "spec.md"
+    spec.write_text("s", encoding="utf-8")
+    alias = project_root / "alias"
+    alias.symlink_to(docs, target_is_directory=True)
+
+    # One resolved target reached two ways: the first configured root keeps document identity.
+    assert discover_doc_paths([alias, spec], [], project_root) == [alias / "spec.md"]
+    assert discover_doc_paths([spec, alias], [], project_root) == [spec]
+
+
+def test_ignore_glob_excludes_file_root_by_basename(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    spec = docs / "spec.md"
+    spec.write_text("s", encoding="utf-8")
+    keep = tmp_path / "keep.md"
+    keep.write_text("k", encoding="utf-8")
+    # a file root is matched against its basename, since its path relative to itself is "."
+    assert discover_doc_paths([spec, keep], ["spec.md"], tmp_path) == [keep]
+
+
 def test_read_doc_returns_text(tmp_path: Path):
     p = tmp_path / "a.md"
     p.write_text("hello", encoding="utf-8")
