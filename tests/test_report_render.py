@@ -18,9 +18,9 @@ from doc_lattice.report_render import (
 )
 
 
-def _recording_console() -> tuple[Console, StringIO]:
+def _recording_console(width: int = 200) -> tuple[Console, StringIO]:
     output = StringIO()
-    return Console(file=output, record=True, width=200, color_system=None), output
+    return Console(file=output, record=True, width=width, color_system=None), output
 
 
 def test_render_statuses_writes_exact_plain_text_and_escapes_markup():
@@ -115,6 +115,30 @@ def test_render_impact_writes_exact_plain_text_and_escapes_markup():
         "affected[/]  (docs/[plan].md)  tickets: GAME-[1]\n"
         "unticketed  (docs/unticketed.md)  tickets: -\n"
     )
+
+
+def test_render_impact_keeps_a_path_wider_than_the_console_on_one_line():
+    console, output = _recording_console(width=20)
+    path = Path("docs/a/deeply/nested/directory/structure/downstream-document.md")
+    affected = [
+        (
+            Node(
+                id="downstream",
+                title=None,
+                layer=None,
+                authority=None,
+                path=path,
+                body="body\n",
+                derives_from=(),
+                tickets=(),
+            ),
+            1,
+        )
+    ]
+
+    render_impact(console, affected)
+
+    assert output.getvalue() == f"downstream  ({path})  tickets: -\n"
 
 
 def test_state_colors_cover_every_edge_state():

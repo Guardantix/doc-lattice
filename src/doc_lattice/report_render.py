@@ -72,10 +72,17 @@ def render_lint(console: Console, result: LintResult) -> None:
 def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
     """Render affected nodes to a Rich console.
 
+    Each node is one record terminated by exactly one newline, so a path never breaks across
+    lines and stays copyable and pipeable. `soft_wrap` opts this site out of Rich's wrapping
+    and cropping the same way the long, copy-sensitive output sites in the CLI adapters do.
+
     Args:
         console: Destination console.
         affected: Affected nodes paired with their minimum impact depths.
     """
     for node, _impact_depth_not_shown in affected:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
-        console.print(f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}")
+        console.print(
+            f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}",
+            soft_wrap=True,
+        )

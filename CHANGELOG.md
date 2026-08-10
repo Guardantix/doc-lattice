@@ -34,6 +34,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The convention that `datetime.now()` and `datetime.utcnow()` may appear only in
   `datetime_utils.py` still stands and is still enforced by `tests/test_conventions.py`.
 
+### Fixed
+
+- `impact` no longer hard-wraps its human output at the terminal width. It previously inserted
+  real newlines mid-path, breaking the rendered document path into unusable fragments, and it did
+  so even when stdout was a pipe or a file rather than a terminal. That made
+  `doc-lattice impact X | xargs ...` and similar line-oriented pipelines fail, and it worsened
+  with path depth. Each affected node is now one record on one line at any width, so the path
+  stays intact and copyable. `--format json` output is unchanged, and no width policy was added
+  to the shared CLI console.
+
 ## [3.0.0] - 2026-08-05
 
 ### Added
