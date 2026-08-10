@@ -281,8 +281,8 @@ conflict, and rolls the batch back if anything fails before the commit. Its temp
 a project-root journal plus staged before and after images, covered by the `.gitignore` block that
 `doc-lattice init` prints.
 
-See [RECONCILE.md](RECONCILE.md) for selector details, dry-run and JSON output, the durability
-contract, and recovery.
+See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) for
+selector details, dry-run and JSON output, the durability contract, and recovery.
 
 ## Frontmatter reference
 
@@ -385,9 +385,9 @@ uvx --python 3.13 --from doc-lattice==3.0.0 doc-lattice init
 ```
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
-`.gitignore` block (see [RECONCILE.md](RECONCILE.md)), pre-commit hooks, and a GitHub Actions
-workflow that run
-`doc-lattice check` (drift) and `doc-lattice lint` (authority ladder) as your gates. Paste each
+`.gitignore` block (see [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)),
+pre-commit hooks, and a GitHub Actions workflow that run `doc-lattice check` (drift) and
+`doc-lattice lint` (authority ladder) as your gates. Paste each
 where the output says. `init` only prints `.gitignore` guidance and never modifies that file. Pass
 `--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
@@ -408,8 +408,8 @@ installation offline, and `doc-lattice ci refresh` previews and applies managed 
 renames, and repairs. Setup itself is a reviewed human-maintainer procedure: the generated
 artifacts are committed to your repository, and no step is automated on your behalf.
 
-See [MANAGED_CI.md](MANAGED_CI.md) for requirements, migration, the installation procedure, and the
-security model.
+See [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for
+requirements, migration, the installation procedure, and the security model.
 
 ## Linear integration
 
@@ -423,7 +423,8 @@ wait 1 second and then 2 seconds. A non-negative integer `Retry-After` is honore
 30-second cap; negative, date-form, and invalid values use the fallback delay.
 
 > **Security note:** If `linear` is used in CI, use the
-> [managed protected GitHub setup](MANAGED_CI.md). The command processes
+> [managed protected GitHub setup](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md).
+> The command processes
 > repository-controlled `tickets` and `linear_team` while `LINEAR_API_KEY` is present. Untrusted
 > pull-request workflows should use only offline commands.
 
@@ -472,8 +473,8 @@ collision. Equal anchors in different files do not collide.
 | Document | Purpose |
 |----------|---------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design and the decision log |
-| [MANAGED_CI.md](MANAGED_CI.md) | Managed GitHub and Linear CI setup and its security model |
-| [RECONCILE.md](RECONCILE.md) | Reconcile selectors, transaction durability, and recovery |
+| [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) | Managed GitHub and Linear CI setup and its security model |
+| [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) | Reconcile selectors, transaction durability, and recovery |
 | [CLAUDE.md](CLAUDE.md) | Short contributor and agent guide |
 | [roadmap.md](roadmap.md) | Future direction |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and migrations |
