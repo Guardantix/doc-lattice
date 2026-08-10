@@ -60,12 +60,13 @@ def test_impact_depth_zero_rejected(tmp_path: Path, monkeypatch):
 
 
 def test_impact_human_output_lists_tickets(lattice_dir: Path, monkeypatch):
-    monkeypatch.setenv("COLUMNS", "200")  # absolute path makes the line long; stop rich wrapping it
+    # Deliberately narrower than the absolute path: one affected node stays one unwrapped line.
+    monkeypatch.setenv("COLUMNS", "20")
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["impact", "art-direction#accent"])
     assert result.exit_code == 0
-    assert "pc-design" in result.stdout
-    assert "tickets: PC-228" in result.stdout
+    path = (lattice_dir / "docs" / "pc-design.md").resolve()
+    assert result.stdout == f"pc-design  ({path})  tickets: PC-228\n"
 
 
 def test_impact_human_output_dash_when_no_tickets(tmp_path: Path, monkeypatch):
@@ -75,11 +76,13 @@ def test_impact_human_output_dash_when_no_tickets(tmp_path: Path, monkeypatch):
     (docs / "down.md").write_text(
         "---\nid: down\nderives_from:\n  - ref: up#s\n---\n# Down\nb\n", encoding="utf-8"
     )
-    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("COLUMNS", "20")
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["impact", "up"])
     assert result.exit_code == 0
-    assert "tickets: -" in result.stdout
+    # The repro's failure signature: `tickets: -` split away from the path it belongs to.
+    path = (tmp_path / "docs" / "down.md").resolve()
+    assert result.stdout == f"down  ({path})  tickets: -\n"
 
 
 def test_impact_unknown_token_exits_2(lattice_dir: Path, monkeypatch):
