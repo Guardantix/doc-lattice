@@ -3,7 +3,7 @@
 [![CI](https://github.com/Guardantix/doc-lattice/actions/workflows/ci.yml/badge.svg)](https://github.com/Guardantix/doc-lattice/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/doc-lattice)](https://pypi.org/project/doc-lattice/)
 [![Python versions](https://img.shields.io/pypi/pyversions/doc-lattice)](https://pypi.org/project/doc-lattice/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Guardantix/doc-lattice/blob/main/LICENSE)
 
 A deterministic, offline traceability engine for design and production documentation.
 
@@ -177,7 +177,8 @@ only command that writes to your docs, and it only ever rewrites the `seen` scal
 
 ### Prerequisites
 
-- Python 3.13+ (the floor is load bearing; see [AD-24](ARCHITECTURE.md))
+- Python 3.13+ (the floor is load bearing; see
+  [AD-24](https://github.com/Guardantix/doc-lattice/blob/main/ARCHITECTURE.md))
 - [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 
 ### Install and run
@@ -206,7 +207,8 @@ uv sync --group dev
 uv run doc-lattice --help
 ```
 
-Contributor commands, gates, and the full verification set live in [CLAUDE.md](CLAUDE.md).
+Contributor commands, gates, and the full verification set live in
+[CLAUDE.md](https://github.com/Guardantix/doc-lattice/blob/main/CLAUDE.md).
 
 ## Commands
 
@@ -253,8 +255,8 @@ in the pull-request diff. Output selection never changes gate exit codes.
 
 Structured output is always selected with `--format`; the accepted values per command are in the
 table above, and `init` is deliberately excluded from structured-output selection.
-The 1.x silent `--json` alias was removed in 2.0; see [CHANGELOG.md](CHANGELOG.md) for the
-migration.
+The 1.x silent `--json` alias was removed in 2.0; see
+[CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md) for the migration.
 
 `impact` walks the full transitive closure by default. Pass `--depth N` (N >= 1) to bound the
 walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly from it. Human
@@ -472,13 +474,13 @@ collision. Equal anchors in different files do not collide.
 
 | Document | Purpose |
 |----------|---------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System design and the decision log |
+| [ARCHITECTURE.md](https://github.com/Guardantix/doc-lattice/blob/main/ARCHITECTURE.md) | System design and the decision log |
 | [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) | Managed GitHub and Linear CI setup and its security model |
 | [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) | Reconcile selectors, transaction durability, and recovery |
-| [CLAUDE.md](CLAUDE.md) | Short contributor and agent guide |
-| [roadmap.md](roadmap.md) | Future direction |
-| [CHANGELOG.md](CHANGELOG.md) | Release history and migrations |
-| [RELEASING.md](RELEASING.md) | Release checklist and version-tag procedure |
+| [CLAUDE.md](https://github.com/Guardantix/doc-lattice/blob/main/CLAUDE.md) | Short contributor and agent guide |
+| [roadmap.md](https://github.com/Guardantix/doc-lattice/blob/main/roadmap.md) | Future direction |
+| [CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md) | Release history and migrations |
+| [RELEASING.md](https://github.com/Guardantix/doc-lattice/blob/main/RELEASING.md) | Release checklist and version-tag procedure |
 
 ## Project structure
 
@@ -501,8 +503,9 @@ doc-lattice/
 └── pyproject.toml           # project configuration
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries and their rationale.
+See [ARCHITECTURE.md](https://github.com/Guardantix/doc-lattice/blob/main/ARCHITECTURE.md) for
+module boundaries and their rationale.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/Guardantix/doc-lattice/blob/main/LICENSE).
