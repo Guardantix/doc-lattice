@@ -1,9 +1,17 @@
 """Tests for check."""
 
+from collections import Counter
 from pathlib import Path
 
-from doc_lattice.check import EdgeStatus, check_lattice, has_drift, statuses_json
+from doc_lattice.check import (
+    EdgeStatus,
+    check_lattice,
+    has_drift,
+    statuses_json,
+    summarize_statuses,
+)
 from doc_lattice.config import load_config
+from doc_lattice.constants import EDGE_STATES
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
@@ -32,7 +40,7 @@ def test_statuses_json_returns_exact_payload_shape():
         ),
     ]
 
-    assert statuses_json(statuses) == {
+    assert statuses_json(statuses, summarize_statuses(statuses)) == {
         "edges": [
             {
                 "source_id": "down",
@@ -50,8 +58,54 @@ def test_statuses_json_returns_exact_payload_shape():
                 "expected": None,
                 "actual": None,
             },
-        ]
+        ],
+        "summary": {"OK": 0, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 1},
     }
+
+
+def test_summarize_statuses_covers_every_state_including_zero_counts():
+    statuses = [
+        EdgeStatus("down", "up", TargetId("up"), "OK", "h", "h"),
+        EdgeStatus("other", "up", TargetId("up"), "OK", "h", "h"),
+        EdgeStatus("third", "up", TargetId("up"), "STALE", "old", "h"),
+    ]
+
+    summary = summarize_statuses(statuses)
+
+    assert summary == {"OK": 2, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 0}
+    assert tuple(summary) == EDGE_STATES
+
+
+def test_summarize_statuses_of_no_edges_is_all_zeroes():
+    summary = summarize_statuses([])
+
+    assert summary == {"OK": 0, "STALE": 0, "UNRECONCILED": 0, "BROKEN": 0}
+    assert sum(summary.values()) == 0
+
+
+def test_statuses_json_summary_counts_are_independent_of_the_serialized_edges():
+    # The CLI narrows `edges` with --only while the summary keeps counting every classified
+    # edge, so the payload must carry the summary it was given rather than recomputing it.
+    every = [
+        EdgeStatus("down", "up", TargetId("up"), "OK", "h", "h"),
+        EdgeStatus("third", "up", TargetId("up"), "STALE", "old", "h"),
+    ]
+    displayed = [status for status in every if status.state == "STALE"]
+
+    payload = statuses_json(displayed, summarize_statuses(every))
+
+    assert [edge["state"] for edge in payload["edges"]] == ["STALE"]
+    assert payload["summary"] == {"OK": 1, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 0}
+
+
+def test_statuses_json_summary_of_a_sparse_counter_names_every_state():
+    # The parameter is a Mapping, so a caller may pass a counter that omits absent states;
+    # the payload still promises a count for each one rather than raising KeyError.
+    statuses = [EdgeStatus("down", "up", TargetId("up"), "OK", "h", "h")]
+
+    payload = statuses_json(statuses, Counter(status.state for status in statuses))
+
+    assert payload["summary"] == {"OK": 1, "STALE": 0, "UNRECONCILED": 0, "BROKEN": 0}
 
 
 def test_check_classifies_each_state(lattice_dir: Path):

@@ -1,17 +1,19 @@
 """Tests for check, lint, and impact report rendering."""
 
+from collections import Counter
 from io import StringIO
 from pathlib import Path
 from typing import get_args
 
 from rich.console import Console
 
-from doc_lattice.check import EdgeStatus
-from doc_lattice.constants import EdgeState
+from doc_lattice.check import EdgeStatus, summarize_statuses
+from doc_lattice.constants import EDGE_STATES, EdgeState
 from doc_lattice.lint import LadderViolation, LintResult, SkippedEdge
 from doc_lattice.model import Node, TargetId
 from doc_lattice.report_render import (
     _STATE_COLORS,
+    _state_summary,
     render_impact,
     render_lint,
     render_statuses,
@@ -36,9 +38,112 @@ def test_render_statuses_writes_exact_plain_text_and_escapes_markup():
         )
     ]
 
-    render_statuses(console, statuses)
+    render_statuses(console, statuses, summarize_statuses(statuses))
 
-    assert output.getvalue() == "BROKEN        down[/] -> up[bold]\n"
+    assert output.getvalue() == (
+        "BROKEN        down[/] -> up[bold]\n1 edge: 0 OK, 0 STALE, 0 UNRECONCILED, 1 BROKEN\n"
+    )
+
+
+def test_render_statuses_summarizes_a_clean_lattice():
+    console, output = _recording_console()
+    statuses = [
+        EdgeStatus(
+            source_id="down",
+            target_ref="up",
+            target_id=TargetId("up"),
+            state="OK",
+            expected="hash",
+            actual="hash",
+        )
+    ]
+
+    render_statuses(console, statuses, summarize_statuses(statuses))
+
+    assert output.getvalue() == (
+        "OK            down -> up\n1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
+def test_render_statuses_summarizes_an_empty_lattice():
+    console, output = _recording_console()
+
+    render_statuses(console, [], summarize_statuses([]))
+
+    assert output.getvalue() == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+
+
+def test_render_statuses_summary_counts_every_edge_not_only_the_displayed_ones():
+    console, output = _recording_console()
+    every = [
+        EdgeStatus(
+            source_id="clean",
+            target_ref="up",
+            target_id=TargetId("up"),
+            state="OK",
+            expected="hash",
+            actual="hash",
+        ),
+        EdgeStatus(
+            source_id="drifted",
+            target_ref="up",
+            target_id=TargetId("up"),
+            state="STALE",
+            expected="old",
+            actual="hash",
+        ),
+    ]
+    displayed = [status for status in every if status.state == "STALE"]
+
+    render_statuses(console, displayed, summarize_statuses(every))
+
+    assert output.getvalue() == (
+        "STALE         drifted -> up\n2 edges: 1 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
+def test_render_statuses_keeps_the_verdict_on_one_line_at_any_width():
+    # The verdict is the answer a `check | tail -1` reader gets, so Rich's wrapping must not
+    # split it into a fragment on a narrow console. Same contract as render_impact's paths.
+    console, output = _recording_console(width=20)
+
+    render_statuses(console, [], {"OK": 1234567, "STALE": 2, "UNRECONCILED": 3, "BROKEN": 4})
+
+    assert output.getvalue() == ("1234576 edges: 1234567 OK, 2 STALE, 3 UNRECONCILED, 4 BROKEN\n")
+
+
+def test_render_statuses_emits_no_ansi_under_no_color():
+    # Rich's default highlighter bolds bare numbers, and bold survives no_color, so an id
+    # carrying a digit (adr-001, rfc-2119) used to leak escapes into --no-color output.
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+    statuses = [
+        EdgeStatus(
+            source_id="rfc-2119",
+            target_ref="spec-3#sec",
+            target_id=TargetId("spec-3", "sec"),
+            state="OK",
+            expected="hash",
+            actual="hash",
+        )
+    ]
+
+    render_statuses(console, statuses, summarize_statuses(statuses))
+
+    assert "\x1b[" not in output.getvalue()
+
+
+def test_state_summary_of_a_sparse_counter_still_names_every_state():
+    # The parameter is a Mapping, so a caller may pass a counter that omits absent states.
+    assert _state_summary(Counter(["OK", "OK", "STALE"])) == (
+        "3 edges: 2 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN"
+    )
+
+
+def test_state_summary_orders_states_by_literal_declaration():
+    assert _state_summary(summarize_statuses([])).endswith(
+        ", ".join(f"0 {state}" for state in EDGE_STATES)
+    )
 
 
 def test_render_lint_writes_violations_and_exact_skip_summary():

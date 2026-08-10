@@ -2,9 +2,11 @@
 
 import json
 from pathlib import Path
+from typing import get_args
 
 from doc_lattice.cli import app
 from doc_lattice.cli.output import escape_github_property
+from doc_lattice.constants import EdgeState
 
 from .helpers import _clean_docs, runner
 
@@ -22,6 +24,7 @@ def test_check_human_output_is_byte_identical(lattice_dir: Path, monkeypatch):
         "BROKEN        gdd -> ghost\n"
         "STALE         pc-design -> art-direction#accent\n"
         "UNRECONCILED  pc-design -> art-direction#motion\n"
+        "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
     )
 
 
@@ -165,9 +168,12 @@ def test_check_negative_indent_is_rejected(lattice_dir: Path, monkeypatch):
 def test_check_only_filters_human_output(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check", "--only", "STALE"])
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert lines
-    assert all("STALE" in line for line in lines)
+    *rows, summary = [line for line in result.stdout.splitlines() if line.strip()]
+    assert rows
+    assert all("STALE" in line for line in rows)
+    # --only narrows the rows; the summary keeps counting every classified edge, so it
+    # deliberately does not sum to the number of rows above it.
+    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN"
 
 
 def test_check_only_filters_json_output(lattice_dir: Path, monkeypatch):
@@ -181,9 +187,10 @@ def test_check_only_filters_json_output(lattice_dir: Path, monkeypatch):
 def test_check_only_is_case_insensitive(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check", "--only", "stale"])
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert lines
-    assert all("STALE" in line for line in lines)
+    *rows, summary = [line for line in result.stdout.splitlines() if line.strip()]
+    assert rows
+    assert all("STALE" in line for line in rows)
+    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN"
 
 
 def test_check_only_unknown_state_exits_2(lattice_dir: Path, monkeypatch):
@@ -207,7 +214,8 @@ def test_check_only_ok_still_exits_1_on_drift(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check", "--only", "OK"])
     assert result.exit_code == 1
-    assert not result.stdout.strip()
+    # No OK edge to list, yet the run still states the verdict rather than printing nothing.
+    assert result.stdout == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
 
 
 def test_check_only_repeated_flags_combine(lattice_dir: Path, monkeypatch):
@@ -285,6 +293,81 @@ def test_check_reports_unreconciled_for_a_file_docs_root(tmp_path: Path, monkeyp
     payload = json.loads(result.stdout)
     states = {(e["source_id"], e["target_ref"]): e["state"] for e in payload["edges"]}
     assert states[("arch", "spec")] == "UNRECONCILED"
+
+
+def test_check_human_summary_is_present_on_a_clean_tree(tmp_path: Path, monkeypatch):
+    _clean_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["reconcile", "down"]).exit_code == 0
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "OK            down -> up#sec\n1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
+def test_check_human_summary_is_present_when_there_are_no_edges(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\nbody\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+
+
+def test_check_json_summary_covers_every_state_including_zero_counts(
+    lattice_dir: Path, monkeypatch
+):
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check", "--format", "json"])
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == {"OK": 0, "STALE": 1, "UNRECONCILED": 1, "BROKEN": 1}
+    assert set(payload["summary"]) == set(get_args(EdgeState))
+    assert sum(payload["summary"].values()) == len(payload["edges"])
+
+
+def test_check_json_summary_is_not_distorted_by_only(lattice_dir: Path, monkeypatch):
+    monkeypatch.chdir(lattice_dir)
+    unfiltered = json.loads(runner.invoke(app, ["check", "--format", "json"]).stdout)
+    filtered = json.loads(
+        runner.invoke(app, ["check", "--format", "json", "--only", "STALE"]).stdout
+    )
+
+    assert filtered["summary"] == unfiltered["summary"]
+    assert len(filtered["edges"]) == 1
+    assert sum(filtered["summary"].values()) == 3
+
+
+def test_check_json_edge_records_are_unchanged_by_the_summary(lattice_dir: Path, monkeypatch):
+    # The summary is purely additive: existing consumers reading `edges` keep working, in
+    # the same order and with the same per-record keys.
+    monkeypatch.chdir(lattice_dir)
+    payload = json.loads(runner.invoke(app, ["check", "--format", "json"]).stdout)
+
+    assert list(payload) == ["edges", "summary"]
+    assert [(e["source_id"], e["target_ref"]) for e in payload["edges"]] == [
+        ("gdd", "ghost"),
+        ("pc-design", "art-direction#accent"),
+        ("pc-design", "art-direction#motion"),
+    ]
+    assert all(
+        set(edge) == {"source_id", "target_ref", "target_id", "state", "expected", "actual"}
+        for edge in payload["edges"]
+    )
+
+
+def test_check_github_output_carries_no_summary(lattice_dir: Path, monkeypatch):
+    # The GitHub format is annotations-only and silent on a clean tree; a summary line would
+    # be emitted as stray non-annotation output into the workflow log.
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(app, ["check", "--format", "github"])
+    assert all(line.startswith("::error ") for line in result.stdout.splitlines() if line)
+    assert "edges:" not in result.stdout
 
 
 def test_check_exits_0_when_fully_reconciled(tmp_path: Path, monkeypatch):

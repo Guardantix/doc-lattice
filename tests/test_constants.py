@@ -4,6 +4,7 @@ from typing import get_args
 
 from doc_lattice.constants import (
     AUTHORITY_LADDER,
+    EDGE_STATES,
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
@@ -49,6 +50,13 @@ def test_authorities_match_literal():
 def test_edge_states_match_literal():
     assert frozenset(get_args(EdgeState)) == VALID_EDGE_STATES
     assert {"OK", "STALE", "UNRECONCILED", "BROKEN"} == set(VALID_EDGE_STATES)
+
+
+def test_edge_states_keep_literal_declaration_order():
+    # Report output iterates EDGE_STATES, so its order is a user-visible contract and must
+    # come from the Literal rather than from the unordered VALID_EDGE_STATES frozenset.
+    assert get_args(EdgeState) == EDGE_STATES
+    assert EDGE_STATES == ("OK", "STALE", "UNRECONCILED", "BROKEN")
 
 
 def test_location_kinds_match_literal():
