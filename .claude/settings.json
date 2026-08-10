@@ -1,0 +1,18 @@
+{
+  "env": {
+    "COLINEAR_DEFAULT_TEAM": "GTX"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"$CLAUDE_PROJECT_DIR/.claude/orientation/using-colinear.md\""
+          }
+        ]
+      }
+    ]
+  }
+}

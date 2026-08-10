@@ -1,8 +1,13 @@
-# Claude Code / Codex working directories
-.claude/
+# Claude Code / Codex working directories (settings, hooks, and the colinear
+# orientation file stay tracked)
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/orientation/
 .codex
 .worktrees/
 .superpowers/
+.linear-autopilot/
 
 # Python
 .venv/
