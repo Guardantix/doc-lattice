@@ -10,9 +10,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - PyPI Trove classifiers and keywords in the package metadata.
 - `docs_roots` entries may name individual `.md` files, which are tracked as documents.
+- `check` states a verdict. Every human-format run now ends with a summary line counting the
+  classified edges and breaking them down per state, for example
+  `101 edges: 96 OK, 5 STALE, 0 UNRECONCILED, 0 BROKEN`, so truncated output can no longer read
+  as clean when it is not. Every state appears with at least a zero count, in a fixed order, and
+  the line is printed on a clean lattice and on a lattice with no edges too.
+- `check --format json` carries a `summary` object of per-state counts alongside `edges`, so a
+  consumer can answer "is the tree clean?" without folding every edge record. The addition is
+  purely additive: the `edges` key, its ordering, and each edge record are unchanged.
 
 ### Changed
 
+- `check --only STATE` still narrows only the records that are displayed, and now the summary
+  counts, like the exit code, continue to reflect every classified edge. Under `--only` the
+  `summary` counts therefore do not sum to the number of records in `edges`, and a human run
+  that lists no rows still prints its verdict line rather than nothing.
+  `--format github` output is unchanged and carries no summary.
 - The managed GitHub and Linear setup guide moved from the README to
   [MANAGED_CI.md](MANAGED_CI.md), and the version-sync guard now checks install pins in both
   documents.

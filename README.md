@@ -154,6 +154,7 @@ content hash no longer matches `seen`, so:
 ```console
 $ doc-lattice check
 STALE         billing-integration-guide -> api-design#pagination
+1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN
 
 $ doc-lattice impact api-design#pagination
 billing-integration-guide  (/work/acme-api/docs/billing-integration-guide.md)  tickets: ENG-412
@@ -168,6 +169,7 @@ reconciled billing-integration-guide.md: api-design#pagination
 
 $ doc-lattice check
 OK            billing-integration-guide -> api-design#pagination
+1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN
 ```
 
 That edit → `check` → review → `reconcile` loop is the whole workflow. `reconcile` is the
@@ -263,10 +265,22 @@ walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly 
 output is unchanged, and each JSON entry gains a `"depth"` field carrying the minimum number
 of hops at which that doc is reached.
 
+Every human `check` run ends with a one-line verdict counting the classified edges and breaking
+them down per state, for example `101 edges: 96 OK, 5 STALE, 0 UNRECONCILED, 0 BROKEN`. Every
+state is listed, including the ones with a zero count, so truncated output such as `check | tail`
+still states the result rather than trailing off into whichever edges sort last. The line is
+present on a clean lattice too, and a lattice with no edges at all reports `0 edges: 0 OK, 0
+STALE, 0 UNRECONCILED, 0 BROKEN`. `--format json` carries the same counts in a `summary` object
+alongside `edges`, so a wrapper can answer "is the tree clean?" without folding every edge
+record. `--format github` is unchanged: it emits annotations for problems and stays silent on a
+clean tree.
+
 `check` accepts a repeatable `--only STATE` to narrow the display to specific states (case
 insensitive, e.g. `--only stale --only broken`); an unrecognized state exits 2 and names the
-valid set. Filtering is display-only: the exit code always reflects every edge, so `check --only
-OK` on a drifting lattice still exits 1.
+valid set. Filtering is display-only: the exit code and the summary counts always reflect every
+edge, so `check --only OK` on a drifting lattice still exits 1 and still reports the drift in its
+verdict. One consequence is deliberate: under `--only`, the `summary` counts do not sum to the
+number of records in `edges`.
 
 ### `reconcile`
 

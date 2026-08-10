@@ -6,12 +6,13 @@ from typing import get_args
 
 from rich.console import Console
 
-from doc_lattice.check import EdgeStatus
-from doc_lattice.constants import EdgeState
+from doc_lattice.check import EdgeStatus, summarize_statuses
+from doc_lattice.constants import EDGE_STATES, EdgeState
 from doc_lattice.lint import LadderViolation, LintResult, SkippedEdge
 from doc_lattice.model import Node, TargetId
 from doc_lattice.report_render import (
     _STATE_COLORS,
+    _state_summary,
     render_impact,
     render_lint,
     render_statuses,
@@ -36,9 +37,74 @@ def test_render_statuses_writes_exact_plain_text_and_escapes_markup():
         )
     ]
 
-    render_statuses(console, statuses)
+    render_statuses(console, statuses, summarize_statuses(statuses))
 
-    assert output.getvalue() == "BROKEN        down[/] -> up[bold]\n"
+    assert output.getvalue() == (
+        "BROKEN        down[/] -> up[bold]\n1 edge: 0 OK, 0 STALE, 0 UNRECONCILED, 1 BROKEN\n"
+    )
+
+
+def test_render_statuses_summarizes_a_clean_lattice():
+    console, output = _recording_console()
+    statuses = [
+        EdgeStatus(
+            source_id="down",
+            target_ref="up",
+            target_id=TargetId("up"),
+            state="OK",
+            expected="hash",
+            actual="hash",
+        )
+    ]
+
+    render_statuses(console, statuses, summarize_statuses(statuses))
+
+    assert output.getvalue() == (
+        "OK            down -> up\n1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
+def test_render_statuses_summarizes_an_empty_lattice():
+    console, output = _recording_console()
+
+    render_statuses(console, [], summarize_statuses([]))
+
+    assert output.getvalue() == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+
+
+def test_render_statuses_summary_counts_every_edge_not_only_the_displayed_ones():
+    console, output = _recording_console()
+    every = [
+        EdgeStatus(
+            source_id="clean",
+            target_ref="up",
+            target_id=TargetId("up"),
+            state="OK",
+            expected="hash",
+            actual="hash",
+        ),
+        EdgeStatus(
+            source_id="drifted",
+            target_ref="up",
+            target_id=TargetId("up"),
+            state="STALE",
+            expected="old",
+            actual="hash",
+        ),
+    ]
+    displayed = [status for status in every if status.state == "STALE"]
+
+    render_statuses(console, displayed, summarize_statuses(every))
+
+    assert output.getvalue() == (
+        "STALE         drifted -> up\n2 edges: 1 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
+def test_state_summary_orders_states_by_literal_declaration():
+    assert _state_summary(summarize_statuses([])).endswith(
+        ", ".join(f"0 {state}" for state in EDGE_STATES)
+    )
 
 
 def test_render_lint_writes_violations_and_exact_skip_summary():

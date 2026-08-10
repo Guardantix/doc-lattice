@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 
 from doc_lattice import __version__
 from doc_lattice.cache import CacheFile, Entry, StatRecord, cache_path
-from doc_lattice.check import check_lattice, statuses_json
+from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
 from doc_lattice.config import load_config
 from doc_lattice.constants import CACHE_VERSION
 from doc_lattice.error_types import UnreadableDocError
@@ -127,7 +127,8 @@ def test_cache_facade_exports_surviving_names():
 
 
 def _run_check(project) -> str:
-    return json.dumps(statuses_json(check_lattice(load_lattice(project))))
+    statuses = check_lattice(load_lattice(project))
+    return json.dumps(statuses_json(statuses, summarize_statuses(statuses)))
 
 
 @settings(

@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 from rich.markup import escape
 
-from ...check import EdgeStatus, check_lattice, has_drift, statuses_json
+from ...check import EdgeStatus, check_lattice, has_drift, statuses_json, summarize_statuses
 from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
@@ -54,7 +54,8 @@ def register_check(app: typer.Typer) -> None:
                 "--only",
                 help=(
                     "Show only these states (repeatable): OK, STALE, UNRECONCILED, BROKEN. "
-                    "Filters display only; the exit code always reflects every edge."
+                    "Filters display only; the exit code and the summary counts always "
+                    "reflect every edge."
                 ),
             ),
         ] = None,
@@ -72,9 +73,12 @@ def register_check(app: typer.Typer) -> None:
             project = runtime.project(config)
             lattice = runtime.lattice(project)
             statuses = check_lattice(lattice)
+        # The summary is computed before filtering so --only narrows the records shown
+        # without distorting the verdict; the exit code already works that way.
+        summary = summarize_statuses(statuses)
         displayed = _filter_statuses(statuses, only_states)
         if selection.format == "json":
-            write_json(runtime, statuses_json(displayed), indent=selection.indent)
+            write_json(runtime, statuses_json(displayed, summary), indent=selection.indent)
         elif selection.format == "github":
             for status in displayed:
                 if status.state == "OK":
@@ -90,5 +94,5 @@ def register_check(app: typer.Typer) -> None:
                     ),
                 )
         else:
-            render_statuses(runtime.stdout, displayed)
+            render_statuses(runtime.stdout, displayed, summary)
         raise typer.Exit(EXIT_FINDING if has_drift(statuses) else 0)

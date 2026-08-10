@@ -1,8 +1,9 @@
 """Classify every derives_from edge against its locked seen hash."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .constants import EdgeState
+from .constants import EDGE_STATES, EdgeState
 from .model import Edge, Lattice, TargetId
 from .resolve import cached_target_hash
 
@@ -19,14 +20,37 @@ class EdgeStatus:
     actual: str | None
 
 
-def statuses_json(statuses: list[EdgeStatus]) -> dict:
+def summarize_statuses(statuses: list[EdgeStatus]) -> dict[EdgeState, int]:
+    """Count edges per state, including the states that did not occur.
+
+    Every member of ``EdgeState`` is present with at least a zero count, keyed in Literal
+    declaration order, so a consumer never has to distinguish "absent" from "none found".
+
+    Args:
+        statuses: Edge classifications to count. Pass the unfiltered output of
+            ``check_lattice``; a display filter such as ``--only`` must not reach this.
+
+    Returns:
+        A per-state count of the given classifications.
+    """
+    summary: dict[EdgeState, int] = dict.fromkeys(EDGE_STATES, 0)
+    for status in statuses:
+        summary[status.state] += 1
+    return summary
+
+
+def statuses_json(statuses: list[EdgeStatus], summary: Mapping[EdgeState, int]) -> dict:
     """Build the JSON-ready check report payload.
 
     Args:
         statuses: Edge classifications to serialize.
+        summary: Per-state counts from ``summarize_statuses``. It is passed separately
+            because it counts every classified edge while ``statuses`` may already be
+            narrowed to the displayed subset, so under a display filter the summary counts
+            deliberately do not sum to ``len(edges)``.
 
     Returns:
-        A plain dictionary containing the ordered edge payloads.
+        A plain dictionary containing the ordered edge payloads and the per-state summary.
     """
     return {
         "edges": [
@@ -39,7 +63,8 @@ def statuses_json(statuses: list[EdgeStatus]) -> dict:
                 "actual": status.actual,
             }
             for status in statuses
-        ]
+        ],
+        "summary": {state: summary[state] for state in EDGE_STATES},
     }
 
 

@@ -5,11 +5,13 @@ beside their result types in check.py/impact.py/lint.py, so this is the render h
 what linear_render.py keeps in one module.
 """
 
+from collections.abc import Mapping
+
 from rich.console import Console
 from rich.markup import escape
 
 from .check import EdgeStatus
-from .constants import EdgeState
+from .constants import EDGE_STATES, EdgeState
 from .lint import LintResult
 from .model import Node
 
@@ -38,12 +40,25 @@ def _skip_summary(result: LintResult) -> str:
     return line
 
 
-def render_statuses(console: Console, statuses: list[EdgeStatus]) -> None:
-    """Render check statuses to a Rich console.
+def _state_summary(summary: Mapping[EdgeState, int]) -> str:
+    """Render the one-line verdict printed after any human check run."""
+    total = sum(summary.values())
+    label = "edge" if total == 1 else "edges"
+    breakdown = ", ".join(f"{summary[state]} {state}" for state in EDGE_STATES)
+    return f"{total} {label}: {breakdown}"
+
+
+def render_statuses(
+    console: Console, statuses: list[EdgeStatus], summary: Mapping[EdgeState, int]
+) -> None:
+    """Render check statuses to a Rich console, terminated by the verdict line.
 
     Args:
         console: Destination console.
-        statuses: Edge classifications to render in order.
+        statuses: Edge classifications to render in order, already narrowed to what the
+            caller wants displayed.
+        summary: Per-state counts over every classified edge, not only the displayed ones,
+            so a truncated or filtered listing still ends with an honest verdict.
     """
     for status in statuses:
         color = _STATE_COLORS[status.state]
@@ -51,6 +66,9 @@ def render_statuses(console: Console, statuses: list[EdgeStatus]) -> None:
             f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
             f"{escape(status.source_id)} -> {escape(status.target_ref)}"
         )
+    # highlight=False: Rich's default highlighter bolds bare numbers, and bold survives
+    # no_color, so an auto-highlighted verdict would emit ANSI under --no-color.
+    console.print(_state_summary(summary), highlight=False)
 
 
 def render_lint(console: Console, result: LintResult) -> None:

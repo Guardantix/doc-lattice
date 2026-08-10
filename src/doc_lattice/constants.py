@@ -16,7 +16,11 @@ LocationKind = Literal["file", "section"]
 VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
 
 EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN"]
-VALID_EDGE_STATES: frozenset[str] = frozenset(get_args(EdgeState))
+# EDGE_STATES is the ordered form, in Literal declaration order. Report output that must be
+# deterministic (the check summary breakdown) iterates it; VALID_EDGE_STATES stays the
+# membership test and must never drive output order, being a frozenset.
+EDGE_STATES: tuple[EdgeState, ...] = get_args(EdgeState)
+VALID_EDGE_STATES: frozenset[str] = frozenset(EDGE_STATES)
 
 LinearStateType = Literal[
     "triage", "backlog", "unstarted", "started", "completed", "canceled", "duplicate"
