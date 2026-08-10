@@ -370,6 +370,18 @@ def test_main_leaves_no_color_env_unset_without_flag(monkeypatch):
     assert seen["NO_COLOR"] is None
 
 
+def test_check_exits_2_on_non_markdown_docs_roots_entry(tmp_path: Path, monkeypatch):
+    # AC3: an existing docs_roots entry that is neither a directory nor a .md file must be
+    # rejected at config load, before check does any lattice work, with exit code 2.
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [notes.txt]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["check"])
+    assert result.exit_code == 2
+    assert "'notes.txt'" in result.stderr
+    assert "CONFIG_ERROR" in result.stderr
+
+
 @pytest.mark.parametrize(
     "args",
     [["check"], ["lint"], ["impact", "art-direction"], ["graph", "--format", "json"]],

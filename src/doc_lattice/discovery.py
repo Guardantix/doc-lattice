@@ -42,7 +42,7 @@ def discover_doc_paths(
     for root in roots:
         if root.is_dir():
             candidates = sorted(root.rglob("*.md"))
-        elif root.is_file():
+        elif root.is_file() and root.suffix == ".md":
             candidates = [root]
         else:
             # Missing, or something discovery cannot read documents out of. Config already

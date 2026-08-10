@@ -101,6 +101,14 @@ def test_discovers_file_root_as_single_candidate(tmp_path: Path):
     assert discover_doc_paths([spec], [], tmp_path) == [spec]
 
 
+def test_file_root_without_md_suffix_contributes_nothing(tmp_path: Path):
+    # Config rejects a non-.md file root at load time; this covers the TOCTOU window between
+    # config load and discovery, where such a file could still be reached as a root.
+    notes = tmp_path / "notes.txt"
+    notes.write_text("n", encoding="utf-8")
+    assert discover_doc_paths([notes], [], tmp_path) == []
+
+
 def test_discovers_union_of_directory_and_file_roots_sorted(tmp_path: Path):
     docs = tmp_path / "docs"
     docs.mkdir()
