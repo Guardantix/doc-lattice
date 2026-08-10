@@ -256,6 +256,43 @@ def test_cached_load_uses_resolved_project_root(tmp_path: Path, monkeypatch):
     assert set(load_lattice(project).nodes_by_id) == {"node"}
 
 
+def test_mixed_directory_and_file_docs_roots_load_identically_cached_and_uncached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # GTX-1: a docs_roots entry naming a single .md file (not a directory) must resolve
+    # through _load_uncached and _load_cached identically -- same node ids, document paths,
+    # and edges -- cold and warm.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "spec.md").write_text(
+        "---\nid: spec\nauthority: binding\n---\n# Spec\nbody\n", encoding="utf-8"
+    )
+    arch = tmp_path / "ARCHITECTURE.md"
+    arch.write_text(
+        "---\nid: arch\nauthority: derived\nderives_from: [{ref: spec}]\n---\n"
+        "# Architecture\nbody\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / ".doc-lattice.yml"
+
+    config_path.write_text("docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8")
+    uncached = load_lattice(load_config(None, tmp_path))
+
+    config_path.write_text(
+        "docs_roots: [docs, ARCHITECTURE.md]\ncache_key: mixed-file-root\n", encoding="utf-8"
+    )
+    cold = load_lattice(load_config(None, tmp_path))  # writes the cache
+    warm = load_lattice(load_config(None, tmp_path))  # reads it back
+
+    assert set(uncached.nodes_by_id) == {"spec", "arch"}
+    assert uncached.nodes_by_id["arch"].path == arch
+    refs = {e.target_id for e in uncached.nodes_by_id["arch"].derives_from}
+    assert refs == {TargetId("spec")}
+    assert cold == uncached
+    assert warm == uncached
+
+
 def test_warm_cached_run_reparses_nothing(lattice_dir: Path, monkeypatch, tmp_path):
     # Proof the warm path serves from the cache instead of re-parsing: after a cold run populates
     # the cache, a warm run must call parse_meta zero times (every file is a verify-tier hit

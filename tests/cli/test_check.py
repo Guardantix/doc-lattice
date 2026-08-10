@@ -260,6 +260,33 @@ def test_check_human_output_escapes_markup(tmp_path: Path, monkeypatch):
     assert "up[/]" in result.stdout
 
 
+def test_check_reports_unreconciled_for_a_file_docs_root(tmp_path: Path, monkeypatch):
+    # GTX-1: a docs_roots entry naming a single .md file (ARCHITECTURE.md, not a directory)
+    # was silently dropped by discovery, so its edges vanished and check exited 0. It must
+    # now be discovered like any other root and surface its UNRECONCILED edge with exit 1.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "spec.md").write_text(
+        "---\nid: spec\nauthority: binding\n---\n# Spec\nbody\n", encoding="utf-8"
+    )
+    (tmp_path / "ARCHITECTURE.md").write_text(
+        "---\nid: arch\nauthority: derived\nderives_from: [{ref: spec}]\n---\n"
+        "# Architecture\nbody\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    states = {(e["source_id"], e["target_ref"]): e["state"] for e in payload["edges"]}
+    assert states[("arch", "spec")] == "UNRECONCILED"
+
+
 def test_check_exits_0_when_fully_reconciled(tmp_path: Path, monkeypatch):
     _clean_docs(tmp_path)
     monkeypatch.chdir(tmp_path)
