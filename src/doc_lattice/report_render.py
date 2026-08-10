@@ -44,7 +44,10 @@ def _state_summary(summary: Mapping[EdgeState, int]) -> str:
     """Render the one-line verdict printed after any human check run."""
     total = sum(summary.values())
     label = "edge" if total == 1 else "edges"
-    breakdown = ", ".join(f"{summary[state]} {state}" for state in EDGE_STATES)
+    # get(state, 0) rather than indexing: the parameter is a Mapping, so a caller may hand
+    # over a sparse counter that simply omits a state that did not occur. The rendered line
+    # promises every state, and a missing key is that state at zero, not an error.
+    breakdown = ", ".join(f"{summary.get(state, 0)} {state}" for state in EDGE_STATES)
     return f"{total} {label}: {breakdown}"
 
 
@@ -60,15 +63,20 @@ def render_statuses(
         summary: Per-state counts over every classified edge, not only the displayed ones,
             so a truncated or filtered listing still ends with an honest verdict.
     """
+    # highlight=False on both prints: Rich's default highlighter bolds bare numbers, and bold
+    # survives no_color, so it emits ANSI under --no-color. That bites the verdict's counts and
+    # equally any id carrying a number (adr-001, rfc-2119). The explicit state color below is
+    # markup, which highlight=False leaves alone.
     for status in statuses:
         color = _STATE_COLORS[status.state]
         console.print(
             f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
-            f"{escape(status.source_id)} -> {escape(status.target_ref)}"
+            f"{escape(status.source_id)} -> {escape(status.target_ref)}",
+            highlight=False,
         )
-    # highlight=False: Rich's default highlighter bolds bare numbers, and bold survives
-    # no_color, so an auto-highlighted verdict would emit ANSI under --no-color.
-    console.print(_state_summary(summary), highlight=False)
+    # soft_wrap: the verdict is one record on one line at any width, so `check | tail -1` gets
+    # the whole verdict rather than the fragment Rich's wrapping would leave on a narrow console.
+    console.print(_state_summary(summary), highlight=False, soft_wrap=True)
 
 
 def render_lint(console: Console, result: LintResult) -> None:

@@ -268,12 +268,16 @@ of hops at which that doc is reached.
 Every human `check` run ends with a one-line verdict counting the classified edges and breaking
 them down per state, for example `101 edges: 96 OK, 5 STALE, 0 UNRECONCILED, 0 BROKEN`. Every
 state is listed, including the ones with a zero count, so truncated output such as `check | tail`
-still states the result rather than trailing off into whichever edges sort last. The line is
-present on a clean lattice too, and a lattice with no edges at all reports `0 edges: 0 OK, 0
-STALE, 0 UNRECONCILED, 0 BROKEN`. `--format json` carries the same counts in a `summary` object
-alongside `edges`, so a wrapper can answer "is the tree clean?" without folding every edge
-record. `--format github` is unchanged: it emits annotations for problems and stays silent on a
-clean tree.
+still states the result rather than trailing off into whichever edges sort last. The line is one
+record on one line at any terminal width, so `check | tail -1` always gets the whole verdict.
+
+The line is present on a clean lattice too, and a lattice with no edges at all reports
+`0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN`. Because the state names are always printed,
+match on the exit code rather than grepping human output for a state name.
+
+`--format json` carries the same counts in a `summary` object alongside `edges`, so a wrapper
+can answer "is the tree clean?" without folding every edge record. `--format github` is
+unchanged: it emits annotations for problems and stays silent on a clean tree.
 
 `check` accepts a repeatable `--only STATE` to narrow the display to specific states (case
 insensitive, e.g. `--only stale --only broken`); an unrecognized state exits 2 and names the

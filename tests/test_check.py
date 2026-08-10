@@ -1,5 +1,6 @@
 """Tests for check."""
 
+from collections import Counter
 from pathlib import Path
 
 from doc_lattice.check import (
@@ -95,6 +96,16 @@ def test_statuses_json_summary_counts_are_independent_of_the_serialized_edges():
 
     assert [edge["state"] for edge in payload["edges"]] == ["STALE"]
     assert payload["summary"] == {"OK": 1, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 0}
+
+
+def test_statuses_json_summary_of_a_sparse_counter_names_every_state():
+    # The parameter is a Mapping, so a caller may pass a counter that omits absent states;
+    # the payload still promises a count for each one rather than raising KeyError.
+    statuses = [EdgeStatus("down", "up", TargetId("up"), "OK", "h", "h")]
+
+    payload = statuses_json(statuses, Counter(status.state for status in statuses))
+
+    assert payload["summary"] == {"OK": 1, "STALE": 0, "UNRECONCILED": 0, "BROKEN": 0}
 
 
 def test_check_classifies_each_state(lattice_dir: Path):

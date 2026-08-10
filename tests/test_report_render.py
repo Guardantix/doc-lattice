@@ -1,5 +1,6 @@
 """Tests for check, lint, and impact report rendering."""
 
+from collections import Counter
 from io import StringIO
 from pathlib import Path
 from typing import get_args
@@ -98,6 +99,44 @@ def test_render_statuses_summary_counts_every_edge_not_only_the_displayed_ones()
 
     assert output.getvalue() == (
         "STALE         drifted -> up\n2 edges: 1 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
+def test_render_statuses_keeps_the_verdict_on_one_line_at_any_width():
+    # The verdict is the answer a `check | tail -1` reader gets, so Rich's wrapping must not
+    # split it into a fragment on a narrow console. Same contract as render_impact's paths.
+    console, output = _recording_console(width=20)
+
+    render_statuses(console, [], {"OK": 1234567, "STALE": 2, "UNRECONCILED": 3, "BROKEN": 4})
+
+    assert output.getvalue() == ("1234576 edges: 1234567 OK, 2 STALE, 3 UNRECONCILED, 4 BROKEN\n")
+
+
+def test_render_statuses_emits_no_ansi_under_no_color():
+    # Rich's default highlighter bolds bare numbers, and bold survives no_color, so an id
+    # carrying a digit (adr-001, rfc-2119) used to leak escapes into --no-color output.
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+    statuses = [
+        EdgeStatus(
+            source_id="rfc-2119",
+            target_ref="spec-3#sec",
+            target_id=TargetId("spec-3", "sec"),
+            state="OK",
+            expected="hash",
+            actual="hash",
+        )
+    ]
+
+    render_statuses(console, statuses, summarize_statuses(statuses))
+
+    assert "\x1b[" not in output.getvalue()
+
+
+def test_state_summary_of_a_sparse_counter_still_names_every_state():
+    # The parameter is a Mapping, so a caller may pass a counter that omits absent states.
+    assert _state_summary(Counter(["OK", "OK", "STALE"])) == (
+        "3 edges: 2 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN"
     )
 
 

@@ -64,7 +64,10 @@ def statuses_json(statuses: list[EdgeStatus], summary: Mapping[EdgeState, int]) 
             }
             for status in statuses
         ],
-        "summary": {state: summary[state] for state in EDGE_STATES},
+        # get(state, 0) rather than indexing: the parameter is a Mapping, so a caller may hand
+        # over a sparse counter that simply omits a state that did not occur. The payload
+        # promises every state, and a missing key is that state at zero, not a KeyError.
+        "summary": {state: summary.get(state, 0) for state in EDGE_STATES},
     }
 
 
