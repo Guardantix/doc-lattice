@@ -105,6 +105,14 @@ def _fetches_tags(argv: list[str]) -> bool:
     return argv[:2] == ["git", "fetch"] and {"--tags", "--force"} <= set(argv)
 
 
+def _runs_twine_check(argv: list[str]) -> bool:
+    """Report whether a command runs twine's `check` subcommand."""
+    return any(
+        word == "twine" and argv[index + 1 : index + 2] == ["check"]
+        for index, word in enumerate(argv)
+    )
+
+
 def _invokes(argv: list[str], script: str) -> bool:
     """Report whether a command runs `script` rather than only naming it.
 
@@ -191,19 +199,26 @@ def test_build_job_builds_validates_and_uploads_one_artifact():
         # dist-old` and strands every distribution outside the uploaded directory.
         assert _out_dir(argv) in (None, "dist")
     validate = _named_step(build, "Validate distributions")
-    validate_run = _commands(validate)
-    assert "twine check" in validate_run
-    assert (".whl" in validate_run) == (".tar.gz" in validate_run)
+    checks = [argv for argv in _invocations(_commands(validate)) if _runs_twine_check(argv)]
+    assert checks
+    checked = " ".join(checks[0])
+    assert (".whl" in checked) == (".tar.gz" in checked)
     # twine is not preinstalled on the runner, so `twine check` only resolves if the job supplies
     # it. Naming twine inline (`--from`/`--with`) works, as does installing it in an earlier step,
     # as does declaring it in the dev group and reaching it through `uv run`. A bare invocation,
     # or `uv run twine` while the dev group omits twine, fails on a clean runner.
-    twine_line = next(line for line in validate_run.splitlines() if "twine check" in line)
     earlier = build["steps"][: build["steps"].index(validate)]
-    installs = "\n".join(_commands(step) for step in earlier)
-    supplied_inline = "--from twine" in twine_line or "--with twine" in twine_line
-    from_dev_group = "twine" in _dev_dependencies() and twine_line.startswith("uv run")
-    assert supplied_inline or from_dev_group or "install twine" in installs
+    installed_earlier = any(
+        "install" in argv and "twine" in argv
+        for step in earlier
+        for argv in _invocations(_commands(step))
+    )
+    pairs = set(zip(checks[0], checks[0][1:], strict=False))
+    supplied_inline = bool(pairs & {("--from", "twine"), ("--with", "twine")}) or bool(
+        {"--from=twine", "--with=twine"} & set(checks[0])
+    )
+    from_dev_group = "twine" in _dev_dependencies() and checks[0][:2] == ["uv", "run"]
+    assert supplied_inline or from_dev_group or installed_earlier
     upload = _named_step(build, "Upload distributions")
     assert sum(_action(step) == _UPLOAD_ARTIFACT for step in build["steps"]) == 1
     assert _action(upload) == _UPLOAD_ARTIFACT
