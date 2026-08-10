@@ -5,6 +5,8 @@ doc-lattice is a deterministic traceability engine for dependencies between Mark
 ## Authoritative sources
 
 - [README.md](README.md) owns supported user behavior, configuration, commands, and examples.
+- [MANAGED_CI.md](MANAGED_CI.md) owns the managed GitHub and Linear CI setup, its migration
+  procedure, and its security model.
 - [ARCHITECTURE.md](ARCHITECTURE.md) owns durable decisions and pure/impure module boundaries.
 - [CHANGELOG.md](CHANGELOG.md) owns release history and migrations.
 - [RELEASING.md](RELEASING.md) owns the release procedure.
@@ -62,8 +64,9 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 - Do not call `datetime.now()` or `datetime.utcnow()` outside `datetime_utils.py`. No such module
   exists today; recreate it if the engine ever needs the current time again.
 - Keep `src/doc_lattice/__init__.py`, `pyproject.toml`, the first versioned CHANGELOG heading,
-  and exact README install pins synchronized. Run `scripts/check_version_sync.py` for every
-  documentation or release change that can affect those values.
+  and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
+  `scripts/check_version_sync.py` for every documentation or release change that can affect those
+  values.
 - Section identity is pinned to `markdown-it-py==4.2.0` and a `github-slugger@2.0.0` target.
   Never hand-edit `_github_slugger_data.py`. Node is a maintenance-only dependency for generator
   verification. Adapter, dependency, Unicode, or generated-data changes require the generator
