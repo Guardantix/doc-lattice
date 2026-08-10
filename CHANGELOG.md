@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The managed GitHub and Linear setup guide moved from the README to
   [MANAGED_CI.md](MANAGED_CI.md), and the version-sync guard now checks install pins in both
   documents.
+- The reconcile selector, dry-run, durability, and recovery deep dive moved from the README to
+  [RECONCILE.md](RECONCILE.md).
 
 ### Removed
 
