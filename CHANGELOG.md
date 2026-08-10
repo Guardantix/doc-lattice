@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- PyPI Trove classifiers and keywords in the package metadata.
+
+### Changed
+
+- The managed GitHub and Linear setup guide moved from the README to
+  [MANAGED_CI.md](MANAGED_CI.md), and the version-sync guard now checks install pins in both
+  documents.
+- The reconcile selector, dry-run, durability, and recovery deep dive moved from the README to
+  [RECONCILE.md](RECONCILE.md).
+
 ### Removed
 
 - Internal: the `doc_lattice.version_check` module. It was maintainer tooling that no CLI command
@@ -50,7 +62,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Existing installations must migrate the repository-scoped `LINEAR_API_KEY` to the protected
   environment and remove unmarked canonical and hand-written Linear workflows before
   `init --github`. See
-  [Managed GitHub and Linear setup](README.md#managed-github-and-linear-setup) for the full
+  [Managed GitHub and Linear setup](MANAGED_CI.md) for the full
   migration and secret-cleanup procedure.
 
 ## [2.0.0] - 2026-07-14

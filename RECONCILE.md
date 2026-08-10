@@ -1,0 +1,110 @@
+# Reconcile: selectors, transactions, and recovery
+
+`reconcile` is the only command that writes to your docs, and it only ever rewrites the `seen`
+scalar. This document covers the selector forms, the read-only dry-run preview and its JSON plan,
+the write and durability mechanics of a real run, automatic and manual recovery, and the
+transaction artifacts reconcile leaves behind.
+
+## Selectors
+
+Normal reconcile needs either a downstream id or `--all` (running it with neither is an error):
+
+- **`reconcile DOWNSTREAM_ID`**: reconcile every drifting edge of one downstream node.
+- **`reconcile DOWNSTREAM_ID --ref REF`**: narrow to a single upstream ref on that node, selected
+  by resolved identity; refused if it targets a BROKEN edge.
+- **`reconcile --all`**: clear every STALE/UNRECONCILED edge in the lattice. Skips BROKEN and
+  already-OK edges, and skips a node's broken edge rather than failing the node, so one dangling
+  ref never blocks the rest.
+- **`reconcile --all --ref REF`**: reconcile matching drifting edges across every downstream
+  node. Nonmatching, BROKEN, and already-OK edges are skipped; unlike the single-node form, no
+  match is a successful no-op.
+- **`reconcile --recover`**: perform recovery or cleanup for an outstanding transaction and exit
+  without loading the lattice or planning a new batch. It cannot be combined with a downstream id,
+  `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--format json` is supported.
+
+## Dry-run previews
+
+Add `--dry-run` to any normal selector above to preview the plan without writing: it prints
+`would reconcile FILE: REF` per edge that would change (`nothing to reconcile` if none would),
+and remains byte-, namespace-, and cache-read-only. It does not create, rewrite, recover, or remove
+the journal or staged images, and it does not persist the optional load cache. If an outstanding
+journal exists, dry-run exits 2, names it, and tells you to run `reconcile --recover` first without
+loading the lattice.
+
+Combine a safe dry-run with `--format json` for a machine-readable plan:
+`{"dry_run": true, "reconciled": [{"path": ..., "ref": ..., "new_seen": ...}]}`, sorted by path
+then ref. A real run with `--format json` emits the same shape with `"dry_run": false`, after the
+durable commit, artifact cleanup, and lock release complete. Failed real batches emit no human
+`reconciled` lines and no JSON success payload. A source conflict names the changed destination and
+says whether rollback completed; an I/O or durability failure names the failed operation and says
+whether rollback completed or recovery evidence remains.
+
+## Write mechanics and durability
+
+`reconcile` re-reads each downstream file fresh at write time, rewrites only the targeted `seen`
+scalar through round-trip YAML (preserving your body, key order, and comments), and retains the
+exact source and replacement bytes. A real run stages exact before and after images, publishes a
+`prepared` journal, fingerprints each destination immediately before its replacement, and rejects
+a changed destination as a conflict. The full batch is rolled back in reverse order if a conflict
+or write/durability failure occurs before the committed marker. After every replacement is durable,
+the journal becomes `committed`; success output waits until committed cleanup and a clean
+advisory-lock release have both completed.
+
+Every reconcile mode holds a nonblocking advisory lock on the existing project-root directory
+through preflight, planning, and any recovery or commit. A competing invocation exits 2 with
+`another reconcile is in progress; retry after it exits` and does not inspect or alter the active
+transaction. The durability guarantee assumes a local filesystem with reliable advisory-lock,
+atomic-rename, and directory-sync semantics. Network filesystems such as NFS may weaken or emulate
+`flock`, so reconcile on them is outside this durability contract.
+
+## Automatic recovery
+
+A real reconcile checks for recovery immediately after config and lock setup, before loading the
+lattice. A `prepared` journal rolls transaction-owned after images back to their exact before
+images; unrelated edits are preserved. A `committed` journal keeps the committed destinations and
+finishes artifact cleanup. Automatic recovery is reported once on stderr, then the newly requested
+reconcile proceeds. This ordering ensures the new plan sees recovered files.
+
+## Transaction artifacts
+
+The project-root transaction journal is `.doc-lattice-reconcile.json`. Its state is `prepared` or
+`committed`, and each entry records project-relative destination, before-image, and after-image
+paths plus full SHA-256 fingerprints. Temporary files use these exact patterns:
+
+```gitignore
+.doc-lattice-reconcile.json
+.doc-lattice-reconcile.json.*.tmp
+.*.doc-lattice-before.*.tmp
+.*.doc-lattice-after.*.tmp
+```
+
+Before and after images are staged beside each destination, so the last two patterns ignore staged
+images in nested document directories as well as at the project root. `doc-lattice init` always
+prints this block and tells you to append it to `.gitignore`; it never reads, creates, appends to,
+or overwrites `.gitignore` itself.
+
+## Manual recovery
+
+After an interrupted run, use this workflow:
+
+1. Stop any other reconcile and run `doc-lattice reconcile --recover` from the project root. A safe
+   rerun of a normal real reconcile also performs this recovery before lattice loading.
+2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`; a valid
+   `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
+   reports `nothing to recover: JOURNAL`. All three outcomes exit 0.
+3. For machine-readable recovery, add `--format json`. The complete stdout object contains exactly
+   `action` and `journal`, with no additional keys, for example
+   `{"action": "none", "journal": "PATH"}`. `action` is `none`, `rolled_back`, or
+   `cleaned_committed`.
+
+A malformed or unsafe journal exits 2 and is not deleted. Inspect the named journal, destinations,
+and staged files; restore each destination or deliberately preserve its current contents; then move
+the invalid journal aside only after that manual restoration or preservation and rerun
+`doc-lattice reconcile --recover`.
+
+Missing, corrupt, nonregular, or otherwise unauthenticated staged evidence also exits 2 without
+unsafe cleanup. Preserve the journal and available staged files, restore or correct the required
+evidence named by the diagnostic, or manually preserve the affected destination, then rerun
+`doc-lattice reconcile --recover`. Do not delete evidence or guess which image is authoritative
+before inspecting its recorded fingerprint. If rollback itself fails, the diagnostic names the
+remaining artifacts and the destination that still needs manual attention.

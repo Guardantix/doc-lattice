@@ -7,7 +7,7 @@ distributions. PyPI Trusted Publishing trusts the `Guardantix/doc-lattice` repos
 ## Release checklist
 
 1. Bump the version in `src/doc_lattice/__init__.py`, `pyproject.toml`, and every
-   released-version pin in `README.md`, and promote `## [Unreleased]` in `CHANGELOG.md` to
+   released-version pin in `README.md` and `MANAGED_CI.md`, and promote `## [Unreleased]` in `CHANGELOG.md` to
    `## [X.Y.Z] - YYYY-MM-DD` so it becomes the first versioned heading, which is the heading
    the version-sync guard reads.
 2. Run `uv lock` and commit the refreshed `uv.lock`.
