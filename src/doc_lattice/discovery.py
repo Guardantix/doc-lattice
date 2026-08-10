@@ -17,11 +17,17 @@ def discover_doc_paths(
 ) -> list[Path]:
     """Return every ``.md`` path under the roots, minus ignored matches, sorted.
 
+    A root may be a directory to walk or a single ``.md`` file, which contributes itself
+    as its own only candidate. A root that is neither (missing, or a special file that
+    appeared after config validation) is skipped.
+
     Args:
         roots: Already project-contained docs roots (from ``ProjectConfig``).
         ignore_globs: Glob patterns matched against each file's path relative to its
             root, anchored at the root. ``drafts/*.md`` skips only top-level drafts, not
-            a same-named subdirectory; use ``**`` to match at any depth.
+            a same-named subdirectory; use ``**`` to match at any depth. A root that is
+            itself a file has no root-relative path, so it is matched against its
+            basename instead: ``spec.md`` excludes a file root named ``spec.md``.
         project_root: Boundary that resolved document paths must remain inside.
 
     Returns:
@@ -34,9 +40,15 @@ def discover_doc_paths(
     found: set[Path] = set()
     resolved_targets: set[Path] = set()
     for root in roots:
-        if not root.exists():
+        if root.is_dir():
+            candidates = sorted(root.rglob("*.md"))
+        elif root.is_file():
+            candidates = [root]
+        else:
+            # Missing, or something discovery cannot read documents out of. Config already
+            # rejects the latter; this also covers the window between load and discovery.
             continue
-        for path in sorted(root.rglob("*.md")):
+        for path in candidates:
             if not path.is_file():
                 continue
             if _ignored(path, root, ignore_globs):
@@ -58,7 +70,9 @@ def discover_doc_paths(
 
 
 def _ignored(path: Path, root: Path, ignore_globs: Sequence[str]) -> bool:
-    relative_path = path.relative_to(root)
+    # A root that IS the candidate has no meaningful root-relative path (relative_to yields
+    # "."), so match it against its basename, as if anchored at its parent directory.
+    relative_path = Path(path.name) if path == root else path.relative_to(root)
     return any(relative_path.full_match(ignore_glob) for ignore_glob in ignore_globs)
 
 

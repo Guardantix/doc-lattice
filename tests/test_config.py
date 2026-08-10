@@ -145,6 +145,51 @@ def test_symlinked_root_escaping_project_is_rejected(tmp_path: Path):
     assert "resolves outside the project root" in str(exc.value)
 
 
+def test_existing_markdown_file_root_is_accepted(tmp_path: Path):
+    # A docs_roots entry may name a single .md file, not only a directory.
+    (tmp_path / "AGENTS.md").write_text("# agents\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [AGENTS.md]\n", encoding="utf-8")
+    project = load_config(None, tmp_path)
+    assert project.resolved_roots == (tmp_path.resolve() / "AGENTS.md",)
+
+
+def test_existing_non_markdown_file_root_is_rejected(tmp_path: Path):
+    # Discovery cannot walk a non-.md file, so accepting it here would silently drop the entry.
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [notes.txt]\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "'notes.txt'" in str(exc.value)  # the offending entry is named
+    assert "directory" in str(exc.value)
+
+
+def test_missing_root_entry_is_tolerated(tmp_path: Path):
+    # Classification only rejects entries that exist; a missing root stays discovery's problem.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [gone, gone.md]\n", encoding="utf-8")
+    project = load_config(None, tmp_path)
+    assert project.resolved_roots == (
+        tmp_path.resolve() / "gone",
+        tmp_path.resolve() / "gone.md",
+    )
+
+
+def test_symlinked_file_root_escaping_project_is_rejected(tmp_path: Path):
+    # Containment is checked before classification, so an escaping .md symlink is still rejected.
+    outside = tmp_path / "outside-target"
+    outside.mkdir()
+    secret = outside / "secret.md"
+    secret.write_text("secret content", encoding="utf-8")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "linked.md").symlink_to(secret)
+    (project / ".doc-lattice.yml").write_text("docs_roots: [linked.md]\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, project)
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "resolves outside the project root" in str(exc.value)
+
+
 def test_unknown_key_rejected(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
