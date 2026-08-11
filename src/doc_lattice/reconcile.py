@@ -447,8 +447,8 @@ def apply_reconcile(  # noqa: PLR0912
     if data is None:
         return current_file_text, set()
     try:
-        source_root = _source_occurrence_tree(list(YAML(typ="base").parse(raw_meta)))
-        scalar_spans = _scalar_spans(list(YAML(typ="base").scan(raw_meta)))
+        source_root = _source_occurrence_tree(list(YAML(typ="safe").parse(raw_meta)))
+        scalar_spans = _scalar_spans(list(YAML(typ="safe").scan(raw_meta)))
     except YAMLError as exc:
         msg = f"cannot parse frontmatter to reconcile: {exc}"
         raise UnreadableDocError(msg) from exc
