@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from ruamel.yaml.parser import Parser
 
 import doc_lattice.github_ci.workflow_parser as workflow_parser_module
 from doc_lattice.error_types import ConfigError
@@ -745,6 +746,16 @@ def test_parse_workflow_wraps_asserting_unsupported_yaml_versions(directive):
     assert "unsupported YAML version" in message
     assert "AssertionError" not in message
     assert directive not in message
+
+
+def test_parse_workflow_reads_through_the_pure_python_parser():
+    # Installing the optional `ruamel.yaml.clib` accelerator, which any other package may pull
+    # in, otherwise switches a safe loader to the C parser. That parser reads neither the
+    # resolver `_disable_implicit_timestamps` edits nor the version and anchor state this
+    # boundary inspects, so the timestamp, `%YAML` directive and duplicate-anchor guards above
+    # would all degrade at once. The implementation is part of the compatibility surface AD-26
+    # records, not a detail.
+    assert workflow_parser_module._loader().Parser is Parser
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `ruamel.yaml.clib` accelerator, which any other package in an environment may pull in, otherwise
   switched the loader to a C parser reporting different source marks, which moved where reconcile
   measured its edits.
+- `ci audit` now reads workflows through ruamel's pure Python parser explicitly. With the same
+  optional `ruamel.yaml.clib` accelerator installed, the C parser read neither the resolver the
+  audit edits nor the version and anchor state it inspects, so a workflow holding an unquoted
+  timestamp was refused as an unsupported scalar, an unsupported `%YAML` directive was accepted
+  rather than rejected, and a duplicate anchor was reported as generic malformed YAML instead of
+  being named.
 - A replacement or relocated `seen` value holding a character YAML admits only as an escape, such
   as a C1 control or a next-line, is now written back as one instead of raw, so a document that
   loads cleanly can no longer be refused by the reparse gate on every run.

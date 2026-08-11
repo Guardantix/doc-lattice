@@ -436,8 +436,13 @@ implementation is part of that surface, not only the version: every loader this 
 for the pure Python parser explicitly, because a plain safe loader switches to the C one whenever
 the optional `ruamel.yaml.clib` accelerator is installed, which any other package in a user's
 environment may pull in, and that parser reports coarser marks and exposes no scanner at all. The
-`yaml-compatibility` CI leg runs the suite at the floor and the ceiling of the declared range with
-that accelerator present, so the range is verified rather than asserted. Where an event mark and a
+accelerator is not reconcile's problem alone. `github_ci/workflow_parser.py` asks for the pure
+parser for its own reasons, since the C one reads neither the resolver that module edits to keep
+implicit timestamps as strings nor the version and anchor state its `%YAML` directive and
+duplicate-anchor rejections inspect, so all three of those guards degrade together wherever the
+accelerator is installed. The `yaml-compatibility` CI leg runs the suite at the declared floor and
+at the resolved ceiling of the range with that accelerator present, so both the range and the
+choice of implementation are verified rather than asserted. Where an event mark and a
 token mark disagree, the token is authoritative: a node's own mark starts at an anchor or a tag,
 while the scanner's block-mapping start, key indicator, and value indicator give the indentation,
 the pair boundary, and the `:` an edit has to align to. A node's properties are part of that

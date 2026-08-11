@@ -82,7 +82,7 @@ def parse_workflow(path: Path, text: str) -> WorkflowDocument:
         if _exceeds_utf8_input_budget(text):
             raise _resource_limit(path)
 
-        yaml = YAML(typ="safe")
+        yaml = _loader()
         yaml.allow_duplicate_keys = False
         _disable_implicit_timestamps(yaml)
         with warnings.catch_warnings():
@@ -120,6 +120,22 @@ def parse_workflow(path: Path, text: str) -> WorkflowDocument:
         raise _resource_limit(path) from exc
     except (UnicodeEncodeError, UnicodeDecodeError, ValueError) as exc:
         raise _parse_error(path, "malformed YAML") from exc
+
+
+def _loader() -> YAML:
+    """Return a fresh safe loader for one workflow read.
+
+    The pure-Python implementation is requested explicitly. A plain safe loader silently
+    switches to the C parser whenever the optional ``ruamel.yaml.clib`` accelerator is
+    installed, which any other package in the environment may pull in, and that parser reads
+    neither the resolver this module edits nor the anchor and directive state it inspects.
+    Under the accelerator every guard below degrades at once: an implicit timestamp survives
+    ``_disable_implicit_timestamps`` and fails the audit as an unsupported scalar,
+    ``YAML.version`` stays ``None`` so an unsupported ``%YAML`` directive is never rejected,
+    and no ``ReusedAnchorWarning`` is raised so a duplicate anchor loses its own diagnosis.
+    AD-26 records the parser implementation as a compatibility surface.
+    """
+    return YAML(typ="safe", pure=True)
 
 
 def _disable_implicit_timestamps(yaml: YAML) -> None:
