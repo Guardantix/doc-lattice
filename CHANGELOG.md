@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so
+  two-space, column-zero, and mixed list styles no longer produce unrelated cosmetic diffs.
+
 ## [4.0.0] - 2026-08-10
 
 ### Added
