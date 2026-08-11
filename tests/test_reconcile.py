@@ -46,7 +46,7 @@ def test_plan_rewrites_applies_updates_from_reader():
         "---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: old\r\n---\r\ncafé ☕\r\n"
     ).encode()
     expected_after = (
-        "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\ncafé ☕\n"
+        "---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: newhash\r\n---\r\ncafé ☕\r\n"
     ).encode()
 
     rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
@@ -61,15 +61,44 @@ def test_plan_rewrites_applies_updates_from_reader():
     assert rewrite.applied == frozenset({"a#x"})
 
 
-def test_plan_rewrites_normalizes_lone_cr_only_for_transformation():
+def test_plan_rewrites_restores_lone_cr_line_endings():
     path = Path("downstream.md")
     source = b"---\rid: d\rderives_from:\r  - ref: a#x\r    seen: old\r---\rbody\r"
+    expected_after = b"---\rid: d\rderives_from:\r  - ref: a#x\r    seen: newhash\r---\rbody\r"
 
     rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
 
     assert len(rewrites) == 1
     assert rewrites[0].before == source
-    assert b"seen: newhash" in rewrites[0].after
+    assert rewrites[0].after == expected_after
+
+
+def test_plan_rewrites_normalizes_a_file_that_mixes_line_endings():
+    # A mixed file has no single ending to restore, so the spliced LF text is what ships.
+    path = Path("downstream.md")
+    source = b"---\nid: d\r\nderives_from:\n  - ref: a#x\r\n    seen: old\n---\nbody\n"
+    expected_after = b"---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
+
+    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+
+    assert len(rewrites) == 1
+    assert rewrites[0].before == source
+    assert rewrites[0].after == expected_after
+
+
+def test_plan_rewrites_keeps_crlf_out_of_the_inserted_line():
+    # The insert is planned as LF text, so a restored CRLF file must not end up with a
+    # bare LF on the line reconcile added.
+    path = Path("downstream.md")
+    source = b"---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n---\r\nbody\r\n"
+    expected_after = (
+        b"---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: newhash\r\n---\r\nbody\r\n"
+    )
+
+    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+
+    assert len(rewrites) == 1
+    assert rewrites[0].after == expected_after
 
 
 def test_plan_rewrites_wraps_reader_error_with_path():

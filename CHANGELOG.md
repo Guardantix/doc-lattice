@@ -10,6 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so
   two-space, column-zero, and mixed list styles no longer produce unrelated cosmetic diffs.
+- `reconcile` writes a CRLF or lone-CR file back in its own line ending instead of converting the
+  whole file to LF, so updating one `seen` no longer restyles every other line of a downstream
+  document. A file that already mixes endings has none to preserve and is still written out in LF.
 - `reconcile` reparses the rewritten frontmatter before staging it and refuses a rewrite that
   would not reload as the planned frontmatter, edges and every other key alike, so a bad source
   edit can no longer be published durably.

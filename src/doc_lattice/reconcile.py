@@ -934,6 +934,21 @@ def apply_reconcile(
     return f"---\n{new_meta}---\n{body}", set(plan.applied)
 
 
+def _line_ending(text: str) -> str:
+    """Return the ending to restore to spliced text, or LF when there is nothing to restore.
+
+    ``apply_reconcile`` measures source offsets against LF text, so a file written with
+    another ending is normalized to plan against and restored to its own ending afterwards.
+    A file that mixes endings has no single ending to restore, so normalizing it is the
+    outcome, which is what the hashes have always compared anyway.
+    """
+    if "\r\n" in text and not set(text.replace("\r\n", "")) & {"\r", "\n"}:
+        return "\r\n"
+    if "\r" in text and "\n" not in text:
+        return "\r"
+    return "\n"
+
+
 def plan_rewrites(
     plan: dict[Path, dict[str, str]],
     read_bytes: Callable[[Path], bytes],
@@ -942,7 +957,8 @@ def plan_rewrites(
 
     The injected reader retains the exact source bytes for later fingerprinting and
     restoration while UTF-8 text is decoded and newline-normalized only for
-    ``apply_reconcile``.
+    ``apply_reconcile``. A file written entirely in CRLF or in lone CR is rewritten in that
+    same ending, so updating one ``seen`` does not restyle every other line.
 
     Args:
         plan: The planned mapping of downstream file path to ``{ref: new_seen}``.
@@ -960,11 +976,13 @@ def plan_rewrites(
     for path, updates in plan.items():
         try:
             before = read_bytes(path)
-            fresh = normalize_newlines(before.decode("utf-8"))
+            decoded = before.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             msg = f"cannot read {path} to reconcile: {exc}"
             raise UnreadableDocError(msg) from exc
-        new_text, applied = apply_reconcile(fresh, updates, path)
+        new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, path)
         if applied:
-            rewrites.append(Rewrite(path, before, new_text.encode("utf-8"), frozenset(applied)))
+            ending = _line_ending(decoded)
+            after = new_text if ending == "\n" else new_text.replace("\n", ending)
+            rewrites.append(Rewrite(path, before, after.encode("utf-8"), frozenset(applied)))
     return rewrites

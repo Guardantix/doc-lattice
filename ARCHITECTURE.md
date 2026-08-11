@@ -437,8 +437,8 @@ authoritative: a node's own mark starts at an anchor or a tag, while the scanner
 start, key indicator, and value indicator give the indentation, the pair boundary, and the `:` an
 edit has to align to. Each read builds its own loader, since a shared instance carries document
 state (`YAML.version`, and the reader and scanner bound to one document) whose reset behavior is
-itself version dependent. Every rewrite is reparsed and compared against the intended document before it
-is staged, so a mis-measured span is refused rather than published.
+itself version dependent. Every rewrite is reparsed and compared against the intended document
+before it is staged, so a mis-measured span is refused rather than published.
 **Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source
 suite as its evidence, in the same spirit as the AD-13 parser pin, not a floor edit. If a future
 release changes mark accounting, the reparse gate turns a silent corruption into a refusal to
