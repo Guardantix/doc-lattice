@@ -36,8 +36,8 @@ def test_plan_rewrites_applies_updates_from_reader():
         "---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: old\r\n---\r\ncafé ☕\r\n"
     ).encode()
     expected_after = (
-        "---\nid: d\nderives_from:\n- ref: a#x\n  seen: newhash\n---\ncafé ☕\n".encode()
-    )
+        "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\ncafé ☕\n"
+    ).encode()
 
     rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
 
@@ -130,6 +130,46 @@ def test_apply_reconcile_adds_missing_seen():
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n---\nbody\n"
     out, applied = apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
     assert "seen: h" in out
+    assert applied == {"a#x"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n",
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: new\n---\nbody\n",
+        ),
+        (
+            "---\nid: d\nderives_from:\n- ref: a#x\n  seen: old\n---\nbody\n",
+            "---\nid: d\nderives_from:\n- ref: a#x\n  seen: new\n---\nbody\n",
+        ),
+    ],
+)
+def test_apply_reconcile_preserves_derives_from_indentation(text: str, expected: str):
+    out, applied = apply_reconcile(text, {"a#x": "new"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+@pytest.mark.parametrize(
+    ("source_entry", "expected_entry"),
+    [
+        ("  - ref: a#x\n", "  - ref: a#x\n    seen: new\n"),
+        ("- ref: a#x\n", "- ref: a#x\n  seen: new\n"),
+        ("  - {ref: a#x}\n", "  - {ref: a#x, seen: new}\n"),
+    ],
+)
+def test_apply_reconcile_adds_seen_without_reformatting_entry(
+    source_entry: str, expected_entry: str
+):
+    text = f"---\nid: d\nderives_from:\n{source_entry}---\nbody\n"
+    expected = f"---\nid: d\nderives_from:\n{expected_entry}---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "new"}, Path("downstream.md"))
+
+    assert out == expected
     assert applied == {"a#x"}
 
 
@@ -318,18 +358,35 @@ def test_apply_reconcile_preserves_comments_key_order_and_untargeted_edges():
         "---\n"
         "id: d  # the node id\n"
         "derives_from:\n"
-        "  - ref: a#x\n    seen: oldx\n"
-        "  - ref: b#y\n    seen: oldy\n"
-        "tickets: [T-1]\n"
-        "---\n# Body\nkeep\n"
+        "  - ref: a#x\n"
+        "    seen: oldx\n"
+        "  - ref: b#y\n"
+        "    seen: oldy\n"
+        "tickets:\n"
+        "- T-1\n"
+        "---\n"
+        "# Body\n"
+        "keep\n"
     )
+    expected = (
+        "---\n"
+        "id: d  # the node id\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newx\n"
+        "  - ref: b#y\n"
+        "    seen: oldy\n"
+        "tickets:\n"
+        "- T-1\n"
+        "---\n"
+        "# Body\n"
+        "keep\n"
+    )
+
     out, applied = apply_reconcile(text, {"a#x": "newx"}, Path("downstream.md"))
+
+    assert out == expected
     assert applied == {"a#x"}
-    assert "seen: newx" in out
-    assert "seen: oldy" in out  # the untargeted edge is untouched
-    assert "# the node id" in out  # the comment survives
-    assert out.index("id: d") < out.index("derives_from") < out.index("tickets")  # key order
-    assert out.endswith("# Body\nkeep\n")
 
 
 def test_apply_reconcile_no_change_when_seen_already_matches():

@@ -5,7 +5,6 @@ caller injects, and ``reconcile_transaction`` owns durable publication of the re
 planned here.
 """
 
-import io
 from collections import defaultdict
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+from ruamel.yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
@@ -36,6 +36,40 @@ class Rewrite:
     before: bytes
     after: bytes
     applied: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceEdit:
+    start: int
+    end: int
+    replacement: str
+
+
+def _mapping_value_node(mapping: MappingNode, name: str) -> Node | None:
+    for key_node, value_node in mapping.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == name:
+            return value_node
+    return None
+
+
+def _seen_source_edit(raw_meta: str, entry: MappingNode, new_seen: str) -> _SourceEdit:
+    seen_node = _mapping_value_node(entry, "seen")
+    if seen_node is not None:
+        return _SourceEdit(seen_node.start_mark.index, seen_node.end_mark.index, new_seen)
+    if entry.flow_style:
+        insert_at = entry.end_mark.index - 1
+        separator = " " if raw_meta[:insert_at].rstrip().endswith(",") else ", "
+        return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
+    first_key, _ = entry.value[0]
+    insert_at = entry.end_mark.index
+    replacement = f"{' ' * first_key.start_mark.column}seen: {new_seen}\n"
+    return _SourceEdit(insert_at, insert_at, replacement)
+
+
+def _apply_source_edits(raw_meta: str, edits: list[_SourceEdit]) -> str:
+    for edit in sorted(edits, key=lambda item: item.start, reverse=True):
+        raw_meta = raw_meta[: edit.start] + edit.replacement + raw_meta[edit.end :]
+    return raw_meta
 
 
 def reconcile(
@@ -109,7 +143,7 @@ def reconcile(
     return dict(plan)
 
 
-def apply_reconcile(
+def apply_reconcile(  # noqa: PLR0912
     current_file_text: str, updates: dict[str, str], source: Path
 ) -> tuple[str, set[str]]:
     """Return ``current_file_text`` with matching edges' seen scalars set.
@@ -141,8 +175,10 @@ def apply_reconcile(
         return current_file_text, set()
     # Round-trip loaders retain document-specific state, so construct one for each call.
     yaml = YAML(typ="rt")
+    node_yaml = YAML(typ="base")
     try:
         data = yaml.load(raw_meta)
+        root_node = node_yaml.compose(raw_meta)
     except YAMLError as exc:
         msg = f"cannot parse frontmatter to reconcile: {exc}"
         raise UnreadableDocError(msg) from exc
@@ -155,9 +191,16 @@ def apply_reconcile(
         return current_file_text, set()
     if not isinstance(entries, list):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
+    if not isinstance(root_node, MappingNode):
+        raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
+    entry_nodes = _mapping_value_node(root_node, "derives_from")
+    if not isinstance(entry_nodes, SequenceNode) or len(entry_nodes.value) != len(entries):
+        raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
+
+    edits: list[_SourceEdit] = []
     applied: set[str] = set()
-    for entry in entries:
-        if not isinstance(entry, MutableMapping):
+    for entry, entry_node in zip(entries, entry_nodes.value, strict=True):
+        if not isinstance(entry, MutableMapping) or not isinstance(entry_node, MappingNode):
             raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
         ref = entry.get("ref")
         if not isinstance(ref, str):
@@ -165,16 +208,12 @@ def apply_reconcile(
         if ref in updates:
             new_seen = updates[ref]
             if entry.get("seen") != new_seen:
-                entry["seen"] = new_seen
+                edits.append(_seen_source_edit(raw_meta, entry_node, new_seen))
                 applied.add(ref)
     if not applied:
         return current_file_text, applied
-    buffer = io.StringIO()
-    yaml.dump(data, buffer)
-    # ruamel always ends its dump with a newline, so the closing ``---`` lands on its own
-    # line. body has no leading newline (the split joined the post-fence lines), so it is
-    # reattached directly after the fence.
-    return f"---\n{buffer.getvalue()}---\n{body}", applied
+    new_meta = _apply_source_edits(raw_meta, edits)
+    return f"---\n{new_meta}---\n{body}", applied
 
 
 def plan_rewrites(
