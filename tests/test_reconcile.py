@@ -348,6 +348,39 @@ def test_apply_reconcile_keeps_the_comment_on_a_replaced_block_scalar_header(
 
 
 @pytest.mark.parametrize(
+    ("source_value", "expected_value"),
+    [
+        ("!!str # keep\n    old", "# keep\n    newhash"),
+        ("&h # keep\n    old", "# keep\n    newhash"),
+        ("!!str  # keep\n  # and this\n    old", "# keep\n  # and this\n    newhash"),
+        ("&h # first\n    !!str # second\n    old", "# first\n    # second\n    newhash"),
+        ("!!str &h # keep\n    old", "# keep\n    newhash"),
+    ],
+)
+def test_apply_reconcile_keeps_a_comment_written_between_a_seens_properties_and_its_value(
+    source_value: str, expected_value: str
+):
+    # An anchor or a tag is dropped when the value it carries is replaced, and the span
+    # reaching back to it swallowed any comment written between the two. A reload cannot see
+    # that loss, so each property is now removed on its own, up to a comment rather than past
+    # one, which leaves the comment where its author put it.
+    text = f"---\nid: d\nderives_from:\n- ref: a#x\n  seen: {source_value}\ntitle: *h\n---\nbody\n"
+    expected = (
+        f'---\nid: d\nderives_from:\n- ref: a#x\n  seen: {expected_value}\ntitle: &h "old"\n'
+        "---\nbody\n"
+    )
+    if "&h" not in source_value:
+        text = text.replace("title: *h\n", "")
+        expected = expected.replace('title: &h "old"\n', "")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+@pytest.mark.parametrize(
     ("source_root", "expected_root"),
     [
         (

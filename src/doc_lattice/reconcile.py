@@ -134,9 +134,25 @@ class _TokenSpan:
 
 
 @dataclass(frozen=True, slots=True)
-class _TaggedScalar:
+class _ScalarProperties:
+    """The anchor and tag tokens written on one scalar, each where source spells it.
+
+    Attributes:
+        scalar_start: Offset of the scalar token the properties apply to.
+        anchor: Span of its ``&name``, when it carries one.
+        tag: Span of its explicit tag, when it carries one.
+    """
+
     scalar_start: int
-    tag: _TokenSpan
+    anchor: _TokenSpan | None
+    tag: _TokenSpan | None
+
+    def spans(self) -> list[_TokenSpan]:
+        """Return the property spans in source order."""
+        return sorted(
+            (span for span in (self.anchor, self.tag) if span is not None),
+            key=lambda span: span.start,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +168,7 @@ class _TokenMarks:
     Attributes:
         scalar_spans: Span of each scalar token, which excludes the anchor, tag, and quotes
             or block header an event's own marks enclose.
-        tagged_scalars: Span of each explicit tag paired with the scalar token it applies to,
+        scalar_properties: The anchor and tag written on each scalar that carries either,
             which a node's own marks do not always enclose.
         block_mapping_indents: Opening offset and indentation column of each block mapping,
             which is where the mapping was opened rather than where its node starts.
@@ -163,7 +179,7 @@ class _TokenMarks:
     """
 
     scalar_spans: tuple[_TokenSpan, ...]
-    tagged_scalars: tuple[_TaggedScalar, ...]
+    scalar_properties: tuple[_ScalarProperties, ...]
     block_mapping_indents: tuple[_BlockIndent, ...]
     block_sequence_indents: tuple[_BlockIndent, ...]
     key_indicators: tuple[int, ...]
@@ -292,24 +308,28 @@ def _source_occurrence_tree(events: list[Event]) -> _YamlOccurrence:
     raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
 
 
-def _tagged_scalars(tokens: list[Token]) -> tuple[_TaggedScalar, ...]:
-    """Pair each explicit tag with the scalar token it applies to.
+def _scalar_properties(tokens: list[Token]) -> tuple[_ScalarProperties, ...]:
+    """Pair each scalar token with the anchor and tag written on it.
 
-    A tag applies to the node that follows it, and only an anchor may come between the two,
-    so a tag followed by anything else belongs to a collection rather than to a scalar. The
-    pairing is read off the token stream because a scalar's own marks do not delimit its tag:
-    a node whose tag precedes its anchor starts at the anchor, leaving the tag outside it.
+    A property applies to the node that follows it, and only the other property may come
+    between the two, so a property followed by anything else belongs to a collection rather
+    than to a scalar. The pairing is read off the token stream because a scalar's own marks
+    do not delimit its properties: a node whose tag precedes its anchor starts at the anchor,
+    leaving the tag outside it, and a comment may sit between either one and the value.
     """
-    tagged: list[_TaggedScalar] = []
-    pending: _TokenSpan | None = None
+    properties: list[_ScalarProperties] = []
+    anchor: _TokenSpan | None = None
+    tag: _TokenSpan | None = None
     for token in tokens:
-        if isinstance(token, TagToken):
-            pending = _TokenSpan(token.start_mark.index, token.end_mark.index)
-        elif not isinstance(token, AnchorToken):
-            if pending is not None and isinstance(token, ScalarToken):
-                tagged.append(_TaggedScalar(token.start_mark.index, pending))
-            pending = None
-    return tuple(tagged)
+        if isinstance(token, AnchorToken):
+            anchor = _TokenSpan(token.start_mark.index, token.end_mark.index)
+        elif isinstance(token, TagToken):
+            tag = _TokenSpan(token.start_mark.index, token.end_mark.index)
+        else:
+            if (anchor is not None or tag is not None) and isinstance(token, ScalarToken):
+                properties.append(_ScalarProperties(token.start_mark.index, anchor, tag))
+            anchor = tag = None
+    return tuple(properties)
 
 
 def _token_marks(tokens: list[Token]) -> _TokenMarks:
@@ -319,7 +339,7 @@ def _token_marks(tokens: list[Token]) -> _TokenMarks:
             for token in tokens
             if isinstance(token, ScalarToken)
         ),
-        _tagged_scalars(tokens),
+        _scalar_properties(tokens),
         tuple(
             _BlockIndent(token.start_mark.index, token.start_mark.column)
             for token in tokens
@@ -651,11 +671,17 @@ def _seen_scalar_source(new_seen: str, loader: YAML) -> str:
     return json.dumps(new_seen, ensure_ascii=False)
 
 
+def _properties_of(marks: _TokenMarks, span: _TokenSpan) -> _ScalarProperties | None:
+    """Return the anchor and tag written on the scalar token at ``span``, if it carries either."""
+    return next(
+        (found for found in marks.scalar_properties if found.scalar_start == span.start), None
+    )
+
+
 def _explicit_tag_span(marks: _TokenMarks, span: _TokenSpan) -> _TokenSpan | None:
     """Return the span of the explicit tag on the scalar token at ``span``, if it carries one."""
-    return next(
-        (tagged.tag for tagged in marks.tagged_scalars if tagged.scalar_start == span.start), None
-    )
+    properties = _properties_of(marks, span)
+    return None if properties is None else properties.tag
 
 
 def _anchored_seen_source(
@@ -749,20 +775,27 @@ def _block_indent(
     raise UnreadableDocError(msg)  # pragma: no cover
 
 
-def _replaced_scalar_start(
-    context: _SourceContext, seen: _ScalarOccurrence, span: _TokenSpan
-) -> int:
-    """Return the offset a replaced ``seen`` scalar is overwritten from, properties included.
+def _property_removal_edits(context: _SourceContext, span: _TokenSpan) -> list[_SourceEdit]:
+    """Plan the edits that drop the properties of a ``seen`` scalar being replaced.
 
     Neither property can survive the replacement: the anchor is relocated to whichever alias
     still needs the old value, and a leftover tag would retype the new hash on the next read.
-    The node's own mark opens at the first property only when the anchor comes first, so a tag
-    written ahead of it is bounded by its own token instead.
+    Each is removed from its own token rather than by overwriting one span reaching back from
+    the value, because a comment may be written between a property and the value, or between
+    two properties, and that comment is the author's. A removal therefore stops at the first
+    comment ahead of it, and otherwise runs to the next property or to the value, so the run
+    of space a property leaves behind goes with it when there is nothing there to keep.
     """
-    if seen.anchor is None and seen.tag is None:
-        return span.start
-    tag_span = _explicit_tag_span(context.marks, span)
-    return seen.start if tag_span is None else min(seen.start, tag_span.start)
+    properties = _properties_of(context.marks, span)
+    if properties is None:
+        return []
+    spans = properties.spans()
+    boundaries = [*(found.start for found in spans[1:]), span.start]
+    edits = []
+    for found, boundary in zip(spans, boundaries, strict=True):
+        comment = context.raw_meta.find("#", found.end, boundary)
+        edits.append(_SourceEdit(found.start, boundary if comment == -1 else comment, ""))
+    return edits
 
 
 @dataclass(frozen=True, slots=True)
@@ -786,25 +819,26 @@ class _SeenPair:
     alias: _AliasOccurrence | None
 
 
-def _seen_source_edit(
+def _seen_source_edits(
     context: _SourceContext,
     pair: _SeenPair,
     span: _TokenSpan | None,
     new_seen: str,
-) -> _SourceEdit:
+) -> list[_SourceEdit]:
+    """Plan every edit one entry's ``seen`` needs: the value itself, and any property it drops."""
     seen = pair.value
     if isinstance(seen, _AliasOccurrence):
-        return _SourceEdit(seen.start, seen.end, new_seen)
+        return [_SourceEdit(seen.start, seen.end, new_seen)]
     if isinstance(seen, _ScalarOccurrence):
         if span is None:
             # An empty plain scalar has no source of its own, so the hash is written after
             # the key's own indicator rather than over the value.
-            return _null_seen_source_edit(context, pair.mapping, pair.key, new_seen)
-        start = _replaced_scalar_start(context, seen, span)
+            return [_null_seen_source_edit(context, pair.mapping, pair.key, new_seen)]
         comment = _block_header_comment(context.raw_meta, seen, span)
-        return _SourceEdit(
-            start, _scalar_source_end(context.raw_meta, seen, span), f"{new_seen}{comment}"
+        value = _SourceEdit(
+            span.start, _scalar_source_end(context.raw_meta, seen, span), f"{new_seen}{comment}"
         )
+        return [*_property_removal_edits(context, span), value]
     raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
 
 
@@ -932,7 +966,17 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
 
 @dataclass(frozen=True, slots=True)
 class _EntryEdit:
-    edit: _SourceEdit | None
+    """The source edits one entry's update needs, and the anchored value it displaces.
+
+    Attributes:
+        edits: Every edit the update plans, which is the value's own plus one per property
+            the replacement drops. An entry already reading the new hash through an alias
+            plans none.
+        anchored: The anchored ``seen`` being replaced, when the entry carries one, for
+            relocation to whichever alias still reads it.
+    """
+
+    edits: tuple[_SourceEdit, ...]
     anchored: _AnchoredSeen | None
 
 
@@ -1025,7 +1069,7 @@ def _plan_entry_edit(
     new_seen_source: str,
     updated_definitions: frozenset[int],
 ) -> _EntryEdit:
-    """Plan the source edit that sets one entry's ``seen`` scalar."""
+    """Plan the source edits that set one entry's ``seen`` scalar."""
     if isinstance(entry_occurrence, _AliasOccurrence):
         definition = _resolve_occurrence(context.anchors, entry_occurrence)
         # An entry written as an ordered map is a sequence, so a definition of either shape
@@ -1036,17 +1080,16 @@ def _plan_entry_edit(
         ):
             # This entry aliases an entry the same run just updated, so it already reads the
             # new hash: leaving its source untouched keeps the author's alias intact.
-            return _EntryEdit(None, None)
-        return _EntryEdit(
-            _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source), None
-        )
+            return _EntryEdit((), None)
+        alias_edit = _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source)
+        return _EntryEdit((alias_edit,), None)
     pair = _seen_pair(context.anchors, entry_occurrence)
     if pair is None:
         # An entry with no `seen` pair yet takes one as a key, or as an item of its own when
         # it is written as an ordered map.
-        return _EntryEdit(_appended_seen_edit(context, entry_occurrence, new_seen_source), None)
+        return _EntryEdit((_appended_seen_edit(context, entry_occurrence, new_seen_source),), None)
     if pair.alias is not None:
-        return _EntryEdit(_omap_item_alias_source_edit(pair.alias, new_seen_source), None)
+        return _EntryEdit((_omap_item_alias_source_edit(pair.alias, new_seen_source),), None)
     seen = pair.value
     span = (
         _scalar_span(seen, context.marks.scalar_spans)
@@ -1060,8 +1103,8 @@ def _plan_entry_edit(
             seen.start,
             _anchored_seen_source(context, seen, span, old_seen),
         )
-    edit = _seen_source_edit(context, pair, span, new_seen_source)
-    return _EntryEdit(edit, anchored)
+    edits = _seen_source_edits(context, pair, span, new_seen_source)
+    return _EntryEdit(tuple(edits), anchored)
 
 
 def _plan_source_edits(
@@ -1100,8 +1143,7 @@ def _plan_source_edits(
             _seen_scalar_source(new_seen, loader),
             frozenset(updated_definitions),
         )
-        if entry_edit.edit is not None:
-            edits.append(entry_edit.edit)
+        edits.extend(entry_edit.edits)
         if entry_edit.anchored is not None:
             anchored_seen.append(entry_edit.anchored)
         if not isinstance(entry_occurrence, _AliasOccurrence):

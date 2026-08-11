@@ -41,10 +41,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   item rather than as a key. A whole frontmatter document written as an ordered map is
   reconcilable for the same reason: its `derives_from` is found among the items its source
   spells rather than looked up in a mapping that is not written there.
-- `reconcile` keeps the comment on a `seen` written as a block scalar, such as `seen: | # note`.
-  A block scalar's source runs from its header through its contents, so replacing the value used
-  to take the comment with it; the comment is now rewritten onto the line the new hash is
-  written on.
+- `reconcile` keeps a comment written inside the source a replaced `seen` occupies. A block
+  scalar's source runs from its header through its contents, so `seen: | # note` used to lose the
+  note, which is now rewritten onto the line the new hash is written on. An anchor or a tag is
+  dropped when the value it carries is replaced, and a comment written between either one and
+  that value, or between the two, used to go with it; each property is now removed on its own, up
+  to a comment rather than past one, so the comment stays where its author put it.
 - `reconcile` covers the remaining ways one `derives_from` entry can share a node with another: an
   alias to an entry the same run already updated is left alone when that entry is written as an
   ordered map, an ordered map item spelled as an alias takes the pair it stands for rather than
