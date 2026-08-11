@@ -65,22 +65,19 @@ Add a parameterized exact-output test for both accepted block styles:
 
 ```python
 @pytest.mark.parametrize(
-    ("list_indent", "key_indent"),
-    [("  ", "    "), ("", "  ")],
+    ("text", "expected"),
+    [
+        (
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n",
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: new\n---\nbody\n",
+        ),
+        (
+            "---\nid: d\nderives_from:\n- ref: a#x\n  seen: old\n---\nbody\n",
+            "---\nid: d\nderives_from:\n- ref: a#x\n  seen: new\n---\nbody\n",
+        ),
+    ],
 )
-def test_apply_reconcile_preserves_derives_from_indentation(
-    list_indent: str, key_indent: str
-):
-    text = (
-        "---\n"
-        "id: d\n"
-        "derives_from:\n"
-        f"{list_indent}- ref: a#x\n"
-        f"{key_indent}seen: old\n"
-        "---\n"
-        "body\n"
-    )
-    expected = text.replace("seen: old", "seen: new")
+def test_apply_reconcile_preserves_derives_from_indentation(text: str, expected: str):
 
     out, applied = apply_reconcile(text, {"a#x": "new"}, Path("downstream.md"))
 
@@ -134,7 +131,20 @@ text = (
     "# Body\n"
     "keep\n"
 )
-expected = text.replace("seen: oldx", "seen: newx")
+expected = (
+    "---\n"
+    "id: d  # the node id\n"
+    "derives_from:\n"
+    "  - ref: a#x\n"
+    "    seen: newx\n"
+    "  - ref: b#y\n"
+    "    seen: oldy\n"
+    "tickets:\n"
+    "- T-1\n"
+    "---\n"
+    "# Body\n"
+    "keep\n"
+)
 
 out, applied = apply_reconcile(text, {"a#x": "newx"}, Path("downstream.md"))
 
