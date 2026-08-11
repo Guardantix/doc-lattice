@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from ruamel.yaml import YAML
 
 from doc_lattice import reconcile as reconcile_module
 from doc_lattice.check import check_lattice
@@ -30,6 +31,16 @@ def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
 def _planned_refs(plan: dict[Path, dict[str, str]]) -> set[str]:
     """Collect every target ref across all files in a reconcile plan."""
     return {ref for updates in plan.values() for ref in updates}
+
+
+def _reloaded_tickets(text: str) -> list[object]:
+    """Return reconciled `tickets` as the safe loader sees them, element types included."""
+    raw_meta, _ = split_frontmatter(text, Path("downstream.md"))
+    reloaded = YAML(typ="safe").load(raw_meta)
+    assert isinstance(reloaded, dict)
+    tickets = reloaded["tickets"]
+    assert isinstance(tickets, list)
+    return tickets
 
 
 def _validated_reconcile_meta(text: str) -> NodeMeta:
@@ -725,6 +736,98 @@ def test_apply_reconcile_relocates_a_non_string_seen_anchor_without_retyping_it(
 
     assert out == expected
     assert applied == {"a#x"}
+
+
+def test_apply_reconcile_replaces_a_seen_scalar_whose_tag_precedes_its_anchor():
+    # A node written tag first starts at its anchor, so overwriting from the node's own mark
+    # would leave the tag behind to retype the hash written under it.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: !!float &shared 12\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+def test_apply_reconcile_relocates_a_tagged_seen_anchor_without_retyping_it():
+    # The scalar token excludes the tag, so relocating the token alone would republish an
+    # explicit float as an implicit integer. Whole-document verification cannot catch that
+    # on its own, since 12 == 12.0.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared !!float 12\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "tickets: [&shared !!float 12]\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    tickets = _reloaded_tickets(out)
+    assert tickets == [12.0]
+    assert [type(ticket) for ticket in tickets] == [float]
+
+
+@pytest.mark.parametrize(
+    ("properties", "relocated"),
+    [
+        ("&shared !!float\n      12", "&shared !!float 12"),
+        ("&shared\n      12", "&shared 12"),
+        ("!!float &shared 12", "&shared !!float 12"),
+        (
+            "&shared !<tag:yaml.org,2002:float> 12",
+            "&shared !<tag:yaml.org,2002:float> 12",
+        ),
+    ],
+)
+def test_apply_reconcile_relocates_a_tagged_seen_anchor_written_across_lines(
+    properties: str, relocated: str
+):
+    # A node's properties can sit on their own line and in either order, so each part of the
+    # relocated value comes from its own token rather than from one slice of the node.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"    seen: {properties}\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        f"tickets: [{relocated}]\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _reloaded_tickets(out) == [12]
 
 
 @pytest.mark.filterwarnings("ignore:(?s).*duplicate anchor.*")

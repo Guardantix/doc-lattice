@@ -24,9 +24,11 @@ from ruamel.yaml.events import (
     SequenceStartEvent,
 )
 from ruamel.yaml.tokens import (
+    AnchorToken,
     BlockMappingStartToken,
     KeyToken,
     ScalarToken,
+    TagToken,
     Token,
     ValueToken,
 )
@@ -88,6 +90,14 @@ class _ScalarOccurrence:
 
 @dataclass(frozen=True, slots=True)
 class _AnchoredSeen:
+    """An anchored ``seen`` node being replaced, and the text an alias site inherits.
+
+    Attributes:
+        anchor: The anchor name the replaced node defines.
+        start: Offset of the replaced node, which bounds the aliases still reading it.
+        source: Complete replacement text for an alias site, the anchor included.
+    """
+
     anchor: str
     start: int
     source: str
@@ -119,9 +129,15 @@ class _SequenceOccurrence:
 
 
 @dataclass(frozen=True, slots=True)
-class _ScalarSpan:
+class _TokenSpan:
     start: int
     end: int
+
+
+@dataclass(frozen=True, slots=True)
+class _TaggedScalar:
+    scalar_start: int
+    tag: _TokenSpan
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,13 +153,16 @@ class _TokenMarks:
     Attributes:
         scalar_spans: Span of each scalar token, which excludes the anchor, tag, and quotes
             or block header an event's own marks enclose.
+        tagged_scalars: Span of each explicit tag paired with the scalar token it applies to,
+            which a node's own marks do not always enclose.
         block_mapping_indents: Opening offset and indentation column of each block mapping,
             which is where the mapping was opened rather than where its node starts.
         key_indicators: Offset at which each mapping key opens, in source order.
         value_indicators: Offset of each ``:`` that opens a mapping value.
     """
 
-    scalar_spans: tuple[_ScalarSpan, ...]
+    scalar_spans: tuple[_TokenSpan, ...]
+    tagged_scalars: tuple[_TaggedScalar, ...]
     block_mapping_indents: tuple[_BlockMappingIndent, ...]
     key_indicators: tuple[int, ...]
     value_indicators: tuple[int, ...]
@@ -251,13 +270,34 @@ def _source_occurrence_tree(events: list[Event]) -> _YamlOccurrence:
     raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
 
 
+def _tagged_scalars(tokens: list[Token]) -> tuple[_TaggedScalar, ...]:
+    """Pair each explicit tag with the scalar token it applies to.
+
+    A tag applies to the node that follows it, and only an anchor may come between the two,
+    so a tag followed by anything else belongs to a collection rather than to a scalar. The
+    pairing is read off the token stream because a scalar's own marks do not delimit its tag:
+    a node whose tag precedes its anchor starts at the anchor, leaving the tag outside it.
+    """
+    tagged: list[_TaggedScalar] = []
+    pending: _TokenSpan | None = None
+    for token in tokens:
+        if isinstance(token, TagToken):
+            pending = _TokenSpan(token.start_mark.index, token.end_mark.index)
+        elif not isinstance(token, AnchorToken):
+            if pending is not None and isinstance(token, ScalarToken):
+                tagged.append(_TaggedScalar(token.start_mark.index, pending))
+            pending = None
+    return tuple(tagged)
+
+
 def _token_marks(tokens: list[Token]) -> _TokenMarks:
     return _TokenMarks(
         tuple(
-            _ScalarSpan(token.start_mark.index, token.end_mark.index)
+            _TokenSpan(token.start_mark.index, token.end_mark.index)
             for token in tokens
             if isinstance(token, ScalarToken)
         ),
+        _tagged_scalars(tokens),
         tuple(
             _BlockMappingIndent(token.start_mark.index, token.start_mark.column)
             for token in tokens
@@ -443,8 +483,8 @@ def _flow_mapping_has_trailing_comma(raw_meta: str, entry: _MappingOccurrence) -
 
 
 def _scalar_span(
-    occurrence: _ScalarOccurrence, scalar_spans: tuple[_ScalarSpan, ...]
-) -> _ScalarSpan | None:
+    occurrence: _ScalarOccurrence, scalar_spans: tuple[_TokenSpan, ...]
+) -> _TokenSpan | None:
     matches = [
         span
         for span in scalar_spans
@@ -457,7 +497,7 @@ def _scalar_span(
     return matches[0]
 
 
-def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _ScalarSpan) -> int:
+def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _TokenSpan) -> int:
     if occurrence.style in {"|", ">"} and raw_meta[span.end - 1 : span.end] == "\n":
         return span.end - 1
     return span.end
@@ -487,27 +527,42 @@ def _seen_scalar_source(new_seen: str, version: tuple[int, int] | None) -> str:
     return json.dumps(new_seen, ensure_ascii=False)
 
 
+def _explicit_tag_span(marks: _TokenMarks, span: _TokenSpan) -> _TokenSpan | None:
+    """Return the span of the explicit tag on the scalar token at ``span``, if it carries one."""
+    return next(
+        (tagged.tag for tagged in marks.tagged_scalars if tagged.scalar_start == span.start), None
+    )
+
+
 def _anchored_seen_source(
-    raw_meta: str,
+    context: _SourceContext,
     seen: _ScalarOccurrence,
-    span: _ScalarSpan | None,
+    span: _TokenSpan | None,
     value: object,
 ) -> str:
-    """Return source text that reproduces an anchored ``seen`` value at an alias site.
+    """Return source text that reproduces an anchored ``seen`` node at an alias site.
 
-    Strings are re-emitted quoted so a relocated block scalar stays on one line; other
-    scalars keep their own source text, since rendering them through ``str`` would change
-    their type on the next read.
+    The text carries the anchor, and an explicit tag along with it: re-emitting the scalar
+    alone would leave the implicit resolver to retype the value on the next read. Strings are
+    re-emitted quoted so a relocated block scalar stays on one line, and a tag that made the
+    value a string is redundant once it is; every other scalar keeps its own source, since
+    rendering it through ``str`` would retype it too. Each part is taken from its own token
+    rather than sliced whole, because a line break between them would put the relocated value
+    on a line of its own.
     """
+    anchor = f"&{seen.anchor}"
     if value is None:
-        return "null"
+        return f"{anchor} null"
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return f"{anchor} {'true' if value else 'false'}"
     if not isinstance(value, str) and span is not None:
-        source = raw_meta[span.start : _scalar_source_end(raw_meta, seen, span)]
+        source = context.raw_meta[span.start : _scalar_source_end(context.raw_meta, seen, span)]
         if "\n" not in source:
-            return source
-    return json.dumps(str(value), ensure_ascii=False)
+            tag_span = _explicit_tag_span(context.marks, span)
+            if tag_span is None:
+                return f"{anchor} {source}"
+            return f"{anchor} {context.raw_meta[tag_span.start : tag_span.end]} {source}"
+    return f"{anchor} {json.dumps(str(value), ensure_ascii=False)}"
 
 
 def _is_implicit_null(occurrence: _YamlOccurrence) -> bool:
@@ -568,11 +623,27 @@ def _block_mapping_indent(marks: _TokenMarks, entry: _MappingOccurrence) -> int:
     raise UnreadableDocError(msg)  # pragma: no cover
 
 
+def _replaced_scalar_start(
+    context: _SourceContext, seen: _ScalarOccurrence, span: _TokenSpan
+) -> int:
+    """Return the offset a replaced ``seen`` scalar is overwritten from, properties included.
+
+    Neither property can survive the replacement: the anchor is relocated to whichever alias
+    still needs the old value, and a leftover tag would retype the new hash on the next read.
+    The node's own mark opens at the first property only when the anchor comes first, so a tag
+    written ahead of it is bounded by its own token instead.
+    """
+    if seen.anchor is None and seen.tag is None:
+        return span.start
+    tag_span = _explicit_tag_span(context.marks, span)
+    return seen.start if tag_span is None else min(seen.start, tag_span.start)
+
+
 def _seen_source_edit(
     context: _SourceContext,
     entry: _MappingOccurrence,
     seen: _YamlOccurrence | None,
-    span: _ScalarSpan | None,
+    span: _TokenSpan | None,
     new_seen: str,
 ) -> _SourceEdit:
     raw_meta = context.raw_meta
@@ -584,10 +655,7 @@ def _seen_source_edit(
             if pair is None:
                 raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
             return _null_seen_source_edit(context, entry, pair[0], new_seen)
-        # An anchor or a tag sits between the node start and the scalar token, and neither can
-        # survive the replacement: the anchor is relocated to whichever alias still needs the
-        # old value, and a leftover tag would retype the new hash on the next read.
-        start = span.start if seen.anchor is None and seen.tag is None else seen.start
+        start = _replaced_scalar_start(context, seen, span)
         return _SourceEdit(start, _scalar_source_end(raw_meta, seen, span), new_seen)
     if seen is not None:
         raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
@@ -634,9 +702,7 @@ def _append_seen_anchor_relocations(
         ]
         if untouched_aliases:
             alias = untouched_aliases[0]
-            relocation = _SourceEdit(
-                alias.start, alias.end, f"&{anchored.anchor} {anchored.source}"
-            )
+            relocation = _SourceEdit(alias.start, alias.end, anchored.source)
             edits.append(relocation)
             edited_spans.add((relocation.start, relocation.end))
 
@@ -757,7 +823,7 @@ def _plan_entry_edit(
         anchored = _AnchoredSeen(
             seen.anchor,
             seen.start,
-            _anchored_seen_source(context.raw_meta, seen, span, old_seen),
+            _anchored_seen_source(context, seen, span, old_seen),
         )
     edit = _seen_source_edit(context, entry_occurrence, seen, span, new_seen_source)
     return _EntryEdit(edit, anchored)

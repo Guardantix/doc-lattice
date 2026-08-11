@@ -19,9 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `reconcile` quotes a replacement hash that would not reload as a string, keeps a `derives_from`
   list reached through a YAML alias or a merge key editable in the plain `<<` and the explicitly
   tagged spelling alike, updates a `seen` member whose key is written as an alias instead of
-  appending a second one, preserves the type of a relocated non-string `seen` anchor, and no
-  longer rewrites an alias bound to a later definition of a reused anchor name or to an entry the
-  same run already updated.
+  appending a second one, preserves the type of a relocated non-string `seen` anchor along with
+  any explicit tag it carries, and no longer rewrites an alias bound to a later definition of a
+  reused anchor name or to an entry the same run already updated.
 - `reconcile` indents a newly inserted `seen` to the column the entry's mapping was opened at and
   appends it after a multi-line flow value, so an entry written with an explicit key, an anchor or
   a tag on its list line, or a flow tail stays parseable. Replacing an empty `seen` targets the
