@@ -78,7 +78,9 @@ def _null_seen_source_edit(
 def _flow_mapping_has_trailing_comma(raw_meta: str, entry: MappingNode) -> bool:
     _, final_value = entry.value[-1]
     trailing_content = raw_meta[final_value.end_mark.index : entry.end_mark.index - 1]
-    return trailing_content.lstrip().startswith(",")
+    # This begins after the final parsed value, so hashes in this segment introduce comments.
+    without_comments = "".join(line.partition("#")[0] for line in trailing_content.splitlines())
+    return "," in without_comments
 
 
 def _seen_source_edit(raw_meta: str, entry: MappingNode, new_seen: str) -> _SourceEdit:

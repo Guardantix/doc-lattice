@@ -193,6 +193,16 @@ def test_apply_reconcile_adds_seen_to_flow_mapping_with_commented_trailing_comma
     assert applied == {"a#x"}
 
 
+def test_apply_reconcile_adds_seen_after_comment_before_flow_mapping_trailing_comma():
+    text = "---\nid: d\nderives_from:\n- {ref: a#x # keep\n   ,}\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n- {ref: a#x # keep\n   , seen: new}\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "new"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
 def test_apply_reconcile_no_match_leaves_text_and_reports_nothing():
     # A ref edited away between load and write no longer matches the plan key.
     text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
