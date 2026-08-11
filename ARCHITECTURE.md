@@ -430,9 +430,11 @@ loaded document back out. Those are implementation details of a dependency the p
 declares by floor alone, and a change to how ruamel accounts for marks would move every span this
 module measures.
 **Decision:** `reconcile.py` depends on `ruamel.yaml.events`, `ruamel.yaml.tokens`, and
-`start_mark.index`/`end_mark.index` semantics as a deliberate compatibility surface, verified
-against 0.18 and 0.19, and the dependency is bounded to that verified range rather than pinned to
-one release. Each read builds its own loader, since a shared instance carries document state
+`start_mark.index`/`end_mark.index`/`start_mark.column` semantics as a deliberate compatibility
+surface, verified against 0.18 and 0.19, and the dependency is bounded to that verified range
+rather than pinned to one release. Where an event mark and a token mark disagree, the token is
+authoritative: a node's own mark starts at an anchor or a tag, while the scanner's block-mapping
+start and value indicator give the indentation and the `:` an edit has to align to. Each read builds its own loader, since a shared instance carries document state
 (`YAML.version`, and the reader and scanner bound to one document) whose reset behavior is itself
 version dependent. Every rewrite is reparsed and compared against the intended document before it
 is staged, so a mis-measured span is refused rather than published.

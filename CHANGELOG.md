@@ -17,8 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   list reached through a YAML alias or a root merge key editable, preserves the type of a
   relocated non-string `seen` anchor, and no longer rewrites an alias bound to a later definition
   of a reused anchor name or to an entry the same run already updated.
-- `reconcile` indents a newly inserted `seen` to the entry's own key column and appends it after a
-  multi-line flow value, so explicit-key and flow-tailed entries stay parseable.
+- `reconcile` indents a newly inserted `seen` to the column the entry's mapping was opened at and
+  appends it after a multi-line flow value, so an entry written with an explicit key, an anchor or
+  a tag on its list line, or a flow tail stays parseable. Replacing an empty `seen` targets the
+  value indicator itself, so a colon inside a comment on the key no longer misplaces the hash.
 - `reconcile` reads every document through its own loader, so one file's `%YAML` directive can no
   longer change how a later file's hash is quoted, and it quotes a replacement the document's own
   YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,

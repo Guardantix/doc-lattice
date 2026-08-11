@@ -193,6 +193,21 @@ def test_apply_reconcile_replaces_null_seen_without_moving_comment():
     assert applied == {"a#x"}
 
 
+def test_apply_reconcile_replaces_a_null_seen_whose_key_comment_holds_a_colon():
+    # An explicit key can carry a comment between the key and its value indicator, so the
+    # first colon after the key is not necessarily the one that opens the value.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    ? seen # why: blank\n    :\n---\nbody\n"
+    expected = (
+        "---\nid: d\nderives_from:\n  - ref: a#x\n    ? seen # why: blank\n    : new\n---\nbody\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "new"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "new"
+
+
 def test_apply_reconcile_replaces_inline_flow_null_without_corrupting_frontmatter():
     text = "---\nid: d\nderives_from:\n- {ref: a#x, seen: }\n---\nbody\n"
     expected = "---\nid: d\nderives_from:\n- {ref: a#x, seen: newhash}\n---\nbody\n"
@@ -848,6 +863,23 @@ def test_apply_reconcile_inserts_seen_into_an_explicit_key_entry():
     # the key indentation is the mapping's own column rather than the first key's.
     text = "---\nid: d\nderives_from:\n  - ? ref\n    : a#x\n---\nbody\n"
     expected = "---\nid: d\nderives_from:\n  - ? ref\n    : a#x\n    seen: newhash\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["newhash"]
+
+
+@pytest.mark.parametrize("entry_property", ["&edge", "!!map"])
+def test_apply_reconcile_indents_seen_under_an_entry_line_property(entry_property: str):
+    # An anchor or a tag on the sequence line starts the mapping node above and left of its
+    # first key, so the node's own start mark is not the column a new key belongs at.
+    text = f"---\nid: d\nderives_from:\n  - {entry_property}\n      ref: a#x\n---\nbody\n"
+    expected = (
+        f"---\nid: d\nderives_from:\n  - {entry_property}\n"
+        "      ref: a#x\n      seen: newhash\n---\nbody\n"
+    )
 
     out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
 

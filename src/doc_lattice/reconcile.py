@@ -23,7 +23,7 @@ from ruamel.yaml.events import (
     SequenceEndEvent,
     SequenceStartEvent,
 )
-from ruamel.yaml.tokens import ScalarToken, Token
+from ruamel.yaml.tokens import BlockMappingStartToken, ScalarToken, Token, ValueToken
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
@@ -115,9 +115,42 @@ class _ScalarSpan:
     end: int
 
 
+@dataclass(frozen=True, slots=True)
+class _BlockMappingIndent:
+    start: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenMarks:
+    """Source positions the parse events do not carry, read off the token stream instead.
+
+    Attributes:
+        scalar_spans: Span of each scalar token, which excludes the anchor, tag, and quotes
+            or block header an event's own marks enclose.
+        block_mapping_indents: Opening offset and indentation column of each block mapping,
+            which is where the mapping was opened rather than where its node starts.
+        value_indicators: Offset of each ``:`` that opens a mapping value.
+    """
+
+    scalar_spans: tuple[_ScalarSpan, ...]
+    block_mapping_indents: tuple[_BlockMappingIndent, ...]
+    value_indicators: tuple[int, ...]
+
+
 type _YamlOccurrence = (
     _ScalarOccurrence | _AliasOccurrence | _MappingOccurrence | _SequenceOccurrence
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceContext:
+    """The frontmatter source text and the two views of it the planners read."""
+
+    raw_meta: str
+    root: _YamlOccurrence
+    marks: _TokenMarks
+    version: tuple[int, int] | None
 
 
 def _yaml() -> YAML:
@@ -207,11 +240,19 @@ def _source_occurrence_tree(events: list[Event]) -> _YamlOccurrence:
     raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
 
 
-def _scalar_spans(tokens: list[Token]) -> tuple[_ScalarSpan, ...]:
-    return tuple(
-        _ScalarSpan(token.start_mark.index, token.end_mark.index)
-        for token in tokens
-        if isinstance(token, ScalarToken)
+def _token_marks(tokens: list[Token]) -> _TokenMarks:
+    return _TokenMarks(
+        tuple(
+            _ScalarSpan(token.start_mark.index, token.end_mark.index)
+            for token in tokens
+            if isinstance(token, ScalarToken)
+        ),
+        tuple(
+            _BlockMappingIndent(token.start_mark.index, token.start_mark.column)
+            for token in tokens
+            if isinstance(token, BlockMappingStartToken)
+        ),
+        tuple(token.start_mark.index for token in tokens if isinstance(token, ValueToken)),
     )
 
 
@@ -309,13 +350,19 @@ def _resolved_mapping_member(
 
 
 def _null_seen_source_edit(
-    raw_meta: str,
+    context: _SourceContext,
     entry: _MappingOccurrence,
     seen_key: _ScalarOccurrence,
     new_seen: str,
 ) -> _SourceEdit:
-    colon_at = raw_meta.find(":", seen_key.end, entry.end)
-    if colon_at == -1:
+    raw_meta = context.raw_meta
+    # Only the scanner's value indicator reliably opens the value: an explicit key may carry
+    # a comment between the key and its `:`, and a colon inside that comment is not one.
+    colon_at = next(
+        (index for index in context.marks.value_indicators if seen_key.end <= index < entry.end),
+        None,
+    )
+    if colon_at is None:
         raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
     value_start = colon_at + 1
     boundary = entry.end - 1 if entry.flow_style else entry.end
@@ -437,17 +484,32 @@ def _line_start_after(raw_meta: str, index: int) -> int:
     return len(raw_meta) if newline == -1 else newline + 1
 
 
-def _column_at(raw_meta: str, index: int) -> int:
-    return index - (raw_meta.rfind("\n", 0, index) + 1)
+def _block_mapping_indent(marks: _TokenMarks, entry: _MappingOccurrence) -> int:
+    """Return the column a block mapping's own keys are indented to.
+
+    A node's start mark is its first character, which is not the key column whenever an
+    anchor or a tag precedes the first key, nor when an explicit-key entry starts at its `?`
+    indicator one indent short of the key. The scanner opens the mapping at its indentation
+    in every one of those shapes, so its own mark is the only column an appended key can
+    safely take.
+    """
+    for indent in marks.block_mapping_indents:
+        if entry.start <= indent.start < entry.end:
+            return indent.column
+    # The caller has already narrowed to a non-flow mapping, and the scanner opens every one
+    # of those, so this refuses a shape only a mark-accounting change could produce.
+    msg = "frontmatter derives_from entry is malformed; cannot reconcile"
+    raise UnreadableDocError(msg)  # pragma: no cover
 
 
 def _seen_source_edit(
-    raw_meta: str,
+    context: _SourceContext,
     entry: _MappingOccurrence,
     seen: _YamlOccurrence | None,
     span: _ScalarSpan | None,
     new_seen: str,
 ) -> _SourceEdit:
+    raw_meta = context.raw_meta
     if isinstance(seen, _AliasOccurrence):
         return _SourceEdit(seen.start, seen.end, new_seen)
     if isinstance(seen, _ScalarOccurrence):
@@ -455,7 +517,7 @@ def _seen_source_edit(
             pair = _mapping_pair(entry, "seen")
             if pair is None:
                 raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
-            return _null_seen_source_edit(raw_meta, entry, pair[0], new_seen)
+            return _null_seen_source_edit(context, entry, pair[0], new_seen)
         # An anchor or a tag sits between the node start and the scalar token, and neither can
         # survive the replacement: the anchor is relocated to whichever alias still needs the
         # old value, and a leftover tag would retype the new hash on the next read.
@@ -470,10 +532,8 @@ def _seen_source_edit(
         else:
             separator = ", "
         return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
-    # The mapping's own start column is the key indentation. The first key's column is not:
-    # an explicit-key entry starts at its `?` indicator, one indent short of the key itself.
     insert_at = _line_start_after(raw_meta, _entry_content_end(entry))
-    replacement = f"{' ' * _column_at(raw_meta, entry.start)}seen: {new_seen}\n"
+    replacement = f"{' ' * _block_mapping_indent(context.marks, entry)}seen: {new_seen}\n"
     return _SourceEdit(insert_at, insert_at, replacement)
 
 
@@ -563,16 +623,6 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
 
 
 @dataclass(frozen=True, slots=True)
-class _SourceContext:
-    """The frontmatter source text and the two views of it the planners read."""
-
-    raw_meta: str
-    root: _YamlOccurrence
-    scalar_spans: tuple[_ScalarSpan, ...]
-    version: tuple[int, int] | None
-
-
-@dataclass(frozen=True, slots=True)
 class _EntryEdit:
     edit: _SourceEdit | None
     anchored: _AnchoredSeen | None
@@ -631,7 +681,11 @@ def _plan_entry_edit(
             _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source), None
         )
     seen = _mapping_value_occurrence(entry_occurrence, "seen")
-    span = _scalar_span(seen, context.scalar_spans) if isinstance(seen, _ScalarOccurrence) else None
+    span = (
+        _scalar_span(seen, context.marks.scalar_spans)
+        if isinstance(seen, _ScalarOccurrence)
+        else None
+    )
     anchored = None
     if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
         anchored = _AnchoredSeen(
@@ -639,7 +693,7 @@ def _plan_entry_edit(
             seen.start,
             _anchored_seen_source(context.raw_meta, seen, span, old_seen),
         )
-    edit = _seen_source_edit(context.raw_meta, entry_occurrence, seen, span, new_seen_source)
+    edit = _seen_source_edit(context, entry_occurrence, seen, span, new_seen_source)
     return _EntryEdit(edit, anchored)
 
 
@@ -827,7 +881,7 @@ def apply_reconcile(
     context = _SourceContext(
         raw_meta,
         _source_occurrence_tree(events),
-        _scalar_spans(list(_yaml().scan(raw_meta))),
+        _token_marks(list(_yaml().scan(raw_meta))),
         _document_version(events),
     )
     entry_occurrences = _derives_from_occurrences(context.root, entries)
