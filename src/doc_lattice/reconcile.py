@@ -268,20 +268,6 @@ def _token_marks(tokens: list[Token]) -> _TokenMarks:
     )
 
 
-def _mapping_pair(
-    mapping: _MappingOccurrence, name: str
-) -> tuple[_ScalarOccurrence, _YamlOccurrence] | None:
-    for key, value in mapping.value:
-        if isinstance(key, _ScalarOccurrence) and key.value == name:
-            return key, value
-    return None
-
-
-def _mapping_value_occurrence(mapping: _MappingOccurrence, name: str) -> _YamlOccurrence | None:
-    pair = _mapping_pair(mapping, name)
-    return None if pair is None else pair[1]
-
-
 def _walk_occurrences(occurrence: _YamlOccurrence) -> Iterator[_YamlOccurrence]:
     yield occurrence
     if isinstance(occurrence, _MappingOccurrence):
@@ -327,6 +313,30 @@ def _resolve_occurrence(root: _YamlOccurrence, occurrence: _YamlOccurrence) -> _
     return preceding[-1] if preceding else occurrence
 
 
+def _mapping_pair(
+    root: _YamlOccurrence, mapping: _MappingOccurrence, name: str
+) -> tuple[_YamlOccurrence, _YamlOccurrence] | None:
+    """Return the pair whose key names ``name``, following an alias spelling of that key.
+
+    A key written as an alias is the string its definition holds, so the loaded mapping can
+    carry a member that source never spells out. The pair keeps the mapping's own key
+    occurrence rather than the definition it resolves to, since only that occurrence sits
+    where an edit can be measured from.
+    """
+    for key, value in mapping.value:
+        resolved = _resolve_occurrence(root, key)
+        if isinstance(resolved, _ScalarOccurrence) and resolved.value == name:
+            return key, value
+    return None
+
+
+def _mapping_value_occurrence(
+    root: _YamlOccurrence, mapping: _MappingOccurrence, name: str
+) -> _YamlOccurrence | None:
+    pair = _mapping_pair(root, mapping, name)
+    return None if pair is None else pair[1]
+
+
 def _is_merge_key(key: _YamlOccurrence) -> bool:
     """Report whether a mapping key is one the loader flattens into its mapping.
 
@@ -362,7 +372,7 @@ def _resolved_mapping_member(
     """
     if mapping.start in visited:
         return None
-    pair = _mapping_pair(mapping, name)
+    pair = _mapping_pair(root, mapping, name)
     if pair is not None:
         return _resolve_occurrence(root, pair[1])
     for key, value in mapping.value:
@@ -389,7 +399,7 @@ def _value_indicator_after(marks: _TokenMarks, key_end: int, limit: int) -> int 
 def _null_seen_source_edit(
     context: _SourceContext,
     entry: _MappingOccurrence,
-    seen_key: _ScalarOccurrence,
+    seen_key: _YamlOccurrence,
     new_seen: str,
 ) -> _SourceEdit:
     raw_meta = context.raw_meta
@@ -407,7 +417,7 @@ def _null_seen_source_edit(
 def _missing_value_indicator_edit(
     context: _SourceContext,
     entry: _MappingOccurrence,
-    seen_key: _ScalarOccurrence,
+    seen_key: _YamlOccurrence,
     new_seen: str,
 ) -> _SourceEdit:
     """Plan the edit for an explicit ``seen`` key written without a value indicator.
@@ -570,7 +580,7 @@ def _seen_source_edit(
         return _SourceEdit(seen.start, seen.end, new_seen)
     if isinstance(seen, _ScalarOccurrence):
         if span is None:
-            pair = _mapping_pair(entry, "seen")
+            pair = _mapping_pair(context.root, entry, "seen")
             if pair is None:
                 raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
             return _null_seen_source_edit(context, entry, pair[0], new_seen)
@@ -736,7 +746,7 @@ def _plan_entry_edit(
         return _EntryEdit(
             _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source), None
         )
-    seen = _mapping_value_occurrence(entry_occurrence, "seen")
+    seen = _mapping_value_occurrence(context.root, entry_occurrence, "seen")
     span = (
         _scalar_span(seen, context.marks.scalar_spans)
         if isinstance(seen, _ScalarOccurrence)

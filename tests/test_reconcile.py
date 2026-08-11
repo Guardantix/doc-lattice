@@ -865,6 +865,32 @@ def test_apply_reconcile_updates_a_merge_provided_list_beside_an_aliased_key():
     assert applied == {"a#x"}
 
 
+@pytest.mark.parametrize("seen_key", ["? *name\n    : old", "*name : old"])
+def test_apply_reconcile_updates_a_seen_key_spelled_through_an_alias(seen_key: str):
+    # The loader resolves an alias key to the string it names, so an entry can hold a `seen`
+    # member whose key is never spelled `seen` in source. Appending a second one would make
+    # the document unreconcilable rather than update the value the loader reads.
+    text = (
+        f"---\nid: d\ntitle: &name seen\nderives_from:\n  - ref: a#x\n    {seen_key}\n---\nbody\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "title: &name seen\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"    {seen_key.replace('old', 'newhash')}\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
 def test_apply_reconcile_refuses_source_edits_that_do_not_reload_as_planned(
     monkeypatch: pytest.MonkeyPatch,
 ):
