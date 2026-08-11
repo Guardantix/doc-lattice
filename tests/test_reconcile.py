@@ -1245,6 +1245,71 @@ def test_apply_reconcile_updates_an_entry_inheriting_a_seen_that_is_appended():
     ]
 
 
+@pytest.mark.parametrize(
+    ("entry", "edited"),
+    [
+        pytest.param(
+            "  - &edge !!omap\n    - ref: a#x\n    - seen: old\n",
+            "  - &edge !!omap\n    - ref: a#x\n    - seen: newhash\n",
+            id="spelled",
+        ),
+        pytest.param(
+            "  - &edge !!omap\n    - ref: a#x\n",
+            "  - &edge !!omap\n    - ref: a#x\n    - seen: newhash\n",
+            id="appended",
+        ),
+    ],
+)
+def test_apply_reconcile_updates_an_entry_inheriting_seen_from_an_ordered_map(
+    entry: str, edited: str
+):
+    # The loader merges an ordered map as the one-pair mappings it is written as, so the
+    # entry inheriting from one reads whichever `seen` this rewrite writes into it, whether
+    # that hash replaces one already there or is appended as a new item.
+    text = f"---\nid: d\nderives_from:\n{entry}  - <<: *edge\n    ref: b#y\n---\nbody\n"
+    expected = f"---\nid: d\nderives_from:\n{edited}  - <<: *edge\n    ref: b#y\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
+def test_apply_reconcile_updates_entries_inheriting_an_ordered_map_seen_through_a_chain():
+    # The entry that merges the ordered map is itself merged by a third, so the hash written
+    # into the ordered map reaches both and the expectation has to carry it that far.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - &edge !!omap\n"
+        "    - ref: a#x\n"
+        "    - seen: old\n"
+        "  - &mid\n"
+        "    <<: *edge\n"
+        "    ref: b#y\n"
+        "  - <<: *mid\n"
+        "    ref: c#z\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    - seen: old\n", "    - seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+        "newhash",
+    ]
+
+
 def test_apply_reconcile_leaves_an_entry_spelling_its_own_seen_beside_a_merge_alone():
     # This entry names the same anchored scalar the updated entry does, but through a pair
     # of its own rather than through a merge, so the anchor it reads is untouched and it

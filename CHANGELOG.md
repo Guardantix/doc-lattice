@@ -51,7 +51,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   alias to an entry the same run already updated is left alone when that entry is written as an
   ordered map, an ordered map item spelled as an alias takes the pair it stands for rather than
   the shared definition it names being edited, and an entry inheriting `seen` from another through
-  a `<<` merge key no longer makes the reparse gate refuse an otherwise correct rewrite.
+  a `<<` merge key no longer makes the reparse gate refuse an otherwise correct rewrite. That last
+  case holds when the entry inherited from is written as an ordered map, which a merge key reads
+  through as the one-pair mappings its source spells rather than as the entry itself.
 - Frontmatter tagging a scalar with a type its value cannot build, such as `!!int oops`, is
   reported as unreadable frontmatter naming the file. It previously escaped `check` and `build` as
   an internal `ValueError`, since only `reconcile` recognized that failure.
