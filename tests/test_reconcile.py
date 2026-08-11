@@ -285,6 +285,85 @@ def test_apply_reconcile_replaces_targeted_scalar_alias_not_its_anchor():
     ]
 
 
+def test_apply_reconcile_relocates_targeted_seen_anchor_to_untargeted_alias():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared oldhash\n"
+        "  - ref: b#y\n"
+        "    seen: *shared\n"
+        "  - ref: c#z\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        "    seen: &shared oldhash\n"
+        "  - ref: c#z\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "oldhash",
+        "oldhash",
+    ]
+
+
+def test_apply_reconcile_drops_seen_anchor_when_all_alias_consumers_are_targeted():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared oldhash\n"
+        "  - ref: b#y\n"
+        "    seen: *shared\n"
+        "  - ref: c#z\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: new-a\n"
+        "  - ref: b#y\n"
+        "    seen: new-b\n"
+        "  - ref: c#z\n"
+        "    seen: new-c\n"
+        "---\n"
+        "body\n"
+    )
+    updates = {"a#x": "new-a", "b#y": "new-b", "c#z": "new-c"}
+
+    out, applied = apply_reconcile(text, updates, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == set(updates)
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "new-a",
+        "new-b",
+        "new-c",
+    ]
+
+
 def test_apply_reconcile_adds_seen_to_flow_mapping_with_commented_trailing_comma():
     text = "---\nid: d\nderives_from:\n- {ref: a#x, # keep\n  }\n---\nbody\n"
     expected = "---\nid: d\nderives_from:\n- {ref: a#x, # keep\n  seen: new}\n---\nbody\n"

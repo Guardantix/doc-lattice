@@ -61,6 +61,7 @@ class _ScalarOccurrence:
     column: int
     value: str
     style: str | None
+    anchor: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,7 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
                 event.start_mark.column,
                 event.value,
                 event.style,
+                event.anchor,
             ),
             index + 1,
         )
@@ -215,6 +217,50 @@ def _scalar_span(
     return matches[0]
 
 
+def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _ScalarSpan) -> int:
+    if occurrence.style in {"|", ">"} and raw_meta[span.end - 1 : span.end] == "\n":
+        return span.end - 1
+    return span.end
+
+
+def _retained_seen_aliases(
+    entries: list[object],
+    occurrences: tuple[_YamlOccurrence, ...],
+    updates: dict[str, str],
+    anchor: str,
+) -> list[_AliasOccurrence]:
+    aliases: list[_AliasOccurrence] = []
+    for entry, occurrence in zip(entries, occurrences, strict=True):
+        if not isinstance(entry, MutableMapping) or not isinstance(occurrence, _MappingOccurrence):
+            continue
+        seen = _mapping_value_occurrence(occurrence, "seen")
+        if not isinstance(seen, _AliasOccurrence) or seen.anchor != anchor:
+            continue
+        ref = entry.get("ref")
+        alias_will_change = (
+            isinstance(ref, str) and ref in updates and entry.get("seen") != updates[ref]
+        )
+        if not alias_will_change:
+            aliases.append(seen)
+    return aliases
+
+
+def _seen_anchor_relocation_edit(
+    raw_meta: str,
+    seen: _ScalarOccurrence,
+    scalar_spans: tuple[_ScalarSpan, ...],
+    alias: _AliasOccurrence,
+) -> _SourceEdit:
+    if seen.anchor is None:
+        raise UnreadableDocError("frontmatter derives_from entry seen anchor is malformed")
+    span = _scalar_span(seen, scalar_spans)
+    if span is None:
+        scalar_source = "null"
+    else:
+        scalar_source = raw_meta[span.start : _scalar_source_end(raw_meta, seen, span)]
+    return _SourceEdit(alias.start, alias.end, f"&{seen.anchor} {scalar_source}")
+
+
 def _seen_source_edit(
     raw_meta: str,
     entry: _MappingOccurrence,
@@ -231,10 +277,8 @@ def _seen_source_edit(
             if seen_key is None:
                 raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
             return _null_seen_source_edit(raw_meta, entry, seen_key, new_seen)
-        end = span.end
-        if seen.style in {"|", ">"} and raw_meta[end - 1 : end] == "\n":
-            end -= 1
-        return _SourceEdit(span.start, end, new_seen)
+        start = seen.start if seen.anchor is not None else span.start
+        return _SourceEdit(start, _scalar_source_end(raw_meta, seen, span), new_seen)
     if seen is not None:
         raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
     if entry.flow_style:
@@ -415,6 +459,24 @@ def apply_reconcile(  # noqa: PLR0912
         if ref in updates:
             new_seen = updates[ref]
             if entry.get("seen") != new_seen:
+                seen = (
+                    _mapping_value_occurrence(entry_occurrence, "seen")
+                    if isinstance(entry_occurrence, _MappingOccurrence)
+                    else None
+                )
+                if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
+                    retained_aliases = _retained_seen_aliases(
+                        entries, entry_occurrences.value, updates, seen.anchor
+                    )
+                    if retained_aliases:
+                        edits.append(
+                            _seen_anchor_relocation_edit(
+                                raw_meta,
+                                seen,
+                                scalar_spans,
+                                retained_aliases[0],
+                            )
+                        )
                 edit = (
                     _mapping_alias_source_edit(raw_meta, entry_occurrence, new_seen)
                     if isinstance(entry_occurrence, _AliasOccurrence)
