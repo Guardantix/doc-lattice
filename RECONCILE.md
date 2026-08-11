@@ -41,14 +41,15 @@ whether rollback completed or recovery evidence remains.
 
 ## Write mechanics and durability
 
-`reconcile` re-reads each downstream file fresh at write time, rewrites only the targeted `seen`
-scalar through round-trip YAML (preserving your body, key order, comments, and list indentation),
-and retains the exact source and replacement bytes. A real run stages exact before and after images, publishes a
-`prepared` journal, fingerprints each destination immediately before its replacement, and rejects
-a changed destination as a conflict. The full batch is rolled back in reverse order if a conflict
-or write/durability failure occurs before the committed marker. After every replacement is durable,
-the journal becomes `committed`; success output waits until committed cleanup and a clean
-advisory-lock release have both completed.
+`reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
+the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
+verbatim. The rewritten frontmatter is reparsed before it is staged, and a rewrite that would not
+reload as the planned edges is refused rather than written. A real run then stages exact before
+and after images, publishes a `prepared` journal, fingerprints each destination immediately
+before its replacement, and rejects a changed destination as a conflict. The full batch is rolled
+back in reverse order if a conflict or write/durability failure occurs before the committed
+marker. After every replacement is durable, the journal becomes `committed`; success output waits
+until committed cleanup and a clean advisory-lock release have both completed.
 
 Every reconcile mode holds a nonblocking advisory lock on the existing project-root directory
 through preflight, planning, and any recovery or commit. A competing invocation exits 2 with

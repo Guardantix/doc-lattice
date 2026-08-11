@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from doc_lattice import reconcile as reconcile_module
 from doc_lattice.check import check_lattice
 from doc_lattice.config import load_config
 from doc_lattice.error_types import (
@@ -514,6 +515,251 @@ def test_apply_reconcile_adds_seen_after_comment_before_flow_mapping_trailing_co
 
     assert out == expected
     assert applied == {"a#x"}
+
+
+def test_apply_reconcile_adds_seen_before_the_next_indented_list_item():
+    # An indented block entry ends at the *next* item's dash, so appending at the parsed
+    # mapping end would splice the new key into the following entry.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n  - ref: b#y\n    seen: q\n---\nbody\n"
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        "    seen: q\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "q",
+    ]
+
+
+def test_apply_reconcile_adds_seen_above_a_trailing_entry_comment():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    # keep\n"
+        "  - ref: b#y\n"
+        "    seen: q\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "    # keep\n"
+        "  - ref: b#y\n"
+        "    seen: q\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_adds_seen_after_an_entrys_trailing_block_scalar():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    note: |\n"
+        "      text\n"
+        "  - ref: b#y\n"
+        "    seen: q\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    note: |\n"
+        "      text\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        "    seen: q\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_quotes_an_all_digit_hash_so_it_reloads_as_a_string():
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+    digits = "1" * 64
+    expected = f'---\nid: d\nderives_from:\n  - ref: a#x\n    seen: "{digits}"\n---\nbody\n'
+
+    out, applied = apply_reconcile(text, {"a#x": digits}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == digits
+
+
+@pytest.mark.parametrize("source_seen", ["true", "123", "1.10"])
+def test_apply_reconcile_relocates_a_non_string_seen_anchor_without_retyping_it(
+    source_seen: str,
+):
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"    seen: &shared {source_seen}\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        f"tickets: [&shared {source_seen}]\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+@pytest.mark.filterwarnings("ignore:(?s).*duplicate anchor.*")
+def test_apply_reconcile_leaves_an_alias_bound_to_a_later_anchor_definition_alone():
+    # `*shared` reads the second definition, so relocating the first one's value onto it
+    # would silently rewrite an untargeted edge's recorded hash.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared old1\n"
+        "  - ref: b#y\n"
+        "    seen: &shared old2\n"
+        "  - ref: c#z\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        "    seen: &shared old2\n"
+        "  - ref: c#z\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_updates_an_aliased_derives_from_list():
+    text = (
+        "---\nbase: &edges\n  - ref: a#x\n    seen: old\nid: d\nderives_from: *edges\n---\nbody\n"
+    )
+    expected = (
+        "---\nbase: &edges\n  - ref: a#x\n    seen: newhash\nid: d\nderives_from: *edges\n"
+        "---\nbody\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_updates_a_merge_key_provided_derives_from_list():
+    text = (
+        "---\n"
+        "base: &shared\n"
+        "  derives_from:\n"
+        "    - ref: a#x\n"
+        "      seen: old\n"
+        "id: d\n"
+        "<<: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "base: &shared\n"
+        "  derives_from:\n"
+        "    - ref: a#x\n"
+        "      seen: newhash\n"
+        "id: d\n"
+        "<<: *shared\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_refuses_source_edits_that_do_not_reload_as_planned(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The commit transaction never re-reads what it stages, so a mis-measured span has to
+    # be refused here rather than published durably.
+    monkeypatch.setattr(
+        reconcile_module,
+        "_apply_source_edits",
+        lambda *_: "id: d\nderives_from: []\n",
+    )
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match="would not reproduce the derives_from entries"):
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+def test_apply_reconcile_refuses_source_edits_that_leave_unparseable_frontmatter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        reconcile_module,
+        "_apply_source_edits",
+        lambda *_: "id: d\n  bad: [\n",
+    )
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match=r"would leave .* unparseable"):
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
 
 
 def test_apply_reconcile_no_match_leaves_text_and_reports_nothing():

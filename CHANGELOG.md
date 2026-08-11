@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so
   two-space, column-zero, and mixed list styles no longer produce unrelated cosmetic diffs.
+- `reconcile` reparses the rewritten frontmatter before staging it and refuses a rewrite that
+  would not reload as the planned edges, so a bad source edit can no longer be published durably.
+- `reconcile` quotes a replacement hash that would not reload as a string, keeps a `derives_from`
+  list reached through a YAML alias or a root merge key editable, preserves the type of a
+  relocated non-string `seen` anchor, and no longer rewrites an alias bound to a later definition
+  of a reused anchor name.
 
 ## [4.0.0] - 2026-08-10
 
