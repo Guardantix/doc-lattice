@@ -12,6 +12,7 @@ from doc_lattice.error_types import (
     UnreadableDocError,
     ValidationError,
 )
+from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId, parse_ref
@@ -28,6 +29,14 @@ def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
 def _planned_refs(plan: dict[Path, dict[str, str]]) -> set[str]:
     """Collect every target ref across all files in a reconcile plan."""
     return {ref for updates in plan.values() for ref in updates}
+
+
+def _validated_reconcile_meta(text: str) -> NodeMeta:
+    """Reparse reconciled text through the normal typed frontmatter boundary."""
+    raw_meta, _ = split_frontmatter(text, Path("downstream.md"))
+    meta = parse_meta(raw_meta, Path("downstream.md"))
+    assert meta is not None
+    return meta
 
 
 def test_plan_rewrites_applies_updates_from_reader():
@@ -181,6 +190,99 @@ def test_apply_reconcile_replaces_null_seen_without_moving_comment():
 
     assert out == expected
     assert applied == {"a#x"}
+
+
+def test_apply_reconcile_replaces_inline_flow_null_without_corrupting_frontmatter():
+    text = "---\nid: d\nderives_from:\n- {ref: a#x, seen: }\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n- {ref: a#x, seen: newhash}\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+def test_apply_reconcile_replaces_block_scalar_without_consuming_final_newline():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "- ref: a#x\n"
+        "  seen: |-\n"
+        "    oldhash\n"
+        "tickets:\n"
+        "- T-1\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\nid: d\nderives_from:\n- ref: a#x\n  seen: newhash\ntickets:\n- T-1\n---\nbody\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    meta = _validated_reconcile_meta(out)
+    assert meta.derives_from[0].seen == "newhash"
+    assert meta.tickets == ["T-1"]
+
+
+def test_apply_reconcile_updates_each_missing_seen_mapping_alias_occurrence():
+    text = "---\nid: d\nderives_from:\n  - &edge {ref: a#x}\n  - *edge\n---\nbody\n"
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - &edge {ref: a#x, seen: newhash}\n"
+        "  - {<<: *edge, seen: newhash}\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
+def test_apply_reconcile_replaces_targeted_scalar_alias_not_its_anchor():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: b#y\n"
+        "    seen: &shared oldhash\n"
+        "  - ref: a#x\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: b#y\n"
+        "    seen: &shared oldhash\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "oldhash",
+        "newhash",
+    ]
 
 
 def test_apply_reconcile_adds_seen_to_flow_mapping_with_commented_trailing_comma():

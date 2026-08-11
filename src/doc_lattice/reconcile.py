@@ -12,7 +12,16 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
-from ruamel.yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+from ruamel.yaml.events import (
+    AliasEvent,
+    Event,
+    MappingEndEvent,
+    MappingStartEvent,
+    ScalarEvent,
+    SequenceEndEvent,
+    SequenceStartEvent,
+)
+from ruamel.yaml.tokens import ScalarToken, Token
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
@@ -45,65 +54,220 @@ class _SourceEdit:
     replacement: str
 
 
-def _mapping_value_node(mapping: MappingNode, name: str) -> Node | None:
-    for key_node, value_node in mapping.value:
-        if isinstance(key_node, ScalarNode) and key_node.value == name:
-            return value_node
+@dataclass(frozen=True, slots=True)
+class _ScalarOccurrence:
+    start: int
+    end: int
+    column: int
+    value: str
+    style: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _AliasOccurrence:
+    start: int
+    end: int
+    anchor: str
+
+
+@dataclass(frozen=True, slots=True)
+class _MappingOccurrence:
+    start: int
+    end: int
+    flow_style: bool
+    value: tuple[tuple["_YamlOccurrence", "_YamlOccurrence"], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SequenceOccurrence:
+    start: int
+    end: int
+    value: tuple["_YamlOccurrence", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ScalarSpan:
+    start: int
+    end: int
+
+
+type _YamlOccurrence = (
+    _ScalarOccurrence | _AliasOccurrence | _MappingOccurrence | _SequenceOccurrence
+)
+
+
+def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurrence, int]:
+    event = events[index]
+    if isinstance(event, ScalarEvent):
+        return (
+            _ScalarOccurrence(
+                event.start_mark.index,
+                event.end_mark.index,
+                event.start_mark.column,
+                event.value,
+                event.style,
+            ),
+            index + 1,
+        )
+    if isinstance(event, AliasEvent):
+        return (
+            _AliasOccurrence(event.start_mark.index, event.end_mark.index, event.anchor),
+            index + 1,
+        )
+    if isinstance(event, MappingStartEvent):
+        pairs: list[tuple[_YamlOccurrence, _YamlOccurrence]] = []
+        next_index = index + 1
+        while not isinstance(events[next_index], MappingEndEvent):
+            key, next_index = _parse_yaml_occurrence(events, next_index)
+            value, next_index = _parse_yaml_occurrence(events, next_index)
+            pairs.append((key, value))
+        end_event = events[next_index]
+        return (
+            _MappingOccurrence(
+                event.start_mark.index,
+                end_event.end_mark.index,
+                bool(event.flow_style),
+                tuple(pairs),
+            ),
+            next_index + 1,
+        )
+    if isinstance(event, SequenceStartEvent):
+        values: list[_YamlOccurrence] = []
+        next_index = index + 1
+        while not isinstance(events[next_index], SequenceEndEvent):
+            value, next_index = _parse_yaml_occurrence(events, next_index)
+            values.append(value)
+        end_event = events[next_index]
+        return (
+            _SequenceOccurrence(event.start_mark.index, end_event.end_mark.index, tuple(values)),
+            next_index + 1,
+        )
+    raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
+
+
+def _source_occurrence_tree(events: list[Event]) -> _YamlOccurrence:
+    for index, event in enumerate(events):
+        if isinstance(event, (ScalarEvent, AliasEvent, MappingStartEvent, SequenceStartEvent)):
+            root, _ = _parse_yaml_occurrence(events, index)
+            return root
+    raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
+
+
+def _scalar_spans(tokens: list[Token]) -> tuple[_ScalarSpan, ...]:
+    return tuple(
+        _ScalarSpan(token.start_mark.index, token.end_mark.index)
+        for token in tokens
+        if isinstance(token, ScalarToken)
+    )
+
+
+def _mapping_value_occurrence(mapping: _MappingOccurrence, name: str) -> _YamlOccurrence | None:
+    for key, value in mapping.value:
+        if isinstance(key, _ScalarOccurrence) and key.value == name:
+            return value
     return None
 
 
-def _mapping_key_node(mapping: MappingNode, name: str) -> ScalarNode | None:
-    for key_node, _ in mapping.value:
-        if isinstance(key_node, ScalarNode) and key_node.value == name:
-            return key_node
+def _mapping_key_occurrence(mapping: _MappingOccurrence, name: str) -> _ScalarOccurrence | None:
+    for key, _ in mapping.value:
+        if isinstance(key, _ScalarOccurrence) and key.value == name:
+            return key
     return None
 
 
 def _null_seen_source_edit(
-    raw_meta: str, entry: MappingNode, seen_node: Node, new_seen: str
+    raw_meta: str,
+    entry: _MappingOccurrence,
+    seen_key: _ScalarOccurrence,
+    new_seen: str,
 ) -> _SourceEdit:
-    seen_key = _mapping_key_node(entry, "seen")
-    if seen_key is None:
-        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
-    colon_at = raw_meta.find(":", seen_key.end_mark.index, seen_node.start_mark.index)
+    colon_at = raw_meta.find(":", seen_key.end, entry.end)
     if colon_at == -1:
         raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
-    line_end = raw_meta.find("\n", colon_at, seen_node.start_mark.index)
-    comment_at = raw_meta.find("#", colon_at, line_end)
-    if comment_at == -1:
-        return _SourceEdit(colon_at + 1, line_end, f" {new_seen}")
-    return _SourceEdit(colon_at + 1, comment_at, f" {new_seen} ")
+    value_start = colon_at + 1
+    boundary = entry.end - 1 if entry.flow_style else entry.end
+    markers = [raw_meta.find(marker, value_start, entry.end) for marker in ("#", "\n", ",", "}")]
+    value_end = min((marker for marker in markers if marker != -1), default=boundary)
+    suffix = " " if value_end < len(raw_meta) and raw_meta[value_end] == "#" else ""
+    return _SourceEdit(value_start, value_end, f" {new_seen}{suffix}")
 
 
-def _flow_mapping_has_trailing_comma(raw_meta: str, entry: MappingNode) -> bool:
+def _flow_mapping_has_trailing_comma(raw_meta: str, entry: _MappingOccurrence) -> bool:
     _, final_value = entry.value[-1]
-    trailing_content = raw_meta[final_value.end_mark.index : entry.end_mark.index - 1]
+    trailing_content = raw_meta[final_value.end : entry.end - 1]
     # This begins after the final parsed value, so hashes in this segment introduce comments.
     without_comments = "".join(line.partition("#")[0] for line in trailing_content.splitlines())
     return "," in without_comments
 
 
-def _seen_source_edit(raw_meta: str, entry: MappingNode, new_seen: str) -> _SourceEdit:
-    seen_node = _mapping_value_node(entry, "seen")
-    if seen_node is not None:
-        if seen_node.start_mark.index == seen_node.end_mark.index:
-            return _null_seen_source_edit(raw_meta, entry, seen_node, new_seen)
-        return _SourceEdit(seen_node.start_mark.index, seen_node.end_mark.index, new_seen)
+def _scalar_span(
+    occurrence: _ScalarOccurrence, scalar_spans: tuple[_ScalarSpan, ...]
+) -> _ScalarSpan | None:
+    matches = [
+        span
+        for span in scalar_spans
+        if occurrence.start <= span.start and span.end <= occurrence.end
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+    return matches[0]
+
+
+def _seen_source_edit(
+    raw_meta: str,
+    entry: _MappingOccurrence,
+    scalar_spans: tuple[_ScalarSpan, ...],
+    new_seen: str,
+) -> _SourceEdit:
+    seen = _mapping_value_occurrence(entry, "seen")
+    if isinstance(seen, _AliasOccurrence):
+        return _SourceEdit(seen.start, seen.end, new_seen)
+    if isinstance(seen, _ScalarOccurrence):
+        span = _scalar_span(seen, scalar_spans)
+        if span is None:
+            seen_key = _mapping_key_occurrence(entry, "seen")
+            if seen_key is None:
+                raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+            return _null_seen_source_edit(raw_meta, entry, seen_key, new_seen)
+        end = span.end
+        if seen.style in {"|", ">"} and raw_meta[end - 1 : end] == "\n":
+            end -= 1
+        return _SourceEdit(span.start, end, new_seen)
+    if seen is not None:
+        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
     if entry.flow_style:
-        insert_at = entry.end_mark.index - 1
+        insert_at = entry.end - 1
         if _flow_mapping_has_trailing_comma(raw_meta, entry):
             separator = "" if raw_meta[insert_at - 1].isspace() else " "
         else:
             separator = ", "
         return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
     first_key, _ = entry.value[0]
-    insert_at = entry.end_mark.index
-    replacement = f"{' ' * first_key.start_mark.column}seen: {new_seen}\n"
+    if not isinstance(first_key, _ScalarOccurrence):
+        raise UnreadableDocError("frontmatter derives_from entry is malformed")
+    insert_at = entry.end
+    replacement = f"{' ' * first_key.column}seen: {new_seen}\n"
     return _SourceEdit(insert_at, insert_at, replacement)
 
 
+def _mapping_alias_source_edit(
+    raw_meta: str, alias: _AliasOccurrence, new_seen: str
+) -> _SourceEdit:
+    alias_source = raw_meta[alias.start : alias.end]
+    return _SourceEdit(alias.start, alias.end, f"{{<<: {alias_source}, seen: {new_seen}}}")
+
+
 def _apply_source_edits(raw_meta: str, edits: list[_SourceEdit]) -> str:
-    for edit in sorted(edits, key=lambda item: item.start, reverse=True):
+    unique_edits: dict[tuple[int, int], _SourceEdit] = {}
+    for edit in edits:
+        span = (edit.start, edit.end)
+        existing = unique_edits.get(span)
+        if existing is not None and existing.replacement != edit.replacement:
+            raise UnreadableDocError("frontmatter aliases require conflicting seen updates")
+        unique_edits[span] = edit
+    for edit in sorted(unique_edits.values(), key=lambda item: item.start, reverse=True):
         raw_meta = raw_meta[: edit.start] + edit.replacement + raw_meta[edit.end :]
     return raw_meta
 
@@ -211,15 +375,19 @@ def apply_reconcile(  # noqa: PLR0912
         return current_file_text, set()
     # Round-trip loaders retain document-specific state, so construct one for each call.
     yaml = YAML(typ="rt")
-    node_yaml = YAML(typ="base")
     try:
         data = yaml.load(raw_meta)
-        root_node = node_yaml.compose(raw_meta)
     except YAMLError as exc:
         msg = f"cannot parse frontmatter to reconcile: {exc}"
         raise UnreadableDocError(msg) from exc
     if data is None:
         return current_file_text, set()
+    try:
+        source_root = _source_occurrence_tree(list(YAML(typ="base").parse(raw_meta)))
+        scalar_spans = _scalar_spans(list(YAML(typ="base").scan(raw_meta)))
+    except YAMLError as exc:
+        msg = f"cannot parse frontmatter to reconcile: {exc}"
+        raise UnreadableDocError(msg) from exc
     if not isinstance(data, MutableMapping):
         raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
     entries = data.get("derives_from")
@@ -227,16 +395,19 @@ def apply_reconcile(  # noqa: PLR0912
         return current_file_text, set()
     if not isinstance(entries, list):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
-    if not isinstance(root_node, MappingNode):
+    if not isinstance(source_root, _MappingOccurrence):
         raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
-    entry_nodes = _mapping_value_node(root_node, "derives_from")
-    if not isinstance(entry_nodes, SequenceNode) or len(entry_nodes.value) != len(entries):
+    entry_occurrences = _mapping_value_occurrence(source_root, "derives_from")
+    if not isinstance(entry_occurrences, _SequenceOccurrence) or len(
+        entry_occurrences.value
+    ) != len(entries):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
-
     edits: list[_SourceEdit] = []
     applied: set[str] = set()
-    for entry, entry_node in zip(entries, entry_nodes.value, strict=True):
-        if not isinstance(entry, MutableMapping) or not isinstance(entry_node, MappingNode):
+    for entry, entry_occurrence in zip(entries, entry_occurrences.value, strict=True):
+        if not isinstance(entry, MutableMapping) or not isinstance(
+            entry_occurrence, (_MappingOccurrence, _AliasOccurrence)
+        ):
             raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
         ref = entry.get("ref")
         if not isinstance(ref, str):
@@ -244,7 +415,12 @@ def apply_reconcile(  # noqa: PLR0912
         if ref in updates:
             new_seen = updates[ref]
             if entry.get("seen") != new_seen:
-                edits.append(_seen_source_edit(raw_meta, entry_node, new_seen))
+                edit = (
+                    _mapping_alias_source_edit(raw_meta, entry_occurrence, new_seen)
+                    if isinstance(entry_occurrence, _AliasOccurrence)
+                    else _seen_source_edit(raw_meta, entry_occurrence, scalar_spans, new_seen)
+                )
+                edits.append(edit)
                 applied.add(ref)
     if not applied:
         return current_file_text, applied
