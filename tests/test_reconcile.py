@@ -208,6 +208,43 @@ def test_apply_reconcile_replaces_a_null_seen_whose_key_comment_holds_a_colon():
     assert _validated_reconcile_meta(out).derives_from[0].seen == "new"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    ? seen\n---\nbody\n",
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    ? seen\n    : new\n---\nbody\n",
+            id="trailing-key",
+        ),
+        pytest.param(
+            "---\nid: d\nderives_from:\n  - ? seen\n    ref: a#x\n---\nbody\n",
+            "---\nid: d\nderives_from:\n  - ? seen\n    : new\n    ref: a#x\n---\nbody\n",
+            id="leading-key",
+        ),
+        pytest.param(
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    ? seen # note\n---\nbody\n",
+            "---\nid: d\nderives_from:\n  - ref: a#x\n    ? seen # note\n    : new\n---\nbody\n",
+            id="commented-key",
+        ),
+        pytest.param(
+            "---\nid: d\nderives_from:\n  - {ref: a#x, ? seen}\n---\nbody\n",
+            "---\nid: d\nderives_from:\n  - {ref: a#x, ? seen: new}\n---\nbody\n",
+            id="flow-entry",
+        ),
+    ],
+)
+def test_apply_reconcile_writes_the_value_indicator_an_explicit_seen_key_lacks(
+    text: str, expected: str
+):
+    # `? seen` alone is a key whose value is null, so there is no `:` to write after and the
+    # next pair's indicator is the first one in the entry.
+    out, applied = apply_reconcile(text, {"a#x": "new"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "new"
+
+
 def test_apply_reconcile_replaces_inline_flow_null_without_corrupting_frontmatter():
     text = "---\nid: d\nderives_from:\n- {ref: a#x, seen: }\n---\nbody\n"
     expected = "---\nid: d\nderives_from:\n- {ref: a#x, seen: newhash}\n---\nbody\n"

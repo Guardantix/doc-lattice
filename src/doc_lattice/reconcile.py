@@ -23,7 +23,13 @@ from ruamel.yaml.events import (
     SequenceEndEvent,
     SequenceStartEvent,
 )
-from ruamel.yaml.tokens import BlockMappingStartToken, ScalarToken, Token, ValueToken
+from ruamel.yaml.tokens import (
+    BlockMappingStartToken,
+    KeyToken,
+    ScalarToken,
+    Token,
+    ValueToken,
+)
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter
@@ -130,11 +136,13 @@ class _TokenMarks:
             or block header an event's own marks enclose.
         block_mapping_indents: Opening offset and indentation column of each block mapping,
             which is where the mapping was opened rather than where its node starts.
+        key_indicators: Offset at which each mapping key opens, in source order.
         value_indicators: Offset of each ``:`` that opens a mapping value.
     """
 
     scalar_spans: tuple[_ScalarSpan, ...]
     block_mapping_indents: tuple[_BlockMappingIndent, ...]
+    key_indicators: tuple[int, ...]
     value_indicators: tuple[int, ...]
 
 
@@ -252,6 +260,7 @@ def _token_marks(tokens: list[Token]) -> _TokenMarks:
             for token in tokens
             if isinstance(token, BlockMappingStartToken)
         ),
+        tuple(token.start_mark.index for token in tokens if isinstance(token, KeyToken)),
         tuple(token.start_mark.index for token in tokens if isinstance(token, ValueToken)),
     )
 
@@ -356,20 +365,44 @@ def _null_seen_source_edit(
     new_seen: str,
 ) -> _SourceEdit:
     raw_meta = context.raw_meta
-    # Only the scanner's value indicator reliably opens the value: an explicit key may carry
-    # a comment between the key and its `:`, and a colon inside that comment is not one.
+    # Only the scanner's own indicators are reliable here. A colon inside a comment on an
+    # explicit key is not a value indicator, and the search stops at the next key so a
+    # ``seen`` written without any indicator cannot claim the following pair's.
+    limit = min(
+        next((index for index in context.marks.key_indicators if index > seen_key.end), entry.end),
+        entry.end,
+    )
     colon_at = next(
-        (index for index in context.marks.value_indicators if seen_key.end <= index < entry.end),
-        None,
+        (index for index in context.marks.value_indicators if seen_key.end <= index < limit), None
     )
     if colon_at is None:
-        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+        return _missing_value_indicator_edit(context, entry, seen_key, new_seen)
     value_start = colon_at + 1
     boundary = entry.end - 1 if entry.flow_style else entry.end
     markers = [raw_meta.find(marker, value_start, entry.end) for marker in ("#", "\n", ",", "}")]
     value_end = min((marker for marker in markers if marker != -1), default=boundary)
     suffix = " " if value_end < len(raw_meta) and raw_meta[value_end] == "#" else ""
     return _SourceEdit(value_start, value_end, f" {new_seen}{suffix}")
+
+
+def _missing_value_indicator_edit(
+    context: _SourceContext,
+    entry: _MappingOccurrence,
+    seen_key: _ScalarOccurrence,
+    new_seen: str,
+) -> _SourceEdit:
+    """Plan the edit for an explicit ``seen`` key written without a value indicator.
+
+    ``? seen`` on its own is a key whose value is null, so the hash needs a ``:`` written
+    for it rather than written after one. A flow entry takes the indicator directly after
+    the key; a block entry needs it to open the next line at the mapping's own indentation,
+    which is also where any comment trailing the key stays behind.
+    """
+    if entry.flow_style:
+        return _SourceEdit(seen_key.end, seen_key.end, f": {new_seen}")
+    insert_at = _line_start_after(context.raw_meta, seen_key.end)
+    indent = " " * _block_mapping_indent(context.marks, entry)
+    return _SourceEdit(insert_at, insert_at, f"{indent}: {new_seen}\n")
 
 
 def _flow_mapping_has_trailing_comma(raw_meta: str, entry: _MappingOccurrence) -> bool:

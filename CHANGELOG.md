@@ -20,7 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `reconcile` indents a newly inserted `seen` to the column the entry's mapping was opened at and
   appends it after a multi-line flow value, so an entry written with an explicit key, an anchor or
   a tag on its list line, or a flow tail stays parseable. Replacing an empty `seen` targets the
-  value indicator itself, so a colon inside a comment on the key no longer misplaces the hash.
+  value indicator itself, so a colon inside a comment on the key no longer misplaces the hash,
+  and an explicit `seen` key written without any `:` gets one written for it instead of borrowing
+  the next pair's.
 - `reconcile` reads every document through its own loader, so one file's `%YAML` directive can no
   longer change how a later file's hash is quoted, and it quotes a replacement the document's own
   YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,
