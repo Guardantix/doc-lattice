@@ -16,6 +16,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `reconcile` reparses the rewritten frontmatter before staging it and refuses a rewrite that
   would not reload as the planned frontmatter, edges and every other key alike, so a bad source
   edit can no longer be published durably.
+- `reconcile` now reads through ruamel's pure Python parser explicitly. Installing the optional
+  `ruamel.yaml.clib` accelerator, which any other package in an environment may pull in, otherwise
+  switched the loader to a C parser reporting different source marks, which moved where reconcile
+  measured its edits.
+- A replacement or relocated `seen` value holding a character YAML admits only as an escape, such
+  as a C1 control or a next-line, is now written back as one instead of raw, so a document that
+  loads cleanly can no longer be refused by the reparse gate on every run.
+- `.doc-lattice.yml` holding a tagged scalar its type cannot accept, such as `!!int oops`, now
+  reports a config error naming the file instead of exiting with a traceback, matching how the
+  same typo has been reported in document frontmatter.
+- Reconcile's malformed-frontmatter refusals now name the document they came from, so a failed
+  `reconcile --all` says which file to fix.
 - `reconcile` quotes a replacement hash that would not reload as a string, keeps a `derives_from`
   list reached through a YAML alias or a merge key editable in the plain `<<` and the explicitly
   tagged spelling alike, updates a `seen` member whose key is written as an alias instead of

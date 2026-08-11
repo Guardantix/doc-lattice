@@ -249,6 +249,17 @@ def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
     assert "cannot parse config" in str(exc.value)
 
 
+def test_config_with_an_unconstructible_tagged_scalar_raises_config_error(tmp_path: Path):
+    # A tagged scalar its type cannot accept fails inside the constructor rather than the
+    # parser, so it raises a bare builtin. The config boundary catches that family too, so
+    # the same typo reports the file it is in instead of reaching the CLI as a traceback.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: !!int oops\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "cannot parse config" in str(exc.value)
+
+
 def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
     config_path = tmp_path / ".doc-lattice.yml"
     config_path.write_text("docs_roots: [unclosed\n", encoding="utf-8")

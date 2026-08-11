@@ -173,7 +173,8 @@ OK            billing-integration-guide -> api-design#pagination
 ```
 
 That edit → `check` → review → `reconcile` loop is the whole workflow. `reconcile` is the
-only command that writes to your docs, and it only ever rewrites the `seen` scalar.
+only command that writes to your docs, and it only ever rewrites `seen` values and the
+aliases that read them.
 
 ## Quick start
 

@@ -6,9 +6,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
 
 from .error_types import ConfigError
+from .frontmatter_parser import YAML_LOAD_ERRORS
 from .path_utils import safe_resolve
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
@@ -118,7 +118,7 @@ def _read_yaml(path: Path) -> object:
     _YAML.version = None
     try:
         data = _YAML.load(text)
-    except YAMLError as exc:
+    except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse config {path}: {exc}"
         raise ConfigError(msg) from exc
     return data if data is not None else {}

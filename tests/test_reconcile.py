@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from ruamel.yaml import YAML
+from ruamel.yaml.parser import Parser
 
 from doc_lattice import reconcile as reconcile_module
 from doc_lattice.check import check_lattice
@@ -648,6 +649,14 @@ def test_apply_reconcile_relocates_anchored_null_with_null_semantics(source_seen
     ]
 
 
+def test_reconcile_reads_through_the_pure_python_parser():
+    # Installing the optional `ruamel.yaml.clib` accelerator, which any other package may pull
+    # in, otherwise switches a safe loader to the C parser. That parser reports coarser source
+    # marks and exposes no scanner, so every offset this module measures would move: the
+    # implementation is part of the compatibility surface AD-26 records, not a detail.
+    assert reconcile_module._yaml().Parser is Parser
+
+
 def test_apply_reconcile_relocates_block_seen_anchor_into_flow_collection_safely():
     text = (
         "---\n"
@@ -678,6 +687,78 @@ def test_apply_reconcile_relocates_block_seen_anchor_into_flow_collection_safely
     meta = _validated_reconcile_meta(out)
     assert meta.derives_from[0].seen == "newhash"
     assert meta.tickets == ["old value\n"]
+
+
+@pytest.mark.parametrize(
+    "char",
+    ["\x7f", "\x85", "\x9f", "\u2028", "\u2029", "\ufeff", "\t"],
+)
+def test_apply_reconcile_relocates_a_seen_anchor_holding_an_unprintable_character(char: str):
+    # A character YAML admits only as an escape has to be written back as one: emitting it
+    # raw would either leave the document unparseable or fold the value across lines, and
+    # either way the reparse gate would refuse a rewrite the document itself allows.
+    escape = "\\t" if char == "\t" else f"\\u{ord(char):04x}"
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f'    seen: &shared "old{escape}"\n'
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        f'tickets: [&shared "old{escape}"]\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    meta = _validated_reconcile_meta(out)
+    assert meta.derives_from[0].seen == "newhash"
+    assert meta.tickets == [f"old{char}"]
+
+
+def test_apply_reconcile_relocates_a_multiline_tagged_seen_anchor_in_its_own_type():
+    # Only an explicit tag makes a multiline scalar anything but a string, so the relocated
+    # value keeps that tag and takes its scalar quoted rather than being rendered through
+    # `str`, which would retype it and lose the whole rewrite to the reparse gate.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared !!int |\n"
+        "      42\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        'tickets: [&shared !!int "42\\n"]\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _reloaded_tickets(out) == [42]
 
 
 def test_apply_reconcile_adds_seen_to_flow_mapping_with_commented_trailing_comma():

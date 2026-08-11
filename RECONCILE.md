@@ -45,9 +45,10 @@ whether rollback completed or recovery evidence remains.
 the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
 verbatim. A `seen` written as a block scalar is the one place a comment moves rather than staying
 put: its header, the comment on it, and its contents are one span, so the comment is rewritten
-onto the line the new hash is written on. Two edits land outside that scalar. The first is an anchor relocation: when the `seen`
-being replaced carries an anchor that another key still reads through an alias, reconcile writes
-the anchor and its old value at that alias site, so the other key keeps the value it had instead
+onto the line the new hash is written on. Two edits land outside that scalar. The first is an
+anchor relocation: when the `seen` being replaced carries an anchor that another key still reads
+through an alias, reconcile writes the anchor and its old value at that alias site, so the other
+key keeps the value it had instead
 of picking up the new hash. The second covers an entry, or the pair holding its `seen`, that is
 written as an alias to a node something else also reads: the edit lands at that alias site rather
 than in the shared node, so the entry takes the new hash and everything else reading the node

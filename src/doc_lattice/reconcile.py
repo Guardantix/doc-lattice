@@ -5,7 +5,6 @@ caller injects, and ``reconcile_transaction`` owns durable publication of the re
 planned here.
 """
 
-import json
 from collections import defaultdict
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -48,6 +47,22 @@ _PLAIN_SCALAR_UNSAFE_PREFIX = tuple("-?&*!|>'\"%@`")
 # The scalar styles whose token opens on a header line of its own rather than on the value.
 _BLOCK_SCALAR_STYLES = frozenset({"|", ">"})
 
+# YAML's `c-printable` set as inclusive codepoint ranges: everything a document may spell
+# without an escape. A double-quoted scalar carrying anything else is rejected outright.
+_YAML_PRINTABLE_RANGES = ((0x20, 0x7E), (0xA0, 0xD7FF), (0xE000, 0xFFFD), (0x10000, 0x10FFFF))
+
+# Printable codepoints a relocated value still cannot carry raw. The first three are line
+# breaks the 1.1 resolver folds, which would split a scalar across lines, and the last is a
+# byte-order mark, which YAML admits only at the start of a stream.
+_YAML_UNQUOTABLE = frozenset({0x85, 0x2028, 0x2029, 0xFEFF})
+
+# The largest codepoint YAML's four-digit `\uXXXX` escape names; above it takes `\UXXXXXXXX`.
+_MAX_SHORT_ESCAPE = 0xFFFF
+
+# The named escapes a double-quoted scalar spells the whitespace controls with, which are
+# more legible than the numeric escape the rest of the non-printable set takes.
+_YAML_NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
+
 # The tag the loader flattens a mapping key on, which the plain `<<` scalar resolves to.
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
@@ -80,7 +95,6 @@ class _SourceEdit:
 class _ScalarOccurrence:
     start: int
     end: int
-    column: int
     value: str
     style: str | None
     anchor: str | None
@@ -219,6 +233,7 @@ class _SourceContext:
     anchors: _AnchorIndex
     marks: _TokenMarks
     version: tuple[int, int] | None
+    source: Path
 
 
 def _yaml() -> YAML:
@@ -230,8 +245,15 @@ def _yaml() -> YAML:
     frontmatter would keep resolving scalars its way for every later read (exactly as
     ``frontmatter_parser`` guards against), and a shared instance binds its reader and scanner
     to one document at a time, so two concurrent callers would measure each other's offsets.
+
+    The pure-Python implementation is requested explicitly. A plain safe loader silently
+    switches to the C parser whenever the optional ``ruamel.yaml.clib`` accelerator is
+    installed, which any other package may pull in, and that parser reports coarser source
+    marks and exposes no scanner at all. Every offset this module measures comes off those
+    marks, so the accelerator would change where each edit lands rather than only how fast it
+    is found. AD-26 records the mark accounting as the compatibility surface.
     """
-    return YAML(typ="safe")
+    return YAML(typ="safe", pure=True)
 
 
 def _document_version(events: list[Event]) -> tuple[int, int] | None:
@@ -249,7 +271,6 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
             _ScalarOccurrence(
                 event.start_mark.index,
                 event.end_mark.index,
-                event.start_mark.column,
                 event.value,
                 event.style,
                 event.anchor,
@@ -634,18 +655,17 @@ def _final_member_end(entry: _MappingOccurrence | _SequenceOccurrence) -> int:
     return entry.value[-1].end
 
 
-def _scalar_span(
-    occurrence: _ScalarOccurrence, scalar_spans: tuple[_TokenSpan, ...]
-) -> _TokenSpan | None:
+def _scalar_span(occurrence: _ScalarOccurrence, context: "_SourceContext") -> _TokenSpan | None:
     matches = [
         span
-        for span in scalar_spans
+        for span in context.marks.scalar_spans
         if occurrence.start <= span.start and span.end <= occurrence.end
     ]
     if not matches:
         return None
     if len(matches) != 1:
-        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+        msg = f"frontmatter derives_from entry seen is malformed in {context.source}"
+        raise UnreadableDocError(msg)
     return matches[0]
 
 
@@ -691,6 +711,43 @@ def _probe_loader(version: tuple[int, int] | None) -> YAML:
     return loader
 
 
+def _is_yaml_printable(code: int) -> bool:
+    """Report whether a codepoint may stand raw inside a double-quoted scalar.
+
+    Tab, line feed and carriage return fall outside the printable ranges here and take an
+    escape instead, which keeps a relocated value on the single line it has to occupy.
+    """
+    if code in _YAML_UNQUOTABLE:
+        return False
+    return any(low <= code <= high for low, high in _YAML_PRINTABLE_RANGES)
+
+
+def _double_quoted(value: str) -> str:
+    """Return ``value`` as a YAML double-quoted scalar that reloads as the same string.
+
+    JSON's own quoting is not enough: it escapes only the C0 controls below ``#x20`` along
+    with ``"`` and ``\\``, and passes ``#x7f``, the C1 controls and ``#x85`` through raw,
+    each of which YAML either rejects outright or reads as a line break. Anything outside
+    the printable set is written as YAML's ``\\uXXXX`` or ``\\UXXXXXXXX`` escape, which both
+    YAML versions read back as the codepoint it names.
+    """
+    quoted = ['"']
+    for char in value:
+        code = ord(char)
+        if char in '"\\':
+            quoted.append(f"\\{char}")
+        elif (named := _YAML_NAMED_ESCAPES.get(char)) is not None:
+            quoted.append(named)
+        elif _is_yaml_printable(code):
+            quoted.append(char)
+        elif code <= _MAX_SHORT_ESCAPE:
+            quoted.append(f"\\u{code:04x}")
+        else:
+            quoted.append(f"\\U{code:08x}")
+    quoted.append('"')
+    return "".join(quoted)
+
+
 def _seen_scalar_source(new_seen: str, loader: YAML) -> str:
     """Return source text for ``new_seen`` that reloads as the same string.
 
@@ -710,7 +767,7 @@ def _seen_scalar_source(new_seen: str, loader: YAML) -> str:
                 return new_seen
         except YAML_LOAD_ERRORS:
             pass
-    return json.dumps(new_seen, ensure_ascii=False)
+    return _double_quoted(new_seen)
 
 
 def _properties_of(marks: _TokenMarks, span: _TokenSpan) -> _ScalarProperties | None:
@@ -740,7 +797,9 @@ def _anchored_seen_source(
     value a string is redundant once it is; every other scalar keeps its own source, since
     rendering it through ``str`` would retype it too. Each part is taken from its own token
     rather than sliced whole, because a line break between them would put the relocated value
-    on a line of its own.
+    on a line of its own. A multi-line source cannot relocate as written, but only an
+    explicit tag makes a multi-line scalar anything but a string, so quoting the scalar's own
+    text under that same tag keeps the value's type without keeping its lines.
     """
     anchor = f"&{seen.anchor}"
     if value is None:
@@ -748,13 +807,14 @@ def _anchored_seen_source(
     if isinstance(value, bool):
         return f"{anchor} {'true' if value else 'false'}"
     if not isinstance(value, str) and span is not None:
+        tag_span = _explicit_tag_span(context.marks, span)
+        tag = "" if tag_span is None else f"{context.raw_meta[tag_span.start : tag_span.end]} "
         source = context.raw_meta[span.start : _scalar_source_end(context.raw_meta, seen, span)]
         if "\n" not in source:
-            tag_span = _explicit_tag_span(context.marks, span)
-            if tag_span is None:
-                return f"{anchor} {source}"
-            return f"{anchor} {context.raw_meta[tag_span.start : tag_span.end]} {source}"
-    return f"{anchor} {json.dumps(str(value), ensure_ascii=False)}"
+            return f"{anchor} {tag}{source}"
+        if tag:
+            return f"{anchor} {tag}{_double_quoted(seen.value)}"
+    return f"{anchor} {_double_quoted(str(value))}"
 
 
 def _is_implicit_null(occurrence: _YamlOccurrence) -> bool:
@@ -881,7 +941,8 @@ def _seen_source_edits(
             span.start, _scalar_source_end(context.raw_meta, seen, span), f"{new_seen}{comment}"
         )
         return [*_property_removal_edits(context, span), value]
-    raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+    msg = f"frontmatter derives_from entry seen is malformed in {context.source}"
+    raise UnreadableDocError(msg)
 
 
 def _appended_seen_edit(
@@ -1046,11 +1107,11 @@ class _ReconcilePlan:
     entry_updates: tuple[_EntryUpdate, ...]
 
 
-def _load_frontmatter_data(raw_meta: str) -> object:
+def _load_frontmatter_data(raw_meta: str, source: Path) -> object:
     try:
         return _yaml().load(raw_meta)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"cannot parse frontmatter to reconcile: {exc}"
+        msg = f"cannot parse frontmatter of {source} to reconcile: {exc}"
         raise UnreadableDocError(msg) from exc
 
 
@@ -1067,18 +1128,22 @@ def _derives_from_occurrences(
     if not isinstance(root, (_MappingOccurrence, _SequenceOccurrence)):
         # Only a collection loads as the mapping the caller has already seen, so this refuses
         # a root shape only a mark-accounting change could produce.
-        msg = "frontmatter source is not a mapping; cannot reconcile"
+        msg = f"frontmatter of {context.source} is not written as a mapping; cannot reconcile"
         raise UnreadableDocError(msg)  # pragma: no cover
     occurrences = _resolved_member(context.anchors, root, "derives_from")
     if not isinstance(occurrences, _SequenceOccurrence):
-        raise UnreadableDocError("frontmatter derives_from source is not a list; cannot reconcile")
+        msg = (
+            f"frontmatter derives_from of {context.source} is not written as a list;"
+            " cannot reconcile"
+        )
+        raise UnreadableDocError(msg)
     if len(occurrences.value) != len(entries):  # pragma: no cover
         # The loaded list and the source list are two readings of the same text, so this
         # refuses a disagreement only a mark-accounting change could produce, rather than
         # measuring an entry's offsets against a different entry.
         msg = (
-            f"frontmatter derives_from reads as {len(entries)} entries but is written as"
-            f" {len(occurrences.value)}; cannot reconcile"
+            f"frontmatter derives_from of {context.source} reads as {len(entries)} entries but is"
+            f" written as {len(occurrences.value)}; cannot reconcile"
         )
         raise UnreadableDocError(msg)
     return occurrences
@@ -1133,11 +1198,7 @@ def _plan_entry_edit(
     if pair.alias is not None:
         return _EntryEdit((_omap_item_alias_source_edit(pair.alias, new_seen_source),), None)
     seen = pair.value
-    span = (
-        _scalar_span(seen, context.marks.scalar_spans)
-        if isinstance(seen, _ScalarOccurrence)
-        else None
-    )
+    span = _scalar_span(seen, context) if isinstance(seen, _ScalarOccurrence) else None
     anchored = None
     if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
         anchored = _AnchoredSeen(
@@ -1170,10 +1231,12 @@ def _plan_source_edits(
         if not isinstance(entry, MutableMapping) or not isinstance(
             entry_occurrence, (_MappingOccurrence, _SequenceOccurrence, _AliasOccurrence)
         ):
-            raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
+            msg = f"frontmatter derives_from entry in {context.source} is not a mapping"
+            raise UnreadableDocError(msg)
         ref = entry.get("ref")
         if not isinstance(ref, str):
-            raise UnreadableDocError("frontmatter derives_from entry ref is not a string")
+            msg = f"frontmatter derives_from entry ref in {context.source} is not a string"
+            raise UnreadableDocError(msg)
         old_seen = entry.get("seen")
         new_seen = updates.get(ref)
         if new_seen is None or old_seen == new_seen:
@@ -1257,8 +1320,12 @@ def _merge_inherited_updates(
     return inherited
 
 
-def _expected_frontmatter(raw_meta: str, entry_updates: tuple[_EntryUpdate, ...]) -> object:
+def _expected_frontmatter(data: MutableMapping, entry_updates: tuple[_EntryUpdate, ...]) -> object:
     """Return the loaded document the rewritten frontmatter has to reproduce.
+
+    The caller's own load is updated in place rather than the frontmatter being loaded a
+    second time: nothing reads it again once the edits are planned, and the two loads would
+    only ever build the same document twice per rewritten file.
 
     An entry reached through an alias is the same loaded object as its definition, so
     assigning in place keeps every view of it in step with what the reload will see. An alias
@@ -1267,15 +1334,14 @@ def _expected_frontmatter(raw_meta: str, entry_updates: tuple[_EntryUpdate, ...]
     merge key is a copy the loader flattened rather than a shared object, so it carries an
     update of its own, planned by ``_merge_inherited_updates``.
     """
-    expected = _yaml().load(raw_meta)
-    entries = expected["derives_from"]
+    entries = data["derives_from"]
     for update in entry_updates:
         entry = entries[update.index]
         if update.detached:
             entry = dict(entry)
             entries[update.index] = entry
         entry["seen"] = update.new_seen
-    return expected
+    return data
 
 
 def reconcile(
@@ -1383,16 +1449,18 @@ def apply_reconcile(
     if parts is None:
         return current_file_text, set()
     raw_meta = parts.raw_meta
-    data = _load_frontmatter_data(raw_meta)
+    data = _load_frontmatter_data(raw_meta, source)
     if data is None:
         return current_file_text, set()
     if not isinstance(data, MutableMapping):
-        raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
+        msg = f"frontmatter of {source} is not a mapping; cannot reconcile"
+        raise UnreadableDocError(msg)
     entries = data.get("derives_from")
     if entries is None:
         return current_file_text, set()
     if not isinstance(entries, list):
-        raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
+        msg = f"frontmatter derives_from of {source} is not a list; cannot reconcile"
+        raise UnreadableDocError(msg)
     events = list(_yaml().parse(raw_meta))
     source_root = _source_occurrence_tree(events)
     context = _SourceContext(
@@ -1401,6 +1469,7 @@ def apply_reconcile(
         _build_anchor_index(source_root),
         _token_marks(list(_yaml().scan(raw_meta))),
         _document_version(events),
+        source,
     )
     entry_occurrences = _derives_from_occurrences(context, entries)
     plan = _plan_source_edits(context, entries, entry_occurrences, updates)
@@ -1409,7 +1478,7 @@ def apply_reconcile(
     edits = list(plan.edits)
     _append_seen_anchor_relocations(context.anchors, list(plan.anchored_seen), edits)
     new_meta = _apply_source_edits(raw_meta, edits)
-    _verify_reconciled_meta(new_meta, _expected_frontmatter(raw_meta, plan.entry_updates), source)
+    _verify_reconciled_meta(new_meta, _expected_frontmatter(data, plan.entry_updates), source)
     rewritten = (
         f"{parts.prefix}{parts.open_fence}\n{new_meta}"
         f"{parts.close_fence}{parts.close_fence_newline}{parts.body}"

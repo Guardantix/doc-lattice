@@ -15,10 +15,11 @@ _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 _YAML = YAML(typ="safe")
 
-# Everything a safe load of user-authored frontmatter can raise. Beyond the YAMLError family
-# the scanner and parser raise, a constructor building a tagged scalar its type cannot accept
+# Everything a safe load of user-authored YAML can raise. Beyond the YAMLError family the
+# scanner and parser raise, a constructor building a tagged scalar its type cannot accept
 # raises the builtin that construction failed with, so `!!int oops` reaches a caller as a bare
-# ValueError. Every module loading frontmatter catches this family and reports a ProjectError.
+# ValueError. Every module loading a user's YAML catches this family and reports a
+# ProjectError, so the same typo is a clean error wherever the user writes it.
 YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
 
 

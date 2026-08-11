@@ -431,21 +431,27 @@ declares by floor alone, and a change to how ruamel accounts for marks would mov
 module measures.
 **Decision:** `reconcile.py` depends on `ruamel.yaml.events`, `ruamel.yaml.tokens`, and
 `start_mark.index`/`end_mark.index`/`start_mark.column` semantics as a deliberate compatibility
-surface, verified against 0.18 and 0.19, and the dependency is bounded to that verified range
-rather than pinned to one release. Where an event mark and a token mark disagree, the token is
-authoritative: a node's own mark starts at an anchor or a tag, while the scanner's block-mapping
-start, key indicator, and value indicator give the indentation, the pair boundary, and the `:` an
-edit has to align to. A node's properties are part of that surface too. A parsed node reports an
-explicit tag as its resolved URI and reports none for a scalar the loader resolves implicitly,
-which is how this module recognizes a merge key and a tagged scalar the way the constructor does
-rather than by re-resolving either itself. A node written tag first opens at its anchor rather
-than at its tag, so the tag token, paired with the scalar token that follows it, is what bounds an
-edit that has to overwrite or reproduce one. Each read builds its own loader, since a shared
-instance carries document state (`YAML.version`, and the reader and scanner bound to one
-document) whose reset behavior is itself version dependent. Every rewrite is reparsed and compared
-against the intended document before it is staged, so a mis-measured span is refused rather than
-published.
+surface, and the dependency is bounded to a verified range rather than pinned to one release. The
+implementation is part of that surface, not only the version: every loader this module builds asks
+for the pure Python parser explicitly, because a plain safe loader switches to the C one whenever
+the optional `ruamel.yaml.clib` accelerator is installed, which any other package in a user's
+environment may pull in, and that parser reports coarser marks and exposes no scanner at all. The
+`yaml-compatibility` CI leg runs the suite at the floor and the ceiling of the declared range with
+that accelerator present, so the range is verified rather than asserted. Where an event mark and a
+token mark disagree, the token is authoritative: a node's own mark starts at an anchor or a tag,
+while the scanner's block-mapping start, key indicator, and value indicator give the indentation,
+the pair boundary, and the `:` an edit has to align to. A node's properties are part of that
+surface too. A parsed node reports an explicit tag as its resolved URI and reports none for a
+scalar the loader resolves implicitly, which is how this module recognizes a merge key and a
+tagged scalar the way the constructor does rather than by re-resolving either itself. A node
+written tag first opens at its anchor rather than at its tag, so the tag token, paired with the
+scalar token that follows it, is what bounds an edit that has to overwrite or reproduce one. Each
+read builds its own loader, since a shared instance carries document state (`YAML.version`, and
+the reader and scanner bound to one document) whose reset behavior is itself version dependent.
+Every rewrite is reparsed and compared against the intended document before it is staged, so a
+mis-measured span is refused rather than published.
 **Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source
-suite as its evidence, in the same spirit as the AD-13 parser pin, not a floor edit. If a future
-release changes mark accounting, the reparse gate turns a silent corruption into a refusal to
-write, which is the failure mode this engine prefers.
+suite as its evidence, in the same spirit as the AD-13 parser pin, not a floor edit, and widening
+the declared range means widening the compatibility leg's matrix with it. If a future release
+changes mark accounting, the reparse gate turns a silent corruption into a refusal to write, which
+is the failure mode this engine prefers.
