@@ -895,6 +895,30 @@ def test_apply_reconcile_adds_seen_after_an_entry_key_with_an_empty_value():
     assert applied == {"a#x"}
 
 
+@pytest.mark.parametrize(
+    ("tail", "appended_after"),
+    [
+        pytest.param("    ? note\n    :\n", "    ? note\n    :\n", id="explicit-indicator"),
+        pytest.param("    ? note # c\n    :\n", "    ? note # c\n    :\n", id="commented-key"),
+        pytest.param("    ? note\n", "    ? note\n", id="no-indicator"),
+    ],
+)
+def test_apply_reconcile_appends_seen_after_a_trailing_explicit_null(
+    tail: str, appended_after: str
+):
+    # An explicit null spells its value as a `:` on its own line, so the key's end is not
+    # where that pair's source stops.
+    text = f"---\nid: d\nderives_from:\n  - ref: a#x\n{tail}---\nbody\n"
+    expected = (
+        f"---\nid: d\nderives_from:\n  - ref: a#x\n{appended_after}    seen: newhash\n---\nbody\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
 def test_apply_reconcile_inserts_seen_into_an_explicit_key_entry():
     # An explicit-key entry starts at its `?` indicator, one indent short of the key, so
     # the key indentation is the mapping's own column rather than the first key's.

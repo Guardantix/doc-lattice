@@ -29,8 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matching how an anchored one was already handled.
 - `reconcile` refuses a self-referential frontmatter document as a clean error rather than a
   `RecursionError` traceback, quotes a replacement hash a YAML constructor rejects instead of
-  letting that error escape, and appends a missing `seen` after an entry key whose value is empty
-  rather than splicing it into the next entry.
+  letting that error escape, and appends a missing `seen` after an entry key whose value is empty,
+  including the explicit `? key` and `:` spelling of that value, rather than splicing it into the
+  next entry or between the key and its own value indicator.
 
 ## [4.0.0] - 2026-08-10
 

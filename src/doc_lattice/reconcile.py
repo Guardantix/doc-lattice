@@ -358,6 +358,17 @@ def _resolved_mapping_member(
     return None
 
 
+def _value_indicator_after(marks: _TokenMarks, key_end: int, limit: int) -> int | None:
+    """Return the offset of the ``:`` opening the value of the key ending at ``key_end``.
+
+    Only the scanner's own indicators are reliable here: a colon inside a comment on an
+    explicit key is not one. The search stops at the next key, so a key written without any
+    indicator, which is a valid spelling of a null value, cannot claim the following pair's.
+    """
+    bound = min(next((index for index in marks.key_indicators if index > key_end), limit), limit)
+    return next((index for index in marks.value_indicators if key_end <= index < bound), None)
+
+
 def _null_seen_source_edit(
     context: _SourceContext,
     entry: _MappingOccurrence,
@@ -365,16 +376,7 @@ def _null_seen_source_edit(
     new_seen: str,
 ) -> _SourceEdit:
     raw_meta = context.raw_meta
-    # Only the scanner's own indicators are reliable here. A colon inside a comment on an
-    # explicit key is not a value indicator, and the search stops at the next key so a
-    # ``seen`` written without any indicator cannot claim the following pair's.
-    limit = min(
-        next((index for index in context.marks.key_indicators if index > seen_key.end), entry.end),
-        entry.end,
-    )
-    colon_at = next(
-        (index for index in context.marks.value_indicators if seen_key.end <= index < limit), None
-    )
+    colon_at = _value_indicator_after(context.marks, seen_key.end, entry.end)
     if colon_at is None:
         return _missing_value_indicator_edit(context, entry, seen_key, new_seen)
     value_start = colon_at + 1
@@ -490,23 +492,27 @@ def _is_implicit_null(occurrence: _YamlOccurrence) -> bool:
     )
 
 
-def _entry_content_end(occurrence: _YamlOccurrence) -> int:
+def _entry_content_end(marks: _TokenMarks, occurrence: _YamlOccurrence) -> int:
     """Return the offset just past an occurrence's final scalar or alias token.
 
     A block collection's own end mark is the *next* token's offset, which for a sequence
     entry is the following item's dash, so the last leaf is the only reliable anchor for
     an append. A flow collection ends at its own closing bracket, and recursing past that
-    into its final leaf would anchor the append inside a collection that is still open. An
-    implicit null occupies no source of its own and carries that same next-token mark, so a
-    key whose value is empty anchors the append at the key instead.
+    into its final leaf would anchor the append inside a collection that is still open. A
+    null value carries that same next-token mark and holds no source of its own beyond the
+    ``:`` that opens it, so a key whose value is empty anchors the append at that indicator,
+    or at the key itself when the value is spelled without one.
     """
     if isinstance(occurrence, (_MappingOccurrence, _SequenceOccurrence)) and occurrence.flow_style:
         return occurrence.end
     if isinstance(occurrence, _MappingOccurrence) and occurrence.value:
         key, value = occurrence.value[-1]
-        return key.end if _is_implicit_null(value) else _entry_content_end(value)
+        if not _is_implicit_null(value):
+            return _entry_content_end(marks, value)
+        indicator = _value_indicator_after(marks, key.end, occurrence.end)
+        return key.end if indicator is None else indicator + 1
     if isinstance(occurrence, _SequenceOccurrence) and occurrence.value:
-        return _entry_content_end(occurrence.value[-1])
+        return _entry_content_end(marks, occurrence.value[-1])
     return occurrence.end
 
 
@@ -565,7 +571,7 @@ def _seen_source_edit(
         else:
             separator = ", "
         return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
-    insert_at = _line_start_after(raw_meta, _entry_content_end(entry))
+    insert_at = _line_start_after(raw_meta, _entry_content_end(context.marks, entry))
     replacement = f"{' ' * _block_mapping_indent(context.marks, entry)}seen: {new_seen}\n"
     return _SourceEdit(insert_at, insert_at, replacement)
 
