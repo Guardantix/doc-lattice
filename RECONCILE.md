@@ -1,9 +1,9 @@
 # Reconcile: selectors, transactions, and recovery
 
 `reconcile` is the only command that writes to your docs, and it only ever rewrites `seen` values
-and the aliases that read them. This document covers the selector forms, the read-only dry-run preview and its JSON plan,
-the write and durability mechanics of a real run, automatic and manual recovery, and the
-transaction artifacts reconcile leaves behind.
+and the aliases that read them. This document covers the selector forms, the read-only dry-run
+preview and its JSON plan, the write and durability mechanics of a real run, automatic and manual
+recovery, and the transaction artifacts reconcile leaves behind.
 
 ## Selectors
 
