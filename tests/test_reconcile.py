@@ -230,16 +230,12 @@ def test_apply_reconcile_replaces_block_scalar_without_consuming_final_newline()
     assert meta.tickets == ["T-1"]
 
 
-def test_apply_reconcile_updates_each_missing_seen_mapping_alias_occurrence():
+def test_apply_reconcile_leaves_an_alias_of_an_updated_entry_untouched():
+    # The alias reads its value through the anchor, which this run already updated, so
+    # rewriting the alias site would only churn a line the author wrote deliberately.
     text = "---\nid: d\nderives_from:\n  - &edge {ref: a#x}\n  - *edge\n---\nbody\n"
     expected = (
-        "---\n"
-        "id: d\n"
-        "derives_from:\n"
-        "  - &edge {ref: a#x, seen: newhash}\n"
-        "  - {<<: *edge, seen: newhash}\n"
-        "---\n"
-        "body\n"
+        "---\nid: d\nderives_from:\n  - &edge {ref: a#x, seen: newhash}\n  - *edge\n---\nbody\n"
     )
 
     out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
@@ -746,6 +742,109 @@ def test_apply_reconcile_refuses_source_edits_that_do_not_reload_as_planned(
 
     with pytest.raises(UnreadableDocError, match="would not reproduce the derives_from entries"):
         apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+def test_apply_reconcile_refuses_source_edits_that_change_other_frontmatter_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Relocating a seen anchor edits bytes outside derives_from, so checking the edges
+    # alone would let a mis-measured relocation span through to a durable write.
+    monkeypatch.setattr(
+        reconcile_module,
+        "_apply_source_edits",
+        lambda *_: "id: d\nderives_from:\n  - ref: a#x\n    seen: newhash\ntickets: [T-2]\n",
+    )
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\ntickets: [T-1]\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match="frontmatter outside derives_from"):
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+def test_apply_reconcile_refuses_a_tagged_seen_scalar_as_a_project_error():
+    # Splicing a hash under an inherited !!int tag makes the constructor raise a bare
+    # ValueError, which would reach the CLI as a traceback instead of a clean exit.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: !!int 12\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match=r"would leave .* unparseable"):
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+def test_apply_reconcile_inserts_seen_into_an_explicit_key_entry():
+    # An explicit-key entry starts at its `?` indicator, one indent short of the key, so
+    # the key indentation is the mapping's own column rather than the first key's.
+    text = "---\nid: d\nderives_from:\n  - ? ref\n    : a#x\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n  - ? ref\n    : a#x\n    seen: newhash\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["newhash"]
+
+
+def test_apply_reconcile_inserts_seen_after_a_multi_line_flow_value():
+    # The entry's last leaf sits inside a flow sequence that closes on its own line, so
+    # anchoring the insert to that leaf would splice the new key into an open collection.
+    text = (
+        "---\nid: d\nderives_from:\n  - ref: a#x\n    tags: [\n      a,\n      b\n    ]\n"
+        "---\nbody\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    tags: [\n"
+        "      a,\n"
+        "      b\n"
+        "    ]\n"
+        "    seen: newhash\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_does_not_leak_a_yaml_directive_into_the_next_document():
+    # YAML.version is sticky, and under 1.1 semantics an octal-looking hash would be
+    # spliced in bare and then reload as an integer on the next check.
+    directive = (
+        "---\n%YAML 1.1\n--- !!map\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+    )
+    apply_reconcile(directive, {"a#x": "newhash"}, Path("directive.md"))
+
+    text = "---\nid: e\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+    out, applied = apply_reconcile(text, {"a#x": "0o17"}, Path("downstream.md"))
+
+    assert out == '---\nid: e\nderives_from:\n  - ref: a#x\n    seen: "0o17"\n---\nbody\n'
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["0o17"]
+
+
+def test_apply_reconcile_expands_an_alias_whose_anchor_is_not_a_reconciled_entry():
+    # Nothing else updates this anchor, so the alias site needs its own seen; editing the
+    # anchor instead would silently change the unrelated key that defines it.
+    text = "---\nid: d\nshared: &edge {ref: a#x, seen: old}\nderives_from:\n  - *edge\n---\nbody\n"
+    expected = (
+        "---\n"
+        "id: d\n"
+        "shared: &edge {ref: a#x, seen: old}\n"
+        "derives_from:\n"
+        "  - {<<: *edge, seen: newhash}\n"
+        "---\n"
+        "body\n"
+    )
+
+    # NodeMeta forbids the extra key, so this shape only reaches the defensive write path
+    # after a concurrent edit; the point is that `shared` keeps its own value.
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
 
 
 def test_apply_reconcile_refuses_source_edits_that_leave_unparseable_frontmatter(

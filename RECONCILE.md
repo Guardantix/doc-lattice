@@ -44,7 +44,8 @@ whether rollback completed or recovery evidence remains.
 `reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
 the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
 verbatim. The rewritten frontmatter is reparsed before it is staged, and a rewrite that would not
-reload as the planned edges is refused rather than written. A real run then stages exact before
+reload as the whole planned frontmatter, edges and every other key alike, is refused rather than
+written. A real run then stages exact before
 and after images, publishes a `prepared` journal, fingerprints each destination immediately
 before its replacement, and rejects a changed destination as a conflict. The full batch is rolled
 back in reverse order if a conflict or write/durability failure occurs before the committed

@@ -7,7 +7,7 @@ planned here.
 
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterator, MutableMapping
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +33,10 @@ from .resolve import cached_target_hash
 # One safe loader serves every read here: nothing is dumped back, so a round-trip loader
 # would only pay for state this module never uses.
 _SAFE_YAML = YAML(typ="safe")
+
+# Errors a safe constructor raises for a tagged scalar its type cannot build, alongside the
+# YAMLError family the scanner and parser raise.
+_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
 
 # Characters that end or reinterpret a plain scalar in block or flow context, and the
 # indicators that only do so in first position. A replacement carrying any of them is
@@ -102,6 +106,7 @@ class _MappingOccurrence:
 class _SequenceOccurrence:
     start: int
     end: int
+    flow_style: bool
     anchor: str | None
     value: tuple["_YamlOccurrence", ...]
 
@@ -115,6 +120,17 @@ class _ScalarSpan:
 type _YamlOccurrence = (
     _ScalarOccurrence | _AliasOccurrence | _MappingOccurrence | _SequenceOccurrence
 )
+
+
+def _yaml() -> YAML:
+    """Return the shared safe loader with any earlier document's YAML version cleared.
+
+    ``YAML.version`` is sticky, so a ``%YAML`` directive in one frontmatter would otherwise
+    keep resolving scalars its way for every later read in the process, exactly as
+    ``frontmatter_parser`` guards against.
+    """
+    _SAFE_YAML.version = None
+    return _SAFE_YAML
 
 
 def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurrence, int]:
@@ -165,6 +181,7 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
             _SequenceOccurrence(
                 event.start_mark.index,
                 end_event.end_mark.index,
+                bool(event.flow_style),
                 event.anchor,
                 tuple(values),
             ),
@@ -341,7 +358,7 @@ def _seen_scalar_source(new_seen: str) -> str:
         and not new_seen.startswith(_PLAIN_SCALAR_UNSAFE_PREFIX)
     ):
         try:
-            if _SAFE_YAML.load(new_seen) == new_seen:
+            if _yaml().load(new_seen) == new_seen:
                 return new_seen
         except YAMLError:
             pass
@@ -376,8 +393,11 @@ def _entry_content_end(occurrence: _YamlOccurrence) -> int:
 
     A block collection's own end mark is the *next* token's offset, which for a sequence
     entry is the following item's dash, so the last leaf is the only reliable anchor for
-    an append.
+    an append. A flow collection ends at its own closing bracket, and recursing past that
+    into its final leaf would anchor the append inside a collection that is still open.
     """
+    if isinstance(occurrence, (_MappingOccurrence, _SequenceOccurrence)) and occurrence.flow_style:
+        return occurrence.end
     if isinstance(occurrence, _MappingOccurrence) and occurrence.value:
         return _entry_content_end(occurrence.value[-1][1])
     if isinstance(occurrence, _SequenceOccurrence) and occurrence.value:
@@ -390,6 +410,10 @@ def _line_start_after(raw_meta: str, index: int) -> int:
         return index
     newline = raw_meta.find("\n", index)
     return len(raw_meta) if newline == -1 else newline + 1
+
+
+def _column_at(raw_meta: str, index: int) -> int:
+    return index - (raw_meta.rfind("\n", 0, index) + 1)
 
 
 def _seen_source_edit(
@@ -418,11 +442,10 @@ def _seen_source_edit(
         else:
             separator = ", "
         return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
-    first_key, _ = entry.value[0]
-    if not isinstance(first_key, _ScalarOccurrence):
-        raise UnreadableDocError("frontmatter derives_from entry is malformed")
+    # The mapping's own start column is the key indentation. The first key's column is not:
+    # an explicit-key entry starts at its `?` indicator, one indent short of the key itself.
     insert_at = _line_start_after(raw_meta, _entry_content_end(entry))
-    replacement = f"{' ' * first_key.column}seen: {new_seen}\n"
+    replacement = f"{' ' * _column_at(raw_meta, entry.start)}seen: {new_seen}\n"
     return _SourceEdit(insert_at, insert_at, replacement)
 
 
@@ -465,48 +488,188 @@ def _append_seen_anchor_relocations(
 
 
 def _apply_source_edits(raw_meta: str, edits: list[_SourceEdit]) -> str:
-    unique_edits: dict[tuple[int, int], _SourceEdit] = {}
-    for edit in edits:
-        span = (edit.start, edit.end)
-        existing = unique_edits.get(span)
-        if existing is not None and existing.replacement != edit.replacement:
-            raise UnreadableDocError("frontmatter aliases require conflicting seen updates")
-        unique_edits[span] = edit
+    # Two entries can only ever plan the same span from the same update, so keeping one
+    # edit per span drops the repeat rather than choosing between rival replacements.
+    unique_edits = {(edit.start, edit.end): edit for edit in edits}
     for edit in sorted(unique_edits.values(), key=lambda item: item.start, reverse=True):
         raw_meta = raw_meta[: edit.start] + edit.replacement + raw_meta[edit.end :]
     return raw_meta
 
 
-def _verify_reconciled_meta(
-    new_meta: str, expected: list[tuple[str, object]], source: Path
-) -> None:
-    """Reject spliced frontmatter that does not reload as the intended edges.
+def _derives_from_member(data: object) -> object:
+    return data.get("derives_from") if isinstance(data, MutableMapping) else None
+
+
+def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> None:
+    """Reject spliced frontmatter that does not reload as the intended document.
 
     Source edits are byte-level, so a mis-measured span could publish text that no longer
-    parses or that silently changes a value. The commit transaction never re-reads what it
-    stages, so this is the last point at which such a rewrite can be refused instead of
-    written durably.
+    parses or that silently changes a value. Relocating a ``seen`` anchor edits bytes
+    outside ``derives_from``, so the whole reloaded document is compared rather than the
+    edges alone. The commit transaction never re-reads what it stages, so this is the last
+    point at which such a rewrite can be refused instead of written durably.
     """
     try:
-        reloaded = _SAFE_YAML.load(new_meta)
-    except YAMLError as exc:
+        reloaded = _yaml().load(new_meta)
+    except _LOAD_ERRORS as exc:
         msg = f"reconcile would leave {source} unparseable, so nothing was rewritten: {exc}"
         raise UnreadableDocError(msg) from exc
-    entries = reloaded.get("derives_from") if isinstance(reloaded, MutableMapping) else None
-    actual = (
-        [
-            (entry.get("ref"), entry.get("seen")) if isinstance(entry, MutableMapping) else entry
-            for entry in entries
-        ]
-        if isinstance(entries, list)
-        else None
+    if reloaded == expected:
+        return
+    changed = (
+        "derives_from entries"
+        if _derives_from_member(reloaded) != _derives_from_member(expected)
+        else "frontmatter outside derives_from"
     )
-    if actual != expected:
-        msg = (
-            f"reconcile would not reproduce the derives_from entries of {source},"
-            " so nothing was rewritten"
+    msg = f"reconcile would not reproduce the {changed} of {source}, so nothing was rewritten"
+    raise UnreadableDocError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceContext:
+    """The frontmatter source text and the two views of it the planners read."""
+
+    raw_meta: str
+    root: _YamlOccurrence
+    scalar_spans: tuple[_ScalarSpan, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryEdit:
+    edit: _SourceEdit | None
+    anchored: _AnchoredSeen | None
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryUpdate:
+    index: int
+    new_seen: str
+    detached: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ReconcilePlan:
+    edits: tuple[_SourceEdit, ...]
+    anchored_seen: tuple[_AnchoredSeen, ...]
+    applied: frozenset[str]
+    entry_updates: tuple[_EntryUpdate, ...]
+
+
+def _load_frontmatter_data(raw_meta: str) -> object:
+    try:
+        return _yaml().load(raw_meta)
+    except _LOAD_ERRORS as exc:
+        msg = f"cannot parse frontmatter to reconcile: {exc}"
+        raise UnreadableDocError(msg) from exc
+
+
+def _derives_from_occurrences(
+    root: _YamlOccurrence, entries: Sequence[object]
+) -> _SequenceOccurrence:
+    """Return the source occurrences matching the loaded ``derives_from`` entries."""
+    if not isinstance(root, _MappingOccurrence):
+        raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
+    occurrences = _resolved_mapping_member(root, root, "derives_from")
+    if not isinstance(occurrences, _SequenceOccurrence) or len(occurrences.value) != len(entries):
+        raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
+    return occurrences
+
+
+def _plan_entry_edit(
+    context: _SourceContext,
+    entry_occurrence: _MappingOccurrence | _AliasOccurrence,
+    old_seen: object,
+    new_seen_source: str,
+    updated_definitions: frozenset[int],
+) -> _EntryEdit:
+    """Plan the source edit that sets one entry's ``seen`` scalar."""
+    if isinstance(entry_occurrence, _AliasOccurrence):
+        definition = _resolve_occurrence(context.root, entry_occurrence)
+        if isinstance(definition, _MappingOccurrence) and definition.start in updated_definitions:
+            # This entry aliases an entry the same run just updated, so it already reads the
+            # new hash: leaving its source untouched keeps the author's alias intact.
+            return _EntryEdit(None, None)
+        return _EntryEdit(
+            _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source), None
         )
-        raise UnreadableDocError(msg)
+    seen = _mapping_value_occurrence(entry_occurrence, "seen")
+    span = _scalar_span(seen, context.scalar_spans) if isinstance(seen, _ScalarOccurrence) else None
+    anchored = None
+    if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
+        anchored = _AnchoredSeen(
+            seen.anchor,
+            seen.start,
+            _anchored_seen_source(context.raw_meta, seen, span, old_seen),
+        )
+    edit = _seen_source_edit(context.raw_meta, entry_occurrence, seen, span, new_seen_source)
+    return _EntryEdit(edit, anchored)
+
+
+def _plan_source_edits(
+    context: _SourceContext,
+    entries: Sequence[object],
+    entry_occurrences: _SequenceOccurrence,
+    updates: dict[str, str],
+) -> _ReconcilePlan:
+    """Plan every source edit the requested updates need, validating each entry's shape."""
+    edits: list[_SourceEdit] = []
+    anchored_seen: list[_AnchoredSeen] = []
+    applied: set[str] = set()
+    entry_updates: list[_EntryUpdate] = []
+    updated_definitions: set[int] = set()
+    for index, (entry, entry_occurrence) in enumerate(
+        zip(entries, entry_occurrences.value, strict=True)
+    ):
+        if not isinstance(entry, MutableMapping) or not isinstance(
+            entry_occurrence, (_MappingOccurrence, _AliasOccurrence)
+        ):
+            raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
+        ref = entry.get("ref")
+        if not isinstance(ref, str):
+            raise UnreadableDocError("frontmatter derives_from entry ref is not a string")
+        old_seen = entry.get("seen")
+        new_seen = updates.get(ref)
+        if new_seen is None or old_seen == new_seen:
+            continue
+        entry_edit = _plan_entry_edit(
+            context,
+            entry_occurrence,
+            old_seen,
+            _seen_scalar_source(new_seen),
+            frozenset(updated_definitions),
+        )
+        if entry_edit.edit is not None:
+            edits.append(entry_edit.edit)
+        if entry_edit.anchored is not None:
+            anchored_seen.append(entry_edit.anchored)
+        if isinstance(entry_occurrence, _MappingOccurrence):
+            updated_definitions.add(entry_occurrence.start)
+        applied.add(ref)
+        entry_updates.append(
+            _EntryUpdate(index, new_seen, isinstance(entry_occurrence, _AliasOccurrence))
+        )
+    return _ReconcilePlan(
+        tuple(edits), tuple(anchored_seen), frozenset(applied), tuple(entry_updates)
+    )
+
+
+def _expected_frontmatter(raw_meta: str, entry_updates: tuple[_EntryUpdate, ...]) -> object:
+    """Return the loaded document the rewritten frontmatter has to reproduce.
+
+    An entry reached through an alias or a merge key is the same loaded object as its
+    definition, so assigning in place keeps every view of it in step with what the reload
+    will see. An alias site the rewrite replaces with its own mapping is the one edit that
+    does not propagate, so that position is detached from the shared object first.
+    """
+    expected = _yaml().load(raw_meta)
+    entries = expected["derives_from"]
+    for update in entry_updates:
+        entry = entries[update.index]
+        if update.detached:
+            entry = dict(entry)
+            entries[update.index] = entry
+        entry["seen"] = update.new_seen
+    return expected
 
 
 def reconcile(
@@ -580,15 +743,16 @@ def reconcile(
     return dict(plan)
 
 
-def apply_reconcile(  # noqa: PLR0912
+def apply_reconcile(
     current_file_text: str, updates: dict[str, str], source: Path
 ) -> tuple[str, set[str]]:
     """Return ``current_file_text`` with matching edges' seen scalars set.
 
     The fresh read is parsed defensively: a concurrent edit that leaves the frontmatter
     unparseable or in an unexpected shape (not a mapping, a non-list ``derives_from``, a
-    non-mapping entry, a non-string entry ``ref``) raises ``UnreadableDocError`` (a
-    ``ProjectError``) so the CLI exits cleanly instead of crashing with a traceback.
+    non-mapping entry, a non-string entry ``ref``, a ``seen`` that is a collection rather
+    than a scalar) raises ``UnreadableDocError`` (a ``ProjectError``) so the CLI exits
+    cleanly instead of crashing with a traceback.
 
     Args:
         current_file_text: A fresh read of the downstream file at write time.
@@ -611,15 +775,9 @@ def apply_reconcile(  # noqa: PLR0912
     raw_meta, body = split_frontmatter(current_file_text, source)
     if raw_meta is None:
         return current_file_text, set()
-    try:
-        data = _SAFE_YAML.load(raw_meta)
-    except YAMLError as exc:
-        msg = f"cannot parse frontmatter to reconcile: {exc}"
-        raise UnreadableDocError(msg) from exc
+    data = _load_frontmatter_data(raw_meta)
     if data is None:
         return current_file_text, set()
-    source_root = _source_occurrence_tree(list(_SAFE_YAML.parse(raw_meta)))
-    scalar_spans = _scalar_spans(list(_SAFE_YAML.scan(raw_meta)))
     if not isinstance(data, MutableMapping):
         raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
     entries = data.get("derives_from")
@@ -627,58 +785,20 @@ def apply_reconcile(  # noqa: PLR0912
         return current_file_text, set()
     if not isinstance(entries, list):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
-    if not isinstance(source_root, _MappingOccurrence):
-        raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
-    entry_occurrences = _resolved_mapping_member(source_root, source_root, "derives_from")
-    if not isinstance(entry_occurrences, _SequenceOccurrence) or len(
-        entry_occurrences.value
-    ) != len(entries):
-        raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
-    edits: list[_SourceEdit] = []
-    anchored_seen: list[_AnchoredSeen] = []
-    applied: set[str] = set()
-    expected: list[tuple[str, object]] = []
-    for entry, entry_occurrence in zip(entries, entry_occurrences.value, strict=True):
-        if not isinstance(entry, MutableMapping) or not isinstance(
-            entry_occurrence, (_MappingOccurrence, _AliasOccurrence)
-        ):
-            raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
-        ref = entry.get("ref")
-        if not isinstance(ref, str):
-            raise UnreadableDocError("frontmatter derives_from entry ref is not a string")
-        old_seen = entry.get("seen")
-        new_seen = updates.get(ref)
-        if new_seen is None or old_seen == new_seen:
-            expected.append((ref, old_seen))
-            continue
-        seen = (
-            _mapping_value_occurrence(entry_occurrence, "seen")
-            if isinstance(entry_occurrence, _MappingOccurrence)
-            else None
-        )
-        span = _scalar_span(seen, scalar_spans) if isinstance(seen, _ScalarOccurrence) else None
-        if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
-            anchored_seen.append(
-                _AnchoredSeen(
-                    seen.anchor,
-                    seen.start,
-                    _anchored_seen_source(raw_meta, seen, span, old_seen),
-                )
-            )
-        new_seen_source = _seen_scalar_source(new_seen)
-        edits.append(
-            _mapping_alias_source_edit(raw_meta, entry_occurrence, new_seen_source)
-            if isinstance(entry_occurrence, _AliasOccurrence)
-            else _seen_source_edit(raw_meta, entry_occurrence, seen, span, new_seen_source)
-        )
-        applied.add(ref)
-        expected.append((ref, new_seen))
-    if not applied:
-        return current_file_text, applied
-    _append_seen_anchor_relocations(source_root, anchored_seen, edits)
+    context = _SourceContext(
+        raw_meta,
+        _source_occurrence_tree(list(_yaml().parse(raw_meta))),
+        _scalar_spans(list(_yaml().scan(raw_meta))),
+    )
+    entry_occurrences = _derives_from_occurrences(context.root, entries)
+    plan = _plan_source_edits(context, entries, entry_occurrences, updates)
+    if not plan.applied:
+        return current_file_text, set()
+    edits = list(plan.edits)
+    _append_seen_anchor_relocations(context.root, list(plan.anchored_seen), edits)
     new_meta = _apply_source_edits(raw_meta, edits)
-    _verify_reconciled_meta(new_meta, expected, source)
-    return f"---\n{new_meta}---\n{body}", applied
+    _verify_reconciled_meta(new_meta, _expected_frontmatter(raw_meta, plan.entry_updates), source)
+    return f"---\n{new_meta}---\n{body}", set(plan.applied)
 
 
 def plan_rewrites(

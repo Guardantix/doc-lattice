@@ -11,11 +11,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so
   two-space, column-zero, and mixed list styles no longer produce unrelated cosmetic diffs.
 - `reconcile` reparses the rewritten frontmatter before staging it and refuses a rewrite that
-  would not reload as the planned edges, so a bad source edit can no longer be published durably.
+  would not reload as the planned frontmatter, edges and every other key alike, so a bad source
+  edit can no longer be published durably.
 - `reconcile` quotes a replacement hash that would not reload as a string, keeps a `derives_from`
   list reached through a YAML alias or a root merge key editable, preserves the type of a
   relocated non-string `seen` anchor, and no longer rewrites an alias bound to a later definition
-  of a reused anchor name.
+  of a reused anchor name or to an entry the same run already updated.
+- `reconcile` indents a newly inserted `seen` to the entry's own key column and appends it after a
+  multi-line flow value, so explicit-key and flow-tailed entries stay parseable.
+- `reconcile` clears any `%YAML` directive between documents, so one file's YAML version can no
+  longer change how a later file's hash is quoted, and it reports a tagged `seen` scalar it cannot
+  rewrite as a clean error rather than a traceback.
 
 ## [4.0.0] - 2026-08-10
 
