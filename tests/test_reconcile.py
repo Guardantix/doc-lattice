@@ -1068,6 +1068,30 @@ def test_apply_reconcile_relocates_a_seen_anchor_out_of_an_ordered_map_entry():
     assert _validated_reconcile_meta(out).tickets == ["oldhash"]
 
 
+@pytest.mark.parametrize(
+    ("prefix", "open_fence", "close_fence", "tail"),
+    [
+        ("﻿", "---", "---", "\nbody\n"),
+        ("", "---   ", "---  ", "\nbody\n"),
+        ("﻿", "---", "---", ""),
+        ("", "---", "---", "\n"),
+    ],
+)
+def test_apply_reconcile_reattaches_the_document_it_was_given(
+    prefix: str, open_fence: str, close_fence: str, tail: str
+):
+    # A byte-order mark, the spelling of either fence, and whether the closing one ends the
+    # file are the author's, so rewriting the frontmatter must not restyle any of them.
+    meta = "id: d\nderives_from:\n  - ref: a#x\n    seen: {seen}\n"
+    text = f"{prefix}{open_fence}\n{meta.format(seen='old')}{close_fence}{tail}"
+    expected = f"{prefix}{open_fence}\n{meta.format(seen='newhash')}{close_fence}{tail}"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
 def test_apply_reconcile_refuses_source_edits_that_do_not_reload_as_planned(
     monkeypatch: pytest.MonkeyPatch,
 ):

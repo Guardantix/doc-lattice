@@ -32,6 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer change how a later file's hash is quoted, and it quotes a replacement the document's own
   YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,
   matching how an anchored one was already handled.
+- `reconcile` puts back the document around the frontmatter it edits, so a file saved with a
+  byte-order mark keeps it and a `---` fence written with surrounding space, or with no newline
+  after it, is no longer rewritten to this engine's own spelling.
 - `reconcile` keeps an entry written as a YAML ordered map (`!!omap`) editable. Such an entry
   loads as a mapping and validates as an edge, but its source is a sequence of one-pair mappings,
   so the targeted pair is edited inside its own mapping and a missing `seen` is appended as an

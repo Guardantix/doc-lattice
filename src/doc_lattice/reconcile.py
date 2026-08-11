@@ -35,7 +35,7 @@ from ruamel.yaml.tokens import (
 )
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
-from .frontmatter_parser import split_frontmatter
+from .frontmatter_parser import split_frontmatter_parts
 from .hashing import normalize_newlines
 from .model import Lattice, TargetId, parse_ref
 from .resolve import cached_target_hash
@@ -1049,16 +1049,18 @@ def apply_reconcile(
         and excluded from the set. When nothing changed (for example a ref was edited
         away between load and write, or already held the planned hash) the original text
         is returned unchanged and the set is empty, so the caller does not report a write
-        that did not happen. The body after the closing fence is reattached verbatim from
-        ``current_file_text``.
+        that did not happen. Everything around the edited frontmatter is reattached verbatim
+        from ``current_file_text``: a leading byte-order mark, both fences as they were
+        written, and the body after the closing one.
 
     Raises:
         UnreadableDocError: If the fresh frontmatter cannot be parsed or is malformed, or
             if the planned source edits would not reproduce the intended frontmatter.
     """
-    raw_meta, body = split_frontmatter(current_file_text, source)
-    if raw_meta is None:
+    parts = split_frontmatter_parts(current_file_text, source)
+    if parts is None:
         return current_file_text, set()
+    raw_meta = parts.raw_meta
     data = _load_frontmatter_data(raw_meta)
     if data is None:
         return current_file_text, set()
@@ -1084,7 +1086,11 @@ def apply_reconcile(
     _append_seen_anchor_relocations(context.root, list(plan.anchored_seen), edits)
     new_meta = _apply_source_edits(raw_meta, edits)
     _verify_reconciled_meta(new_meta, _expected_frontmatter(raw_meta, plan.entry_updates), source)
-    return f"---\n{new_meta}---\n{body}", set(plan.applied)
+    rewritten = (
+        f"{parts.prefix}{parts.open_fence}\n{new_meta}"
+        f"{parts.close_fence}{parts.close_fence_newline}{parts.body}"
+    )
+    return rewritten, set(plan.applied)
 
 
 def _line_ending(text: str) -> str:
