@@ -66,6 +66,12 @@ class _ScalarOccurrence:
 
 
 @dataclass(frozen=True, slots=True)
+class _AnchoredSeen:
+    occurrence: _ScalarOccurrence
+    value: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _AliasOccurrence:
     start: int
     end: int
@@ -240,12 +246,17 @@ def _alias_occurrences(occurrence: _YamlOccurrence, anchor: str) -> list[_AliasO
 
 
 def _seen_anchor_relocation_edit(
-    seen: _ScalarOccurrence,
+    anchored_seen: _AnchoredSeen,
     alias: _AliasOccurrence,
 ) -> _SourceEdit:
+    seen = anchored_seen.occurrence
     if seen.anchor is None:
         raise UnreadableDocError("frontmatter derives_from entry seen anchor is malformed")
-    scalar_source = json.dumps(seen.value, ensure_ascii=False)
+    scalar_source = (
+        "null"
+        if anchored_seen.value is None
+        else json.dumps(anchored_seen.value, ensure_ascii=False)
+    )
     return _SourceEdit(alias.start, alias.end, f"&{seen.anchor} {scalar_source}")
 
 
@@ -293,11 +304,12 @@ def _mapping_alias_source_edit(
 
 def _append_seen_anchor_relocations(
     source_root: _YamlOccurrence,
-    anchored_seen: list[_ScalarOccurrence],
+    anchored_seen: list[_AnchoredSeen],
     edits: list[_SourceEdit],
 ) -> None:
     edited_spans = {(edit.start, edit.end) for edit in edits}
-    for seen in anchored_seen:
+    for anchored in anchored_seen:
+        seen = anchored.occurrence
         if seen.anchor is None:
             continue
         untouched_aliases = [
@@ -306,7 +318,7 @@ def _append_seen_anchor_relocations(
             if (alias.start, alias.end) not in edited_spans
         ]
         if untouched_aliases:
-            relocation = _seen_anchor_relocation_edit(seen, untouched_aliases[0])
+            relocation = _seen_anchor_relocation_edit(anchored, untouched_aliases[0])
             edits.append(relocation)
             edited_spans.add((relocation.start, relocation.end))
 
@@ -455,7 +467,7 @@ def apply_reconcile(  # noqa: PLR0912
     ) != len(entries):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
     edits: list[_SourceEdit] = []
-    anchored_seen: list[_ScalarOccurrence] = []
+    anchored_seen: list[_AnchoredSeen] = []
     applied: set[str] = set()
     for entry, entry_occurrence in zip(entries, entry_occurrences.value, strict=True):
         if not isinstance(entry, MutableMapping) or not isinstance(
@@ -474,7 +486,10 @@ def apply_reconcile(  # noqa: PLR0912
                     else None
                 )
                 if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
-                    anchored_seen.append(seen)
+                    old_seen = entry.get("seen")
+                    anchored_seen.append(
+                        _AnchoredSeen(seen, None if old_seen is None else str(old_seen))
+                    )
                 edit = (
                     _mapping_alias_source_edit(raw_meta, entry_occurrence, new_seen)
                     if isinstance(entry_occurrence, _AliasOccurrence)

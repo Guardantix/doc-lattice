@@ -429,6 +429,41 @@ def test_apply_reconcile_relocates_tagged_seen_anchor_as_a_string():
     ]
 
 
+@pytest.mark.parametrize("source_seen", ["&shared null", "&shared ~", "&shared"])
+def test_apply_reconcile_relocates_anchored_null_with_null_semantics(source_seen: str):
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"    seen: {source_seen}\n"
+        "  - ref: b#y\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        "    seen: &shared null\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        None,
+    ]
+
+
 def test_apply_reconcile_relocates_block_seen_anchor_into_flow_collection_safely():
     text = (
         "---\n"
