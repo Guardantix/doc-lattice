@@ -52,13 +52,47 @@ def _mapping_value_node(mapping: MappingNode, name: str) -> Node | None:
     return None
 
 
+def _mapping_key_node(mapping: MappingNode, name: str) -> ScalarNode | None:
+    for key_node, _ in mapping.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == name:
+            return key_node
+    return None
+
+
+def _null_seen_source_edit(
+    raw_meta: str, entry: MappingNode, seen_node: Node, new_seen: str
+) -> _SourceEdit:
+    seen_key = _mapping_key_node(entry, "seen")
+    if seen_key is None:
+        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+    colon_at = raw_meta.find(":", seen_key.end_mark.index, seen_node.start_mark.index)
+    if colon_at == -1:
+        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+    line_end = raw_meta.find("\n", colon_at, seen_node.start_mark.index)
+    comment_at = raw_meta.find("#", colon_at, line_end)
+    if comment_at == -1:
+        return _SourceEdit(colon_at + 1, line_end, f" {new_seen}")
+    return _SourceEdit(colon_at + 1, comment_at, f" {new_seen} ")
+
+
+def _flow_mapping_has_trailing_comma(raw_meta: str, entry: MappingNode) -> bool:
+    _, final_value = entry.value[-1]
+    trailing_content = raw_meta[final_value.end_mark.index : entry.end_mark.index - 1]
+    return trailing_content.lstrip().startswith(",")
+
+
 def _seen_source_edit(raw_meta: str, entry: MappingNode, new_seen: str) -> _SourceEdit:
     seen_node = _mapping_value_node(entry, "seen")
     if seen_node is not None:
+        if seen_node.start_mark.index == seen_node.end_mark.index:
+            return _null_seen_source_edit(raw_meta, entry, seen_node, new_seen)
         return _SourceEdit(seen_node.start_mark.index, seen_node.end_mark.index, new_seen)
     if entry.flow_style:
         insert_at = entry.end_mark.index - 1
-        separator = " " if raw_meta[:insert_at].rstrip().endswith(",") else ", "
+        if _flow_mapping_has_trailing_comma(raw_meta, entry):
+            separator = "" if raw_meta[insert_at - 1].isspace() else " "
+        else:
+            separator = ", "
         return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
     first_key, _ = entry.value[0]
     insert_at = entry.end_mark.index
