@@ -994,6 +994,80 @@ def test_apply_reconcile_updates_a_seen_key_spelled_through_an_alias(seen_key: s
     assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
 
 
+@pytest.mark.parametrize(
+    ("source_entry", "expected_entry"),
+    [
+        (
+            "  - !!omap\n    - ref: a#x\n    - seen: old\n",
+            "  - !!omap\n    - ref: a#x\n    - seen: newhash\n",
+        ),
+        (
+            "  - !!omap\n    - ref: a#x\n",
+            "  - !!omap\n    - ref: a#x\n    - seen: newhash\n",
+        ),
+        (
+            "- !!omap\n  - ref: a#x\n",
+            "- !!omap\n  - ref: a#x\n  - seen: newhash\n",
+        ),
+        (
+            "  - !!omap\n    - ref: a#x   # keep\n    - seen: old  # and this\n",
+            "  - !!omap\n    - ref: a#x   # keep\n    - seen: newhash  # and this\n",
+        ),
+        (
+            "  - !!omap [{ref: a#x}, {seen: old}]\n",
+            "  - !!omap [{ref: a#x}, {seen: newhash}]\n",
+        ),
+        (
+            "  - !!omap [{ref: a#x}]\n",
+            "  - !!omap [{ref: a#x}, {seen: newhash}]\n",
+        ),
+    ],
+)
+def test_apply_reconcile_updates_an_ordered_map_entry(source_entry: str, expected_entry: str):
+    # An `!!omap` entry loads as a mapping and validates as an edge, so it stays reconcilable
+    # even though its source is a sequence: the pair an edit targets sits in a one-pair
+    # mapping inside it, and a missing one is appended as an item rather than as a key.
+    text = f"---\nid: d\nderives_from:\n{source_entry}---\nbody\n"
+    expected = f"---\nid: d\nderives_from:\n{expected_entry}---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+def test_apply_reconcile_relocates_a_seen_anchor_out_of_an_ordered_map_entry():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - !!omap\n"
+        "    - ref: a#x\n"
+        "    - seen: &shared oldhash\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - !!omap\n"
+        "    - ref: a#x\n"
+        "    - seen: newhash\n"
+        'tickets: [&shared "oldhash"]\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).tickets == ["oldhash"]
+
+
 def test_apply_reconcile_refuses_source_edits_that_do_not_reload_as_planned(
     monkeypatch: pytest.MonkeyPatch,
 ):

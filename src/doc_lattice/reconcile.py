@@ -26,6 +26,7 @@ from ruamel.yaml.events import (
 from ruamel.yaml.tokens import (
     AnchorToken,
     BlockMappingStartToken,
+    BlockSequenceStartToken,
     KeyToken,
     ScalarToken,
     TagToken,
@@ -141,7 +142,7 @@ class _TaggedScalar:
 
 
 @dataclass(frozen=True, slots=True)
-class _BlockMappingIndent:
+class _BlockIndent:
     start: int
     column: int
 
@@ -157,13 +158,16 @@ class _TokenMarks:
             which a node's own marks do not always enclose.
         block_mapping_indents: Opening offset and indentation column of each block mapping,
             which is where the mapping was opened rather than where its node starts.
+        block_sequence_indents: The same for each block sequence, which is where an appended
+            item's own ``-`` belongs.
         key_indicators: Offset at which each mapping key opens, in source order.
         value_indicators: Offset of each ``:`` that opens a mapping value.
     """
 
     scalar_spans: tuple[_TokenSpan, ...]
     tagged_scalars: tuple[_TaggedScalar, ...]
-    block_mapping_indents: tuple[_BlockMappingIndent, ...]
+    block_mapping_indents: tuple[_BlockIndent, ...]
+    block_sequence_indents: tuple[_BlockIndent, ...]
     key_indicators: tuple[int, ...]
     value_indicators: tuple[int, ...]
 
@@ -299,9 +303,14 @@ def _token_marks(tokens: list[Token]) -> _TokenMarks:
         ),
         _tagged_scalars(tokens),
         tuple(
-            _BlockMappingIndent(token.start_mark.index, token.start_mark.column)
+            _BlockIndent(token.start_mark.index, token.start_mark.column)
             for token in tokens
             if isinstance(token, BlockMappingStartToken)
+        ),
+        tuple(
+            _BlockIndent(token.start_mark.index, token.start_mark.column)
+            for token in tokens
+            if isinstance(token, BlockSequenceStartToken)
         ),
         tuple(token.start_mark.index for token in tokens if isinstance(token, KeyToken)),
         tuple(token.start_mark.index for token in tokens if isinstance(token, ValueToken)),
@@ -470,16 +479,22 @@ def _missing_value_indicator_edit(
     if entry.flow_style:
         return _SourceEdit(seen_key.end, seen_key.end, f": {new_seen}")
     insert_at = _line_start_after(context.raw_meta, seen_key.end)
-    indent = " " * _block_mapping_indent(context.marks, entry)
+    indent = " " * _block_indent(context.marks.block_mapping_indents, entry)
     return _SourceEdit(insert_at, insert_at, f"{indent}: {new_seen}\n")
 
 
-def _flow_mapping_has_trailing_comma(raw_meta: str, entry: _MappingOccurrence) -> bool:
-    _, final_value = entry.value[-1]
-    trailing_content = raw_meta[final_value.end : entry.end - 1]
-    # This begins after the final parsed value, so hashes in this segment introduce comments.
+def _flow_has_trailing_comma(raw_meta: str, final_member_end: int, closing_bracket: int) -> bool:
+    trailing_content = raw_meta[final_member_end:closing_bracket]
+    # This begins after the final parsed member, so hashes in this segment introduce comments.
     without_comments = "".join(line.partition("#")[0] for line in trailing_content.splitlines())
     return "," in without_comments
+
+
+def _final_member_end(entry: _MappingOccurrence | _SequenceOccurrence) -> int:
+    """Return the offset just past a flow collection's last parsed member."""
+    if isinstance(entry, _MappingOccurrence):
+        return entry.value[-1][1].end
+    return entry.value[-1].end
 
 
 def _scalar_span(
@@ -605,20 +620,22 @@ def _line_start_after(raw_meta: str, index: int) -> int:
     return len(raw_meta) if newline == -1 else newline + 1
 
 
-def _block_mapping_indent(marks: _TokenMarks, entry: _MappingOccurrence) -> int:
-    """Return the column a block mapping's own keys are indented to.
+def _block_indent(
+    indents: tuple[_BlockIndent, ...], entry: _MappingOccurrence | _SequenceOccurrence
+) -> int:
+    """Return the column a block collection's own members are indented to.
 
-    A node's start mark is its first character, which is not the key column whenever an
-    anchor or a tag precedes the first key, nor when an explicit-key entry starts at its `?`
-    indicator one indent short of the key. The scanner opens the mapping at its indentation
-    in every one of those shapes, so its own mark is the only column an appended key can
-    safely take.
+    A node's start mark is its first character, which is not the member column whenever an
+    anchor or a tag precedes the first one, nor when an explicit-key entry starts at its `?`
+    indicator one indent short of the key. The scanner opens the collection at its
+    indentation in every one of those shapes, so its own mark is the only column an appended
+    key or item can safely take.
     """
-    for indent in marks.block_mapping_indents:
+    for indent in indents:
         if entry.start <= indent.start < entry.end:
             return indent.column
-    # The caller has already narrowed to a non-flow mapping, and the scanner opens every one
-    # of those, so this refuses a shape only a mark-accounting change could produce.
+    # The caller has already narrowed to a non-flow collection, and the scanner opens every
+    # one of those, so this refuses a shape only a mark-accounting change could produce.
     msg = "frontmatter derives_from entry is malformed; cannot reconcile"
     raise UnreadableDocError(msg)  # pragma: no cover
 
@@ -659,16 +676,33 @@ def _seen_source_edit(
         return _SourceEdit(start, _scalar_source_end(raw_meta, seen, span), new_seen)
     if seen is not None:
         raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
+    return _appended_seen_edit(context, entry, new_seen)
+
+
+def _appended_seen_edit(
+    context: _SourceContext, entry: _MappingOccurrence | _SequenceOccurrence, new_seen: str
+) -> _SourceEdit:
+    """Plan the edit that adds the ``seen`` an entry does not carry yet.
+
+    An entry written as an ordered map is a sequence of one-pair mappings rather than a
+    mapping, so its new pair is appended as an item of its own rather than as a key.
+    """
+    raw_meta = context.raw_meta
+    mapping = isinstance(entry, _MappingOccurrence)
     if entry.flow_style:
         insert_at = entry.end - 1
-        if _flow_mapping_has_trailing_comma(raw_meta, entry):
+        if _flow_has_trailing_comma(raw_meta, _final_member_end(entry), insert_at):
             separator = "" if raw_meta[insert_at - 1].isspace() else " "
         else:
             separator = ", "
-        return _SourceEdit(insert_at, insert_at, f"{separator}seen: {new_seen}")
+        member = f"seen: {new_seen}" if mapping else f"{{seen: {new_seen}}}"
+        return _SourceEdit(insert_at, insert_at, f"{separator}{member}")
     insert_at = _line_start_after(raw_meta, _entry_content_end(context.marks, entry))
-    replacement = f"{' ' * _block_mapping_indent(context.marks, entry)}seen: {new_seen}\n"
-    return _SourceEdit(insert_at, insert_at, replacement)
+    indents = (
+        context.marks.block_mapping_indents if mapping else context.marks.block_sequence_indents
+    )
+    member = f"seen: {new_seen}" if mapping else f"- seen: {new_seen}"
+    return _SourceEdit(insert_at, insert_at, f"{' ' * _block_indent(indents, entry)}{member}\n")
 
 
 def _mapping_alias_source_edit(
@@ -795,9 +829,29 @@ def _derives_from_occurrences(
     return occurrences
 
 
+def _seen_container(
+    root: _YamlOccurrence, entry: _MappingOccurrence | _SequenceOccurrence
+) -> _MappingOccurrence | None:
+    """Return the mapping whose own pairs an entry's ``seen`` belongs among.
+
+    An entry written as an ordered map is a sequence of one-pair mappings rather than a
+    mapping, so the pair an edit targets sits in a mapping of its own inside that sequence.
+    That inner mapping is an ordinary one, so returning it lets every edit be planned exactly
+    as it is for an entry written as a mapping. An ordered map that carries no ``seen`` pair
+    yet has no such mapping, and takes an appended item instead.
+    """
+    if isinstance(entry, _MappingOccurrence):
+        return entry
+    for item in entry.value:
+        resolved = _resolve_occurrence(root, item)
+        if isinstance(resolved, _MappingOccurrence) and _mapping_pair(root, resolved, "seen"):
+            return resolved
+    return None
+
+
 def _plan_entry_edit(
     context: _SourceContext,
-    entry_occurrence: _MappingOccurrence | _AliasOccurrence,
+    entry_occurrence: _MappingOccurrence | _SequenceOccurrence | _AliasOccurrence,
     old_seen: object,
     new_seen_source: str,
     updated_definitions: frozenset[int],
@@ -812,7 +866,11 @@ def _plan_entry_edit(
         return _EntryEdit(
             _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source), None
         )
-    seen = _mapping_value_occurrence(context.root, entry_occurrence, "seen")
+    container = _seen_container(context.root, entry_occurrence)
+    if container is None:
+        # An ordered map with no `seen` pair yet takes one as an item of its own.
+        return _EntryEdit(_appended_seen_edit(context, entry_occurrence, new_seen_source), None)
+    seen = _mapping_value_occurrence(context.root, container, "seen")
     span = (
         _scalar_span(seen, context.marks.scalar_spans)
         if isinstance(seen, _ScalarOccurrence)
@@ -825,7 +883,7 @@ def _plan_entry_edit(
             seen.start,
             _anchored_seen_source(context, seen, span, old_seen),
         )
-    edit = _seen_source_edit(context, entry_occurrence, seen, span, new_seen_source)
+    edit = _seen_source_edit(context, container, seen, span, new_seen_source)
     return _EntryEdit(edit, anchored)
 
 
@@ -844,8 +902,10 @@ def _plan_source_edits(
     for index, (entry, entry_occurrence) in enumerate(
         zip(entries, entry_occurrences.value, strict=True)
     ):
+        # An `!!omap` entry loads as a mapping while its source is a sequence of one-pair
+        # mappings, so a sequence occurrence is a mapping entry too and is edited as one.
         if not isinstance(entry, MutableMapping) or not isinstance(
-            entry_occurrence, (_MappingOccurrence, _AliasOccurrence)
+            entry_occurrence, (_MappingOccurrence, _SequenceOccurrence, _AliasOccurrence)
         ):
             raise UnreadableDocError("frontmatter derives_from entry is not a mapping")
         ref = entry.get("ref")
@@ -866,7 +926,7 @@ def _plan_source_edits(
             edits.append(entry_edit.edit)
         if entry_edit.anchored is not None:
             anchored_seen.append(entry_edit.anchored)
-        if isinstance(entry_occurrence, _MappingOccurrence):
+        if not isinstance(entry_occurrence, _AliasOccurrence):
             updated_definitions.add(entry_occurrence.start)
         applied.add(ref)
         entry_updates.append(

@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer change how a later file's hash is quoted, and it quotes a replacement the document's own
   YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,
   matching how an anchored one was already handled.
+- `reconcile` keeps an entry written as a YAML ordered map (`!!omap`) editable. Such an entry
+  loads as a mapping and validates as an edge, but its source is a sequence of one-pair mappings,
+  so the targeted pair is edited inside its own mapping and a missing `seen` is appended as an
+  item rather than as a key.
 - `reconcile` refuses a self-referential frontmatter document as a clean error rather than a
   `RecursionError` traceback, quotes a replacement hash a YAML constructor rejects instead of
   letting that error escape, and appends a missing `seen` after an entry key whose value is empty,
