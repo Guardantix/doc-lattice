@@ -418,3 +418,25 @@ becoming more permissive and therefore a major version (3.0.0). A consumer whose
 a doc-lattice audit that included shell certification must add the standalone step to keep those
 findings. Shell-scanner work is now filed, reviewed, and released on the extracted repository at
 its own cadence, and a change there can no longer regress this engine.
+
+### AD-26: Reconcile output identity depends on ruamel parser internals
+
+**Date:** 2026-08-11
+**Status:** Accepted
+**Context:** Reconcile rewrites exact source bytes so a document's body, key order, comments, and
+list indentation survive a `seen` update. Locating those bytes means reading ruamel's parser
+events and scanner tokens, and the byte offsets on their source marks, rather than dumping a
+loaded document back out. Those are implementation details of a dependency the project otherwise
+declares by floor alone, and a change to how ruamel accounts for marks would move every span this
+module measures.
+**Decision:** `reconcile.py` depends on `ruamel.yaml.events`, `ruamel.yaml.tokens`, and
+`start_mark.index`/`end_mark.index` semantics as a deliberate compatibility surface, verified
+against 0.18 and 0.19, and the dependency is bounded to that verified range rather than pinned to
+one release. Each read builds its own loader, since a shared instance carries document state
+(`YAML.version`, and the reader and scanner bound to one document) whose reset behavior is itself
+version dependent. Every rewrite is reparsed and compared against the intended document before it
+is staged, so a mis-measured span is refused rather than published.
+**Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source
+suite as its evidence, in the same spirit as the AD-13 parser pin, not a floor edit. If a future
+release changes mark accounting, the reparse gate turns a silent corruption into a refusal to
+write, which is the failure mode this engine prefers.

@@ -15,6 +15,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.events import (
     AliasEvent,
+    DocumentStartEvent,
     Event,
     MappingEndEvent,
     MappingStartEvent,
@@ -29,10 +30,6 @@ from .frontmatter_parser import split_frontmatter
 from .hashing import normalize_newlines
 from .model import Lattice, TargetId, parse_ref
 from .resolve import cached_target_hash
-
-# One safe loader serves every read here: nothing is dumped back, so a round-trip loader
-# would only pay for state this module never uses.
-_SAFE_YAML = YAML(typ="safe")
 
 # Errors a safe constructor raises for a tagged scalar its type cannot build, alongside the
 # YAMLError family the scanner and parser raise.
@@ -77,6 +74,7 @@ class _ScalarOccurrence:
     value: str
     style: str | None
     anchor: str | None
+    tag: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,14 +121,24 @@ type _YamlOccurrence = (
 
 
 def _yaml() -> YAML:
-    """Return the shared safe loader with any earlier document's YAML version cleared.
+    """Return a fresh safe loader for one read.
 
-    ``YAML.version`` is sticky, so a ``%YAML`` directive in one frontmatter would otherwise
-    keep resolving scalars its way for every later read in the process, exactly as
-    ``frontmatter_parser`` guards against.
+    Nothing here is dumped back, so a round-trip loader would only pay for state this module
+    never uses. A loader is built per read rather than shared because a ``YAML`` instance
+    carries document state: ``YAML.version`` is sticky, so a ``%YAML`` directive in one
+    frontmatter would keep resolving scalars its way for every later read (exactly as
+    ``frontmatter_parser`` guards against), and a shared instance binds its reader and scanner
+    to one document at a time, so two concurrent callers would measure each other's offsets.
     """
-    _SAFE_YAML.version = None
-    return _SAFE_YAML
+    return YAML(typ="safe")
+
+
+def _document_version(events: list[Event]) -> tuple[int, int] | None:
+    """Return the YAML version this frontmatter declares, or None when it declares none."""
+    for event in events:
+        if isinstance(event, DocumentStartEvent):
+            return event.version
+    return None
 
 
 def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurrence, int]:
@@ -144,6 +152,7 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
                 event.value,
                 event.style,
                 event.anchor,
+                event.tag,
             ),
             index + 1,
         )
@@ -345,11 +354,13 @@ def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _Scal
     return span.end
 
 
-def _seen_scalar_source(new_seen: str) -> str:
+def _seen_scalar_source(new_seen: str, version: tuple[int, int] | None) -> str:
     """Return source text for ``new_seen`` that reloads as the same string.
 
     An all-digit hash reloads as an integer when spliced in bare, which fails frontmatter
-    validation on the next read, so anything that does not round-trip plain is quoted.
+    validation on the next read, so anything that does not round-trip plain is quoted. The
+    round-trip is tested under the document's own YAML version, since a 1.1 document reads
+    scalars such as ``y`` and ``on`` as booleans that 1.2 leaves as strings.
     """
     if (
         new_seen
@@ -357,10 +368,12 @@ def _seen_scalar_source(new_seen: str) -> str:
         and not (_PLAIN_SCALAR_UNSAFE & set(new_seen))
         and not new_seen.startswith(_PLAIN_SCALAR_UNSAFE_PREFIX)
     ):
+        loader = _yaml()
+        loader.version = version
         try:
-            if _yaml().load(new_seen) == new_seen:
+            if loader.load(new_seen) == new_seen:
                 return new_seen
-        except YAMLError:
+        except _LOAD_ERRORS:
             pass
     return json.dumps(new_seen, ensure_ascii=False)
 
@@ -388,18 +401,30 @@ def _anchored_seen_source(
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def _is_implicit_null(occurrence: _YamlOccurrence) -> bool:
+    """Report whether an occurrence is the empty plain scalar YAML reads as null."""
+    return (
+        isinstance(occurrence, _ScalarOccurrence)
+        and occurrence.style is None
+        and occurrence.value == ""
+    )
+
+
 def _entry_content_end(occurrence: _YamlOccurrence) -> int:
     """Return the offset just past an occurrence's final scalar or alias token.
 
     A block collection's own end mark is the *next* token's offset, which for a sequence
     entry is the following item's dash, so the last leaf is the only reliable anchor for
     an append. A flow collection ends at its own closing bracket, and recursing past that
-    into its final leaf would anchor the append inside a collection that is still open.
+    into its final leaf would anchor the append inside a collection that is still open. An
+    implicit null occupies no source of its own and carries that same next-token mark, so a
+    key whose value is empty anchors the append at the key instead.
     """
     if isinstance(occurrence, (_MappingOccurrence, _SequenceOccurrence)) and occurrence.flow_style:
         return occurrence.end
     if isinstance(occurrence, _MappingOccurrence) and occurrence.value:
-        return _entry_content_end(occurrence.value[-1][1])
+        key, value = occurrence.value[-1]
+        return key.end if _is_implicit_null(value) else _entry_content_end(value)
     if isinstance(occurrence, _SequenceOccurrence) and occurrence.value:
         return _entry_content_end(occurrence.value[-1])
     return occurrence.end
@@ -431,7 +456,10 @@ def _seen_source_edit(
             if pair is None:
                 raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
             return _null_seen_source_edit(raw_meta, entry, pair[0], new_seen)
-        start = seen.start if seen.anchor is not None else span.start
+        # An anchor or a tag sits between the node start and the scalar token, and neither can
+        # survive the replacement: the anchor is relocated to whichever alias still needs the
+        # old value, and a leftover tag would retype the new hash on the next read.
+        start = span.start if seen.anchor is None and seen.tag is None else seen.start
         return _SourceEdit(start, _scalar_source_end(raw_meta, seen, span), new_seen)
     if seen is not None:
         raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
@@ -514,13 +542,22 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
     except _LOAD_ERRORS as exc:
         msg = f"reconcile would leave {source} unparseable, so nothing was rewritten: {exc}"
         raise UnreadableDocError(msg) from exc
-    if reloaded == expected:
-        return
-    changed = (
-        "derives_from entries"
-        if _derives_from_member(reloaded) != _derives_from_member(expected)
-        else "frontmatter outside derives_from"
-    )
+    try:
+        if reloaded == expected:
+            return
+        changed = (
+            "derives_from entries"
+            if _derives_from_member(reloaded) != _derives_from_member(expected)
+            else "frontmatter outside derives_from"
+        )
+    except RecursionError as exc:
+        # An anchor that contains its own alias loads as a cyclic document, which compares
+        # without bound. An unverifiable rewrite is refused rather than published unchecked.
+        msg = (
+            f"frontmatter of {source} is self-referential, so a reconcile rewrite cannot be"
+            " verified and nothing was rewritten"
+        )
+        raise UnreadableDocError(msg) from exc
     msg = f"reconcile would not reproduce the {changed} of {source}, so nothing was rewritten"
     raise UnreadableDocError(msg)
 
@@ -532,6 +569,7 @@ class _SourceContext:
     raw_meta: str
     root: _YamlOccurrence
     scalar_spans: tuple[_ScalarSpan, ...]
+    version: tuple[int, int] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,7 +673,7 @@ def _plan_source_edits(
             context,
             entry_occurrence,
             old_seen,
-            _seen_scalar_source(new_seen),
+            _seen_scalar_source(new_seen, context.version),
             frozenset(updated_definitions),
         )
         if entry_edit.edit is not None:
@@ -785,10 +823,12 @@ def apply_reconcile(
         return current_file_text, set()
     if not isinstance(entries, list):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
+    events = list(_yaml().parse(raw_meta))
     context = _SourceContext(
         raw_meta,
-        _source_occurrence_tree(list(_yaml().parse(raw_meta))),
+        _source_occurrence_tree(events),
         _scalar_spans(list(_yaml().scan(raw_meta))),
+        _document_version(events),
     )
     entry_occurrences = _derives_from_occurrences(context.root, entries)
     plan = _plan_source_edits(context, entries, entry_occurrences, updates)

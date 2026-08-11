@@ -52,7 +52,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13",
     "pydantic>=2",
-    "ruamel.yaml>=0.18",
+    "ruamel.yaml>=0.18,<0.20",
 ]
 
 [dependency-groups]

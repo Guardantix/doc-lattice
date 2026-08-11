@@ -1,7 +1,7 @@
 # Reconcile: selectors, transactions, and recovery
 
-`reconcile` is the only command that writes to your docs, and it only ever rewrites the `seen`
-scalar. This document covers the selector forms, the read-only dry-run preview and its JSON plan,
+`reconcile` is the only command that writes to your docs, and it only ever rewrites `seen` values
+and the aliases that read them. This document covers the selector forms, the read-only dry-run preview and its JSON plan,
 the write and durability mechanics of a real run, automatic and manual recovery, and the
 transaction artifacts reconcile leaves behind.
 
@@ -43,9 +43,12 @@ whether rollback completed or recovery evidence remains.
 
 `reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
 the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
-verbatim. The rewritten frontmatter is reparsed before it is staged, and a rewrite that would not
-reload as the whole planned frontmatter, edges and every other key alike, is refused rather than
-written. A real run then stages exact before
+verbatim. The one edit outside that scalar is an anchor relocation: when the `seen` being replaced
+carries an anchor that another key still reads through an alias, reconcile writes the anchor and
+its old value at that alias site, so the other key keeps the value it had instead of picking up
+the new hash. The rewritten frontmatter is reparsed before it is staged, and a rewrite that would
+not reload as the whole planned frontmatter, edges and every other key alike, is refused rather
+than written. A real run then stages exact before
 and after images, publishes a `prepared` journal, fingerprints each destination immediately
 before its replacement, and rejects a changed destination as a conflict. The full batch is rolled
 back in reverse order if a conflict or write/durability failure occurs before the committed

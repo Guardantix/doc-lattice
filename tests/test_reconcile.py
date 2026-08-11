@@ -760,13 +760,87 @@ def test_apply_reconcile_refuses_source_edits_that_change_other_frontmatter_keys
         apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
 
 
-def test_apply_reconcile_refuses_a_tagged_seen_scalar_as_a_project_error():
-    # Splicing a hash under an inherited !!int tag makes the constructor raise a bare
-    # ValueError, which would reach the CLI as a traceback instead of a clean exit.
-    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: !!int 12\n---\nbody\n"
+@pytest.mark.parametrize("source_seen", ["!!int 12", "!!null ~", "!!str 12"])
+def test_apply_reconcile_replaces_a_tagged_seen_scalar_with_its_tag(source_seen: str):
+    # The tag belongs to the value being replaced: leaving it in place would retype the new
+    # hash, or reject it outright, on the next read.
+    text = f"---\nid: d\nderives_from:\n  - ref: a#x\n    seen: {source_seen}\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
 
-    with pytest.raises(UnreadableDocError, match=r"would leave .* unparseable"):
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["newhash"]
+
+
+def test_apply_reconcile_refuses_a_collection_seen_as_a_project_error():
+    # A list has no single scalar to splice, so this shape is refused rather than guessed at.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: [1, 2]\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match="entry seen is malformed"):
         apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+def test_apply_reconcile_refuses_self_referential_frontmatter_as_a_project_error():
+    # A cyclic document compares without bound, so the rewrite cannot be verified; the CLI
+    # gets a clean refusal instead of a RecursionError traceback.
+    text = "---\nid: d\nr: &r\n  self: *r\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match="self-referential"):
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+def test_apply_reconcile_quotes_a_replacement_the_constructor_rejects():
+    # The plain-scalar probe loads the replacement, and a safe constructor raises a bare
+    # ValueError for an impossible timestamp; quoting it keeps it a string either way.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "2026-13-45"}, Path("downstream.md"))
+
+    assert out == '---\nid: d\nderives_from:\n  - ref: a#x\n    seen: "2026-13-45"\n---\nbody\n'
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["2026-13-45"]
+
+
+def test_apply_reconcile_quotes_a_hash_this_documents_yaml_version_would_retype():
+    # Under 1.1 a bare `y` reloads as a boolean, so the plain-scalar probe has to run under
+    # the document's own declared version rather than the loader default.
+    text = (
+        "---\n%YAML 1.1\n--- !!map\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "y"}, Path("downstream.md"))
+
+    assert out == (
+        '---\n%YAML 1.1\n--- !!map\nid: d\nderives_from:\n  - ref: a#x\n    seen: "y"\n---\nbody\n'
+    )
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_adds_seen_after_an_entry_key_with_an_empty_value():
+    # An implicit null carries the *next* token's mark, so anchoring the append to it would
+    # splice the new key into the following entry.
+    text = (
+        "---\nid: d\nderives_from:\n  - ref: a#x\n    note:\n  - ref: b#y\n    seen: q\n---\nbody\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    note:\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        "    seen: q\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
 
 
 def test_apply_reconcile_inserts_seen_into_an_explicit_key_entry():

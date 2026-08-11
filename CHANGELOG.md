@@ -19,9 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of a reused anchor name or to an entry the same run already updated.
 - `reconcile` indents a newly inserted `seen` to the entry's own key column and appends it after a
   multi-line flow value, so explicit-key and flow-tailed entries stay parseable.
-- `reconcile` clears any `%YAML` directive between documents, so one file's YAML version can no
-  longer change how a later file's hash is quoted, and it reports a tagged `seen` scalar it cannot
-  rewrite as a clean error rather than a traceback.
+- `reconcile` reads every document through its own loader, so one file's `%YAML` directive can no
+  longer change how a later file's hash is quoted, and it quotes a replacement the document's own
+  YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,
+  matching how an anchored one was already handled.
+- `reconcile` refuses a self-referential frontmatter document as a clean error rather than a
+  `RecursionError` traceback, quotes a replacement hash a YAML constructor rejects instead of
+  letting that error escape, and appends a missing `seen` after an entry key whose value is empty
+  rather than splicing it into the next entry.
 
 ## [4.0.0] - 2026-08-10
 
