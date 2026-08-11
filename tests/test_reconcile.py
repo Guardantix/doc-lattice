@@ -1279,6 +1279,93 @@ def test_apply_reconcile_updates_an_entry_inheriting_seen_from_an_ordered_map(
     ]
 
 
+def test_apply_reconcile_updates_an_entry_merging_the_ordered_map_item_that_holds_seen():
+    # This merge names one item of the ordered map rather than the map itself, and it is the
+    # item the hash is written into, so the entry reads the new one.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - !!omap\n"
+        "    - ref: a#x\n"
+        "    - &seen_item {seen: old}\n"
+        "  - <<: *seen_item\n"
+        "    ref: b#y\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("{seen: old}", "{seen: newhash}")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
+def test_apply_reconcile_leaves_an_entry_merging_an_ordered_map_item_without_seen_alone():
+    # This merge names the one item of the ordered map the rewrite does not touch, so the
+    # entry inherits no `seen` before or after it. Treating every item of an updated ordered
+    # map as changed would expect a hash here that the reload correctly never shows.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - !!omap\n"
+        "    - &ref_item {ref: a#x}\n"
+        "    - seen: old\n"
+        "  - <<: *ref_item\n"
+        "    ref: b#y\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    - seen: old\n", "    - seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        None,
+    ]
+
+
+def test_apply_reconcile_leaves_a_merge_reading_the_definition_an_ordered_map_item_aliases():
+    # The targeted entry spells its `seen` through an alias, so the rewrite writes a pair of
+    # its own at that item and leaves the definition alone. The entry merging that definition
+    # keeps reading the old hash, and so does the entry the definition is written in.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - !!omap\n"
+        "    - ref: c#w\n"
+        "    - &shared_pair {seen: shared}\n"
+        "  - !!omap\n"
+        "    - ref: a#x\n"
+        "    - *shared_pair\n"
+        "  - <<: *shared_pair\n"
+        "    ref: b#y\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    - *shared_pair\n", "    - {seen: newhash}\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "shared",
+        "newhash",
+        "shared",
+    ]
+
+
 def test_apply_reconcile_updates_entries_inheriting_an_ordered_map_seen_through_a_chain():
     # The entry that merges the ordered map is itself merged by a third, so the hash written
     # into the ordered map reaches both and the expectation has to carry it that far.

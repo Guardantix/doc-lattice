@@ -431,24 +431,43 @@ def _is_merge_key(key: _YamlOccurrence) -> bool:
     return key.style is None and key.value == "<<"
 
 
-def _merge_source_mappings(
-    anchors: _AnchorIndex, value: _YamlOccurrence
-) -> list[_MappingOccurrence]:
-    """Return the mappings a merge key's value supplies members from, in the loader's order.
+@dataclass(frozen=True, slots=True)
+class _MergeSource:
+    """One mapping a merge key takes members from, and the offsets that identify it.
+
+    Attributes:
+        identities: Every offset this source can be recognized by, outermost first. A merge
+            naming an ordered map takes the one-pair mappings its source is written as, so
+            such a source is identified by the sequence the merge named as readily as by the
+            item the member sits in, and a merge naming one of those items alone carries
+            only that item. Which of the two an edit changed is what tells an inheriting
+            entry apart from one reading a part of the same ordered map that did not change.
+        mapping: The mapping the member is looked up in.
+    """
+
+    identities: tuple[int, ...]
+    mapping: _MappingOccurrence
+
+
+def _merge_sources(anchors: _AnchorIndex, value: _YamlOccurrence) -> list[_MergeSource]:
+    """Return the sources a merge key's value supplies members from, in the loader's order.
 
     The loader merges from a sequence of mappings as readily as from a single one, and it
     reads through an alias before deciding which of the two it holds. An ordered map is a
     sequence of one-pair mappings, so naming one after a merge key merges those items, and
     the alias that names it has to be resolved before the sequence can be seen at all.
     """
-    resolved_value = _resolve_occurrence(anchors, value)
-    candidates = (
-        list(resolved_value.value)
-        if isinstance(resolved_value, _SequenceOccurrence)
-        else [resolved_value]
-    )
-    resolved = [_resolve_occurrence(anchors, candidate) for candidate in candidates]
-    return [candidate for candidate in resolved if isinstance(candidate, _MappingOccurrence)]
+    named = _resolve_occurrence(anchors, value)
+    if isinstance(named, _MappingOccurrence):
+        return [_MergeSource((named.start,), named)]
+    if not isinstance(named, _SequenceOccurrence):
+        return []
+    sources: list[_MergeSource] = []
+    for item in named.value:
+        mapping = _resolve_occurrence(anchors, item)
+        if isinstance(mapping, _MappingOccurrence):
+            sources.append(_MergeSource((named.start, mapping.start), mapping))
+    return sources
 
 
 def _resolved_mapping_member(
@@ -470,8 +489,10 @@ def _resolved_mapping_member(
     for key, value in mapping.value:
         if not _is_merge_key(key):
             continue
-        for source in _merge_source_mappings(anchors, value):
-            member = _resolved_mapping_member(anchors, source, name, visited | {mapping.start})
+        for source in _merge_sources(anchors, value):
+            member = _resolved_mapping_member(
+                anchors, source.mapping, name, visited | {mapping.start}
+            )
             if member is not None:
                 return member
     return None
@@ -524,37 +545,30 @@ def _inherited_seen_origin(
     A merge key gives a mapping the members it does not spell itself, so editing one entry's
     ``seen`` changes every entry inheriting it, and the rewrite has to expect that. The loader
     takes the first source that provides the member, which after a rewrite means the first
-    that either spells ``seen`` in source or is having one written into it. The caller has
-    already established that ``mapping`` spells no ``seen`` of its own.
+    that either spells ``seen`` in source or is having one written into it. A source having
+    one written into it is recognized by whichever of its identities the rewrite changed, so
+    a merge naming one item of an ordered map that is not the edited one passes over it. The
+    caller has already established that ``mapping`` spells no ``seen`` of its own.
     """
     if mapping.start in visited:
         return None
     for key, value in mapping.value:
         if not _is_merge_key(key):
             continue
-        for source in _merge_source_mappings(anchors, value):
-            if source.start in updated or _mapping_pair(anchors, source, "seen") is not None:
-                return source.start
-            deeper = _inherited_seen_origin(anchors, source, updated, visited | {mapping.start})
+        for source in _merge_sources(anchors, value):
+            changed = next(
+                (identity for identity in source.identities if identity in updated), None
+            )
+            if changed is not None:
+                return changed
+            if _mapping_pair(anchors, source.mapping, "seen") is not None:
+                return source.mapping.start
+            deeper = _inherited_seen_origin(
+                anchors, source.mapping, updated, visited | {mapping.start}
+            )
             if deeper is not None:
                 return deeper
     return None
-
-
-def _merge_origin_starts(
-    anchors: _AnchorIndex, entry: _MappingOccurrence | _SequenceOccurrence
-) -> tuple[int, ...]:
-    """Return every offset at which a merge can report ``entry`` as the source of a ``seen``.
-
-    A merge reports the mapping it took the member from, which for an ordinary entry is the
-    entry itself. An entry written as an ordered map is never that mapping: a merge naming
-    one takes the one-pair mappings it is written as, so it reports an item instead. Every
-    item is an origin of the entry rather than only the one spelling ``seen`` today, since
-    an entry taking its first ``seen`` is recognized before the append that gives it one.
-    """
-    if isinstance(entry, _MappingOccurrence):
-        return (entry.start,)
-    return tuple(_resolve_occurrence(anchors, item).start for item in entry.value)
 
 
 def _value_indicator_after(marks: _TokenMarks, key_end: int, limit: int) -> int | None:
@@ -1186,6 +1200,27 @@ def _plan_source_edits(
     )
 
 
+def _merge_origin_starts(
+    anchors: _AnchorIndex, entry: _MappingOccurrence | _SequenceOccurrence
+) -> tuple[int, ...]:
+    """Return the offsets a merge reading the updated ``entry`` recognizes the change by.
+
+    An ordinary entry is the mapping a merge takes the member from, so its own offset is the
+    whole answer. An entry written as an ordered map is never that mapping: a merge naming
+    the entry takes the one-pair mappings its source is written as, and recognizes the change
+    by the entry it named, while a merge naming a single item recognizes it only when that
+    item is the one the hash lands in. Nothing beyond the entry is offered for a ``seen``
+    written through an alias item or appended as a new one, since neither leaves an item a
+    merge could already name carrying the new hash.
+    """
+    if isinstance(entry, _MappingOccurrence):
+        return (entry.start,)
+    pair = _seen_pair(anchors, entry)
+    if pair is None or pair.alias is not None:
+        return (entry.start,)
+    return (entry.start, pair.mapping.start)
+
+
 def _merge_inherited_updates(
     context: _SourceContext,
     entry_occurrences: _SequenceOccurrence,
@@ -1197,9 +1232,9 @@ def _merge_inherited_updates(
     editing that source changes this entry too even though nothing was written at it. The
     reload sees that, so the expectation has to as well or a rewrite that is exactly right
     would be refused. An entry written as an ordered map is a merge source like any other,
-    and reports itself through its own items, so it is recorded through those. Entries
-    reached through an alias need nothing here: the loader gives an alias and its definition
-    one object, which a single assignment already updates.
+    recorded by the offsets a merge reading it recognizes the edit by. Entries reached
+    through an alias need nothing here: the loader gives an alias and its definition one
+    object, which a single assignment already updates.
     """
     updated = {update.index: update.new_seen for update in planned}
     origins: dict[int, str] = {}
