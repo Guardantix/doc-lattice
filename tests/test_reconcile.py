@@ -809,6 +809,62 @@ def test_apply_reconcile_updates_a_merge_key_provided_derives_from_list():
     assert applied == {"a#x"}
 
 
+def test_apply_reconcile_updates_a_tagged_merge_key_provided_derives_from_list():
+    # The loader merges on the resolved tag, which an explicit `!!merge` carries just as the
+    # plain `<<` spelling does, so matching only the shorthand loses the inherited source.
+    text = (
+        "---\n"
+        "base: &shared\n"
+        "  derives_from:\n"
+        "    - ref: a#x\n"
+        "      seen: old\n"
+        "id: d\n"
+        "!!merge inherited: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "base: &shared\n"
+        "  derives_from:\n"
+        "    - ref: a#x\n"
+        "      seen: newhash\n"
+        "id: d\n"
+        "!!merge inherited: *shared\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_updates_a_merge_provided_list_beside_an_aliased_key():
+    # A key written as an alias carries no tag of its own, so the scan for the merge key that
+    # provides derives_from has to pass over it rather than read one off it.
+    text = (
+        "---\n"
+        "base: &shared\n"
+        "  derives_from:\n"
+        "    - ref: a#x\n"
+        "      seen: old\n"
+        "id: &name d\n"
+        "? *name\n"
+        ": kept\n"
+        "<<: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("      seen: old\n", "      seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
 def test_apply_reconcile_refuses_source_edits_that_do_not_reload_as_planned(
     monkeypatch: pytest.MonkeyPatch,
 ):

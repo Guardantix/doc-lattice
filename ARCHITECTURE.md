@@ -435,7 +435,10 @@ surface, verified against 0.18 and 0.19, and the dependency is bounded to that v
 rather than pinned to one release. Where an event mark and a token mark disagree, the token is
 authoritative: a node's own mark starts at an anchor or a tag, while the scanner's block-mapping
 start, key indicator, and value indicator give the indentation, the pair boundary, and the `:` an
-edit has to align to. Each read builds its own loader, since a shared instance carries document
+edit has to align to. A node's properties are part of that surface too: a parsed node reports an
+explicit tag as its resolved URI and reports none for a scalar the loader resolves implicitly,
+which is how this module recognizes a merge key the way the constructor does rather than by
+re-resolving one itself. Each read builds its own loader, since a shared instance carries document
 state (`YAML.version`, and the reader and scanner bound to one document) whose reset behavior is
 itself version dependent. Every rewrite is reparsed and compared against the intended document
 before it is staged, so a mis-measured span is refused rather than published.

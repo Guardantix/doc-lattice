@@ -47,6 +47,9 @@ _LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
 _PLAIN_SCALAR_UNSAFE = frozenset(",[]{}#:\n\t")
 _PLAIN_SCALAR_UNSAFE_PREFIX = tuple("-?&*!|>'\"%@`")
 
+# The tag the loader flattens a mapping key on, which the plain `<<` scalar resolves to.
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
 
 @dataclass(frozen=True, slots=True)
 class Rewrite:
@@ -324,6 +327,20 @@ def _resolve_occurrence(root: _YamlOccurrence, occurrence: _YamlOccurrence) -> _
     return preceding[-1] if preceding else occurrence
 
 
+def _is_merge_key(key: _YamlOccurrence) -> bool:
+    """Report whether a mapping key is one the loader flattens into its mapping.
+
+    The loader merges on a key's resolved tag, so an explicit ``!!merge`` spells a merge key
+    on any scalar, while a quoted or otherwise tagged ``<<`` is an ordinary key it leaves
+    alone. Only a plain ``<<`` resolves to the merge tag on its own.
+    """
+    if not isinstance(key, _ScalarOccurrence):
+        return False
+    if key.tag is not None:
+        return key.tag == _MERGE_TAG
+    return key.style is None and key.value == "<<"
+
+
 def _merge_source_mappings(
     root: _YamlOccurrence, value: _YamlOccurrence
 ) -> list[_MappingOccurrence]:
@@ -349,7 +366,7 @@ def _resolved_mapping_member(
     if pair is not None:
         return _resolve_occurrence(root, pair[1])
     for key, value in mapping.value:
-        if not (isinstance(key, _ScalarOccurrence) and key.value == "<<"):
+        if not _is_merge_key(key):
             continue
         for source in _merge_source_mappings(root, value):
             member = _resolved_mapping_member(root, source, name, visited | {mapping.start})
