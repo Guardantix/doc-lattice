@@ -5,6 +5,7 @@ caller injects, and ``reconcile_transaction`` owns durable publication of the re
 planned here.
 """
 
+import json
 from collections import defaultdict
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
@@ -223,41 +224,28 @@ def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _Scal
     return span.end
 
 
-def _retained_seen_aliases(
-    entries: list[object],
-    occurrences: tuple[_YamlOccurrence, ...],
-    updates: dict[str, str],
-    anchor: str,
-) -> list[_AliasOccurrence]:
+def _alias_occurrences(occurrence: _YamlOccurrence, anchor: str) -> list[_AliasOccurrence]:
     aliases: list[_AliasOccurrence] = []
-    for entry, occurrence in zip(entries, occurrences, strict=True):
-        if not isinstance(entry, MutableMapping) or not isinstance(occurrence, _MappingOccurrence):
-            continue
-        seen = _mapping_value_occurrence(occurrence, "seen")
-        if not isinstance(seen, _AliasOccurrence) or seen.anchor != anchor:
-            continue
-        ref = entry.get("ref")
-        alias_will_change = (
-            isinstance(ref, str) and ref in updates and entry.get("seen") != updates[ref]
-        )
-        if not alias_will_change:
-            aliases.append(seen)
+    if isinstance(occurrence, _AliasOccurrence):
+        if occurrence.anchor == anchor:
+            aliases.append(occurrence)
+    elif isinstance(occurrence, _MappingOccurrence):
+        for key, value in occurrence.value:
+            aliases.extend(_alias_occurrences(key, anchor))
+            aliases.extend(_alias_occurrences(value, anchor))
+    elif isinstance(occurrence, _SequenceOccurrence):
+        for value in occurrence.value:
+            aliases.extend(_alias_occurrences(value, anchor))
     return aliases
 
 
 def _seen_anchor_relocation_edit(
-    raw_meta: str,
     seen: _ScalarOccurrence,
-    scalar_spans: tuple[_ScalarSpan, ...],
     alias: _AliasOccurrence,
 ) -> _SourceEdit:
     if seen.anchor is None:
         raise UnreadableDocError("frontmatter derives_from entry seen anchor is malformed")
-    span = _scalar_span(seen, scalar_spans)
-    if span is None:
-        scalar_source = "null"
-    else:
-        scalar_source = raw_meta[span.start : _scalar_source_end(raw_meta, seen, span)]
+    scalar_source = json.dumps(seen.value, ensure_ascii=False)
     return _SourceEdit(alias.start, alias.end, f"&{seen.anchor} {scalar_source}")
 
 
@@ -301,6 +289,26 @@ def _mapping_alias_source_edit(
 ) -> _SourceEdit:
     alias_source = raw_meta[alias.start : alias.end]
     return _SourceEdit(alias.start, alias.end, f"{{<<: {alias_source}, seen: {new_seen}}}")
+
+
+def _append_seen_anchor_relocations(
+    source_root: _YamlOccurrence,
+    anchored_seen: list[_ScalarOccurrence],
+    edits: list[_SourceEdit],
+) -> None:
+    edited_spans = {(edit.start, edit.end) for edit in edits}
+    for seen in anchored_seen:
+        if seen.anchor is None:
+            continue
+        untouched_aliases = [
+            alias
+            for alias in _alias_occurrences(source_root, seen.anchor)
+            if (alias.start, alias.end) not in edited_spans
+        ]
+        if untouched_aliases:
+            relocation = _seen_anchor_relocation_edit(seen, untouched_aliases[0])
+            edits.append(relocation)
+            edited_spans.add((relocation.start, relocation.end))
 
 
 def _apply_source_edits(raw_meta: str, edits: list[_SourceEdit]) -> str:
@@ -447,6 +455,7 @@ def apply_reconcile(  # noqa: PLR0912
     ) != len(entries):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
     edits: list[_SourceEdit] = []
+    anchored_seen: list[_ScalarOccurrence] = []
     applied: set[str] = set()
     for entry, entry_occurrence in zip(entries, entry_occurrences.value, strict=True):
         if not isinstance(entry, MutableMapping) or not isinstance(
@@ -465,18 +474,7 @@ def apply_reconcile(  # noqa: PLR0912
                     else None
                 )
                 if isinstance(seen, _ScalarOccurrence) and seen.anchor is not None:
-                    retained_aliases = _retained_seen_aliases(
-                        entries, entry_occurrences.value, updates, seen.anchor
-                    )
-                    if retained_aliases:
-                        edits.append(
-                            _seen_anchor_relocation_edit(
-                                raw_meta,
-                                seen,
-                                scalar_spans,
-                                retained_aliases[0],
-                            )
-                        )
+                    anchored_seen.append(seen)
                 edit = (
                     _mapping_alias_source_edit(raw_meta, entry_occurrence, new_seen)
                     if isinstance(entry_occurrence, _AliasOccurrence)
@@ -486,6 +484,7 @@ def apply_reconcile(  # noqa: PLR0912
                 applied.add(ref)
     if not applied:
         return current_file_text, applied
+    _append_seen_anchor_relocations(source_root, anchored_seen, edits)
     new_meta = _apply_source_edits(raw_meta, edits)
     return f"---\n{new_meta}---\n{body}", applied
 

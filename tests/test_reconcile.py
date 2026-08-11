@@ -306,7 +306,7 @@ def test_apply_reconcile_relocates_targeted_seen_anchor_to_untargeted_alias():
         "  - ref: a#x\n"
         "    seen: newhash\n"
         "  - ref: b#y\n"
-        "    seen: &shared oldhash\n"
+        '    seen: &shared "oldhash"\n'
         "  - ref: c#z\n"
         "    seen: *shared\n"
         "---\n"
@@ -362,6 +362,103 @@ def test_apply_reconcile_drops_seen_anchor_when_all_alias_consumers_are_targeted
         "new-b",
         "new-c",
     ]
+
+
+def test_apply_reconcile_relocates_seen_anchor_to_untouched_ticket_alias():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared oldhash\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        'tickets: [&shared "oldhash"]\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    meta = _validated_reconcile_meta(out)
+    assert meta.derives_from[0].seen == "newhash"
+    assert meta.tickets == ["oldhash"]
+
+
+def test_apply_reconcile_relocates_tagged_seen_anchor_as_a_string():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared !!str 123\n"
+        "  - ref: b#y\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        '    seen: &shared "123"\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "123",
+    ]
+
+
+def test_apply_reconcile_relocates_block_seen_anchor_into_flow_collection_safely():
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared |\n"
+        "      old value\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        'tickets: [&shared "old value\\n"]\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    meta = _validated_reconcile_meta(out)
+    assert meta.derives_from[0].seen == "newhash"
+    assert meta.tickets == ["old value\n"]
 
 
 def test_apply_reconcile_adds_seen_to_flow_mapping_with_commented_trailing_comma():
