@@ -43,7 +43,9 @@ whether rollback completed or recovery evidence remains.
 
 `reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
 the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
-verbatim. Two edits land outside that scalar. The first is an anchor relocation: when the `seen`
+verbatim. A `seen` written as a block scalar is the one place a comment moves rather than staying
+put: its header, the comment on it, and its contents are one span, so the comment is rewritten
+onto the line the new hash is written on. Two edits land outside that scalar. The first is an anchor relocation: when the `seen`
 being replaced carries an anchor that another key still reads through an alias, reconcile writes
 the anchor and its old value at that alias site, so the other key keeps the value it had instead
 of picking up the new hash. The second covers an entry, or the pair holding its `seen`, that is

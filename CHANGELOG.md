@@ -38,7 +38,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `reconcile` keeps an entry written as a YAML ordered map (`!!omap`) editable. Such an entry
   loads as a mapping and validates as an edge, but its source is a sequence of one-pair mappings,
   so the targeted pair is edited inside its own mapping and a missing `seen` is appended as an
-  item rather than as a key.
+  item rather than as a key. A whole frontmatter document written as an ordered map is
+  reconcilable for the same reason: its `derives_from` is found among the items its source
+  spells rather than looked up in a mapping that is not written there.
+- `reconcile` keeps the comment on a `seen` written as a block scalar, such as `seen: | # note`.
+  A block scalar's source runs from its header through its contents, so replacing the value used
+  to take the comment with it; the comment is now rewritten onto the line the new hash is
+  written on.
 - `reconcile` covers the remaining ways one `derives_from` entry can share a node with another: an
   alias to an entry the same run already updated is left alone when that entry is written as an
   ordered map, an ordered map item spelled as an alias takes the pair it stands for rather than

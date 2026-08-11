@@ -45,6 +45,9 @@ from .resolve import cached_target_hash
 _PLAIN_SCALAR_UNSAFE = frozenset(",[]{}#:\n\t")
 _PLAIN_SCALAR_UNSAFE_PREFIX = tuple("-?&*!|>'\"%@`")
 
+# The scalar styles whose token opens on a header line of its own rather than on the value.
+_BLOCK_SCALAR_STYLES = frozenset({"|", ">"})
+
 # The tag the loader flattens a mapping key on, which the plain `<<` scalar resolves to.
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
@@ -442,6 +445,42 @@ def _resolved_mapping_member(
     return None
 
 
+def _omap_member(
+    anchors: _AnchorIndex, sequence: _SequenceOccurrence, name: str
+) -> _YamlOccurrence | None:
+    """Look ``name`` up among the one-pair mappings an ordered map is written as.
+
+    The loader builds an ordered map from its items directly rather than through mapping
+    construction, so it never flattens a merge inside one and refuses a document that writes
+    one there. No merge is followed here for that reason: following one would find a member
+    no document reaching this far can carry.
+    """
+    for item in sequence.value:
+        resolved = _resolve_occurrence(anchors, item)
+        # The loader refuses an ordered map holding an item that is not a one-pair mapping,
+        # so a document reaching this far has none.
+        if not isinstance(resolved, _MappingOccurrence):  # pragma: no cover
+            continue
+        pair = _mapping_pair(anchors, resolved, name)
+        if pair is not None:
+            return _resolve_occurrence(anchors, pair[1])
+    return None
+
+
+def _resolved_member(
+    anchors: _AnchorIndex, node: _MappingOccurrence | _SequenceOccurrence, name: str
+) -> _YamlOccurrence | None:
+    """Look ``name`` up in a node the loader reads as a mapping, however it is written.
+
+    An ``!!omap`` loads as a mapping while its source is a sequence of one-pair mappings, so
+    a member of one has to be found among those items rather than in a mapping that is not
+    there.
+    """
+    if isinstance(node, _MappingOccurrence):
+        return _resolved_mapping_member(anchors, node, name)
+    return _omap_member(anchors, node, name)
+
+
 def _inherited_seen_origin(
     anchors: _AnchorIndex,
     mapping: _MappingOccurrence,
@@ -549,9 +588,32 @@ def _scalar_span(
 
 
 def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _TokenSpan) -> int:
-    if occurrence.style in {"|", ">"} and raw_meta[span.end - 1 : span.end] == "\n":
+    if occurrence.style in _BLOCK_SCALAR_STYLES and raw_meta[span.end - 1 : span.end] == "\n":
         return span.end - 1
     return span.end
+
+
+def _block_header_comment(raw_meta: str, occurrence: _ScalarOccurrence, span: _TokenSpan) -> str:
+    """Return the comment written on a block scalar's header line, its own spacing included.
+
+    A block scalar's token opens at its indicator and closes past its contents, so a comment
+    written on the header sits inside the span a replacement overwrites, unlike the comment
+    after a plain or quoted scalar, which sits outside it and survives untouched. The header
+    carries nothing but the style, chomping and indentation indicators, so the first ``#`` on
+    that line opens a comment. Its text moves onto the replacement's own line, which is where
+    a one-line hash leaves it, and reload verification cannot see it go if it does not.
+    """
+    if occurrence.style not in _BLOCK_SCALAR_STYLES:
+        return ""
+    line_end = raw_meta.find("\n", span.start)
+    header = raw_meta[span.start : len(raw_meta) if line_end == -1 else line_end]
+    comment_at = header.find("#")
+    if comment_at == -1:
+        return ""
+    indicators = header[:comment_at].rstrip()
+    # A comment opens on whitespace, so the run before it is the author's own spacing; the
+    # fallback covers a header no scanner accepts rather than emitting a hash bare.
+    return f"{header[len(indicators) : comment_at] or ' '}{header[comment_at:]}"
 
 
 def _probe_loader(version: tuple[int, int] | None) -> YAML:
@@ -739,7 +801,10 @@ def _seen_source_edit(
             # the key's own indicator rather than over the value.
             return _null_seen_source_edit(context, pair.mapping, pair.key, new_seen)
         start = _replaced_scalar_start(context, seen, span)
-        return _SourceEdit(start, _scalar_source_end(context.raw_meta, seen, span), new_seen)
+        comment = _block_header_comment(context.raw_meta, seen, span)
+        return _SourceEdit(
+            start, _scalar_source_end(context.raw_meta, seen, span), f"{new_seen}{comment}"
+        )
     raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
 
 
@@ -906,10 +971,19 @@ def _load_frontmatter_data(raw_meta: str) -> object:
 def _derives_from_occurrences(
     context: _SourceContext, entries: Sequence[object]
 ) -> _SequenceOccurrence:
-    """Return the source occurrences matching the loaded ``derives_from`` entries."""
-    if not isinstance(context.root, _MappingOccurrence):
-        raise UnreadableDocError("frontmatter source is not a mapping; cannot reconcile")
-    occurrences = _resolved_mapping_member(context.anchors, context.root, "derives_from")
+    """Return the source occurrences matching the loaded ``derives_from`` entries.
+
+    The caller has established that the document loads as a mapping carrying a
+    ``derives_from`` list, which a root written as an ordered map does while its source is a
+    sequence, so the member is resolved from whichever shape the root is written in.
+    """
+    root = context.root
+    if not isinstance(root, (_MappingOccurrence, _SequenceOccurrence)):
+        # Only a collection loads as the mapping the caller has already seen, so this refuses
+        # a root shape only a mark-accounting change could produce.
+        msg = "frontmatter source is not a mapping; cannot reconcile"
+        raise UnreadableDocError(msg)  # pragma: no cover
+    occurrences = _resolved_member(context.anchors, root, "derives_from")
     if not isinstance(occurrences, _SequenceOccurrence):
         raise UnreadableDocError("frontmatter derives_from source is not a list; cannot reconcile")
     if len(occurrences.value) != len(entries):  # pragma: no cover

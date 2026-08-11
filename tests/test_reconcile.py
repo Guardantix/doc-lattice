@@ -322,6 +322,68 @@ def test_apply_reconcile_replaces_block_scalar_without_consuming_final_newline()
     assert meta.tickets == ["T-1"]
 
 
+@pytest.mark.parametrize(
+    ("header", "expected_value"),
+    [
+        ("|  # keep this", "newhash  # keep this"),
+        (">- # keep this", "newhash # keep this"),
+        ("|2 # indented", "newhash # indented"),
+        ("!!str | # tagged", "newhash # tagged"),
+    ],
+)
+def test_apply_reconcile_keeps_the_comment_on_a_replaced_block_scalar_header(
+    header: str, expected_value: str
+):
+    # A block scalar's token spans its header, the comment on it, and the contents, so
+    # replacing the whole span drops a comment that a plain scalar on the same line keeps.
+    # The comment is the author's, not the value's, and reload verification cannot see it go.
+    text = f"---\nid: d\nderives_from:\n- ref: a#x\n  seen: {header}\n    oldhash\n---\nbody\n"
+    expected = f"---\nid: d\nderives_from:\n- ref: a#x\n  seen: {expected_value}\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+@pytest.mark.parametrize(
+    ("source_root", "expected_root"),
+    [
+        (
+            "!!omap\n- id: d\n- derives_from:\n    - ref: a#x\n      seen: old\n",
+            "!!omap\n- id: d\n- derives_from:\n    - ref: a#x\n      seen: newhash\n",
+        ),
+        (
+            "!!omap\n- id: d\n- derives_from:\n  - ref: a#x\n",
+            "!!omap\n- id: d\n- derives_from:\n  - ref: a#x\n    seen: newhash\n",
+        ),
+        (
+            "!!omap [{id: d}, {derives_from: [{ref: a#x, seen: old}]}]\n",
+            "!!omap [{id: d}, {derives_from: [{ref: a#x, seen: newhash}]}]\n",
+        ),
+        (
+            "!!omap\n- id: d  # keep\n- derives_from: [{ref: a#x}]  # and this\n",
+            "!!omap\n- id: d  # keep\n- derives_from: [{ref: a#x, seen: newhash}]  # and this\n",
+        ),
+    ],
+)
+def test_apply_reconcile_updates_an_ordered_map_at_the_frontmatter_root(
+    source_root: str, expected_root: str
+):
+    # A root written as an ordered map loads as a mapping and validates as a lattice node,
+    # so its `derives_from` has to be found among the one-pair mappings its source spells
+    # rather than looked up in a mapping that is not there.
+    text = f"---\n{source_root}---\nbody\n"
+    expected = f"---\n{expected_root}---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
 def test_apply_reconcile_leaves_an_alias_of_an_updated_entry_untouched():
     # The alias reads its value through the anchor, which this run already updated, so
     # rewriting the alias site would only churn a line the author wrote deliberately.
