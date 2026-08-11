@@ -43,18 +43,22 @@ whether rollback completed or recovery evidence remains.
 
 `reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
 the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
-verbatim. The one edit outside that scalar is an anchor relocation: when the `seen` being replaced
-carries an anchor that another key still reads through an alias, reconcile writes the anchor and
-its old value at that alias site, so the other key keeps the value it had instead of picking up
-the new hash. Everything around the frontmatter is put back as it was read, including a leading
-byte-order mark and both `---` fences exactly as they were written. A file written entirely in
-CRLF or in lone CR is rewritten in that same ending; a file that already mixes endings has none to
-preserve and is written out in LF, which is what hashing has always compared. The rewritten
-frontmatter is reparsed before it is staged, and a rewrite that would not reload as the whole
-planned frontmatter, edges and every other key alike, is refused rather than written. A real run
-then stages exact before
-and after images, publishes a `prepared` journal, fingerprints each destination immediately
-before its replacement, and rejects a changed destination as a conflict. The full batch is rolled
+verbatim. Two edits land outside that scalar. The first is an anchor relocation: when the `seen`
+being replaced carries an anchor that another key still reads through an alias, reconcile writes
+the anchor and its old value at that alias site, so the other key keeps the value it had instead
+of picking up the new hash. The second covers an entry, or the pair holding its `seen`, that is
+written as an alias to a node something else also reads: the edit lands at that alias site rather
+than in the shared node, so the entry takes the new hash and everything else reading the node
+keeps its own value. An entry that inherits `seen` from another through a `<<` merge key spells
+none of its own, so updating the entry that does update both. Everything around the frontmatter is
+put back as it was read, including a leading byte-order mark and both `---` fences exactly as they
+were written. A file written entirely in CRLF or in lone CR is rewritten in that same ending; a
+file that already mixes endings has none to preserve and is written out in LF, which is what
+hashing has always compared. The rewritten frontmatter is reparsed before it is staged, and a
+rewrite that would not reload as the whole planned frontmatter, edges and every other key alike,
+is refused rather than written. A real run then stages exact before and after images, publishes a
+`prepared` journal, fingerprints each destination immediately before its replacement, and rejects
+a changed destination as a conflict. The full batch is rolled
 back in reverse order if a conflict or write/durability failure occurs before the committed
 marker. After every replacement is durable, the journal becomes `committed`; success output waits
 until committed cleanup and a clean advisory-lock release have both completed.

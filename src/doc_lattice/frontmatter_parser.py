@@ -15,6 +15,12 @@ _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 _YAML = YAML(typ="safe")
 
+# Everything a safe load of user-authored frontmatter can raise. Beyond the YAMLError family
+# the scanner and parser raise, a constructor building a tagged scalar its type cannot accept
+# raises the builtin that construction failed with, so `!!int oops` reaches a caller as a bare
+# ValueError. Every module loading frontmatter catches this family and reports a ProjectError.
+YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
+
 
 @dataclass(frozen=True, slots=True)
 class FrontmatterParts:
@@ -118,7 +124,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> NodeMeta | None:
     _YAML.version = None
     try:
         data: Any = _YAML.load(raw_meta)
-    except YAMLError as exc:
+    except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse frontmatter in {source}: {exc}"
         raise UnreadableDocError(msg) from exc
     if not isinstance(data, dict) or "id" not in data:

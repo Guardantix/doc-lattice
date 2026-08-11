@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
 from ruamel.yaml.events import (
     AliasEvent,
     DocumentStartEvent,
@@ -35,14 +34,10 @@ from ruamel.yaml.tokens import (
 )
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
-from .frontmatter_parser import split_frontmatter_parts
+from .frontmatter_parser import YAML_LOAD_ERRORS, split_frontmatter_parts
 from .hashing import normalize_newlines
 from .model import Lattice, TargetId, parse_ref
 from .resolve import cached_target_hash
-
-# Errors a safe constructor raises for a tagged scalar its type cannot build, alongside the
-# YAMLError family the scanner and parser raise.
-_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
 
 # Characters that end or reinterpret a plain scalar in block or flow context, and the
 # indicators that only do so in first position. A replacement carrying any of them is
@@ -178,11 +173,31 @@ type _YamlOccurrence = (
 
 
 @dataclass(frozen=True, slots=True)
+class _AnchorIndex:
+    """Every anchored occurrence and every alias in one frontmatter, keyed by anchor name.
+
+    Resolving an alias asks for the definitions of one name, and relocating an anchored node
+    asks for the aliases of one name. Both are answered from this index, built in a single
+    pass, rather than by walking the whole occurrence tree per lookup: a mapping that spells
+    its keys through aliases would otherwise pay one walk for every key of every lookup.
+
+    Attributes:
+        definitions: Non-alias occurrences carrying each anchor, in source order, since a
+            reused name rebinds at each definition rather than naming one node.
+        aliases: Alias occurrences reading each anchor.
+    """
+
+    definitions: dict[str, tuple[_YamlOccurrence, ...]]
+    aliases: dict[str, tuple[_AliasOccurrence, ...]]
+
+
+@dataclass(frozen=True, slots=True)
 class _SourceContext:
-    """The frontmatter source text and the two views of it the planners read."""
+    """The frontmatter source text and the three views of it the planners read."""
 
     raw_meta: str
     root: _YamlOccurrence
+    anchors: _AnchorIndex
     marks: _TokenMarks
     version: tuple[int, int] | None
 
@@ -328,42 +343,42 @@ def _walk_occurrences(occurrence: _YamlOccurrence) -> Iterator[_YamlOccurrence]:
             yield from _walk_occurrences(value)
 
 
-def _anchor_definitions(root: _YamlOccurrence, anchor: str) -> list[_YamlOccurrence]:
-    """Return every occurrence defining ``anchor``, in source order.
+def _build_anchor_index(root: _YamlOccurrence) -> _AnchorIndex:
+    """Index every anchor definition and alias in one walk of the occurrence tree."""
+    definitions: dict[str, list[_YamlOccurrence]] = defaultdict(list)
+    aliases: dict[str, list[_AliasOccurrence]] = defaultdict(list)
+    for occurrence in _walk_occurrences(root):
+        if isinstance(occurrence, _AliasOccurrence):
+            aliases[occurrence.anchor].append(occurrence)
+        elif occurrence.anchor is not None:
+            definitions[occurrence.anchor].append(occurrence)
+    return _AnchorIndex(
+        {
+            anchor: tuple(sorted(found, key=lambda occurrence: occurrence.start))
+            for anchor, found in definitions.items()
+        },
+        {anchor: tuple(found) for anchor, found in aliases.items()},
+    )
 
-    A frontmatter document may reuse an anchor name, in which case each alias binds to
-    the most recent preceding definition rather than to the name as a whole.
+
+def _resolve_occurrence(anchors: _AnchorIndex, occurrence: _YamlOccurrence) -> _YamlOccurrence:
+    """Return the definition an alias binds to, or ``occurrence`` when it is not an alias.
+
+    A frontmatter document may reuse an anchor name, in which case each alias binds to the
+    most recent preceding definition rather than to the name as a whole.
     """
-    definitions = [
-        occurrence
-        for occurrence in _walk_occurrences(root)
-        if not isinstance(occurrence, _AliasOccurrence) and occurrence.anchor == anchor
-    ]
-    return sorted(definitions, key=lambda occurrence: occurrence.start)
-
-
-def _alias_occurrences(root: _YamlOccurrence, anchor: str) -> list[_AliasOccurrence]:
-    return [
-        occurrence
-        for occurrence in _walk_occurrences(root)
-        if isinstance(occurrence, _AliasOccurrence) and occurrence.anchor == anchor
-    ]
-
-
-def _resolve_occurrence(root: _YamlOccurrence, occurrence: _YamlOccurrence) -> _YamlOccurrence:
-    """Return the definition an alias binds to, or ``occurrence`` when it is not an alias."""
     if not isinstance(occurrence, _AliasOccurrence):
         return occurrence
     preceding = [
         definition
-        for definition in _anchor_definitions(root, occurrence.anchor)
+        for definition in anchors.definitions.get(occurrence.anchor, ())
         if definition.start < occurrence.start
     ]
     return preceding[-1] if preceding else occurrence
 
 
 def _mapping_pair(
-    root: _YamlOccurrence, mapping: _MappingOccurrence, name: str
+    anchors: _AnchorIndex, mapping: _MappingOccurrence, name: str
 ) -> tuple[_YamlOccurrence, _YamlOccurrence] | None:
     """Return the pair whose key names ``name``, following an alias spelling of that key.
 
@@ -373,17 +388,10 @@ def _mapping_pair(
     where an edit can be measured from.
     """
     for key, value in mapping.value:
-        resolved = _resolve_occurrence(root, key)
+        resolved = _resolve_occurrence(anchors, key)
         if isinstance(resolved, _ScalarOccurrence) and resolved.value == name:
             return key, value
     return None
-
-
-def _mapping_value_occurrence(
-    root: _YamlOccurrence, mapping: _MappingOccurrence, name: str
-) -> _YamlOccurrence | None:
-    pair = _mapping_pair(root, mapping, name)
-    return None if pair is None else pair[1]
 
 
 def _is_merge_key(key: _YamlOccurrence) -> bool:
@@ -401,15 +409,15 @@ def _is_merge_key(key: _YamlOccurrence) -> bool:
 
 
 def _merge_source_mappings(
-    root: _YamlOccurrence, value: _YamlOccurrence
+    anchors: _AnchorIndex, value: _YamlOccurrence
 ) -> list[_MappingOccurrence]:
     candidates = list(value.value) if isinstance(value, _SequenceOccurrence) else [value]
-    resolved = [_resolve_occurrence(root, candidate) for candidate in candidates]
+    resolved = [_resolve_occurrence(anchors, candidate) for candidate in candidates]
     return [candidate for candidate in resolved if isinstance(candidate, _MappingOccurrence)]
 
 
 def _resolved_mapping_member(
-    root: _YamlOccurrence,
+    anchors: _AnchorIndex,
     mapping: _MappingOccurrence,
     name: str,
     visited: frozenset[int] = frozenset(),
@@ -421,16 +429,44 @@ def _resolved_mapping_member(
     """
     if mapping.start in visited:
         return None
-    pair = _mapping_pair(root, mapping, name)
+    pair = _mapping_pair(anchors, mapping, name)
     if pair is not None:
-        return _resolve_occurrence(root, pair[1])
+        return _resolve_occurrence(anchors, pair[1])
     for key, value in mapping.value:
         if not _is_merge_key(key):
             continue
-        for source in _merge_source_mappings(root, value):
-            member = _resolved_mapping_member(root, source, name, visited | {mapping.start})
+        for source in _merge_source_mappings(anchors, value):
+            member = _resolved_mapping_member(anchors, source, name, visited | {mapping.start})
             if member is not None:
                 return member
+    return None
+
+
+def _inherited_seen_origin(
+    anchors: _AnchorIndex,
+    mapping: _MappingOccurrence,
+    updated: frozenset[int],
+    visited: frozenset[int] = frozenset(),
+) -> int | None:
+    """Return the offset of the mapping a ``<<`` merge will supply ``seen`` from after a rewrite.
+
+    A merge key gives a mapping the members it does not spell itself, so editing one entry's
+    ``seen`` changes every entry inheriting it, and the rewrite has to expect that. The loader
+    takes the first source that provides the member, which after a rewrite means the first
+    that either spells ``seen`` in source or is having one written into it. The caller has
+    already established that ``mapping`` spells no ``seen`` of its own.
+    """
+    if mapping.start in visited:
+        return None
+    for key, value in mapping.value:
+        if not _is_merge_key(key):
+            continue
+        for source in _merge_source_mappings(anchors, value):
+            if source.start in updated or _mapping_pair(anchors, source, "seen") is not None:
+                return source.start
+            deeper = _inherited_seen_origin(anchors, source, updated, visited | {mapping.start})
+            if deeper is not None:
+                return deeper
     return None
 
 
@@ -518,7 +554,20 @@ def _scalar_source_end(raw_meta: str, occurrence: _ScalarOccurrence, span: _Toke
     return span.end
 
 
-def _seen_scalar_source(new_seen: str, version: tuple[int, int] | None) -> str:
+def _probe_loader(version: tuple[int, int] | None) -> YAML:
+    """Return the loader the round-trip probe for a document's replacement scalars reads with.
+
+    One loader serves every entry of a document: the probe input is a bare scalar this module
+    generated rather than user frontmatter, so it carries no directive that could make
+    ``YAML.version`` sticky, and the version each probe needs is the document's own, which is
+    fixed for the whole call.
+    """
+    loader = _yaml()
+    loader.version = version
+    return loader
+
+
+def _seen_scalar_source(new_seen: str, loader: YAML) -> str:
     """Return source text for ``new_seen`` that reloads as the same string.
 
     An all-digit hash reloads as an integer when spliced in bare, which fails frontmatter
@@ -532,12 +581,10 @@ def _seen_scalar_source(new_seen: str, version: tuple[int, int] | None) -> str:
         and not (_PLAIN_SCALAR_UNSAFE & set(new_seen))
         and not new_seen.startswith(_PLAIN_SCALAR_UNSAFE_PREFIX)
     ):
-        loader = _yaml()
-        loader.version = version
         try:
             if loader.load(new_seen) == new_seen:
                 return new_seen
-        except _LOAD_ERRORS:
+        except YAML_LOAD_ERRORS:
             pass
     return json.dumps(new_seen, ensure_ascii=False)
 
@@ -656,27 +703,44 @@ def _replaced_scalar_start(
     return seen.start if tag_span is None else min(seen.start, tag_span.start)
 
 
+@dataclass(frozen=True, slots=True)
+class _SeenPair:
+    """Where an entry's ``seen`` pair sits, resolved once for every planner that needs it.
+
+    Attributes:
+        mapping: The mapping the pair belongs among. An entry written as an ordered map is a
+            sequence of one-pair mappings rather than a mapping, so its pair sits in a
+            mapping of its own inside that sequence; that inner mapping is an ordinary one,
+            so every edit is planned from here exactly as it is for a mapping entry.
+        key: The pair's own key occurrence, which is where a missing ``:`` is written.
+        value: The pair's value occurrence.
+        alias: The item an ordered map spells the pair through, when it names one, rather
+            than holding the pair itself.
+    """
+
+    mapping: _MappingOccurrence
+    key: _YamlOccurrence
+    value: _YamlOccurrence
+    alias: _AliasOccurrence | None
+
+
 def _seen_source_edit(
     context: _SourceContext,
-    entry: _MappingOccurrence,
-    seen: _YamlOccurrence | None,
+    pair: _SeenPair,
     span: _TokenSpan | None,
     new_seen: str,
 ) -> _SourceEdit:
-    raw_meta = context.raw_meta
+    seen = pair.value
     if isinstance(seen, _AliasOccurrence):
         return _SourceEdit(seen.start, seen.end, new_seen)
     if isinstance(seen, _ScalarOccurrence):
         if span is None:
-            pair = _mapping_pair(context.root, entry, "seen")
-            if pair is None:
-                raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
-            return _null_seen_source_edit(context, entry, pair[0], new_seen)
+            # An empty plain scalar has no source of its own, so the hash is written after
+            # the key's own indicator rather than over the value.
+            return _null_seen_source_edit(context, pair.mapping, pair.key, new_seen)
         start = _replaced_scalar_start(context, seen, span)
-        return _SourceEdit(start, _scalar_source_end(raw_meta, seen, span), new_seen)
-    if seen is not None:
-        raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
-    return _appended_seen_edit(context, entry, new_seen)
+        return _SourceEdit(start, _scalar_source_end(context.raw_meta, seen, span), new_seen)
+    raise UnreadableDocError("frontmatter derives_from entry seen is malformed")
 
 
 def _appended_seen_edit(
@@ -712,8 +776,21 @@ def _mapping_alias_source_edit(
     return _SourceEdit(alias.start, alias.end, f"{{<<: {alias_source}, seen: {new_seen}}}")
 
 
+def _omap_item_alias_source_edit(alias: _AliasOccurrence, new_seen: str) -> _SourceEdit:
+    """Replace the alias an ordered map spells its ``seen`` pair through with that pair.
+
+    The mapping such an alias names is shared with everything else reading that anchor, so
+    editing it would rewrite a member this edge does not own. An ordered map item is a
+    one-pair mapping and this one holds only ``seen``, so writing the pair out at the item
+    keeps the entry's value exact while leaving the definition alone. A merge key cannot
+    stand in here the way it does for a whole aliased entry, since the loader requires an
+    ordered map item to hold exactly one pair and does not flatten merges inside one.
+    """
+    return _SourceEdit(alias.start, alias.end, f"{{seen: {new_seen}}}")
+
+
 def _append_seen_anchor_relocations(
-    source_root: _YamlOccurrence,
+    anchors: _AnchorIndex,
     anchored_seen: list[_AnchoredSeen],
     edits: list[_SourceEdit],
 ) -> None:
@@ -723,13 +800,13 @@ def _append_seen_anchor_relocations(
         # definition and the next one of the same name read the value being replaced.
         later_definitions = [
             definition.start
-            for definition in _anchor_definitions(source_root, anchored.anchor)
+            for definition in anchors.definitions.get(anchored.anchor, ())
             if definition.start > anchored.start
         ]
         rebound_at = min(later_definitions, default=None)
         untouched_aliases = [
             alias
-            for alias in _alias_occurrences(source_root, anchored.anchor)
+            for alias in anchors.aliases.get(anchored.anchor, ())
             if alias.start > anchored.start
             and (rebound_at is None or alias.start < rebound_at)
             and (alias.start, alias.end) not in edited_spans
@@ -765,7 +842,7 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
     """
     try:
         reloaded = _yaml().load(new_meta)
-    except _LOAD_ERRORS as exc:
+    except YAML_LOAD_ERRORS as exc:
         msg = f"reconcile would leave {source} unparseable, so nothing was rewritten: {exc}"
         raise UnreadableDocError(msg) from exc
     try:
@@ -796,6 +873,15 @@ class _EntryEdit:
 
 @dataclass(frozen=True, slots=True)
 class _EntryUpdate:
+    """One entry's expected ``seen`` after the rewrite, and where to record it.
+
+    Attributes:
+        index: Position of the entry in the loaded ``derives_from`` list.
+        new_seen: The value the reloaded entry has to hold.
+        detached: Whether the rewrite gives this position a mapping of its own, which stops
+            it sharing the object the loader gave it and its definition.
+    """
+
     index: int
     new_seen: str
     detached: bool
@@ -812,40 +898,49 @@ class _ReconcilePlan:
 def _load_frontmatter_data(raw_meta: str) -> object:
     try:
         return _yaml().load(raw_meta)
-    except _LOAD_ERRORS as exc:
+    except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse frontmatter to reconcile: {exc}"
         raise UnreadableDocError(msg) from exc
 
 
 def _derives_from_occurrences(
-    root: _YamlOccurrence, entries: Sequence[object]
+    context: _SourceContext, entries: Sequence[object]
 ) -> _SequenceOccurrence:
     """Return the source occurrences matching the loaded ``derives_from`` entries."""
-    if not isinstance(root, _MappingOccurrence):
-        raise UnreadableDocError("frontmatter is not a mapping; cannot reconcile")
-    occurrences = _resolved_mapping_member(root, root, "derives_from")
-    if not isinstance(occurrences, _SequenceOccurrence) or len(occurrences.value) != len(entries):
-        raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
+    if not isinstance(context.root, _MappingOccurrence):
+        raise UnreadableDocError("frontmatter source is not a mapping; cannot reconcile")
+    occurrences = _resolved_mapping_member(context.anchors, context.root, "derives_from")
+    if not isinstance(occurrences, _SequenceOccurrence):
+        raise UnreadableDocError("frontmatter derives_from source is not a list; cannot reconcile")
+    if len(occurrences.value) != len(entries):  # pragma: no cover
+        # The loaded list and the source list are two readings of the same text, so this
+        # refuses a disagreement only a mark-accounting change could produce, rather than
+        # measuring an entry's offsets against a different entry.
+        msg = (
+            f"frontmatter derives_from reads as {len(entries)} entries but is written as"
+            f" {len(occurrences.value)}; cannot reconcile"
+        )
+        raise UnreadableDocError(msg)
     return occurrences
 
 
-def _seen_container(
-    root: _YamlOccurrence, entry: _MappingOccurrence | _SequenceOccurrence
-) -> _MappingOccurrence | None:
-    """Return the mapping whose own pairs an entry's ``seen`` belongs among.
-
-    An entry written as an ordered map is a sequence of one-pair mappings rather than a
-    mapping, so the pair an edit targets sits in a mapping of its own inside that sequence.
-    That inner mapping is an ordinary one, so returning it lets every edit be planned exactly
-    as it is for an entry written as a mapping. An ordered map that carries no ``seen`` pair
-    yet has no such mapping, and takes an appended item instead.
-    """
+def _seen_pair(
+    anchors: _AnchorIndex, entry: _MappingOccurrence | _SequenceOccurrence
+) -> _SeenPair | None:
+    """Return where an entry's ``seen`` pair is written, or None when it carries none yet."""
     if isinstance(entry, _MappingOccurrence):
-        return entry
+        pair = _mapping_pair(anchors, entry, "seen")
+        return None if pair is None else _SeenPair(entry, pair[0], pair[1], None)
     for item in entry.value:
-        resolved = _resolve_occurrence(root, item)
-        if isinstance(resolved, _MappingOccurrence) and _mapping_pair(root, resolved, "seen"):
-            return resolved
+        resolved = _resolve_occurrence(anchors, item)
+        # The loader refuses an ordered map holding an item that is not a one-pair mapping,
+        # so a document reaching this far has none.
+        if not isinstance(resolved, _MappingOccurrence):  # pragma: no cover
+            continue
+        pair = _mapping_pair(anchors, resolved, "seen")
+        if pair is not None:
+            alias = item if isinstance(item, _AliasOccurrence) else None
+            return _SeenPair(resolved, pair[0], pair[1], alias)
     return None
 
 
@@ -858,19 +953,27 @@ def _plan_entry_edit(
 ) -> _EntryEdit:
     """Plan the source edit that sets one entry's ``seen`` scalar."""
     if isinstance(entry_occurrence, _AliasOccurrence):
-        definition = _resolve_occurrence(context.root, entry_occurrence)
-        if isinstance(definition, _MappingOccurrence) and definition.start in updated_definitions:
+        definition = _resolve_occurrence(context.anchors, entry_occurrence)
+        # An entry written as an ordered map is a sequence, so a definition of either shape
+        # is one this run may already have updated.
+        if (
+            isinstance(definition, (_MappingOccurrence, _SequenceOccurrence))
+            and definition.start in updated_definitions
+        ):
             # This entry aliases an entry the same run just updated, so it already reads the
             # new hash: leaving its source untouched keeps the author's alias intact.
             return _EntryEdit(None, None)
         return _EntryEdit(
             _mapping_alias_source_edit(context.raw_meta, entry_occurrence, new_seen_source), None
         )
-    container = _seen_container(context.root, entry_occurrence)
-    if container is None:
-        # An ordered map with no `seen` pair yet takes one as an item of its own.
+    pair = _seen_pair(context.anchors, entry_occurrence)
+    if pair is None:
+        # An entry with no `seen` pair yet takes one as a key, or as an item of its own when
+        # it is written as an ordered map.
         return _EntryEdit(_appended_seen_edit(context, entry_occurrence, new_seen_source), None)
-    seen = _mapping_value_occurrence(context.root, container, "seen")
+    if pair.alias is not None:
+        return _EntryEdit(_omap_item_alias_source_edit(pair.alias, new_seen_source), None)
+    seen = pair.value
     span = (
         _scalar_span(seen, context.marks.scalar_spans)
         if isinstance(seen, _ScalarOccurrence)
@@ -883,7 +986,7 @@ def _plan_entry_edit(
             seen.start,
             _anchored_seen_source(context, seen, span, old_seen),
         )
-    edit = _seen_source_edit(context, container, seen, span, new_seen_source)
+    edit = _seen_source_edit(context, pair, span, new_seen_source)
     return _EntryEdit(edit, anchored)
 
 
@@ -899,6 +1002,7 @@ def _plan_source_edits(
     applied: set[str] = set()
     entry_updates: list[_EntryUpdate] = []
     updated_definitions: set[int] = set()
+    loader = _probe_loader(context.version)
     for index, (entry, entry_occurrence) in enumerate(
         zip(entries, entry_occurrences.value, strict=True)
     ):
@@ -919,7 +1023,7 @@ def _plan_source_edits(
             context,
             entry_occurrence,
             old_seen,
-            _seen_scalar_source(new_seen, context.version),
+            _seen_scalar_source(new_seen, loader),
             frozenset(updated_definitions),
         )
         if entry_edit.edit is not None:
@@ -932,18 +1036,54 @@ def _plan_source_edits(
         entry_updates.append(
             _EntryUpdate(index, new_seen, isinstance(entry_occurrence, _AliasOccurrence))
         )
+    entry_updates.extend(_merge_inherited_updates(context, entry_occurrences, entry_updates))
     return _ReconcilePlan(
         tuple(edits), tuple(anchored_seen), frozenset(applied), tuple(entry_updates)
     )
 
 
+def _merge_inherited_updates(
+    context: _SourceContext,
+    entry_occurrences: _SequenceOccurrence,
+    planned: Sequence[_EntryUpdate],
+) -> list[_EntryUpdate]:
+    """Return the updates an entry inherits from another through a ``<<`` merge key.
+
+    An entry spelling no ``seen`` of its own reads whichever one its merge source holds, so
+    editing that source changes this entry too even though nothing was written at it. The
+    reload sees that, so the expectation has to as well or a rewrite that is exactly right
+    would be refused. Entries reached through an alias need nothing here: the loader gives an
+    alias and its definition one object, which a single assignment already updates.
+    """
+    updated = {update.index: update.new_seen for update in planned}
+    origins = {
+        entry_occurrences.value[update.index].start: update.new_seen
+        for update in planned
+        if isinstance(entry_occurrences.value[update.index], _MappingOccurrence)
+    }
+    if not origins:
+        return []
+    inherited: list[_EntryUpdate] = []
+    for index, entry_occurrence in enumerate(entry_occurrences.value):
+        if index in updated or not isinstance(entry_occurrence, _MappingOccurrence):
+            continue
+        if _mapping_pair(context.anchors, entry_occurrence, "seen") is not None:
+            continue
+        origin = _inherited_seen_origin(context.anchors, entry_occurrence, frozenset(origins))
+        if origin in origins:
+            inherited.append(_EntryUpdate(index, origins[origin], detached=False))
+    return inherited
+
+
 def _expected_frontmatter(raw_meta: str, entry_updates: tuple[_EntryUpdate, ...]) -> object:
     """Return the loaded document the rewritten frontmatter has to reproduce.
 
-    An entry reached through an alias or a merge key is the same loaded object as its
-    definition, so assigning in place keeps every view of it in step with what the reload
-    will see. An alias site the rewrite replaces with its own mapping is the one edit that
-    does not propagate, so that position is detached from the shared object first.
+    An entry reached through an alias is the same loaded object as its definition, so
+    assigning in place keeps every view of it in step with what the reload will see. An alias
+    site the rewrite replaces with its own mapping is the one edit that does not propagate,
+    so that position is detached from the shared object first. An entry inheriting through a
+    merge key is a copy the loader flattened rather than a shared object, so it carries an
+    update of its own, planned by ``_merge_inherited_updates``.
     """
     expected = _yaml().load(raw_meta)
     entries = expected["derives_from"]
@@ -1072,18 +1212,20 @@ def apply_reconcile(
     if not isinstance(entries, list):
         raise UnreadableDocError("frontmatter derives_from is not a list; cannot reconcile")
     events = list(_yaml().parse(raw_meta))
+    source_root = _source_occurrence_tree(events)
     context = _SourceContext(
         raw_meta,
-        _source_occurrence_tree(events),
+        source_root,
+        _build_anchor_index(source_root),
         _token_marks(list(_yaml().scan(raw_meta))),
         _document_version(events),
     )
-    entry_occurrences = _derives_from_occurrences(context.root, entries)
+    entry_occurrences = _derives_from_occurrences(context, entries)
     plan = _plan_source_edits(context, entries, entry_occurrences, updates)
     if not plan.applied:
         return current_file_text, set()
     edits = list(plan.edits)
-    _append_seen_anchor_relocations(context.root, list(plan.anchored_seen), edits)
+    _append_seen_anchor_relocations(context.anchors, list(plan.anchored_seen), edits)
     new_meta = _apply_source_edits(raw_meta, edits)
     _verify_reconciled_meta(new_meta, _expected_frontmatter(raw_meta, plan.entry_updates), source)
     rewritten = (

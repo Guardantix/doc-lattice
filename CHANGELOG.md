@@ -39,6 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   loads as a mapping and validates as an edge, but its source is a sequence of one-pair mappings,
   so the targeted pair is edited inside its own mapping and a missing `seen` is appended as an
   item rather than as a key.
+- `reconcile` covers the remaining ways one `derives_from` entry can share a node with another: an
+  alias to an entry the same run already updated is left alone when that entry is written as an
+  ordered map, an ordered map item spelled as an alias takes the pair it stands for rather than
+  the shared definition it names being edited, and an entry inheriting `seen` from another through
+  a `<<` merge key no longer makes the reparse gate refuse an otherwise correct rewrite.
+- Frontmatter tagging a scalar with a type its value cannot build, such as `!!int oops`, is
+  reported as unreadable frontmatter naming the file. It previously escaped `check` and `build` as
+  an internal `ValueError`, since only `reconcile` recognized that failure.
 - `reconcile` refuses a self-referential frontmatter document as a clean error rather than a
   `RecursionError` traceback, quotes a replacement hash a YAML constructor rejects instead of
   letting that error escape, and appends a missing `seen` after an entry key whose value is empty,

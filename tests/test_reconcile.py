@@ -1037,6 +1037,156 @@ def test_apply_reconcile_updates_an_ordered_map_entry(source_entry: str, expecte
     assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
 
 
+def test_apply_reconcile_leaves_an_alias_of_an_updated_ordered_map_entry_untouched():
+    # An entry written as an ordered map is a sequence rather than a mapping, so the guard
+    # that recognizes an entry this run already updated has to accept one too. Rewriting the
+    # alias site instead would discard the author's spelling and stop that entry being an
+    # ordered map, neither of which the update asked for.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - &edge !!omap\n"
+        "    - ref: a#x\n"
+        "    - seen: old\n"
+        "  - *edge\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    - seen: old\n", "    - seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
+def test_apply_reconcile_writes_an_ordered_map_pair_spelled_through_an_alias_at_its_item():
+    # The mapping this item names is shared with the key that defines it, so editing the
+    # definition would rewrite a member the edge does not own. An ordered map item holds
+    # exactly one pair, and this one holds only `seen`, so writing that pair out at the item
+    # keeps the entry's value exact and leaves the definition alone.
+    text = (
+        "---\n"
+        "id: d\n"
+        "shared: &pair\n"
+        "  seen: old\n"
+        "derives_from:\n"
+        "  - !!omap\n"
+        "    - ref: a#x\n"
+        "    - *pair\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    - *pair\n", "    - {seen: newhash}\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    raw_meta, _ = split_frontmatter(out, Path("downstream.md"))
+    reloaded = YAML(typ="safe").load(raw_meta)
+    assert reloaded["shared"] == {"seen": "old"}
+    assert reloaded["derives_from"][0]["seen"] == "newhash"
+
+
+def test_apply_reconcile_updates_an_entry_inheriting_seen_through_a_merge_key():
+    # The loader flattens a merge into a copy rather than giving both entries one object, so
+    # the inheriting entry is not updated by assigning to the one that spells `seen`. The
+    # rewrite changes what both read all the same, and an expectation modelling only the
+    # entry that was edited would refuse a rewrite that is exactly right.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - &base\n"
+        "    ref: a#x\n"
+        "    seen: old\n"
+        "  - <<: *base\n"
+        "    ref: b#y\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    seen: old\n", "    seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
+def test_apply_reconcile_updates_an_entry_inheriting_a_seen_that_is_appended():
+    # The merge source carries no `seen` yet, so one is written into it and the inheriting
+    # entry starts reading it. Nothing is written at that entry, and the expectation has to
+    # account for it anyway.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - &base\n"
+        "    ref: a#x\n"
+        "  - <<: *base\n"
+        "    ref: b#y\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    ref: a#x\n", "    ref: a#x\n    seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
+def test_apply_reconcile_leaves_an_entry_spelling_its_own_seen_beside_a_merge_alone():
+    # This entry names the same anchored scalar the updated entry does, but through a pair
+    # of its own rather than through a merge, so the anchor it reads is untouched and it
+    # keeps the old hash. Treating it as inheriting would expect a change that never lands.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: &shared old\n"
+        "  - ref: b#y\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        "  - ref: b#y\n"
+        '    seen: &shared "old"\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "old",
+    ]
+
+
 def test_apply_reconcile_relocates_a_seen_anchor_out_of_an_ordered_map_entry():
     text = (
         "---\n"

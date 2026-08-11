@@ -201,6 +201,15 @@ def test_parse_meta_bad_yaml_raises():
         parse_meta("id: [unclosed\n", Path("a.md"))
 
 
+@pytest.mark.parametrize("raw_meta", ["id: d\ncount: !!int oops\n", "id: d\nflag: !!bool maybe\n"])
+def test_parse_meta_reports_a_tagged_scalar_its_type_cannot_build(raw_meta: str):
+    # A safe constructor asked for a type it cannot build from a scalar raises the builtin
+    # that construction failed with rather than a YAMLError, so catching only that family
+    # let a bare ValueError out of the boundary and print as an internal error.
+    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in doc\.md"):
+        parse_meta(raw_meta, Path("doc.md"))
+
+
 def test_parse_meta_bad_yaml_carries_code_and_names_file():
     with pytest.raises(UnreadableDocError) as exc:
         parse_meta("id: [unclosed\n", Path("a.md"))
