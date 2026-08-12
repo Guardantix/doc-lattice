@@ -5,9 +5,9 @@
 !.claude/hooks/
 !.claude/orientation/
 .codex
+.colinear/
 .worktrees/
 .superpowers/
-.linear-autopilot/
 
 # Python
 .venv/
