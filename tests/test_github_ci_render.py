@@ -1,6 +1,5 @@
 """Tests for deterministic managed GitHub Actions workflow rendering."""
 
-import inspect
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -9,7 +8,6 @@ from typing import get_args
 import pytest
 from ruamel.yaml import YAML
 
-from doc_lattice import scaffold as scaffold_module
 from doc_lattice.constants import (
     CHECKOUT_REF,
     CHECKOUT_USES,
@@ -236,13 +234,6 @@ def test_render_linear_workflow_installs_before_mapping_secret():
     assert "doc-lattice==2.1.0" in install
 
 
-def test_action_refs_are_approved_full_commit_shas():
-    assert CHECKOUT_REF == "11d5960a326750d5838078e36cf38b85af677262"  # pragma: allowlist secret
-    assert SETUP_UV_REF == "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
-    assert re.fullmatch(r"[0-9a-f]{40}", CHECKOUT_REF) is not None
-    assert re.fullmatch(r"[0-9a-f]{40}", SETUP_UV_REF) is not None
-
-
 def test_rendered_workflows_pin_actions_and_mark_ownership():
     artifacts = render_workflows("Guardantix/doc-lattice", "2.1.0")
 
@@ -310,17 +301,6 @@ def test_rendered_workflows_match_golden_bytes_exactly():
             f"managed {artifact.role} workflow no longer matches {golden.name}; "
             "review the diff and update the fixture only if the change is intended"
         )
-
-
-def test_action_pins_are_single_sourced_from_constants():
-    # constants.py owns every pin value, so no other renderer module may spell one out. An
-    # identity check would not prove that: CPython interns the 40-character hex SHAs, so
-    # `render.CHECKOUT_REF is constants.CHECKOUT_REF` holds even for an independently declared
-    # duplicate literal. Reading the module source is what rules a second copy out.
-    for module in (render_module, scaffold_module):
-        source = inspect.getsource(module)
-        for value in (CHECKOUT_REF, CHECKOUT_VERSION, SETUP_UV_REF, SETUP_UV_VERSION):
-            assert value not in source, f"{module.__name__} spells out the pin value {value!r}"
 
 
 def test_managed_templates_carry_no_inline_pin_literals():

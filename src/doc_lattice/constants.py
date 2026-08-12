@@ -66,8 +66,12 @@ CACHE_FILE_NAME: str = "load-cache.json"
 # `init` prints (scaffold.py) and the managed templates (github_ci/render.py). Each action
 # owns two halves that must move together, the immutable commit SHA and the release tag it
 # corresponds to, because the tag is rendered as a trailing `# vX.Y.Z` comment beside every
-# pinned `uses:` line. Both halves live here so bumping a pin is a single edit that reaches
-# both renderers. This module is the correct owner because it is the leaf both renderers
+# pinned `uses:` line. Both halves live here so both renderers read one owner, but a bump is
+# not a single edit: this repository's own `.github/workflows/*.yml`, the golden fixtures under
+# `tests/fixtures/managed-workflows/`, and the deliberately spelled-out copies in
+# `tests/test_github_ci_render.py` and `tests/cli/test_init.py` each assert the value
+# independently, and each one fails until it follows.
+# This module is the correct owner because it is the leaf both renderers
 # already sit above: scaffold.py imports it, github_ci/render.py imports PYTHON_PIN from
 # scaffold.py, so the dependency only ever points this way.
 #

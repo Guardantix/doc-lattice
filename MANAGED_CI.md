@@ -89,10 +89,8 @@ Run this human-maintainer sequence from reviewed, trusted project state:
    uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice reconcile --all
    ```
 
-   An installation migrated per `## Migrating an existing installation` above retains its existing
-   baseline and skips this step: that repository has already established one, and `reconcile --all`
-   would acknowledge legitimate drift nobody has reviewed. When this step applies and what it
-   does not promise are owned by
+   An installation migrated per `## Migrating an existing installation` above skips this step.
+   When this step applies and what it does not promise are owned by
    [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the selector semantics are
    owned by [RECONCILE.md](RECONCILE.md).
 

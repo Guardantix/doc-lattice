@@ -21,9 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for each action now has a single owner in `constants.py` that both the snippet and the managed
   renderer read, so bumping a pin updates both.
 - The printed snippet also adopts the managed workflows' least-privilege posture: the job
-  declares `permissions: contents: read` and the checkout step sets `persist-credentials: false`,
-  so the job token is not left in `.git/config` while the following step resolves and runs
-  third-party packages.
+  declares `permissions: contents: read`, the checkout step sets `persist-credentials: false`, so
+  the job token is not left in `.git/config` while the following step resolves and runs
+  third-party packages, and the setup-uv step sets `enable-cache: false`, so no persistent
+  cross-run cache another workflow on the repository can populate is restored into the gate job.
 - `actions/checkout` moves from `v4.3.1` to `v4.4.0`, the pin this repository's own gates already
   ran, in both the printed snippet and the managed workflows. `tests/test_workflow_pinning.py`
   now holds the two together, so a shipped pin cannot silently fall behind the pin doc-lattice

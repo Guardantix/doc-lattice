@@ -88,6 +88,8 @@ def _legacy_stdout(version: str) -> str:
         "          persist-credentials: false\n"
         "      - uses: astral-sh/setup-uv@"
         "d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0\n"  # pragma: allowlist secret
+        "        with:\n"
+        "          enable-cache: false\n"
         "      - run: |\n"
         "          set +e\n"
         f"          uvx --python 3.13 --from doc-lattice=={version} doc-lattice check\n"

@@ -6,17 +6,34 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
-from doc_lattice.constants import CHECKOUT_REF, SETUP_UV_REF
+from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_DIR = _ROOT / ".github/workflows"
 _SHA_PINNED_USES_RE = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+# The composed fragments, not their SHA halves: the release tag is rendered as a trailing
+# `# vX.Y.Z` comment, which the safe loader discards, so comparing parsed refs would let a
+# bumped SHA keep a stale tag and mislabel the commit everywhere the pin ships.
+_SHIPPED_USES = {"actions/checkout": CHECKOUT_USES, "astral-sh/setup-uv": SETUP_UV_USES}
+
+
+def _workflow_paths() -> list[Path]:
+    return sorted(path for path in _WORKFLOW_DIR.iterdir() if path.suffix in {".yml", ".yaml"})
 
 
 def _workflows() -> dict[str, Any]:
     loader = YAML(typ="safe")
-    paths = sorted(path for path in _WORKFLOW_DIR.iterdir() if path.suffix in {".yml", ".yaml"})
-    return {path.name: loader.load(path.read_text(encoding="utf-8")) for path in paths}
+    return {path.name: loader.load(path.read_text(encoding="utf-8")) for path in _workflow_paths()}
+
+
+def _uses_fragments(path: Path) -> list[str]:
+    """Every `uses:` value as written, including the trailing version comment."""
+    return [
+        stripped.partition("uses:")[2].strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        for stripped in [line.strip()]
+        if stripped.startswith(("uses:", "- uses:"))
+    ]
 
 
 def _action_references(workflow: Any) -> list[str]:
@@ -71,15 +88,28 @@ def test_shipped_action_pins_match_the_pins_this_repository_runs():
     # could not, so the only thing keeping it current is that it is the same pin our own gates
     # depend on. Tying the two together makes an upgrade here fail until constants.py follows,
     # which is what stops scaffolded repositories from being frozen a release behind us.
-    shipped = {"actions/checkout": CHECKOUT_REF, "astral-sh/setup-uv": SETUP_UV_REF}
+    # Comparing whole fragments also pins the `# vX.Y.Z` label to the SHA it names.
     divergent = [
-        f"{name}: {ref}"
-        for name, workflow in _workflows().items()
-        for ref in _action_references(workflow)
-        for action, _, sha in [ref.partition("@")]
-        if action in shipped and sha != shipped[action]
+        f"{path.name}: {fragment}"
+        for path in _workflow_paths()
+        for fragment in _uses_fragments(path)
+        for action, _, _ in [fragment.partition("@")]
+        if action in _SHIPPED_USES and fragment != _SHIPPED_USES[action]
     ]
     assert divergent == []
+
+
+def test_every_shipped_action_pin_is_exercised_by_this_repository():
+    # The parity test above only compares references it happens to find, so it would pass
+    # vacuously for any action this repository stopped referencing directly, and the pin would
+    # then freeze at whatever release it held while still shipping to every scaffolded repo.
+    # This is the guard that turns that silent lapse into a failure.
+    referenced = {
+        fragment.partition("@")[0]
+        for path in _workflow_paths()
+        for fragment in _uses_fragments(path)
+    }
+    assert referenced >= set(_SHIPPED_USES)
 
 
 def test_every_workflow_container_image_is_pinned_to_a_digest():

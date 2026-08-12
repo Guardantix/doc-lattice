@@ -410,6 +410,21 @@ ignored: it does not change command results or exit codes.
 
 ## Adopting doc-lattice in your docs repo
 
+Both setups below share one rule. For an initial adoption with no established baseline, annotate
+your documents, then run `doc-lattice reconcile --all` once before enabling the gates:
+
+```bash
+uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice reconcile --all
+```
+
+This acknowledges the current state of every STALE and UNRECONCILED edge, so the gates start
+from a known baseline instead of reporting the whole backlog on their first run. Do this only
+on a first adoption: `init` is rerunnable against an existing config, and on an established
+lattice `reconcile --all` would acknowledge legitimate drift you have not reviewed. It also
+does not by itself make CI green, because `reconcile` skips BROKEN edges and those remain
+findings. See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
+for the selector semantics.
+
 ### Ordinary offline setup
 
 Bootstrap config and the drift and authority-ladder gates for a repo whose docs you want to
@@ -427,21 +442,6 @@ where the output says. `init` only prints `.gitignore` guidance and never modifi
 `--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
-
-For an initial adoption with no established baseline, annotate your documents, then run
-`doc-lattice reconcile --all` once before enabling the gates:
-
-```bash
-uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice reconcile --all
-```
-
-This acknowledges the current state of every STALE and UNRECONCILED edge, so the gates start
-from a known baseline instead of reporting the whole backlog on their first run. Do this only
-on a first adoption: `init` is rerunnable against an existing config, and on an established
-lattice `reconcile --all` would acknowledge legitimate drift you have not reviewed. It also
-does not by itself make CI green, because `reconcile` skips BROKEN edges and those remain
-findings. See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
-for the selector semantics.
 
 To test an unreleased commit, replace the PyPI requirement with a Git source such as
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should

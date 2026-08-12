@@ -108,11 +108,12 @@ def render_ci(version: str) -> str:
     either command failed.
 
     Both actions are pinned by commit SHA with a trailing version comment, and the job carries
-    the same least-privilege posture as the managed workflows: a read-only ``contents`` token
-    and ``persist-credentials: false``, so the job's token is not left in ``.git/config`` while
-    the following step resolves and runs third-party packages. The pinned ``uses:`` fragments
-    are read from ``constants.py``, the single owner shared with the managed renderer, so
-    bumping a pin updates both.
+    the same least-privilege posture as the managed workflows: a read-only ``contents`` token,
+    ``persist-credentials: false`` so the job's token is not left in ``.git/config`` while the
+    following step resolves and runs third-party packages, and ``enable-cache: false`` so no
+    persistent cross-run cache another workflow on the repository can populate is restored into
+    the gate job. The pinned ``uses:`` fragments are read from ``constants.py``, the single
+    owner shared with the managed renderer, so bumping a pin updates both.
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")
@@ -134,6 +135,8 @@ def render_ci(version: str) -> str:
         "        with:\n"
         "          persist-credentials: false\n"
         f"      - uses: {SETUP_UV_USES}\n"
+        "        with:\n"
+        "          enable-cache: false\n"
         "      - run: |\n"
         "          set +e\n"
         f"          {check_cmd}\n"
