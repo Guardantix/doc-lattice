@@ -16,12 +16,11 @@ from doc_lattice import __version__
 from doc_lattice.cli import app
 from doc_lattice.cli.commands import ci as ci_module
 from doc_lattice.cli.runtime import CliRuntime
+from doc_lattice.constants import CHECKOUT_REF, SETUP_UV_REF
 from doc_lattice.error_types import ConfigError
 from doc_lattice.github_ci.filesystem import apply_changes, preflight_create
 from doc_lattice.github_ci.render import (
     CANONICAL_ARTIFACT_TARGETS,
-    CHECKOUT_REF,
-    SETUP_UV_REF,
     render_managed_artifacts,
 )
 

@@ -1,0 +1,36 @@
+# doc-lattice-managed: github-ci-v1
+# doc-lattice-artifact: linear
+# doc-lattice-version: 2.1.0
+# doc-lattice-repository: Guardantix/doc-lattice
+name: doc-lattice Linear
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linear:
+    name: Trusted Linear gate
+    if: >-
+      github.repository == 'Guardantix/doc-lattice' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: doc-lattice-linear
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: false
+      - name: Install pinned doc-lattice without the Linear secret
+        run: |
+          uv python install 3.13
+          uv venv --python 3.13 "$RUNNER_TEMP/doc-lattice-venv"
+          uv pip install --python "$RUNNER_TEMP/doc-lattice-venv/bin/python" doc-lattice==2.1.0
+      - name: Run trusted Linear gate
+        env:
+          LINEAR_API_KEY: ${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}
+        run: '"$RUNNER_TEMP/doc-lattice-venv/bin/doc-lattice" linear --exit-code'

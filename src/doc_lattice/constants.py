@@ -62,6 +62,33 @@ CACHE_VERSION: int = 3
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 
+# GitHub Actions commit pins, shared by both workflow renderers: the ordinary snippet that
+# `init` prints (scaffold.py) and the managed templates (github_ci/render.py). Each action
+# owns two halves that must move together, the immutable commit SHA and the release tag it
+# corresponds to, because the tag is rendered as a trailing `# vX.Y.Z` comment beside every
+# pinned `uses:` line. Both halves live here so both renderers read one owner, but a bump is
+# not a single edit: this repository's own `.github/workflows/*.yml`, the golden fixtures under
+# `tests/fixtures/managed-workflows/`, and the deliberately spelled-out copies in
+# `tests/test_github_ci_render.py` and `tests/cli/test_init.py` each assert the value
+# independently, and each one fails until it follows.
+# This module is the correct owner because it is the leaf both renderers
+# already sit above: scaffold.py imports it, github_ci/render.py imports PYTHON_PIN from
+# scaffold.py, so the dependency only ever points this way.
+#
+# These are the same pins this repository's own workflows run, which
+# `tests/test_workflow_pinning.py` enforces: a frozen SHA cannot drift from a floating tag on
+# its own, so the shipped pin is kept current by being the pin our own CI depends on.
+CHECKOUT_REF: str = "11d5960a326750d5838078e36cf38b85af677262"  # pragma: allowlist secret
+CHECKOUT_VERSION: str = "v4.4.0"
+SETUP_UV_REF: str = "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
+SETUP_UV_VERSION: str = "v6.8.0"
+
+# The composed `uses:` fragment both renderers emit verbatim. Owning the assembled form here,
+# not just its halves, keeps the `@<sha> # vX.Y.Z` shape in one place rather than hand-spelled
+# beside every pinned step.
+CHECKOUT_USES: str = f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}"
+SETUP_UV_USES: str = f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}"
+
 # Reconcile transaction schema plus the shared journal and staged-image naming contract.
 RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
 RECONCILE_JOURNAL_VERSION: int = 1

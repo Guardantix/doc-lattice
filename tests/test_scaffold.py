@@ -10,10 +10,14 @@ from ruamel.yaml import YAML
 import doc_lattice.scaffold as scaffold_module
 from doc_lattice.config import Config
 from doc_lattice.constants import (
+    CHECKOUT_REF,
+    CHECKOUT_VERSION,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_NAME,
+    SETUP_UV_REF,
+    SETUP_UV_VERSION,
 )
 from doc_lattice.scaffold import (
     build_scaffold,
@@ -138,9 +142,38 @@ def test_snippets_pin_pypi_version_and_python():
         assert "git+" not in text
     assert "repo: local" in scaffold.precommit_text
     assert "pass_filenames: false" in scaffold.precommit_text
-    assert "actions/checkout@v4" in scaffold.ci_text
-    assert "astral-sh/setup-uv@v6" in scaffold.ci_text
+    assert f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}" in scaffold.ci_text
+    assert f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}" in scaffold.ci_text
     assert "linear" not in scaffold.ci_text
+
+
+def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
+    # A floating tag re-resolves on every run, which is what the managed workflows exist to
+    # avoid; the printed snippet has to match that posture.
+    ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+
+    assert "actions/checkout@v4" not in ci
+    assert "astral-sh/setup-uv@v6" not in ci
+    for line in ci.splitlines():
+        if "uses:" in line:
+            action, _, ref = line.partition("@")
+            assert re.fullmatch(r"[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+", ref), action
+
+
+def test_ci_snippet_carries_the_managed_least_privilege_posture():
+    # The snippet's docstring claims the managed workflows' posture, and the step that follows
+    # checkout resolves and executes third-party packages. Without these settings the job's
+    # token stays in .git/config and is writable while that happens, and a persistent cache any
+    # other workflow on the repository can populate is restored into the gate job.
+    ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+    workflow = YAML(typ="safe").load(ci)
+    steps = workflow["jobs"]["check"]["steps"]
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert steps[0]["uses"] == f"actions/checkout@{CHECKOUT_REF}"
+    assert steps[0]["with"] == {"persist-credentials": False}
+    assert steps[1]["uses"] == f"astral-sh/setup-uv@{SETUP_UV_REF}"
+    assert steps[1]["with"] == {"enable-cache": False}
 
 
 def test_invocation_installs_from_exact_pypi_requirement():

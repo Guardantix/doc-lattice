@@ -1,10 +1,17 @@
 """Tests for constants."""
 
+import re
 from typing import get_args
 
 from doc_lattice.constants import (
     AUTHORITY_LADDER,
+    CHECKOUT_REF,
+    CHECKOUT_USES,
+    CHECKOUT_VERSION,
     EDGE_STATES,
+    SETUP_UV_REF,
+    SETUP_UV_USES,
+    SETUP_UV_VERSION,
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
@@ -103,3 +110,20 @@ def test_authority_ladder_is_ordered_weak_to_strong():
 def test_skip_reasons_match_literal():
     assert frozenset(get_args(SkipReason)) == VALID_SKIP_REASONS
     assert {"source-unannotated", "target-unannotated"} == set(VALID_SKIP_REASONS)
+
+
+def test_action_refs_are_approved_full_commit_shas():
+    # The pin values themselves, asserted where constants.py's invariants live. A floating tag
+    # re-resolves on every run, which is exactly what pinning by commit exists to prevent, so
+    # both halves are checked here once rather than at each renderer that emits them.
+    assert CHECKOUT_REF == "11d5960a326750d5838078e36cf38b85af677262"  # pragma: allowlist secret
+    assert SETUP_UV_REF == "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
+    assert re.fullmatch(r"[0-9a-f]{40}", CHECKOUT_REF) is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", SETUP_UV_REF) is not None
+    assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", CHECKOUT_VERSION) is not None
+    assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", SETUP_UV_VERSION) is not None
+
+
+def test_composed_uses_fragments_join_both_halves():
+    assert f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}" == CHECKOUT_USES
+    assert f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}" == SETUP_UV_USES

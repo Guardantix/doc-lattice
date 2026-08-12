@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from doc_lattice.constants import CHECKOUT_REF, SETUP_UV_USES
 from doc_lattice.error_types import ConfigError
 from doc_lattice.github_ci.audit import (
     SECRET_NAMES,
@@ -24,8 +25,6 @@ from doc_lattice.github_ci.identity import parse_repository
 from doc_lattice.github_ci.model import InstalledArtifact, WorkflowDiscovery, WorkflowDocument
 from doc_lattice.github_ci.render import (
     CANONICAL_ARTIFACT_TARGETS,
-    CHECKOUT_REF,
-    SETUP_UV_REF,
     render_managed_artifacts,
 )
 from doc_lattice.github_ci.workflow_parser import parse_workflow
@@ -1239,11 +1238,7 @@ def test_managed_audit_detects_action_moved_after_command_step(tmp_path: Path):
     offline = render_managed_artifacts("Guardantix/doc-lattice", "2.1.0")[0]
     destination = tmp_path / offline.relative_path
     text = destination.read_text(encoding="utf-8")
-    setup_uv = (
-        f"      - uses: astral-sh/setup-uv@{SETUP_UV_REF} # v6.8.0\n"
-        "        with:\n"
-        "          enable-cache: false\n"
-    )
+    setup_uv = f"      - uses: {SETUP_UV_USES}\n        with:\n          enable-cache: false\n"
     assert setup_uv in text
     destination.write_text(
         text.replace(setup_uv, "", 1).rstrip() + "\n" + setup_uv,

@@ -5,7 +5,14 @@ import inspect
 from pathlib import Path
 
 from doc_lattice import error_types
-from doc_lattice.constants import VALID_AUTHORITIES, VALID_STATUSES
+from doc_lattice.constants import (
+    CHECKOUT_REF,
+    CHECKOUT_VERSION,
+    SETUP_UV_REF,
+    SETUP_UV_VERSION,
+    VALID_AUTHORITIES,
+    VALID_STATUSES,
+)
 from doc_lattice.error_types import ProjectError
 
 SRC_DIR = Path(__file__).parent.parent / "src" / "doc_lattice"
@@ -113,6 +120,22 @@ def test_no_raw_status_strings():
         for value in sorted(VALID_STATUSES):
             assert f'"{value}"' not in content, f"{py_file.name} inlines status '{value}'"
             assert f"'{value}'" not in content, f"{py_file.name} inlines status '{value}'"
+
+
+def test_no_raw_action_pin_values():
+    """Action pin values must be imported from constants.py, not inlined as raw literals.
+
+    An identity check on the imported names would not prove this: CPython interns the
+    40-character hex SHAs, so ``render.CHECKOUT_REF is constants.CHECKOUT_REF`` holds even for
+    an independently declared duplicate literal. Reading every module's source rules out a
+    second copy anywhere, including in a renderer that does not exist yet.
+    """
+    for py_file in _source_files():
+        if py_file.name == "constants.py":
+            continue
+        content = py_file.read_text(encoding="utf-8")
+        for value in (CHECKOUT_REF, CHECKOUT_VERSION, SETUP_UV_REF, SETUP_UV_VERSION):
+            assert value not in content, f"{py_file.name} inlines the pin value '{value}'"
 
 
 def test_no_em_dashes_in_source():

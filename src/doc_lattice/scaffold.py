@@ -11,10 +11,12 @@ from dataclasses import dataclass
 from ruamel.yaml import YAML
 
 from .constants import (
+    CHECKOUT_USES,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_NAME,
+    SETUP_UV_USES,
 )
 
 DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
@@ -104,6 +106,14 @@ def render_ci(version: str) -> str:
     Both commands run in one shell step so a check failure does not skip lint. set +e
     disables errexit so both exit codes are captured; the final test fails the step if
     either command failed.
+
+    Both actions are pinned by commit SHA with a trailing version comment, and the job carries
+    the same least-privilege posture as the managed workflows: a read-only ``contents`` token,
+    ``persist-credentials: false`` so the job's token is not left in ``.git/config`` while the
+    following step resolves and runs third-party packages, and ``enable-cache: false`` so no
+    persistent cross-run cache another workflow on the repository can populate is restored into
+    the gate job. The pinned ``uses:`` fragments are read from ``constants.py``, the single
+    owner shared with the managed renderer, so bumping a pin updates both.
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")
@@ -114,13 +124,19 @@ def render_ci(version: str) -> str:
         "    branches: [main]\n"
         "  pull_request:\n"
         "    branches: [main]\n"
+        "permissions:\n"
+        "  contents: read\n"
         "jobs:\n"
         "  check:\n"
         "    name: Traceability check\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        "      - uses: actions/checkout@v4\n"
-        "      - uses: astral-sh/setup-uv@v6\n"
+        f"      - uses: {CHECKOUT_USES}\n"
+        "        with:\n"
+        "          persist-credentials: false\n"
+        f"      - uses: {SETUP_UV_USES}\n"
+        "        with:\n"
+        "          enable-cache: false\n"
         "      - run: |\n"
         "          set +e\n"
         f"          {check_cmd}\n"

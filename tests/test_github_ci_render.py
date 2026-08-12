@@ -2,12 +2,21 @@
 
 import re
 from collections.abc import Mapping, Sequence
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import get_args
 
 import pytest
 from ruamel.yaml import YAML
 
+from doc_lattice.constants import (
+    CHECKOUT_REF,
+    CHECKOUT_USES,
+    CHECKOUT_VERSION,
+    SETUP_UV_REF,
+    SETUP_UV_USES,
+    SETUP_UV_VERSION,
+)
+from doc_lattice.github_ci import render as render_module
 from doc_lattice.github_ci.model import (
     ARTIFACT_MARKER_PREFIX,
     MANAGED_SCHEMA_LINE,
@@ -18,10 +27,8 @@ from doc_lattice.github_ci.model import (
 )
 from doc_lattice.github_ci.render import (
     BOOTSTRAP_PATH,
-    CHECKOUT_REF,
     LINEAR_WORKFLOW_PATH,
     OFFLINE_WORKFLOW_PATH,
-    SETUP_UV_REF,
     ownership_header,
     render_managed_artifacts,
     render_workflows,
@@ -29,6 +36,24 @@ from doc_lattice.github_ci.render import (
 from doc_lattice.scaffold import PYTHON_PIN
 
 _SECRETS_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])secrets(?![A-Za-z0-9_])")
+
+# Inputs the committed golden fixtures were captured with. Fixed on purpose, and deliberately
+# not the live __version__, so a release cannot silently invalidate the byte comparison.
+GOLDEN_REPOSITORY = "Guardantix/doc-lattice"
+GOLDEN_VERSION = "2.1.0"
+_GOLDEN_DIR = Path(__file__).parent / "fixtures" / "managed-workflows"
+
+# The supported recapture path after an intended renderer change: run from the repository root,
+# then review the fixture diff like any other code change. The fixtures are byte-exact and the
+# pre-commit whitespace fixers are excluded from their directory, so hand-editing them is
+# error-prone by design; regenerate instead.
+_RECAPTURE_COMMAND = (
+    'uv run python -c "'
+    "from pathlib import Path; from doc_lattice.github_ci.render import render_workflows; "
+    "[Path('tests/fixtures/managed-workflows', a.role + '.yml.golden')"
+    ".write_bytes(a.text.encode('utf-8')) "
+    f"for a in render_workflows('{GOLDEN_REPOSITORY}', '{GOLDEN_VERSION}')]\""
+)
 
 
 def _load_workflow(text):
@@ -221,13 +246,6 @@ def test_render_linear_workflow_installs_before_mapping_secret():
     assert "doc-lattice==2.1.0" in install
 
 
-def test_action_refs_are_approved_full_commit_shas():
-    assert CHECKOUT_REF == "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
-    assert SETUP_UV_REF == "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
-    assert re.fullmatch(r"[0-9a-f]{40}", CHECKOUT_REF) is not None
-    assert re.fullmatch(r"[0-9a-f]{40}", SETUP_UV_REF) is not None
-
-
 def test_rendered_workflows_pin_actions_and_mark_ownership():
     artifacts = render_workflows("Guardantix/doc-lattice", "2.1.0")
 
@@ -239,8 +257,8 @@ def test_rendered_workflows_pin_actions_and_mark_ownership():
         assert steps[0]["with"] == {"persist-credentials": False}
         assert steps[1]["uses"] == f"astral-sh/setup-uv@{SETUP_UV_REF}"
         assert steps[1]["with"] == {"enable-cache": False}
-        assert f"actions/checkout@{CHECKOUT_REF} # v4.3.1" in artifact.text
-        assert f"astral-sh/setup-uv@{SETUP_UV_REF} # v6.8.0" in artifact.text
+        assert f"      - uses: {CHECKOUT_USES}\n" in artifact.text
+        assert f"      - uses: {SETUP_UV_USES}\n" in artifact.text
         assert "actions/cache" not in artifact.text
         assert "doc-lattice==2.1.0" in artifact.text
         assert artifact.text.splitlines()[:4] == [
@@ -283,12 +301,40 @@ def test_render_workflows_is_byte_deterministic():
     assert first == second
 
 
+def test_rendered_workflows_match_golden_bytes_exactly():
+    # The guard the substring and self-comparison tests above cannot provide: both would accept
+    # an unintended but deterministic byte change. These fixtures were captured from the
+    # renderer and are committed as auditable evidence, so any drift in the managed output has
+    # to be an explicit, reviewed update to the fixture rather than a silent edit.
+    for artifact in render_workflows(GOLDEN_REPOSITORY, GOLDEN_VERSION):
+        golden = _GOLDEN_DIR / f"{artifact.role}.yml.golden"
+
+        assert artifact.text.encode("utf-8") == golden.read_bytes(), (
+            f"managed {artifact.role} workflow no longer matches {golden.name}; "
+            "review the diff and, only if the change is intended, recapture with: "
+            f"{_RECAPTURE_COMMAND}"
+        )
+
+
+def test_managed_templates_carry_no_inline_pin_literals():
+    # The whole `uses:` fragment is interpolated, so neither the SHA, the version label, nor
+    # the composed fragment may appear as a literal in the template source that renders them.
+    for template in (render_module._OFFLINE_TEMPLATE, render_module._LINEAR_TEMPLATE):
+        assert CHECKOUT_REF not in template
+        assert SETUP_UV_REF not in template
+        assert CHECKOUT_VERSION not in template
+        assert SETUP_UV_VERSION not in template
+        assert "- uses: __CHECKOUT_USES__\n" in template
+        assert "- uses: __SETUP_UV_USES__\n" in template
+
+
 @pytest.mark.parametrize(
     "repository",
     [
         "a/__VERSION__",
-        "a/__CHECKOUT_REF__",
-        "a/__SETUP_UV_REF__",
+        "a/__CHECKOUT_USES__",
+        "a/__SETUP_UV_USES__",
+        "a/__PYTHON_PIN__",
     ],
 )
 def test_render_workflows_preserves_token_like_repository_names(repository):
