@@ -27,6 +27,24 @@ if TYPE_CHECKING:
     from ...github_ci.model import ArtifactChange
 
 
+# Printed by both init branches, so the managed and unmanaged paths cannot drift. Scoped to a
+# first adoption on purpose: init is rerunnable against an existing config, and reconcile --all
+# acknowledges every STALE and UNRECONCILED edge, so an unconditional instruction would tell an
+# established adopter to erase legitimate drift. It deliberately stops short of promising green
+# CI, because reconcile --all skips BROKEN edges and those remain findings. README and
+# MANAGED_CI.md carry the same wording; change all three together.
+#
+# Printed with soft_wrap=True so Rich does not insert hard newlines: default wrapping split
+# `doc-lattice reconcile --all` across a real line break, which survives redirection and breaks
+# the command on copy. Same per-site opt-in the bootstrap command line below already uses.
+_BASELINE_GUIDANCE = (
+    "For an initial adoption with no established baseline, run `doc-lattice reconcile --all` "
+    "once after annotating documents and before enabling the gates. It acknowledges the "
+    "current state so the gates start from a known baseline; BROKEN edges are skipped and "
+    "remain findings, so this does not by itself make CI green."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _GithubInitPlan:
     """Preflighted inputs for explicit managed GitHub artifact creation."""
@@ -175,6 +193,7 @@ def register_init(app: typer.Typer) -> None:
                     f"exact pinned version {__version__} is published on PyPI so the "
                     "snippets resolve."
                 )
+                runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
             else:
                 offline_path, linear_path, bootstrap_path, attributes_path = (
                     escape(change.artifact.relative_path.as_posix())
@@ -188,6 +207,7 @@ def register_init(app: typer.Typer) -> None:
                     f"the exact pinned version {__version__} is published on PyPI so the "
                     "generated workflows resolve."
                 )
+                runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
                 runtime.stderr.print(
                     f"bash {bootstrap_path} plan {escape(github_plan.repository)}",
                     soft_wrap=True,

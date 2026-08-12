@@ -25,6 +25,16 @@ def _git_repository(tmp_path: Path) -> None:
     )
 
 
+# Spelled out here rather than imported from the command module, so a wording change fails the
+# test instead of being followed silently.
+_EXPECTED_BASELINE_GUIDANCE = (
+    "For an initial adoption with no established baseline, run `doc-lattice reconcile --all` "
+    "once after annotating documents and before enabling the gates. It acknowledges the "
+    "current state so the gates start from a known baseline; BROKEN edges are skipped and "
+    "remain findings, so this does not by itself make CI green."
+)
+
+
 def _shared_guidance(version: str) -> str:
     return (
         "# ===== .gitignore (append these lines) =====\n"
@@ -68,8 +78,12 @@ def _legacy_stdout(version: str) -> str:
         "    name: Traceability check\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        "      - uses: actions/checkout@v4\n"
-        "      - uses: astral-sh/setup-uv@v6\n"
+        # Spelled out rather than interpolated from constants, so this stays an independent
+        # assertion of the exact bytes init prints.
+        "      - uses: actions/checkout@"
+        "34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1\n"  # pragma: allowlist secret
+        "      - uses: astral-sh/setup-uv@"
+        "d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0\n"  # pragma: allowlist secret
         "      - run: |\n"
         "          set +e\n"
         f"          uvx --python 3.13 --from doc-lattice=={version} doc-lattice check\n"
@@ -115,6 +129,9 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         "Append the .gitignore block, add the pre-commit block under `repos:`, save the \n"
         "workflow as .github/workflows/doc-lattice.yml, and make sure the exact pinned \n"
         f"version {__version__} is published on PyPI so the snippets resolve.\n"
+        # One unwrapped line: soft_wrap keeps Rich from splitting `doc-lattice reconcile --all`
+        # across a hard newline, which would break the command on copy and in redirection.
+        f"{_EXPECTED_BASELINE_GUIDANCE}\n"
     )
 
 
@@ -389,6 +406,45 @@ def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
     narration = " ".join(result.stderr.split())
     assert f"exact pinned version {__version__} is published on PyPI" in narration
     assert "tag is pushed" not in narration
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        pytest.param([], id="unmanaged"),
+        pytest.param(["--github", "--repository", "Guardantix/doc-lattice"], id="managed"),
+    ],
+)
+def test_init_prints_first_adoption_baseline_guidance_in_both_branches(
+    tmp_path: Path,
+    monkeypatch,
+    extra_args: list[str],
+):
+    # Without a baseline, a fresh adoption turns CI red on its first run and reads as a
+    # misconfiguration. Both branches must say so, and must say the same thing.
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", *extra_args])
+
+    assert result.exit_code == 0
+    narration = " ".join(result.stderr.split())
+    assert _EXPECTED_BASELINE_GUIDANCE in narration
+
+
+def test_baseline_guidance_has_one_owner_shared_by_both_branches():
+    # Both branches print the same module-level constant, so they cannot drift apart.
+    assert " ".join(init_command._BASELINE_GUIDANCE.split()) == _EXPECTED_BASELINE_GUIDANCE
+
+
+def test_baseline_guidance_is_scoped_and_does_not_promise_green_ci():
+    # init is rerunnable against an existing config, and reconcile --all acknowledges every
+    # STALE and UNRECONCILED edge, so unqualified guidance would tell an established adopter to
+    # erase legitimate drift. BROKEN edges are skipped, so the baseline is not a green-CI promise.
+    guidance = " ".join(init_command._BASELINE_GUIDANCE.split())
+
+    assert "initial adoption with no established baseline" in guidance
+    assert "doc-lattice reconcile --all" in guidance
+    assert "does not by itself make CI green" in guidance
 
 
 def test_init_prints_gitignore_guidance_before_other_snippets_and_preserves_existing_file(

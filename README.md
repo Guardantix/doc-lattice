@@ -81,6 +81,13 @@ leading and trailing blank lines, so those cosmetic edits never trip drift. Inte
 whitespace is preserved, so rewrapping a paragraph (which moves its line breaks) does count
 as a change.
 
+The hash input never includes frontmatter. A `file` ref hashes the canonicalized document body;
+a `section` ref hashes only the canonicalized text of the target section. Because `reconcile`
+writes only `seen`, and `seen` lives inside frontmatter, a reconcile write can never change any
+target's hash. That is what lets `reconcile --all` converge in one pass over a stable snapshot:
+acknowledging one edge cannot invalidate another. Convergence covers the reconcilable edges
+only, since `reconcile` skips BROKEN ones and they remain findings after the pass.
+
 ### Broken refs and tool errors
 
 A ref that points at nothing is a normal, reportable lattice state: `check` calls it BROKEN
@@ -420,6 +427,21 @@ where the output says. `init` only prints `.gitignore` guidance and never modifi
 `--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
+
+For an initial adoption with no established baseline, annotate your documents, then run
+`doc-lattice reconcile --all` once before enabling the gates:
+
+```bash
+uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice reconcile --all
+```
+
+This acknowledges the current state of every STALE and UNRECONCILED edge, so the gates start
+from a known baseline instead of reporting the whole backlog on their first run. Do this only
+on a first adoption: `init` is rerunnable against an existing config, and on an established
+lattice `reconcile --all` would acknowledge legitimate drift you have not reviewed. It also
+does not by itself make CI green, because `reconcile` skips BROKEN edges and those remain
+findings. See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
+for the selector semantics.
 
 To test an unreleased commit, replace the PyPI requirement with a Git source such as
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should

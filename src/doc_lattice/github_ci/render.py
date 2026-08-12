@@ -3,6 +3,13 @@
 import re
 from pathlib import PurePosixPath
 
+# Commit pins for actions/checkout and astral-sh/setup-uv. constants.py is the single owner of
+# both halves of each pin, the SHA and the release tag, so a bump there reaches this renderer
+# and the ordinary `init` snippet in scaffold.py alike. The `# v...` comments beside the `uses:`
+# lines in the templates below render from __CHECKOUT_VERSION__ and __SETUP_UV_VERSION__ rather
+# than being written inline, so no half of a pin can drift out of that owner. These names are
+# also re-exported by binding them here, which preserves this module's historical import surface.
+from ..constants import CHECKOUT_REF, CHECKOUT_VERSION, SETUP_UV_REF, SETUP_UV_VERSION
 from ..scaffold import PYTHON_PIN
 from .identity import parse_repository, validate_final_release_version
 from .model import (
@@ -33,12 +40,6 @@ CANONICAL_ARTIFACT_TARGETS = (
     ManagedArtifactTarget("attributes", GIT_ATTRIBUTES_PATH),
 )
 
-# Commit pins for actions/checkout v4.3.1 and astral-sh/setup-uv v6.8.0. The `# v...` comments
-# beside the `uses:` lines in both templates below are rendered into the installed workflow, so
-# a bump edits the SHA here and the tag comment at every template site that names it.
-CHECKOUT_REF = "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
-SETUP_UV_REF = "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
-
 # The trusted Linear step maps the dedicated environment secret onto this fixed environment
 # variable. Rendering and the audit trusted-slot exemption both read these constants so a
 # template edit cannot leave the exemption stale and fail a correct install.
@@ -46,7 +47,10 @@ LINEAR_JOB_ID = "linear"
 LINEAR_SECRET_ENV_NAME = "LINEAR_API_KEY"  # noqa: S105  # pragma: allowlist secret
 LINEAR_SECRET_ENV_VALUE = "${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}"  # noqa: S105  # pragma: allowlist secret
 
-_TOKEN_RE = re.compile(r"__(?:REPOSITORY|VERSION|CHECKOUT_REF|SETUP_UV_REF|PYTHON_PIN)__")
+_TOKEN_RE = re.compile(
+    r"__(?:REPOSITORY|VERSION|CHECKOUT_REF|CHECKOUT_VERSION"
+    r"|SETUP_UV_REF|SETUP_UV_VERSION|PYTHON_PIN)__"
+)
 
 # The run body disables errexit and collects each gate's status by hand because GitHub's default
 # shell is `bash -e {0}`: without `set +e` the first failing gate would abort the step and the
@@ -69,10 +73,10 @@ jobs:
     name: Offline doc-lattice gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@__CHECKOUT_REF__ # v4.3.1
+      - uses: actions/checkout@__CHECKOUT_REF__ # __CHECKOUT_VERSION__
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@__SETUP_UV_REF__ # v6.8.0
+      - uses: astral-sh/setup-uv@__SETUP_UV_REF__ # __SETUP_UV_VERSION__
         with:
           enable-cache: false
       - name: Audit, check, and lint
@@ -109,10 +113,10 @@ jobs:
     environment: doc-lattice-linear
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@__CHECKOUT_REF__ # v4.3.1
+      - uses: actions/checkout@__CHECKOUT_REF__ # __CHECKOUT_VERSION__
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@__SETUP_UV_REF__ # v6.8.0
+      - uses: astral-sh/setup-uv@__SETUP_UV_REF__ # __SETUP_UV_VERSION__
         with:
           enable-cache: false
       - name: Install pinned doc-lattice without the Linear secret
@@ -597,7 +601,9 @@ def _replace_tokens(template: str, repository: str, version: str) -> str:
         "__REPOSITORY__": repository,
         "__VERSION__": version,
         "__CHECKOUT_REF__": CHECKOUT_REF,
+        "__CHECKOUT_VERSION__": CHECKOUT_VERSION,
         "__SETUP_UV_REF__": SETUP_UV_REF,
+        "__SETUP_UV_VERSION__": SETUP_UV_VERSION,
         "__PYTHON_PIN__": PYTHON_PIN,
     }
     return _TOKEN_RE.sub(lambda match: replacements[match.group(0)], template)

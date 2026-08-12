@@ -11,10 +11,14 @@ from dataclasses import dataclass
 from ruamel.yaml import YAML
 
 from .constants import (
+    CHECKOUT_REF,
+    CHECKOUT_VERSION,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_NAME,
+    SETUP_UV_REF,
+    SETUP_UV_VERSION,
 )
 
 DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
@@ -104,6 +108,10 @@ def render_ci(version: str) -> str:
     Both commands run in one shell step so a check failure does not skip lint. set +e
     disables errexit so both exit codes are captured; the final test fails the step if
     either command failed.
+
+    Both actions are pinned by commit SHA with a trailing version comment, matching the
+    managed workflows. The SHA and the version label are read from ``constants.py``, the
+    single owner shared with the managed renderer, so bumping a pin updates both.
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")
@@ -119,8 +127,8 @@ def render_ci(version: str) -> str:
         "    name: Traceability check\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        "      - uses: actions/checkout@v4\n"
-        "      - uses: astral-sh/setup-uv@v6\n"
+        f"      - uses: actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}\n"
+        f"      - uses: astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}\n"
         "      - run: |\n"
         "          set +e\n"
         f"          {check_cmd}\n"

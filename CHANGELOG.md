@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `init` now closes with baseline guidance in both the ordinary and the managed branch, telling a
+  first-time adopter to run `doc-lattice reconcile --all` once after annotating documents and
+  before enabling the gates. The line is scoped to an initial adoption with no established
+  baseline, since `init` is rerunnable and `reconcile --all` would otherwise acknowledge drift an
+  established adopter has not reviewed, and it does not promise green CI, since BROKEN edges are
+  skipped and remain findings. README and MANAGED_CI.md carry the same step.
+- The GitHub Actions workflow snippet `init` prints now pins `actions/checkout` and
+  `astral-sh/setup-uv` by commit SHA with a trailing version comment, matching the managed
+  workflows, instead of using the floating `@v4` and `@v6` tags. Each action's SHA and version
+  label now have a single owner in `constants.py` that both the snippet and the managed renderer
+  read, so bumping a pin updates both. Managed workflow output is unchanged byte for byte.
+
 ### Fixed
 
 - `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so

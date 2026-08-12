@@ -2,12 +2,14 @@
 
 import re
 from collections.abc import Mapping, Sequence
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import get_args
 
 import pytest
 from ruamel.yaml import YAML
 
+from doc_lattice import constants
+from doc_lattice.github_ci import render as render_module
 from doc_lattice.github_ci.model import (
     ARTIFACT_MARKER_PREFIX,
     MANAGED_SCHEMA_LINE,
@@ -19,9 +21,11 @@ from doc_lattice.github_ci.model import (
 from doc_lattice.github_ci.render import (
     BOOTSTRAP_PATH,
     CHECKOUT_REF,
+    CHECKOUT_VERSION,
     LINEAR_WORKFLOW_PATH,
     OFFLINE_WORKFLOW_PATH,
     SETUP_UV_REF,
+    SETUP_UV_VERSION,
     ownership_header,
     render_managed_artifacts,
     render_workflows,
@@ -29,6 +33,12 @@ from doc_lattice.github_ci.render import (
 from doc_lattice.scaffold import PYTHON_PIN
 
 _SECRETS_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])secrets(?![A-Za-z0-9_])")
+
+# Inputs the committed golden fixtures were captured with. Fixed on purpose, and deliberately
+# not the live __version__, so a release cannot silently invalidate the byte comparison.
+GOLDEN_REPOSITORY = "Guardantix/doc-lattice"
+GOLDEN_VERSION = "2.1.0"
+_GOLDEN_DIR = Path(__file__).parent / "fixtures" / "managed-workflows"
 
 
 def _load_workflow(text):
@@ -283,12 +293,49 @@ def test_render_workflows_is_byte_deterministic():
     assert first == second
 
 
+def test_rendered_workflows_match_golden_bytes_exactly():
+    # The guard the substring and self-comparison tests above cannot provide: both would accept
+    # an unintended but deterministic byte change. These fixtures were captured from the
+    # renderer and are committed as auditable evidence, so any drift in the managed output has
+    # to be an explicit, reviewed update to the fixture rather than a silent edit.
+    for artifact in render_workflows(GOLDEN_REPOSITORY, GOLDEN_VERSION):
+        golden = _GOLDEN_DIR / f"{artifact.role}.yml.golden"
+
+        assert artifact.text.encode("utf-8") == golden.read_bytes(), (
+            f"managed {artifact.role} workflow no longer matches {golden.name}; "
+            "review the diff and update the fixture only if the change is intended"
+        )
+
+
+def test_action_pins_are_single_sourced_from_constants():
+    # The names stay importable from this module for compatibility, but constants.py owns them.
+    # Identity, not equality, is what proves there is no second copy to drift.
+    assert render_module.CHECKOUT_REF is constants.CHECKOUT_REF
+    assert render_module.CHECKOUT_VERSION is constants.CHECKOUT_VERSION
+    assert render_module.SETUP_UV_REF is constants.SETUP_UV_REF
+    assert render_module.SETUP_UV_VERSION is constants.SETUP_UV_VERSION
+
+
+def test_managed_templates_carry_no_inline_pin_literals():
+    # Both halves of each pin are interpolated, so neither the SHA nor the version label may
+    # appear as a literal in the template source that renders them.
+    for template in (render_module._OFFLINE_TEMPLATE, render_module._LINEAR_TEMPLATE):
+        assert CHECKOUT_REF not in template
+        assert SETUP_UV_REF not in template
+        assert CHECKOUT_VERSION not in template
+        assert SETUP_UV_VERSION not in template
+        assert "__CHECKOUT_REF__ # __CHECKOUT_VERSION__" in template
+        assert "__SETUP_UV_REF__ # __SETUP_UV_VERSION__" in template
+
+
 @pytest.mark.parametrize(
     "repository",
     [
         "a/__VERSION__",
         "a/__CHECKOUT_REF__",
+        "a/__CHECKOUT_VERSION__",
         "a/__SETUP_UV_REF__",
+        "a/__SETUP_UV_VERSION__",
     ],
 )
 def test_render_workflows_preserves_token_like_repository_names(repository):

@@ -80,20 +80,34 @@ Run this human-maintainer sequence from reviewed, trusted project state:
      --github --repository OWNER/REPO
    ```
 
-2. Inspect the remote repository, plan eligibility, environment, and visible secret names.
+2. Establish the reconcile baseline, on an initial adoption only.
+
+   Annotate your documents, then run this once in the same reviewed change, before the generated
+   workflows reach `main` and the gates begin running:
+
+   ```bash
+   uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice reconcile --all
+   ```
+
+   An installation migrated per `## Migrating an existing installation` above retains its existing
+   baseline and skips this step: that repository has already established one, and `reconcile --all`
+   would acknowledge legitimate drift nobody has reviewed. Establishing the baseline does not by
+   itself make CI green, because `reconcile` skips BROKEN edges and those remain findings.
+
+3. Inspect the remote repository, plan eligibility, environment, and visible secret names.
 
    ```bash
    bash .github/doc-lattice-bootstrap.sh plan OWNER/REPO
    ```
 
-3. Apply and read back the exact `main`-only environment policy after typing the canonical
+4. Apply and read back the exact `main`-only environment policy after typing the canonical
    repository identity.
 
    ```bash
    bash .github/doc-lattice-bootstrap.sh apply OWNER/REPO
    ```
 
-4. Set the dedicated environment secret separately.
+5. Set the dedicated environment secret separately.
 
    Stop unless `apply` printed the exact success phrase: `environment policy verified`.
 
@@ -103,7 +117,7 @@ Run this human-maintainer sequence from reviewed, trusted project state:
      --env doc-lattice-linear --repo OWNER/REPO
    ```
 
-5. Complete secret migration in the same reviewed change. Run either deletion only when `plan` or
+6. Complete secret migration in the same reviewed change. Run either deletion only when `plan` or
    `apply` reported that repository-scoped name.
 
    ```bash
@@ -111,7 +125,7 @@ Run this human-maintainer sequence from reviewed, trusted project state:
    gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo OWNER/REPO
    ```
 
-6. Verify both the remote environment state and the committed local workflow policy.
+7. Verify both the remote environment state and the committed local workflow policy.
 
    ```bash
    bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO

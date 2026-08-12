@@ -10,10 +10,14 @@ from ruamel.yaml import YAML
 import doc_lattice.scaffold as scaffold_module
 from doc_lattice.config import Config
 from doc_lattice.constants import (
+    CHECKOUT_REF,
+    CHECKOUT_VERSION,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_NAME,
+    SETUP_UV_REF,
+    SETUP_UV_VERSION,
 )
 from doc_lattice.scaffold import (
     build_scaffold,
@@ -138,9 +142,43 @@ def test_snippets_pin_pypi_version_and_python():
         assert "git+" not in text
     assert "repo: local" in scaffold.precommit_text
     assert "pass_filenames: false" in scaffold.precommit_text
-    assert "actions/checkout@v4" in scaffold.ci_text
-    assert "astral-sh/setup-uv@v6" in scaffold.ci_text
+    assert f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}" in scaffold.ci_text
+    assert f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}" in scaffold.ci_text
     assert "linear" not in scaffold.ci_text
+
+
+def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
+    # A floating tag re-resolves on every run, which is what the managed workflows exist to
+    # avoid; the printed snippet has to match that posture.
+    ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+
+    assert re.fullmatch(r"[0-9a-f]{40}", CHECKOUT_REF) is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", SETUP_UV_REF) is not None
+    assert "actions/checkout@v4" not in ci
+    assert "astral-sh/setup-uv@v6" not in ci
+    for line in ci.splitlines():
+        if "uses:" in line:
+            action, _, ref = line.partition("@")
+            assert re.fullmatch(r"[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+", ref), action
+
+
+def test_ci_snippet_reads_both_pin_halves_from_shared_constants(monkeypatch):
+    # Both the SHA and the trailing version label must come from the shared owner, so bumping
+    # a pin in constants.py reaches this snippet and the managed renderer alike. Substituted
+    # values prove neither half survives as an inline literal in the template.
+    monkeypatch.setattr(scaffold_module, "CHECKOUT_REF", "a" * 40)
+    monkeypatch.setattr(scaffold_module, "CHECKOUT_VERSION", "v9.9.9")
+    monkeypatch.setattr(scaffold_module, "SETUP_UV_REF", "b" * 40)
+    monkeypatch.setattr(scaffold_module, "SETUP_UV_VERSION", "v8.8.8")
+
+    ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+
+    assert f"      - uses: actions/checkout@{'a' * 40} # v9.9.9\n" in ci
+    assert f"      - uses: astral-sh/setup-uv@{'b' * 40} # v8.8.8\n" in ci
+    assert CHECKOUT_REF not in ci
+    assert SETUP_UV_REF not in ci
+    assert CHECKOUT_VERSION not in ci
+    assert SETUP_UV_VERSION not in ci
 
 
 def test_invocation_installs_from_exact_pypi_requirement():

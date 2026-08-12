@@ -62,6 +62,19 @@ CACHE_VERSION: int = 3
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 
+# GitHub Actions commit pins, shared by both workflow renderers: the ordinary snippet that
+# `init` prints (scaffold.py) and the managed templates (github_ci/render.py). Each action
+# owns two halves that must move together, the immutable commit SHA and the release tag it
+# corresponds to, because the tag is rendered as a trailing `# vX.Y.Z` comment beside every
+# pinned `uses:` line. Both halves live here so bumping a pin is a single edit that reaches
+# both renderers. This module is the correct owner because it is the leaf both renderers
+# already sit above: scaffold.py imports it, github_ci/render.py imports PYTHON_PIN from
+# scaffold.py, so the dependency only ever points this way.
+CHECKOUT_REF: str = "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
+CHECKOUT_VERSION: str = "v4.3.1"
+SETUP_UV_REF: str = "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
+SETUP_UV_VERSION: str = "v6.8.0"
+
 # Reconcile transaction schema plus the shared journal and staged-image naming contract.
 RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
 RECONCILE_JOURNAL_VERSION: int = 1
