@@ -1270,6 +1270,36 @@ def test_apply_reconcile_writes_an_ordered_map_pair_spelled_through_an_alias_at_
     assert reloaded["derives_from"][0]["seen"] == "newhash"
 
 
+def test_apply_reconcile_updates_an_entry_merging_through_an_aliased_merge_key():
+    # A merge key carries its resolved tag on the node itself, so an alias naming an anchored
+    # `<<` is a merge key too. Reading the tag off the alias site finds none and leaves the
+    # inheriting entry looking independent, which refuses a rewrite that is exactly right.
+    text = (
+        "---\n"
+        "id: d\n"
+        "&m <<: {}\n"
+        "derives_from:\n"
+        "  - &base\n"
+        "    ref: a#x\n"
+        "    seen: old\n"
+        "  - ? *m\n"
+        "    : *base\n"
+        "    ref: b#y\n"
+        "---\n"
+        "body\n"
+    )
+    expected = text.replace("    seen: old\n", "    seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == [
+        "newhash",
+        "newhash",
+    ]
+
+
 def test_apply_reconcile_updates_an_entry_inheriting_seen_through_a_merge_key():
     # The loader flattens a merge into a copy rather than giving both entries one object, so
     # the inheriting entry is not updated by assigning to the one that spells `seen`. The

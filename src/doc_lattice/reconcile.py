@@ -438,18 +438,21 @@ def _mapping_pair(
     return None
 
 
-def _is_merge_key(key: _YamlOccurrence) -> bool:
+def _is_merge_key(anchors: _AnchorIndex, key: _YamlOccurrence) -> bool:
     """Report whether a mapping key is one the loader flattens into its mapping.
 
     The loader merges on a key's resolved tag, so an explicit ``!!merge`` spells a merge key
     on any scalar, while a quoted or otherwise tagged ``<<`` is an ordinary key it leaves
-    alone. Only a plain ``<<`` resolves to the merge tag on its own.
+    alone. Only a plain ``<<`` resolves to the merge tag on its own. That tag belongs to the
+    node an anchor names rather than to the site naming it, so an alias of an anchored ``<<``
+    is a merge key wherever it is written and has to be resolved before it is read.
     """
-    if not isinstance(key, _ScalarOccurrence):
+    resolved = _resolve_occurrence(anchors, key)
+    if not isinstance(resolved, _ScalarOccurrence):
         return False
-    if key.tag is not None:
-        return key.tag == _MERGE_TAG
-    return key.style is None and key.value == "<<"
+    if resolved.tag is not None:
+        return resolved.tag == _MERGE_TAG
+    return resolved.style is None and resolved.value == "<<"
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,7 +511,7 @@ def _resolved_mapping_member(
     if pair is not None:
         return _resolve_occurrence(anchors, pair[1])
     for key, value in mapping.value:
-        if not _is_merge_key(key):
+        if not _is_merge_key(anchors, key):
             continue
         for source in _merge_sources(anchors, value):
             member = _resolved_mapping_member(
@@ -574,7 +577,7 @@ def _inherited_seen_origin(
     if mapping.start in visited:
         return None
     for key, value in mapping.value:
-        if not _is_merge_key(key):
+        if not _is_merge_key(anchors, key):
             continue
         for source in _merge_sources(anchors, value):
             changed = next(
