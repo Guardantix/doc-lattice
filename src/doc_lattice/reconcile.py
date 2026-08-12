@@ -430,8 +430,15 @@ def _mapping_pair(
     carry a member that source never spells out. The pair keeps the mapping's own key
     occurrence rather than the definition it resolves to, since only that occurrence sits
     where an edit can be measured from.
+
+    A merge key names no member at all, whatever its scalar text spells: the loader reads it
+    as an instruction and flattens its value, so an explicit ``!!merge seen`` leaves an entry
+    with the members that value holds and no ``seen`` of its own. Matching it on text alone
+    would offer a mapping in place of the hash's source.
     """
     for key, value in mapping.value:
+        if _is_merge_key(anchors, key):
+            continue
         resolved = _resolve_occurrence(anchors, key)
         if isinstance(resolved, _ScalarOccurrence) and resolved.value == name:
             return key, value

@@ -1270,6 +1270,20 @@ def test_apply_reconcile_writes_an_ordered_map_pair_spelled_through_an_alias_at_
     assert reloaded["derives_from"][0]["seen"] == "newhash"
 
 
+def test_apply_reconcile_appends_a_seen_beside_a_merge_key_whose_text_spells_seen():
+    # A merge key is an instruction rather than a member, so `!!merge seen` leaves the entry
+    # with whatever its value holds and no `seen` of its own. Matching the key on text alone
+    # offered the merged mapping as the hash's source and refused the entry as malformed.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    !!merge seen: {}\n---\nbody\n"
+    expected = text.replace("    !!merge seen: {}\n", "    !!merge seen: {}\n    seen: newhash\n")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["newhash"]
+
+
 def test_apply_reconcile_updates_an_entry_merging_through_an_aliased_merge_key():
     # A merge key carries its resolved tag on the node itself, so an alias naming an anchored
     # `<<` is a merge key too. Reading the tag off the alias site finds none and leaves the
