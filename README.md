@@ -86,7 +86,9 @@ a `section` ref hashes only the canonicalized text of the target section. Becaus
 writes only `seen`, and `seen` lives inside frontmatter, a reconcile write can never change any
 target's hash. That is what lets `reconcile --all` converge in one pass over a stable snapshot:
 acknowledging one edge cannot invalidate another. Convergence covers the reconcilable edges
-only, since `reconcile` skips BROKEN ones and they remain findings after the pass.
+only, since `reconcile` skips BROKEN ones and they remain findings after the pass. The write
+scope and selector semantics restated here are owned by
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md).
 
 ### Broken refs and tool errors
 

@@ -43,6 +43,18 @@ GOLDEN_REPOSITORY = "Guardantix/doc-lattice"
 GOLDEN_VERSION = "2.1.0"
 _GOLDEN_DIR = Path(__file__).parent / "fixtures" / "managed-workflows"
 
+# The supported recapture path after an intended renderer change: run from the repository root,
+# then review the fixture diff like any other code change. The fixtures are byte-exact and the
+# pre-commit whitespace fixers are excluded from their directory, so hand-editing them is
+# error-prone by design; regenerate instead.
+_RECAPTURE_COMMAND = (
+    'uv run python -c "'
+    "from pathlib import Path; from doc_lattice.github_ci.render import render_workflows; "
+    "[Path('tests/fixtures/managed-workflows', a.role + '.yml.golden')"
+    ".write_bytes(a.text.encode('utf-8')) "
+    f"for a in render_workflows('{GOLDEN_REPOSITORY}', '{GOLDEN_VERSION}')]\""
+)
+
 
 def _load_workflow(text):
     """Parse one rendered workflow as safe YAML."""
@@ -299,7 +311,8 @@ def test_rendered_workflows_match_golden_bytes_exactly():
 
         assert artifact.text.encode("utf-8") == golden.read_bytes(), (
             f"managed {artifact.role} workflow no longer matches {golden.name}; "
-            "review the diff and update the fixture only if the change is intended"
+            "review the diff and, only if the change is intended, recapture with: "
+            f"{_RECAPTURE_COMMAND}"
         )
 
 

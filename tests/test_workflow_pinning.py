@@ -27,13 +27,21 @@ def _workflows() -> dict[str, Any]:
 
 
 def _uses_fragments(path: Path) -> list[str]:
-    """Every `uses:` value as written, including the trailing version comment."""
-    return [
-        stripped.partition("uses:")[2].strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        for stripped in [line.strip()]
-        if stripped.startswith(("uses:", "- uses:"))
-    ]
+    """Every `uses:` value as written, including the trailing version comment.
+
+    The value half is unquoted before reassembly: YAML allows `uses: "owner/action@sha"`, and
+    the quote would otherwise survive into the extracted action name, silently dropping that
+    reference out of the fragment parity check while the safe-loader pin test still passes.
+    """
+    fragments: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("uses:", "- uses:")):
+            continue
+        value, marker, comment = stripped.partition("uses:")[2].partition("#")
+        value = value.strip().strip("'\"")
+        fragments.append(f"{value} # {comment.strip()}" if marker else value)
+    return fragments
 
 
 def _action_references(workflow: Any) -> list[str]:
@@ -103,11 +111,13 @@ def test_every_shipped_action_pin_is_exercised_by_this_repository():
     # The parity test above only compares references it happens to find, so it would pass
     # vacuously for any action this repository stopped referencing directly, and the pin would
     # then freeze at whatever release it held while still shipping to every scaffolded repo.
-    # This is the guard that turns that silent lapse into a failure.
+    # This is the guard that turns that silent lapse into a failure. Parsed references suffice
+    # here: the trailing version comment matters only to the parity test above, and everything
+    # after the `@` is discarded anyway.
     referenced = {
-        fragment.partition("@")[0]
-        for path in _workflow_paths()
-        for fragment in _uses_fragments(path)
+        reference.partition("@")[0]
+        for workflow in _workflows().values()
+        for reference in _action_references(workflow)
     }
     assert referenced >= set(_SHIPPED_USES)
 
