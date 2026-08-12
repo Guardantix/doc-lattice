@@ -614,6 +614,63 @@ def test_apply_reconcile_relocates_tagged_seen_anchor_as_a_string():
     ]
 
 
+@pytest.mark.parametrize(
+    ("null_seen", "replaced", "relocated"),
+    [
+        ("    seen:\n      &shared\n", "    seen: newhash\n", "&shared null"),
+        ("    seen: # note\n      &shared\n", "    seen: newhash # note\n", "&shared null"),
+        ("    seen: !!str\n      &shared\n", "    seen: newhash\n", '&shared ""'),
+    ],
+)
+def test_apply_reconcile_replaces_a_null_seen_whose_properties_open_their_own_line(
+    null_seen: str, replaced: str, relocated: str
+):
+    # An empty scalar has no token of its own, so its anchor and tag were reached only when
+    # they shared the key's line and the replacement happened to run over them. A property
+    # written on the line below survived the rewrite as stray source of a value that is no
+    # longer there, which left the document unparseable or retyped the new hash.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"{null_seen}"
+        "  - ref: b#y\n"
+        "    seen: *shared\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"{replaced}"
+        "  - ref: b#y\n"
+        f"    seen: {relocated}\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+def test_apply_reconcile_replaces_a_null_seen_whose_tag_alone_opens_its_own_line():
+    # A tag on its own line has no anchor beside it to relocate, so nothing but the removal
+    # itself keeps the tag from retyping the hash written in the value's place.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen:\n      !!str\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert [edge.seen for edge in _validated_reconcile_meta(out).derives_from] == ["newhash"]
+
+
 @pytest.mark.parametrize("source_seen", ["&shared null", "&shared ~", "&shared"])
 def test_apply_reconcile_relocates_anchored_null_with_null_semantics(source_seen: str):
     text = (

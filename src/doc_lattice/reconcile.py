@@ -25,6 +25,8 @@ from ruamel.yaml.tokens import (
     AnchorToken,
     BlockMappingStartToken,
     BlockSequenceStartToken,
+    FlowMappingStartToken,
+    FlowSequenceStartToken,
     KeyToken,
     ScalarToken,
     TagToken,
@@ -65,6 +67,15 @@ _YAML_NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 
 # The tag the loader flattens a mapping key on, which the plain `<<` scalar resolves to.
 _MERGE_TAG = "tag:yaml.org,2002:merge"
+
+# The tokens that open a node an anchor or a tag ahead of them belongs to rather than to a
+# scalar, in either the block or the flow spelling.
+_COLLECTION_START_TOKENS = (
+    BlockMappingStartToken,
+    BlockSequenceStartToken,
+    FlowMappingStartToken,
+    FlowSequenceStartToken,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,10 +344,15 @@ def _scalar_properties(tokens: list[Token]) -> tuple[_ScalarProperties, ...]:
     """Pair each scalar token with the anchor and tag written on it.
 
     A property applies to the node that follows it, and only the other property may come
-    between the two, so a property followed by anything else belongs to a collection rather
+    between the two, so a property followed by a collection belongs to that collection rather
     than to a scalar. The pairing is read off the token stream because a scalar's own marks
     do not delimit its properties: a node whose tag precedes its anchor starts at the anchor,
     leaving the tag outside it, and a comment may sit between either one and the value.
+
+    A property followed by neither is written on the empty plain scalar YAML reads as null,
+    which has no token at all. Such a node is recorded where a scalar token of its own would
+    have opened, just past the last property, since that is the position every caller holding
+    the node already knows it by.
     """
     properties: list[_ScalarProperties] = []
     anchor: _TokenSpan | None = None
@@ -347,8 +363,11 @@ def _scalar_properties(tokens: list[Token]) -> tuple[_ScalarProperties, ...]:
         elif isinstance(token, TagToken):
             tag = _TokenSpan(token.start_mark.index, token.end_mark.index)
         else:
-            if (anchor is not None or tag is not None) and isinstance(token, ScalarToken):
+            written = [span for span in (anchor, tag) if span is not None]
+            if written and isinstance(token, ScalarToken):
                 properties.append(_ScalarProperties(token.start_mark.index, anchor, tag))
+            elif written and not isinstance(token, _COLLECTION_START_TOKENS):
+                properties.append(_ScalarProperties(max(span.end for span in written), anchor, tag))
             anchor = tag = None
     return tuple(properties)
 
@@ -618,7 +637,17 @@ def _null_seen_source_edit(
     entry: _MappingOccurrence,
     seen_key: _YamlOccurrence,
     new_seen: str,
+    properties: _ScalarProperties | None,
 ) -> _SourceEdit:
+    """Plan the edit that writes a hash where an empty ``seen`` value stood.
+
+    An empty scalar holds no source of its own, so the hash goes after the key's own
+    indicator and takes the run of space the value was spelled with. That run ends at the
+    first property the value carries, which the removals plan separately, so a property
+    written on the line below is left for them rather than swallowed along with the line
+    break. A comment ahead of the property is the author's, so the run stops there instead
+    and the property is removed on its own.
+    """
     raw_meta = context.raw_meta
     colon_at = _value_indicator_after(context.marks, seen_key.end, entry.end)
     if colon_at is None:
@@ -627,6 +656,10 @@ def _null_seen_source_edit(
     boundary = entry.end - 1 if entry.flow_style else entry.end
     markers = [raw_meta.find(marker, value_start, entry.end) for marker in ("#", "\n", ",", "}")]
     value_end = min((marker for marker in markers if marker != -1), default=boundary)
+    if properties is not None:
+        written = properties.spans()[0].start
+        if raw_meta.find("#", value_start, written) == -1:
+            value_end = written
     suffix = " " if value_end < len(raw_meta) and raw_meta[value_end] == "#" else ""
     return _SourceEdit(value_start, value_end, f" {new_seen}{suffix}")
 
@@ -910,6 +943,38 @@ def _property_removal_edits(context: _SourceContext, span: _TokenSpan) -> list[_
     return edits
 
 
+def _line_break_before(raw_meta: str, index: int) -> int:
+    """Return the offset of the line break ``index`` opens its line after, or ``index``.
+
+    A removal that takes everything a line holds leaves the break that opened it behind, and
+    a line of nothing but indentation is not what the author wrote either. Only a run of
+    space back to a break is passed over, so a removal sharing its line with anything else
+    keeps that line.
+    """
+    start = index
+    while start > 0 and raw_meta[start - 1] in " \t":
+        start -= 1
+    return start - 1 if start > 0 and raw_meta[start - 1] == "\n" else index
+
+
+def _null_property_removal_edits(
+    context: _SourceContext, seen: _ScalarOccurrence, written: int
+) -> list[_SourceEdit]:
+    """Plan the edits that drop the properties of an empty ``seen`` being replaced.
+
+    The empty scalar stands where its last property ends, which is the position the removals
+    run up to. Whatever the value edit already covers is left to it, so only a property it
+    did not reach is removed here, along with the line break opening the line such a property
+    was written on.
+    """
+    edits = _property_removal_edits(context, _TokenSpan(seen.end, seen.end))
+    if not edits:
+        return []
+    first = edits[0]
+    start = max(written, _line_break_before(context.raw_meta, first.start))
+    return [_SourceEdit(start, first.end, ""), *edits[1:]]
+
+
 @dataclass(frozen=True, slots=True)
 class _SeenPair:
     """Where an entry's ``seen`` pair sits, resolved once for every planner that needs it.
@@ -944,8 +1009,11 @@ def _seen_source_edits(
     if isinstance(seen, _ScalarOccurrence):
         if span is None:
             # An empty plain scalar has no source of its own, so the hash is written after
-            # the key's own indicator rather than over the value.
-            return [_null_seen_source_edit(context, pair.mapping, pair.key, new_seen)]
+            # the key's own indicator rather than over the value. Its properties are still
+            # written somewhere, and neither may outlive the value they were written on.
+            properties = _properties_of(context.marks, _TokenSpan(seen.end, seen.end))
+            value = _null_seen_source_edit(context, pair.mapping, pair.key, new_seen, properties)
+            return [*_null_property_removal_edits(context, seen, value.end), value]
         comment = _block_header_comment(context.raw_meta, seen, span)
         value = _SourceEdit(
             span.start, _scalar_source_end(context.raw_meta, seen, span), f"{new_seen}{comment}"

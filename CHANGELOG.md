@@ -37,7 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `reconcile` quotes a replacement hash that would not reload as a string, keeps a `derives_from`
   list reached through a YAML alias or a merge key editable in the plain `<<`, the explicitly
   tagged, and the aliased spelling of that key alike, along with any entry inheriting `seen`
-  through one, updates a `seen` member whose key is written as an alias instead of
+  through one, reads a merge key as the instruction it is rather than as a member of its own, so
+  an entry whose merge key happens to spell `seen` has a hash appended instead of being refused,
+  updates a `seen` member whose key is written as an alias instead of
   appending a second one, preserves the type of a relocated non-string `seen` anchor along with
   any explicit tag it carries, and no longer rewrites an alias bound to a later definition of a
   reused anchor name or to an entry the same run already updated.
@@ -46,7 +48,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a tag on its list line, or a flow tail stays parseable. Replacing an empty `seen` targets the
   value indicator itself, so a colon inside a comment on the key no longer misplaces the hash,
   and an explicit `seen` key written without any `:` gets one written for it instead of borrowing
-  the next pair's.
+  the next pair's. An anchor or a tag written on the line below an empty `seen` goes with the
+  value it belonged to, rather than being left behind as source of a value that is no longer
+  there, and a comment written between the two stays.
 - `reconcile` reads every document through its own loader, so one file's `%YAML` directive can no
   longer change how a later file's hash is quoted, and it quotes a replacement the document's own
   YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,
