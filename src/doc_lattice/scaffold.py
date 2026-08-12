@@ -11,14 +11,12 @@ from dataclasses import dataclass
 from ruamel.yaml import YAML
 
 from .constants import (
-    CHECKOUT_REF,
-    CHECKOUT_VERSION,
+    CHECKOUT_USES,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_NAME,
-    SETUP_UV_REF,
-    SETUP_UV_VERSION,
+    SETUP_UV_USES,
 )
 
 DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
@@ -109,9 +107,12 @@ def render_ci(version: str) -> str:
     disables errexit so both exit codes are captured; the final test fails the step if
     either command failed.
 
-    Both actions are pinned by commit SHA with a trailing version comment, matching the
-    managed workflows. The SHA and the version label are read from ``constants.py``, the
-    single owner shared with the managed renderer, so bumping a pin updates both.
+    Both actions are pinned by commit SHA with a trailing version comment, and the job carries
+    the same least-privilege posture as the managed workflows: a read-only ``contents`` token
+    and ``persist-credentials: false``, so the job's token is not left in ``.git/config`` while
+    the following step resolves and runs third-party packages. The pinned ``uses:`` fragments
+    are read from ``constants.py``, the single owner shared with the managed renderer, so
+    bumping a pin updates both.
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")
@@ -122,13 +123,17 @@ def render_ci(version: str) -> str:
         "    branches: [main]\n"
         "  pull_request:\n"
         "    branches: [main]\n"
+        "permissions:\n"
+        "  contents: read\n"
         "jobs:\n"
         "  check:\n"
         "    name: Traceability check\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        f"      - uses: actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}\n"
-        f"      - uses: astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}\n"
+        f"      - uses: {CHECKOUT_USES}\n"
+        "        with:\n"
+        "          persist-credentials: false\n"
+        f"      - uses: {SETUP_UV_USES}\n"
         "      - run: |\n"
         "          set +e\n"
         f"          {check_cmd}\n"

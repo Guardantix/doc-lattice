@@ -1,5 +1,6 @@
 """Tests for deterministic managed GitHub Actions workflow rendering."""
 
+import inspect
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -8,7 +9,15 @@ from typing import get_args
 import pytest
 from ruamel.yaml import YAML
 
-from doc_lattice import constants
+from doc_lattice import scaffold as scaffold_module
+from doc_lattice.constants import (
+    CHECKOUT_REF,
+    CHECKOUT_USES,
+    CHECKOUT_VERSION,
+    SETUP_UV_REF,
+    SETUP_UV_USES,
+    SETUP_UV_VERSION,
+)
 from doc_lattice.github_ci import render as render_module
 from doc_lattice.github_ci.model import (
     ARTIFACT_MARKER_PREFIX,
@@ -20,12 +29,8 @@ from doc_lattice.github_ci.model import (
 )
 from doc_lattice.github_ci.render import (
     BOOTSTRAP_PATH,
-    CHECKOUT_REF,
-    CHECKOUT_VERSION,
     LINEAR_WORKFLOW_PATH,
     OFFLINE_WORKFLOW_PATH,
-    SETUP_UV_REF,
-    SETUP_UV_VERSION,
     ownership_header,
     render_managed_artifacts,
     render_workflows,
@@ -232,7 +237,7 @@ def test_render_linear_workflow_installs_before_mapping_secret():
 
 
 def test_action_refs_are_approved_full_commit_shas():
-    assert CHECKOUT_REF == "34e114876b0b11c390a56381ad16ebd13914f8d5"  # pragma: allowlist secret
+    assert CHECKOUT_REF == "11d5960a326750d5838078e36cf38b85af677262"  # pragma: allowlist secret
     assert SETUP_UV_REF == "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
     assert re.fullmatch(r"[0-9a-f]{40}", CHECKOUT_REF) is not None
     assert re.fullmatch(r"[0-9a-f]{40}", SETUP_UV_REF) is not None
@@ -249,8 +254,8 @@ def test_rendered_workflows_pin_actions_and_mark_ownership():
         assert steps[0]["with"] == {"persist-credentials": False}
         assert steps[1]["uses"] == f"astral-sh/setup-uv@{SETUP_UV_REF}"
         assert steps[1]["with"] == {"enable-cache": False}
-        assert f"actions/checkout@{CHECKOUT_REF} # v4.3.1" in artifact.text
-        assert f"astral-sh/setup-uv@{SETUP_UV_REF} # v6.8.0" in artifact.text
+        assert f"      - uses: {CHECKOUT_USES}\n" in artifact.text
+        assert f"      - uses: {SETUP_UV_USES}\n" in artifact.text
         assert "actions/cache" not in artifact.text
         assert "doc-lattice==2.1.0" in artifact.text
         assert artifact.text.splitlines()[:4] == [
@@ -308,34 +313,35 @@ def test_rendered_workflows_match_golden_bytes_exactly():
 
 
 def test_action_pins_are_single_sourced_from_constants():
-    # The names stay importable from this module for compatibility, but constants.py owns them.
-    # Identity, not equality, is what proves there is no second copy to drift.
-    assert render_module.CHECKOUT_REF is constants.CHECKOUT_REF
-    assert render_module.CHECKOUT_VERSION is constants.CHECKOUT_VERSION
-    assert render_module.SETUP_UV_REF is constants.SETUP_UV_REF
-    assert render_module.SETUP_UV_VERSION is constants.SETUP_UV_VERSION
+    # constants.py owns every pin value, so no other renderer module may spell one out. An
+    # identity check would not prove that: CPython interns the 40-character hex SHAs, so
+    # `render.CHECKOUT_REF is constants.CHECKOUT_REF` holds even for an independently declared
+    # duplicate literal. Reading the module source is what rules a second copy out.
+    for module in (render_module, scaffold_module):
+        source = inspect.getsource(module)
+        for value in (CHECKOUT_REF, CHECKOUT_VERSION, SETUP_UV_REF, SETUP_UV_VERSION):
+            assert value not in source, f"{module.__name__} spells out the pin value {value!r}"
 
 
 def test_managed_templates_carry_no_inline_pin_literals():
-    # Both halves of each pin are interpolated, so neither the SHA nor the version label may
-    # appear as a literal in the template source that renders them.
+    # The whole `uses:` fragment is interpolated, so neither the SHA, the version label, nor
+    # the composed fragment may appear as a literal in the template source that renders them.
     for template in (render_module._OFFLINE_TEMPLATE, render_module._LINEAR_TEMPLATE):
         assert CHECKOUT_REF not in template
         assert SETUP_UV_REF not in template
         assert CHECKOUT_VERSION not in template
         assert SETUP_UV_VERSION not in template
-        assert "__CHECKOUT_REF__ # __CHECKOUT_VERSION__" in template
-        assert "__SETUP_UV_REF__ # __SETUP_UV_VERSION__" in template
+        assert "- uses: __CHECKOUT_USES__\n" in template
+        assert "- uses: __SETUP_UV_USES__\n" in template
 
 
 @pytest.mark.parametrize(
     "repository",
     [
         "a/__VERSION__",
-        "a/__CHECKOUT_REF__",
-        "a/__CHECKOUT_VERSION__",
-        "a/__SETUP_UV_REF__",
-        "a/__SETUP_UV_VERSION__",
+        "a/__CHECKOUT_USES__",
+        "a/__SETUP_UV_USES__",
+        "a/__PYTHON_PIN__",
     ],
 )
 def test_render_workflows_preserves_token_like_repository_names(repository):

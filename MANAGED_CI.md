@@ -91,8 +91,10 @@ Run this human-maintainer sequence from reviewed, trusted project state:
 
    An installation migrated per `## Migrating an existing installation` above retains its existing
    baseline and skips this step: that repository has already established one, and `reconcile --all`
-   would acknowledge legitimate drift nobody has reviewed. Establishing the baseline does not by
-   itself make CI green, because `reconcile` skips BROKEN edges and those remain findings.
+   would acknowledge legitimate drift nobody has reviewed. When this step applies and what it
+   does not promise are owned by
+   [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the selector semantics are
+   owned by [RECONCILE.md](RECONCILE.md).
 
 3. Inspect the remote repository, plan eligibility, environment, and visible secret names.
 

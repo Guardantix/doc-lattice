@@ -13,12 +13,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   before enabling the gates. The line is scoped to an initial adoption with no established
   baseline, since `init` is rerunnable and `reconcile --all` would otherwise acknowledge drift an
   established adopter has not reviewed, and it does not promise green CI, since BROKEN edges are
-  skipped and remain findings. README and MANAGED_CI.md carry the same step.
+  skipped and remain findings. README.md owns the rule; MANAGED_CI.md sequences the command and
+  links there.
 - The GitHub Actions workflow snippet `init` prints now pins `actions/checkout` and
   `astral-sh/setup-uv` by commit SHA with a trailing version comment, matching the managed
-  workflows, instead of using the floating `@v4` and `@v6` tags. Each action's SHA and version
-  label now have a single owner in `constants.py` that both the snippet and the managed renderer
-  read, so bumping a pin updates both. Managed workflow output is unchanged byte for byte.
+  workflows, instead of using the floating `@v4` and `@v6` tags. The composed `uses:` fragment
+  for each action now has a single owner in `constants.py` that both the snippet and the managed
+  renderer read, so bumping a pin updates both.
+- The printed snippet also adopts the managed workflows' least-privilege posture: the job
+  declares `permissions: contents: read` and the checkout step sets `persist-credentials: false`,
+  so the job token is not left in `.git/config` while the following step resolves and runs
+  third-party packages.
+- `actions/checkout` moves from `v4.3.1` to `v4.4.0`, the pin this repository's own gates already
+  ran, in both the printed snippet and the managed workflows. `tests/test_workflow_pinning.py`
+  now holds the two together, so a shipped pin cannot silently fall behind the pin doc-lattice
+  itself depends on.
 
 ### Fixed
 

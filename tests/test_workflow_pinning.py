@@ -6,6 +6,8 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
+from doc_lattice.constants import CHECKOUT_REF, SETUP_UV_REF
+
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_DIR = _ROOT / ".github/workflows"
 _SHA_PINNED_USES_RE = re.compile(r"^[^@]+@[0-9a-f]{40}$")
@@ -62,6 +64,22 @@ def test_every_workflow_action_is_pinned_to_a_commit_sha():
         if not _SHA_PINNED_USES_RE.match(ref)
     ]
     assert unpinned == []
+
+
+def test_shipped_action_pins_match_the_pins_this_repository_runs():
+    # A SHA we ship to users cannot go stale on its own the way the floating tags it replaced
+    # could not, so the only thing keeping it current is that it is the same pin our own gates
+    # depend on. Tying the two together makes an upgrade here fail until constants.py follows,
+    # which is what stops scaffolded repositories from being frozen a release behind us.
+    shipped = {"actions/checkout": CHECKOUT_REF, "astral-sh/setup-uv": SETUP_UV_REF}
+    divergent = [
+        f"{name}: {ref}"
+        for name, workflow in _workflows().items()
+        for ref in _action_references(workflow)
+        for action, _, sha in [ref.partition("@")]
+        if action in shipped and sha != shipped[action]
+    ]
+    assert divergent == []
 
 
 def test_every_workflow_container_image_is_pinned_to_a_digest():

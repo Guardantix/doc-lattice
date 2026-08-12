@@ -73,6 +73,8 @@ def _legacy_stdout(version: str) -> str:
         "    branches: [main]\n"
         "  pull_request:\n"
         "    branches: [main]\n"
+        "permissions:\n"
+        "  contents: read\n"
         "jobs:\n"
         "  check:\n"
         "    name: Traceability check\n"
@@ -81,7 +83,9 @@ def _legacy_stdout(version: str) -> str:
         # Spelled out rather than interpolated from constants, so this stays an independent
         # assertion of the exact bytes init prints.
         "      - uses: actions/checkout@"
-        "34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1\n"  # pragma: allowlist secret
+        "11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n"  # pragma: allowlist secret
+        "        with:\n"
+        "          persist-credentials: false\n"
         "      - uses: astral-sh/setup-uv@"
         "d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0\n"  # pragma: allowlist secret
         "      - run: |\n"

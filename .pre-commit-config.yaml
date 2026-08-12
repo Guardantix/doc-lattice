@@ -2,8 +2,13 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # The managed-workflow fixtures are byte-exact captures of renderer output. A hook that
+      # normalizes them would make the golden comparison unfixable by recapture, so both
+      # whitespace fixers leave that directory alone.
       - id: trailing-whitespace
+        exclude: ^tests/fixtures/managed-workflows/
       - id: end-of-file-fixer
+        exclude: ^tests/fixtures/managed-workflows/
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files

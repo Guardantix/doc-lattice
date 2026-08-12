@@ -162,23 +162,17 @@ def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
             assert re.fullmatch(r"[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+", ref), action
 
 
-def test_ci_snippet_reads_both_pin_halves_from_shared_constants(monkeypatch):
-    # Both the SHA and the trailing version label must come from the shared owner, so bumping
-    # a pin in constants.py reaches this snippet and the managed renderer alike. Substituted
-    # values prove neither half survives as an inline literal in the template.
-    monkeypatch.setattr(scaffold_module, "CHECKOUT_REF", "a" * 40)
-    monkeypatch.setattr(scaffold_module, "CHECKOUT_VERSION", "v9.9.9")
-    monkeypatch.setattr(scaffold_module, "SETUP_UV_REF", "b" * 40)
-    monkeypatch.setattr(scaffold_module, "SETUP_UV_VERSION", "v8.8.8")
-
+def test_ci_snippet_carries_the_managed_least_privilege_posture():
+    # The snippet's docstring claims the managed workflows' posture, and the step that follows
+    # checkout resolves and executes third-party packages. Without these two settings the job's
+    # token stays in .git/config and is writable while that happens.
     ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+    workflow = YAML(typ="safe").load(ci)
+    steps = workflow["jobs"]["check"]["steps"]
 
-    assert f"      - uses: actions/checkout@{'a' * 40} # v9.9.9\n" in ci
-    assert f"      - uses: astral-sh/setup-uv@{'b' * 40} # v8.8.8\n" in ci
-    assert CHECKOUT_REF not in ci
-    assert SETUP_UV_REF not in ci
-    assert CHECKOUT_VERSION not in ci
-    assert SETUP_UV_VERSION not in ci
+    assert workflow["permissions"] == {"contents": "read"}
+    assert steps[0]["uses"] == f"actions/checkout@{CHECKOUT_REF}"
+    assert steps[0]["with"] == {"persist-credentials": False}
 
 
 def test_invocation_installs_from_exact_pypi_requirement():

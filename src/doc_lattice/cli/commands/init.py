@@ -31,8 +31,10 @@ if TYPE_CHECKING:
 # first adoption on purpose: init is rerunnable against an existing config, and reconcile --all
 # acknowledges every STALE and UNRECONCILED edge, so an unconditional instruction would tell an
 # established adopter to erase legitimate drift. It deliberately stops short of promising green
-# CI, because reconcile --all skips BROKEN edges and those remain findings. README and
-# MANAGED_CI.md carry the same wording; change all three together.
+# CI, because reconcile --all skips BROKEN edges and those remain findings. README.md owns this
+# rule for users and states it at length; MANAGED_CI.md only sequences the command and links
+# there. Tightening the rule means editing README.md and this string, and tests/cli/test_init.py
+# holds the only mechanically enforced copy of the wording.
 #
 # Printed with soft_wrap=True so Rich does not insert hard newlines: default wrapping split
 # `doc-lattice reconcile --all` across a real line break, which survives redirection and breaks
