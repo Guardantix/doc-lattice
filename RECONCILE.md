@@ -1,9 +1,9 @@
 # Reconcile: selectors, transactions, and recovery
 
-`reconcile` is the only command that writes to your docs, and it only ever rewrites the `seen`
-scalar. This document covers the selector forms, the read-only dry-run preview and its JSON plan,
-the write and durability mechanics of a real run, automatic and manual recovery, and the
-transaction artifacts reconcile leaves behind.
+`reconcile` is the only command that writes to your docs, and it only ever rewrites `seen` values
+and the aliases that read them. This document covers the selector forms, the read-only dry-run
+preview and its JSON plan, the write and durability mechanics of a real run, automatic and manual
+recovery, and the transaction artifacts reconcile leaves behind.
 
 ## Selectors
 
@@ -41,14 +41,30 @@ whether rollback completed or recovery evidence remains.
 
 ## Write mechanics and durability
 
-`reconcile` re-reads each downstream file fresh at write time, rewrites only the targeted `seen`
-scalar through round-trip YAML (preserving your body, key order, and comments), and retains the
-exact source and replacement bytes. A real run stages exact before and after images, publishes a
+`reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
+the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
+verbatim. A `seen` written as a block scalar is the one place a comment moves rather than staying
+put: its header, the comment on it, and its contents are one span, so the comment is rewritten
+onto the line the new hash is written on. Two edits land outside that scalar. The first is an
+anchor relocation: when the `seen` being replaced carries an anchor that another key still reads
+through an alias, reconcile writes the anchor and its old value at that alias site, so the other
+key keeps the value it had instead
+of picking up the new hash. The second covers an entry, or the pair holding its `seen`, that is
+written as an alias to a node something else also reads: the edit lands at that alias site rather
+than in the shared node, so the entry takes the new hash and everything else reading the node
+keeps its own value. An entry that inherits `seen` from another through a `<<` merge key spells
+none of its own, so updating the entry that does update both. Everything around the frontmatter is
+put back as it was read, including a leading byte-order mark and both `---` fences exactly as they
+were written. A file written entirely in CRLF or in lone CR is rewritten in that same ending; a
+file that already mixes endings has none to preserve and is written out in LF, which is what
+hashing has always compared. The rewritten frontmatter is reparsed before it is staged, and a
+rewrite that would not reload as the whole planned frontmatter, edges and every other key alike,
+is refused rather than written. A real run then stages exact before and after images, publishes a
 `prepared` journal, fingerprints each destination immediately before its replacement, and rejects
-a changed destination as a conflict. The full batch is rolled back in reverse order if a conflict
-or write/durability failure occurs before the committed marker. After every replacement is durable,
-the journal becomes `committed`; success output waits until committed cleanup and a clean
-advisory-lock release have both completed.
+a changed destination as a conflict. The full batch is rolled
+back in reverse order if a conflict or write/durability failure occurs before the committed
+marker. After every replacement is durable, the journal becomes `committed`; success output waits
+until committed cleanup and a clean advisory-lock release have both completed.
 
 Every reconcile mode holds a nonblocking advisory lock on the existing project-root directory
 through preflight, planning, and any recovery or commit. A competing invocation exits 2 with

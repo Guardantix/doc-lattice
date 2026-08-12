@@ -1,5 +1,6 @@
 """Boundary module: split and validate untyped YAML frontmatter into typed NodeMeta."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,74 @@ from .model import NodeMeta
 _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 _YAML = YAML(typ="safe")
+
+# Everything a safe load of user-authored YAML can raise. Beyond the YAMLError family the
+# scanner and parser raise, a constructor building a tagged scalar its type cannot accept
+# raises the builtin that construction failed with, so `!!int oops` reaches a caller as a bare
+# ValueError. Every module loading a user's YAML catches this family and reports a
+# ProjectError, so the same typo is a clean error wherever the user writes it.
+YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
+
+
+@dataclass(frozen=True, slots=True)
+class FrontmatterParts:
+    """Every source piece a document's frontmatter block is spelled with.
+
+    Attributes:
+        prefix: A leading byte-order mark, which precedes the opening fence.
+        open_fence: The opening fence line as written, any surrounding space included.
+        raw_meta: The YAML between the fences, empty when the block holds none.
+        close_fence: The closing fence line as written.
+        close_fence_newline: The newline ending the closing fence, empty at end of file.
+        body: Everything after that newline.
+    """
+
+    prefix: str
+    open_fence: str
+    raw_meta: str
+    close_fence: str
+    close_fence_newline: str
+    body: str
+
+
+def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
+    """Split a document into every piece its frontmatter block is written with.
+
+    ``split_frontmatter`` returns the two pieces a reader needs. This returns the rest of
+    them as well, since a byte-exact rewrite has to put back the fences the author wrote,
+    and any byte-order mark before them, rather than the spelling this engine would choose.
+
+    Args:
+        text: The full file text.
+        source: The file the frontmatter came from, for error messages.
+
+    Returns:
+        The document's frontmatter pieces, or None if it does not open with a fence.
+
+    Raises:
+        UnreadableDocError: If an opening fence has no closing fence.
+    """
+    # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
+    # "---" fence recognized on line 0 instead of being read as having no frontmatter.
+    stripped = text.lstrip(_BOM)
+    lines = stripped.split("\n")
+    if not lines or lines[0].strip() != _FENCE:
+        return None
+    for closing_fence_index, line in enumerate(lines[1:], start=1):
+        if line.strip() == _FENCE:
+            raw_meta = "\n".join(lines[1:closing_fence_index])
+            # Splitting on newlines leaves the closing fence as the final element only when
+            # the file ends on it, so a last line here is what shows the newline was there.
+            trailing = "\n" if closing_fence_index < len(lines) - 1 else ""
+            return FrontmatterParts(
+                text[: len(text) - len(stripped)],
+                lines[0],
+                raw_meta + "\n" if raw_meta else "",
+                line,
+                trailing,
+                "\n".join(lines[closing_fence_index + 1 :]),
+            )
+    raise UnreadableDocError(f"unclosed YAML frontmatter in {source}: add a closing '---' fence")
 
 
 def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
@@ -31,18 +100,8 @@ def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
     Raises:
         UnreadableDocError: If an opening fence has no closing fence.
     """
-    # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
-    # "---" fence recognized on line 0 instead of being read as having no frontmatter.
-    stripped = text.lstrip(_BOM)
-    lines = stripped.split("\n")
-    if not lines or lines[0].strip() != _FENCE:
-        return None, text
-    for closing_fence_index, line in enumerate(lines[1:], start=1):
-        if line.strip() == _FENCE:
-            raw_meta = "\n".join(lines[1:closing_fence_index])
-            body = "\n".join(lines[closing_fence_index + 1 :])
-            return raw_meta + "\n" if raw_meta else "", body
-    raise UnreadableDocError(f"unclosed YAML frontmatter in {source}: add a closing '---' fence")
+    parts = split_frontmatter_parts(text, source)
+    return (None, text) if parts is None else (parts.raw_meta, parts.body)
 
 
 def parse_meta(raw_meta: str | None, source: Path) -> NodeMeta | None:
@@ -66,7 +125,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> NodeMeta | None:
     _YAML.version = None
     try:
         data: Any = _YAML.load(raw_meta)
-    except YAMLError as exc:
+    except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse frontmatter in {source}: {exc}"
         raise UnreadableDocError(msg) from exc
     if not isinstance(data, dict) or "id" not in data:

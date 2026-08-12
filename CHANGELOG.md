@@ -6,6 +6,86 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so
+  two-space, column-zero, and mixed list styles no longer produce unrelated cosmetic diffs.
+- `reconcile` writes a CRLF or lone-CR file back in its own line ending instead of converting the
+  whole file to LF, so updating one `seen` no longer restyles every other line of a downstream
+  document. A file that already mixes endings has none to preserve and is still written out in LF.
+- `reconcile` reparses the rewritten frontmatter before staging it and refuses a rewrite that
+  would not reload as the planned frontmatter, edges and every other key alike, so a bad source
+  edit can no longer be published durably.
+- `reconcile` now reads through ruamel's pure Python parser explicitly. Installing the optional
+  `ruamel.yaml.clib` accelerator, which any other package in an environment may pull in, otherwise
+  switched the loader to a C parser reporting different source marks, which moved where reconcile
+  measured its edits.
+- `ci audit` now reads workflows through ruamel's pure Python parser explicitly. With the same
+  optional `ruamel.yaml.clib` accelerator installed, the C parser read neither the resolver the
+  audit edits nor the version and anchor state it inspects, so a workflow holding an unquoted
+  timestamp was refused as an unsupported scalar, an unsupported `%YAML` directive was accepted
+  rather than rejected, and a duplicate anchor was reported as generic malformed YAML instead of
+  being named.
+- A replacement or relocated `seen` value holding a character YAML admits only as an escape, such
+  as a C1 control or a next-line, is now written back as one instead of raw, so a document that
+  loads cleanly can no longer be refused by the reparse gate on every run.
+- `.doc-lattice.yml` holding a tagged scalar its type cannot accept, such as `!!int oops`, now
+  reports a config error naming the file instead of exiting with a traceback, matching how the
+  same typo has been reported in document frontmatter.
+- Reconcile's malformed-frontmatter refusals now name the document they came from, so a failed
+  `reconcile --all` says which file to fix.
+- `reconcile` quotes a replacement hash that would not reload as a string, keeps a `derives_from`
+  list reached through a YAML alias or a merge key editable in the plain `<<`, the explicitly
+  tagged, and the aliased spelling of that key alike, along with any entry inheriting `seen`
+  through one, reads a merge key as the instruction it is rather than as a member of its own, so
+  an entry whose merge key happens to spell `seen` has a hash appended instead of being refused,
+  updates a `seen` member whose key is written as an alias instead of
+  appending a second one, preserves the type of a relocated non-string `seen` anchor along with
+  any explicit tag it carries, and no longer rewrites an alias bound to a later definition of a
+  reused anchor name or to an entry the same run already updated.
+- `reconcile` indents a newly inserted `seen` to the column the entry's mapping was opened at and
+  appends it after a multi-line flow value, so an entry written with an explicit key, an anchor or
+  a tag on its list line, or a flow tail stays parseable. Replacing an empty `seen` targets the
+  value indicator itself, so a colon inside a comment on the key no longer misplaces the hash,
+  and an explicit `seen` key written without any `:` gets one written for it instead of borrowing
+  the next pair's. An anchor or a tag written on the line below an empty `seen` goes with the
+  value it belonged to, rather than being left behind as source of a value that is no longer
+  there, and a comment written between the two stays.
+- `reconcile` reads every document through its own loader, so one file's `%YAML` directive can no
+  longer change how a later file's hash is quoted, and it quotes a replacement the document's own
+  YAML version would otherwise retype. A tagged `seen` scalar is rewritten with its tag dropped,
+  matching how an anchored one was already handled.
+- `reconcile` puts back the document around the frontmatter it edits, so a file saved with a
+  byte-order mark keeps it and a `---` fence written with surrounding space, or with no newline
+  after it, is no longer rewritten to this engine's own spelling.
+- `reconcile` keeps an entry written as a YAML ordered map (`!!omap`) editable. Such an entry
+  loads as a mapping and validates as an edge, but its source is a sequence of one-pair mappings,
+  so the targeted pair is edited inside its own mapping and a missing `seen` is appended as an
+  item rather than as a key. A whole frontmatter document written as an ordered map is
+  reconcilable for the same reason: its `derives_from` is found among the items its source
+  spells rather than looked up in a mapping that is not written there.
+- `reconcile` keeps a comment written inside the source a replaced `seen` occupies. A block
+  scalar's source runs from its header through its contents, so `seen: | # note` used to lose the
+  note, which is now rewritten onto the line the new hash is written on. An anchor or a tag is
+  dropped when the value it carries is replaced, and a comment written between either one and
+  that value, or between the two, used to go with it; each property is now removed on its own, up
+  to a comment rather than past one, so the comment stays where its author put it.
+- `reconcile` covers the remaining ways one `derives_from` entry can share a node with another: an
+  alias to an entry the same run already updated is left alone when that entry is written as an
+  ordered map, an ordered map item spelled as an alias takes the pair it stands for rather than
+  the shared definition it names being edited, and an entry inheriting `seen` from another through
+  a `<<` merge key no longer makes the reparse gate refuse an otherwise correct rewrite. That last
+  case holds when the entry inherited from is written as an ordered map, which a merge key reads
+  through as the one-pair mappings its source spells rather than as the entry itself.
+- Frontmatter tagging a scalar with a type its value cannot build, such as `!!int oops`, is
+  reported as unreadable frontmatter naming the file. It previously escaped `check` and `build` as
+  an internal `ValueError`, since only `reconcile` recognized that failure.
+- `reconcile` refuses a self-referential frontmatter document as a clean error rather than a
+  `RecursionError` traceback, quotes a replacement hash a YAML constructor rejects instead of
+  letting that error escape, and appends a missing `seen` after an entry key whose value is empty,
+  including the explicit `? key` and `:` spelling of that value, rather than splicing it into the
+  next entry or between the key and its own value indicator.
+
 ## [4.0.0] - 2026-08-10
 
 ### Added

@@ -8,7 +8,11 @@ from hypothesis import strategies as st
 
 import doc_lattice.frontmatter_parser as frontmatter_parser_module
 from doc_lattice.error_types import ConfigError, UnreadableDocError
-from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter
+from doc_lattice.frontmatter_parser import (
+    parse_meta,
+    split_frontmatter,
+    split_frontmatter_parts,
+)
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
@@ -17,6 +21,48 @@ def test_split_frontmatter_separates_meta_and_body():
     raw, body = split_frontmatter(DOC, Path("a.md"))
     assert raw == "id: pc\ntitle: PC\n"
     assert body == "# Body\ntext\n"
+
+
+def test_split_frontmatter_parts_keeps_every_piece_it_read():
+    text = "﻿---   \nid: pc\n---  \n# Body\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.prefix == "﻿"
+    assert parts.open_fence == "---   "
+    assert parts.raw_meta == "id: pc\n"
+    assert parts.close_fence == "---  "
+    assert parts.close_fence_newline == "\n"
+    assert parts.body == "# Body\n"
+    # Every piece together is the document it was given, byte for byte.
+    assert (
+        parts.prefix
+        + parts.open_fence
+        + "\n"
+        + parts.raw_meta
+        + parts.close_fence
+        + parts.close_fence_newline
+        + parts.body
+    ) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "newline"),
+    [("---\nid: pc\n---", ""), ("---\nid: pc\n---\n", "\n")],
+)
+def test_split_frontmatter_parts_records_whether_the_closing_fence_ends_the_file(
+    text: str, newline: str
+):
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.close_fence_newline == newline
+    assert parts.body == ""
+
+
+def test_split_frontmatter_parts_none_when_absent():
+    assert split_frontmatter_parts("# No frontmatter\n", Path("a.md")) is None
 
 
 def test_split_frontmatter_none_when_absent():
@@ -153,6 +199,15 @@ def test_parse_meta_invalid_value_raises_config_error(raw):
 def test_parse_meta_bad_yaml_raises():
     with pytest.raises(UnreadableDocError):
         parse_meta("id: [unclosed\n", Path("a.md"))
+
+
+@pytest.mark.parametrize("raw_meta", ["id: d\ncount: !!int oops\n", "id: d\nflag: !!bool maybe\n"])
+def test_parse_meta_reports_a_tagged_scalar_its_type_cannot_build(raw_meta: str):
+    # A safe constructor asked for a type it cannot build from a scalar raises the builtin
+    # that construction failed with rather than a YAMLError, so catching only that family
+    # let a bare ValueError out of the boundary and print as an internal error.
+    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in doc\.md"):
+        parse_meta(raw_meta, Path("doc.md"))
 
 
 def test_parse_meta_bad_yaml_carries_code_and_names_file():
