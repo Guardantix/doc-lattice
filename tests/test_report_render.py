@@ -112,6 +112,29 @@ def test_render_statuses_keeps_the_verdict_on_one_line_at_any_width():
     assert output.getvalue() == ("1234576 edges: 1234567 OK, 2 STALE, 3 UNRECONCILED, 4 BROKEN\n")
 
 
+def test_render_statuses_keeps_every_row_on_one_line_at_any_width():
+    # Same contract as the verdict test above, but for the per-edge rows: an id or ref that
+    # survives a pipe today must stay intact at any terminal width, not just the summary.
+    console, output = _recording_console(width=20)
+    statuses = [
+        EdgeStatus(
+            source_id="billing-integration-guide",
+            target_ref="api-design#pagination",
+            target_id=TargetId("api-design", "pagination"),
+            state="STALE",
+            expected="old",
+            actual="hash",
+        )
+    ]
+
+    render_statuses(console, statuses, summarize_statuses(statuses))
+
+    assert output.getvalue() == (
+        "STALE         billing-integration-guide -> api-design#pagination\n"
+        "1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    )
+
+
 def test_render_statuses_emits_no_ansi_under_no_color():
     # Rich's default highlighter bolds bare numbers, and bold survives no_color, so an id
     # carrying a digit (adr-001, rfc-2119) used to leak escapes into --no-color output.
@@ -183,6 +206,64 @@ def test_render_lint_writes_violations_and_exact_skip_summary():
     )
 
 
+def test_render_lint_keeps_every_line_on_one_line_at_any_width():
+    # Same contract as render_statuses: a violation's id/ref survives a pipe at any width,
+    # and the skip summary (no id/ref of its own) still gets soft_wrap for a consistent
+    # per-print record contract across the renderer.
+    console, output = _recording_console(width=20)
+    result = LintResult(
+        violations=(
+            LadderViolation(
+                source_id="billing-integration-guide",
+                source_authority="binding",
+                target_id=TargetId("api-design", "pagination"),
+                target_ref="api-design#pagination",
+                target_authority="derived",
+            ),
+        ),
+        skipped=(),
+    )
+
+    render_lint(console, result)
+
+    assert output.getvalue() == (
+        "VIOLATION  billing-integration-guide (binding) -> "
+        "api-design#pagination (derived)\n"
+        "1 ladder violation, 0 edges unranked\n"
+    )
+
+
+def test_render_lint_emits_no_ansi_under_no_color():
+    # Same contract as render_statuses: Rich's default highlighter bolds bare numbers and
+    # parentheses, and bold survives no_color, so a numbered id (rfc-2119) and the skip
+    # summary's counts used to leak escapes into --no-color lint output.
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+    result = LintResult(
+        violations=(
+            LadderViolation(
+                source_id="rfc-2119",
+                source_authority="binding",
+                target_id=TargetId("spec-3", "sec"),
+                target_ref="spec-3#sec",
+                target_authority="derived",
+            ),
+        ),
+        skipped=(
+            SkippedEdge(
+                source_id="source",
+                target_ref="bare",
+                target_id=TargetId("bare"),
+                reason="source-unannotated",
+            ),
+        ),
+    )
+
+    render_lint(console, result)
+
+    assert "\x1b[" not in output.getvalue()
+
+
 def test_render_impact_writes_exact_plain_text_and_escapes_markup():
     console, output = _recording_console()
     affected = [
@@ -244,6 +325,32 @@ def test_render_impact_keeps_a_path_wider_than_the_console_on_one_line():
     render_impact(console, affected)
 
     assert output.getvalue() == f"downstream  ({path})  tickets: -\n"
+
+
+def test_render_impact_emits_no_ansi_under_no_color():
+    # Same contract as render_statuses and render_lint: a numbered id, a numbered path, and a
+    # ticket key all carry digits that Rich's highlighter bolds, and bold survives no_color.
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+    affected = [
+        (
+            Node(
+                id="adr-001",
+                title=None,
+                layer=None,
+                authority=None,
+                path=Path("docs/adr-001.md"),
+                body="body\n",
+                derives_from=(),
+                tickets=("GAME-42",),
+            ),
+            1,
+        )
+    ]
+
+    render_impact(console, affected)
+
+    assert "\x1b[" not in output.getvalue()
 
 
 def test_state_colors_cover_every_edge_state():

@@ -67,15 +67,17 @@ def render_statuses(
     # survives no_color, so it emits ANSI under --no-color. That bites the verdict's counts and
     # equally any id carrying a number (adr-001, rfc-2119). The explicit state color below is
     # markup, which highlight=False leaves alone.
+    # soft_wrap on both prints: each row and the verdict are one record on one line at any
+    # width, so `check | tail -1` (or grep) gets the whole record rather than the fragment
+    # Rich's wrapping would leave on a narrow console. Same fix GTX-2 applied to render_impact.
     for status in statuses:
         color = _STATE_COLORS[status.state]
         console.print(
             f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
             f"{escape(status.source_id)} -> {escape(status.target_ref)}",
             highlight=False,
+            soft_wrap=True,
         )
-    # soft_wrap: the verdict is one record on one line at any width, so `check | tail -1` gets
-    # the whole verdict rather than the fragment Rich's wrapping would leave on a narrow console.
     console.print(_state_summary(summary), highlight=False, soft_wrap=True)
 
 
@@ -86,13 +88,23 @@ def render_lint(console: Console, result: LintResult) -> None:
         console: Destination console.
         result: Authority-lint violations and skipped edges to render.
     """
+    # soft_wrap on both prints: each violation and the skip summary are one record on one
+    # line at any width, matching render_statuses. The summary carries no id or ref of its
+    # own, but soft_wrap keeps every print in this renderer to the same record contract.
+    # highlight=False on both prints for the same reason render_statuses carries it: Rich's
+    # default highlighter bolds bare numbers and parentheses, and bold survives no_color, so
+    # both the skip summary's counts and any id carrying a number (adr-001, rfc-2119) would
+    # leak ANSI under --no-color. The explicit VIOLATION color below is markup, which
+    # highlight=False leaves alone.
     for violation in result.violations:
         console.print(
             f"[red]VIOLATION[/red]  {escape(violation.source_id)} "
             f"({violation.source_authority}) -> {escape(violation.target_ref)} "
-            f"({violation.target_authority})"
+            f"({violation.target_authority})",
+            highlight=False,
+            soft_wrap=True,
         )
-    console.print(_skip_summary(result))
+    console.print(_skip_summary(result), highlight=False, soft_wrap=True)
 
 
 def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
@@ -101,6 +113,9 @@ def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
     Each node is one record terminated by exactly one newline, so a path never breaks across
     lines and stays copyable and pipeable. `soft_wrap` opts this site out of Rich's wrapping
     and cropping the same way the long, copy-sensitive output sites in the CLI adapters do.
+    `highlight=False` matches render_statuses and render_lint: Rich's default highlighter bolds
+    bare numbers and parentheses, and bold survives no_color, so a numbered id (adr-001), a
+    dated path, or a ticket (GTX-48) would otherwise leak ANSI under --no-color.
 
     Args:
         console: Destination console.
@@ -110,5 +125,6 @@ def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
         console.print(
             f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}",
+            highlight=False,
             soft_wrap=True,
         )
