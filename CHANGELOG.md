@@ -130,9 +130,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   grepped human output for a state name, now matches on every run because the verdict names
   every state including the zero-count ones. Gate on the exit code (1 on drift, unchanged) or
   on `--format json` instead. The line's format is documented in [README.md](README.md).
-- `check --only STATE` still narrows only the records that are displayed, and now the summary
-  counts, like the exit code, continue to reflect every classified edge. `--format github`
-  output is unchanged and carries no summary.
+- `check --only STATE` still narrows only the records that are displayed. The summary counts and
+  the exit code both reflect every classified edge. `--format github` output is unchanged and
+  carries no summary.
 - The managed GitHub and Linear setup guide moved from the README to
   [MANAGED_CI.md](MANAGED_CI.md), and the version-sync guard now checks install pins in both
   documents.
