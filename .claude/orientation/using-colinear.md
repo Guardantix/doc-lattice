@@ -8,10 +8,10 @@ description: Auto-loaded orientation for Linear workflows with colinear. Injecte
 Linear work for this repo flows through one named pipeline.
 Three named commands cover it.
 `/linear-promote` and `/linear-show` are direct-invocation routers — each loads exactly one `modes/` file per invocation and never fires on its own.
-`/linear-finalize` has no modes and is the one skill that auto-invokes, on an open `PC-N` PR.
+`/linear-finalize` has no modes and is the one skill that auto-invokes, on an open `ABC-N` PR.
 For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
 
-This orientation matches colinear 0.37.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
+This orientation matches colinear 0.44.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
 ## The pipeline
@@ -32,11 +32,11 @@ promote   show       show                    finalize   promote
 
 - **Triage → Backlog (or other dispositions)**: `/linear-promote --triage` — batch-review the queue and apply on user confirmation.
 - **Deferred review**: `/linear-promote --deferred` — batch-review Deferred issues and apply confirmed decisions.
-- **Backlog → Ready**: `/linear-show --next` to discover newly unblocked items, then `/linear-promote --ready PC-N` to gate one through.
-- **Ready → In Progress**: `/linear-show --ready` to see the queue, then `/linear-promote --delegate PC-N` to start work in an isolated worktree.
-- **UI issues routed design-first**: `/linear-promote --design PC-N` drafts the Claude Design brief (human-gated).
-- **In Progress**: implementation work — done by a human, typically inside the worktree `--delegate` set up. Run the pipeline commands as you go; there is no autonomous driver. When you run the test suite during delegated work, record it: `colinear review record-test --issue PC-N --command '<cmd>' --passed N --failed N`. Re-run after fixes — the report keeps the latest run per command.
-- **Open PR → reviewer handoff**: `/linear-finalize` — hand an issue with an open `PC-N` PR back to the reviewer, including the non-delegated `ai:ready` path.
+- **Backlog → Ready**: `/linear-show --next` to discover newly unblocked items, then `/linear-promote --ready ABC-N` to gate one through.
+- **Ready → In Progress**: `/linear-show --ready` to see the queue, then `/linear-promote --delegate ABC-N` to start work in an isolated worktree.
+- **UI issues routed design-first**: `/linear-promote --design ABC-N` drafts the Claude Design brief (human-gated).
+- **In Progress**: implementation work — done by a human, typically inside the worktree `--delegate` set up. Run the pipeline commands as you go; there is no autonomous driver. When you run the test suite during delegated work, record it: `colinear review record-test --issue ABC-N --command '<cmd>' --passed N --failed N`. Re-run after fixes — the report keeps the latest run per command.
+- **Open PR → reviewer handoff**: `/linear-finalize` — hand an issue with an open `ABC-N` PR back to the reviewer, including the non-delegated `ai:ready` path.
 - **In Review → Done**: `/linear-promote --ship` — human-gated; never auto-invoke.
 
 ## Bulk filing
