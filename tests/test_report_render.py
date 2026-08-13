@@ -233,6 +233,37 @@ def test_render_lint_keeps_every_line_on_one_line_at_any_width():
     )
 
 
+def test_render_lint_emits_no_ansi_under_no_color():
+    # Same contract as render_statuses: Rich's default highlighter bolds bare numbers and
+    # parentheses, and bold survives no_color, so a numbered id (rfc-2119) and the skip
+    # summary's counts used to leak escapes into --no-color lint output.
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+    result = LintResult(
+        violations=(
+            LadderViolation(
+                source_id="rfc-2119",
+                source_authority="binding",
+                target_id=TargetId("spec-3", "sec"),
+                target_ref="spec-3#sec",
+                target_authority="derived",
+            ),
+        ),
+        skipped=(
+            SkippedEdge(
+                source_id="source",
+                target_ref="bare",
+                target_id=TargetId("bare"),
+                reason="source-unannotated",
+            ),
+        ),
+    )
+
+    render_lint(console, result)
+
+    assert "\x1b[" not in output.getvalue()
+
+
 def test_render_impact_writes_exact_plain_text_and_escapes_markup():
     console, output = _recording_console()
     affected = [
@@ -294,6 +325,32 @@ def test_render_impact_keeps_a_path_wider_than_the_console_on_one_line():
     render_impact(console, affected)
 
     assert output.getvalue() == f"downstream  ({path})  tickets: -\n"
+
+
+def test_render_impact_emits_no_ansi_under_no_color():
+    # Same contract as render_statuses and render_lint: a numbered id, a numbered path, and a
+    # ticket key all carry digits that Rich's highlighter bolds, and bold survives no_color.
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+    affected = [
+        (
+            Node(
+                id="adr-001",
+                title=None,
+                layer=None,
+                authority=None,
+                path=Path("docs/adr-001.md"),
+                body="body\n",
+                derives_from=(),
+                tickets=("GAME-42",),
+            ),
+            1,
+        )
+    ]
+
+    render_impact(console, affected)
+
+    assert "\x1b[" not in output.getvalue()
 
 
 def test_state_colors_cover_every_edge_state():
