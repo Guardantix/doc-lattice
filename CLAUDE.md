@@ -17,8 +17,10 @@ doc-lattice is a deterministic traceability engine for dependencies between Mark
 When behavior or policy changes, update its owner and link to it. Do not restate the same contract
 in another maintained document.
 
-`docs/` holds dated research artifacts and completed specs and plans. Nothing under it is
-authoritative or maintained; update the owner documents above instead.
+`docs/` is a staging area, not an archive. Nothing under it is authoritative or maintained;
+update the owner documents above instead. Per the ownership decision in
+[ARCHITECTURE.md](ARCHITECTURE.md) (AD-14), anything under it that is not presently
+authoritative is mined for durable content and deleted at release.
 
 ## Contributor commands
 
