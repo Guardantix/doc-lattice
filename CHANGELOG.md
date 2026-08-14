@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** human-format `check` output now lists problem edges only. The per-edge `OK`
+  rows are gone from the default listing, so a problem-free lattice prints its verdict line
+  alone. This matches `lint`, which has always printed violations only, and keeps the default
+  invocation on a large lattice from burying a one-line verdict under thousands of unread `OK`
+  lines. The verdict line added in 4.0.0 is what makes the omission safe rather than lossy: the
+  total and every per-state count, `OK` included, stay on it. Exit codes, summary counts, and
+  the classification itself are unchanged, as is `--format github`, which already suppressed
+  `OK` records. Migration for a consumer that needs the `OK` rows: read `--format json`, which
+  still carries one record per edge including `OK` ones, or ask for them explicitly with
+  `check --only OK` (repeat `--only` to name every state when the previous full listing is
+  wanted). Anything gating on the exit code or grepping for a problem state is unaffected.
+
 ## [4.1.0] - 2026-08-14
 
 ### Changed

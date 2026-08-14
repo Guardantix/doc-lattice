@@ -11,6 +11,31 @@ from doc_lattice.constants import EdgeState
 from .helpers import _clean_docs, runner
 
 
+def _mixed_docs(tmp_path: Path) -> None:
+    """Write a graph carrying one OK edge and two problem edges in a pinned order.
+
+    The shared ``lattice_dir`` fixture is load bearing across suites and has no OK edge, so
+    the default-filter cases build their own graph here instead of widening it. Node ids sort
+    ``mid`` before ``zdown``, and ``check`` classifies in node-id then frontmatter-edge order,
+    so the classified sequence is OK, BROKEN, UNRECONCILED. Callers reconcile ``mid`` to turn
+    its edge OK; ``zdown``'s two edges stay problems either way.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text(
+        "---\nid: up\n---\n# Up {#sec}\nsec body\n\n## Other {#other}\nother body\n",
+        encoding="utf-8",
+    )
+    (docs / "mid.md").write_text(
+        "---\nid: mid\nderives_from:\n  - ref: up#sec\n---\n# Mid\nbody\n",
+        encoding="utf-8",
+    )
+    (docs / "zdown.md").write_text(
+        "---\nid: zdown\nderives_from:\n  - ref: ghost\n  - ref: up#other\n---\n# Z Down\nbody\n",
+        encoding="utf-8",
+    )
+
+
 def test_check_exits_1_on_drift(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check"])
@@ -218,6 +243,53 @@ def test_check_only_ok_still_exits_1_on_drift(lattice_dir: Path, monkeypatch):
     assert result.stdout == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
 
 
+def test_check_human_output_omits_ok_rows_by_default(tmp_path: Path, monkeypatch):
+    _mixed_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["reconcile", "mid"]).exit_code == 0
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 1
+    # The OK row that would have led this listing is gone; the two problem rows keep their
+    # classification order, and the verdict still counts all three edges.
+    assert result.stdout == (
+        "BROKEN        zdown -> ghost\n"
+        "UNRECONCILED  zdown -> up#other\n"
+        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+    )
+
+
+def test_check_only_ok_still_shows_ok_rows(tmp_path: Path, monkeypatch):
+    # The new default is a branch on whether --only was supplied, not a change to what the
+    # flag does, so an explicit --only OK against a graph that has an OK edge still lists it.
+    _mixed_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["reconcile", "mid"]).exit_code == 0
+
+    result = runner.invoke(app, ["check", "--only", "OK"])
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "OK            mid -> up#sec\n3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+    )
+
+
+def test_check_json_still_carries_ok_records_by_default(tmp_path: Path, monkeypatch):
+    _mixed_docs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["reconcile", "mid"]).exit_code == 0
+
+    result = runner.invoke(app, ["check", "--format", "json"])
+
+    payload = json.loads(result.stdout)
+    assert [(e["source_id"], e["target_ref"], e["state"]) for e in payload["edges"]] == [
+        ("mid", "up#sec", "OK"),
+        ("zdown", "ghost", "BROKEN"),
+        ("zdown", "up#other", "UNRECONCILED"),
+    ]
+
+
 def test_check_only_repeated_flags_combine(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(
@@ -303,9 +375,9 @@ def test_check_human_summary_is_present_on_a_clean_tree(tmp_path: Path, monkeypa
     result = runner.invoke(app, ["check"])
 
     assert result.exit_code == 0
-    assert result.stdout == (
-        "OK            down -> up#sec\n1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
-    )
+    # A problem-free graph is the verdict line alone: the default listing is problem-only, and
+    # the verdict is what keeps a clean run explicit rather than silent.
+    assert result.stdout == "1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
 
 
 def test_check_human_summary_is_present_when_there_are_no_edges(tmp_path: Path, monkeypatch):

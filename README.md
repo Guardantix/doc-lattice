@@ -177,9 +177,11 @@ $ doc-lattice reconcile billing-integration-guide
 reconciled billing-integration-guide.md: api-design#pagination
 
 $ doc-lattice check
-OK            billing-integration-guide -> api-design#pagination
 1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN
 ```
+
+The listing is empty because there is nothing left to act on; the verdict line is what states
+the run was clean.
 
 That edit → `check` → review → `reconcile` loop is the whole workflow. `reconcile` is the
 only command that writes to your docs, and it only ever rewrites `seen` values and the
@@ -279,26 +281,38 @@ walk to N hops from TOKEN: `--depth 1` lists only the docs that derive directly 
 output is unchanged, and each JSON entry gains a `"depth"` field carrying the minimum number
 of hops at which that doc is reached.
 
+Human `check` output lists problem edges only. OK edges are classified, counted, and reported
+everywhere else, but they are not listed as rows, so the default invocation on a large lattice
+shows what needs acting on rather than thousands of `OK` lines. This matches `lint`, which has
+always printed violations only, so the two gating commands now ship one output philosophy
+instead of opposite ones. The verdict line below is what makes the omission safe rather than
+lossy: the totals and every per-state count stay visible, so a clean run is explicit rather than
+silent. `--only` overrides the default in both directions, and `--format json` is unaffected.
+
 Every human `check` run ends with a one-line verdict counting the classified edges and breaking
 them down per state, for example `101 edges: 96 OK, 5 STALE, 0 UNRECONCILED, 0 BROKEN`. Every
 state is listed, including the ones with a zero count, so truncated output such as `check | tail`
 still states the result rather than trailing off into whichever edges sort last. The line is one
 record on one line at any terminal width, so `check | tail -1` always gets the whole verdict.
 
-The line is present on a clean lattice too, and a lattice with no edges at all reports
-`0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN`. Because the state names are always printed,
-match on the exit code rather than grepping human output for a state name.
+The line is present on a clean lattice too, where it is the entire output, and a lattice with no
+edges at all reports `0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN`. Because the state names
+are always printed, match on the exit code rather than grepping human output for a state name.
 
 `--format json` carries the same counts in a `summary` object alongside `edges`, so a wrapper
-can answer "is the tree clean?" without folding every edge record. `--format github` is
-unchanged: it emits annotations for problems and stays silent on a clean tree.
+can answer "is the tree clean?" without folding every edge record. JSON is the complete
+structured record and still carries one entry per edge, OK edges included; the problem-only
+default is a human-output rule and does not reach it. `--format github` is likewise unchanged:
+it emits annotations for problems and stays silent on a clean tree.
 
-`check` accepts a repeatable `--only STATE` to narrow the display to specific states (case
+`check` accepts a repeatable `--only STATE` to select which states are displayed (case
 insensitive, e.g. `--only stale --only broken`); an unrecognized state exits 2 and names the
-valid set. Filtering is display-only: the exit code and the summary counts always reflect every
-edge, so `check --only OK` on a drifting lattice still exits 1 and still reports the drift in its
-verdict. One consequence is deliberate: under `--only`, the `summary` counts do not sum to the
-number of records in `edges`.
+valid set. Supplying it replaces the defaults in both formats that list records: human output
+shows exactly the selected states, so `check --only OK` lists the OK edges the default omits,
+and JSON narrows `edges` to them. Filtering is display-only: the exit code and the summary
+counts always reflect every edge, so `check --only OK` on a drifting lattice still exits 1 and
+still reports the drift in its verdict. One consequence is deliberate: under `--only`, the
+`summary` counts do not sum to the number of records in `edges`.
 
 ### `reconcile`
 

@@ -35,6 +35,27 @@ def _filter_statuses(statuses: list[EdgeStatus], only: frozenset[str] | None) ->
     return [status for status in statuses if status.state in only]
 
 
+def _human_rows(displayed: list[EdgeStatus], only: frozenset[str] | None) -> list[EdgeStatus]:
+    """Narrow the human listing to problems when no --only was supplied.
+
+    This is the implicit human default only. It branches on whether the flag was given, not
+    on what it selects, so an explicit ``--only OK`` still lists OK rows. It also lives here
+    rather than in ``_filter_statuses`` or ``render_statuses`` because both of those are
+    shared: narrowing there would strip OK records from default JSON output, and the renderer
+    contracts to display exactly the rows its caller hands it.
+
+    Args:
+        displayed: Statuses already narrowed by any explicit ``--only``.
+        only: The parsed ``--only`` selection, or None when the flag was not supplied.
+
+    Returns:
+        The rows the human renderer should list.
+    """
+    if only is not None:
+        return displayed
+    return [status for status in displayed if status.state != "OK"]
+
+
 def register_check(app: typer.Typer) -> None:
     """Register the ``check`` command on an application.
 
@@ -54,8 +75,9 @@ def register_check(app: typer.Typer) -> None:
                 "--only",
                 help=(
                     "Show only these states (repeatable): OK, STALE, UNRECONCILED, BROKEN. "
-                    "Filters display only; the exit code and the summary counts always "
-                    "reflect every edge."
+                    "Without it, human output lists problem edges only; pass --only OK to "
+                    "list OK edges. Filters display only; the exit code and the summary "
+                    "counts always reflect every edge."
                 ),
             ),
         ] = None,
@@ -94,5 +116,5 @@ def register_check(app: typer.Typer) -> None:
                     ),
                 )
         else:
-            render_statuses(runtime.stdout, displayed, summary)
+            render_statuses(runtime.stdout, _human_rows(displayed, only_states), summary)
         raise typer.Exit(EXIT_FINDING if has_drift(statuses) else 0)
