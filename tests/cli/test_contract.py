@@ -1,7 +1,9 @@
 """Cross-command and CLI entry-point contract tests."""
 
+import io
 import json
 import os
+import pty
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,7 @@ import doc_lattice.cli as cli_mod
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice import __version__
 from doc_lattice.cli import app
+from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
 
 from .helpers import _run, runner
@@ -64,6 +67,158 @@ def _run_cli_subprocess(argv: list[str], env: dict[str, str]) -> subprocess.Comp
     return subprocess.run(  # noqa: S603 - fixed argv and generated script, no untrusted input
         [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=False
     )
+
+
+class _TTYCapture(io.StringIO):
+    """In-memory text stream that reports itself as a terminal.
+
+    Rich's terminal detection (``Console.is_terminal``) falls back to
+    ``file.isatty()`` once no ``FORCE_COLOR``/``TTY_COMPATIBLE`` override is set, so this
+    is enough to make a ``Console`` built by ``_create_runtime`` believe it is writing to
+    a real terminal without needing an actual pty.
+    """
+
+    def isatty(self) -> bool:
+        """Report this stream as a terminal so Rich enables terminal rendering."""
+        return True
+
+
+def _run_cli_pty(argv: list[str], env: dict[str, str]) -> bytes:
+    """Run ``doc_lattice.cli.main`` under a real pty and return the raw stderr bytes.
+
+    A pty is required over ``CliRunner`` or captured pipes: those are never a terminal,
+    so Rich would auto-disable highlighting regardless of the fix under test and the
+    assertion could pass without it.
+    """
+    script = (
+        "import sys\n"
+        f"sys.argv = {argv!r}\n"
+        "from doc_lattice.cli import main\n"
+        "try:\n    main()\nexcept SystemExit:\n    pass\n"
+    )
+    master_fd, slave_fd = pty.openpty()
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv and generated script
+            [sys.executable, "-c", script],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+        slave_fd = -1
+        chunks = bytearray()
+        while True:
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        process.wait(timeout=10)
+        return bytes(chunks)
+    finally:
+        os.close(master_fd)
+        if slave_fd != -1:
+            os.close(slave_fd)
+
+
+@pytest.mark.parametrize(
+    ("lever_argv", "lever_env"),
+    [
+        (["--no-color"], {}),
+        ([], {"NO_COLOR": "1"}),
+    ],
+    ids=["flag", "env"],
+)
+def test_no_color_lever_leaves_no_escape_under_pty(
+    lever_argv: list[str], lever_env: dict[str, str]
+):
+    # Regression test for GTX-49: `check --only 123` prints its diagnostic through the
+    # shared runtime console with no local `highlight=False`, so under a real terminal
+    # Rich's automatic highlighter bolds the quoted tokens even though `_create_runtime`
+    # already suppressed color via `no_color`. `no_color` alone leaves bold in place;
+    # only `highlight=False` plus `color_system=None` make the disabled branch fully
+    # escape-free.
+    env = dict(os.environ)
+    env.pop("NO_COLOR", None)
+    env.update(lever_env)
+    argv = ["doc-lattice", *lever_argv, "check", "--only", "123"]
+
+    stderr = _run_cli_pty(argv, env)
+
+    assert stderr, "expected the --only diagnostic on stderr"
+    assert b"\x1b" not in stderr, stderr
+
+
+def test_no_color_flag_and_env_produce_byte_identical_pty_output():
+    env = dict(os.environ)
+    env.pop("NO_COLOR", None)
+    flag_stderr = _run_cli_pty(["doc-lattice", "--no-color", "check", "--only", "123"], env)
+    env_lever = dict(env)
+    env_lever["NO_COLOR"] = "1"
+    env_stderr = _run_cli_pty(["doc-lattice", "check", "--only", "123"], env_lever)
+
+    assert flag_stderr
+    assert flag_stderr == env_stderr
+
+
+def test_no_lever_pty_output_still_carries_ansi_styling():
+    # Positive control: proves the pty harness above actually observes styling when
+    # neither lever is set, so the escape-free assertions in the lever-set tests are
+    # meaningful rather than a harness artifact. Run in a fresh subprocess (not
+    # sequentially in-process): `main()` mutates `NO_COLOR` and
+    # `_TYPER_FORCE_DISABLE_TERMINAL` in the ambient environment, so a case that ran
+    # after a lever-set case in the same process could be silently contaminated.
+    env = dict(os.environ)
+    env.pop("NO_COLOR", None)
+    env.pop("FORCE_COLOR", None)
+    # Rich also treats a dumb terminal (TERM=dumb/unknown, common in some CI/sandbox
+    # shells) as non-styling-capable even when isatty() is true, which would make this
+    # positive control false-negative on ambient TERM alone; pin a styling-capable value
+    # so the control is deterministic regardless of the environment it runs under.
+    env["TERM"] = "xterm-256color"
+
+    stderr = _run_cli_pty(["doc-lattice", "check", "--only", "123"], env)
+
+    assert b"\x1b[" in stderr, stderr
+    # The pty normalizes line endings to CRLF, which is a terminal artifact unrelated to
+    # the escape-sequence contract under test; strip it before diffing plain text.
+    plain = Text.from_ansi(stderr.replace(b"\r\n", b"\n").decode("utf-8")).plain
+    assert "unknown --only state(s): 123" in plain
+    assert "valid: BROKEN, OK, STALE, UNRECONCILED" in plain
+
+
+def test_create_runtime_disabled_console_strips_bold_and_link_markup(monkeypatch, tmp_path: Path):
+    # Explicit-markup probe: `highlight=False` alone only stops Rich's *automatic*
+    # highlighter. An explicit `[bold]` or `[link=...]` request from a future command
+    # adapter must also render escape-free once a no-color lever is set, so this probes
+    # `_create_runtime` (not a hand-built Console) with a terminal-capable stream and
+    # explicit markup on both the stdout and stderr consoles.
+    stdout_stream = _TTYCapture()
+    stderr_stream = _TTYCapture()
+
+    def fake_get_text_stream(name: str) -> io.StringIO:
+        return stdout_stream if name == "stdout" else stderr_stream
+
+    monkeypatch.setattr(runtime_module.typer, "get_text_stream", fake_get_text_stream)
+    monkeypatch.chdir(tmp_path)
+
+    runtime = default_runtime(no_color=True)
+    runtime.stdout.print("[bold]bold text[/bold]")
+    runtime.stdout.print("[link=https://example.com]linked text[/link]")
+    runtime.stderr.print("[bold]bold text[/bold]")
+    runtime.stderr.print("[link=https://example.com]linked text[/link]")
+
+    # Assert both that the tag rendered (markup parsing is still enabled, so `[bold]`
+    # was consumed as a style directive) and that it left no escape byte behind. Either
+    # assertion alone would miss a `markup=False` regression: the literal tag text also
+    # contains "bold text" and also carries zero escape bytes.
+    assert "bold text" in stdout_stream.getvalue()
+    assert "[bold]" not in stdout_stream.getvalue()
+    assert "\x1b" not in stdout_stream.getvalue()
+    assert "\x1b" not in stderr_stream.getvalue()
 
 
 @pytest.mark.parametrize(

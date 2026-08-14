@@ -46,7 +46,14 @@ def create_app(*, runtime_factory: RuntimeFactory = default_runtime) -> typer.Ty
             ),
         ] = False,
         no_color: Annotated[
-            bool, typer.Option("--no-color", help="Disable colored output.")
+            bool,
+            typer.Option(
+                "--no-color",
+                help=(
+                    "Disable all styling, not just color: an intentional extension of the "
+                    "NO_COLOR baseline. Same effect as the NO_COLOR environment variable."
+                ),
+            ),
         ] = False,
     ) -> None:
         """doc-lattice: documentation traceability engine."""
