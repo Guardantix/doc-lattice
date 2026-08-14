@@ -15,10 +15,19 @@ external users, because they are cheap while breaking changes cost nothing and e
 - Make recovery reporting truthful: a partial rollback must be distinguishable from a full
   one, and recovery must never destroy the evidence an operator still needs (GTX-97, with
   test coverage for the realistic crash states, GTX-98).
-- Stop silently dropping documents whose frontmatter lacks an `id`. Ships as a behavior
-  change while the breaking-change window is open (GTX-102).
 - Reorder the release pipeline so a failed gate cannot strand an immutable tag, and put the
   unguarded release steps under contract tests (GTX-103).
+
+## Next: the 5.0.0 breaking-change window
+
+Adoption is still internal, so the breaking-change window is open and cheap. The behavior
+changes below batch into one 5.0.0 release rather than trickling out across minors. They are
+independent of each other; co-membership in the release is not a sequencing constraint.
+
+- Stop silently dropping documents whose frontmatter lacks an `id` (GTX-102).
+- Make `check`'s human output problem-only by default, matching `lint`. Default stdout loses
+  the per-edge `OK` rows; the verdict line GTX-41 added keeps the full counts visible, so a
+  clean run stays explicit rather than silent (GTX-55).
 
 ## Harden before external adoption
 
