@@ -459,8 +459,12 @@ scalar token that follows it, is what bounds an edit that has to overwrite or re
 read builds its own loader, since a shared instance carries document state (`YAML.version`, and
 the reader and scanner bound to one document) whose reset behavior is itself version dependent.
 The boundary loaders in `frontmatter_parser.py` and `config.py` may keep shared module-level
-instances despite that, because they consume only loaded values and never a source mark, and the
-one piece of document state they do carry, `YAML.version`, is reset explicitly before each load.
+instances despite that, because they consume only loaded values and never a source mark. A shared
+instance does retain state across loads: `YAML.version`, the piece that steers a later parse, is
+reset explicitly before each load, and the `DocInfo` record each load appends to `doc_infos` is
+write-only metadata the loader never consults, one small record per document for the life of the
+process, with no effect on any later parse; the cross-document directive-leakage tests pin that
+a directive in one document does not steer the next.
 Every rewrite is reparsed and compared against the intended document before it is staged, so a
 mis-measured span is refused rather than published.
 **Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source
