@@ -94,13 +94,30 @@ class CliRuntime:
 
 
 def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
+    # `--no-color` and `NO_COLOR` mean "no styling", not merely "no color": deliberately
+    # broader than the NO_COLOR standard (https://no-color.org/), which leaves bold,
+    # underline, and italic in place. `no_color=True` alone only suppresses color and
+    # still lets Rich's automatic highlighter and explicit markup (e.g. `[bold]`, an OSC 8
+    # `[link=...]`) render those other escapes, so the disabled branch also turns off the
+    # console-wide highlighter and forces `color_system=None`, which makes rendering
+    # escape-free even for explicit style requests. The enabled branch is unchanged:
+    # `highlight=True` and `color_system="auto"` are Rich's own defaults.
     disabled = no_color or os.environ.get("NO_COLOR", "") != ""
+    highlight = not disabled
+    color_system = None if disabled else "auto"
     return CliRuntime(
-        stdout=Console(file=typer.get_text_stream("stdout"), no_color=disabled),
+        stdout=Console(
+            file=typer.get_text_stream("stdout"),
+            no_color=disabled,
+            highlight=highlight,
+            color_system=color_system,
+        ),
         stderr=Console(
             file=typer.get_text_stream("stderr"),
             stderr=True,
             no_color=disabled,
+            highlight=highlight,
+            color_system=color_system,
         ),
         cwd=cwd,
         load_config=load_config,

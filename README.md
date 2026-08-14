@@ -257,8 +257,12 @@ without an effective `--format json` is a usage error.
 
 Use the global `--no-color` option before the command to disable colored output explicitly, for
 example `doc-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
-environment variable; `--no-color` is the command-line equivalent. Either one also strips the
-styling from help and usage-error text even when a terminal-forcing variable is set.
+environment variable; `--no-color` is the command-line equivalent. doc-lattice intentionally
+extends the `NO_COLOR` baseline: the standard itself only asks implementers to drop color and
+leaves bold, underline, and italic styling in place, but either lever here means no styling at
+all, so no terminal escape sequence reaches the output under either one, even when a
+terminal-forcing variable is set. This covers every command's output, not just help and
+usage-error text.
 
 `check` and `lint` also accept `--format human|json|github`. `human` is the default. `github`
 emits one escaped GitHub Actions `::error` workflow command per drift finding or ladder

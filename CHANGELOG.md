@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `--no-color` and `NO_COLOR` now suppress all terminal styling, not only color. Both levers
+  previously left Rich's automatic bold highlighting (and any future explicit `[bold]` or
+  `[link=...]` markup) in place on any shared-console print site with no local
+  `highlight=False`, such as the `check --only` diagnostic. `_create_runtime` now also disables
+  the console-wide highlighter and forces `color_system=None` when a lever is set, so `--no-color`
+  and `NO_COLOR` produce byte-identical, escape-free output; this is a deliberate extension of the
+  `NO_COLOR` baseline, documented in README.md and the `--no-color` option help.
 - `reconcile` now preserves the input indentation of frontmatter lists when it updates `seen`, so
   two-space, column-zero, and mixed list styles no longer produce unrelated cosmetic diffs.
 - `reconcile` writes a CRLF or lone-CR file back in its own line ending instead of converting the
