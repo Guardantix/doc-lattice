@@ -8,10 +8,10 @@ tracker; the GTX identifiers below are pointers, not restatements.
 Adoption today is internal only. Several items below deliberately land before any push for
 external users, because they are cheap while breaking changes cost nothing and expensive after.
 
-## Now: close out 4.0.x
+## Now: close out 4.x
 
-- Ship 4.0.1 with the accumulated reconcile rewriter fixes in the Unreleased changelog
-  section, and bump the internal adopters' pinned workflows to match.
+- Bump the internal adopters' pinned workflows to 4.1.0, which shipped the accumulated
+  `init` changes and reconcile rewriter fixes.
 - Make recovery reporting truthful: a partial rollback must be distinguishable from a full
   one, and recovery must never destroy the evidence an operator still needs (GTX-97, with
   test coverage for the realistic crash states, GTX-98).
