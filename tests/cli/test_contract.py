@@ -3,9 +3,10 @@
 import io
 import json
 import os
-import pty
+import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -83,45 +84,87 @@ class _TTYCapture(io.StringIO):
         return True
 
 
+_PTY_TIMEOUT_SECONDS = 30
+
+
 def _run_cli_pty(argv: list[str], env: dict[str, str]) -> bytes:
     """Run ``doc_lattice.cli.main`` under a real pty and return the raw stderr bytes.
 
     A pty is required over ``CliRunner`` or captured pipes: those are never a terminal,
     so Rich would auto-disable highlighting regardless of the fix under test and the
     assertion could pass without it.
+
+    Skips on any platform without ``pty`` (Windows), rather than failing this whole
+    module at import time and taking the platform-independent contract tests with it.
     """
+    pty = pytest.importorskip("pty", reason="a pty is unavailable on this platform")
     script = (
         "import sys\n"
         f"sys.argv = {argv!r}\n"
         "from doc_lattice.cli import main\n"
         "try:\n    main()\nexcept SystemExit:\n    pass\n"
     )
+    # `pty.openpty()` leaves the window size at 0x0, so Rich falls back to its own
+    # default width, and an inherited `COLUMNS` would override even that. Pin a wide
+    # value so the diagnostic never soft-wraps and the text assertions below are
+    # independent of the shell the suite runs under.
+    child_env = {**env, "COLUMNS": "200"}
     master_fd, slave_fd = pty.openpty()
     try:
         process = subprocess.Popen(  # noqa: S603 - fixed argv and generated script
             [sys.executable, "-c", script],
-            env=env,
+            env=child_env,
             stdout=subprocess.DEVNULL,
             stderr=slave_fd,
             close_fds=True,
         )
         os.close(slave_fd)
         slave_fd = -1
-        chunks = bytearray()
-        while True:
-            try:
-                chunk = os.read(master_fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            chunks.extend(chunk)
-        process.wait(timeout=10)
-        return bytes(chunks)
+        try:
+            return _drain_pty(master_fd, process)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
     finally:
         os.close(master_fd)
         if slave_fd != -1:
             os.close(slave_fd)
+
+
+def _drain_pty(master_fd: int, process: "subprocess.Popen[bytes]") -> bytes:
+    """Read a pty master until the child closes it, under a hard deadline.
+
+    A bare blocking read would hang the whole suite forever if the child ever wedged,
+    since nothing else bounds it; poll with a deadline and fail loudly instead.
+    """
+    deadline = time.monotonic() + _PTY_TIMEOUT_SECONDS
+    chunks = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pytest.fail(f"pty child did not exit within {_PTY_TIMEOUT_SECONDS}s")
+        if not select.select([master_fd], [], [], remaining)[0]:
+            continue
+        try:
+            chunk = os.read(master_fd, 4096)
+        except OSError:
+            # The child closed the last slave descriptor; on Linux that surfaces as EIO.
+            break
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    process.wait(timeout=_PTY_TIMEOUT_SECONDS)
+    return bytes(chunks)
+
+
+def _pty_plain_text(stderr: bytes) -> str:
+    """Decode raw pty stderr bytes to plain text without ANSI or CRLF artifacts.
+
+    The pty line discipline rewrites ``\\n`` to ``\\r\\n``, which is a terminal artifact
+    unrelated to the escape-sequence contract under test.
+    """
+    return Text.from_ansi(stderr.replace(b"\r\n", b"\n").decode("utf-8")).plain
 
 
 @pytest.mark.parametrize(
@@ -148,7 +191,10 @@ def test_no_color_lever_leaves_no_escape_under_pty(
 
     stderr = _run_cli_pty(argv, env)
 
-    assert stderr, "expected the --only diagnostic on stderr"
+    # Assert the diagnostic itself, not merely that stderr is non-empty: any unrelated
+    # child failure (an import error traceback, say) is also escape-free, so the
+    # escape assertion alone would go green without the fixed path ever running.
+    assert "unknown --only state(s): 123" in _pty_plain_text(stderr), stderr
     assert b"\x1b" not in stderr, stderr
 
 
@@ -160,7 +206,9 @@ def test_no_color_flag_and_env_produce_byte_identical_pty_output():
     env_lever["NO_COLOR"] = "1"
     env_stderr = _run_cli_pty(["doc-lattice", "check", "--only", "123"], env_lever)
 
-    assert flag_stderr
+    # Same reasoning as above: two identical crash tracebacks would also compare equal,
+    # so pin the diagnostic before comparing bytes.
+    assert "unknown --only state(s): 123" in _pty_plain_text(flag_stderr), flag_stderr
     assert flag_stderr == env_stderr
 
 
@@ -183,9 +231,7 @@ def test_no_lever_pty_output_still_carries_ansi_styling():
     stderr = _run_cli_pty(["doc-lattice", "check", "--only", "123"], env)
 
     assert b"\x1b[" in stderr, stderr
-    # The pty normalizes line endings to CRLF, which is a terminal artifact unrelated to
-    # the escape-sequence contract under test; strip it before diffing plain text.
-    plain = Text.from_ansi(stderr.replace(b"\r\n", b"\n").decode("utf-8")).plain
+    plain = _pty_plain_text(stderr)
     assert "unknown --only state(s): 123" in plain
     assert "valid: BROKEN, OK, STALE, UNRECONCILED" in plain
 
