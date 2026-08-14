@@ -112,9 +112,10 @@ existing project-root directory through `reconcile_transaction.reconcile_lock`. 
 transaction module owns the lock capability and mechanics; the CLI adapter owns its
 lifetime across any recovery, lattice loading, planning, fresh reads, and commit call.
 For each planned write, the adapter resolves the document identity path against the
-project root before re-reading exact bytes. `commit_rewrites` independently calls
-`_preflight_rewrite_destinations`, which uses `safe_resolve` to contain every supplied
-live destination against the canonical project root before staging.
+project root before re-reading exact bytes. `commit_rewrites` independently re-validates containment during
+preparation: `_prepare_transaction` calls `_preflight_rewrite_destinations`, which uses
+`safe_resolve` to contain every supplied live destination against the canonical project
+root before staging.
 
 The transaction retains exact before and after bytes and stages synced before-image
 and after-image files beside each destination. Before mutation, it durably publishes
@@ -426,7 +427,11 @@ its own cadence, and a change there can no longer regress this engine.
 **Context:** Reconcile rewrites exact source bytes so a document's body, key order, comments, and
 list indentation survive a `seen` update. Locating those bytes means reading ruamel's parser
 events and scanner tokens, and the byte offsets on their source marks, rather than dumping a
-loaded document back out. Those are implementation details of a dependency the project otherwise
+loaded document back out. Dumping cannot meet the contract that only `seen` changes: a fixed
+emitter indentation rewrites whichever accepted list style it was not configured for, and even
+an emitter setting selected per document restyles unrelated collections when a file mixes
+styles, so only targeted source edits leave every unrelated byte alone. The marks that locate
+those edits are implementation details of a dependency the project otherwise
 declares by floor alone, and a change to how ruamel accounts for marks would move every span this
 module measures.
 **Decision:** `reconcile.py` depends on `ruamel.yaml.events`, `ruamel.yaml.tokens`, and
@@ -453,6 +458,9 @@ written tag first opens at its anchor rather than at its tag, so the tag token, 
 scalar token that follows it, is what bounds an edit that has to overwrite or reproduce one. Each
 read builds its own loader, since a shared instance carries document state (`YAML.version`, and
 the reader and scanner bound to one document) whose reset behavior is itself version dependent.
+The boundary loaders in `frontmatter_parser.py` and `config.py` may keep shared module-level
+instances despite that, because they consume only loaded values and never a source mark, and the
+one piece of document state they do carry, `YAML.version`, is reset explicitly before each load.
 Every rewrite is reparsed and compared against the intended document before it is staged, so a
 mis-measured span is refused rather than published.
 **Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source
