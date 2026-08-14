@@ -76,7 +76,7 @@ Run this human-maintainer sequence from reviewed, trusted project state:
 1. Generate and review the local managed artifacts.
 
    ```bash
-   uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice init \
+   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init \
      --github --repository OWNER/REPO
    ```
 
@@ -86,7 +86,7 @@ Run this human-maintainer sequence from reviewed, trusted project state:
    workflows reach `main` and the gates begin running:
 
    ```bash
-   uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice reconcile --all
+   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
    ```
 
    An installation migrated per `## Migrating an existing installation` above skips this step.
@@ -129,7 +129,7 @@ Run this human-maintainer sequence from reviewed, trusted project state:
 
    ```bash
    bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO
-   uvx --python 3.13 --from doc-lattice==4.0.0 doc-lattice ci audit \
+   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice ci audit \
      --repository OWNER/REPO
    ```
 

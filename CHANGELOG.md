@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-08-14
+
 ### Changed
 
 - `init` now closes with baseline guidance in both the ordinary and the managed branch, telling a
