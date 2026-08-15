@@ -661,7 +661,7 @@ bytes, recovery artifacts, and the before-image rollback sink are deliberately p
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
 
-Twenty-two near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
+Twenty-six near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
 guard and each was reproduced against it before being closed. The gate must be its own
 unconditional top-level statement, since a gate merely contained in an earlier statement can sit
 inside a conditional and skip the path a later changed return takes. Both operands of the
@@ -674,7 +674,9 @@ contribute are restricted the same way, since text spliced into the reassembly f
 published byte for byte. The reassembly is pinned as a complete envelope, each piece reattached
 exactly once and in order around the verified metadata, since requiring only that some verified
 value appear accepts an assembly that emits nothing but gate-verified bytes while dropping the
-fences and the entire body. Producer and publication scans resolve module-qualified references
+fences and the entire body. The literals hold their place in that sequence rather than being
+validated and dropped, since a legal line ending in an illegal position is still published
+unverified. Producer and publication scans resolve module-qualified references
 and every kind of alias, by import, by assignment, by parameter default, or by inheritance, since
 `Rewrite as R`, `R = Rewrite`, `def build(..., constructor=Rewrite)`, `class Rogue(Rewrite)`, and
 `persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
@@ -684,7 +686,9 @@ descriptor-relative variant that publishes without calling it at all. The stagin
 staged operand as well as the prefix, since a site can bind the after-image infix to a local
 first, a shape the transaction module already uses. The producer scan also refuses a dataclass
 field copy, since `dataclasses.replace(rewrite, after=...)` mints a `Rewrite` carrying ungated
-bytes without ever naming the class. The sink must take its image and its destination from the
+bytes without ever naming the class, and refuses one whose keyword arrives unpacked, since a
+`**` argument carries no readable field name and an unreadable copy fails closed rather than
+being assumed harmless. The sink must take its image and its destination from the
 same journal entry expression, since matching only the two field names lets one entry's staged
 image publish over every destination the commit loop visits.
 
@@ -693,7 +697,10 @@ audited by destination rather than by primitive: nothing there may hand a journa
 destination to a callee outside a pinned reader set, or call a method on one. Enumerating write
 primitives could not close this, since a new sink can always name a primitive the guard has never
 heard of, whereas reaching the destination is the one step it cannot avoid. That audit is scoped
-to `reconcile_transaction.py`, the only module owning reconcile destinations.
+to `reconcile_transaction.py`, the only module owning reconcile destinations. Its exemptions are
+bare names resolved in that module rather than terminal attribute names, so an unrelated method
+cannot borrow a pinned reader's name, and a name with more than one binding stays tainted if any
+of them held a destination, since a rebound name is ambiguous rather than safe.
 
 Recording a destination in an in-memory container reaches no filesystem, so classification and
 rollback outcome bookkeeping may accumulate one. That exemption is recognized by shape, not by

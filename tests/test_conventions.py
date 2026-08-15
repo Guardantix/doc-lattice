@@ -242,16 +242,20 @@ COMPOSITE_PUBLISH_USERS: dict[str, frozenset[str]] = {
 # as a complete envelope: each piece exactly once, in this order, around the verified metadata.
 # `raw_meta` is deliberately absent, since it holds the pre-edit YAML the gate never verified and
 # admitting it would let the check pass on a document reintroducing the bytes the gate replaced.
+# The literal is part of the order, not a validated aside. Checking each constant on its own and
+# then dropping it lets any number of endings be spliced anywhere, and those bytes are published.
 GATED_SLOT = "<gate-verified metadata>"
+NEWLINE_SLOT = "<line ending>"
 ENVELOPE_ORDER = (
     "prefix",
     "open_fence",
+    NEWLINE_SLOT,
     GATED_SLOT,
     "close_fence",
     "close_fence_newline",
     "body",
 )
-ENVELOPE_FIELDS = frozenset(ENVELOPE_ORDER) - {GATED_SLOT}
+ENVELOPE_FIELDS = frozenset(ENVELOPE_ORDER) - {GATED_SLOT, NEWLINE_SLOT}
 
 
 def _gate_msg(detail: str) -> str:
@@ -625,9 +629,13 @@ def _reassembles_envelope(
     """True when an f-string rebuilds the whole document envelope around the verified meta.
 
     Recording only that some verified value appears is not enough: ``f"{new_meta}"`` emits
-    nothing but gate-verified bytes and still drops the fences and the entire body. The
-    interpolations must therefore match ``ENVELOPE_ORDER`` exactly, so each piece is reattached
-    once, in place, with the verified metadata between the fences.
+    nothing but gate-verified bytes and still drops the fences and the entire body. The whole
+    sequence must therefore match ``ENVELOPE_ORDER`` exactly, so each piece is reattached once,
+    in place, with the verified metadata between the fences.
+
+    Literals take their place in that sequence rather than being validated and dropped. Checking
+    each constant on its own admits ``f"\\n{parts.prefix}..."``, which is a legal line ending in
+    an illegal position, and every one of those bytes is published without the gate seeing it.
     """
     if context.envelope_root is None:
         return False
@@ -636,6 +644,7 @@ def _reassembles_envelope(
         if isinstance(value, ast.Constant):
             if not _is_envelope_literal(value):
                 return False
+            order.append(NEWLINE_SLOT)
             continue
         if not isinstance(value, ast.FormattedValue):
             return False
@@ -703,13 +712,18 @@ def _field_copy_sites(trees: dict[str, ast.Module]) -> list[_Site]:
     gate never saw and is not a ``Rewrite(...)`` call site, so the sole-producer pin has to read
     the copy route too. ``str.replace`` takes no keyword arguments, so the line-ending
     restoration cannot match here.
+
+    An unpacked mapping fails closed. ``replace(rewrite, **{"after": data})`` names no keyword
+    at all, since a ``**`` argument carries ``arg`` of None, so which field it replaces is not
+    readable from the call and the copy has to be refused rather than assumed harmless.
     """
     sites: list[_Site] = []
     for site in _call_sites(trees):
         func = site.call.func
         named = isinstance(func, ast.Name) and func.id == COPY_CALLEE
         qualified = isinstance(func, ast.Attribute) and func.attr == COPY_CALLEE
-        if (named or qualified) and any(kw.arg == AFTER_FIELD for kw in site.call.keywords):
+        replaces_after = any(keyword.arg in (AFTER_FIELD, None) for keyword in site.call.keywords)
+        if (named or qualified) and replaces_after:
             sites.append(site)
     return sites
 
@@ -984,7 +998,13 @@ class _DestinationScope:
 
 
 def _is_destination(expr: ast.expr, scope: _DestinationScope, seen: tuple[str, ...] = ()) -> bool:
-    """True for a journal entry's destination, named directly or reached through a local."""
+    """True for a journal entry's destination, named directly or reached through a local.
+
+    Every binding of a name is read, not only a sole one. Resolving through ``_sole_binding``
+    would treat a rebound name as safe rather than as ambiguous, and ``target = entry.destination``
+    followed by ``target = target`` still holds the destination at runtime while defeating that
+    reading. A name that could have held one stays tainted.
+    """
     if isinstance(expr, ast.Attribute) and expr.attr == DESTINATION_FIELD:
         return True
     if isinstance(expr, ast.Subscript):
@@ -993,8 +1013,10 @@ def _is_destination(expr: ast.expr, scope: _DestinationScope, seen: tuple[str, .
         return False
     if expr.id in scope.elements:
         return True
-    binding = _sole_binding(scope.bindings, expr.id)
-    return binding is not None and _is_destination(binding.value, scope, (*seen, expr.id))
+    return any(
+        _is_destination(binding.value, scope, (*seen, expr.id))
+        for binding in scope.bindings.get(expr.id, [])
+    )
 
 
 def _display_elements(value: ast.expr) -> list[ast.expr]:
@@ -1156,9 +1178,13 @@ def _destination_write_violations(trees: dict[str, ast.Module]) -> list[str]:
                 )
             )
             continue
-        name = _callee_name(site.call)
-        if name in DESTINATION_READERS or _accumulates_destination(site.call, scope):
+        # The exemption is a bare name resolved in this module, never a terminal attribute:
+        # `writer.file_sha256(entry.destination)` borrows a pinned reader's name for an
+        # unrelated method that could publish over the path it is handed.
+        pinned = isinstance(func, ast.Name) and func.id in DESTINATION_READERS
+        if pinned or _accumulates_destination(site.call, scope):
             continue
+        name = _callee_name(site.call)
         arguments = [*site.call.args, *(keyword.value for keyword in site.call.keywords)]
         if any(_is_destination(argument, scope) for argument in arguments):
             problems.append(
@@ -1348,6 +1374,18 @@ REORDERED_ENVELOPE_ASSEMBLY = (
     '        f"{parts.body}{parts.close_fence}{parts.close_fence_newline}"'
 )
 
+UNPACKED_COPY_PRODUCER_MODULE = '''"""A producer copying a Rewrite through an unpacked mapping."""
+
+import dataclasses
+
+from .reconcile import Rewrite
+
+
+def corrupt(rewrite: Rewrite, data: bytes) -> Rewrite:
+    """Return a Rewrite carrying bytes the reparse gate never saw."""
+    return dataclasses.replace(rewrite, **{"after": data})
+'''
+
 SUBCLASS_PRODUCER_MODULE = '''"""A producer minting an ungated Rewrite through a subclass."""
 
 from pathlib import Path
@@ -1439,10 +1477,13 @@ def _positive_controls() -> dict[str, dict[str, str]]:
     bookkeeping exemption cannot be borrowed by anything that merely answers to ``append``. The
     next three came from a further review pass: the whole document envelope dropped around the
     verified metadata, the envelope reattached out of order, and a producer behind an alias bound
-    as a parameter default. The final four close the routes that launder a guarded value through
+    as a parameter default. The next four close the routes that launder a guarded value through
     another shape: a producer subclassing the record to inherit its constructor, and a
     destination republished after a container round trip, by subscript of a literal, by subscript
-    of a bookkeeping accumulation, and by iterating one back.
+    of a bookkeeping accumulation, and by iterating one back. The final four close what a matcher
+    reads rather than what it matches: a legal line ending in an illegal envelope position, a
+    field copy whose keyword is unreadable because it arrives unpacked, a destination surviving
+    under a rebound name, and an unrelated method borrowing a pinned reader's terminal name.
 
     Cached alongside the source read so the parametrized run builds this mapping once.
     """
@@ -1597,6 +1638,30 @@ def _positive_controls() -> dict[str, dict[str, str]]:
             f"{FORWARD_SINK_CALL}\n{SINK_INDENT}destinations = [entry.destination]"
             f"\n{SINK_INDENT}for target in destinations:"
             f"\n{SINK_INDENT}    os.replace(entry.before_path, target)",
+        ),
+        "envelope-line-ending-spliced-into-an-illegal-position": _patched(
+            sources,
+            RECONCILE_MODULE,
+            'f"{parts.prefix}{parts.open_fence}\\n{new_meta}"',
+            'f"\\n{parts.prefix}{parts.open_fence}\\n{new_meta}"',
+        ),
+        "rewrite-minted-by-an-unpacked-field-copy": {
+            **sources,
+            "rogue_unpacked_copy_producer.py": UNPACKED_COPY_PRODUCER_MODULE,
+        },
+        "destination-republished-through-a-rebound-name": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}target = entry.destination"
+            f"\n{SINK_INDENT}target = target"
+            f"\n{SINK_INDENT}os.replace(entry.before_path, target)",
+        ),
+        "destination-handed-to-a-borrowed-reader-name": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}writer.file_sha256(entry.destination)",
         ),
     }
 
