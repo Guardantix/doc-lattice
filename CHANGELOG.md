@@ -115,6 +115,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The release job validates the changelog section before it pushes the tag, so a release that
+  fails its own notes check no longer strands an immutable tag. Extraction ran inside `Publish
+  release notes`, which is two steps after `Create and push the tag`: a missing or empty
+  `## [X.Y.Z]` section failed the run only after the tag existed and had been pushed, leaving a
+  published tag with no GitHub Release and no way forward except cutting another version. The
+  implicit `success()` on the dependent jobs did block PyPI publication, so nothing was ever
+  published against unvalidated notes; the damage was the stranded tag alone. Generation is now
+  its own `Extract release notes` step that runs under the same gate, before both the tag push
+  and the network smoke, and writes the file that `gh release create` reads back. Reruns are
+  unaffected: the step is gated on `proceed` rather than on `create_tag`, so the resume path that
+  finishes a missing GitHub Release still regenerates the notes it needs.
 - No command crashes any more on frontmatter whose `!!omap` repeats a key. A block such as
   `extra: !!omap` followed by two items spelling the same key escaped every YAML boundary as an
   uncaught `AssertionError` and printed a traceback, from `check`, `lint`, `impact`, `graph`,

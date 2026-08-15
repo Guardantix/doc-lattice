@@ -20,10 +20,25 @@ _UPLOAD_ARTIFACT = "actions/upload-artifact"
 _DOWNLOAD_ARTIFACT = "actions/download-artifact"
 _PYPI_PUBLISH = "pypa/gh-action-pypi-publish"
 _ARTIFACT_NAME = "release-distributions"
+_PROCEED = "steps.gate.outputs.proceed == 'true'"
+_TAG_STEP = "Create and push the tag"
+_SMOKE_FIXTURE = "tests/fixtures/release-smoke/.doc-lattice.yml"
+_PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
+# The release steps that verify the source and the published artifacts. None of them produces a
+# job output, so deleting one leaves every other job green and the release still publishes; these
+# names are the only thing standing between a silent deletion and an unverified release.
+_PROTECTED_STEPS = frozenset(
+    {"Re-assert version sync", "Smoke-test the commit", "Confirm pinned ref resolves"}
+)
 
 
 def _named_step(job: dict, name: str) -> dict:
     return next(step for step in job["steps"] if step.get("name") == name)
+
+
+def _step_index(job: dict, name: str) -> int:
+    """Return a named step's position, which is the order the runner executes it in."""
+    return next(index for index, step in enumerate(job["steps"]) if step.get("name") == name)
 
 
 def _action(step: dict) -> str:
@@ -96,6 +111,46 @@ def _out_dir(argv: list[str]) -> str | None:
     return None
 
 
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    """Return the value a command passes to `flag`, or None when the flag is absent.
+
+    Both the separated and the attached spelling count, since `--notes-file notes.md` and
+    `--notes-file=notes.md` name the same file to every program that parses either.
+    """
+    for index, word in enumerate(argv):
+        if word == flag:
+            return argv[index + 1] if index + 1 < len(argv) else ""
+        if word.startswith(f"{flag}="):
+            return word.split("=", 1)[1]
+    return None
+
+
+def _redirect_target(text: str) -> str | None:
+    """Return the path shell text redirects stdout to, or None when nothing is redirected.
+
+    The extractor writes its notes to stdout, so the redirect target is the only record of
+    which file the later publish step has to read back.
+    """
+    for argv in _invocations(text):
+        for index, word in enumerate(argv):
+            if word == ">":
+                return argv[index + 1] if index + 1 < len(argv) else ""
+    return None
+
+
+def _runs_subcommand(argv: list[str], program: str, subcommand: str) -> bool:
+    """Report whether a command runs `program` with `subcommand` as its first word.
+
+    The program is matched anywhere in the line because the release steps reach their tools
+    through runners: `uvx --from "${REF}" doc-lattice check` runs the packaged CLI's `check`
+    just as `doc-lattice check` would, and the runner's own flags precede it.
+    """
+    return any(
+        word == program and argv[index + 1 : index + 2] == [subcommand]
+        for index, word in enumerate(argv)
+    )
+
+
 def _fetches_tags(argv: list[str]) -> bool:
     """Report whether a command fetches tags and overwrites the local refs.
 
@@ -107,10 +162,7 @@ def _fetches_tags(argv: list[str]) -> bool:
 
 def _runs_twine_check(argv: list[str]) -> bool:
     """Report whether a command runs twine's `check` subcommand."""
-    return any(
-        word == "twine" and argv[index + 1 : index + 2] == ["check"]
-        for index, word in enumerate(argv)
-    )
+    return _runs_subcommand(argv, "twine", "check")
 
 
 def _invokes(argv: list[str], script: str) -> bool:
@@ -160,6 +212,99 @@ def test_release_gate_invokes_testable_script_with_runner_environment():
     assert fetches
     assert gates
     assert fetches[0] < gates[0]
+
+
+def test_release_notes_are_validated_before_the_tag_is_pushed():
+    # A tag is immutable, so the changelog check has to fail while there is still nothing to
+    # strand. Running it inside "Publish release notes" left an empty section tagging the commit
+    # and then failing, which needs a hand-cut version to escape.
+    release = _WORKFLOW["jobs"]["release"]
+    extract = _named_step(release, "Extract release notes")
+    assert extract["if"] == _PROCEED
+    assert extract["env"]["VERSION"] == "${{ steps.target.outputs.version }}"
+    # Require an actual run of the extractor. A step that only names the path exits 0 over an
+    # empty section, which is the failure this whole reordering exists to prevent.
+    extractions = [
+        argv
+        for argv in _invocations(_commands(extract))
+        if _invokes(argv, "scripts/extract_release_notes.py")
+    ]
+    assert extractions
+    # Without the version the extractor fails on argparse alone, which would fail every release
+    # rather than only the ones whose section is missing or empty.
+    assert "${VERSION}" in extractions[0]
+    assert _step_index(release, "Extract release notes") < _step_index(release, _TAG_STEP)
+
+
+def test_published_notes_come_from_the_file_extraction_wrote():
+    # Splitting generation from publication only holds if both halves name the same file. A
+    # publish step reading some other path would post whatever that path happened to contain.
+    release = _WORKFLOW["jobs"]["release"]
+    written = _redirect_target(_commands(_named_step(release, "Extract release notes")))
+    assert written
+    publish = _invocations(_commands(_named_step(release, "Publish release notes")))
+    creates = [argv for argv in publish if argv[:3] == ["gh", "release", "create"]]
+    assert creates
+    for argv in creates:
+        assert _flag_value(argv, "--notes-file") == written
+    # Publication must not quietly regain its own extraction: a second copy running after the tag
+    # would restore the very ordering this contract removes.
+    assert not [argv for argv in publish if _invokes(argv, "scripts/extract_release_notes.py")]
+
+
+def test_release_job_keeps_every_protected_step_under_the_gate():
+    # Each of these verifies something no other job repeats, and none of them feeds a job output,
+    # so deleting one produces a fully green run that published an unverified release.
+    release = _WORKFLOW["jobs"]["release"]
+    present = {step.get("name") for step in release["steps"]}
+    assert _PROTECTED_STEPS.issubset(present)
+    for name in sorted(_PROTECTED_STEPS):
+        assert _named_step(release, name)["if"] == _PROCEED
+
+
+def test_version_sync_is_re_asserted_against_the_release_source():
+    # The same guard runs in code-quality, but against the pull request's merge commit. This is
+    # the only run against the commit that actually becomes the tag.
+    step = _named_step(_WORKFLOW["jobs"]["release"], "Re-assert version sync")
+    assert any(
+        _invokes(argv, "scripts/check_version_sync.py") for argv in _invocations(_commands(step))
+    )
+
+
+def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
+    # This is the pre-tag execution of the packaged CLI, installed from the release source rather
+    # than from the working tree, so a packaging break shows up before anything immutable exists.
+    release = _WORKFLOW["jobs"]["release"]
+    step = _named_step(release, "Smoke-test the commit")
+    assert step["env"]["REF"] == f"{_PACKAGE_URL}@${{{{ github.sha }}}}"
+    assert step["env"]["FIXTURE"] == _SMOKE_FIXTURE
+    assert (_ROOT / _SMOKE_FIXTURE).is_file()
+    argvs = _invocations(_commands(step))
+    for subcommand in ("check", "lint"):
+        runs = [argv for argv in argvs if _runs_subcommand(argv, "doc-lattice", subcommand)]
+        assert runs
+        for argv in runs:
+            # Reading the fixture off the step's own environment keeps the assertion on what the
+            # command is handed, so pointing FIXTURE at a passing stub fails here too.
+            assert _flag_value(argv, "--config") == "${FIXTURE}"
+            assert _flag_value(argv, "--from") == "${REF}"
+    assert _step_index(release, "Smoke-test the commit") < _step_index(release, _TAG_STEP)
+
+
+def test_pinned_ref_confirmation_resolves_the_tag_that_was_pushed():
+    # The only check that the published tag is installable as users will install it. Running it
+    # against the SHA instead would pass even when the tag never reached the remote.
+    release = _WORKFLOW["jobs"]["release"]
+    step = _named_step(release, "Confirm pinned ref resolves")
+    assert step["env"]["TAG"] == "${{ steps.target.outputs.tag }}"
+    pinned = [
+        argv
+        for argv in _invocations(_commands(step))
+        if _flag_value(argv, "--from") == f"{_PACKAGE_URL}@${{TAG}}"
+    ]
+    assert pinned
+    assert any("doc-lattice" in argv for argv in pinned)
+    assert _step_index(release, _TAG_STEP) < _step_index(release, "Confirm pinned ref resolves")
 
 
 def test_tag_creation_and_github_release_are_idempotent():
