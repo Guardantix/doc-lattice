@@ -1240,6 +1240,26 @@ def test_orphaned_artifacts_without_a_journal_are_reported_and_never_deleted(tmp
     assert _tree_snapshot(tmp_path) == before
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory read permissions")
+def test_unreadable_directory_is_reported_rather_than_narrowing_the_orphan_scan(tmp_path: Path):
+    unreadable = tmp_path / "locked"
+    unreadable.mkdir()
+    unreadable.chmod(0o000)
+    try:
+        result = recover_transaction(tmp_path)
+    finally:
+        unreadable.chmod(0o755)
+
+    assert result.action == "none"
+    assert result.orphans == ()
+    # The scan could not prove this subtree holds no orphan, so it says so instead of
+    # letting the run read as clean.
+    assert result.is_incomplete
+    assert len(result.scan_errors) == 1
+    assert str(unreadable) in result.scan_errors[0]
+    assert "orphaned artifacts" in result.scan_errors[0]
+
+
 def test_journal_recovery_and_its_leaked_publication_stage_are_reported_together(tmp_path: Path):
     transaction = _write_synthetic_transaction(tmp_path)
     # An interrupted journal publication can leave the canonical journal and the helper

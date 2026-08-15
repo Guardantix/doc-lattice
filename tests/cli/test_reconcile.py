@@ -516,6 +516,24 @@ def test_reconcile_recover_reports_orphans_without_deleting_them(tmp_path: Path,
     assert _tree_snapshot(tmp_path) == before
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory read permissions")
+def test_reconcile_recover_reports_an_unscannable_directory(tmp_path: Path, monkeypatch):
+    unreadable = tmp_path / "locked"
+    unreadable.mkdir()
+    unreadable.chmod(0o000)
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        result = runner.invoke(app, ["reconcile", "--recover"])
+    finally:
+        unreadable.chmod(0o755)
+
+    assert result.exit_code == 2
+    assert "no reconcile journal to recover" in result.stdout
+    assert "for orphaned artifacts" in result.stderr
+    assert str(unreadable) in result.stderr
+
+
 def test_reconcile_partial_automatic_recovery_halts_before_loading_the_lattice(
     lattice_dir: Path, monkeypatch
 ):
