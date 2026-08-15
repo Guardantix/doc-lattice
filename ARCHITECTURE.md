@@ -632,22 +632,37 @@ envelope reassembly only; that `Rewrite.after` derives from what `apply_reconcil
 through line-ending restoration and UTF-8 encoding only; that every possibly changed return
 follows the gate; the single after-image staging site and the bytes it stages; and the single
 forward publication sink, with the publication helper reachable from no module but
-`reconcile_transaction.py`. Positive controls prove the detector rejects each bypass rather than
+`reconcile_transaction.py`, whether named directly or through a composite primitive that stages
+and publishes one destination in a single call. Each such primitive's present users write their
+own artifacts rather than documents and are pinned per primitive, so a new one fails closed.
+Positive controls prove the detector rejects each bypass rather than
 passing vacuously. The invariant covers transaction after images only. Before images, journal
 bytes, recovery artifacts, and the before-image rollback sink are deliberately published without
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
 
-Five near-miss shapes are pinned explicitly, because each defeated an earlier draft of the guard
+Ten near-miss shapes are pinned explicitly, because each defeated an earlier draft of the guard
 and each was reproduced against it before being closed. The gate must be its own unconditional
 top-level statement, since a gate merely contained in an earlier statement can sit inside a
 conditional and skip the path a later changed return takes. Both operands of the line-ending
 restoration are constrained, since checking only the searched text admits a replacement that
 rewrites verified content. The envelope fields a rewrite may reattach are whitelisted, excluding
-`raw_meta`, which holds the pre-edit YAML the gate never verified. Producer and publication scans
-resolve import aliases and module-qualified references, since `Rewrite as R` and
-`persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
-publication-reach rule reads every mention of the identifier rather than only its imports.
+`raw_meta`, which holds the pre-edit YAML the gate never verified, and the literals it may
+contribute are restricted to line endings, since text spliced into the reassembly f-string is
+published byte for byte. Producer and publication scans resolve import aliases and
+module-qualified references, since `Rewrite as R` and `persistence.replace_staged(...)` are each
+a complete route past a bare-name scan. The publication-reach rule reads every mention of the
+identifier rather than only its imports, and follows both composite primitives: the one that
+reaches the helper without naming it, and the descriptor-relative variant that publishes without
+calling it at all. The staging scan reads the staged operand as well as the prefix, since
+a site can bind the after-image infix to a local first, a shape the transaction module already
+uses. The producer scan also refuses a dataclass field copy, since `dataclasses.replace(rewrite,
+after=...)` mints a `Rewrite` carrying ungated bytes without ever naming the class.
+
+One scoping limit is deliberate rather than closed: `persistence.py` owns the publication helper
+and is exempt from both the reach rule and the sink audit, so a forward sink added inside that
+module is invisible to the guard. Narrowing it would fire on the module's own correct internal
+use of the helper. Publication ownership stays a review obligation there.
 **Consequences:** A genuinely new producer, staging site, or publication route fails closed and
 forces a conscious audit, instead of silently widening the set of bytes that can reach a
 document. The guard is a tripwire on the current AST shape, not a general dataflow analysis:

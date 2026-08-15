@@ -3,6 +3,7 @@
 import ast
 import inspect
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -186,18 +187,28 @@ ENVELOPE_SPLITTER = "split_frontmatter_parts"
 AFTER_IMAGE_INFIX = "RECONCILE_AFTER_IMAGE_INFIX"
 STAGE_CALLEE = "stage_bytes"
 PUBLISH_CALLEE = "replace_staged"
+COPY_CALLEE = "replace"
 STAGING_FUNCTION = "_prepare_transaction"
 FORWARD_PUBLISHER = "_commit_rewrites_locked"
-ROLLBACK_PUBLISHER = "_rollback_prepared"
 RECONCILE_MODULE = "reconcile.py"
 TRANSACTION_MODULE = "reconcile_transaction.py"
-AFTER_FIELD_INDEX = list(Rewrite.__dataclass_fields__).index("after")
+AFTER_FIELD = "after"
+AFTER_FIELD_INDEX = list(Rewrite.__dataclass_fields__).index(AFTER_FIELD)
 FORWARD_IMAGE_FIELD = "after_path"
 ROLLBACK_IMAGE_FIELD = "before_path"
 LINE_ENDING_CALLEE = "_line_ending"
 LINE_ENDING_CHARS = frozenset("\r\n")
 OPAQUE_BINDING = -1
 PUBLICATION_OWNERS = frozenset({"persistence.py", TRANSACTION_MODULE})
+# Each composite primitive below stages and publishes one destination in a single call, so naming
+# one overwrites a document without ever naming the publication helper and would slip past a scan
+# that reads only that helper's name. The descriptor-relative variant does not even route through
+# it. Each primitive's present users write their own artifacts rather than documents, so they are
+# pinned per primitive and any new user of either route fails closed.
+COMPOSITE_PUBLISH_USERS: dict[str, frozenset[str]] = {
+    "atomic_replace_bytes": frozenset({"cache/store.py"}),
+    "atomic_replace_bytes_at": frozenset({"github_ci/filesystem.py"}),
+}
 # The envelope pieces a rewrite may reattach verbatim. `raw_meta` is deliberately absent: it
 # holds the pre-edit YAML the gate never verified, so admitting it would let the mis-splice
 # check pass on a document that reintroduces exactly the bytes the gate was meant to replace.
@@ -240,8 +251,13 @@ class _TraceContext:
     restoration: bool = False
 
 
+@cache
 def _production_sources() -> dict[str, str]:
-    """Every production module's source, keyed by path relative to the package root."""
+    """Every production module's source, keyed by path relative to the package root.
+
+    Cached because the parametrized positive controls read the whole package once per case, and
+    every consumer builds a new mapping rather than mutating this one.
+    """
     return {
         path.relative_to(SRC_DIR).as_posix(): path.read_text(encoding="utf-8")
         for path in _source_files()
@@ -344,6 +360,13 @@ def _function(tree: ast.Module, name: str) -> ast.FunctionDef | None:
     return None
 
 
+def _record_opaque(bound: dict[str, list[_Binding]], target: ast.expr, value: ast.expr) -> None:
+    """Mark every name under a target shape this reader cannot follow element by element."""
+    for node in ast.walk(target):
+        if isinstance(node, ast.Name):
+            bound.setdefault(node.id, []).append(_Binding(value, OPAQUE_BINDING))
+
+
 def _record_target(bound: dict[str, list[_Binding]], target: ast.expr, value: ast.expr) -> None:
     """Record every name a single assignment target binds, marking shapes we cannot read."""
     if isinstance(target, ast.Name):
@@ -354,11 +377,12 @@ def _record_target(bound: dict[str, list[_Binding]], target: ast.expr, value: as
             if isinstance(element, ast.Name):
                 bound.setdefault(element.id, []).append(_Binding(value, index))
             else:
-                _record_target(bound, element, value)
+                # A nested or starred element does not sit at ``index`` of ``value``. Recursing
+                # would re-key its names to the outer index and let ``(text, _), applied =
+                # apply_reconcile(...)`` pass ``text`` off as the element the gate verified.
+                _record_opaque(bound, element, value)
         return
-    for node in ast.walk(target):
-        if isinstance(node, ast.Name):
-            bound.setdefault(node.id, []).append(_Binding(value, OPAQUE_BINDING))
+    _record_opaque(bound, target, value)
 
 
 def _bindings(func: ast.FunctionDef) -> dict[str, list[_Binding]]:
@@ -440,6 +464,16 @@ def _is_envelope_part(expr: ast.expr, root: str) -> bool:
     return expr.value.id == root and expr.attr in ENVELOPE_FIELDS
 
 
+def _is_envelope_literal(node: ast.Constant) -> bool:
+    """True for the only literal an envelope reassembly may contribute: a line ending.
+
+    Literal text in the f-string is published byte for byte, so skipping constants outright
+    would admit ``f"{parts.prefix}{parts.open_fence}\\nINJECTED{new_meta}"`` and write content
+    the gate never verified. Only the fence-terminating newline is a legitimate literal.
+    """
+    return isinstance(node.value, str) and set(node.value) <= LINE_ENDING_CHARS
+
+
 def _traces_to(expr: ast.expr, context: _TraceContext, seen: tuple[str, ...] = ()) -> bool:
     """True when ``expr`` provably carries verified bytes through allowed steps only."""
     if isinstance(expr, ast.Name):
@@ -476,6 +510,8 @@ def _reassembles_envelope(
     carried = False
     for value in expr.values:
         if isinstance(value, ast.Constant):
+            if not _is_envelope_literal(value):
+                return False
             continue
         if not isinstance(value, ast.FormattedValue):
             return False
@@ -533,9 +569,35 @@ def _returns_no_change(node: ast.Return) -> bool:
     )
 
 
+def _field_copy_sites(trees: dict[str, ast.Module]) -> list[_Site]:
+    """Every ``replace(..., after=...)`` call, which mints a Rewrite without naming one.
+
+    ``dataclasses.replace(rewrite, after=data)`` returns a frozen ``Rewrite`` carrying bytes the
+    gate never saw and is not a ``Rewrite(...)`` call site, so the sole-producer pin has to read
+    the copy route too. ``str.replace`` takes no keyword arguments, so the line-ending
+    restoration cannot match here.
+    """
+    sites: list[_Site] = []
+    for site in _call_sites(trees):
+        func = site.call.func
+        named = isinstance(func, ast.Name) and func.id == COPY_CALLEE
+        qualified = isinstance(func, ast.Attribute) and func.attr == COPY_CALLEE
+        if (named or qualified) and any(kw.arg == AFTER_FIELD for kw in site.call.keywords):
+            sites.append(site)
+    return sites
+
+
 def _rewrite_producer_violations(trees: dict[str, ast.Module]) -> list[str]:
     """The sole ``Rewrite(...)`` must live in the producer and carry the gated text."""
     expected = f"{RECONCILE_MODULE}::{PRODUCER}"
+    copies = sorted(site.located for site in _field_copy_sites(trees))
+    if copies:
+        return [
+            _gate_msg(
+                f"{copies} copy a dataclass with a replacement {AFTER_FIELD!r} field, minting a "
+                f"{Rewrite.__name__} outside {expected}"
+            )
+        ]
     sites = _symbol_call_sites(trees, Rewrite.__name__)
     located = sorted(site.located for site in sites)
     if located != [expected]:
@@ -619,21 +681,42 @@ def _changed_return_violations(
     return problems
 
 
-def _has_after_image_prefix(call: ast.Call) -> bool:
-    """True for a call whose ``prefix`` argument is built from the after-image infix."""
-    for keyword in call.keywords:
-        if keyword.arg != "prefix":
+def _mentions_after_infix(
+    expr: ast.expr, bindings: dict[str, list[_Binding]], seen: tuple[str, ...] = ()
+) -> bool:
+    """True when an expression names the after-image infix, directly or through a local.
+
+    Resolving locals matters: ``reconcile_transaction.py`` already binds the infix to a name
+    before building a prefix from it, so a bare-name scan of the ``prefix`` argument would let a
+    second staging site hide behind exactly the shape the module uses elsewhere.
+    """
+    for node in ast.walk(expr):
+        if not isinstance(node, ast.Name):
             continue
-        return any(
-            isinstance(node, ast.Name) and node.id == AFTER_IMAGE_INFIX
-            for node in ast.walk(keyword.value)
-        )
+        if node.id == AFTER_IMAGE_INFIX:
+            return True
+        if node.id in seen:
+            continue
+        binding = _sole_binding(bindings, node.id)
+        if binding is not None and _mentions_after_infix(binding.value, bindings, (*seen, node.id)):
+            return True
     return False
+
+
+def _stages_after_bytes(call: ast.Call) -> bool:
+    """True for a call whose staged operand is some record's ``after`` field."""
+    staged = _argument(call, "data", 1)
+    return isinstance(staged, ast.Attribute) and staged.attr == AFTER_FIELD
+
+
+def _prefix_argument(call: ast.Call) -> ast.expr | None:
+    """The ``prefix`` keyword argument of a staging call, when it has one."""
+    return next((keyword.value for keyword in call.keywords if keyword.arg == "prefix"), None)
 
 
 def _is_produced_rewrite_after(expr: ast.expr | None, bindings: dict[str, list[_Binding]]) -> bool:
     """True for ``<name>.after`` where ``<name>`` is bound once to a pending entry's rewrite."""
-    if not (isinstance(expr, ast.Attribute) and expr.attr == "after"):
+    if not (isinstance(expr, ast.Attribute) and expr.attr == AFTER_FIELD):
         return False
     if not isinstance(expr.value, ast.Name):
         return False
@@ -643,10 +726,44 @@ def _is_produced_rewrite_after(expr: ast.expr | None, bindings: dict[str, list[_
     return isinstance(binding.value, ast.Attribute) and binding.value.attr == "rewrite"
 
 
+def _enclosing_bindings(
+    trees: dict[str, ast.Module],
+    site: _Site,
+    cache: dict[tuple[str, str | None], dict[str, list[_Binding]]],
+) -> dict[str, list[_Binding]]:
+    """Every binding in the function enclosing a call site, empty outside any function."""
+    key = (site.module, site.function)
+    if key not in cache:
+        func = _function(trees[site.module], site.function) if site.function else None
+        cache[key] = _bindings(func) if func is not None else {}
+    return cache[key]
+
+
+def _after_image_staging_sites(trees: dict[str, ast.Module]) -> list[_Site]:
+    """Every call that stages an after image, read by staged operand and by prefix infix.
+
+    Both readings are needed. The prefix reading alone misses a site that stages after bytes
+    under a prefix it computed some other way; the operand reading alone misses a site that
+    stages after bytes it had already bound to an unrelated name.
+    """
+    cache: dict[tuple[str, str | None], dict[str, list[_Binding]]] = {}
+    sites: list[_Site] = []
+    for site in _call_sites(trees):
+        if _stages_after_bytes(site.call):
+            sites.append(site)
+            continue
+        prefix = _prefix_argument(site.call)
+        if prefix is not None and _mentions_after_infix(
+            prefix, _enclosing_bindings(trees, site, cache)
+        ):
+            sites.append(site)
+    return sites
+
+
 def _staging_violations(trees: dict[str, ast.Module]) -> list[str]:
     """The sole after-image staging site must stage the produced rewrite's own bytes."""
     expected = f"{TRANSACTION_MODULE}::{STAGING_FUNCTION}"
-    sites = [site for site in _call_sites(trees) if _has_after_image_prefix(site.call)]
+    sites = _after_image_staging_sites(trees)
     located = sorted(site.located for site in sites)
     if located != [expected]:
         return [_gate_msg(f"after-image staging sites are {located}, expected only {expected}")]
@@ -673,21 +790,41 @@ def _publication_reach_violations(trees: dict[str, ast.Module]) -> list[str]:
     check pins: a new module naming it at all is a new publication route and fails here instead
     of slipping past a sink audit that never looked at it.
 
+    Reaching it indirectly counts, and so does bypassing it. Each composite primitive in
+    ``COMPOSITE_PUBLISH_USERS`` stages and publishes one destination in a single call, so a
+    module can overwrite a reconcile destination through one of them without ever naming
+    ``replace_staged``; the descriptor-relative variant does not even call it. Each primitive's
+    current users publish their own artifacts rather than documents and are pinned per
+    primitive, so a new user of either route fails here too.
+
     The check reads every mention of the identifier, not just a ``from ... import`` of it. A
     module can reach the helper as ``from . import persistence`` followed by
     ``persistence.replace_staged(...)``, which no import-name scan would see.
+
+    ``persistence.py`` itself stays exempt from both this rule and the sink audit, so a forward
+    sink added inside it is outside the guard. Narrowing that exemption would fire on the
+    module's own correct internal use of the helper; AD-30 records the limit.
     """
     reaching = sorted(
         module
         for module, tree in trees.items()
-        if module not in PUBLICATION_OWNERS and _mentions_symbol(tree, PUBLISH_CALLEE)
+        if module not in PUBLICATION_OWNERS
+        and (
+            _mentions_symbol(tree, PUBLISH_CALLEE)
+            or any(
+                module not in users and _mentions_symbol(tree, callee)
+                for callee, users in COMPOSITE_PUBLISH_USERS.items()
+            )
+        )
     )
     if not reaching:
         return []
+    pinned = sorted(name for users in COMPOSITE_PUBLISH_USERS.values() for name in users)
     return [
         _gate_msg(
-            f"modules reaching {PUBLISH_CALLEE}() outside {sorted(PUBLICATION_OWNERS)} are "
-            f"{reaching}, expected none"
+            f"modules publishing through {PUBLISH_CALLEE}() or "
+            f"{sorted(COMPOSITE_PUBLISH_USERS)}, outside {sorted(PUBLICATION_OWNERS)} and the "
+            f"pinned users {pinned}, are {reaching}, expected none"
         )
     ]
 
@@ -735,6 +872,11 @@ def _publication_violations(trees: dict[str, ast.Module]) -> list[str]:
 def _provenance_violations(sources: dict[str, str]) -> list[str]:
     """Every way the given production source lets bytes reach a document without the gate."""
     trees = {module: ast.parse(source) for module, source in sources.items()}
+    # Every rule below indexes these two modules directly, so report a move as the guard
+    # diagnostic it is instead of letting the suite die on a bare KeyError.
+    missing = sorted({RECONCILE_MODULE, TRANSACTION_MODULE} - trees.keys())
+    if missing:
+        return [_gate_msg(f"the modules this guard reads, {missing}, are no longer where it looks")]
     return [
         *_rewrite_producer_violations(trees),
         *_gated_text_violations(trees),
@@ -811,6 +953,48 @@ def build(path: Path, before: bytes, data: bytes) -> R:
     return R(path, before, data, frozenset())
 '''
 
+INDIRECT_INFIX_STAGING_SITE = '''
+
+def _rogue_stage_indirect(destination: Path, data: bytes) -> Path:
+    """Stage a second after image behind a locally bound infix."""
+    infix = RECONCILE_AFTER_IMAGE_INFIX
+    return stage_bytes(destination, data, prefix=f".{destination.name}{infix}")
+'''
+
+COMPOSITE_PUBLISHER_MODULE = '''"""A module publishing through the composite primitive."""
+
+from pathlib import Path
+
+from .persistence import atomic_replace_bytes
+
+
+def publish(destination: Path, data: bytes) -> None:
+    """Publish arbitrary bytes over a reconcile destination without naming the helper."""
+    atomic_replace_bytes(destination, data, prefix=".rogue")
+'''
+
+DESCRIPTOR_PUBLISHER_MODULE = '''"""A module publishing at a descriptor-relative destination."""
+
+from .persistence import atomic_replace_bytes_at
+
+
+def publish(directory_fd: int, destination_name: str, data: bytes) -> None:
+    """Publish arbitrary bytes over a reconcile destination without reaching the helper."""
+    atomic_replace_bytes_at(directory_fd, destination_name, data, prefix=".rogue")
+'''
+
+FIELD_COPY_PRODUCER_MODULE = '''"""A producer that copies a Rewrite instead of building one."""
+
+import dataclasses
+
+from .reconcile import Rewrite
+
+
+def corrupt(rewrite: Rewrite, data: bytes) -> Rewrite:
+    """Return a Rewrite carrying bytes the reparse gate never saw."""
+    return dataclasses.replace(rewrite, after=data)
+'''
+
 
 def _patched(sources: dict[str, str], module: str, old: str, new: str) -> dict[str, str]:
     """Sources with one anchored edit applied, asserting the anchor still exists."""
@@ -824,16 +1008,24 @@ def _extended(sources: dict[str, str], module: str, addition: str) -> dict[str, 
     return {**sources, module: sources[module] + addition}
 
 
+@cache
 def _positive_controls() -> dict[str, dict[str, str]]:
     """Each named control bends production source into one distinct bypass of the gate.
 
     The first seven cover the modes the issue enumerated; the second-forward-publication mode
-    is exercised both inside the transaction module and from a fresh module. The last five were
+    is exercised both inside the transaction module and from a fresh module. The next five were
     found by adversarial review of this guard and each was reproduced against it before being
     closed: a gate nested in a conditional, a line-ending restoration that corrupts through its
     replacement operand, unverified ``raw_meta`` reattached to the envelope, the publication
     helper reached through its module rather than by name, and a producer hidden behind an
-    import alias.
+    import alias. The last five came from a second adversarial pass, likewise reproduced first:
+    literal text spliced into the envelope f-string, an after image staged behind a locally
+    bound infix, a document published through ``atomic_replace_bytes`` without ever naming the
+    publication helper, the same through the descriptor-relative ``atomic_replace_bytes_at``,
+    which does not even call that helper, and a Rewrite minted by ``dataclasses.replace`` rather
+    than constructed.
+
+    Cached alongside the source read so the parametrized run builds this mapping once.
     """
     sources = _production_sources()
     return {
@@ -894,6 +1086,27 @@ def _positive_controls() -> dict[str, dict[str, str]]:
         "rewrite-producer-hidden-behind-an-alias": {
             **sources,
             "rogue_aliased_producer.py": ALIASED_PRODUCER_MODULE,
+        },
+        "literal-text-spliced-into-the-envelope": _patched(
+            sources,
+            RECONCILE_MODULE,
+            'f"{parts.prefix}{parts.open_fence}\\n{new_meta}"',
+            'f"{parts.prefix}{parts.open_fence}\\nINJECTED{new_meta}"',
+        ),
+        "after-image-staged-behind-a-bound-infix": _extended(
+            sources, TRANSACTION_MODULE, INDIRECT_INFIX_STAGING_SITE
+        ),
+        "document-published-through-the-composite-primitive": {
+            **sources,
+            "rogue_composite_publisher.py": COMPOSITE_PUBLISHER_MODULE,
+        },
+        "document-published-through-the-descriptor-relative-primitive": {
+            **sources,
+            "rogue_descriptor_publisher.py": DESCRIPTOR_PUBLISHER_MODULE,
+        },
+        "rewrite-minted-by-a-dataclass-field-copy": {
+            **sources,
+            "rogue_field_copy_producer.py": FIELD_COPY_PRODUCER_MODULE,
         },
     }
 
