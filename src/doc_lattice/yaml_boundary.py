@@ -42,8 +42,9 @@ class SafeYamlLoader:
 
     Reusing one loader avoids rebuilding the parser per document, but a reused instance
     carries `YAML.version` across loads, so a `%YAML` directive in one document would
-    otherwise steer the parse of the next. `load` resets it every time, which is what makes
-    a reused instance behave like a fresh one for the values these boundaries consume.
+    otherwise steer the parse of the next. `load` discards the underlying loader whenever a
+    directive touched it, which is what makes a reused instance behave like a fresh one for
+    the values these boundaries consume.
     """
 
     def __init__(self) -> None:
@@ -65,8 +66,16 @@ class SafeYamlLoader:
                 constructor can also raise the builtin whose type rejected a tagged scalar,
                 so callers catch `YAML_LOAD_ERRORS` rather than this one type.
         """
-        # A YAML directive can update the reusable parser's version even when parsing fails.
-        # Reset it so each document starts with default YAML semantics, matching a fresh
-        # safe loader.
-        self._yaml.version = None
+        # A YAML directive can update the reusable parser's version even when parsing fails,
+        # and a stale version steers the next document's resolution. Clearing `YAML.version`
+        # is not enough on its own across the declared `ruamel.yaml` range: 0.18 builds the
+        # versioned resolver once, on first access, and never rebuilds it, so the previous
+        # document's 1.1 resolution survives the reset there and a later `on:` reads back as
+        # `True`. 0.19 rebuilds the resolver when the version no longer matches. Discarding
+        # the loader instead is correct under both, and it costs a construction only for the
+        # rare document that actually carried a directive. `version` stays None under the
+        # optional `ruamel.yaml.clib` parser, which skips directive state entirely (AD-26),
+        # so this never fires there and nothing leaks either.
+        if self._yaml.version is not None:
+            self._yaml = YAML(typ="safe")
         return self._yaml.load(text)

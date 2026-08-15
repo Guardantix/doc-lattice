@@ -47,6 +47,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   constructor raises whichever builtin the target type rejected the value with, and only the
   `ValueError` that `!!int` and `!!float` raise was handled, while the `KeyError` from `!!bool`
   was not. Duplicate-key and reused-anchor workflows keep their own more specific messages.
+- A `%YAML 1.1` directive in one document's frontmatter no longer changes how the documents read
+  after it in the same run. The shared safe loader cleared `YAML.version` between loads, which is
+  enough on `ruamel.yaml` 0.19 but not on 0.18, where the versioned resolver is built once and
+  never rebuilt; the declared range admits both. On 0.18 without the optional `ruamel.yaml.clib`
+  accelerator that left every later document resolving under 1.1, so an unquoted `on`, `yes`, or
+  `no` became a boolean and a leading-zero number became octal, silently and only for documents
+  parsed after the one carrying the directive. The loader is now discarded outright whenever a
+  directive touched it, which is version independent. The `yaml-compatibility` CI leg gained the
+  accelerator-absent half of its matrix, since the C parser ignores directives entirely and so
+  hid this on both of the ruamel versions it tested.
 
 ## [4.1.0] - 2026-08-14
 

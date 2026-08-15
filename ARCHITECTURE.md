@@ -468,10 +468,14 @@ mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the res
 Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
 than becoming one cross-module instance whose document state a second boundary could observe. A
 shared instance does retain state across loads: `YAML.version`, the piece that steers a later
-parse, is reset explicitly before each load, and the `DocInfo` record each load appends to
-`doc_infos` is write-only metadata the loader never consults, one small record per document for
-the life of the process, with no effect on any later parse; the cross-document
-directive-leakage tests pin that a directive in one document does not steer the next.
+parse, is cleared before each load by discarding the underlying loader whenever a directive set
+it, since clearing the attribute alone does not rebuild the versioned resolver at the declared
+floor and would leave the previous document's version in force there. The `DocInfo` record each
+load appends to `doc_infos` is write-only metadata the loader never consults, one small record
+per document for the life of the process, with no effect on any later parse; the cross-document
+directive-leakage tests pin that a directive in one document does not steer the next, and the
+compatibility leg runs them with and without the accelerator, since the C parser ignores
+directives outright and would otherwise pass them vacuously.
 Every rewrite is reparsed and compared against the intended document before it is staged, so a
 mis-measured span is refused rather than published.
 **Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source

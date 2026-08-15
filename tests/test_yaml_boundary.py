@@ -43,6 +43,24 @@ def test_load_resets_the_yaml_version_after_a_failed_parse():
     assert loader.load("key: on\n") == {"key": "on"}
 
 
+def test_load_reuses_the_underlying_loader_until_a_directive_touches_it():
+    # The reset works by discarding the underlying loader, because clearing `YAML.version`
+    # alone does not rebuild the versioned resolver on every ruamel release the project
+    # declares. That has to stay the rare path: an ordinary document must not pay for a
+    # parser construction, which is the whole reason these boundaries keep one instance.
+    loader = SafeYamlLoader()
+    original = loader._yaml
+
+    loader.load("key: on\n")
+    loader.load("other: 1\n")
+    assert loader._yaml is original
+
+    loader.load("%YAML 1.1\n---\nkey: on\n")
+    directive_recorded = original.version is not None  # clib never records the directive.
+    loader.load("key: on\n")
+    assert (loader._yaml is not original) is directive_recorded
+
+
 def test_separate_loaders_do_not_share_version_state():
     # Each boundary builds its own instance precisely so one module's directive cannot steer
     # another module's parse. Asserted the same one-sided way, and for the same reason, as
