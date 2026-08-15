@@ -1,0 +1,1650 @@
+"""Round-trip fuzz gate for the reconcile frontmatter rewriter's declared subset (AD-31).
+
+The properties here generate documents from the AD-31 layer 2 matrix by writable position and
+by load phase, rather than from a flat bag of YAML features, because support is conditional on
+both. Family 1 generates only the strict tracked-document column plus the layer 2a envelope and
+demands a correct rewrite. Family 2 generates the layer 5 outcomes at the exact scope each one
+is guaranteed at, and accepts a safe outcome union for the defensive reread column. Family 3
+pins the two ordered-map behaviors AD-31 assigns to this gate as current bounded behavior.
+
+Every expectation is computed from the generated model, never from production planning code, so
+a rewriter defect cannot make its own oracle agree with it. No property asserts anything
+stricter than AD-31: the mutation footprint is checked against the allowances the model predicts
+for the shape it generated, never against a universal one-line diff, and syntax outside layer 2
+is never required to be refused.
+"""
+
+from dataclasses import dataclass, replace
+from datetime import date
+from pathlib import Path
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from doc_lattice.error_types import ConfigError, ProjectError, UnreadableDocError
+from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
+from doc_lattice.hashing import normalize_newlines
+from doc_lattice.reconcile import apply_reconcile, plan_rewrites
+from doc_lattice.yaml_boundary import SafeYamlLoader
+
+DOC = Path("doc.md")
+BOM = chr(0xFEFF)
+
+# One named settings object per this file, applied as a decorator to each property. A registered
+# profile would be suite-global and would retune the Hypothesis tests other modules already own.
+# derandomize keeps CI reproducible without a fixed seed, and the deadline is off because one
+# example parses YAML several times.
+FUZZ_SETTINGS = settings(max_examples=300, derandomize=True, deadline=None)
+
+
+# --------------------------------------------------------------------------------------------
+# The typed syntax model: spellings by writable position, and the documents built from them.
+# --------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RefForm:
+    """One supported spelling of an entry's ``ref`` member and the layout it leaves behind.
+
+    Attributes:
+        name: Identifier used in failure messages.
+        templates: Entry lines up to and including ``ref``, the first opening with ``- ``.
+        key_indent: Column the entry's own keys sit at, relative to the sequence item.
+        split: Whether the ref is written across two lines, which makes its value the two
+            halves joined by a space.
+        note: Whether the spelling carries a trailing comment.
+    """
+
+    name: str
+    templates: tuple[str, ...]
+    key_indent: int
+    split: bool
+    note: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SeenForm:
+    """One supported spelling of an entry's ``seen`` member.
+
+    Attributes:
+        name: Identifier used in failure messages.
+        templates: Member lines, the first at the entry's key column and every continuation
+            line already carrying the extra indentation it needs.
+        value: How the loaded value relates to the written text: ``"old"``, ``"old-newline"``
+            for a clipped block scalar, or ``"null"``.
+        present: Whether a ``seen`` member is written at all.
+        anchored: Whether the member anchors its value, which makes relocation possible.
+        note: Whether the spelling carries a comment.
+    """
+
+    name: str
+    templates: tuple[str, ...]
+    value: str
+    present: bool
+    anchored: bool
+    note: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WholeForm:
+    """One supported spelling of a whole entry, written as its own lines or inline.
+
+    Attributes:
+        name: Identifier used in failure messages.
+        templates: Entry lines for a block context, or a single inline spelling when
+            ``inline`` is set.
+        inline: The one-line flow spelling, or None for a block-only form.
+        value: How the loaded ``seen`` relates to the written text, as for ``SeenForm``.
+        present: Whether a ``seen`` member is written at all.
+        anchored: Whether the entry anchors its ``seen`` value.
+    """
+
+    name: str
+    templates: tuple[str, ...]
+    inline: str | None
+    value: str
+    present: bool
+    anchored: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Entry:
+    """One generated ``derives_from`` entry: its source, and what the loader makes of it.
+
+    Attributes:
+        name: The spellings this entry combines, for failure messages.
+        lines: Block-context source lines, the first opening with ``- ``.
+        inline: The flow spelling when the entry has one, for a flow-carrier sequence.
+        ref: The ref string the entry loads as.
+        seen: The ``seen`` value the entry loads as.
+        present: Whether the entry carries a ``seen`` member before any rewrite.
+        anchor: The anchor name written on the ``seen`` value, when it carries one.
+        notes: Comment texts written inside the entry.
+        extras: Members beyond ``ref`` and ``seen``, which only the fresh reread tolerates.
+        marker: The opening of the entry's source, up to the point an allowed edit may reach.
+            Layer 3 keeps the collection style the author wrote, so this text has to come back
+            verbatim. It is None for an entry whose whole site layer 4 may replace, which is
+            what an alias site expansion does.
+    """
+
+    name: str
+    lines: tuple[str, ...]
+    inline: str | None
+    ref: str
+    seen: object
+    present: bool
+    anchor: str | None
+    notes: tuple[str, ...]
+    extras: tuple[tuple[str, object], ...] = ()
+    marker: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Envelope:
+    """The lexical envelope of layer 2a, chosen independently of the frontmatter structure.
+
+    Attributes:
+        boms: Length of the byte-order-mark run before the opening fence.
+        open_fence: The opening fence line as written, its surrounding space included.
+        close_fence: The closing fence line as written.
+        trailing_newline: Whether a newline follows the closing fence.
+        body: Everything after that newline.
+        ending: ``"\\n"``, ``"\\r\\n"``, ``"\\r"``, or ``"mixed"``.
+        directive: The ``%YAML`` version the block declares, or None.
+    """
+
+    boms: int
+    open_fence: str
+    close_fence: str
+    trailing_newline: bool
+    body: str
+    ending: str
+    directive: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Document:
+    """A generated document, its independent semantics, and the footprint a rewrite may take.
+
+    Attributes:
+        meta_lines: The frontmatter block between the fences, one string per line.
+        entries: The generated entries, in ``derives_from`` order.
+        spans: Half-open ``meta_lines`` ranges each entry occupies.
+        root: The root members other than ``derives_from``, as the loader builds them.
+        key_order: The root key order the reload has to show, or None when a merge makes the
+            order a loader detail rather than a preservation claim.
+        envelope: The layer 2a choices this document was rendered with.
+        notes: Every comment text written in the frontmatter.
+        mirrors: Root keys the loader gives the very same list object as ``derives_from``,
+            which an alias spelling produces and which therefore follow every update.
+    """
+
+    meta_lines: tuple[str, ...]
+    entries: tuple[Entry, ...]
+    spans: tuple[tuple[int, int], ...]
+    root: dict[str, object]
+    key_order: tuple[str, ...] | None
+    envelope: Envelope
+    notes: tuple[str, ...]
+    mirrors: tuple[str, ...] = ()
+
+    def render(self) -> str:
+        """Return the exact document text, envelope and line ending included."""
+        env = self.envelope
+        meta = "".join(f"{line}\n" for line in self.meta_lines)
+        text = f"{env.open_fence}\n{meta}{env.close_fence}"
+        if env.trailing_newline:
+            text = f"{text}\n{env.body}"
+        return _with_ending(BOM * env.boms + text, env.ending)
+
+    def applied(self, updates: dict[str, str]) -> frozenset[str]:
+        """Return the refs whose ``seen`` the requested updates actually change."""
+        return frozenset(
+            entry.ref
+            for entry in self.entries
+            if entry.ref in updates and updates[entry.ref] != entry.seen
+        )
+
+    def expected(self, updates: dict[str, str]) -> dict[str, object]:
+        """Return the mapping the rewritten frontmatter has to load as."""
+        entries: list[dict[str, object]] = []
+        for entry in self.entries:
+            seen, present = entry.seen, entry.present
+            planned = updates.get(entry.ref)
+            if planned is not None and planned != seen:
+                seen, present = planned, True
+            item: dict[str, object] = {"ref": entry.ref}
+            if present:
+                item["seen"] = seen
+            item.update(dict(entry.extras))
+            entries.append(item)
+        expected = {**self.root, "derives_from": entries}
+        for key in self.mirrors:
+            expected[key] = entries
+        return expected
+
+    def allowed_lines(self, updates: dict[str, str]) -> set[int]:
+        """Return the ``meta_lines`` indices a rewrite of ``updates`` may touch.
+
+        The allowance is the layer 4 footprint for this shape: the source of every entry the
+        run targets, plus every alias site an anchored ``seen`` being replaced may be
+        relocated onto. It is deliberately a superset within those regions, since layer 4
+        permits several edits there and pinning which one landed would assert more than
+        AD-31 does.
+        """
+        applied = self.applied(updates)
+        allowed: set[int] = set()
+        for entry, (start, stop) in zip(self.entries, self.spans, strict=True):
+            if entry.ref not in applied:
+                continue
+            allowed.update(range(start, stop))
+            if entry.anchor is None:
+                continue
+            alias = f"*{entry.anchor}"
+            allowed.update(index for index, line in enumerate(self.meta_lines) if alias in line)
+        return allowed
+
+
+# --------------------------------------------------------------------------------------------
+# Layer 2 spellings, one table per writable position.
+# --------------------------------------------------------------------------------------------
+
+REF_FORMS = (
+    RefForm("plain", ("- ref: {ref}",), 2, False, False),
+    RefForm("explicit-pair", ("- ? ref", "  : {ref}"), 2, False, False),
+    RefForm("trailing-comment", ("- ref: {ref} # note{index}",), 2, False, True),
+    RefForm("block-scalar", ("- ref: |-", "    {ref}"), 2, False, False),
+    RefForm("multi-line-double-quoted", ('- ref: "{head}', '    {tail}"'), 2, True, False),
+    RefForm("multi-line-plain", ("- ref: {head}", "    {tail}"), 2, True, False),
+    RefForm("entry-anchor", ("- &entry{index}", "    ref: {ref}"), 4, False, False),
+    RefForm("entry-tag", ("- !!map", "    ref: {ref}"), 4, False, False),
+    RefForm("entry-anchor-and-tag", ("- &entry{index} !!map", "    ref: {ref}"), 4, False, False),
+)
+
+SEEN_FORMS = (
+    SeenForm("absent", (), "null", False, False, False),
+    SeenForm("plain", ("seen: {old}",), "old", True, False, False),
+    SeenForm("single-quoted", ("seen: '{old}'",), "old", True, False, False),
+    SeenForm("double-quoted", ('seen: "{old}"',), "old", True, False, False),
+    SeenForm("explicit-null", ("seen: null",), "null", True, False, False),
+    SeenForm("tilde-null", ("seen: ~",), "null", True, False, False),
+    SeenForm("empty", ("seen:",), "null", True, False, False),
+    SeenForm("empty-with-comment", ("seen: # note{index}",), "null", True, False, True),
+    SeenForm("literal-strip", ("seen: |-", "  {old}"), "old", True, False, False),
+    SeenForm("literal-clip", ("seen: |", "  {old}"), "old-newline", True, False, False),
+    SeenForm("folded-strip", ("seen: >-", "  {old}"), "old", True, False, False),
+    SeenForm("literal-indent-indicator", ("seen: |2-", "  {old}"), "old", True, False, False),
+    SeenForm(
+        "literal-header-comment", ("seen: |- # note{index}", "  {old}"), "old", True, False, True
+    ),
+    SeenForm("explicit-pair", ("? seen", ": {old}"), "old", True, False, False),
+    SeenForm("explicit-key-no-value", ("? seen",), "null", True, False, False),
+    SeenForm("anchored", ("seen: &{anchor} {old}",), "old", True, True, False),
+    SeenForm("tagged", ("seen: !!str {old}",), "old", True, False, False),
+    SeenForm("anchor-then-tag", ("seen: &{anchor} !!str {old}",), "old", True, True, False),
+    SeenForm("tag-then-anchor", ("seen: !!str &{anchor} {old}",), "old", True, True, False),
+    SeenForm(
+        "anchor-with-comment-above-value",
+        ("seen: &{anchor} # note{index}", "  {old}"),
+        "old",
+        True,
+        True,
+        True,
+    ),
+    SeenForm("tag-on-its-own-line", ("seen:", "  !!str {old}"), "old", True, False, False),
+    SeenForm(
+        "both-properties-on-their-own-lines",
+        ("seen: &{anchor} # note{index}", "  !!str", "  {old}"),
+        "old",
+        True,
+        True,
+        True,
+    ),
+)
+
+WHOLE_FORMS = (
+    WholeForm(
+        "omap-block", ("- !!omap", "  - ref: {ref}", "  - seen: {old}"), None, "old", True, False
+    ),
+    WholeForm("omap-block-absent", ("- !!omap", "  - ref: {ref}"), None, "null", False, False),
+    WholeForm(
+        "omap-block-explicit-key",
+        ("- !!omap", "  - ref: {ref}", "  - ? seen"),
+        None,
+        "null",
+        True,
+        False,
+    ),
+    WholeForm(
+        "omap-block-anchored",
+        ("- !!omap", "  - ref: {ref}", "  - seen: &{anchor} {old}"),
+        None,
+        "old",
+        True,
+        True,
+    ),
+    WholeForm("flow-plain", (), "{{ref: {ref}, seen: {old}}}", "old", True, False),
+    WholeForm("flow-absent", (), "{{ref: {ref}}}", "null", False, False),
+    WholeForm("flow-trailing-comma", (), "{{ref: {ref}, }}", "null", False, False),
+    WholeForm("flow-empty-seen", (), "{{ref: {ref}, seen: }}", "null", True, False),
+    WholeForm("flow-explicit-key", (), "{{ref: {ref}, ? seen}}", "null", True, False),
+    WholeForm("flow-double-quoted", (), '{{ref: {ref}, seen: "{old}"}}', "old", True, False),
+    WholeForm("flow-tagged", (), "{{ref: {ref}, seen: !!str {old}}}", "old", True, False),
+    WholeForm("flow-anchored", (), "{{ref: {ref}, seen: &{anchor} {old}}}", "old", True, True),
+    WholeForm("flow-omap", (), "!!omap [{{ref: {ref}}}, {{seen: {old}}}]", "old", True, False),
+    WholeForm("flow-omap-absent", (), "!!omap [{{ref: {ref}}}]", "null", False, False),
+)
+
+FLOW_FORMS = tuple(form for form in WHOLE_FORMS if form.inline is not None)
+
+ROOT_EXTRAS = (
+    ("title", ("title: Document {index}",), "Document {index}"),
+    ("layer", ("layer: design",), "design"),
+    ("authority", ("authority: derived",), "derived"),
+    ("tickets", ("tickets:", "  - GTX-1"), ["GTX-1"]),
+    ("tickets", ("tickets: [GTX-1, GTX-2]",), ["GTX-1", "GTX-2"]),
+)
+
+
+# --------------------------------------------------------------------------------------------
+# Building entries and documents from the tables.
+# --------------------------------------------------------------------------------------------
+
+
+def _fields(index: int) -> dict[str, str]:
+    """Return the per-entry substitutions every spelling template is rendered with."""
+    head = f"up-{index}#s{index}"
+    return {
+        "index": str(index),
+        "ref": head,
+        "head": head,
+        "tail": f"part{index}",
+        "old": f"old{index:04d}",
+        "anchor": f"seen{index}",
+        "note": f"note{index}",
+    }
+
+
+def _seen_value(kind: str, old: str) -> str | None:
+    """Return the value a ``seen`` spelling of ``kind`` loads as."""
+    if kind == "null":
+        return None
+    return f"{old}\n" if kind == "old-newline" else old
+
+
+def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry:
+    """Build an entry from one ``ref`` spelling and one ``seen`` spelling."""
+    fields = _fields(index)
+    pad = " " * ref_form.key_indent
+    lines = [template.format(**fields) for template in ref_form.templates]
+    lines.extend(f"{pad}{template.format(**fields)}" for template in seen_form.templates)
+    ref = f"{fields['head']} {fields['tail']}" if ref_form.split else fields["ref"]
+    notes = [f"# {fields['note']}"] if ref_form.note or seen_form.note else []
+    return Entry(
+        f"{ref_form.name}+{seen_form.name}",
+        tuple(lines),
+        None,
+        ref,
+        _seen_value(seen_form.value, fields["old"]),
+        seen_form.present,
+        fields["anchor"] if seen_form.anchored else None,
+        tuple(notes),
+        (),
+        _style_marker(lines[0]),
+    )
+
+
+def _style_marker(first_line: str) -> str | None:
+    """Return the opening of an entry's source that no allowed edit may restyle.
+
+    The run stops at the first place an edit can reach, which is the ``seen`` member or the
+    bracket a flow collection closes on, since an appended member is written just inside it.
+    The sequence dash is dropped so one marker serves an entry written as a block sequence
+    item and the same entry written inside a flow sequence.
+    """
+    body = first_line.removeprefix("- ")
+    cut = min(
+        (index for index in (body.find("seen"), body.find("}"), body.find("]")) if index != -1),
+        default=len(body),
+    )
+    return body[:cut] or None
+
+
+def _whole_entry(index: int, form: WholeForm) -> Entry:
+    """Build an entry written as one indivisible spelling, block or flow."""
+    fields = _fields(index)
+    lines = tuple(template.format(**fields) for template in form.templates)
+    inline = None if form.inline is None else form.inline.format(**fields)
+    if inline is not None:
+        lines = (f"- {inline}",)
+    return Entry(
+        form.name,
+        lines,
+        inline,
+        fields["ref"],
+        _seen_value(form.value, fields["old"]),
+        form.present,
+        fields["anchor"] if form.anchored else None,
+        (),
+        (),
+        _style_marker(lines[0]),
+    )
+
+
+def _indent(lines: tuple[str, ...], pad: int) -> list[str]:
+    """Return ``lines`` shifted right by ``pad`` columns, leaving empty lines empty."""
+    return [f"{' ' * pad}{line}" if line else line for line in lines]
+
+
+def _block_sequence(
+    entries: tuple[Entry, ...], pad: int
+) -> tuple[list[str], list[tuple[int, int]]]:
+    """Render entries as a block sequence, returning the lines and each entry's line span."""
+    lines: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for entry in entries:
+        start = len(lines)
+        lines.extend(_indent(entry.lines, pad))
+        spans.append((start, len(lines)))
+    return lines, spans
+
+
+def _member_lines(name: str, entries: tuple[Entry, ...], carrier: str, pad: int) -> list[str]:
+    """Render the ``derives_from`` member in the requested carrier shape."""
+    if carrier == "flow":
+        inlines = ", ".join(entry.inline or "" for entry in entries)
+        return [f"{name}: [{inlines}]"]
+    body, _ = _block_sequence(entries, pad)
+    return [f"{name}:", *body]
+
+
+def _root_key_value(extra: tuple[str, tuple[str, ...], object], index: int) -> object:
+    """Return the loaded value of one optional root member."""
+    value = extra[2]
+    return value.format(index=index) if isinstance(value, str) else value
+
+
+# --------------------------------------------------------------------------------------------
+# Rendering and reading documents.
+# --------------------------------------------------------------------------------------------
+
+
+def _with_ending(text: str, ending: str) -> str:
+    """Return ``text`` rewritten in the requested document line ending."""
+    if ending == "mixed":
+        return text.replace("\n", "\r\n", 1)
+    return text if ending == "\n" else text.replace("\n", ending)
+
+
+def _document_ending(text: str) -> str:
+    """Return the ending a document is written in, mirroring the rewriter's own rule."""
+    if "\r\n" in text and not set(text.replace("\r\n", "")) & {"\r", "\n"}:
+        return "\r\n"
+    if "\r" in text and "\n" not in text:
+        return "\r"
+    return "mixed" if "\r" in text else "\n"
+
+
+def _parts(text: str):
+    """Split a document into its frontmatter pieces after normalizing its line endings."""
+    parts = split_frontmatter_parts(normalize_newlines(text), DOC)
+    assert parts is not None
+    return parts
+
+
+def _meta_lines(text: str) -> list[str]:
+    """Return the frontmatter block of a document as a list of lines."""
+    raw_meta = _parts(text).raw_meta
+    return raw_meta.split("\n")[:-1] if raw_meta else []
+
+
+def _reload(text: str) -> object:
+    """Reload a document's frontmatter through the project's safe loader."""
+    return SafeYamlLoader().load(_parts(text).raw_meta)
+
+
+def _rewrite_bytes(text: str, updates: dict[str, str]):
+    """Drive the production planner over one in-memory document."""
+    before = text.encode("utf-8")
+    return plan_rewrites({DOC: updates}, lambda _path: before)
+
+
+# --------------------------------------------------------------------------------------------
+# Assertions shared by the properties.
+# --------------------------------------------------------------------------------------------
+
+
+def _assert_strict_tracked(text: str) -> None:
+    """Assert the real strict load classifies this document as a tracked node.
+
+    A failure here is a generator bug rather than a rewriter one: family 1 declares that it
+    generates only the strict tracked-document column of layer 2, and this is the machine
+    check of that claim.
+    """
+    parts = split_frontmatter_parts(normalize_newlines(text), DOC)
+    assert parts is not None, "family 1 document has no frontmatter block"
+    assert parse_meta(parts.raw_meta, DOC).disposition == "tracked"
+
+
+def _find_run(haystack: list[str], needle: tuple[str, ...], start: int) -> int | None:
+    """Return the first index at or after ``start`` where ``needle`` appears in ``haystack``."""
+    width = len(needle)
+    for index in range(start, len(haystack) - width + 1):
+        if tuple(haystack[index : index + width]) == needle:
+            return index
+    return None
+
+
+def _unallowed_runs(lines: list[str], allowed: set[int]) -> list[tuple[int, tuple[str, ...]]]:
+    """Group the lines outside the allowed footprint into contiguous runs."""
+    runs: list[tuple[int, tuple[str, ...]]] = []
+    current: list[str] = []
+    start = 0
+    for index, line in enumerate(lines):
+        if index in allowed:
+            if current:
+                runs.append((start, tuple(current)))
+                current = []
+            continue
+        if not current:
+            start = index
+        current.append(line)
+    if current:
+        runs.append((start, tuple(current)))
+    return runs
+
+
+def _assert_footprint_confined(before: list[str], after: list[str], allowed: set[int]) -> None:
+    """Assert every line outside the predicted footprint survives, in order and unchanged.
+
+    Nothing is asserted about the allowed regions themselves: layer 4 permits several
+    different edits there, and the semantic oracle is what decides whether the right one
+    landed.
+    """
+    position = 0
+    for start, run in _unallowed_runs(before, allowed):
+        if start == 0:
+            assert tuple(after[: len(run)]) == run, f"leading lines changed: {run!r}"
+            position = len(run)
+            continue
+        found = _find_run(after, run, position)
+        assert found is not None, f"lines outside the allowed footprint changed: {run!r}"
+        position = found + len(run)
+    if before and (len(before) - 1) not in allowed:
+        assert position == len(after), "content changed after the last allowed line"
+
+
+def _assert_envelope_preserved(document: Document, before: str, after: str) -> None:
+    """Assert layer 3: the envelope, comments, key order and line ending come back as read."""
+    env = document.envelope
+    old, new = _parts(before), _parts(after)
+    assert new.prefix == old.prefix == BOM * env.boms
+    assert new.open_fence == old.open_fence
+    assert new.close_fence == old.close_fence
+    assert new.close_fence_newline == old.close_fence_newline
+    assert new.body == old.body
+    expected_ending = "\n" if env.ending == "mixed" else env.ending
+    assert _document_ending(after) == expected_ending
+    if env.directive is not None:
+        assert f"%YAML {env.directive}" in new.raw_meta
+        assert "--- !!map" in new.raw_meta
+    for note in document.notes:
+        assert note in new.raw_meta, f"comment {note!r} was dropped"
+
+
+def _assert_styles_preserved(document: Document, after: str) -> None:
+    """Assert layer 3 collection style: an entry comes back written the way it was read."""
+    raw_meta = _parts(after).raw_meta
+    for entry in document.entries:
+        if entry.marker is not None:
+            assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
+
+
+def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
+    """Assert a layer 2 document rewrites correctly, preserving layer 3 and confining layer 4."""
+    text = document.render()
+    _assert_strict_tracked(text)
+    expected_applied = document.applied(updates)
+    assert expected_applied, "the generator must force at least one applicable update"
+
+    rewrites = _rewrite_bytes(text, updates)
+
+    assert len(rewrites) == 1
+    after = rewrites[0].after.decode("utf-8")
+    assert rewrites[0].applied == expected_applied
+    assert _reload(after) == document.expected(updates)
+    _assert_envelope_preserved(document, text, after)
+    _assert_styles_preserved(document, after)
+    _assert_footprint_confined(
+        _meta_lines(text), _meta_lines(after), document.allowed_lines(updates)
+    )
+    if document.key_order is not None:
+        reloaded = _reload(after)
+        assert isinstance(reloaded, dict)
+        assert tuple(reloaded) == document.key_order
+
+
+# --------------------------------------------------------------------------------------------
+# Strategies.
+# --------------------------------------------------------------------------------------------
+
+BODIES = ("", "body\n", "prose\n---\nnot frontmatter\n", "# Heading\n\ntext\n")
+FENCES = ("---", " ---", "--- ", "  ---  ")
+
+
+@st.composite
+def envelopes(draw, *, endings=("\n",), directives=(None,)) -> Envelope:
+    """Draw one layer 2a envelope, independent of the frontmatter it wraps."""
+    trailing = draw(st.booleans())
+    return Envelope(
+        draw(st.integers(min_value=0, max_value=2)),
+        draw(st.sampled_from(FENCES)),
+        draw(st.sampled_from(FENCES)),
+        trailing,
+        draw(st.sampled_from(BODIES)) if trailing else "",
+        draw(st.sampled_from(endings)),
+        draw(st.sampled_from(directives)),
+    )
+
+
+@st.composite
+def block_entries(draw, index: int) -> Entry:
+    """Draw one entry written in a shape a block sequence can carry."""
+    if draw(st.booleans()):
+        return _whole_entry(index, draw(st.sampled_from(WHOLE_FORMS)))
+    return _combined_entry(
+        index, draw(st.sampled_from(REF_FORMS)), draw(st.sampled_from(SEEN_FORMS))
+    )
+
+
+@st.composite
+def flow_entries(draw, index: int) -> Entry:
+    """Draw one entry written in a shape a flow sequence can carry."""
+    return _whole_entry(index, draw(st.sampled_from(FLOW_FORMS)))
+
+
+def _updates(draw, entries: tuple[Entry, ...]) -> dict[str, str]:
+    """Draw the planned updates, always including one that actually applies."""
+    updates = {entries[0].ref: f"new{0:04x}beef"}
+    for index, entry in enumerate(entries[1:], start=1):
+        if draw(st.booleans()):
+            updates[entry.ref] = f"new{index:04x}beef"
+    return updates
+
+
+def _root_members(draw, index_base: int) -> list[tuple[str, list[str], object]]:
+    """Draw the optional root members, each as its key, its source lines, and its value."""
+    members: list[tuple[str, list[str], object]] = []
+    chosen = draw(st.lists(st.sampled_from(ROOT_EXTRAS), max_size=2, unique_by=lambda e: e[0]))
+    for extra in chosen:
+        lines = [line.format(index=index_base) for line in extra[1]]
+        members.append((extra[0], lines, _root_key_value(extra, index_base)))
+    return members
+
+
+@st.composite
+def block_root_documents(draw) -> Document:
+    """Draw a document whose root is a block mapping, the commonest supported shape."""
+    count = draw(st.integers(min_value=1, max_value=3))
+    entries = tuple(draw(block_entries(index)) for index in range(count))
+    carrier = "flow" if all(entry.inline for entry in entries) and draw(st.booleans()) else "block"
+    pad = draw(st.sampled_from((0, 2)))
+    id_lines = draw(st.sampled_from((["id: doc"], ["? id", ": doc"])))
+    members = _root_members(draw, count)
+    comment = draw(st.sampled_from(("", "# root note")))
+
+    lines: list[str] = []
+    if comment:
+        lines.append(comment)
+    lines.extend(id_lines)
+    for _, extra_lines, _ in members:
+        lines.extend(extra_lines)
+    body, spans = _block_sequence(entries, pad)
+    offset = len(lines) + 1
+    if carrier == "flow":
+        lines.extend(_member_lines("derives_from", entries, "flow", pad))
+        spans = [(offset - 1, offset)] * count
+    else:
+        lines.append("derives_from:")
+        lines.extend(body)
+        spans = [(start + offset, stop + offset) for start, stop in spans]
+
+    root: dict[str, object] = {"id": "doc"}
+    for key, _, value in members:
+        root[key] = value
+    order = ("id", *(key for key, _, _ in members), "derives_from")
+    notes = [comment] if comment else []
+    for entry in entries:
+        notes.extend(entry.notes)
+    assembled = Document(
+        tuple(lines), entries, tuple(spans), root, order, _flat_envelope(), tuple(notes)
+    )
+    return _finish(draw, assembled)
+
+
+def _finish(draw, document: Document) -> Document:
+    """Attach a drawn envelope to an assembled document, shifting spans past any directive."""
+    envelope = draw(envelopes())
+    lines, spans = document.meta_lines, document.spans
+    if envelope.directive is not None:
+        lines = (f"%YAML {envelope.directive}", "--- !!map", *lines)
+        spans = tuple((start + 2, stop + 2) for start, stop in spans)
+    return replace(document, meta_lines=lines, spans=spans, envelope=envelope)
+
+
+@st.composite
+def ordered_map_root_documents(draw) -> Document:
+    """Draw a document whose root is an ``!!omap`` or a flow mapping."""
+    count = draw(st.integers(min_value=1, max_value=2))
+    style = draw(st.sampled_from(("omap-block", "omap-flow", "flow-map")))
+    if style == "omap-block":
+        entries = tuple(draw(block_entries(index)) for index in range(count))
+        return _ordered_map_block(draw, entries)
+    entries = tuple(draw(flow_entries(index)) for index in range(count))
+    inlines = ", ".join(entry.inline or "" for entry in entries)
+    if style == "omap-flow":
+        line = f"!!omap [{{id: doc}}, {{derives_from: [{inlines}]}}]"
+    else:
+        line = f"{{id: doc, derives_from: [{inlines}]}}"
+    spans = tuple((0, 1) for _ in entries)
+    order = ("id", "derives_from")
+    return _finish(
+        draw, Document((line,), entries, spans, {"id": "doc"}, order, _flat_envelope(), ())
+    )
+
+
+def _ordered_map_block(draw, entries: tuple[Entry, ...]) -> Document:
+    """Assemble an ``!!omap`` root written in block style around the given entries."""
+    pad = draw(st.sampled_from((0, 2)))
+    body, spans = _block_sequence(entries, pad)
+    lines = ["!!omap", "- id: doc", "- derives_from:", *_indent(tuple(body), 2)]
+    offset = 3
+    spans = tuple((start + offset, stop + offset) for start, stop in spans)
+    notes = tuple(note for entry in entries for note in entry.notes)
+    order = ("id", "derives_from")
+    return _finish(
+        draw, Document(tuple(lines), entries, spans, {"id": "doc"}, order, _flat_envelope(), notes)
+    )
+
+
+@st.composite
+def alias_and_merge_documents(draw) -> Document:
+    """Draw the alias-, anchor- and merge-heavy shapes layer 2 keeps in its strict column."""
+    builders = {
+        "aliased-entry": _aliased_entry_document,
+        "reused-anchor": _reused_anchor_document,
+        "relocating-anchor": _relocating_anchor_document,
+        "merge": _merge_document,
+        "tagged-merge": _merge_document,
+        "entry-merge": _entry_merge_document,
+        "tagged-entry-merge": _entry_merge_document,
+        "alias-spelled-entry-key": _alias_spelled_key_document,
+        "alias-spelled-root-key": _alias_spelled_key_document,
+    }
+    shape = draw(st.sampled_from(tuple(builders)))
+    return builders[shape](draw, shape)
+
+
+def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | None) -> Entry:
+    """Build an entry whose source is spelled out rather than composed from the tables."""
+    fields = _fields(index)
+    written = tuple(line.format(**fields) for line in lines)
+    return Entry(
+        "explicit",
+        written,
+        None,
+        fields["ref"],
+        seen,
+        seen is not None,
+        anchor,
+        (),
+        (),
+        _style_marker(written[0]),
+    )
+
+
+def _aliased_entry_document(draw, _shape: str) -> Document:
+    """An entry written as an alias to another entry, which shares its loaded mapping."""
+    style = draw(st.sampled_from(("flow", "block")))
+    if style == "flow":
+        first = _entry(0, ("- &edge {{ref: {ref}, seen: {old}}}",), "old0000", None)
+    else:
+        first = _entry(0, ("- &edge", "    ref: {ref}", "    seen: {old}"), "old0000", None)
+    second = Entry("alias-entry", ("- *edge",), None, first.ref, first.seen, True, None, ())
+    lines = ["id: doc", "derives_from:", *first.lines, *second.lines]
+    spans = ((2, 2 + len(first.lines)), (2 + len(first.lines), len(lines)))
+    order = ("id", "derives_from")
+    entries = (first, second)
+    return _finish(
+        draw, Document(tuple(lines), entries, spans, {"id": "doc"}, order, _flat_envelope(), ())
+    )
+
+
+def _reused_anchor_document(_draw, _shape: str) -> Document:
+    """A reused anchor name whose later definition rebinds the alias sites below it."""
+    first = _entry(0, ("- ref: {ref}", "  seen: &shared {old}"), "old0000", "shared")
+    second = _entry(1, ("- ref: {ref}", "  seen: &shared {old}"), "old0001", "shared")
+    third = Entry(
+        "alias-of-rebound",
+        ("- ref: up-2#s2", "  seen: *shared"),
+        None,
+        "up-2#s2",
+        "old0001",
+        True,
+        None,
+        (),
+    )
+    lines = ["id: doc", "derives_from:", *first.lines, *second.lines, *third.lines]
+    entries = (first, second, third)
+    spans = ((2, 4), (4, 6), (6, 8))
+    order = ("id", "derives_from")
+    return Document(tuple(lines), entries, spans, {"id": "doc"}, order, _flat_envelope(), ())
+
+
+SCALAR_CONTENTS = (
+    "old0000",
+    "p\\u0085q",
+    "a\\u009bb",
+    'has \\"quote\\"',
+    "back\\\\slash",
+    "tab\\there",
+)
+
+
+def _relocating_anchor_document(draw, _shape: str) -> Document:
+    """An anchored ``seen`` whose replacement relocates the old value onto its alias site."""
+    content = draw(st.sampled_from(SCALAR_CONTENTS))
+    value = content.encode("utf-8").decode("unicode_escape")
+    first = Entry(
+        "anchored-seen",
+        ("- ref: up-0#s0", f'  seen: &shared "{content}"'),
+        None,
+        "up-0#s0",
+        value,
+        True,
+        "shared",
+        (),
+    )
+    second = Entry(
+        "alias-seen", ("- ref: up-1#s1", "  seen: *shared"), None, "up-1#s1", value, True, None, ()
+    )
+    lines = ["id: doc", "derives_from:", *first.lines, *second.lines]
+    return Document(
+        tuple(lines),
+        (first, second),
+        ((2, 4), (4, 6)),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+
+def _merge_document(draw, shape: str) -> Document:
+    """A ``derives_from`` supplied by a merge key, in the plain and the tagged spelling."""
+    key = "<<" if shape == "merge" else "!!merge inherited"
+    inner = "ref: up-0#s0, seen: old0000"
+    lines = ["id: doc", f"{key}: {{derives_from: [{{{inner}}}]}}"]
+    merged = Entry(
+        "merge-supplied",
+        (),
+        f"{{{inner}}}",
+        "up-0#s0",
+        "old0000",
+        True,
+        None,
+        (),
+    )
+    assembled = Document(
+        tuple(lines), (merged,), ((1, 2),), {"id": "doc"}, None, _flat_envelope(), ()
+    )
+    return _finish(draw, assembled)
+
+
+def _entry_merge_document(draw, shape: str) -> Document:
+    """An entry whose ``ref`` arrives through a merge key, in either merge spelling."""
+    key = "<<" if shape == "entry-merge" else "!!merge inherited"
+    spelled = draw(st.booleans())
+    entry_lines = [f"- {key}: {{ref: up-0#s0}}"]
+    if spelled:
+        entry_lines.append("  seen: old0000")
+    entry = Entry(
+        f"{shape}-{'with' if spelled else 'without'}-own-seen",
+        tuple(entry_lines),
+        None,
+        "up-0#s0",
+        "old0000" if spelled else None,
+        spelled,
+        None,
+        (),
+    )
+    lines = ("id: doc", "derives_from:", *_indent(entry.lines, 2))
+    order = ("id", "derives_from")
+    assembled = Document(
+        lines, (entry,), ((2, len(lines)),), {"id": "doc"}, order, _flat_envelope(), ()
+    )
+    return _finish(draw, assembled)
+
+
+def _alias_spelled_key_document(draw, shape: str) -> Document:
+    """A mapping key spelled through an alias, at an entry and at the root.
+
+    The anchor a key alias reads has to be defined on a value ``NodeMeta`` allows, which is
+    what keeps this spelling inside the strict column rather than the reread-only one.
+    """
+    explicit = draw(st.booleans())
+    root: dict[str, object] = {"id": "doc"}
+    if shape == "alias-spelled-entry-key":
+        member = ["? *keyname", ": old0000"] if explicit else ["*keyname : old0000"]
+        entry = Entry(
+            "alias-spelled-seen-key",
+            ("- ref: up-0#s0", *(f"  {line}" for line in member)),
+            None,
+            "up-0#s0",
+            "old0000",
+            True,
+            None,
+            (),
+        )
+        lines = ("id: doc", "title: &keyname seen", "derives_from:", *_indent(entry.lines, 2))
+        root["title"] = "seen"
+        order: tuple[str, ...] = ("id", "title", "derives_from")
+        spans = ((3, len(lines)),)
+    else:
+        entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
+        head = ("? *idkey", ": doc") if explicit else ("*idkey : doc",)
+        lines = ("title: &idkey id", *head, "derives_from:", *_indent(entry.lines, 2))
+        root["title"] = "id"
+        order = ("title", "id", "derives_from")
+        spans = ((len(head) + 2, len(lines)),)
+    assembled = Document(lines, (entry,), spans, root, order, _flat_envelope(), ())
+    return _finish(draw, assembled)
+
+
+def _flat_envelope() -> Envelope:
+    """Return the plain LF envelope the explicitly spelled documents are rendered with."""
+    return Envelope(0, "---", "---", True, "body\n", "\n", None)
+
+
+# --------------------------------------------------------------------------------------------
+# Family 1: supported writes.
+# --------------------------------------------------------------------------------------------
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_block_root_documents_round_trip(data) -> None:
+    document = data.draw(block_root_documents())
+    updates = _updates(data.draw, document.entries)
+    _assert_supported_round_trip(document, updates)
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_ordered_map_and_flow_roots_round_trip(data) -> None:
+    document = data.draw(ordered_map_root_documents())
+    updates = _updates(data.draw, document.entries)
+    _assert_supported_round_trip(document, updates)
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_alias_and_merge_shapes_round_trip(data) -> None:
+    document = data.draw(alias_and_merge_documents())
+    target = data.draw(st.integers(min_value=0, max_value=len(document.entries) - 1))
+    updates = {document.entries[target].ref: "new0000beef"}
+    _assert_supported_round_trip(document, updates)
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_envelopes_and_line_endings_round_trip(data) -> None:
+    count = data.draw(st.integers(min_value=1, max_value=2))
+    entries = tuple(data.draw(block_entries(index)) for index in range(count))
+    lines = ["id: doc", "derives_from:"]
+    body, spans = _block_sequence(entries, 2)
+    lines.extend(body)
+    spans = tuple((start + 2, stop + 2) for start, stop in spans)
+    envelope = data.draw(
+        envelopes(endings=("\n", "\r\n", "\r", "mixed"), directives=(None, "1.1", "1.2"))
+    )
+    meta = tuple(lines)
+    if envelope.directive is not None:
+        meta = (f"%YAML {envelope.directive}", "--- !!map", *meta)
+        spans = tuple((start + 2, stop + 2) for start, stop in spans)
+    notes = tuple(note for entry in entries for note in entry.notes)
+    document = Document(
+        meta, entries, spans, {"id": "doc"}, ("id", "derives_from"), envelope, notes
+    )
+    _assert_supported_round_trip(document, _updates(data.draw, entries))
+
+
+@pytest.mark.parametrize("ref_form", REF_FORMS, ids=lambda form: form.name)
+def test_every_ref_and_seen_spelling_pair_round_trips(ref_form: RefForm) -> None:
+    """Cover the layer 2 spelling tables exhaustively, which sampling alone cannot promise."""
+    for seen_form in SEEN_FORMS:
+        entry = _combined_entry(0, ref_form, seen_form)
+        _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
+
+
+def test_every_whole_entry_spelling_round_trips() -> None:
+    """Cover every entry spelling that is written as one indivisible shape."""
+    for form in WHOLE_FORMS:
+        entry = _whole_entry(0, form)
+        _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
+
+
+def _single_entry_document(entry: Entry, root_lines: tuple[str, ...] = ("id: doc",)) -> Document:
+    """Wrap one entry in the plainest supported block-mapping root and LF envelope."""
+    lines = [*root_lines, "derives_from:", *_indent(entry.lines, 2)]
+    start = len(root_lines) + 1
+    return Document(
+        tuple(lines),
+        (entry,),
+        ((start, len(lines)),),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        entry.notes,
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Family 2a: refusals, generated at the exact scope AD-31 layer 5 guarantees each one at.
+# --------------------------------------------------------------------------------------------
+
+UNREADABLE_ON_ANY_REREAD = (
+    ("unclosed-fence", "id: doc\nderives_from:\n  - ref: up-0#s0\n", False),
+    ("unparseable-flow", "id: doc\nderives_from: [1, 2\n", True),
+    ("unparseable-indent", "id: doc\n  stray: 1\nderives_from: []\n", True),
+    ("root-block-sequence", "- one\n- two\n", True),
+    ("root-flow-sequence", "[one, two]\n", True),
+    ("root-bare-scalar", "just prose\n", True),
+    ("root-quoted-scalar", '"just prose"\n', True),
+)
+
+NON_LIST_DERIVES_FROM = (
+    "derives_from: 5",
+    "derives_from: text",
+    "derives_from: {up-0#s0: old}",
+    "derives_from: !!omap [{up-0#s0: old}]",
+    "derives_from: true",
+)
+
+NON_MAPPING_ENTRIES = ("- plainstring", "- 5", "- [1, 2]", "- null", "- ~")
+
+NON_STRING_REFS = (
+    ("- ref: [a, b]", "  seen: old0000"),
+    ("- ref: 5", "  seen: old0000"),
+    ("- ref: {a: b}", "  seen: old0000"),
+    ("- ref:", "  seen: old0000"),
+    ("- seen: old0000",),
+)
+
+COLLECTION_SEENS = ("[1, 2]", "{a: b}", "!!omap [{a: b}]")
+
+
+def _fenced(meta: str, envelope: Envelope) -> str:
+    """Render an arbitrary frontmatter block inside a layer 2a envelope."""
+    text = f"{envelope.open_fence}\n{meta}{envelope.close_fence}"
+    if envelope.trailing_newline:
+        text = f"{text}\n{envelope.body}"
+    return _with_ending(BOM * envelope.boms + text, envelope.ending)
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_any_reread_refuses_a_broken_block(data) -> None:
+    name, meta, closed = data.draw(st.sampled_from(UNREADABLE_ON_ANY_REREAD))
+    envelope = data.draw(envelopes(endings=("\n", "\r\n", "\r")))
+    text = _fenced(meta, envelope) if closed else _with_ending(f"---\n{meta}body\n", "\n")
+
+    with pytest.raises(UnreadableDocError) as error:
+        _rewrite_bytes(text, {"up-0#s0": "new0000beef"})
+
+    assert error.value.code == "UNREADABLE_DOC", name
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_a_mapping_root_refuses_a_derives_from_that_is_not_a_list(data) -> None:
+    member = data.draw(st.sampled_from(NON_LIST_DERIVES_FROM))
+    envelope = data.draw(envelopes())
+    text = _fenced(f"id: doc\n{member}\n", envelope)
+
+    with pytest.raises(UnreadableDocError, match="is not a list"):
+        _rewrite_bytes(text, {"up-0#s0": "new0000beef"})
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_reached_planning_refuses_a_malformed_entry(data) -> None:
+    bad = data.draw(
+        st.one_of(
+            st.sampled_from(NON_MAPPING_ENTRIES).map(lambda line: (line,)),
+            st.sampled_from(NON_STRING_REFS),
+        )
+    )
+    good = ("- ref: up-9#s9", "  seen: old0009")
+    before = data.draw(st.booleans())
+    entries = [*bad, *good] if before else [*good, *bad]
+    # The refusal is scoped to planning being reached, not to the bad entry being targeted,
+    # so the update deliberately varies between one that matches and one that matches nothing.
+    updates = data.draw(st.sampled_from(({"up-9#s9": "new0000beef"}, {"gone#none": "new0000beef"})))
+    text = _fenced(
+        "id: doc\nderives_from:\n" + "".join(f"  {line}\n" for line in entries),
+        data.draw(envelopes()),
+    )
+
+    with pytest.raises(UnreadableDocError) as error:
+        _rewrite_bytes(text, updates)
+
+    assert error.value.code == "UNREADABLE_DOC"
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_a_targeted_entry_refuses_a_collection_seen(data) -> None:
+    collection = data.draw(st.sampled_from(COLLECTION_SEENS))
+    text = _fenced(
+        f"id: doc\nderives_from:\n  - ref: up-0#s0\n    seen: {collection}\n",
+        data.draw(envelopes()),
+    )
+
+    with pytest.raises(UnreadableDocError, match="entry seen is malformed"):
+        _rewrite_bytes(text, {"up-0#s0": "new0000beef"})
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_an_untargeted_collection_seen_neither_refuses_nor_is_rewritten(data) -> None:
+    collection = data.draw(st.sampled_from(COLLECTION_SEENS))
+    meta = (
+        "id: doc\nderives_from:\n"
+        "  - ref: up-0#s0\n    seen: old0000\n"
+        f"  - ref: up-1#s1\n    seen: {collection}\n"
+    )
+    text = _fenced(meta, data.draw(envelopes()))
+
+    rewrites = _rewrite_bytes(text, {"up-0#s0": "new0000beef"})
+
+    assert len(rewrites) == 1
+    after = rewrites[0].after.decode("utf-8")
+    assert rewrites[0].applied == frozenset({"up-0#s0"})
+    assert f"seen: {collection}" in _parts(after).raw_meta
+    assert "seen: new0000beef" in _parts(after).raw_meta
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_an_applied_update_refuses_self_referential_frontmatter(data) -> None:
+    cycle = data.draw(st.sampled_from(("loop: &loop\n  self: *loop\n", "loop: &loop\n  - *loop\n")))
+    text = _fenced(
+        f"id: doc\n{cycle}derives_from:\n  - ref: up-0#s0\n    seen: old0000\n",
+        data.draw(envelopes()),
+    )
+
+    with pytest.raises(UnreadableDocError, match="self-referential"):
+        _rewrite_bytes(text, {"up-0#s0": "new0000beef"})
+
+
+# --------------------------------------------------------------------------------------------
+# Family 2b: documented no-ops, which are never refusals.
+# --------------------------------------------------------------------------------------------
+
+NO_OP_METAS = (
+    ("null-root", "null\n"),
+    ("tilde-root", "~\n"),
+    ("empty-block", ""),
+    ("absent-derives-from", "id: doc\ntitle: only prose\n"),
+    ("null-derives-from", "id: doc\nderives_from:\n"),
+    ("explicit-null-derives-from", "id: doc\nderives_from: null\n"),
+    ("empty-derives-from", "id: doc\nderives_from: []\n"),
+    ("no-matching-ref", "id: doc\nderives_from:\n  - ref: other#s0\n    seen: old0000\n"),
+    ("already-holds-the-hash", "id: doc\nderives_from:\n  - ref: up-0#s0\n    seen: new0000beef\n"),
+)
+
+UNFENCED_DOCUMENTS = ("", "just prose\n", "# Heading\n\ntext\n", "not --- a fence\n")
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_documented_no_ops_produce_no_rewrite(data) -> None:
+    name, meta = data.draw(st.sampled_from(NO_OP_METAS))
+    text = _fenced(meta, data.draw(envelopes(endings=("\n", "\r\n", "\r"))))
+
+    assert _rewrite_bytes(text, {"up-0#s0": "new0000beef"}) == [], name
+    assert apply_reconcile(normalize_newlines(text), {"up-0#s0": "new0000beef"}, DOC) == (
+        normalize_newlines(text),
+        set(),
+    )
+
+
+@FUZZ_SETTINGS
+@given(text=st.sampled_from(UNFENCED_DOCUMENTS))
+def test_a_document_with_no_opening_fence_produces_no_rewrite(text: str) -> None:
+    assert _rewrite_bytes(text, {"up-0#s0": "new0000beef"}) == []
+    assert apply_reconcile(text, {"up-0#s0": "new0000beef"}, DOC) == (text, set())
+
+
+# --------------------------------------------------------------------------------------------
+# Family 2c: non-contractual defensive recovery, accepted as a union of safe outcomes.
+# --------------------------------------------------------------------------------------------
+
+
+def _recovery_documents() -> tuple[Document, ...]:
+    """Build the reread-only shapes strict validation rejects, each with its own model."""
+    return (
+        _recovery_extra_root_key(),
+        _recovery_extra_entry_key(),
+        _recovery_non_string_seen("!!int 5", 5),
+        _recovery_non_string_seen("5", 5),
+        _recovery_non_string_seen("true", True),
+        _recovery_non_string_seen("1.5", 1.5),
+        _recovery_non_string_seen("2026-01-01", date(2026, 1, 1)),
+        _recovery_relocated_non_string_seen(),
+        _recovery_aliased_derives_from(),
+        _recovery_aliased_entry(),
+        _recovery_trailing_block_scalar_member(),
+        _recovery_multi_line_flow_member(),
+        _recovery_null_member("note:", None),
+        _recovery_null_member("note: null", None),
+    )
+
+
+def _recovery_extra_root_key() -> Document:
+    entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
+    lines = ("id: doc", "extra: kept", "derives_from:", *_indent(entry.lines, 2))
+    return Document(
+        lines,
+        (entry,),
+        ((3, len(lines)),),
+        {"id": "doc", "extra": "kept"},
+        ("id", "extra", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+
+def _recovery_extra_entry_key() -> Document:
+    entry = Entry(
+        "entry-extra-key",
+        ("- ref: up-0#s0", "  seen: old0000", "  extra: kept"),
+        None,
+        "up-0#s0",
+        "old0000",
+        True,
+        None,
+        (),
+        (("extra", "kept"),),
+    )
+    return _single_entry_document(entry)
+
+
+def _recovery_non_string_seen(written: str, value: object) -> Document:
+    entry = Entry(
+        f"non-string-seen-{written}",
+        ("- ref: up-0#s0", f"  seen: {written}"),
+        None,
+        "up-0#s0",
+        value,
+        True,
+        None,
+        (),
+    )
+    return _single_entry_document(entry)
+
+
+def _recovery_relocated_non_string_seen() -> Document:
+    first = Entry(
+        "anchored-int-seen",
+        ("- ref: up-0#s0", "  seen: &shared !!int 5"),
+        None,
+        "up-0#s0",
+        5,
+        True,
+        "shared",
+        (),
+    )
+    second = Entry(
+        "alias-int-seen", ("- ref: up-1#s1", "  seen: *shared"), None, "up-1#s1", 5, True, None, ()
+    )
+    lines = ("id: doc", "derives_from:", *first.lines, *second.lines)
+    return Document(
+        lines,
+        (first, second),
+        ((2, 4), (4, 6)),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+
+def _recovery_aliased_derives_from() -> Document:
+    entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
+    lines = ("base: &edges", *_indent(entry.lines, 2), "id: doc", "derives_from: *edges")
+    return Document(
+        lines,
+        (entry,),
+        ((1, 3),),
+        {"id": "doc"},
+        None,
+        _flat_envelope(),
+        (),
+        ("base",),
+    )
+
+
+def _recovery_aliased_entry() -> Document:
+    entry = Entry(
+        "alias-to-a-node-elsewhere",
+        ("- *edge",),
+        None,
+        "up-0#s0",
+        "old0000",
+        True,
+        None,
+        (),
+    )
+    lines = ("id: doc", "shared: &edge {ref: up-0#s0, seen: old0000}", "derives_from:", "  - *edge")
+    return Document(
+        lines,
+        (entry,),
+        ((3, 4),),
+        {"id": "doc", "shared": {"ref": "up-0#s0", "seen": "old0000"}},
+        ("id", "shared", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+
+def _recovery_trailing_block_scalar_member() -> Document:
+    entry = Entry(
+        "trailing-block-scalar-member",
+        ("- ref: up-0#s0", "  note: |-", "    two", "    lines"),
+        None,
+        "up-0#s0",
+        None,
+        False,
+        None,
+        (),
+        (("note", "two\nlines"),),
+    )
+    return _single_entry_document(entry)
+
+
+def _recovery_multi_line_flow_member() -> Document:
+    entry = Entry(
+        "multi-line-flow-member",
+        ("- ref: up-0#s0", "  tags: [", "    one,", "    two", "  ]"),
+        None,
+        "up-0#s0",
+        None,
+        False,
+        None,
+        (),
+        (("tags", ["one", "two"]),),
+    )
+    return _single_entry_document(entry)
+
+
+def _recovery_null_member(written: str, value: object) -> Document:
+    entry = Entry(
+        f"null-member-{written}",
+        ("- ref: up-0#s0", f"  {written}"),
+        None,
+        "up-0#s0",
+        None,
+        False,
+        None,
+        (),
+        (("note", value),),
+    )
+    return _single_entry_document(entry)
+
+
+def _assert_not_strictly_tracked(text: str) -> None:
+    """Assert the strict path rejects this shape, so it really is the reread-only column."""
+    parts = split_frontmatter_parts(normalize_newlines(text), DOC)
+    assert parts is not None
+    try:
+        disposition = parse_meta(parts.raw_meta, DOC).disposition
+    except (ConfigError, UnreadableDocError):
+        return
+    assert disposition != "tracked", "a recovery shape must not pass strict validation"
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
+    """A reread-only shape may no-op, refuse cleanly, or rewrite correctly, and nothing else.
+
+    Requiring success here would promote non-contractual recovery into a commitment, so the
+    property only rejects a crash, a wrong value, and an edit outside the layer 4 footprint.
+    """
+    document = data.draw(st.sampled_from(_recovery_documents()))
+    updates = {document.entries[0].ref: "new0000beef"}
+    text = document.render()
+    _assert_not_strictly_tracked(text)
+
+    try:
+        rewrites = _rewrite_bytes(text, updates)
+    except UnreadableDocError:
+        # A clean project-level refusal is one of the three outcomes the union admits; any
+        # other exception type escapes here and fails the property as the crash it is.
+        return
+
+    if not rewrites:
+        return
+    after = rewrites[0].after.decode("utf-8")
+    assert rewrites[0].applied == document.applied(updates)
+    assert _reload(after) == document.expected(updates)
+    # Layer 3 is a claim about layer 2 documents, so recovery is held only to the layer 4
+    # footprint and to meaning the same thing afterwards.
+    _assert_footprint_confined(
+        _meta_lines(text), _meta_lines(after), document.allowed_lines(updates)
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Family 3: current bounded ordered-map behavior, pinned rather than guaranteed.
+# --------------------------------------------------------------------------------------------
+
+MALFORMED_ORDERED_MAPS = (
+    pytest.param(
+        "id: doc\nderives_from:\n  - !!omap\n    - ref: up-0#s0\n      seen: old0000\n",
+        id="entry-item-holds-two-pairs",
+    ),
+    pytest.param(
+        "id: doc\nderives_from:\n  - !!omap\n    - ref: up-0#s0\n    - plain\n",
+        id="entry-item-is-a-scalar",
+    ),
+    pytest.param(
+        "!!omap\n- id: doc\n  extra: kept\n- derives_from:\n    - ref: up-0#s0\n",
+        id="root-item-holds-two-pairs",
+    ),
+    pytest.param("!!omap\n- id: doc\n- plain\n", id="root-item-is-a-scalar"),
+)
+
+MERGES_INSIDE_ORDERED_MAPS = (
+    pytest.param(
+        "id: doc\nbase: &b\n  seen: old0000\nderives_from:\n"
+        "  - !!omap\n    - ref: up-0#s0\n    - <<: *b\n",
+        id="merge-in-an-entry",
+    ),
+    pytest.param(
+        "!!omap\n- id: doc\n- <<: {derives_from: [{ref: up-0#s0, seen: old0000}]}\n",
+        id="merge-in-the-root",
+    ),
+    pytest.param(
+        "id: doc\nderives_from:\n  - !!omap\n    - ref: up-0#s0\n"
+        "    - !!merge x: {seen: old0000}\n",
+        id="tagged-merge-in-an-entry",
+    ),
+)
+
+
+@pytest.mark.parametrize("meta", MALFORMED_ORDERED_MAPS)
+@pytest.mark.parametrize("updates", [{"up-0#s0": "new0000beef"}, {"gone#none": "new0000beef"}])
+def test_a_malformed_ordered_map_is_reported_as_an_unreadable_document(
+    meta: str, updates: dict[str, str]
+) -> None:
+    """Pin current bounded loader behavior: the safe constructor's refusal reaches the CLI clean.
+
+    AD-31 records this as current behavior rather than a guaranteed refusal, so the pin is the
+    stable observable, the project error type and its code, not the loader's own message, which
+    differs across the ``ruamel.yaml`` releases and accelerator cells CI runs.
+    """
+    text = f"---\n{meta}---\nbody\n"
+
+    with pytest.raises(UnreadableDocError) as error:
+        apply_reconcile(text, updates, DOC)
+
+    assert error.value.code == "UNREADABLE_DOC"
+    assert isinstance(error.value, ProjectError)
+    assert "doc.md" in str(error.value)
+
+
+@pytest.mark.parametrize("meta", MERGES_INSIDE_ORDERED_MAPS)
+def test_a_merge_inside_an_ordered_map_is_reported_as_an_unreadable_document(meta: str) -> None:
+    """Pin current bounded loader behavior: an ordered map never flattens a merge key.
+
+    The loader builds an ordered map from its items rather than through mapping construction,
+    so the merge tag reaches the constructor with nothing to build it and the document is
+    refused at load rather than reconciled. Pinned at the type and code for the same
+    cross-parser reason as the malformed case above.
+    """
+    text = f"---\n{meta}---\nbody\n"
+
+    with pytest.raises(UnreadableDocError) as error:
+        apply_reconcile(text, {"up-0#s0": "new0000beef"}, DOC)
+
+    assert error.value.code == "UNREADABLE_DOC"
+
+
+# --------------------------------------------------------------------------------------------
+# Deterministic regression cases for the shapes the properties must never stop covering.
+# --------------------------------------------------------------------------------------------
+
+PLAIN_META = "id: doc\nderives_from:\n  - ref: up-0#s0\n    seen: old0000\n"
+PLAIN_REWRITTEN = "id: doc\nderives_from:\n  - ref: up-0#s0\n    seen: new0000beef\n"
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [pytest.param("\n", id="uniform-lf"), pytest.param("\r\n", id="uniform-crlf")],
+)
+def test_a_uniform_line_ending_survives_the_rewrite(ending: str) -> None:
+    before = _with_ending(f"---\n{PLAIN_META}---\nbody\n", ending)
+
+    rewrites = _rewrite_bytes(before, {"up-0#s0": "new0000beef"})
+
+    assert len(rewrites) == 1
+    expected = _with_ending(f"---\n{PLAIN_REWRITTEN}---\nbody\n", ending)
+    assert rewrites[0].after.decode("utf-8") == expected
+
+
+def test_a_uniform_lone_carriage_return_document_survives_the_rewrite() -> None:
+    before = _with_ending(f"---\n{PLAIN_META}---\nbody\n", "\r")
+
+    rewrites = _rewrite_bytes(before, {"up-0#s0": "new0000beef"})
+
+    assert len(rewrites) == 1
+    after = rewrites[0].after.decode("utf-8")
+    assert "\n" not in after
+    assert after == _with_ending(f"---\n{PLAIN_REWRITTEN}---\nbody\n", "\r")
+
+
+def test_a_document_that_mixes_line_endings_is_normalized_to_lf() -> None:
+    before = f"---\r\n{PLAIN_META}---\nbody\n"
+
+    rewrites = _rewrite_bytes(before, {"up-0#s0": "new0000beef"})
+
+    assert len(rewrites) == 1
+    after = rewrites[0].after.decode("utf-8")
+    assert "\r" not in after
+    assert after == f"---\n{PLAIN_REWRITTEN}---\nbody\n"
+
+
+def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
+    document = _reused_anchor_document(None, "reused-anchor")
+
+    _assert_supported_round_trip(document, {document.entries[0].ref: "new0000beef"})
+
+    after = _rewrite_bytes(document.render(), {"up-0#s0": "new0000beef"})[0].after.decode("utf-8")
+    # The relocation must not land on the alias site, which reads the second definition.
+    assert "seen: &shared old0001" in after
+    assert "seen: *shared" in after
+
+
+NEL = "\u0085"
+CSI = "\u009b"
+
+RELOCATED_CONTENTS = (
+    pytest.param('"p\\u0085q"', f"p{NEL}q", id="nel"),
+    pytest.param('"a\\u009bb"', f"a{CSI}b", id="c1-control"),
+    pytest.param('"p\\u0085q\\u009b\\tr"', f"p{NEL}q{CSI}\tr", id="nel-and-c1-and-tab"),
+    pytest.param(
+        '"has \\"quote\\" and \\\\ slash"',
+        'has "quote" and \\ slash',
+        id="quotes-and-backslashes",
+    ),
+)
+
+
+@pytest.mark.parametrize(("written", "value"), RELOCATED_CONTENTS)
+def test_an_anchored_seen_relocates_as_escapes_and_reparses(written: str, value: str) -> None:
+    """A displaced anchored value is re-emitted escape-only, so the alias site still reparses."""
+    first = Entry(
+        "anchored-seen",
+        ("- ref: up-0#s0", f"  seen: &shared {written}"),
+        None,
+        "up-0#s0",
+        value,
+        True,
+        "shared",
+        (),
+    )
+    second = Entry(
+        "alias-seen", ("- ref: up-1#s1", "  seen: *shared"), None, "up-1#s1", value, True, None, ()
+    )
+    lines = ("id: doc", "derives_from:", *first.lines, *second.lines)
+    document = Document(
+        lines,
+        (first, second),
+        ((2, 4), (4, 6)),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+    _assert_supported_round_trip(document, {"up-0#s0": "new0000beef"})
+
+    after = _rewrite_bytes(document.render(), {"up-0#s0": "new0000beef"})[0].after.decode("utf-8")
+    assert f"seen: &shared {written}" in after
+    assert not any(0x7F <= ord(char) <= 0x9F for char in after)
+
+
+def test_a_byte_order_mark_run_is_reattached_verbatim() -> None:
+    for count in (1, 2, 3):
+        before = f"{BOM * count}---\n{PLAIN_META}---\nbody\n"
+
+        rewrites = _rewrite_bytes(before, {"up-0#s0": "new0000beef"})
+
+        assert len(rewrites) == 1
+        expected = f"{BOM * count}---\n{PLAIN_REWRITTEN}---\nbody\n"
+        assert rewrites[0].after.decode("utf-8") == expected
+
+
+@pytest.mark.parametrize("version", ["1.1", "1.2"])
+def test_the_yaml_directive_envelope_survives_the_rewrite(version: str) -> None:
+    before = f"---\n%YAML {version}\n--- !!map\n{PLAIN_META}---\nbody\n"
+
+    rewrites = _rewrite_bytes(before, {"up-0#s0": "new0000beef"})
+
+    assert len(rewrites) == 1
+    after = rewrites[0].after.decode("utf-8")
+    assert after == f"---\n%YAML {version}\n--- !!map\n{PLAIN_REWRITTEN}---\nbody\n"

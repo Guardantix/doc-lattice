@@ -763,10 +763,10 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 | Position | Dimension | Strict tracked-document load accepts | Fresh reread additionally handles |
 |---|---|---|---|
 | Root | Carrier shape | A block or flow mapping, or an `!!omap` in either style | Nothing more; a root that loads as neither a mapping nor a null is refused, a plain sequence included, while a null root returns the file unchanged |
-| Root | Key spelling | Exactly the `NodeMeta` keys, `id` required; a key may be spelled through an alias or written as an explicit `? key` / `: value` pair; members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
+| Root | Key spelling | Exactly the `NodeMeta` keys, `id` required; a key may be written as an explicit `? key` / `: value` pair, and may be spelled through an alias, written as that explicit pair or with space before its `:`, since the bare `*name:` form does not scan; members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
 | `derives_from` | Carrier shape | A block or flow sequence, written inline or supplied by a merge | Additionally one reached through an alias, which is not strictly reachable because the anchor needs a carrier key `NodeMeta` forbids |
 | Entry | Carrier shape | A block or flow mapping, or an `!!omap` in either style, written inline or as an alias to a node elsewhere | Nothing more |
-| Entry | Key spelling | `ref` and an optional `seen` and nothing else; either may be an explicit `? key` / `: value` pair; a key may be spelled through an alias; members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
+| Entry | Key spelling | `ref` and an optional `seen` and nothing else; either may be an explicit `? key` / `: value` pair; a key may be spelled through an alias, written as an explicit `? key` pair or with space before its `:`, since the bare `*name:` form does not scan; members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
 | Entry | Node properties | An anchor, a tag, or both opening the entry, including on the sequence line above and left of its first key | Nothing more |
 | Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, a flow entry written with or without a trailing comma, or a `ref` spanning lines as a block scalar in either style, a multi-line double-quoted scalar, or a multi-line plain scalar | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
 | Entry `ref` | Value | A string | Nothing more; a non-string `ref` is refused whenever planning is reached |
@@ -865,9 +865,9 @@ preservation for out-of-subset input.
 for roots and for entries, with block, flow, and alias coverage in the reconcile source suite.
 Dropping it later would be a compatibility decision of its own rather than a correction to this
 record. Two ordered-map refusals are current bounded-loader behavior rather than guaranteed
-refusals, because no test pins either today: a malformed ordered map, meaning an item that is not
-a one-pair mapping, and a merge written inside one. Pinning them belongs with a future round-trip
-fuzz gate.
+refusals: a malformed ordered map, meaning an item that is not a one-pair mapping, and a merge
+written inside one. The round-trip fuzz gate in `tests/test_reconcile_fuzz.py` now pins both as
+current bounded behavior rather than promoting either into a guaranteed refusal.
 
 **Consequences:** "Is the rewriter complete" is now a finite question about this subset. A
 spelling outside layer 2 is not a completeness defect, and admitting one is a deliberate widening
