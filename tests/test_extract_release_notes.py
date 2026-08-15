@@ -1,10 +1,27 @@
 """Tests for the release-notes extraction script."""
 
+import sys
 from pathlib import Path
 from runpy import run_path
 
+import pytest
+
 _SCRIPT = run_path(str(Path(__file__).parents[1] / "scripts" / "extract_release_notes.py"))
 changelog_section = _SCRIPT["changelog_section"]
+main = _SCRIPT["main"]
+
+
+def _run_main(tmp_path, monkeypatch, changelog: str, version: str) -> None:
+    """Run the script's entry point against a changelog written to `tmp_path`.
+
+    `main` reads `CHANGELOG.md` relative to the `_REPO_ROOT` its own module computed from
+    `__file__`, so redirect that global rather than the copy `run_path` handed back.
+    """
+    (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    monkeypatch.setitem(main.__globals__, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["extract_release_notes.py", version])
+    main()
+
 
 _NOTES_CHANGELOG = (
     "# Changelog\n\n"
@@ -72,6 +89,33 @@ def test_changelog_section_last_section_runs_to_end_of_file():
 def test_changelog_section_does_not_match_a_version_that_is_a_substring():
     changelog = "# Changelog\n\n## [10.6.0]\n\n- ten\n"
     assert changelog_section(changelog, "0.6.0") is None
+
+
+def test_main_exits_nonzero_when_the_section_is_empty(tmp_path, monkeypatch, capsys):
+    # The release job runs this before pushing the tag, so a nonzero exit here is what keeps an
+    # empty section from stranding an immutable tag with no notes to publish against it.
+    changelog = "# Changelog\n\n## [1.2.3] - 2026-08-15\n\n## [1.2.2]\n\n- old\n"
+    with pytest.raises(SystemExit) as raised:
+        _run_main(tmp_path, monkeypatch, changelog, "1.2.3")
+    assert raised.value.code == 1
+    assert "empty" in capsys.readouterr().err
+
+
+def test_main_exits_nonzero_when_the_section_is_missing(tmp_path, monkeypatch, capsys):
+    changelog = "# Changelog\n\n## [1.2.2]\n\n- old\n"
+    with pytest.raises(SystemExit) as raised:
+        _run_main(tmp_path, monkeypatch, changelog, "1.2.3")
+    assert raised.value.code == 1
+    assert "no '## [1.2.3]' section" in capsys.readouterr().err
+
+
+def test_main_writes_the_section_body_to_stdout(tmp_path, monkeypatch, capsys):
+    changelog = "# Changelog\n\n## [1.2.3]\n\n### Added\n\n- a thing\n\n## [1.2.2]\n\n- old\n"
+    _run_main(tmp_path, monkeypatch, changelog, "1.2.3")
+    captured = capsys.readouterr()
+    assert "- a thing" in captured.out
+    assert "old" not in captured.out
+    assert captured.err == ""
 
 
 def test_changelog_section_does_not_truncate_on_a_code_comment_line():

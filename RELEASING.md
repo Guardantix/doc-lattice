@@ -11,14 +11,18 @@ distributions. PyPI Trusted Publishing trusts the `Guardantix/doc-lattice` repos
    `## [X.Y.Z] - YYYY-MM-DD` so it becomes the first versioned heading, which is the heading
    the version-sync guard reads.
 2. Run `uv lock` and commit the refreshed `uv.lock`.
-3. Confirm the new changelog section is nonempty.
+3. Confirm the new changelog section is nonempty. The release job checks this too, before it
+   pushes the tag, but failing there costs a release run.
 4. Run the full verification suite, open a pull request, and wait for every CI check to pass.
 5. Merge the pull request to `main`.
 
 The release pipeline then runs in this order:
 
-1. The `release` job smoke-tests the release source, creates the immutable `vX.Y.Z` tag, and
-   creates its GitHub Release.
+1. The `release` job re-asserts version sync, extracts the `## [X.Y.Z]` changelog section into
+   the release notes, and smoke-tests the release source. Only then does it create the immutable
+   `vX.Y.Z` tag and its GitHub Release, from the notes already extracted. Every check that can
+   fail the release runs before the tag exists, so a missing or empty changelog section fails the
+   run while there is still nothing immutable to strand.
 2. The dependent, unprivileged `build-release` job checks out that exact tag, builds the wheel
    and source distribution, validates both with Twine, and uploads them as an artifact.
 3. The `publish` job downloads the validated artifact and uploads it to PyPI through OIDC. It

@@ -139,6 +139,17 @@ jobs:
         if: steps.gate.outputs.proceed == 'true'
         run: uv run --no-sync python scripts/check_version_sync.py
 
+      # Generating the notes is separated from publishing them so the changelog is validated
+      # while the run can still be abandoned cleanly. The extractor exits non-zero on a missing
+      # or empty section, and a tag is immutable, so this has to precede the tag push; it also
+      # precedes the network smoke below because it is the cheaper of the two failures to reach.
+      - name: Extract release notes
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          uv run --no-sync python scripts/extract_release_notes.py "${VERSION}" > release-notes.md
+
       - name: Smoke-test the commit
         if: steps.gate.outputs.proceed == 'true'
         env:
@@ -162,13 +173,11 @@ jobs:
         if: steps.gate.outputs.proceed == 'true'
         env:
           TAG: ${{ steps.target.outputs.tag }}
-          VERSION: ${{ steps.target.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "GitHub Release ${TAG} already exists; leaving it unchanged."
           else
-            uv run --no-sync python scripts/extract_release_notes.py "${VERSION}" > release-notes.md
             gh release create "${TAG}" --title "${TAG}" --notes-file release-notes.md --verify-tag
           fi
 
