@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .constants import Authority, Layer, LocationKind
+from .constants import Authority, FrontmatterDisposition, Layer, LocationKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +142,22 @@ class Node:
     body: str
     derives_from: tuple[Edge, ...]
     tickets: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedMeta:
+    """What one discovered file's frontmatter turned out to be, and whether it is a node.
+
+    Carrying the disposition alongside the node is what lets a skip stay describable after the
+    parse: a caller can tell prose apart from a metadata block missing its ``id`` without
+    re-reading the file, and the load cache can persist the distinction. The parse itself never
+    reports the skip, so every load path renders the same diagnostic from one place.
+
+    ``meta`` is not None exactly when ``disposition`` is ``"tracked"``.
+    """
+
+    meta: NodeMeta | None
+    disposition: FrontmatterDisposition
 
 
 @dataclass(frozen=True, slots=True)

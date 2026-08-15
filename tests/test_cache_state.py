@@ -13,6 +13,7 @@ def _entry(*roots: str) -> Entry:
         file_sha256="a" * 64,
         stats={root: StatRecord(size=1, mtime_ns=1) for root in roots},
         node=None,
+        disposition="untracked",
     )
 
 

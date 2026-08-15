@@ -9,6 +9,22 @@ Authority = Literal["binding", "derived", "exploratory"]
 VALID_AUTHORITIES: frozenset[str] = frozenset(get_args(Authority))
 AUTHORITY_LADDER: tuple[Authority, ...] = ("exploratory", "derived", "binding")
 
+# What one discovered file's frontmatter turned out to be. "untracked" and "id-less" are the two
+# distinct ways a file is left out of the lattice, which a bare "no node" answer conflated: the
+# first is prose the engine has nothing to say about, the second is a metadata block that lost or
+# never had its `id`. The load cache persists this so a warm run replays the diagnostic a cold run
+# emitted.
+FrontmatterDisposition = Literal["tracked", "untracked", "id-less"]
+VALID_FRONTMATTER_DISPOSITIONS: frozenset[str] = frozenset(get_args(FrontmatterDisposition))
+
+# The exact frontmatter keys that declare lattice intent. An id-less block carrying any of them is
+# a typo'd node rather than incidental metadata, so it is a tool error instead of a warning. This
+# is an intent set, not "every NodeMeta field except id": `title` and `layer` describe a document
+# without wiring it into the graph, so an id-less block carrying only those stays in the warning
+# tier. Membership is tested by key presence, never by value truth, because `derives_from: []`,
+# `tickets: []`, and `authority: null` all still declare intent.
+LATTICE_INTENT_KEYS: frozenset[str] = frozenset({"authority", "derives_from", "tickets"})
+
 LocationKind = Literal["file", "section"]
 VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
 
@@ -55,7 +71,7 @@ C1_CONTROL_MAX: int = 0x9F
 # releases.
 # MAX_STAT_ROOTS bounds the per-root stat ledger. CACHE_FILE_NAME is the single JSON document under
 # the cache slot.
-CACHE_VERSION: int = 3
+CACHE_VERSION: int = 4
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 

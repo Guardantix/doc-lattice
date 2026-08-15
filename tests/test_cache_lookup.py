@@ -15,6 +15,7 @@ from doc_lattice.cache.schema import (
     StatRecord,
     stat_record,
 )
+from doc_lattice.constants import FrontmatterDisposition
 from doc_lattice.error_types import UnreadableDocError
 from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
 
@@ -36,12 +37,14 @@ def _entry_for(
     text: str,
     node: NodePayload | None,
     stats: dict[str, StatRecord] | None = None,
+    disposition: FrontmatterDisposition | None = None,
 ) -> Entry:
     data = text.encode("utf-8")
     return Entry(
         file_sha256=hashlib.sha256(data).hexdigest(),
         stats=stats if stats is not None else {ROOT: StatRecord(size=len(data), mtime_ns=0)},
         node=node,
+        disposition=disposition or ("tracked" if node is not None else "untracked"),
     )
 
 
@@ -87,6 +90,22 @@ def test_verify_non_node_hit_returns_none_doc(tmp_path: Path) -> None:
     assert result.doc is None
 
 
+@pytest.mark.parametrize("disposition", ["untracked", "id-less"])
+def test_verify_hit_replays_the_stored_disposition_a_null_node_conflated(
+    tmp_path: Path, disposition: FrontmatterDisposition
+) -> None:
+    # Both of these cache as `node=None`. Only the stored disposition tells prose apart from a
+    # fenced block that lost its `id`, so it is what a warm run has to report from.
+    text = "# plain\n"
+    path = _write(tmp_path, text)
+
+    result = resolve(_entry_for(text, None, disposition=disposition), path, VERIFY)
+
+    assert isinstance(result, CacheHit)
+    assert result.doc is None
+    assert result.disposition == disposition
+
+
 def test_changed_content_is_a_miss_carrying_current_bytes(tmp_path: Path) -> None:
     path = _write(tmp_path, "changed\n")
 
@@ -104,11 +123,14 @@ def test_trusting_stat_hit_skips_read_and_hash(tmp_path: Path) -> None:
         file_sha256="deadbeef" * 8,
         stats={ROOT: stat_record(st)},
         node=None,
+        disposition="id-less",
     )
 
     result = resolve(entry, path, TRUSTING)
 
-    assert result == CacheHit(doc=None, refreshed_stat=None)
+    # A stat-tier hit never reads the file, so the disposition it reports can only come from
+    # the entry. That is what lets a warm run replay the skip its cold run reported.
+    assert result == CacheHit(doc=None, disposition="id-less", refreshed_stat=None)
 
 
 def test_verify_policy_disables_stat_tier(tmp_path: Path) -> None:
@@ -118,6 +140,7 @@ def test_verify_policy_disables_stat_tier(tmp_path: Path) -> None:
         file_sha256="deadbeef" * 8,
         stats={ROOT: stat_record(path.stat())},
         node=None,
+        disposition="untracked",
     )
 
     result = resolve(entry, path, VERIFY)

@@ -1,9 +1,12 @@
 """Wire config, discovery, parsing, and loading into a Lattice."""
 
 import os
+import warnings
+from pathlib import Path
 
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
 from .config import ProjectConfig
+from .constants import FrontmatterDisposition
 from .discovery import decode_doc, discover_doc_paths, read_doc
 from .frontmatter_parser import parse_meta, split_frontmatter
 from .loader import build_lattice, derive_file_sections
@@ -31,7 +34,16 @@ def load_lattice(
             commands pass False while retaining verified cache reads.
 
     Returns:
-        The built Lattice. Files without lattice frontmatter (no ``id``) are skipped.
+        The built Lattice. A file whose frontmatter declares no ``id`` is left out of it; an
+        id-less fenced block additionally emits a warning naming the file on the way past.
+
+    Raises:
+        ConfigError: If a discovered file's frontmatter has an unknown or malformed key, or
+            declares lattice intent with no ``id``.
+        UnreadableDocError: If a discovered file cannot be read or decoded, or its frontmatter
+            opens a fence it never closes or cannot be parsed as YAML.
+        DuplicateIdError: If two discovered files, or two headings in one file, register the
+            same id.
     """
     if project.config.cache_key is None:
         return _load_uncached(project)
@@ -39,6 +51,29 @@ def load_lattice(
         project,
         require_verified=require_verified,
         persist_cache=persist_cache,
+    )
+
+
+def _report_skip(disposition: FrontmatterDisposition, path: Path) -> None:
+    """Report a file skipped for frontmatter that carries no ``id``.
+
+    Every load path funnels through this one call rather than warning where it happens to
+    notice the skip. Python renders a warning with the source location it was raised from and
+    suppresses repeats by that same location, so a second call site for the cache-replay path
+    would change both the rendered line and when it is shown, and a warm run would not match
+    the cold run it replays. ``stacklevel`` stays at its default 1 for that reason: it pins the
+    location to this function instead of to whichever caller reached it.
+
+    Args:
+        disposition: What the parse concluded about the file. Only ``"id-less"`` is reported;
+            a tracked file has nothing to say and untracked prose is not a skip.
+        path: The discovered path as this checkout sees it, named in the message.
+    """
+    if disposition != "id-less":
+        return
+    warnings.warn(
+        f"skipping {path}: its frontmatter declares no 'id', so it is not a lattice node",
+        stacklevel=1,
     )
 
 
@@ -50,10 +85,11 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
     ):
         text = read_doc(path)
         raw_meta, body = split_frontmatter(text, path)
-        meta = parse_meta(raw_meta, path)
-        if meta is None:
+        outcome = parse_meta(raw_meta, path)
+        _report_skip(outcome.disposition, path)
+        if outcome.meta is None:
             continue
-        parsed.append(ParsedDoc(path=path, meta=meta, body=body))
+        parsed.append(ParsedDoc(path=path, meta=outcome.meta, body=body))
     return build_lattice(parsed)
 
 
@@ -83,16 +119,19 @@ def _load_cached(
         result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
+            _report_skip(result.disposition, doc_path)
             if result.doc is not None:
                 parsed.append(result.doc)
             continue
         text = decode_doc(doc_path, result.data)
         raw_meta, body = split_frontmatter(text, doc_path)
-        meta = parse_meta(raw_meta, doc_path)
+        outcome = parse_meta(raw_meta, doc_path)
+        _report_skip(outcome.disposition, doc_path)
+        meta = outcome.meta
         sections = derive_file_sections(body) if meta is not None else None
         state.replace(
             rel_key,
-            make_entry(result.data, meta, body, sections, result.stat, current_root),
+            make_entry(result.data, outcome, body, sections, result.stat, current_root),
         )
         if meta is not None:
             parsed.append(ParsedDoc(path=doc_path, meta=meta, body=body, sections=sections))

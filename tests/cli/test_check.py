@@ -1,6 +1,9 @@
 """CLI integration tests for the check command."""
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import get_args
 
@@ -9,6 +12,8 @@ from doc_lattice.cli.output import escape_github_property
 from doc_lattice.constants import EdgeState
 
 from .helpers import _clean_docs, runner
+
+_SRC = Path(__file__).resolve().parents[2] / "src"
 
 
 def _mixed_docs(tmp_path: Path) -> None:
@@ -448,3 +453,82 @@ def test_check_exits_0_when_fully_reconciled(tmp_path: Path, monkeypatch):
     assert runner.invoke(app, ["reconcile", "down"]).exit_code == 0
     # No broken refs and every edge reconciled, so check reports clean.
     assert runner.invoke(app, ["check"]).exit_code == 0
+
+
+def _frontmatter_tiers(tmp_path: Path) -> dict[str, Path]:
+    """Write one file per frontmatter tier: a node, unfenced prose, and id-less metadata."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    paths = {
+        "node": docs / "up.md",
+        "prose": docs / "prose.md",
+        "skillish": docs / "skillish.md",
+    }
+    paths["node"].write_text("---\nid: up\n---\n# Up\n", encoding="utf-8")
+    paths["prose"].write_text("# just prose\n", encoding="utf-8")
+    paths["skillish"].write_text(
+        "---\nname: some-skill\ndescription: non-lattice frontmatter\n---\n# Skill\n",
+        encoding="utf-8",
+    )
+    return paths
+
+
+def _check_in(cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``check`` in a real subprocess, so warnings render to a real stderr.
+
+    pytest replaces ``showwarning`` for the duration of a test, so an in-process run records
+    the warning instead of writing it. Only a separate interpreter exercises the stderr a user
+    actually sees. ``PYTHONPATH`` carries the source tree because pytest's ``pythonpath``
+    setting only reaches the interpreter running the suite, not one this test spawns.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", "from doc_lattice.cli import main; main()", "check"],
+        cwd=cwd,
+        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC), **(env or {})},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_check_reports_id_less_frontmatter_on_stderr_without_changing_its_exit(tmp_path: Path):
+    paths = _frontmatter_tiers(tmp_path)
+
+    completed = _check_in(tmp_path)
+
+    assert completed.returncode == 0  # a skip is a warning, not a gate failure
+    assert f"skipping {paths['skillish']}" in completed.stderr
+    assert "declares no 'id', so it is not a lattice node" in completed.stderr
+    assert str(paths["prose"]) not in completed.stderr  # no opening fence stays silent
+    assert str(paths["node"]) not in completed.stderr
+
+
+def test_check_id_less_stderr_is_byte_identical_uncached_cold_and_warm(tmp_path: Path):
+    # The point of storing the disposition in the cache: what a user sees must not depend on
+    # whether the load was accelerated.
+    _frontmatter_tiers(tmp_path)
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
+
+    uncached = _check_in(tmp_path, env)
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: idless\n", encoding="utf-8")
+    cold = _check_in(tmp_path, env)  # writes the cache
+    warm = _check_in(tmp_path, env)  # every file served from it
+
+    assert "declares no 'id'" in uncached.stderr
+    assert (cold.stderr, cold.returncode) == (uncached.stderr, uncached.returncode)
+    assert (warm.stderr, warm.returncode) == (uncached.stderr, uncached.returncode)
+
+
+def test_check_exits_2_naming_the_file_when_an_id_less_block_declares_lattice_intent(
+    tmp_path: Path,
+):
+    # The reported typo: `idd` swallows both the node and the live edge it declares.
+    _frontmatter_tiers(tmp_path)
+    typo = tmp_path / "docs" / "down.md"
+    typo.write_text("---\nidd: down\nderives_from:\n  - ref: up\n---\n# Down\n", encoding="utf-8")
+
+    completed = _check_in(tmp_path)
+
+    assert completed.returncode == 2
+    assert f"frontmatter in {typo} declares 'derives_from' but has no 'id' key" in completed.stderr
+    assert "CONFIG_ERROR" in completed.stderr

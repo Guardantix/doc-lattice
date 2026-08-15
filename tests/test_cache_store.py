@@ -27,6 +27,7 @@ def _sample_cache_file() -> CacheFile:
                     total_lines=1,
                     sections=[SectionRecordModel(anchor="a-top", start=1, end=1)],
                 ),
+                disposition="tracked",
             )
         },
     )

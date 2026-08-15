@@ -1,6 +1,7 @@
 """Tests for load_lattice wiring."""
 
 import os
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,8 +32,56 @@ def test_files_without_frontmatter_skipped(tmp_path: Path):
     docs.mkdir()
     (docs / "plain.md").write_text("# just prose\n", encoding="utf-8")
     project = load_config(None, tmp_path)
-    lat = load_lattice(project)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a file with no fence is untracked prose, not a skip
+        lat = load_lattice(project)
     assert lat.nodes_by_id == {}
+
+
+def _corpus(tmp_path: Path) -> dict[str, Path]:
+    """Write one file of each frontmatter tier, minus the fatal one.
+
+    The typo'd node is left out so the corpus loads; the tests that need it add it themselves.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    paths = {
+        "node": docs / "node.md",
+        "prose": docs / "prose.md",
+        "skillish": docs / "skillish.md",
+    }
+    paths["node"].write_text("---\nid: up\n---\n# Up\n", encoding="utf-8")
+    paths["prose"].write_text("# just prose\n\nno fence at all\n", encoding="utf-8")
+    paths["skillish"].write_text(
+        "---\nname: some-skill\ndescription: non-lattice frontmatter\n---\n# Skill\n",
+        encoding="utf-8",
+    )
+    return paths
+
+
+def _warnings_from_load(tmp_path: Path) -> list[str]:
+    """Load the project and return every warning message it emitted, in order."""
+    with warnings.catch_warnings(record=True) as caught:
+        # The default filter shows one warning per source location, and this module reloads the
+        # same corpus repeatedly from one emission site. Without "always", whichever load ran
+        # first would swallow the rest and the result would depend on test order.
+        warnings.simplefilter("always")
+        load_lattice(load_config(None, tmp_path))
+    return [str(w.message) for w in caught]
+
+
+def test_id_less_frontmatter_warns_and_is_skipped_without_changing_the_lattice(tmp_path: Path):
+    paths = _corpus(tmp_path)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        lattice = load_lattice(load_config(None, tmp_path))
+
+    assert set(lattice.nodes_by_id) == {"up"}
+    assert [str(w.message) for w in caught] == [
+        f"skipping {paths['skillish']}: its frontmatter declares no 'id', so it is not a "
+        "lattice node"
+    ]
 
 
 def test_cached_and_uncached_loads_reject_unclosed_frontmatter_identically(
@@ -315,3 +364,89 @@ def test_warm_cached_run_reparses_nothing(lattice_dir: Path, monkeypatch, tmp_pa
     calls["n"] = 0
     load_lattice(load_config(None, lattice_dir))  # warm: every node served from the cache
     assert calls["n"] == 0
+
+
+def test_id_less_warning_is_identical_uncached_cold_and_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # AD-12: the cache accelerates a load, it does not change what the load reports. A warning
+    # raised as a parser side effect would fire on the uncached and cold runs and vanish on the
+    # warm one, because a warm run never reaches the parser.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    _corpus(tmp_path)
+
+    uncached = _warnings_from_load(tmp_path)
+    _with_cache(tmp_path)
+    cold = _warnings_from_load(tmp_path)  # writes the cache
+    warm = _warnings_from_load(tmp_path)  # every file served from it
+
+    assert len(uncached) == 1
+    assert cold == uncached
+    assert warm == uncached
+
+
+def test_id_less_warning_survives_a_stat_tier_hit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # The stat tier never opens the file, so the disposition can only come from the cache entry.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    _corpus(tmp_path)
+    _with_cache(tmp_path, trust_stat=True)
+
+    cold = _warnings_from_load(tmp_path)
+    warm = _warnings_from_load(tmp_path)
+
+    assert len(cold) == 1
+    assert warm == cold
+
+
+def test_id_less_warning_names_the_current_checkouts_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A cache slot is shared across checkouts, so the entry stores the disposition and the
+    # message is rendered from the path this run discovered. Persisting the rendered text would
+    # replay the first checkout's path in the second.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    first_paths = _corpus(first)
+    second_paths = _corpus(second)
+    _with_cache(first)
+    _with_cache(second)  # the same cache_key, so both checkouts share one slot
+
+    _warnings_from_load(first)  # fills the shared slot from the first checkout
+    from_second = _warnings_from_load(second)
+
+    assert len(from_second) == 1
+    assert str(second_paths["skillish"]) in from_second[0]
+    assert str(first_paths["skillish"]) not in from_second[0]
+
+
+@pytest.mark.filterwarnings("ignore:(?s)skipping .*declares no 'id'")
+def test_id_less_frontmatter_declaring_lattice_intent_fails_identically_across_tiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The typo this issue is about: `idd` plus a live edge. The node and its edge would both
+    # vanish, so it is a tool error rather than a skip, and a warm run must not cache its way
+    # past it.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    _corpus(tmp_path)
+    typo = tmp_path / "docs" / "typo.md"
+    typo.write_text("---\nidd: down\nderives_from:\n  - ref: up\n---\n# Down\n", encoding="utf-8")
+    expected = (
+        f"frontmatter in {typo} declares 'derives_from' but has no 'id' key, so the file and "
+        "every edge it declares would be dropped from the lattice; add an 'id' (check it for "
+        "a typo) or remove the lattice keys"
+    )
+
+    with pytest.raises(ConfigError) as uncached:
+        load_lattice(load_config(None, tmp_path))
+
+    _with_cache(tmp_path)
+    with pytest.raises(ConfigError) as cold:
+        load_lattice(load_config(None, tmp_path))
+    with pytest.raises(ConfigError) as warm:
+        load_lattice(load_config(None, tmp_path))
+
+    assert str(uncached.value) == expected
+    assert str(cold.value) == expected
+    assert str(warm.value) == expected

@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..constants import FrontmatterDisposition
 from ..discovery import _unreadable, read_doc_bytes_and_stat
 from ..model import ParsedDoc
 from .schema import Entry, StatRecord, reconstruct_doc, stat_record
@@ -30,12 +31,14 @@ class LookupPolicy:
 class CacheHit:
     """A tier hit and any stat fact learned while verifying content.
 
-    ``doc`` is the reconstructed ParsedDoc, or None for a cached non-node. A verify-tier hit
-    carries ``refreshed_stat`` from the same file handle as the verified bytes; a stat-tier hit
-    leaves it as None.
+    ``doc`` is the reconstructed ParsedDoc, or None for a cached non-node. ``disposition``
+    replays what the parse that filled this entry concluded, so a hit can be reported exactly
+    as the miss that produced it was. A verify-tier hit carries ``refreshed_stat`` from the
+    same file handle as the verified bytes; a stat-tier hit leaves it as None.
     """
 
     doc: ParsedDoc | None
+    disposition: FrontmatterDisposition
     refreshed_stat: StatRecord | None = None
 
 
@@ -68,7 +71,11 @@ def resolve(entry: Entry | None, path: Path, policy: LookupPolicy) -> CacheHit |
             return hit
     data, st = read_doc_bytes_and_stat(path)
     if entry is not None and entry.file_sha256 == hashlib.sha256(data).hexdigest():
-        return CacheHit(doc=reconstruct_doc(entry, path), refreshed_stat=stat_record(st))
+        return CacheHit(
+            doc=reconstruct_doc(entry, path),
+            disposition=entry.disposition,
+            refreshed_stat=stat_record(st),
+        )
     return CacheMiss(data=data, stat=st)
 
 
@@ -83,4 +90,4 @@ def _stat_tier(entry: Entry, path: Path, current_root: str) -> CacheHit | None:
         raise _unreadable(path, exc) from exc
     if record.size != st.st_size or record.mtime_ns != st.st_mtime_ns:
         return None
-    return CacheHit(doc=reconstruct_doc(entry, path))
+    return CacheHit(doc=reconstruct_doc(entry, path), disposition=entry.disposition)

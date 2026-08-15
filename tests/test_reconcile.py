@@ -47,7 +47,7 @@ def _reloaded_tickets(text: str) -> list[object]:
 def _validated_reconcile_meta(text: str) -> NodeMeta:
     """Reparse reconciled text through the normal typed frontmatter boundary."""
     raw_meta, _ = split_frontmatter(text, Path("downstream.md"))
-    meta = parse_meta(raw_meta, Path("downstream.md"))
+    meta = parse_meta(raw_meta, Path("downstream.md")).meta
     assert meta is not None
     return meta
 
