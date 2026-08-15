@@ -754,7 +754,7 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 
 | Position | Dimension | Strict tracked-document load accepts | Fresh reread additionally handles |
 |---|---|---|---|
-| Root | Carrier shape | A block or flow mapping, or an `!!omap` in either style | Nothing more; a root that does not load as a mapping is refused, a plain sequence included |
+| Root | Carrier shape | A block or flow mapping, or an `!!omap` in either style | Nothing more; a root that loads as neither a mapping nor a null is refused, a plain sequence included, while a null root returns the file unchanged |
 | Root | Key spelling | Exactly the `NodeMeta` keys, `id` required; a key may be spelled through an alias or written as an explicit `? key` / `: value` pair; members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
 | `derives_from` | Carrier shape | A block or flow sequence, written inline or supplied by a merge | Additionally one reached through an alias, which is not strictly reachable because the anchor needs a carrier key `NodeMeta` forbids |
 | Entry | Carrier shape | A block or flow mapping, or an `!!omap` in either style, written inline or as an alias to a node elsewhere | Nothing more |

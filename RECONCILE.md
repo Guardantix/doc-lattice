@@ -43,20 +43,22 @@ whether rollback completed or recovery evidence remains.
 
 `reconcile` re-reads each downstream file fresh at write time and edits only the source bytes of
 the targeted `seen` scalar, so your body, key order, comments, and list indentation survive
-verbatim, and so does the file's line ending, which is what hashing compares. An entry that
-inherits `seen` from another through a `<<` merge key spells none of its own, so updating the
-entry that does update both. Every rewrite is verified against the document it was planned to
-produce before anything is staged, and one that would not reproduce it is refused rather than
-written, which fails the whole batch. A real run then stages exact before and after images,
-publishes a `prepared` journal, fingerprints each destination immediately before its replacement,
-and rejects a changed destination as a conflict. The full batch is rolled back in reverse order if
-a conflict or write/durability failure occurs before the committed marker. A destination counts as
-possibly applied from the moment its replacement is attempted, not once that call returns, because
-the rename lands before the directory synchronization that can still fail. Destinations the run
-never reached are not rollback candidates, so an ordinary pre-replace conflict on one file is a
-complete rollback of everything the run did touch rather than a partial one. After every
-replacement is durable, the journal becomes `committed`; success output waits until committed
-cleanup and a clean advisory-lock release have both completed.
+verbatim, and so does the file's line ending, which is what hashing compares. The one exception is
+a file that already mixes endings: there is no single ending to restore, so a run that changes
+anything in it rewrites the whole document in LF. An entry that inherits `seen` from another
+through a `<<` merge key spells none of its own, so updating the entry that does update both.
+Every rewrite is verified against the document it was planned to produce before anything is
+staged, and one that would not reproduce it is refused rather than written, which fails the whole
+batch. A real run then stages exact before and after images, publishes a `prepared` journal,
+fingerprints each destination immediately before its replacement, and rejects a changed
+destination as a conflict. The full batch is rolled back in reverse order if a conflict or
+write/durability failure occurs before the committed marker. A destination counts as possibly
+applied from the moment its replacement is attempted, not once that call returns, because the rename
+lands before the directory synchronization that can still fail. Destinations the run never reached
+are not rollback candidates, so an ordinary pre-replace conflict on one file is a complete rollback
+of everything the run did touch rather than a partial one. After every replacement is durable, the
+journal becomes `committed`; success output waits until committed cleanup and a clean advisory-lock
+release have both completed.
 
 [AD-31](ARCHITECTURE.md#ad-31-the-reconcile-rewriter-supports-a-declared-frontmatter-subset) owns
 the normative rules behind that: the frontmatter syntax this rewriter supports, what it puts back
