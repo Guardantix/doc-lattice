@@ -1142,8 +1142,8 @@ def _abort_prepared(
         destinations = ", ".join(str(destination) for destination in outcome.unresolved)
         error = ReconcilePersistenceError(
             f"{primary}; rollback was incomplete: {destinations} matched neither the "
-            "transaction before image nor its after image; the journal and every staged "
-            "image were retained; run 'doc-lattice reconcile --recover'"
+            "transaction before image nor its after image; the journal and every remaining "
+            "staged image were retained; run 'doc-lattice reconcile --recover'"
         )
         copy_exception_notes(error, primary)
         raise error from primary

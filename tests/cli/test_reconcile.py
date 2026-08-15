@@ -462,7 +462,11 @@ def test_reconcile_recover_reports_partial_rollback_and_exits_nonzero(tmp_path: 
     assert "partially rolled back reconcile transaction" in result.stdout
     assert "could not restore 1 destination" in result.stderr
     assert "unresolved destination: docs/down.md" in result.stderr
+    assert "every remaining staged image were retained" in result.stderr
     assert "rerun 'doc-lattice reconcile --recover'" in result.stderr
+    # Rerunning cannot resolve bytes the journal has no record of, so the guidance has to
+    # name the other way out rather than leaving the operator in a loop.
+    assert "to keep the current bytes instead" in result.stderr
     assert destination.read_bytes() == b"unrelated editor bytes\n"
     assert journal.exists()
     assert before.read_bytes() == b"original document\n"

@@ -1178,6 +1178,59 @@ def test_partial_recovery_is_idempotent_until_the_destination_is_repaired(tmp_pa
     assert not transaction.journal.exists()
 
 
+def test_partial_rollback_keeps_only_the_stages_it_did_not_consume(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    entries: list[JournalEntry] = []
+    stages: dict[str, tuple[Path, Path]] = {}
+    for name, destination_bytes in (
+        ("restored.md", b"after restored.md\n"),
+        ("unresolved.md", b"bytes from neither image\n"),
+    ):
+        destination = docs / name
+        before = docs / f".{name}.doc-lattice-before.mixed.tmp"
+        after = docs / f".{name}.doc-lattice-after.mixed.tmp"
+        before_bytes = f"before {name}\n".encode()
+        after_bytes = f"after {name}\n".encode()
+        destination.write_bytes(destination_bytes)
+        before.write_bytes(before_bytes)
+        after.write_bytes(after_bytes)
+        stages[name] = (before, after)
+        entries.append(
+            JournalEntry(
+                destination=destination.relative_to(tmp_path).as_posix(),
+                before_path=before.relative_to(tmp_path).as_posix(),
+                before_sha256=sha256(before_bytes).hexdigest(),
+                after_path=after.relative_to(tmp_path).as_posix(),
+                after_sha256=sha256(after_bytes).hexdigest(),
+            )
+        )
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    journal.write_text(
+        Journal(
+            version=RECONCILE_JOURNAL_VERSION, state="prepared", entries=tuple(entries)
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "partially_rolled_back"
+    assert result.restored == 1
+    assert result.unresolved == ("docs/unresolved.md",)
+    assert (docs / "restored.md").read_bytes() == b"before restored.md\n"
+    # Restoring a destination consumes its before stage by renaming it into place, so a
+    # partial rollback retains every *remaining* stage rather than every stage.
+    restored_before, restored_after = stages["restored.md"]
+    assert not restored_before.exists()
+    assert restored_after.exists()
+    unresolved_before, unresolved_after = stages["unresolved.md"]
+    assert unresolved_before.exists()
+    assert unresolved_after.exists()
+    assert journal.exists()
+    assert result.orphans == ()
+
+
 @pytest.mark.parametrize("attempted", [True, False], ids=["candidate", "never-attempted"])
 def test_rollback_separates_unresolved_candidates_from_untouched_destinations(
     tmp_path: Path, attempted: bool

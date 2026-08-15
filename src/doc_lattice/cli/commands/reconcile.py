@@ -130,9 +130,11 @@ def _report_recovery_problems(runtime: CliRuntime, recovery: RecoveryResult) -> 
         for destination in recovery.unresolved:
             runtime.stderr.print(f"  unresolved destination: {escape(destination)}", soft_wrap=True)
         runtime.stderr.print(
-            "the prepared journal and every staged image were retained; restore or "
-            "deliberately preserve each destination, then rerun "
-            "'doc-lattice reconcile --recover'",
+            "the prepared journal and every remaining staged image were retained; to finish "
+            "the rollback, restore each destination to its recorded before or after image, "
+            "then rerun 'doc-lattice reconcile --recover'; to keep the current bytes instead, "
+            "inspect the journal and then move it and the stages it names aside yourself, "
+            "since rerunning recovery cannot resolve bytes it has no record of",
             soft_wrap=True,
         )
     if recovery.orphans:

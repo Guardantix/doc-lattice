@@ -142,8 +142,17 @@ of which destination, path, and digest belong together. The one image that unavo
 is a before image consumed by restoring its own destination.
 
 Recovery stays idempotent while a destination is unresolved: rerunning `--recover` reports the same
-partial result and changes nothing. Restore or deliberately preserve each named destination, then
-rerun; once no entry is unresolved, that run performs the ordinary full cleanup and exits 0.
+partial result and changes nothing. Rerunning on its own is therefore not a way out, and until you
+take one of the two below, `--recover`, a real reconcile, and a dry run all refuse to proceed,
+because the journal is still outstanding.
+
+- **Finish the rollback.** Restore each named destination to its recorded before or after image,
+  then rerun `--recover`. Once no entry is unresolved, that run performs the ordinary full cleanup
+  and exits 0.
+- **Keep the current bytes.** Recovery cannot resolve contents it has no record of, so it will
+  never accept them for you. Inspect the journal to confirm what the transaction owned, then move
+  the journal and the stages it names aside yourself. With no journal outstanding, reconcile runs
+  again normally.
 
 ## Orphaned artifacts
 
