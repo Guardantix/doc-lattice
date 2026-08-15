@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Regenerating and verifying the generated slug data is now reproducible offline and no longer
+  breaks when Node's ICU advances. `scripts/generate_github_slugger_data.py --check` previously
+  hard-failed on any Node reporting a JavaScript Unicode version other than 17.0, recorded the
+  generating Node nowhere, and shelled to `npm install github-slugger@2.0.0`, so it needed the
+  network and would have become unrunnable at Unicode 18. The exact runtime is now pinned in
+  `.nvmrc` (`v24.13.1`, all three components, because nvm resolves a partial version to the
+  latest matching patch and Node 24.13.1 itself carried an ICU update), validated by the
+  generator, and rendered into the artifact as a new `GENERATED_NODE_VERSION` line. Upstream
+  input is the unmodified npm tarball vendored at `vendor/github-slugger-2.0.0.tgz`, verified
+  against a pinned SHA-512 before extraction and resolved by default; `--package-root` stays as
+  an explicit override and the implicit `npm install` fallback is gone. The tarball digest is the
+  complete upstream-input identity, since the evaluator runs `index.js`, which imports
+  `regex.js`; `UPSTREAM_REGEX_SHA256` is unchanged and still records artifact-level behavior
+  provenance. The vendored bytes reproduce the existing artifact exactly, so no slug, section
+  ref, or Unicode behavior changes. AD-28 in ARCHITECTURE.md records the reasoning. This is a
+  maintenance-path change only: the shipped package still has no Node dependency, and `vendor/`
+  is excluded from both the sdist and the wheel.
+
 - **BREAKING:** human-format `check` output now lists problem edges only. The per-edge `OK`
   rows are gone from the default listing, so a problem-free lattice prints its verdict line
   alone. This matches `lint`, which has always printed violations only, and keeps the default

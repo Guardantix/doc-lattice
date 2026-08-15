@@ -1,6 +1,7 @@
 """Generated compatibility data for github-slugger. Do not edit by hand."""
 
 UPSTREAM_PACKAGE = "github-slugger@2.0.0"
+GENERATED_NODE_VERSION = "24.13.1"
 JAVASCRIPT_UNICODE_VERSION = "17.0"
 PYTHON_BASELINE_UNICODE_VERSION = "15.1.0"
 UPSTREAM_REGEX_SHA256 = (

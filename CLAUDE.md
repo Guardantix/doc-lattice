@@ -75,6 +75,12 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
   Never hand-edit `_github_slugger_data.py`. Node is a maintenance-only dependency for generator
   verification. Adapter, dependency, Unicode, or generated-data changes require the generator
   check, relevant parity tests, and `scripts/bench_sections.py`.
+- Regenerating or verifying `_github_slugger_data.py` requires the exact Node version in
+  [.nvmrc](.nvmrc); run `nvm use` first, since the generator rejects any other version and a
+  partial pin would let an ICU update change the artifact bytes. Upstream input is the
+  checksummed tarball in [vendor/](vendor/README.md), so both paths run offline and
+  `--package-root` is only an explicit override. Never bump the Node pin, the tarball, or its
+  digest without regenerating and re-running the parity tests and benchmark.
 - Ruff uses a 100-character line length. Every module needs a module docstring, and public
   functions use Google-style docstrings. Do not use em dashes in drafted content.
 

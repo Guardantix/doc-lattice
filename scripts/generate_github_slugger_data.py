@@ -4,12 +4,16 @@
 Node evaluates the exact upstream slug operation and casing properties over every Unicode scalar
 value. Python 3.13 supplies the minimum supported lowercase table so the generated artifact can
 patch version gaps.
+
+Upstream input comes from the checksummed tarball under ``vendor/``, so generation and ``--check``
+need no network. Node must be the exact version pinned in ``.nvmrc``; run ``nvm use`` first.
 """
 
 import argparse
 import hashlib
 import json
 import subprocess
+import tarfile
 import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -18,8 +22,20 @@ from pathlib import Path
 
 UPSTREAM_VERSION = "2.0.0"
 UPSTREAM_JAVASCRIPT_UNICODE = "17.0"
+# The exact generating runtime, not a major. A partial version in .nvmrc resolves to the latest
+# matching patch, and Node 24.13.1 itself carried an ICU update, so any looser pin lets the ICU
+# table -- and therefore the artifact bytes -- move without the pin changing. Keep this in step
+# with .nvmrc, which spells the same version with nvm's leading "v".
+UPSTREAM_NODE_VERSION = "24.13.1"
 PYTHON_BASELINE_UNICODE = "15.1.0"
 CHECKED_UNICODE_SCALARS = 1_112_064
+# SHA-512 of the vendored npm registry tarball, verified before extraction. Equivalent to the
+# registry's own `sha512-IaOQ9puYtjrkq7Y0Ygl9KDZnrf/aiUJYUpVf89y8kyaxbRG7Y1SrX/jaumrv81vc61+
+# kiMempujsM3Yw7w5qcw==` in base64 SRI form. See vendor/README.md.
+VENDORED_TARBALL_SHA512 = (
+    "21a390f69b98b63ae4abb63462097d283667adffda89425852955ff3dcbc9326"  # pragma: allowlist secret
+    "b16d11bb6354ab5ff8daba6aeff35bdceb5fa488c7a6a6e8ec337630ef0e6a73"  # pragma: allowlist secret
+)
 _MAX_UNICODE = 0x10FFFF
 _MAX_BMP = 0xFFFF
 _SURROGATE_START = 0xD800
@@ -27,6 +43,9 @@ _SURROGATE_END = 0xDFFF
 _LOWERCASE_MAPPING_FIELDS = 2
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_OUTPUT = _REPO_ROOT / "src" / "doc_lattice" / "_github_slugger_data.py"
+_VENDORED_TARBALL = _REPO_ROOT / "vendor" / f"github-slugger-{UPSTREAM_VERSION}.tgz"
+# npm tarballs root every entry under a literal "package/" prefix.
+_TARBALL_PACKAGE_PREFIX = "package"
 
 _NODE_PROGRAM = r"""
 import {pathToFileURL} from 'node:url'
@@ -100,6 +119,7 @@ class ArtifactMetadata:
     version: str
     regex_sha256: str
     stripped_count: int
+    node_version: str
     javascript_unicode: str
     python_baseline_unicode: str
     upstream_lowercase_count: int
@@ -213,6 +233,7 @@ def render_module(
     return (
         '"""Generated compatibility data for github-slugger. Do not edit by hand."""\n\n'
         f'UPSTREAM_PACKAGE = "github-slugger@{metadata.version}"\n'
+        f'GENERATED_NODE_VERSION = "{metadata.node_version}"\n'
         f'JAVASCRIPT_UNICODE_VERSION = "{metadata.javascript_unicode}"\n'
         f'PYTHON_BASELINE_UNICODE_VERSION = "{metadata.python_baseline_unicode}"\n'
         "UPSTREAM_REGEX_SHA256 = (\n"
@@ -414,6 +435,15 @@ def _render_from_package(
             f"found {unicode_version!r} from Node {node_version}"
         )
         raise ValueError(msg)
+    # The Unicode check above is necessary but not sufficient: the rendered artifact records the
+    # exact Node version, so two runtimes reporting the same Unicode version still produce
+    # different bytes. Pin the patch and fail here rather than emitting a mislabelled artifact.
+    if node_version != UPSTREAM_NODE_VERSION:
+        msg = (
+            f"expected Node {UPSTREAM_NODE_VERSION} (see .nvmrc), found {node_version!r}; "
+            "run `nvm use` before regenerating"
+        )
+        raise ValueError(msg)
     baseline_lowercase, baseline_unicode = _evaluate_python_lowercase(python_executable)
     if baseline_unicode != PYTHON_BASELINE_UNICODE:
         msg = (
@@ -459,6 +489,7 @@ def _render_from_package(
         version=version,
         regex_sha256=regex_sha256,
         stripped_count=len(stripped),
+        node_version=node_version,
         javascript_unicode=unicode_version,
         python_baseline_unicode=baseline_unicode,
         upstream_lowercase_count=len(lowercase),
@@ -484,26 +515,48 @@ def _render_from_package(
     )
 
 
-def _install_package(working_dir: Path) -> Path:
+def verify_vendored_tarball(tarball: Path) -> bytes:
+    """Read the vendored upstream tarball and verify it against the pinned digest.
+
+    Args:
+        tarball: Path to the vendored ``github-slugger`` npm tarball.
+
+    Returns:
+        The verified tarball bytes.
+
+    Raises:
+        FileNotFoundError: If the vendored tarball is absent.
+        ValueError: If the bytes do not match ``VENDORED_TARBALL_SHA512``.
+    """
     try:
-        subprocess.run(
-            [
-                "npm",
-                "install",
-                "--ignore-scripts",
-                "--no-package-lock",
-                "--no-save",
-                f"github-slugger@{UPSTREAM_VERSION}",
-            ],
-            cwd=working_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        payload = tarball.read_bytes()
     except FileNotFoundError as exc:
-        msg = "npm executable not found; install Node.js and npm to generate slug data"
-        raise RuntimeError(msg) from exc
-    return working_dir / "node_modules" / "github-slugger"
+        msg = f"vendored upstream tarball is missing: {tarball}"
+        raise FileNotFoundError(msg) from exc
+    digest = hashlib.sha512(payload).hexdigest()
+    if digest != VENDORED_TARBALL_SHA512:
+        msg = (
+            f"vendored tarball digest mismatch for {tarball}: "
+            f"expected sha512 {VENDORED_TARBALL_SHA512}, found {digest}"
+        )
+        raise ValueError(msg)
+    return payload
+
+
+def _extract_vendored_package(tarball: Path, working_dir: Path) -> Path:
+    # Verify before extraction, never after: unpacking unverified bytes would write attacker
+    # -chosen content to disk regardless of what the digest comparison later concluded.
+    payload = verify_vendored_tarball(tarball)
+    staged = working_dir / tarball.name
+    staged.write_bytes(payload)
+    with tarfile.open(staged, mode="r:gz") as archive:
+        # filter="data" rejects absolute paths, parent traversal, links, and device nodes.
+        archive.extractall(working_dir, filter="data")
+    package_root = working_dir / _TARBALL_PACKAGE_PREFIX
+    if not (package_root / "package.json").is_file():
+        msg = f"vendored tarball does not contain {_TARBALL_PACKAGE_PREFIX}/package.json"
+        raise ValueError(msg)
+    return package_root
 
 
 def _write_or_check(
@@ -550,7 +603,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--package-root",
         type=Path,
-        help="existing github-slugger package directory; otherwise install the exact pin",
+        help=(
+            "override the vendored tarball with an existing github-slugger package directory; "
+            "by default the checksummed tarball under vendor/ is used, which needs no network"
+        ),
+    )
+    parser.add_argument(
+        "--tarball",
+        type=Path,
+        default=_VENDORED_TARBALL,
+        help="vendored github-slugger npm tarball verified against the pinned SHA-512",
     )
     parser.add_argument(
         "--python-baseline",
@@ -573,7 +635,7 @@ def main() -> int:
         )
         return status
     with tempfile.TemporaryDirectory(prefix="doc-lattice-slugger-") as tmp:
-        package_root = _install_package(Path(tmp))
+        package_root = _extract_vendored_package(args.tarball, Path(tmp))
         status, _ = _write_or_check(
             package_root,
             args.output,
