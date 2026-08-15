@@ -834,8 +834,10 @@ shape the run never reaches is a no-op rather than an error:
 - Whenever planning is reached, meaning the document carries a `derives_from` list, and
   independent of whether any planned ref still matches: an entry that does not load as a mapping,
   and an entry whose `ref` is not a string.
-- When the targeted entry matches an applicable update: a collection-valued `seen`. A
-  collection-valued `seen` at an entry no update targets is not reached and returns unchanged.
+- When the targeted entry matches an applicable update: a collection-valued `seen`. The same
+  shape at an entry no update targets is never inspected, so it neither refuses the run nor is
+  rewritten, while the updates the run does target still apply and rewrite the document around
+  it, as `test_apply_reconcile_leaves_a_collection_seen_at_an_unmatched_entry_alone` pins.
 - When at least one update is applied: self-referential frontmatter, which compares without bound
   and so cannot be verified; a rewrite that fails to reload; and a rewrite that does not reproduce
   the whole planned frontmatter, edges and every other key alike.
