@@ -641,23 +641,35 @@ bytes, recovery artifacts, and the before-image rollback sink are deliberately p
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
 
-Ten near-miss shapes are pinned explicitly, because each defeated an earlier draft of the guard
-and each was reproduced against it before being closed. The gate must be its own unconditional
-top-level statement, since a gate merely contained in an earlier statement can sit inside a
-conditional and skip the path a later changed return takes. Both operands of the line-ending
-restoration are constrained, since checking only the searched text admits a replacement that
-rewrites verified content. The envelope fields a rewrite may reattach are whitelisted, excluding
+Fifteen near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
+guard and each was reproduced against it before being closed. The gate must be its own
+unconditional top-level statement, since a gate merely contained in an earlier statement can sit
+inside a conditional and skip the path a later changed return takes. Both operands of the
+line-ending restoration are constrained, since checking only the searched text admits a
+replacement that rewrites verified content, and each is one complete ending rather than any run
+of ending characters, since replacing one newline with two opens a blank line after every line
+the gate verified. The envelope fields a rewrite may reattach are whitelisted, excluding
 `raw_meta`, which holds the pre-edit YAML the gate never verified, and the literals it may
-contribute are restricted to line endings, since text spliced into the reassembly f-string is
-published byte for byte. Producer and publication scans resolve import aliases and
-module-qualified references, since `Rewrite as R` and `persistence.replace_staged(...)` are each
-a complete route past a bare-name scan. The publication-reach rule reads every mention of the
-identifier rather than only its imports, and follows both composite primitives: the one that
-reaches the helper without naming it, and the descriptor-relative variant that publishes without
-calling it at all. The staging scan reads the staged operand as well as the prefix, since
-a site can bind the after-image infix to a local first, a shape the transaction module already
-uses. The producer scan also refuses a dataclass field copy, since `dataclasses.replace(rewrite,
-after=...)` mints a `Rewrite` carrying ungated bytes without ever naming the class.
+contribute are restricted the same way, since text spliced into the reassembly f-string is
+published byte for byte. Producer and publication scans resolve module-qualified references and
+every kind of alias, by import or by assignment, since `Rewrite as R`, `R = Rewrite`, and
+`persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
+publication-reach rule reads every mention of the identifier rather than only its imports, and
+follows both composite primitives: the one that reaches the helper without naming it, and the
+descriptor-relative variant that publishes without calling it at all. The staging scan reads the
+staged operand as well as the prefix, since a site can bind the after-image infix to a local
+first, a shape the transaction module already uses. The producer scan also refuses a dataclass
+field copy, since `dataclasses.replace(rewrite, after=...)` mints a `Rewrite` carrying ungated
+bytes without ever naming the class. The sink must take its image and its destination from the
+same journal entry expression, since matching only the two field names lets one entry's staged
+image publish over every destination the commit loop visits.
+
+A publication route need not name any pinned helper at all, so the transaction module is also
+audited by destination rather than by primitive: nothing there may hand a journal entry's
+destination to a callee outside a pinned reader set, or call a method on one. Enumerating write
+primitives could not close this, since a new sink can always name a primitive the guard has never
+heard of, whereas reaching the destination is the one step it cannot avoid. That audit is scoped
+to `reconcile_transaction.py`, the only module owning reconcile destinations.
 
 One scoping limit is deliberate rather than closed: `persistence.py` owns the publication helper
 and is exempt from both the reach rule and the sink audit, so a forward sink added inside that

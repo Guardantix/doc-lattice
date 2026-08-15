@@ -197,8 +197,29 @@ AFTER_FIELD_INDEX = list(Rewrite.__dataclass_fields__).index(AFTER_FIELD)
 FORWARD_IMAGE_FIELD = "after_path"
 ROLLBACK_IMAGE_FIELD = "before_path"
 LINE_ENDING_CALLEE = "_line_ending"
-LINE_ENDING_CHARS = frozenset("\r\n")
+# The complete endings a restoration operand or an envelope literal may carry. A character-set
+# test would accept any run of CR and LF, so `new_text.replace("\n", "\n\n")` would pass while
+# doubling every newline through the gate-verified YAML and body.
+LINE_ENDINGS = frozenset({"\n", "\r\n", "\r"})
 OPAQUE_BINDING = -1
+DESTINATION_FIELD = "destination"
+# Calls in the transaction module that may hold a reconcile destination without publishing over
+# it. A new sink can always name a write primitive this guard has never heard of, so the audit
+# is keyed to the destination rather than to a list of primitives, and every callee that reaches
+# one is classified here deliberately. `stage_bytes` writes a sibling temporary, never the
+# destination itself; the rest fingerprint, validate, or report it.
+DESTINATION_READERS = frozenset(
+    {
+        "_authenticate_staged_artifact",
+        "_commit_operation_error",
+        "_recovery_operation_error",
+        "_resolve_journal_path",
+        "_validate_artifact_path",
+        "file_sha256",
+        "stage_bytes",
+        PUBLISH_CALLEE,
+    }
+)
 PUBLICATION_OWNERS = frozenset({"persistence.py", TRANSACTION_MODULE})
 # Each composite primitive below stages and publishes one destination in a single call, so naming
 # one overwrites a document without ever naming the publication helper and would slip past a scan
@@ -306,8 +327,25 @@ def _call_sites(trees: dict[str, ast.Module], callee: str | None = None) -> list
     return sites
 
 
+def _assigned_names(tree: ast.Module) -> list[tuple[list[ast.expr], ast.expr]]:
+    """Every assignment in a module, as its target list paired with its assigned value."""
+    pairs: list[tuple[list[ast.expr], ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            pairs.append((node.targets, node.value))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            pairs.append(([node.target], node.value))
+    return pairs
+
+
 def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
-    """Every local name in a module that refers to ``symbol``, import aliases included."""
+    """Every local name in a module that refers to ``symbol``, however it was bound.
+
+    Imports are not the only way to rename a guarded symbol. ``R = Rewrite`` followed by
+    ``R(...)``, or ``publish = persistence.replace_staged``, rebinds it under a name an
+    import-only scan never sees, leaving the original site as the apparent sole one. Assignments
+    are followed to a fixpoint so a chain of renames resolves too.
+    """
     aliases: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -316,6 +354,20 @@ def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
             )
         elif isinstance(node, ast.ClassDef | ast.FunctionDef) and node.name == symbol:
             aliases.add(symbol)
+    assignments = _assigned_names(tree)
+    growing = True
+    while growing:
+        growing = False
+        for targets, value in assignments:
+            renames = (isinstance(value, ast.Name) and value.id in aliases) or (
+                isinstance(value, ast.Attribute) and value.attr == symbol
+            )
+            if not renames:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in aliases:
+                    aliases.add(target.id)
+                    growing = True
     return frozenset(aliases)
 
 
@@ -427,11 +479,14 @@ def _argument(call: ast.Call, name: str, index: int) -> ast.expr | None:
 
 
 def _is_line_ending_operand(expr: ast.expr, context: _TraceContext) -> bool:
-    """True for a literal line-ending run, or a local holding the source's own ending."""
+    """True for one complete line-ending literal, or a local holding the source's own ending.
+
+    The literal must be exactly one ending rather than any run of ending characters. A run
+    admits ``new_text.replace("\\n", "\\n\\n")``, which inserts a blank line after every line of
+    the gate-verified YAML and body instead of restoring the ending the source was written with.
+    """
     if isinstance(expr, ast.Constant):
-        if not (isinstance(expr.value, str) and expr.value):
-            return False
-        return set(expr.value) <= LINE_ENDING_CHARS
+        return expr.value in LINE_ENDINGS
     if isinstance(expr, ast.Name):
         binding = _sole_binding(context.bindings, expr.id)
         return binding is not None and _is_call_to(binding.value, LINE_ENDING_CALLEE)
@@ -469,9 +524,10 @@ def _is_envelope_literal(node: ast.Constant) -> bool:
 
     Literal text in the f-string is published byte for byte, so skipping constants outright
     would admit ``f"{parts.prefix}{parts.open_fence}\\nINJECTED{new_meta}"`` and write content
-    the gate never verified. Only the fence-terminating newline is a legitimate literal.
+    the gate never verified. Only the fence-terminating newline is a legitimate literal, and
+    only exactly one of them: a run would open a blank line the gate never saw.
     """
-    return isinstance(node.value, str) and set(node.value) <= LINE_ENDING_CHARS
+    return node.value in LINE_ENDINGS
 
 
 def _traces_to(expr: ast.expr, context: _TraceContext, seen: tuple[str, ...] = ()) -> bool:
@@ -829,20 +885,103 @@ def _publication_reach_violations(trees: dict[str, ast.Module]) -> list[str]:
     ]
 
 
+def _same_entry(staged: ast.expr | None, destination: ast.Attribute) -> bool:
+    """True when both publication operands read fields of the very same journal entry.
+
+    Matching only the two attribute names lets ``replace_staged(prepared.entries[0].after_path,
+    entry.destination)`` pass, which authenticates the entry the commit loop is on and then
+    publishes the first document's bytes over every destination it visits.
+    """
+    if not isinstance(staged, ast.Attribute):
+        return False
+    return ast.dump(staged.value) == ast.dump(destination.value)
+
+
+def _is_destination(
+    expr: ast.expr, bindings: dict[str, list[_Binding]], seen: tuple[str, ...] = ()
+) -> bool:
+    """True for a journal entry's destination, named directly or held by a local."""
+    if isinstance(expr, ast.Attribute) and expr.attr == DESTINATION_FIELD:
+        return True
+    if not isinstance(expr, ast.Name) or expr.id in seen:
+        return False
+    binding = _sole_binding(bindings, expr.id)
+    return binding is not None and _is_destination(binding.value, bindings, (*seen, expr.id))
+
+
+def _callee_name(call: ast.Call) -> str | None:
+    """The bare name of whatever a call invokes, ignoring how it was qualified."""
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _destination_write_violations(trees: dict[str, ast.Module]) -> list[str]:
+    """Nothing in the transaction module may reach a destination but a pinned reader.
+
+    The sink audit resolves ``replace_staged``, so a route that never names it is invisible
+    there: ``os.replace(entry.after_path, entry.destination)`` and
+    ``entry.destination.write_bytes(data)`` both publish arbitrary bytes over a document while
+    the expected call stays in place. Enumerating write primitives cannot close that, since a
+    new sink can name one this guard has never heard of, so the audit keys on the destination
+    instead and every callee that reaches one is classified in ``DESTINATION_READERS``.
+
+    The scan covers ``reconcile_transaction.py`` alone, the only module that owns reconcile
+    destinations. Elsewhere a ``.destination`` field belongs to an unrelated domain, and the
+    reach rule already pins which modules may publish at all.
+    """
+    scoped = {TRANSACTION_MODULE: trees[TRANSACTION_MODULE]}
+    cache: dict[tuple[str, str | None], dict[str, list[_Binding]]] = {}
+    problems: list[str] = []
+    for site in _call_sites(scoped):
+        bindings = _enclosing_bindings(scoped, site, cache)
+        func = site.call.func
+        if isinstance(func, ast.Attribute) and _is_destination(func.value, bindings):
+            problems.append(
+                _gate_msg(
+                    f"{site.located} calls {func.attr}() on a reconcile destination, which no "
+                    "pinned reader does"
+                )
+            )
+            continue
+        name = _callee_name(site.call)
+        if name in DESTINATION_READERS:
+            continue
+        arguments = [*site.call.args, *(keyword.value for keyword in site.call.keywords)]
+        if any(_is_destination(argument, bindings) for argument in arguments):
+            problems.append(
+                _gate_msg(
+                    f"{site.located} hands a reconcile destination to {name}(), which is not a "
+                    f"pinned reader in {sorted(DESTINATION_READERS)}"
+                )
+            )
+    return problems
+
+
 def _publication_violations(trees: dict[str, ast.Module]) -> list[str]:
     """One forward document-publication sink; the before-image rollback sink stays exempt."""
     problems = _publication_reach_violations(trees)
+    problems.extend(_destination_write_violations(trees))
     roles: dict[str, list[str]] = {FORWARD_IMAGE_FIELD: [], ROLLBACK_IMAGE_FIELD: []}
     scoped = {TRANSACTION_MODULE: trees[TRANSACTION_MODULE]}
     for site in _symbol_call_sites(scoped, PUBLISH_CALLEE):
         staged = site.call.args[0] if site.call.args else None
         destination = site.call.args[1] if len(site.call.args) > 1 else None
         role = staged.attr if isinstance(staged, ast.Attribute) else None
-        if not (isinstance(destination, ast.Attribute) and destination.attr == "destination"):
+        if not (isinstance(destination, ast.Attribute) and destination.attr == DESTINATION_FIELD):
             problems.append(
                 _gate_msg(
                     f"{PUBLISH_CALLEE}() at {site.located} does not publish over a journal entry "
                     "destination"
+                )
+            )
+        elif not _same_entry(staged, destination):
+            problems.append(
+                _gate_msg(
+                    f"{PUBLISH_CALLEE}() at {site.located} takes its image and its destination "
+                    "from different journal entry expressions"
                 )
             )
         elif role in roles:
@@ -983,6 +1122,25 @@ def publish(directory_fd: int, destination_name: str, data: bytes) -> None:
     atomic_replace_bytes_at(directory_fd, destination_name, data, prefix=".rogue")
 '''
 
+# The forward sink the controls below bend, with the indentation its statement sits at, so an
+# added statement lands in the same block rather than reindenting the module into a syntax error.
+FORWARD_SINK_CALL = "replace_staged(entry.after_path, entry.destination)"
+SINK_INDENT = " " * 12
+
+ASSIGNED_ALIAS_PRODUCER_MODULE = '''"""A producer hidden behind an assigned alias."""
+
+from pathlib import Path
+
+from .reconcile import Rewrite
+
+R = Rewrite
+
+
+def build(path: Path, before: bytes, data: bytes) -> Rewrite:
+    """Mint a Rewrite the gate never saw, naming the class only in an assignment."""
+    return R(path, before, data, frozenset())
+'''
+
 FIELD_COPY_PRODUCER_MODULE = '''"""A producer that copies a Rewrite instead of building one."""
 
 import dataclasses
@@ -1023,7 +1181,11 @@ def _positive_controls() -> dict[str, dict[str, str]]:
     bound infix, a document published through ``atomic_replace_bytes`` without ever naming the
     publication helper, the same through the descriptor-relative ``atomic_replace_bytes_at``,
     which does not even call that helper, and a Rewrite minted by ``dataclasses.replace`` rather
-    than constructed.
+    than constructed. The last five came from external review of this guard, again each
+    reproduced first: a restoration replacing one newline with two, a sink pairing one entry's
+    staged image with another entry's destination, a destination republished by a raw
+    ``os.replace``, a destination overwritten through its own write method, and a producer
+    behind an alias introduced by assignment rather than by import.
 
     Cached alongside the source read so the parametrized run builds this mapping once.
     """
@@ -1107,6 +1269,34 @@ def _positive_controls() -> dict[str, dict[str, str]]:
         "rewrite-minted-by-a-dataclass-field-copy": {
             **sources,
             "rogue_field_copy_producer.py": FIELD_COPY_PRODUCER_MODULE,
+        },
+        "line-ending-restoration-that-doubles-every-newline": _patched(
+            sources,
+            RECONCILE_MODULE,
+            'new_text.replace("\\n", ending)',
+            'new_text.replace("\\n", "\\n\\n")',
+        ),
+        "image-and-destination-taken-from-different-entries": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            "replace_staged(prepared.entries[0].after_path, entry.destination)",
+        ),
+        "destination-republished-by-a-raw-replace-primitive": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}os.replace(entry.after_path, entry.destination)",
+        ),
+        "destination-overwritten-through-its-own-write-method": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}entry.destination.write_bytes(b'')",
+        ),
+        "rewrite-minted-behind-an-assigned-alias": {
+            **sources,
+            "rogue_assigned_alias_producer.py": ASSIGNED_ALIAS_PRODUCER_MODULE,
         },
     }
 
