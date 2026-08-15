@@ -188,6 +188,73 @@ def test_render_findings_blocked_shows_reason_not_state():
     assert "PC-999 (not-found)" in out
 
 
+def test_render_findings_emits_no_ansi_under_no_color():
+    # Same contract as the three renderers in test_report_render: Rich's default highlighter
+    # bolds bare numbers, and bold survives no_color, so a ticket ref (GTX-96), a numbered
+    # node id (adr-001), and a digit-carrying drifted ref used to leak escapes into
+    # --no-color stale-shipped output. A non-terminal Console cannot catch this -- it emits
+    # no ANSI whatever the highlighter does -- so this one forces a terminal.
+    ticket = Ticket(
+        identifier="GTX-96",
+        title="t",
+        url="https://x/GTX-96",
+        state=TicketState(name="Done", type="completed"),
+        parent=None,
+        children=(),
+    )
+    finding = Finding(
+        severity="DANGER",
+        node_id="adr-001",
+        node_title=None,
+        node_path=Path("docs/adr-001.md"),
+        drifted_refs=("rfc-2119#sec-3",),
+        ticket_ref="GTX-96",
+        reason=None,
+        ticket=ticket,
+    )
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, color_system="standard", no_color=True)
+
+    render_findings(console, [finding])
+
+    assert "\x1b[" not in output.getvalue()
+
+
+def test_render_findings_keeps_every_finding_on_one_line_at_any_width():
+    # Same contract as render_statuses/render_lint: a node id, ticket ref, or drifted ref that
+    # survives a pipe today must stay intact at any terminal width rather than hard-wrapping
+    # mid-token into a fragment.
+    finding = Finding(
+        severity="DANGER",
+        node_id="billing-integration-guide",
+        node_title=None,
+        node_path=Path("docs/billing-integration-guide.md"),
+        drifted_refs=("api-design#pagination",),
+        ticket_ref="GTX-96",
+        reason=None,
+        ticket=_ticket(),
+    )
+    output = io.StringIO()
+    console = Console(file=output, width=20, color_system=None)
+
+    render_findings(console, [finding])
+
+    assert output.getvalue() == (
+        "DANGER   billing-integration-guide  GTX-96 [Done]  drift: api-design#pagination\n"
+    )
+
+
+def test_render_findings_keeps_the_empty_placeholder_on_one_line_at_any_width():
+    # The all-clear branch is a print like any other, so it carries the same one-record
+    # contract: 25 characters must not wrap into two lines on a 20-column console.
+    output = io.StringIO()
+    console = Console(file=output, width=20, color_system=None)
+
+    render_findings(console, [])
+
+    assert output.getvalue() == "no stale-shipped findings\n"
+
+
 def test_render_findings_joins_multiple_drifted_refs():
     # drifted_refs is plural by design; a two-ref finding pins the ", ".join contract that a
     # single-element tuple can never exercise.

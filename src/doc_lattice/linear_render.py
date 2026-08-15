@@ -71,8 +71,17 @@ def render_findings(console: Console, findings: Sequence[Finding]) -> None:
         console: The output console.
         findings: The ordered findings.
     """
+    # highlight=False on both prints, matching the three renderers in report_render.py: Rich's
+    # default highlighter bolds bare numbers, and bold survives no_color, so it emits ANSI under
+    # --no-color. That bites a ticket ref (GTX-96), a numbered node id (adr-001), and any drifted
+    # ref carrying a digit. The explicit severity color below is markup, which highlight=False
+    # leaves alone.
+    # soft_wrap on both prints: each finding and the all-clear line are one record on one line at
+    # any width, so a pipe or a grep gets the whole record rather than the fragment Rich's
+    # wrapping would leave on a narrow console. Same contract GTX-2 and GTX-48 applied to impact,
+    # check, and lint.
     if not findings:
-        console.print("no stale-shipped findings")
+        console.print("no stale-shipped findings", highlight=False, soft_wrap=True)
         return
     for finding in findings:
         color = _SEVERITY_COLORS[finding.severity]
@@ -83,5 +92,7 @@ def render_findings(console: Console, findings: Sequence[Finding]) -> None:
             detail = render_safe(f"{finding.ticket_ref} ({finding.reason})")
         console.print(
             f"[{color}]{finding.severity:<{_SEVERITY_COLUMN_WIDTH}}[/{color}] "
-            f"{render_safe(finding.node_id)}  {detail}  drift: {refs}"
+            f"{render_safe(finding.node_id)}  {detail}  drift: {refs}",
+            highlight=False,
+            soft_wrap=True,
         )
