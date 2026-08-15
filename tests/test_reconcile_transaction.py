@@ -561,7 +561,16 @@ def test_journal_rejects_unknown_state():
 def test_recovery_result_is_frozen_and_slotted(tmp_path: Path):
     result = RecoveryResult(action="none", journal=tmp_path / RECONCILE_JOURNAL_NAME)
 
-    assert result.__slots__ == ("action", "journal")
+    assert result.__slots__ == (
+        "action",
+        "journal",
+        "restored",
+        "already_before",
+        "unresolved",
+        "orphans",
+        "scan_errors",
+    )
+    assert not result.is_incomplete
     with pytest.raises(FrozenInstanceError):
         result.action = "rolled_back"  # ty: ignore[invalid-assignment]
 
@@ -891,19 +900,29 @@ def test_prepared_after_image_is_rolled_back_and_artifacts_are_cleaned(tmp_path:
 
     result = recover_transaction(tmp_path)
 
-    assert result == RecoveryResult(action="rolled_back", journal=transaction.journal)
+    assert result == RecoveryResult(
+        action="rolled_back",
+        journal=transaction.journal,
+        restored=1,
+    )
+    assert not result.is_incomplete
     assert transaction.destination.read_bytes() == b"before image\n"
     assert not transaction.before.exists()
     assert not transaction.after.exists()
     assert not transaction.journal.exists()
 
 
-def test_prepared_destination_already_at_before_image_is_left_unchanged(tmp_path: Path):
+def test_prepared_destination_already_at_before_image_is_a_full_rollback(tmp_path: Path):
     transaction = _write_synthetic_transaction(tmp_path, destination_bytes=b"before image\n")
 
     result = recover_transaction(tmp_path)
 
-    assert result.action == "rolled_back"
+    assert result == RecoveryResult(
+        action="rolled_back",
+        journal=transaction.journal,
+        already_before=1,
+    )
+    assert not result.is_incomplete
     assert transaction.destination.read_bytes() == b"before image\n"
     assert not transaction.before.exists()
     assert not transaction.after.exists()
@@ -911,7 +930,7 @@ def test_prepared_destination_already_at_before_image_is_left_unchanged(tmp_path
 
 
 @pytest.mark.parametrize("destination_bytes", [b"unrelated editor change\n", None])
-def test_prepared_unrelated_edit_or_deletion_is_preserved_while_artifacts_are_cleaned(
+def test_prepared_unresolved_destination_is_reported_partial_and_keeps_its_evidence(
     tmp_path: Path, destination_bytes: bytes | None
 ):
     transaction = _write_synthetic_transaction(
@@ -921,14 +940,19 @@ def test_prepared_unrelated_edit_or_deletion_is_preserved_while_artifacts_are_cl
 
     result = recover_transaction(tmp_path)
 
-    assert result.action == "rolled_back"
+    assert result.action == "partially_rolled_back"
+    assert result.is_incomplete
+    assert result.unresolved == ("docs/doc.md",)
+    assert result.restored == 0
+    assert result.already_before == 0
     if destination_bytes is None:
         assert not transaction.destination.exists()
     else:
         assert transaction.destination.read_bytes() == destination_bytes
-    assert not transaction.before.exists()
-    assert not transaction.after.exists()
-    assert not transaction.journal.exists()
+    assert transaction.before.read_bytes() == b"before image\n"
+    assert transaction.after.read_bytes() == b"after image\n"
+    assert transaction.journal.exists()
+    assert result.orphans == ()
 
 
 def test_committed_recovery_never_reads_or_changes_destination(tmp_path: Path, monkeypatch):
@@ -1093,13 +1117,10 @@ def test_absent_artifact_is_never_passed_to_unlink(tmp_path: Path, monkeypatch):
     assert not transaction.journal.exists()
 
 
-@pytest.mark.parametrize("destination_bytes", [b"before image\n", b"unrelated edit\n"])
-def test_prepared_recovery_allows_unneeded_staged_artifacts_to_be_absent(
-    tmp_path: Path, destination_bytes: bytes
-):
+def test_prepared_recovery_allows_unneeded_staged_artifacts_to_be_absent(tmp_path: Path):
     transaction = _write_synthetic_transaction(
         tmp_path,
-        destination_bytes=destination_bytes,
+        destination_bytes=b"before image\n",
         before_present=False,
         after_present=False,
     )
@@ -1107,8 +1128,149 @@ def test_prepared_recovery_allows_unneeded_staged_artifacts_to_be_absent(
     result = recover_transaction(tmp_path)
 
     assert result.action == "rolled_back"
-    assert transaction.destination.read_bytes() == destination_bytes
+    assert result.already_before == 1
+    assert transaction.destination.read_bytes() == b"before image\n"
     assert not transaction.journal.exists()
+
+
+def test_prepared_unresolved_destination_keeps_the_journal_when_no_stage_remains(tmp_path: Path):
+    transaction = _write_synthetic_transaction(
+        tmp_path,
+        destination_bytes=b"unrelated edit\n",
+        before_present=False,
+        after_present=False,
+    )
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "partially_rolled_back"
+    assert result.unresolved == ("docs/doc.md",)
+    assert transaction.destination.read_bytes() == b"unrelated edit\n"
+    # The journal is the surviving recovery authority: it alone still records which
+    # destination, paths, and digests the interrupted transaction owned.
+    assert transaction.journal.exists()
+
+
+def test_partial_recovery_is_idempotent_until_the_destination_is_repaired(tmp_path: Path):
+    transaction = _write_synthetic_transaction(
+        tmp_path,
+        destination_bytes=b"unrelated editor change\n",
+    )
+
+    first = recover_transaction(tmp_path)
+    second = recover_transaction(tmp_path)
+
+    assert first == second
+    assert first.action == "partially_rolled_back"
+    assert first.orphans == ()
+    assert transaction.before.read_bytes() == b"before image\n"
+    assert transaction.after.read_bytes() == b"after image\n"
+    assert transaction.journal.exists()
+
+    transaction.destination.write_bytes(b"after image\n")
+    repaired = recover_transaction(tmp_path)
+
+    assert repaired.action == "rolled_back"
+    assert repaired.restored == 1
+    assert transaction.destination.read_bytes() == b"before image\n"
+    assert not transaction.before.exists()
+    assert not transaction.after.exists()
+    assert not transaction.journal.exists()
+
+
+@pytest.mark.parametrize("attempted", [True, False], ids=["candidate", "never-attempted"])
+def test_rollback_separates_unresolved_candidates_from_untouched_destinations(
+    tmp_path: Path, attempted: bool
+):
+    transaction = _write_synthetic_transaction(
+        tmp_path,
+        destination_bytes=b"bytes from neither image\n",
+    )
+    _loaded, entries, journal_bytes = reconcile_transaction._load_journal(
+        tmp_path, transaction.journal
+    )
+    candidates = frozenset({entries[0].destination}) if attempted else frozenset()
+
+    outcome = reconcile_transaction._rollback_prepared(
+        entries,
+        transaction.journal,
+        journal_bytes,
+        candidates=candidates,
+    )
+
+    assert outcome.restored == ()
+    assert outcome.already_before == ()
+    if attempted:
+        assert outcome.unresolved == (entries[0].destination,)
+        assert outcome.untouched == ()
+        # An unresolved entry blocks cleanup, so every stage and the journal survive.
+        assert transaction.journal.exists()
+        assert transaction.before.exists()
+    else:
+        assert outcome.unresolved == ()
+        assert outcome.untouched == (entries[0].destination,)
+        # A destination the transaction never attempted is not a rollback it failed, so
+        # cleanup proceeds and the run stays a full rollback.
+        assert not transaction.journal.exists()
+        assert not transaction.before.exists()
+    assert transaction.destination.read_bytes() == b"bytes from neither image\n"
+
+
+def test_orphaned_artifacts_without_a_journal_are_reported_and_never_deleted(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    nested_stage = docs / ".doc.md.doc-lattice-after.orphan1.tmp"
+    root_stage = tmp_path / ".root.md.doc-lattice-before.orphan2.tmp"
+    journal_stage = tmp_path / f"{RECONCILE_JOURNAL_NAME}.orphan3.tmp"
+    unrelated = docs / "notes.tmp"
+    for path in (nested_stage, root_stage, journal_stage, unrelated):
+        path.write_bytes(b"orphan\n")
+    before = _tree_snapshot(tmp_path)
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "none"
+    assert result.is_incomplete
+    assert result.orphans == (
+        ".doc-lattice-reconcile.json.orphan3.tmp",
+        ".root.md.doc-lattice-before.orphan2.tmp",
+        "docs/.doc.md.doc-lattice-after.orphan1.tmp",
+    )
+    assert result.scan_errors == ()
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_journal_recovery_and_its_leaked_publication_stage_are_reported_together(tmp_path: Path):
+    transaction = _write_synthetic_transaction(tmp_path)
+    # An interrupted journal publication can leave the canonical journal and the helper
+    # stage it was linked from. Scanning only before journal handling would hide the helper
+    # until a second invocation.
+    leaked = tmp_path / f"{RECONCILE_JOURNAL_NAME}.leaked.tmp"
+    leaked.write_bytes(transaction.journal.read_bytes())
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "rolled_back"
+    assert result.restored == 1
+    assert result.is_incomplete
+    assert result.orphans == (".doc-lattice-reconcile.json.leaked.tmp",)
+    assert transaction.destination.read_bytes() == b"before image\n"
+    assert not transaction.journal.exists()
+    assert leaked.exists()
+
+
+def test_partial_rollback_never_reports_its_own_retained_evidence_as_orphaned(tmp_path: Path):
+    transaction = _write_synthetic_transaction(
+        tmp_path,
+        destination_bytes=b"unrelated editor change\n",
+    )
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "partially_rolled_back"
+    assert result.orphans == ()
+    assert transaction.before.exists()
+    assert transaction.after.exists()
 
 
 def test_repeated_recovery_is_safe(tmp_path: Path):
@@ -1402,17 +1564,13 @@ def test_retry_syncs_absent_isolated_stage_parent_before_removing_journal(
     assert not transaction.journal.exists()
 
 
-@pytest.mark.parametrize(
-    ("state", "expected_action"),
-    [("prepared", "rolled_back"), ("committed", "cleaned_committed")],
-)
 def test_absent_artifacts_and_parent_sync_existing_ancestor_before_journal_removal(
     tmp_path: Path,
     monkeypatch,
-    state: JournalState,
-    expected_action: str,
 ):
-    transaction = _write_synthetic_transaction(tmp_path, state=state)
+    # Committed only: an absent destination is unresolved under a prepared journal, which
+    # retains the journal instead of reaching cleanup at all.
+    transaction = _write_synthetic_transaction(tmp_path, state="committed")
     for path in (transaction.destination, transaction.before, transaction.after):
         path.unlink()
     transaction.destination.parent.rmdir()
@@ -1434,7 +1592,7 @@ def test_absent_artifacts_and_parent_sync_existing_ancestor_before_journal_remov
 
     result = recover_transaction(tmp_path)
 
-    assert result.action == expected_action
+    assert result.action == "cleaned_committed"
     assert events[:3] == [
         ("sync", tmp_path),
         ("sync", tmp_path),
