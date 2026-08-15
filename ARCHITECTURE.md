@@ -472,3 +472,43 @@ suite as its evidence, in the same spirit as the AD-13 parser pin, not a floor e
 the declared range means widening the compatibility leg's matrix with it. If a future release
 changes mark accounting, the reparse gate turns a silent corruption into a refusal to write, which
 is the failure mode this engine prefers.
+
+### AD-27: Runtime dependencies are bounded above, and markdown-it-py stays exact
+
+**Date:** 2026-08-14
+**Status:** Accepted
+**Context:** Adopters invoke this engine by exact version, and `uvx --from doc-lattice==X` resolves
+the dependency closure fresh on every run, so an upstream release rather than a doc-lattice release
+decides what an adopter's gate actually executes. `typer`, `rich`, and `pydantic` were declared by
+floor alone. Each sits on a user-visible surface: typer owns the command surface and its parsing,
+rich renders every human report, and pydantic's validation messages are embedded in that output, so
+even a minor changes what users see and a major can break every pinned adopter with nothing in this
+repository having changed.
+**Decision:** Every runtime dependency carries an upper bound. `typer`, `rich`, and `pydantic` are
+capped at their current majors, `<1`, `<16`, and `<3` respectively, so crossing a ceiling is a
+deliberate edit here rather than a resolver's choice on an adopter's machine. A bound is the floor
+of the treatment, not the whole of it; how far a dependency is verified past its declaration is
+decided per dependency by how much of its behavior this engine actually reads.
+
+- `ruamel.yaml` is bounded to a range and additionally verified across it by the
+  `yaml-compatibility` CI leg, because AD-26 makes that parser's event and token source marks a
+  compatibility surface rather than an implementation detail. A range that is only asserted would
+  let a difference at the declared floor ship unseen, since the lock only ever installs the ceiling.
+- `markdown-it-py` stays pinned exact at `==4.2.0` rather than ranged. AD-13 makes section identity
+  depend on that parser's tokenization, so a range would admit releases under which the same
+  heading resolves to a different section ref: a silent identity change rather than a visible
+  break. The known cost is a transitive constraint through `rich`, which depends on
+  `markdown-it-py` itself, so a future `rich` whose floor moves past 4.2.0 is unresolvable until
+  this pin is re-reviewed and section identity re-verified. That is the intended trade, because an
+  unresolvable lock fails loudly and a shifted slug does not.
+- `typer`, `rich`, and `pydantic` carry bounds only. No leg verifies the span beneath each ceiling,
+  because nothing here reads their internals; the bound exists to hold the next major out until
+  someone looks at it.
+
+**Consequences:** An upstream major cannot reach a pinned adopter without a doc-lattice release,
+and raising a ceiling is a compatibility review with the suite as its evidence.
+`tests/test_package_metadata.py` fails when any runtime dependency is declared without an upper
+bound, so the policy covers dependencies this record does not name. The standing cost is
+maintenance: a new upstream major is unavailable to adopters until this project reviews it and
+ships, and the `markdown-it-py` pin can block a `rich` upgrade outright until both are reviewed
+together.

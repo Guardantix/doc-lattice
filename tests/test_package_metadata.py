@@ -13,6 +13,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PYPROJECT = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 _NORMALIZED_NAME = re.sub(r"[-_.]+", "_", _PYPROJECT["project"]["name"])
 _DIST_PREFIX = f"{_NORMALIZED_NAME}-{_PYPROJECT['project']['version']}"
+_REQUIREMENT = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?P<specifiers>.*)$")
+
+
+def _specifiers(requirement):
+    match = _REQUIREMENT.match(requirement)
+    assert match is not None, f"unparsable requirement: {requirement!r}"
+    return [part.strip() for part in match["specifiers"].split(",") if part.strip()]
 
 
 def _assert_sdist_members(members, expected_prefix):
@@ -97,6 +104,41 @@ def test_sdist_has_an_explicit_minimal_include_set():
         "/tests/test_slugger_generator.py",
         "/tests/test_workflow_pinning.py",
     ]
+
+
+def test_runtime_dependencies_are_bounded_above():
+    unbounded = [
+        requirement
+        for requirement in _PYPROJECT["project"]["dependencies"]
+        if not any(
+            specifier.startswith(("<", "==", "~=")) for specifier in _specifiers(requirement)
+        )
+    ]
+    assert unbounded == [], (
+        "runtime dependencies without an upper bound (see AD-27): "
+        f"{unbounded}. An upstream major can otherwise break every exact-pinned adopter "
+        "with no doc-lattice release involved."
+    )
+
+
+def test_runtime_dependency_bounds_match_the_recorded_decisions():
+    assert _PYPROJECT["project"]["dependencies"] == [
+        "markdown-it-py==4.2.0",
+        "typer>=0.12,<1",
+        "rich>=13,<16",
+        "pydantic>=2,<3",
+        "ruamel.yaml>=0.18,<0.20",
+    ]
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    ["typer>=0.12", "rich>=13", "pydantic>=2", "markdown-it-py"],
+)
+def test_upper_bound_check_detects_an_unbounded_requirement(requirement):
+    assert not any(
+        specifier.startswith(("<", "==", "~=")) for specifier in _specifiers(requirement)
+    )
 
 
 def test_build_backend_is_pinned_and_available_in_dev_environment():
