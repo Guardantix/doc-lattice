@@ -35,10 +35,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Migration for the new exit 2: run any lattice command once; the message names the file and the
   key. Restore the `id` (checking it for a typo) or, if the file is genuinely untracked, delete the
   lattice keys. Migration for the new stderr warning: it is expected on a docs root that carries
-  frontmatter belonging to another tool, and it does not fail a gate. Silence it with
-  `PYTHONWARNINGS=ignore`, or drop the file from discovery with `ignore_globs`. Those three keys are
-  an exact set, not "every frontmatter field except `id`": a block carrying only `title` or `layer`
-  warns rather than failing. AD-29 in ARCHITECTURE.md records the decision, including why the
+  frontmatter belonging to another tool, and it does not fail a gate. Drop the file from discovery
+  with `ignore_globs` to silence it precisely; `PYTHONWARNINGS` also applies but no available form
+  targets this warning alone, since its message field is a literal prefix and the symlink-escape
+  warning shares that prefix. Those three keys are an exact set, not "every frontmatter field
+  except `id`": a block carrying only `title` or `layer` warns rather than failing. AD-29 in ARCHITECTURE.md records the decision, including why the
   disposition is cached rather than recomputed.
 - The load cache records why a file is not a lattice node, not just that it is not one, and
   `CACHE_VERSION` rises to 4 so entries written before the field are discarded rather than read as

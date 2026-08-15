@@ -370,10 +370,16 @@ belonging to another tool. `title` and `layer` are not in the set: they describe
 without wiring it into the graph, so a block carrying only those is a warning, not an error.
 
 The warning exists because a docs root can legitimately hold frontmatter this engine does not own,
-such as a tool's own `name`/`description` block. It is a Python warning, so the usual
+such as a tool's own `name`/`description` block. To silence it for one file, prefer `ignore_globs`:
+it drops the file from discovery, so nothing else a run reports is affected.
+
+It is also a Python warning, so the
 [`PYTHONWARNINGS`](https://docs.python.org/3/using/cmdline.html#envvar-PYTHONWARNINGS) filters
-silence it (`PYTHONWARNINGS=ignore`), and `ignore_globs` removes the file from discovery entirely.
-The report is identical whether the load was accelerated by the
+apply, but neither available form targets it precisely. `PYTHONWARNINGS=ignore` silences every
+warning the run emits. `PYTHONWARNINGS=ignore:skipping` looks narrower and is not: that field is a
+literal message prefix rather than a regular expression, and the warning for a document symlinked
+outside the project root opens with the same `skipping ` prefix, so filtering on it hides that one
+too. The report is identical whether the load was accelerated by the
 [load cache](#load-cache-opt-in) or not.
 
 Section ids are optional: a heading is addressed by its GitHub slug by default (e.g.
@@ -444,14 +450,15 @@ byte-identical to an uncached run under any cache state (cold, warm, stale, stru
 wrong version); only timing differs. That covers stderr as well as stdout: an entry records why a
 file is not a node, not just that it is not one, so the skip warning above reproduces on a warm run
 that never re-reads the file. Because two checkouts can share a slot, an entry stores the reason
-rather than the rendered sentence, and each run names the path it discovered. A structurally corrupt cache (unreadable, non-JSON, wrong
-version, or schema-invalid) is discarded wholesale and rebuilt; the cache is a trusted single-writer
-file under your own cache home, so it is not hardened against hand-edited tampering that stays
-schema-valid. Setting `cache_trust_stat: true` adds a faster tier for read-only commands that trusts
-a file whose size and modification time are unchanged, accepting that the file is not opened at all:
-a rewrite that preserves both its size and its nanosecond mtime is served stale, and a file made
-unreadable (for example a permissions change, which does not alter size or mtime) is served from
-cache instead of erroring, each until the file is touched. `reconcile` ignores `cache_trust_stat`
+rather than the rendered sentence, and each run names the path it discovered. A structurally
+corrupt cache (unreadable, non-JSON, wrong version, or schema-invalid) is discarded wholesale and
+rebuilt; the cache is a trusted single-writer file under your own cache home, so it is not hardened
+against hand-edited tampering that stays schema-valid. Setting `cache_trust_stat: true` adds a
+faster tier for read-only commands that trusts a file whose size and modification time are
+unchanged, accepting that the file is not opened at all: a rewrite that preserves both its size
+and its nanosecond mtime is served stale, and a file made unreadable (for example a permissions
+change, which does not alter size or mtime) is served from cache instead of erroring, each until
+the file is touched. `reconcile` ignores `cache_trust_stat`
 and always verifies content, so it can never write frontmatter from stale data.
 `cache_trust_stat: true` requires `cache_key`; otherwise config loading is a tool error and exits 2.
 Two projects sharing a `cache_key` stay correct (a content-hash
@@ -574,8 +581,10 @@ lists `authority` and `tickets` when those are what the block declared.
 
 **`skipping ... its frontmatter declares no 'id'` on stderr.** Not an error: a file with fenced
 frontmatter that declares no `id` and no lattice keys is left out of the lattice, and the exit
-status is unchanged. Expected when a docs root holds frontmatter belonging to another tool. Silence
-it with `PYTHONWARNINGS=ignore`, or exclude the file from discovery with `ignore_globs`.
+status is unchanged. Expected when a docs root holds frontmatter belonging to another tool. Exclude
+the file with `ignore_globs` to silence it precisely; see
+[Files with no `id`](#files-with-no-id) for why the `PYTHONWARNINGS` alternatives are blunter than
+they look.
 
 **`duplicate id ...` exits 2.** A duplicate id makes the index incoherent, so loading the lattice
 fails with exit 2 (a tool error, distinct from the exit 1 that `check` and `lint` use for drift).

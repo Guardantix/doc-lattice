@@ -13,6 +13,8 @@ from doc_lattice.constants import EdgeState
 
 from .helpers import _clean_docs, runner
 
+_SRC = Path(__file__).resolve().parents[2] / "src"
+
 
 def _mixed_docs(tmp_path: Path) -> None:
     """Write a graph carrying one OK edge and two problem edges in a pinned order.
@@ -476,12 +478,13 @@ def _check_in(cwd: Path, env: dict[str, str] | None = None) -> subprocess.Comple
 
     pytest replaces ``showwarning`` for the duration of a test, so an in-process run records
     the warning instead of writing it. Only a separate interpreter exercises the stderr a user
-    actually sees.
+    actually sees. ``PYTHONPATH`` carries the source tree because pytest's ``pythonpath``
+    setting only reaches the interpreter running the suite, not one this test spawns.
     """
     return subprocess.run(
         [sys.executable, "-c", "from doc_lattice.cli import main; main()", "check"],
         cwd=cwd,
-        env={**os.environ, "NO_COLOR": "1", **(env or {})},
+        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC), **(env or {})},
         capture_output=True,
         text=True,
         check=False,

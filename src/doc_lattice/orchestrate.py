@@ -34,7 +34,16 @@ def load_lattice(
             commands pass False while retaining verified cache reads.
 
     Returns:
-        The built Lattice. Files without lattice frontmatter (no ``id``) are skipped.
+        The built Lattice. A file whose frontmatter declares no ``id`` is left out of it; an
+        id-less fenced block additionally emits a warning naming the file on the way past.
+
+    Raises:
+        ConfigError: If a discovered file's frontmatter has an unknown or malformed key, or
+            declares lattice intent with no ``id``.
+        UnreadableDocError: If a discovered file cannot be read or decoded, or its frontmatter
+            opens a fence it never closes or cannot be parsed as YAML.
+        DuplicateIdError: If two discovered files, or two headings in one file, register the
+            same id.
     """
     if project.config.cache_key is None:
         return _load_uncached(project)
