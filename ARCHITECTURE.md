@@ -132,18 +132,38 @@ durable and the journal is durably marked `committed`; recovery then preserves t
 destinations and only cleans staged evidence. Success output is emitted only after
 committed cleanup and clean lock release.
 
+Rollback classifies rather than skips. Each destination is `restored` from its before
+image, `already_before` and so needing no mutation, or `unresolved` because it matches
+neither recorded image, absence included. Only `unresolved` is a partial rollback, and
+a partial rollback is reported as such in every channel: a distinct recovery action,
+the unresolved destinations named on stderr, and a nonzero exit from both `--recover`
+and automatic pre-run recovery, which stops before lattice loading. A partial rollback
+performs no cleanup at all, keeping the exact journal and every remaining stage, since
+the journal is the only record binding a destination to its paths and digests and
+selective cleanup would add a fallible mutation path without helping correctness. The
+in-process abort distinguishes destinations whose replacement it attempted from those
+it never reached, counting a destination as possibly applied from before the call
+because `replace_staged` renames before it synchronizes; a destination the run never
+touched is therefore not an unresolved rollback entry.
+
 Normal real startup recovers a valid outstanding journal before lattice loading, and an
 automatic-recovery notice may be emitted on stderr while the lock is held.
 `reconcile --recover` performs only that recovery, while dry-run never recovers or
 persists anything and refuses an outstanding journal. Invalid or unauthenticated
 recovery evidence is retained for explicit manual remediation rather than guessed at
-or deleted. The transaction module resolves journal paths through `safe_resolve` and
-validates project-relative containment, path roles, artifact locations and file types,
-and recorded fingerprints before recovery mutates them.
+or deleted. Every recovery also scans the project for transaction artifacts no retained
+journal accounts for, after journal handling rather than only in the no-journal branch,
+so that an interrupted journal publication reports both the recovered journal and its
+leaked helper stage in one invocation. Orphans are reported with project-relative paths
+and a nonzero exit and are never deleted. The transaction module resolves journal paths
+through `safe_resolve` and validates project-relative containment, path roles, artifact
+locations and file types, and recorded fingerprints before recovery mutates them.
 
 **Consequences:** A successful reconcile is a durable all-or-nothing batch from the
 operator's perspective. A `prepared` journal rolls transaction-owned changes back; a
-`committed` journal records that PONR has passed and makes recovery cleanup-only. The
+`committed` journal records that PONR has passed and makes recovery cleanup-only. A
+recovery that could not restore everything says so and keeps the evidence needed to
+finish by hand, so no exit code or report can claim a rollback that did not happen. The
 lock serializes doc-lattice reconcile processes but does not coordinate unrelated
 editors. This contract assumes local-filesystem `flock`, atomic rename, and directory
 sync behavior; network filesystems are outside it.

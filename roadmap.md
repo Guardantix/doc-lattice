@@ -14,7 +14,9 @@ external users, because they are cheap while breaking changes cost nothing and e
   `init` changes and reconcile rewriter fixes.
 - Make recovery reporting truthful: a partial rollback must be distinguishable from a full
   one, and recovery must never destroy the evidence an operator still needs (GTX-97, with
-  test coverage for the realistic crash states, GTX-98).
+  test coverage for the realistic crash states, GTX-98). The journal format then moves to
+  v2, so a crash journal records when, by what version, and from which selector it was
+  written, and a v1 journal stays recoverable across the upgrade (GTX-126).
 - Reorder the release pipeline so a failed gate cannot strand an immutable tag, and put the
   unguarded release steps under contract tests (GTX-103).
 
