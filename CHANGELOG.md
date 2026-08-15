@@ -8,6 +8,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING:** `reconcile --recover` no longer reports a full rollback it did not perform, and no
+  longer deletes the evidence needed to finish one by hand. Rolling back a `prepared` journal
+  previously skipped any destination whose contents did not match the recorded after image, then
+  cleaned up unconditionally: an unrelated edit or a deletion left the destination unrestored while
+  the command printed `rolled back reconcile transaction`, exited 0, and removed the before image
+  and journal that were the only way to recover. Each destination is now classified as restored,
+  already equal to its before image, or unresolved, where unresolved means matching neither
+  recorded image, absence included. Any unresolved entry makes the run a partial rollback: it
+  reports the new `partially_rolled_back` action, names every unresolved destination on stderr as a
+  project-relative path, retains the journal and every remaining stage without cleaning anything,
+  and exits 2. A destination already equal to its before image is still a full rollback. Recovery
+  stays idempotent while an entry is unresolved, and a rerun after manual repair completes the
+  cleanup normally.
+- **BREAKING:** automatic pre-run recovery now stops the command on an incomplete recovery. It
+  previously logged any non-`none` action and continued into lattice loading, planning, and commit,
+  which planned against a tree that was never fully restored. It now reports the problem on stderr
+  and exits 2 before loading anything.
+- **BREAKING:** the `reconcile --recover --format json` object gained `restored`, `already_before`,
+  `unresolved`, `orphans`, and `scan_errors` alongside `action` and `journal`, and `action` gained
+  the `partially_rolled_back` value. Consumers asserting the exact key set need updating; the
+  previous two keys are unchanged in name and meaning.
+- `reconcile --recover` now reports orphaned transaction artifacts that no retained journal
+  accounts for, instead of printing `nothing to recover` over a tree that still holds them. The
+  scan runs after journal handling in every branch, so a journal publication interrupted between
+  linking the journal and removing its helper stage reports both in one invocation, and it covers
+  staged images in nested document directories as well as journal temporaries. Orphans are reported
+  as project-relative paths with a nonzero exit and are never deleted. With no journal present and
+  orphans found, the summary reads `no reconcile journal to recover` rather than
+  `nothing to recover`.
+- An in-process abort no longer reports `no files were reconciled (rollback complete)` after a
+  rollback that may have skipped entries. It distinguishes destinations whose replacement it
+  attempted from those it never reached, treating a destination as possibly applied from before the
+  call because `replace_staged` renames before it synchronizes. An ordinary pre-replace conflict on
+  one file therefore still reports a complete rollback of everything the run touched.
+- RECONCILE.md documents the partial-rollback and orphan contracts, and ARCHITECTURE.md AD-5
+  records the classification, evidence-retention, and exit-code decisions.
 - The frontmatter syntax `reconcile` supports is now declared rather than implied. AD-30 in
   ARCHITECTURE.md records it as five layers: the validated schema, the spellings accepted per
   writable position and per load phase, what a rewrite preserves, what it may mutate beyond the

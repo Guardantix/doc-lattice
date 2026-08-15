@@ -50,9 +50,13 @@ produce before anything is staged, and one that would not reproduce it is refuse
 written, which fails the whole batch. A real run then stages exact before and after images,
 publishes a `prepared` journal, fingerprints each destination immediately before its replacement,
 and rejects a changed destination as a conflict. The full batch is rolled back in reverse order if
-a conflict or write/durability failure occurs before the committed marker. After every replacement
-is durable, the journal becomes `committed`; success output waits until committed cleanup and a
-clean advisory-lock release have both completed.
+a conflict or write/durability failure occurs before the committed marker. A destination counts as
+possibly applied from the moment its replacement is attempted, not once that call returns, because
+the rename lands before the directory synchronization that can still fail. Destinations the run
+never reached are not rollback candidates, so an ordinary pre-replace conflict on one file is a
+complete rollback of everything the run did touch rather than a partial one. After every
+replacement is durable, the journal becomes `committed`; success output waits until committed
+cleanup and a clean advisory-lock release have both completed.
 
 [AD-30](ARCHITECTURE.md#ad-30-the-reconcile-rewriter-supports-a-declared-frontmatter-subset) owns
 the normative rules behind that: the frontmatter syntax this rewriter supports, what it puts back
@@ -73,6 +77,11 @@ lattice. A `prepared` journal rolls transaction-owned after images back to their
 images; unrelated edits are preserved. A `committed` journal keeps the committed destinations and
 finishes artifact cleanup. Automatic recovery is reported once on stderr, then the newly requested
 reconcile proceeds. This ordering ensures the new plan sees recovered files.
+
+An incomplete automatic recovery stops the command instead. If any destination stayed unresolved,
+or the run found orphaned artifacts, reconcile reports them on stderr and exits 2 without loading
+the lattice, planning, or writing, since planning against a tree that was never fully restored
+would reconcile from unrecovered bytes.
 
 ## Transaction artifacts
 
@@ -98,13 +107,64 @@ After an interrupted run, use this workflow:
 
 1. Stop any other reconcile and run `doc-lattice reconcile --recover` from the project root. A safe
    rerun of a normal real reconcile also performs this recovery before lattice loading.
-2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`; a valid
-   `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
-   reports `nothing to recover: JOURNAL`. All three outcomes exit 0.
+2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`, or
+   `partially rolled back reconcile transaction: JOURNAL` when a destination stayed unresolved; a
+   valid `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
+   reports `nothing to recover: JOURNAL`, or `no reconcile journal to recover: JOURNAL` when the
+   scan reported an orphan or a failure. A full rollback, a committed cleanup, and a clean
+   no-journal run exit 0. A partial rollback, any orphaned artifact, and any scan failure exit 2,
+   whichever journal state the run started from.
 3. For machine-readable recovery, add `--format json`. The complete stdout object contains exactly
-   `action` and `journal`, with no additional keys, for example
-   `{"action": "none", "journal": "PATH"}`. `action` is `none`, `rolled_back`, or
-   `cleaned_committed`.
+   `action`, `journal`, `restored`, `already_before`, `unresolved`, `orphans`, and `scan_errors`,
+   with no additional keys, for example `{"action": "none", "journal": "PATH", "restored": 0,
+   "already_before": 0, "unresolved": [], "orphans": [], "scan_errors": []}`. `action` is `none`,
+   `rolled_back`, `partially_rolled_back`, or `cleaned_committed`. `restored` and `already_before`
+   count rolled-back destinations; `unresolved`, `orphans`, and `scan_errors` are the sorted
+   details behind a nonzero exit.
+
+## Partial rollback
+
+Rolling back a `prepared` journal classifies each destination against the images the transaction
+recorded. A destination still holding the after image is **restored** from its before image. A
+destination already equal to its before image is **already before**: nothing to do, and a full
+rollback all the same. A destination matching neither image, **including one that no longer
+exists**, is **unresolved**: the transaction cannot account for its current contents, so recovery
+neither guesses nor overwrites.
+
+Any unresolved destination makes the whole run a partial rollback. It reports
+`partially rolled back reconcile transaction: JOURNAL` on stdout, names every unresolved
+destination on stderr as a project-relative path, and exits 2. A partial rollback deletes nothing:
+the journal and every remaining staged image are retained, because the journal is the only record
+of which destination, path, and digest belong together. The one image that unavoidably disappears
+is a before image consumed by restoring its own destination.
+
+Recovery stays idempotent while a destination is unresolved: rerunning `--recover` reports the same
+partial result and changes nothing. Rerunning on its own is therefore not a way out, and until you
+take one of the two below, `--recover`, a real reconcile, and a dry run all refuse to proceed,
+because the journal is still outstanding.
+
+- **Finish the rollback.** Restore each named destination to its recorded before or after image,
+  then rerun `--recover`. Once no entry is unresolved, that run performs the ordinary full cleanup
+  and exits 0.
+- **Keep the current bytes.** Recovery cannot resolve contents it has no record of, so it will
+  never accept them for you. Inspect the journal to confirm what the transaction owned, then move
+  the journal and the stages it names aside yourself. With no journal outstanding, reconcile runs
+  again normally.
+
+## Orphaned artifacts
+
+Every recovery also scans the project for transaction artifacts matching the patterns above that no
+retained journal accounts for. The scan runs after journal handling, not only when no journal was
+found, so a publication interrupted between linking the journal and removing its helper stage
+reports both the recovered journal and the leaked helper in one invocation. It covers staged images
+in nested document directories as well as journal publication temporaries.
+
+Orphans are reported on stderr as project-relative paths and exit 2. Nothing is ever deleted:
+inspect each artifact and remove it yourself after confirming it is not a destination. When no
+journal is present and orphans are found, the summary line reads `no reconcile journal to recover`
+rather than `nothing to recover`, so that a completeness claim is never made about an unclean tree.
+If the scan cannot enumerate part of the project, the failure is reported the same way rather than
+silently narrowing the search.
 
 A malformed or unsafe journal exits 2 and is not deleted. Inspect the named journal, destinations,
 and staged files; restore each destination or deliberately preserve its current contents; then move

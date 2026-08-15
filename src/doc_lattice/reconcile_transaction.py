@@ -40,7 +40,13 @@ from .persistence import (
 from .reconcile import Rewrite
 
 JournalState = Literal["prepared", "committed"]
-RecoveryAction = Literal["none", "rolled_back", "cleaned_committed"]
+RecoveryAction = Literal[
+    "none",
+    "rolled_back",
+    "partially_rolled_back",
+    "cleaned_committed",
+]
+_DestinationState = Literal["after", "before", "other"]
 Sha256Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _JournalStatus = Literal["absent", "invalid", "exact"]
 _LOCK_FACTORY_TOKEN = object()
@@ -79,6 +85,21 @@ class RecoveryResult:
 
     action: RecoveryAction
     journal: Path
+    restored: int = 0
+    already_before: int = 0
+    unresolved: tuple[str, ...] = ()
+    orphans: tuple[str, ...] = ()
+    scan_errors: tuple[str, ...] = ()
+
+    @property
+    def is_incomplete(self) -> bool:
+        """Return whether recovery left state an operator still has to resolve.
+
+        Returns:
+            True when any destination stayed unresolved, any orphaned artifact was
+            found, or the artifact scan could not enumerate part of the project.
+        """
+        return bool(self.unresolved or self.orphans or self.scan_errors)
 
 
 class ReconcileLock:
@@ -163,6 +184,23 @@ class _PreparedTransaction:
     entries: tuple[_ResolvedEntry, ...]
     journal_path: Path
     journal_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _RollbackOutcome:
+    """Every prepared destination classified by what one rollback found and did.
+
+    ``restored`` still held the transaction's after image and was replaced with its
+    before image. ``already_before`` was a full rollback that needed no mutation.
+    ``unresolved`` matched neither recorded image, including absence, on a destination
+    the transaction may have applied. ``untouched`` is that same mismatch on a
+    destination the transaction never attempted, which no rollback owns.
+    """
+
+    restored: tuple[Path, ...]
+    already_before: tuple[Path, ...]
+    unresolved: tuple[Path, ...]
+    untouched: tuple[Path, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -681,47 +719,168 @@ def _authenticate_transaction_artifacts(
         )
 
 
+def _classify_destination(
+    entry: _ResolvedEntry,
+    journal: Path,
+    journal_bytes: bytes,
+) -> _DestinationState:
+    """Compare one live destination against the images the transaction recorded."""
+    try:
+        current_sha256 = file_sha256(entry.destination)
+    except FileNotFoundError:
+        # Absence matches neither recorded image. Reconcile only ever rewrites an existing
+        # tracked document, so a destination that vanished is a state the transaction
+        # cannot account for rather than a rollback it already achieved.
+        return "other"
+    except OSError as cause:
+        raise _recovery_operation_error(
+            "fingerprinting destination",
+            entry.destination,
+            journal,
+            journal_bytes,
+            cause,
+        ) from cause
+    if current_sha256 == entry.after_sha256:
+        return "after"
+    if current_sha256 == entry.before_sha256:
+        return "before"
+    return "other"
+
+
+def _restore_destination(
+    entry: _ResolvedEntry,
+    journal: Path,
+    journal_bytes: bytes,
+) -> None:
+    """Replace one destination still holding its after image with its before image."""
+    is_present = _authenticate_staged_artifact(
+        entry.before_path,
+        entry.before_sha256,
+        entry.destination,
+        journal,
+        journal_bytes,
+    )
+    if not is_present:
+        raise _unsafe_before_error(entry, journal, journal_bytes, "missing")
+    try:
+        replace_staged(entry.before_path, entry.destination)
+    except (OSError, ValueError) as cause:
+        raise _recovery_operation_error(
+            "restoring destination",
+            entry.destination,
+            journal,
+            journal_bytes,
+            cause,
+        ) from cause
+
+
 def _rollback_prepared(
     entries: tuple[_ResolvedEntry, ...],
     journal: Path,
     journal_bytes: bytes,
-) -> None:
-    """Restore transaction-owned after-images while preserving unrelated changes."""
+    *,
+    candidates: frozenset[Path] | None = None,
+) -> _RollbackOutcome:
+    """Restore transaction-owned after images while preserving unrelated changes.
+
+    Args:
+        entries: Validated journal entries to roll back in reverse order.
+        journal: Canonical journal path serving as recovery authority.
+        journal_bytes: Exact bytes of that journal.
+        candidates: Destinations the caller may already have applied, or None when
+            every entry is a candidate because the caller cannot know how far a
+            crashed transaction progressed.
+
+    Returns:
+        The per-destination classification this rollback produced.
+
+    Raises:
+        ReconcilePersistenceError: If restoring or cleaning an entry cannot proceed safely.
+    """
+    restored: list[Path] = []
+    already_before: list[Path] = []
+    unresolved: list[Path] = []
+    untouched: list[Path] = []
     for entry in reversed(entries):
-        try:
-            current_sha256 = file_sha256(entry.destination)
-        except FileNotFoundError:
-            continue
-        except OSError as cause:
-            raise _recovery_operation_error(
-                "fingerprinting destination",
-                entry.destination,
-                journal,
-                journal_bytes,
-                cause,
-            ) from cause
-        if current_sha256 != entry.after_sha256:
-            continue
-        is_present = _authenticate_staged_artifact(
-            entry.before_path,
-            entry.before_sha256,
-            entry.destination,
-            journal,
-            journal_bytes,
-        )
-        if not is_present:
-            raise _unsafe_before_error(entry, journal, journal_bytes, "missing")
-        try:
-            replace_staged(entry.before_path, entry.destination)
-        except (OSError, ValueError) as cause:
-            raise _recovery_operation_error(
-                "restoring destination",
-                entry.destination,
-                journal,
-                journal_bytes,
-                cause,
-            ) from cause
-    _cleanup_transaction_artifacts(entries, journal, journal_bytes)
+        state = _classify_destination(entry, journal, journal_bytes)
+        if state == "after":
+            _restore_destination(entry, journal, journal_bytes)
+            restored.append(entry.destination)
+        elif state == "before":
+            already_before.append(entry.destination)
+        elif candidates is None or entry.destination in candidates:
+            unresolved.append(entry.destination)
+        else:
+            untouched.append(entry.destination)
+    outcome = _RollbackOutcome(
+        restored=tuple(restored),
+        already_before=tuple(already_before),
+        unresolved=tuple(unresolved),
+        untouched=tuple(untouched),
+    )
+    # An unresolved entry keeps the whole journal and every remaining stage. The journal
+    # holds the destination, path, and digest associations a manual repair needs, and
+    # selective cleanup would add a fallible mutation path without helping correctness.
+    if not outcome.unresolved:
+        _cleanup_transaction_artifacts(entries, journal, journal_bytes)
+    return outcome
+
+
+def _is_transaction_artifact_name(name: str) -> bool:
+    """Return whether one namespace entry name is a reconcile transaction stage."""
+    if not name.endswith(PERSISTENCE_TEMP_SUFFIX):
+        return False
+    if name.startswith(_JOURNAL_STAGE_PREFIX):
+        return True
+    return name.startswith(".") and (
+        RECONCILE_BEFORE_IMAGE_INFIX in name or RECONCILE_AFTER_IMAGE_INFIX in name
+    )
+
+
+def _retained_artifacts(entries: tuple[_ResolvedEntry, ...], journal: Path) -> frozenset[Path]:
+    """Return every artifact an incomplete rollback deliberately keeps as authority."""
+    retained = {journal}
+    for entry in entries:
+        retained.add(entry.before_path)
+        retained.add(entry.after_path)
+    return frozenset(retained)
+
+
+def _project_relative(paths: tuple[Path, ...], canonical_root: Path) -> tuple[str, ...]:
+    """Render contained paths as sorted, deterministic project-relative strings."""
+    return tuple(sorted(path.relative_to(canonical_root).as_posix() for path in paths))
+
+
+def _scan_orphan_artifacts(
+    canonical_root: Path,
+    referenced: frozenset[Path],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Find transaction artifacts that no retained journal accounts for.
+
+    Args:
+        canonical_root: The resolved project root to enumerate without following symlinks.
+            Journal entries resolve against this same root, so orphan and retained paths
+            are directly comparable.
+        referenced: Artifacts a retained journal still owns, which are never orphans.
+
+    Returns:
+        Sorted project-relative orphan paths and sorted enumeration-failure diagnostics.
+    """
+    orphans: list[Path] = []
+    scan_errors: list[str] = []
+
+    def _record_scan_error(cause: OSError) -> None:
+        scan_errors.append(f"cannot scan {cause.filename} for orphaned artifacts: {cause}")
+
+    for directory, subdirectories, names in os.walk(canonical_root, onerror=_record_scan_error):
+        parent = Path(directory)
+        for name in (*subdirectories, *names):
+            if not _is_transaction_artifact_name(name):
+                continue
+            candidate = parent / name
+            if candidate not in referenced:
+                orphans.append(candidate)
+    return _project_relative(tuple(orphans), canonical_root), tuple(sorted(scan_errors))
 
 
 def _journal_path(project_root: Path) -> Path:
@@ -942,9 +1101,25 @@ def _abort_prepared(
     prepared: _PreparedTransaction,
     primary: ReconcileConflictError | ReconcilePersistenceError,
     *,
+    candidates: frozenset[Path],
     authenticate_all: bool = True,
 ) -> NoReturn:
-    """Roll back a prepared transaction, preserving the primary failure."""
+    """Roll back a prepared transaction, preserving the primary failure.
+
+    Args:
+        prepared: The published prepared transaction to roll back.
+        primary: The conflict or persistence failure that triggered the abort.
+        candidates: Destinations whose replacement this process already entered, and
+            which therefore may already hold the after image. Required rather than
+            defaulted, because an empty set claims the run applied nothing and would let
+            cleanup delete the very journal an unresolved destination still needs.
+        authenticate_all: Whether to authenticate every stage before mutating.
+
+    Raises:
+        ReconcileConflictError: The primary conflict, once rollback completed in full.
+        ReconcilePersistenceError: The primary persistence failure once rollback
+            completed in full, or a compound diagnostic when it did not.
+    """
     try:
         if authenticate_all:
             _authenticate_transaction_artifacts(
@@ -952,10 +1127,11 @@ def _abort_prepared(
                 prepared.journal_path,
                 prepared.journal_bytes,
             )
-        _rollback_prepared(
+        outcome = _rollback_prepared(
             prepared.entries,
             prepared.journal_path,
             prepared.journal_bytes,
+            candidates=candidates,
         )
     except ReconcilePersistenceError as rollback_error:
         error = ReconcilePersistenceError(
@@ -964,6 +1140,15 @@ def _abort_prepared(
         )
         error.add_note(f"original commit failure: {_cause_details(primary)}")
         error.add_note(f"rollback failure: {_cause_details(rollback_error)}")
+        raise error from primary
+    if outcome.unresolved:
+        destinations = ", ".join(str(destination) for destination in outcome.unresolved)
+        error = ReconcilePersistenceError(
+            f"{primary}; rollback was incomplete: {destinations} matched neither the "
+            "transaction before image nor its after image; the journal and every remaining "
+            "staged image were retained; run 'doc-lattice reconcile --recover'"
+        )
+        copy_exception_notes(error, primary)
         raise error from primary
     message = f"{primary}; no files were reconciled (rollback complete)"
     if isinstance(primary, ReconcileConflictError):
@@ -1026,6 +1211,7 @@ def _abort_failed_marker(
     prepared: _PreparedTransaction,
     committed_bytes: bytes,
     primary: ReconcilePersistenceError,
+    candidates: frozenset[Path],
 ) -> NoReturn:
     """Reset a failed commit marker before allowing document rollback."""
     try:
@@ -1039,7 +1225,7 @@ def _abort_failed_marker(
         error.add_note(f"original marker failure: {_cause_details(primary)}")
         error.add_note(f"journal reset failure: {_cause_details(reset_error)}")
         raise error from primary
-    _abort_prepared(prepared, primary)
+    _abort_prepared(prepared, primary, candidates=candidates)
 
 
 def commit_rewrites(
@@ -1073,6 +1259,12 @@ def _commit_rewrites_locked(
 ) -> None:
     """Commit rewrites while the public API holds its capability lease."""
     prepared = _prepare_transaction(project_root, rewrites, write_paths)
+    # Destinations this process may already have applied. An entry joins before its
+    # replacement is attempted, never after: replace_staged renames first and only then
+    # synchronizes the directory, so it can fail with the destination already changed.
+    # Entries that never reach that call stay out, which is what keeps an ordinary
+    # pre-replace conflict from being reported as an incomplete rollback.
+    candidates: set[Path] = set()
     for entry in prepared.entries:
         try:
             current_sha256 = file_sha256(entry.destination)
@@ -1080,12 +1272,12 @@ def _commit_rewrites_locked(
             primary = _commit_operation_error(
                 "fingerprinting destination", entry.destination, cause
             )
-            _abort_prepared(prepared, primary)
+            _abort_prepared(prepared, primary, candidates=frozenset(candidates))
         if current_sha256 != entry.before_sha256:
             primary = ReconcileConflictError(
                 f"reconcile destination {entry.destination} changed after validation"
             )
-            _abort_prepared(prepared, primary)
+            _abort_prepared(prepared, primary, candidates=frozenset(candidates))
         try:
             after_present = _authenticate_staged_artifact(
                 entry.after_path,
@@ -1095,18 +1287,29 @@ def _commit_rewrites_locked(
                 prepared.journal_bytes,
             )
         except ReconcilePersistenceError as primary:
-            _abort_prepared(prepared, primary, authenticate_all=False)
+            _abort_prepared(
+                prepared,
+                primary,
+                authenticate_all=False,
+                candidates=frozenset(candidates),
+            )
         if not after_present:
             primary = ReconcilePersistenceError(
                 f"cannot apply reconcile destination {entry.destination}: staged after image "
                 f"{entry.after_path} is missing immediately before replacement"
             )
-            _abort_prepared(prepared, primary, authenticate_all=False)
+            _abort_prepared(
+                prepared,
+                primary,
+                authenticate_all=False,
+                candidates=frozenset(candidates),
+            )
+        candidates.add(entry.destination)
         try:
             replace_staged(entry.after_path, entry.destination)
         except (OSError, ValueError) as cause:
             primary = _commit_operation_error("replacing destination", entry.destination, cause)
-            _abort_prepared(prepared, primary)
+            _abort_prepared(prepared, primary, candidates=frozenset(candidates))
     committed = Journal(
         version=prepared.journal.version,
         state="committed",
@@ -1121,7 +1324,7 @@ def _commit_rewrites_locked(
         )
     except OSError as cause:
         primary = _commit_operation_error("marking journal committed", prepared.journal_path, cause)
-        _abort_failed_marker(prepared, committed_bytes, primary)
+        _abort_failed_marker(prepared, committed_bytes, primary, frozenset(candidates))
     # _abort_failed_marker never returns, so reaching this line is AD-5's point of no return:
     # every destination is durable and the journal is durably marked committed. From here on
     # recovery only cleans staged evidence, it never rolls a destination back.
@@ -1285,7 +1488,8 @@ def recover_transaction(
         lock: Active capability protecting this project root.
 
     Returns:
-        The recovery action and project journal path.
+        The recovery action, project journal path, rollback classification counts, and
+        any unresolved destination or orphaned artifact the caller must still act on.
 
     Raises:
         ReconcileInProgressError: If the lock capability is absent or invalid.
@@ -1297,12 +1501,38 @@ def recover_transaction(
 def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
     """Recover one journal while the public API holds its capability lease."""
     journal = _journal_path(project_root)
+    canonical_root = project_root.resolve()
+    # Orphan scanning runs after journal handling in every branch, not only when no journal
+    # was found. An interrupted journal publication can leave both the canonical journal and
+    # its helper stage, so recovering the journal first is what exposes the helper.
     if not _journal_is_present(journal):
-        return RecoveryResult(action="none", journal=journal)
+        orphans, scan_errors = _scan_orphan_artifacts(canonical_root, frozenset())
+        return RecoveryResult(
+            action="none",
+            journal=journal,
+            orphans=orphans,
+            scan_errors=scan_errors,
+        )
     loaded, entries, journal_bytes = _load_journal(project_root, journal)
     _authenticate_transaction_artifacts(_staged_artifacts(entries), journal, journal_bytes)
-    if loaded.state == "prepared":
-        _rollback_prepared(entries, journal, journal_bytes)
-        return RecoveryResult(action="rolled_back", journal=journal)
-    _cleanup_transaction_artifacts(entries, journal, journal_bytes)
-    return RecoveryResult(action="cleaned_committed", journal=journal)
+    if loaded.state != "prepared":
+        _cleanup_transaction_artifacts(entries, journal, journal_bytes)
+        orphans, scan_errors = _scan_orphan_artifacts(canonical_root, frozenset())
+        return RecoveryResult(
+            action="cleaned_committed",
+            journal=journal,
+            orphans=orphans,
+            scan_errors=scan_errors,
+        )
+    outcome = _rollback_prepared(entries, journal, journal_bytes)
+    retained = _retained_artifacts(entries, journal) if outcome.unresolved else frozenset()
+    orphans, scan_errors = _scan_orphan_artifacts(canonical_root, retained)
+    return RecoveryResult(
+        action="partially_rolled_back" if outcome.unresolved else "rolled_back",
+        journal=journal,
+        restored=len(outcome.restored),
+        already_before=len(outcome.already_before),
+        unresolved=_project_relative(outcome.unresolved, canonical_root),
+        orphans=orphans,
+        scan_errors=scan_errors,
+    )

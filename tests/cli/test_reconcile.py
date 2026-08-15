@@ -176,6 +176,11 @@ def test_reconcile_recover_without_journal_reports_exact_json(lattice_dir: Path,
     assert json.loads(result.stdout) == {
         "action": "none",
         "journal": str(lattice_dir / RECONCILE_JOURNAL_NAME),
+        "restored": 0,
+        "already_before": 0,
+        "unresolved": [],
+        "orphans": [],
+        "scan_errors": [],
     }
 
 
@@ -232,6 +237,11 @@ def test_reconcile_recover_cleans_committed_without_planning(tmp_path: Path, mon
     assert json.loads(result.stdout) == {
         "action": "cleaned_committed",
         "journal": str(journal),
+        "restored": 0,
+        "already_before": 0,
+        "unresolved": [],
+        "orphans": [],
+        "scan_errors": [],
     }
     assert destination.read_bytes() == after_bytes
     assert not journal.exists()
@@ -434,6 +444,124 @@ def test_reconcile_real_run_recovers_before_loading_and_plans_recovered_bytes(
     assert not journal.exists()
     assert not before.exists()
     assert not after.exists()
+
+
+def test_reconcile_recover_reports_partial_rollback_and_exits_nonzero(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    destination.write_bytes(b"unrelated editor bytes\n")
+    journal, before, after = _write_cli_transaction(
+        tmp_path, destination, b"original document\n", b"transaction document\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 2
+    assert "partially rolled back reconcile transaction" in result.stdout
+    assert "could not restore 1 destination" in result.stderr
+    assert "unresolved destination: docs/down.md" in result.stderr
+    assert "every remaining staged image were retained" in result.stderr
+    assert "rerun 'doc-lattice reconcile --recover'" in result.stderr
+    # Rerunning cannot resolve bytes the journal has no record of, so the guidance has to
+    # name the other way out rather than leaving the operator in a loop.
+    assert "to keep the current bytes instead" in result.stderr
+    assert destination.read_bytes() == b"unrelated editor bytes\n"
+    assert journal.exists()
+    assert before.read_bytes() == b"original document\n"
+    assert after.read_bytes() == b"transaction document\n"
+
+
+def test_reconcile_recover_partial_json_names_the_unresolved_destination(
+    tmp_path: Path, monkeypatch
+):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    destination.write_bytes(b"unrelated editor bytes\n")
+    journal, _before, _after = _write_cli_transaction(
+        tmp_path, destination, b"original document\n", b"transaction document\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "action": "partially_rolled_back",
+        "journal": str(journal),
+        "restored": 0,
+        "already_before": 0,
+        "unresolved": ["docs/down.md"],
+        "orphans": [],
+        "scan_errors": [],
+    }
+
+
+def test_reconcile_recover_reports_orphans_without_deleting_them(tmp_path: Path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    stage = docs / ".down.md.doc-lattice-after.leaked.tmp"
+    stage.write_bytes(b"leaked stage\n")
+    journal_stage = tmp_path / f"{RECONCILE_JOURNAL_NAME}.leaked.tmp"
+    journal_stage.write_bytes(b"leaked journal stage\n")
+    monkeypatch.chdir(tmp_path)
+    before = _tree_snapshot(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 2
+    assert "nothing to recover" not in result.stdout
+    assert "no reconcile journal to recover" in result.stdout
+    assert "orphaned reconcile artifacts remain; nothing was deleted" in result.stderr
+    assert "orphaned artifact: .doc-lattice-reconcile.json.leaked.tmp" in result.stderr
+    assert "orphaned artifact: docs/.down.md.doc-lattice-after.leaked.tmp" in result.stderr
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory read permissions")
+def test_reconcile_recover_reports_an_unscannable_directory(tmp_path: Path, monkeypatch):
+    unreadable = tmp_path / "locked"
+    unreadable.mkdir()
+    unreadable.chmod(0o000)
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        result = runner.invoke(app, ["reconcile", "--recover"])
+    finally:
+        unreadable.chmod(0o755)
+
+    assert result.exit_code == 2
+    assert "no reconcile journal to recover" in result.stdout
+    assert "for orphaned artifacts" in result.stderr
+    assert str(unreadable) in result.stderr
+
+
+def test_reconcile_partial_automatic_recovery_halts_before_loading_the_lattice(
+    lattice_dir: Path, monkeypatch
+):
+    destination = lattice_dir / "docs" / "pc-design.md"
+    destination.write_bytes(b"unrelated editor bytes\n")
+    journal, before, after = _write_cli_transaction(
+        lattice_dir, destination, b"original document\n", b"transaction document\n"
+    )
+    monkeypatch.chdir(lattice_dir)
+
+    def fail_if_loaded(*_args, **_kwargs):
+        pytest.fail("a partial automatic recovery planned against an unrestored tree")
+
+    monkeypatch.setattr(runtime_module, "load_lattice", fail_if_loaded)
+    result = runner.invoke(app, ["reconcile", "pc-design"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "recovered reconcile transaction: partially_rolled_back" in result.stderr
+    assert "unresolved destination: docs/pc-design.md" in result.stderr
+    assert destination.read_bytes() == b"unrelated editor bytes\n"
+    assert journal.exists()
+    assert before.exists()
+    assert after.exists()
 
 
 @pytest.mark.parametrize("json_out", [False, True], ids=["human", "json"])
