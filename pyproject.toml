@@ -70,14 +70,12 @@ dev = [
 [project.scripts]
 doc-lattice = "doc_lattice.cli:main"
 
-# --- urls start ---
 [project.urls]
 Homepage = "https://github.com/Guardantix/doc-lattice"
 Source = "https://github.com/Guardantix/doc-lattice"
 Issues = "https://github.com/Guardantix/doc-lattice/issues"
 Changelog = "https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md"
 Releases = "https://github.com/Guardantix/doc-lattice/releases"
-# --- urls end ---
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

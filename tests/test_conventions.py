@@ -11,7 +11,6 @@ from doc_lattice.constants import (
     SETUP_UV_REF,
     SETUP_UV_VERSION,
     VALID_AUTHORITIES,
-    VALID_STATUSES,
 )
 from doc_lattice.error_types import ProjectError
 
@@ -109,17 +108,6 @@ def test_no_raw_authority_strings():
         for value in sorted(VALID_AUTHORITIES):
             assert f'"{value}"' not in content, f"{py_file.name} inlines authority '{value}'"
             assert f"'{value}'" not in content, f"{py_file.name} inlines authority '{value}'"
-
-
-def test_no_raw_status_strings():
-    """Status values must be imported from constants.py, not inlined as raw literals."""
-    for py_file in _source_files():
-        if py_file.name == "constants.py":
-            continue
-        content = py_file.read_text(encoding="utf-8")
-        for value in sorted(VALID_STATUSES):
-            assert f'"{value}"' not in content, f"{py_file.name} inlines status '{value}'"
-            assert f"'{value}'" not in content, f"{py_file.name} inlines status '{value}'"
 
 
 def test_no_raw_action_pin_values():

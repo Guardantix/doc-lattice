@@ -5,14 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
-from ruamel.yaml import YAML
 
 from .error_types import ConfigError
-from .frontmatter_parser import YAML_LOAD_ERRORS
 from .path_utils import safe_resolve
+from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
-_YAML = YAML(typ="safe")
+_LOADER = SafeYamlLoader()
 
 # A cache_key is one safe path segment: it must start with an alphanumeric (rejecting ".",
 # "..", and hidden-directory names) and thereafter allow only word, dot, and hyphen, so it can
@@ -113,11 +112,8 @@ def _read_yaml(path: Path) -> object:
     except (OSError, UnicodeDecodeError) as exc:
         msg = f"cannot read config {path}: {exc}"
         raise ConfigError(msg) from exc
-    # A YAML directive updates the reusable parser's version. Reset it so each config starts
-    # with default YAML semantics, matching a fresh safe loader.
-    _YAML.version = None
     try:
-        data = _YAML.load(text)
+        data = _LOADER.load(text)
     except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse config {path}: {exc}"
         raise ConfigError(msg) from exc

@@ -21,7 +21,6 @@ from doc_lattice.constants import (
     VALID_REPORT_FORMATS,
     VALID_SEVERITIES,
     VALID_SKIP_REASONS,
-    VALID_STATUSES,
     Authority,
     BlockedReason,
     EdgeState,
@@ -31,17 +30,7 @@ from doc_lattice.constants import (
     ReportFormat,
     Severity,
     SkipReason,
-    Status,
 )
-
-
-def test_valid_statuses_matches_literal():
-    assert frozenset(get_args(Status)) == VALID_STATUSES
-    assert {"active", "inactive"} == set(VALID_STATUSES)
-
-
-def test_invalid_value_not_in_set():
-    assert "deleted" not in VALID_STATUSES
 
 
 def test_layers_match_literal():

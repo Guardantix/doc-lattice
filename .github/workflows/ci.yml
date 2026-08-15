@@ -28,7 +28,6 @@ jobs:
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
 
-  # --- semgrep start ---
   security-scan:
     name: Security scan
     runs-on: ubuntu-latest
@@ -37,7 +36,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: semgrep scan --error --config=p/python --config=p/security-audit --config=p/secrets
-  # --- semgrep end ---
 
   tests:
     name: Tests
