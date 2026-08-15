@@ -464,7 +464,7 @@ the reader and scanner bound to one document) whose reset behavior is itself ver
 The boundary loaders behind `frontmatter_parser.py` and `config.py` may keep shared module-level
 instances despite that, because they consume only loaded values and never a source mark. Those
 mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the reset, and its
-`YAML_LOAD_ERRORS` names the failure family all three of those modules and `reconcile.py` catch.
+`YAML_LOAD_ERRORS` names the failure family both of those modules and `reconcile.py` catch.
 Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
 than becoming one cross-module instance whose document state a second boundary could observe. A
 shared instance does retain state across loads: `YAML.version`, the piece that steers a later
