@@ -59,7 +59,12 @@ were written. A file written entirely in CRLF or in lone CR is rewritten in that
 file that already mixes endings has none to preserve and is written out in LF, which is what
 hashing has always compared. The rewritten frontmatter is reparsed before it is staged, and a
 rewrite that would not reload as the whole planned frontmatter, edges and every other key alike,
-is refused rather than written. A real run then stages exact before and after images, publishes a
+is refused rather than written.
+[AD-30](ARCHITECTURE.md#ad-30-the-reconcile-rewriter-supports-a-declared-frontmatter-subset) owns
+the normative matrix of the frontmatter syntax this rewriter supports, what a rewrite may mutate
+beyond the `seen` scalar, when a refusal is guaranteed, and the compatibility rationale for all
+three; this section stays with what those rules mean for a run.
+A real run then stages exact before and after images, publishes a
 `prepared` journal, fingerprints each destination immediately before its replacement, and rejects
 a changed destination as a conflict. The full batch is rolled
 back in reverse order if a conflict or write/durability failure occurs before the committed

@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The frontmatter syntax `reconcile` supports is now declared rather than implied. AD-30 in
+  ARCHITECTURE.md records it as five layers: the validated schema, the spellings accepted per
+  writable position and per load phase, what a rewrite preserves, what it may mutate beyond the
+  `seen` scalar, and when a refusal is guaranteed. RECONCILE.md links to it for the normative
+  matrix and keeps its operational guidance. No behavior changes and no code was added: this
+  documents what the rewriter already does, so that a spelling outside the subset is a known
+  boundary rather than an open question.
 - Regenerating and verifying the generated slug data is now reproducible offline and no longer
   breaks when Node's ICU advances. `scripts/generate_github_slugger_data.py --check` previously
   hard-failed on any Node reporting a JavaScript Unicode version other than 17.0, recorded the
