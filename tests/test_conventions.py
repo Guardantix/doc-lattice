@@ -220,6 +220,12 @@ DESTINATION_READERS = frozenset(
         PUBLISH_CALLEE,
     }
 )
+# Recording a destination in an in-memory container is not a write, so classification and
+# outcome bookkeeping may accumulate one. This is recognized by shape rather than by callee
+# name: the receiver must be a local provably bound to a collection built in the same function.
+# Admitting the bare names would let any object with an `append` method take a destination.
+COLLECTION_ACCUMULATORS = frozenset({"add", "append", "discard", "extend", "insert", "update"})
+COLLECTION_BUILDERS = frozenset({"dict", "list", "set"})
 PUBLICATION_OWNERS = frozenset({"persistence.py", TRANSACTION_MODULE})
 # Each composite primitive below stages and publishes one destination in a single call, so naming
 # one overwrites a document without ever naming the publication helper and would slip past a scan
@@ -909,6 +915,36 @@ def _is_destination(
     return binding is not None and _is_destination(binding.value, bindings, (*seen, expr.id))
 
 
+def _is_local_collection(expr: ast.expr, bindings: dict[str, list[_Binding]]) -> bool:
+    """True for a name bound once to a list, set, or dict built in the same function."""
+    if not isinstance(expr, ast.Name):
+        return False
+    binding = _sole_binding(bindings, expr.id)
+    if binding is None:
+        return False
+    value = binding.value
+    if isinstance(value, ast.List | ast.Set | ast.Dict | ast.ListComp | ast.SetComp | ast.DictComp):
+        return True
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in COLLECTION_BUILDERS
+    )
+
+
+def _accumulates_destination(call: ast.Call, bindings: dict[str, list[_Binding]]) -> bool:
+    """True when a call only records its arguments into a local collection.
+
+    Classification and rollback outcome bookkeeping collect destinations to report on them,
+    which reaches no filesystem. The receiver has to be a provable local collection rather than
+    anything answering to ``append``, so a writer cannot borrow the exemption by method name.
+    """
+    func = call.func
+    if not (isinstance(func, ast.Attribute) and func.attr in COLLECTION_ACCUMULATORS):
+        return False
+    return _is_local_collection(func.value, bindings)
+
+
 def _callee_name(call: ast.Call) -> str | None:
     """The bare name of whatever a call invokes, ignoring how it was qualified."""
     if isinstance(call.func, ast.Name):
@@ -947,7 +983,7 @@ def _destination_write_violations(trees: dict[str, ast.Module]) -> list[str]:
             )
             continue
         name = _callee_name(site.call)
-        if name in DESTINATION_READERS:
+        if name in DESTINATION_READERS or _accumulates_destination(site.call, bindings):
             continue
         arguments = [*site.call.args, *(keyword.value for keyword in site.call.keywords)]
         if any(_is_destination(argument, bindings) for argument in arguments):
@@ -1185,7 +1221,9 @@ def _positive_controls() -> dict[str, dict[str, str]]:
     reproduced first: a restoration replacing one newline with two, a sink pairing one entry's
     staged image with another entry's destination, a destination republished by a raw
     ``os.replace``, a destination overwritten through its own write method, and a producer
-    behind an alias introduced by assignment rather than by import.
+    behind an alias introduced by assignment rather than by import. The last records a
+    destination into something that is not a provable local collection, pinning that the
+    bookkeeping exemption cannot be borrowed by anything that merely answers to ``append``.
 
     Cached alongside the source read so the parametrized run builds this mapping once.
     """
@@ -1293,6 +1331,12 @@ def _positive_controls() -> dict[str, dict[str, str]]:
             TRANSACTION_MODULE,
             FORWARD_SINK_CALL,
             f"{FORWARD_SINK_CALL}\n{SINK_INDENT}entry.destination.write_bytes(b'')",
+        ),
+        "destination-accumulated-into-something-that-is-not-a-collection": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}prepared.append(entry.destination)",
         ),
         "rewrite-minted-behind-an-assigned-alias": {
             **sources,

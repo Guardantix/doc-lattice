@@ -691,6 +691,12 @@ primitives could not close this, since a new sink can always name a primitive th
 heard of, whereas reaching the destination is the one step it cannot avoid. That audit is scoped
 to `reconcile_transaction.py`, the only module owning reconcile destinations.
 
+Recording a destination in an in-memory container reaches no filesystem, so classification and
+rollback outcome bookkeeping may accumulate one. That exemption is recognized by shape, not by
+callee name: the receiver must be a local provably bound to a collection built in the same
+function. Admitting the bare names would let anything answering to `append` take a destination,
+and a control pins that it cannot.
+
 One scoping limit is deliberate rather than closed: `persistence.py` owns the publication helper
 and is exempt from both the reach rule and the sink audit, so a forward sink added inside that
 module is invisible to the guard. Narrowing it would fire on the module's own correct internal
