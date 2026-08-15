@@ -13,6 +13,7 @@ from ...path_utils import safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
 from ...reconcile import reconcile as plan_reconcile
 from ...reconcile_transaction import (
+    RecoveryAction,
     RecoveryResult,
     commit_rewrites,
     ensure_dry_run_safe,
@@ -85,27 +86,71 @@ def _report_reconcile(
         runtime.stdout.print("nothing to reconcile")
 
 
+_RECOVERY_SUMMARIES: dict[RecoveryAction, str] = {
+    "none": "nothing to recover",
+    "rolled_back": "rolled back reconcile transaction",
+    "partially_rolled_back": "partially rolled back reconcile transaction",
+    "cleaned_committed": "cleaned committed reconcile transaction",
+}
+
+
+def _recovery_json_payload(recovery: RecoveryResult) -> str:
+    return json.dumps(
+        {
+            "action": recovery.action,
+            "journal": str(recovery.journal),
+            "restored": recovery.restored,
+            "already_before": recovery.already_before,
+            "unresolved": list(recovery.unresolved),
+            "orphans": list(recovery.orphans),
+            "scan_errors": list(recovery.scan_errors),
+        }
+    )
+
+
 def _report_recovery(runtime: CliRuntime, recovery: RecoveryResult, *, json_out: bool) -> None:
     if json_out:
-        write_text(
-            runtime,
-            json.dumps({"action": recovery.action, "journal": str(recovery.journal)}),
-        )
-    elif recovery.action == "none":
-        runtime.stdout.print(
-            f"nothing to recover: {escape(str(recovery.journal))}",
-            soft_wrap=True,
-        )
-    elif recovery.action == "rolled_back":
-        runtime.stdout.print(
-            f"rolled back reconcile transaction: {escape(str(recovery.journal))}",
-            soft_wrap=True,
-        )
+        write_text(runtime, _recovery_json_payload(recovery))
+        return
+    # "nothing to recover" is a completeness claim, so an orphan-bearing run must not make
+    # it even though no journal was there to recover.
+    if recovery.action == "none" and recovery.is_incomplete:
+        summary = "no reconcile journal to recover"
     else:
-        runtime.stdout.print(
-            f"cleaned committed reconcile transaction: {escape(str(recovery.journal))}",
+        summary = _RECOVERY_SUMMARIES[recovery.action]
+    runtime.stdout.print(f"{summary}: {escape(str(recovery.journal))}", soft_wrap=True)
+
+
+def _report_recovery_problems(runtime: CliRuntime, recovery: RecoveryResult) -> None:
+    if recovery.unresolved:
+        runtime.stderr.print(
+            f"[red]error[/red]: reconcile recovery could not restore "
+            f"{len(recovery.unresolved)} destination(s)",
             soft_wrap=True,
         )
+        for destination in recovery.unresolved:
+            runtime.stderr.print(f"  unresolved destination: {escape(destination)}", soft_wrap=True)
+        runtime.stderr.print(
+            "the prepared journal and every remaining staged image were retained; to finish "
+            "the rollback, restore each destination to its recorded before or after image, "
+            "then rerun 'doc-lattice reconcile --recover'; to keep the current bytes instead, "
+            "inspect the journal and then move it and the stages it names aside yourself, "
+            "since rerunning recovery cannot resolve bytes it has no record of",
+            soft_wrap=True,
+        )
+    if recovery.orphans:
+        runtime.stderr.print(
+            "[red]error[/red]: orphaned reconcile artifacts remain; nothing was deleted",
+            soft_wrap=True,
+        )
+        for orphan in recovery.orphans:
+            runtime.stderr.print(f"  orphaned artifact: {escape(orphan)}", soft_wrap=True)
+        runtime.stderr.print(
+            "inspect each artifact and remove it manually after confirming it is not a destination",
+            soft_wrap=True,
+        )
+    for detail in recovery.scan_errors:
+        runtime.stderr.print(f"[red]error[/red]: {escape(detail)}", soft_wrap=True)
 
 
 def register_reconcile(app: typer.Typer) -> None:
@@ -161,6 +206,9 @@ def register_reconcile(app: typer.Typer) -> None:
                 with reconcile_lock(project.project_root) as lock:
                     recovery = recover_transaction(project.project_root, lock=lock)
                 _report_recovery(runtime, recovery, json_out=json_out)
+                _report_recovery_problems(runtime, recovery)
+                if recovery.is_incomplete:
+                    raise typer.Exit(EXIT_TOOL_ERROR)
                 return
 
             with reconcile_lock(project.project_root) as lock:
@@ -170,6 +218,11 @@ def register_reconcile(app: typer.Typer) -> None:
                     recovery = recover_transaction(project.project_root, lock=lock)
                     if recovery.action != "none":
                         runtime.stderr.print(f"recovered reconcile transaction: {recovery.action}")
+                    _report_recovery_problems(runtime, recovery)
+                    # An incomplete recovery stops here: planning against a tree that was
+                    # never fully restored would reconcile from unrecovered bytes.
+                    if recovery.is_incomplete:
+                        raise typer.Exit(EXIT_TOOL_ERROR)
 
                 lattice = runtime.lattice(
                     project,

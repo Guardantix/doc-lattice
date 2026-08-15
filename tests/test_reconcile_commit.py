@@ -515,13 +515,19 @@ def test_second_conflict_rolls_back_first_and_preserves_editor_bytes(tmp_path: P
 
     monkeypatch.setattr(reconcile_transaction, "file_sha256", _edit_second_then_hash)
 
-    with pytest.raises(ReconcileConflictError, match=r"second.md.*changed after validation"):
+    with pytest.raises(
+        ReconcileConflictError, match=r"second.md.*changed after validation"
+    ) as caught:
         _commit_rewrites(
             tmp_path,
             rewrites,
             {first: first, second: second},
         )
 
+    # The conflicting destination was never attempted, so it is not an unresolved rollback
+    # entry: this stays an ordinary conflict with a complete rollback behind it.
+    assert "rollback was incomplete" not in str(caught.value)
+    assert "rollback complete" in str(caught.value)
     assert first.read_bytes() == b"old first"
     assert second.read_bytes() == b"unrelated editor bytes"
     _assert_no_transaction_artifacts(tmp_path)
@@ -754,9 +760,73 @@ def test_directory_sync_failure_after_replace_rolls_back_consumed_stage(
             {destination: destination},
         )
 
+    # replace_staged renames before it synchronizes, so this destination already held the
+    # after image when the sync failed. It is a rollback candidate from before the call, and
+    # rollback therefore restores it rather than reporting it unresolved.
     assert "destination directory fsync failed" in str(caught.value)
     assert "rollback complete" in str(caught.value)
+    assert "rollback was incomplete" not in str(caught.value)
     assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_applied_destination_diverging_during_rollback_is_reported_incomplete(
+    tmp_path: Path, monkeypatch
+):
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"old first")
+    second.write_bytes(b"old second")
+    rewrites = [
+        _rewrite(first, b"old first", b"new first", "up#a"),
+        _rewrite(second, b"old second", b"new second", "up#b"),
+    ]
+    real_replace = reconcile_transaction.replace_staged
+
+    def _fail_second_and_divert_first(staged: Path, destination: Path) -> None:
+        if destination == second:
+            # first was already replaced, so it is a rollback candidate. An editor lands on
+            # it here, leaving bytes that match neither recorded image.
+            first.write_bytes(b"editor bytes arriving mid-transaction")
+            raise OSError("second replacement failed")
+        real_replace(staged, destination)
+
+    monkeypatch.setattr(reconcile_transaction, "replace_staged", _fail_second_and_divert_first)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            rewrites,
+            {first: first, second: second},
+        )
+
+    message = str(caught.value)
+    assert "rollback was incomplete" in message
+    assert str(first) in message
+    assert "no files were reconciled" not in message
+    assert first.read_bytes() == b"editor bytes arriving mid-transaction"
+    assert second.read_bytes() == b"old second"
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    assert journal.exists()
+    assert json.loads(journal.read_bytes())["state"] == "prepared"
+    # Every stage the transaction still owns survives. Only first's after image is gone,
+    # because publishing it consumed the stage by renaming it onto the destination.
+    assert len(list(tmp_path.rglob("*.tmp"))) == 3
+
+    # The retained journal is enough authority to finish the job once the operator puts the
+    # destination back, and recovery stays idempotent until they do.
+    stalled = _recover_transaction(tmp_path)
+    assert stalled.action == "partially_rolled_back"
+    assert stalled.unresolved == ("first.md",)
+    assert journal.exists()
+
+    first.write_bytes(b"new first")
+    recovered = _recover_transaction(tmp_path)
+
+    assert recovered.action == "rolled_back"
+    assert recovered.restored == 1
+    assert recovered.already_before == 1
+    assert first.read_bytes() == b"old first"
     _assert_no_transaction_artifacts(tmp_path)
 
 
