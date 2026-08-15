@@ -381,6 +381,45 @@ def test_apply_reconcile_keeps_a_comment_written_between_a_seens_properties_and_
     assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
 
 
+def test_apply_reconcile_updates_a_flow_mapping_root():
+    # A root written in flow style is a mapping the same as a block one, so the member
+    # lookup has to find `derives_from` without the line structure a block root gives it.
+    text = "---\n{id: d, derives_from: [{ref: a#x, seen: old}]}\n---\nbody\n"
+    expected = "---\n{id: d, derives_from: [{ref: a#x, seen: newhash}]}\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+def test_apply_reconcile_updates_a_root_key_written_as_an_explicit_pair():
+    # An explicit `? key` / `: value` root key loads to the same mapping a plain one does,
+    # so it stays inside the strict schema and its `derives_from` has to be locatable.
+    text = "---\n? id\n: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+    expected = "---\n? id\n: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+def test_apply_reconcile_replaces_a_single_quoted_seen():
+    # A single-quoted scalar constructs to a string, so it satisfies the strict schema and
+    # is replaced in place with the plain hash rather than kept in its old quoting.
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: 'old'\n---\nbody\n"
+    expected = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
 @pytest.mark.parametrize(
     ("source_root", "expected_root"),
     [
@@ -401,6 +440,7 @@ def test_apply_reconcile_keeps_a_comment_written_between_a_seens_properties_and_
             "!!omap\n- id: d  # keep\n- derives_from: [{ref: a#x, seen: newhash}]  # and this\n",
         ),
     ],
+    ids=["block", "insert", "flow", "comments"],
 )
 def test_apply_reconcile_updates_an_ordered_map_at_the_frontmatter_root(
     source_root: str, expected_root: str
@@ -416,6 +456,40 @@ def test_apply_reconcile_updates_an_ordered_map_at_the_frontmatter_root(
     assert out == expected
     assert applied == {"a#x"}
     assert _validated_reconcile_meta(out).derives_from[0].seen == "newhash"
+
+
+@pytest.mark.parametrize(
+    ("source_root", "expected_root"),
+    [
+        (
+            "!!omap\n- base: &e\n    - ref: a#x\n      seen: old\n- id: d\n- derives_from: *e\n",
+            "!!omap\n- base: &e\n    - ref: a#x\n      seen: newhash\n- id: d\n"
+            "- derives_from: *e\n",
+        ),
+        (
+            "!!omap\n- spare: &item\n    derives_from:\n      - ref: a#x\n        seen: old\n"
+            "- id: d\n- *item\n",
+            "!!omap\n- spare: &item\n    derives_from:\n      - ref: a#x\n        seen: newhash\n"
+            "- id: d\n- *item\n",
+        ),
+    ],
+    ids=["aliased-member", "aliased-item"],
+)
+def test_apply_reconcile_resolves_an_alias_inside_an_ordered_map_root(
+    source_root: str, expected_root: str
+):
+    # An ordered-map root spells its members as sequence items, so following an alias to
+    # `derives_from`, or to the whole one-pair item that holds it, goes through the ordered
+    # map's own lookup rather than a mapping's. Both need the anchoring key an ordered map
+    # can carry but `NodeMeta` forbids, so this is the reread column rather than the strict
+    # one, which is why the result is not revalidated as a node.
+    text = f"---\n{source_root}---\nbody\n"
+    expected = f"---\n{expected_root}---\nbody\n"
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
 
 
 def test_apply_reconcile_leaves_an_alias_of_an_updated_entry_untouched():
@@ -961,6 +1035,44 @@ def test_apply_reconcile_relocates_a_non_string_seen_anchor_without_retyping_it(
         "  - ref: a#x\n"
         "    seen: newhash\n"
         f"tickets: [&shared {source_seen}]\n"
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
+@pytest.mark.parametrize(
+    ("source_seen", "relocated"),
+    [("!!bool true", "true"), ("!!null ~", "null")],
+    ids=["bool", "null"],
+)
+def test_apply_reconcile_relocates_a_tagged_bool_or_null_seen_in_its_own_spelling(
+    source_seen: str, relocated: str
+):
+    # Relocation keeps a displaced value's type, but a bool and a null carry theirs in their
+    # own spelling, so re-emitting the tag would only add a token the reload does not need.
+    # That is the one place the lifecycle differs from a tagged float, which keeps its tag.
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f"    seen: &shared {source_seen}\n"
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        f"tickets: [&shared {relocated}]\n"
         "---\n"
         "body\n"
     )
@@ -1725,6 +1837,22 @@ def test_apply_reconcile_refuses_a_collection_seen_as_a_project_error():
         apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
 
 
+def test_apply_reconcile_leaves_a_collection_seen_at_an_unmatched_entry_alone():
+    # That refusal is scoped to an entry an update targets, because there is no preflight
+    # classifier: an entry the run never plans an edit for is never inspected, so a shape
+    # elsewhere in the same document must not fail an otherwise applicable run.
+    text = (
+        "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n  - ref: b#y\n"
+        "    seen: [nope]\n---\nbody\n"
+    )
+    expected = text.replace("seen: old", "seen: newhash")
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+
+
 def test_apply_reconcile_refuses_self_referential_frontmatter_as_a_project_error():
     # A cyclic document compares without bound, so the rewrite cannot be verified; the CLI
     # gets a clean refusal instead of a RecursionError traceback.
@@ -1944,6 +2072,25 @@ def test_apply_reconcile_non_mapping_frontmatter_raises():
     text = "---\n- just\n- a list\n---\nbody\n"
     with pytest.raises(UnreadableDocError):
         apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "---\n!!omap\n- id: d\n- id: e\n---\nbody\n",
+        "---\nid: d\nderives_from:\n  - !!omap\n    - ref: a#x\n    - ref: b#y\n---\nbody\n",
+    ],
+    ids=["root", "entry"],
+)
+def test_apply_reconcile_duplicate_key_in_an_ordered_map_raises(text: str):
+    # The safe constructor enforces `!!omap` key uniqueness with a bare `assert`, so a
+    # duplicate key reaches the reread as an AssertionError rather than a YAMLError. It has
+    # to be reported as an unreadable document, not escape as a traceback.
+    with pytest.raises(UnreadableDocError) as exc:
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
+
+    assert exc.value.code == "UNREADABLE_DOC"
+    assert "downstream.md" in str(exc.value)
 
 
 def test_apply_reconcile_non_mapping_entry_raises():

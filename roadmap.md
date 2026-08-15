@@ -33,9 +33,9 @@ independent of each other; co-membership in the release is not a sequencing cons
 
 ## Harden before external adoption
 
-- Freeze reconcile's supported YAML subset as an accepted decision, then stand up a
-  round-trip fuzz gate so rewriter edge cases surface in CI instead of in user documents
-  (GTX-101, GTX-100, with the reparse gate itself guarded by GTX-99).
+- Stand up a round-trip fuzz gate so rewriter edge cases surface in CI instead of in user
+  documents, now that AD-31 has frozen the supported YAML subset as an accepted decision to
+  fuzz against (GTX-100, with the reparse gate itself guarded by GTX-99).
 - Bring load-boundary diagnostics up to the standard the transaction layer already sets, and
   close the README gaps around error codes and strict parsing (GTX-112, GTX-113).
 - Publish the operational surface an external user would need: security reporting, a

@@ -87,6 +87,16 @@ def test_load_errors_family_covers_a_rejected_tagged_scalar():
     assert not isinstance(exc.value, YAMLError)
 
 
-@pytest.mark.parametrize("error_type", [YAMLError, ValueError, KeyError, TypeError])
+def test_load_errors_family_covers_a_duplicate_key_in_an_ordered_map():
+    # ruamel's safe `construct_yaml_omap` enforces `!!omap` key uniqueness with a bare
+    # `assert`, so a duplicate key leaves the loader as an AssertionError rather than a
+    # YAMLError and used to escape every caller's handler as an uncaught traceback.
+    with pytest.raises(YAML_LOAD_ERRORS) as exc:
+        SafeYamlLoader().load("!!omap\n- a: 1\n- a: 2\n")
+
+    assert not isinstance(exc.value, YAMLError)
+
+
+@pytest.mark.parametrize("error_type", [YAMLError, ValueError, KeyError, TypeError, AssertionError])
 def test_load_errors_family_is_the_documented_membership(error_type):
     assert error_type in YAML_LOAD_ERRORS

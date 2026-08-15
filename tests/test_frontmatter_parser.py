@@ -273,6 +273,16 @@ def test_parse_meta_reports_a_tagged_scalar_its_type_cannot_build(raw_meta: str)
         parse_meta(raw_meta, Path("doc.md"))
 
 
+def test_parse_meta_reports_a_duplicate_key_in_an_ordered_map():
+    # An `!!omap` rejects a repeated key with a bare `assert` inside the safe constructor,
+    # which is neither a YAMLError nor one of the builtins a tagged scalar raises, so it used
+    # to leave this boundary as an uncaught AssertionError.
+    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in doc\.md") as exc:
+        parse_meta("id: d\nextra: !!omap\n- a: 1\n- a: 2\n", Path("doc.md"))
+
+    assert exc.value.code == "UNREADABLE_DOC"
+
+
 def test_parse_meta_bad_yaml_carries_code_and_names_file():
     with pytest.raises(UnreadableDocError) as exc:
         parse_meta("id: [unclosed\n", Path("a.md"))
