@@ -44,7 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one file therefore still reports a complete rollback of everything the run touched.
 - RECONCILE.md documents the partial-rollback and orphan contracts, and ARCHITECTURE.md AD-5
   records the classification, evidence-retention, and exit-code decisions.
-- The frontmatter syntax `reconcile` supports is now declared rather than implied. AD-30 in
+- The frontmatter syntax `reconcile` supports is now declared rather than implied. AD-31 in
   ARCHITECTURE.md records it as five layers: the validated schema, the spellings accepted per
   writable position and per load phase, what a rewrite preserves, what it may mutate beyond the
   `seen` scalar, and when a refusal is guaranteed. RECONCILE.md now links to it for those rules

@@ -628,7 +628,101 @@ rendered at the shared site, or the warm path will not reproduce it. `title` and
 from `NodeMeta`'s fields instead of declaring it would turn ordinary descriptive frontmatter into
 an exit 2.
 
-### AD-30: The reconcile rewriter supports a declared frontmatter subset
+### AD-30: Only gate-verified bytes may reach a reconcile destination
+
+**Date:** 2026-08-15
+**Status:** Accepted
+**Context:** AD-5 makes the commit transaction durable but not self-checking: it stages
+`Rewrite.after` and publishes those exact bytes without ever reparsing them, so
+`reconcile.py::_verify_reconciled_meta` is the last point at which a mis-spliced rewrite can be
+refused instead of written durably. The chain that reaches the gate held only by convention.
+`Rewrite` is an ordinary frozen dataclass, and the staging and publication helpers are ordinary
+functions, so a future producer or sink could route around the gate and the suite would stay
+green. Reachability alone is too weak a property to assert: a producer can call the gate and
+then build its output from a different buffer, the gate can verify one value while the changed
+return is assembled from another, and a new publication route can bypass the `Rewrite` and
+after-image-infix anchors entirely.
+**Decision:** The invariant is that every byte published over a reconcile destination on the
+forward path originates in the value `_verify_reconciled_meta` verified. It is enforced
+mechanically by an AST convention test in `tests/test_conventions.py`, keyed to function, callee,
+and value provenance rather than to line numbers, which pins: the sole production `Rewrite(...)`
+site; the `plan_rewrites` to `apply_reconcile` to `_verify_reconciled_meta` chain; that the
+changed-output text derives from the exact argument the gate verified, through frontmatter
+envelope reassembly only; that `Rewrite.after` derives from what `apply_reconcile` returned,
+through line-ending restoration and UTF-8 encoding only; that every possibly changed return
+follows the gate; the single after-image staging site and the bytes it stages; and the single
+forward publication sink, with the publication helper reachable from no module but
+`reconcile_transaction.py`, whether named directly or through a composite primitive that stages
+and publishes one destination in a single call. Each such primitive's present users write their
+own artifacts rather than documents and are pinned per primitive, so a new one fails closed.
+Positive controls prove the detector rejects each bypass rather than
+passing vacuously. The invariant covers transaction after images only. Before images, journal
+bytes, recovery artifacts, and the before-image rollback sink are deliberately published without
+passing through the gate, and a negative control pins that exemption so the guard does not fail
+on correct code.
+
+Twenty-six near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
+guard and each was reproduced against it before being closed. The gate must be its own
+unconditional top-level statement, since a gate merely contained in an earlier statement can sit
+inside a conditional and skip the path a later changed return takes. Both operands of the
+line-ending restoration are constrained, since checking only the searched text admits a
+replacement that rewrites verified content, and each is one complete ending rather than any run
+of ending characters, since replacing one newline with two opens a blank line after every line
+the gate verified. The envelope fields a rewrite may reattach are whitelisted, excluding
+`raw_meta`, which holds the pre-edit YAML the gate never verified, and the literals it may
+contribute are restricted the same way, since text spliced into the reassembly f-string is
+published byte for byte. The reassembly is pinned as a complete envelope, each piece reattached
+exactly once and in order around the verified metadata, since requiring only that some verified
+value appear accepts an assembly that emits nothing but gate-verified bytes while dropping the
+fences and the entire body. The literals hold their place in that sequence rather than being
+validated and dropped, since a legal line ending in an illegal position is still published
+unverified. Producer and publication scans resolve module-qualified references
+and every kind of alias, by import, by assignment, by parameter default, or by inheritance, since
+`Rewrite as R`, `R = Rewrite`, `def build(..., constructor=Rewrite)`, `class Rogue(Rewrite)`, and
+`persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
+publication-reach rule reads every mention of the identifier rather than only its imports, and
+follows both composite primitives: the one that reaches the helper without naming it, and the
+descriptor-relative variant that publishes without calling it at all. The staging scan reads the
+staged operand as well as the prefix, since a site can bind the after-image infix to a local
+first, a shape the transaction module already uses. The producer scan also refuses a dataclass
+field copy, since `dataclasses.replace(rewrite, after=...)` mints a `Rewrite` carrying ungated
+bytes without ever naming the class, and refuses one whose keyword arrives unpacked, since a
+`**` argument carries no readable field name and an unreadable copy fails closed rather than
+being assumed harmless. The sink must take its image and its destination from the
+same journal entry expression, since matching only the two field names lets one entry's staged
+image publish over every destination the commit loop visits.
+
+A publication route need not name any pinned helper at all, so the transaction module is also
+audited by destination rather than by primitive: nothing there may hand a journal entry's
+destination to a callee outside a pinned reader set, or call a method on one. Enumerating write
+primitives could not close this, since a new sink can always name a primitive the guard has never
+heard of, whereas reaching the destination is the one step it cannot avoid. That audit is scoped
+to `reconcile_transaction.py`, the only module owning reconcile destinations. Its exemptions are
+bare names resolved in that module rather than terminal attribute names, so an unrelated method
+cannot borrow a pinned reader's name, and a name with more than one binding stays tainted if any
+of them held a destination, since a rebound name is ambiguous rather than safe.
+
+Recording a destination in an in-memory container reaches no filesystem, so classification and
+rollback outcome bookkeeping may accumulate one. That exemption is recognized by shape, not by
+callee name: the receiver must be a local provably bound to a collection built in the same
+function. Admitting the bare names would let anything answering to `append` take a destination,
+and a control pins that it cannot. Storing a destination does not launder it either. A container
+that ever received one is tainted, and reading an element back out, by subscript or by iterating
+it into a loop variable, is a destination again, so a round trip through a list does not carry a
+publication past the audit.
+
+One scoping limit is deliberate rather than closed: `persistence.py` owns the publication helper
+and is exempt from both the reach rule and the sink audit, so a forward sink added inside that
+module is invisible to the guard. Narrowing it would fire on the module's own correct internal
+use of the helper. Publication ownership stays a review obligation there.
+**Consequences:** A genuinely new producer, staging site, or publication route fails closed and
+forces a conscious audit, instead of silently widening the set of bytes that can reach a
+document. The guard is a tripwire on the current AST shape, not a general dataflow analysis:
+restructuring these functions is expected to fail it, and the resolution is to re-derive the
+invariant, never to loosen the matcher until it passes. What the gate compares stays a behavior
+assertion in `tests/test_reconcile.py`; this decision governs only which bytes reach it.
+
+### AD-31: The reconcile rewriter supports a declared frontmatter subset
 
 **Date:** 2026-08-15
 **Status:** Accepted

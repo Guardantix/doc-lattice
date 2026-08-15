@@ -58,7 +58,7 @@ complete rollback of everything the run did touch rather than a partial one. Aft
 replacement is durable, the journal becomes `committed`; success output waits until committed
 cleanup and a clean advisory-lock release have both completed.
 
-[AD-30](ARCHITECTURE.md#ad-30-the-reconcile-rewriter-supports-a-declared-frontmatter-subset) owns
+[AD-31](ARCHITECTURE.md#ad-31-the-reconcile-rewriter-supports-a-declared-frontmatter-subset) owns
 the normative rules behind that: the frontmatter syntax this rewriter supports, what it puts back
 untouched, what a rewrite may mutate beyond the `seen` scalar, when a refusal is guaranteed, and
 the compatibility rationale for all four. This section stays with what those rules mean for a run.
