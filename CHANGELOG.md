@@ -19,6 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   still carries one record per edge including `OK` ones, or ask for them explicitly with
   `check --only OK` (repeat `--only` to name every state when the previous full listing is
   wanted). Anything gating on the exit code or grepping for a problem state is unaffected.
+- Every runtime dependency now carries an upper bound. `typer`, `rich`, and `pydantic` were
+  declared by floor alone and are capped at their current majors (`typer<1`, `rich<16`,
+  `pydantic<3`), so an upstream major can no longer change what a pinned
+  `uvx --from doc-lattice==X` invocation executes with no doc-lattice release involved. The
+  versions this project resolves today are unchanged. AD-27 in ARCHITECTURE.md records the
+  reasoning, including why `ruamel.yaml` additionally gets the `yaml-compatibility` CI leg and why
+  `markdown-it-py` stays exact-pinned at 4.2.0 despite the transitive constraint that places on
+  `rich`.
 
 ## [4.1.0] - 2026-08-14
 
