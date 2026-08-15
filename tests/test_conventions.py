@@ -387,6 +387,13 @@ def _rebindings(tree: ast.Module) -> list[tuple[list[str], ast.expr]]:
     return pairs
 
 
+def _names_symbol(expr: ast.expr, symbol: str, aliases: set[str]) -> bool:
+    """True when an expression refers to the guarded symbol, by alias or by qualification."""
+    if isinstance(expr, ast.Name):
+        return expr.id in aliases
+    return isinstance(expr, ast.Attribute) and expr.attr == symbol
+
+
 def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
     """Every local name in a module that refers to ``symbol``, however it was bound.
 
@@ -405,19 +412,24 @@ def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
         elif isinstance(node, ast.ClassDef | ast.FunctionDef) and node.name == symbol:
             aliases.add(symbol)
     rebindings = _rebindings(tree)
+    subclasses = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.bases]
     growing = True
     while growing:
         growing = False
         for names, value in rebindings:
-            renames = (isinstance(value, ast.Name) and value.id in aliases) or (
-                isinstance(value, ast.Attribute) and value.attr == symbol
-            )
-            if not renames:
+            if not _names_symbol(value, symbol, aliases):
                 continue
             for name in names:
                 if name not in aliases:
                     aliases.add(name)
                     growing = True
+        # A subclass inherits the frozen dataclass constructor, so `class Rogue(Rewrite)`
+        # followed by `Rogue(...)` mints the guarded type without the call site naming it.
+        for node in subclasses:
+            inherits = any(_names_symbol(base, symbol, aliases) for base in node.bases)
+            if inherits and node.name not in aliases:
+                aliases.add(node.name)
+                growing = True
     return frozenset(aliases)
 
 
@@ -956,16 +968,119 @@ def _same_entry(staged: ast.expr | None, destination: ast.Attribute) -> bool:
     return ast.dump(staged.value) == ast.dump(destination.value)
 
 
-def _is_destination(
-    expr: ast.expr, bindings: dict[str, list[_Binding]], seen: tuple[str, ...] = ()
-) -> bool:
-    """True for a journal entry's destination, named directly or held by a local."""
+@dataclass(frozen=True)
+class _DestinationScope:
+    """What one function reveals about which of its names can yield a destination.
+
+    A destination does not stay in the field it was read from. Storing one in a container and
+    reading it back, by subscript or by iteration, produces the same path under a name the
+    field scan alone cannot see, so containers that ever received one are tracked as tainted
+    and the names their elements bind to are tracked with them.
+    """
+
+    bindings: dict[str, list[_Binding]]
+    containers: frozenset[str]
+    elements: frozenset[str]
+
+
+def _is_destination(expr: ast.expr, scope: _DestinationScope, seen: tuple[str, ...] = ()) -> bool:
+    """True for a journal entry's destination, named directly or reached through a local."""
     if isinstance(expr, ast.Attribute) and expr.attr == DESTINATION_FIELD:
         return True
+    if isinstance(expr, ast.Subscript):
+        return isinstance(expr.value, ast.Name) and expr.value.id in scope.containers
     if not isinstance(expr, ast.Name) or expr.id in seen:
         return False
-    binding = _sole_binding(bindings, expr.id)
-    return binding is not None and _is_destination(binding.value, bindings, (*seen, expr.id))
+    if expr.id in scope.elements:
+        return True
+    binding = _sole_binding(scope.bindings, expr.id)
+    return binding is not None and _is_destination(binding.value, scope, (*seen, expr.id))
+
+
+def _display_elements(value: ast.expr) -> list[ast.expr]:
+    """Every element a collection display holds, or nothing for anything else."""
+    if isinstance(value, ast.List | ast.Set | ast.Tuple):
+        return list(value.elts)
+    if isinstance(value, ast.Dict):
+        return [element for element in value.values if element is not None]
+    return []
+
+
+def _iterates_destinations(expr: ast.expr, scope: _DestinationScope) -> bool:
+    """True when iterating an expression yields destinations, through one wrapper at most."""
+    if isinstance(expr, ast.Name):
+        return expr.id in scope.containers
+    if any(_is_destination(element, scope) for element in _display_elements(expr)):
+        return True
+    unwrapped = expr.args[0] if isinstance(expr, ast.Call) and len(expr.args) == 1 else None
+    return unwrapped is not None and _iterates_destinations(unwrapped, scope)
+
+
+def _taints_container(call: ast.Call, scope: _DestinationScope) -> str | None:
+    """The local collection a call records a destination into, when it is one."""
+    receiver = call.func
+    if not (isinstance(receiver, ast.Attribute) and receiver.attr in COLLECTION_ACCUMULATORS):
+        return None
+    target = receiver.value
+    if not isinstance(target, ast.Name) or not _is_local_collection(target, scope.bindings):
+        return None
+    if not any(_is_destination(argument, scope) for argument in call.args):
+        return None
+    return target.id
+
+
+def _destination_scope(func: ast.FunctionDef | None) -> _DestinationScope:
+    """Resolve every name in a function that can yield a destination, containers included.
+
+    Taint and destination provenance are mutually recursive, since a container is tainted by
+    receiving a destination and a subscript of a tainted container is itself a destination, so
+    both are grown together to a fixpoint.
+    """
+    if func is None:
+        return _DestinationScope({}, frozenset(), frozenset())
+    bindings = _bindings(func)
+    local = list(_walk_local(func))
+    calls = [node for node in local if isinstance(node, ast.Call)]
+    loops = [node for node in local if isinstance(node, ast.For | ast.AsyncFor)]
+    containers: set[str] = set()
+    elements: set[str] = set()
+    growing = True
+    while growing:
+        growing = False
+        scope = _DestinationScope(bindings, frozenset(containers), frozenset(elements))
+        for name in bindings:
+            binding = _sole_binding(bindings, name)
+            if name in containers or binding is None:
+                continue
+            if any(_is_destination(held, scope) for held in _display_elements(binding.value)):
+                containers.add(name)
+                growing = True
+        for call in calls:
+            tainted = _taints_container(call, scope)
+            if tainted is not None and tainted not in containers:
+                containers.add(tainted)
+                growing = True
+        for loop in loops:
+            target = loop.target
+            if not isinstance(target, ast.Name) or target.id in elements:
+                continue
+            if _iterates_destinations(loop.iter, scope):
+                elements.add(target.id)
+                growing = True
+    return _DestinationScope(bindings, frozenset(containers), frozenset(elements))
+
+
+def _enclosing_scope(
+    trees: dict[str, ast.Module],
+    site: _Site,
+    cache: dict[tuple[str, str | None], _DestinationScope],
+) -> _DestinationScope:
+    """The destination scope of the function enclosing a call site, resolved once per function."""
+    key = (site.module, site.function)
+    if key not in cache:
+        func = _function(trees[site.module], site.function) if site.function else None
+        cache[key] = _destination_scope(func)
+    return cache[key]
 
 
 def _is_local_collection(expr: ast.expr, bindings: dict[str, list[_Binding]]) -> bool:
@@ -985,17 +1100,19 @@ def _is_local_collection(expr: ast.expr, bindings: dict[str, list[_Binding]]) ->
     )
 
 
-def _accumulates_destination(call: ast.Call, bindings: dict[str, list[_Binding]]) -> bool:
+def _accumulates_destination(call: ast.Call, scope: _DestinationScope) -> bool:
     """True when a call only records its arguments into a local collection.
 
     Classification and rollback outcome bookkeeping collect destinations to report on them,
     which reaches no filesystem. The receiver has to be a provable local collection rather than
     anything answering to ``append``, so a writer cannot borrow the exemption by method name.
+    Storing a destination this way does not launder it: the collection is tainted from here, so
+    reading an element back out of it is a destination again.
     """
     func = call.func
     if not (isinstance(func, ast.Attribute) and func.attr in COLLECTION_ACCUMULATORS):
         return False
-    return _is_local_collection(func.value, bindings)
+    return _is_local_collection(func.value, scope.bindings)
 
 
 def _callee_name(call: ast.Call) -> str | None:
@@ -1017,17 +1134,21 @@ def _destination_write_violations(trees: dict[str, ast.Module]) -> list[str]:
     new sink can name one this guard has never heard of, so the audit keys on the destination
     instead and every callee that reaches one is classified in ``DESTINATION_READERS``.
 
+    A destination reached through a container counts. Storing one in a list and reading it back
+    by subscript or by iteration produces the same path under a name no field scan would match,
+    so ``_DestinationScope`` tracks tainted containers and the names their elements bind to.
+
     The scan covers ``reconcile_transaction.py`` alone, the only module that owns reconcile
     destinations. Elsewhere a ``.destination`` field belongs to an unrelated domain, and the
     reach rule already pins which modules may publish at all.
     """
     scoped = {TRANSACTION_MODULE: trees[TRANSACTION_MODULE]}
-    cache: dict[tuple[str, str | None], dict[str, list[_Binding]]] = {}
+    cache: dict[tuple[str, str | None], _DestinationScope] = {}
     problems: list[str] = []
     for site in _call_sites(scoped):
-        bindings = _enclosing_bindings(scoped, site, cache)
+        scope = _enclosing_scope(scoped, site, cache)
         func = site.call.func
-        if isinstance(func, ast.Attribute) and _is_destination(func.value, bindings):
+        if isinstance(func, ast.Attribute) and _is_destination(func.value, scope):
             problems.append(
                 _gate_msg(
                     f"{site.located} calls {func.attr}() on a reconcile destination, which no "
@@ -1036,10 +1157,10 @@ def _destination_write_violations(trees: dict[str, ast.Module]) -> list[str]:
             )
             continue
         name = _callee_name(site.call)
-        if name in DESTINATION_READERS or _accumulates_destination(site.call, bindings):
+        if name in DESTINATION_READERS or _accumulates_destination(site.call, scope):
             continue
         arguments = [*site.call.args, *(keyword.value for keyword in site.call.keywords)]
-        if any(_is_destination(argument, bindings) for argument in arguments):
+        if any(_is_destination(argument, scope) for argument in arguments):
             problems.append(
                 _gate_msg(
                     f"{site.located} hands a reconcile destination to {name}(), which is not a "
@@ -1227,6 +1348,22 @@ REORDERED_ENVELOPE_ASSEMBLY = (
     '        f"{parts.body}{parts.close_fence}{parts.close_fence_newline}"'
 )
 
+SUBCLASS_PRODUCER_MODULE = '''"""A producer minting an ungated Rewrite through a subclass."""
+
+from pathlib import Path
+
+from .reconcile import Rewrite
+
+
+class Rogue(Rewrite):
+    """Inherits the frozen dataclass constructor without naming it at the call site."""
+
+
+def build(path: Path, before: bytes, data: bytes) -> Rewrite:
+    """Mint a Rewrite the gate never saw."""
+    return Rogue(path, before, data, frozenset())
+'''
+
 PARAMETER_DEFAULT_PRODUCER_MODULE = '''"""A producer hidden behind a parameter default."""
 
 from pathlib import Path
@@ -1300,9 +1437,12 @@ def _positive_controls() -> dict[str, dict[str, str]]:
     behind an alias introduced by assignment rather than by import. The last records a
     destination into something that is not a provable local collection, pinning that the
     bookkeeping exemption cannot be borrowed by anything that merely answers to ``append``. The
-    final three came from a further review pass: the whole document envelope dropped around the
+    next three came from a further review pass: the whole document envelope dropped around the
     verified metadata, the envelope reattached out of order, and a producer behind an alias bound
-    as a parameter default.
+    as a parameter default. The final four close the routes that launder a guarded value through
+    another shape: a producer subclassing the record to inherit its constructor, and a
+    destination republished after a container round trip, by subscript of a literal, by subscript
+    of a bookkeeping accumulation, and by iterating one back.
 
     Cached alongside the source read so the parametrized run builds this mapping once.
     """
@@ -1431,6 +1571,33 @@ def _positive_controls() -> dict[str, dict[str, str]]:
             **sources,
             "rogue_parameter_default_producer.py": PARAMETER_DEFAULT_PRODUCER_MODULE,
         },
+        "rewrite-minted-by-a-subclass-of-the-record": {
+            **sources,
+            "rogue_subclass_producer.py": SUBCLASS_PRODUCER_MODULE,
+        },
+        "destination-republished-after-a-container-round-trip": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}destinations = [entry.destination]"
+            f"\n{SINK_INDENT}os.replace(entry.before_path, destinations[0])",
+        ),
+        "destination-republished-after-bookkeeping-accumulation": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}seen = []"
+            f"\n{SINK_INDENT}seen.append(entry.destination)"
+            f"\n{SINK_INDENT}os.replace(entry.before_path, seen[0])",
+        ),
+        "destination-republished-after-being-iterated-back": _patched(
+            sources,
+            TRANSACTION_MODULE,
+            FORWARD_SINK_CALL,
+            f"{FORWARD_SINK_CALL}\n{SINK_INDENT}destinations = [entry.destination]"
+            f"\n{SINK_INDENT}for target in destinations:"
+            f"\n{SINK_INDENT}    os.replace(entry.before_path, target)",
+        ),
     }
 
 

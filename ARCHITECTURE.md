@@ -661,7 +661,7 @@ bytes, recovery artifacts, and the before-image rollback sink are deliberately p
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
 
-Eighteen near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
+Twenty-two near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
 guard and each was reproduced against it before being closed. The gate must be its own
 unconditional top-level statement, since a gate merely contained in an earlier statement can sit
 inside a conditional and skip the path a later changed return takes. Both operands of the
@@ -675,9 +675,9 @@ published byte for byte. The reassembly is pinned as a complete envelope, each p
 exactly once and in order around the verified metadata, since requiring only that some verified
 value appear accepts an assembly that emits nothing but gate-verified bytes while dropping the
 fences and the entire body. Producer and publication scans resolve module-qualified references
-and every kind of alias, by import, by assignment, or by parameter default, since `Rewrite as R`,
-`R = Rewrite`, `def build(..., constructor=Rewrite)`, and `persistence.replace_staged(...)` are
-each a complete route past a bare-name scan. The
+and every kind of alias, by import, by assignment, by parameter default, or by inheritance, since
+`Rewrite as R`, `R = Rewrite`, `def build(..., constructor=Rewrite)`, `class Rogue(Rewrite)`, and
+`persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
 publication-reach rule reads every mention of the identifier rather than only its imports, and
 follows both composite primitives: the one that reaches the helper without naming it, and the
 descriptor-relative variant that publishes without calling it at all. The staging scan reads the
@@ -699,7 +699,10 @@ Recording a destination in an in-memory container reaches no filesystem, so clas
 rollback outcome bookkeeping may accumulate one. That exemption is recognized by shape, not by
 callee name: the receiver must be a local provably bound to a collection built in the same
 function. Admitting the bare names would let anything answering to `append` take a destination,
-and a control pins that it cannot.
+and a control pins that it cannot. Storing a destination does not launder it either. A container
+that ever received one is tainted, and reading an element back out, by subscript or by iterating
+it into a loop variable, is a destination again, so a round trip through a list does not carry a
+publication past the audit.
 
 One scoping limit is deliberate rather than closed: `persistence.py` owns the publication helper
 and is exempt from both the reach rule and the sink audit, so a forward sink added inside that
