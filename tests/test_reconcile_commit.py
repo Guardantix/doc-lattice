@@ -59,7 +59,7 @@ def _file_snapshot(root: Path) -> dict[str, bytes]:
     """Capture every regular file a crash left behind, keyed by project-relative path."""
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted(root.rglob("*"))
+        for path in root.rglob("*")
         if path.is_file()
     }
 
@@ -1147,8 +1147,9 @@ def test_rollback_failure_preserves_prepared_recovery_evidence_and_both_causes(
     assert first.read_bytes() == b"new first"
     assert second.read_bytes() == b"old second"
     assert list(tmp_path.rglob("*.doc-lattice-before.*.tmp"))
-    # Restoring the first destination consumed its after stage; every other stage the
-    # journal names is still on disk as the authority a repair needs.
+    # Applying the first destination consumed its after stage, and the rollback that would
+    # have consumed its before stage is the one that failed; every other stage the journal
+    # names is still on disk as the authority a repair needs.
     entries = json.loads(journal.read_bytes())["entries"]
     assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*.tmp")} == {
         entries[0]["before_path"],
@@ -1426,8 +1427,10 @@ def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
     # No journal means no authority to roll anything back: the stage is reported and kept.
     assert result.action == "none"
     assert result.restored == 0
+    assert result.already_before == 0
     assert result.unresolved == ()
     assert result.orphans == (retained[0].name,)
+    assert result.scan_errors == ()
     assert result.is_incomplete
     assert destination.read_bytes() == b"new bytes"
     assert _file_snapshot(tmp_path) == crash_tree
@@ -1496,6 +1499,7 @@ def test_restored_journal_helper_cleanup_failure_leaves_a_recoverable_prepared_j
     assert result.already_before == 0
     assert result.unresolved == ()
     assert result.orphans == (helper_stages[0].name,)
+    assert result.scan_errors == ()
     assert result.is_incomplete
     assert destination.read_bytes() == b"old bytes"
     assert not journal.exists()
@@ -1611,8 +1615,9 @@ def test_reset_writing_wrong_bytes_is_caught_by_the_exact_byte_postcondition(
             raise OSError("marker sync failed after visible replace")
         # The reset write reports success while publishing bytes that are not the exact
         # prepared image, which only the postcondition can catch.
-        written.append(data + b"\n")
-        path.write_bytes(written[0])
+        inexact = data + b"\n"
+        written.append(inexact)
+        path.write_bytes(inexact)
 
     monkeypatch.setattr(
         reconcile_transaction, "atomic_replace_bytes", _fail_marker_then_reset_inexactly
@@ -1634,7 +1639,7 @@ def test_reset_writing_wrong_bytes_is_caught_by_the_exact_byte_postcondition(
     assert restores == []
     assert destination.read_bytes() == b"new bytes"
     # Refusing leaves exactly what the failed reset published; nothing rewrites it after.
-    assert journal.read_bytes() == written[0]
+    assert written == [journal.read_bytes()]
     assert list(tmp_path.rglob("*.tmp"))
 
 
