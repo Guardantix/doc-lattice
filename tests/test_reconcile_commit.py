@@ -1,12 +1,17 @@
 """Tests for transactional reconcile batch commits."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from doc_lattice import persistence, reconcile_transaction
-from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
+from doc_lattice.constants import (
+    RECONCILE_BEFORE_IMAGE_INFIX,
+    RECONCILE_JOURNAL_NAME,
+    RECONCILE_JOURNAL_VERSION,
+)
 from doc_lattice.error_types import (
     ReconcileConflictError,
     ReconcileInProgressError,
@@ -48,6 +53,31 @@ def _assert_no_transaction_artifacts(root: Path) -> None:
     """Assert that a completed abort left no journal or temporary stages."""
     assert not (root / RECONCILE_JOURNAL_NAME).exists()
     assert not list(root.rglob("*.tmp"))
+
+
+def _file_snapshot(root: Path) -> dict[str, bytes]:
+    """Capture every regular file a crash left behind, keyed by project-relative path."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _record_before_restores(monkeypatch, restores: list[Path]) -> None:
+    """Record the destinations a rollback restores, without altering the restore itself.
+
+    A refusal contract is only observable if an attempted rollback would show up, so this
+    watches the one call a rollback has to make rather than inferring it from final bytes.
+    """
+    real_replace = reconcile_transaction.replace_staged
+
+    def _watch_replacement(staged: Path, destination: Path) -> None:
+        if RECONCILE_BEFORE_IMAGE_INFIX in staged.name:
+            restores.append(destination)
+        real_replace(staged, destination)
+
+    monkeypatch.setattr(reconcile_transaction, "replace_staged", _watch_replacement)
 
 
 def test_commit_requires_a_valid_active_lock_before_mutation(tmp_path: Path):
@@ -979,6 +1009,23 @@ def test_journal_post_publication_stage_cleanup_failure_names_orphan(tmp_path: P
     assert str(helper_stages[0]) in message
     assert "inspect and remove it manually" in message
 
+    # Recovery is a new process: the injector that produced this tree is gone before the
+    # next run reads it, so what follows is what an operator would actually get.
+    monkeypatch.undo()
+    crash_tree = _file_snapshot(tmp_path)
+
+    result = _recover_transaction(tmp_path)
+
+    assert result.action == "none"
+    assert result.restored == 0
+    assert result.already_before == 0
+    assert result.unresolved == ()
+    assert result.orphans == (helper_stages[0].name,)
+    assert result.scan_errors == ()
+    assert result.is_incomplete
+    assert destination.read_bytes() == b"old bytes"
+    assert _file_snapshot(tmp_path) == crash_tree
+
 
 def test_existing_journal_is_preserved_and_requires_recovery(tmp_path: Path):
     destination = tmp_path / "doc.md"
@@ -1041,6 +1088,24 @@ def test_preparation_cleanup_failure_is_secondary_to_primary_error(tmp_path: Pat
     assert "inspect and remove it manually" in str(caught.value)
     assert destination.read_bytes() == b"old bytes"
     assert not (tmp_path / RECONCILE_JOURNAL_NAME).exists()
+    assert list(tmp_path.rglob("*.tmp")) == remaining
+
+    # Recovery is a new process: the injector that produced this tree is gone before the
+    # next run reads it, so what follows is what an operator would actually get.
+    monkeypatch.undo()
+    crash_tree = _file_snapshot(tmp_path)
+
+    result = _recover_transaction(tmp_path)
+
+    assert result.action == "none"
+    assert result.restored == 0
+    assert result.already_before == 0
+    assert result.unresolved == ()
+    assert result.orphans == (remaining[0].name,)
+    assert result.scan_errors == ()
+    assert result.is_incomplete
+    assert destination.read_bytes() == b"old bytes"
+    assert _file_snapshot(tmp_path) == crash_tree
 
 
 def test_rollback_failure_preserves_prepared_recovery_evidence_and_both_causes(
@@ -1082,6 +1147,31 @@ def test_rollback_failure_preserves_prepared_recovery_evidence_and_both_causes(
     assert first.read_bytes() == b"new first"
     assert second.read_bytes() == b"old second"
     assert list(tmp_path.rglob("*.doc-lattice-before.*.tmp"))
+    # Restoring the first destination consumed its after stage; every other stage the
+    # journal names is still on disk as the authority a repair needs.
+    entries = json.loads(journal.read_bytes())["entries"]
+    assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*.tmp")} == {
+        entries[0]["before_path"],
+        entries[1]["before_path"],
+        entries[1]["after_path"],
+    }
+
+    # Recovery is a new process: the patched replace_staged that failed this rollback is
+    # gone, so the retry restores the destination it could not reach in the crashed run.
+    monkeypatch.undo()
+
+    result = _recover_transaction(tmp_path)
+
+    assert result.action == "rolled_back"
+    assert result.restored == 1
+    assert result.already_before == 1
+    assert result.unresolved == ()
+    assert result.orphans == ()
+    assert result.scan_errors == ()
+    assert not result.is_incomplete
+    assert first.read_bytes() == b"old first"
+    assert second.read_bytes() == b"old second"
+    _assert_no_transaction_artifacts(tmp_path)
 
 
 def test_marker_replace_failure_resets_prepared_journal_then_rolls_back(
@@ -1227,6 +1317,384 @@ def test_marker_reset_failure_refuses_unsafe_rollback_and_requires_recovery(
     result = _recover_transaction(tmp_path)
     assert result.action == "cleaned_committed"
     assert destination.read_bytes() == b"new bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_marker_failure_restores_an_absent_prepared_journal_before_rolling_back(
+    tmp_path: Path, monkeypatch
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    rollback_journal_states: list[str] = []
+    real_replace = reconcile_transaction.replace_staged
+
+    def _lose_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        path.unlink()
+        raise OSError("committed marker replace failed")
+
+    def _observe_rollback_authority(staged: Path, target: Path) -> None:
+        if RECONCILE_BEFORE_IMAGE_INFIX in staged.name:
+            rollback_journal_states.append(json.loads(journal.read_bytes())["state"])
+        real_replace(staged, target)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
+    monkeypatch.setattr(reconcile_transaction, "replace_staged", _observe_rollback_authority)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+
+    message = str(caught.value)
+    assert "marking journal committed" in message
+    assert "committed marker replace failed" in message
+    assert "rollback complete" in message
+    # The rollback only ran because the reset re-created the prepared journal that had
+    # vanished, so the recovery authority was visible again at the moment it mattered.
+    assert rollback_journal_states == ["prepared"]
+    assert destination.read_bytes() == b"old bytes"
+    _assert_no_transaction_artifacts(tmp_path)
+
+
+def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
+    tmp_path: Path, monkeypatch
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    restores: list[Path] = []
+    real_create = reconcile_transaction.atomic_create_bytes
+    marker_failed = False
+
+    def _lose_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        nonlocal marker_failed
+        marker_failed = True
+        path.unlink()
+        raise OSError("committed marker replace failed")
+
+    def _fail_journal_restore(path: Path, data: bytes, *, prefix: str) -> None:
+        # Only the reset's restore, never the preparation publication that precedes it.
+        if marker_failed:
+            raise OSError("prepared journal restore failed")
+        real_create(path, data, prefix=prefix)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
+    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_journal_restore)
+    _record_before_restores(monkeypatch, restores)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+
+    message = str(caught.value)
+    assert "restoring prepared journal" in message
+    assert "prepared journal restore failed" in message
+    assert "rollback was not attempted" in message
+    assert "run 'doc-lattice reconcile --recover'" in message
+    assert restores == []
+    assert destination.read_bytes() == b"new bytes"
+    # A create that failed before publication leaves the journal absent rather than
+    # half-written, and refusing must not invent one either.
+    assert not journal.exists()
+    retained = list(tmp_path.rglob("*.tmp"))
+    assert len(retained) == 1
+    assert RECONCILE_BEFORE_IMAGE_INFIX in retained[0].name
+
+    monkeypatch.undo()
+    crash_tree = _file_snapshot(tmp_path)
+
+    result = _recover_transaction(tmp_path)
+
+    # No journal means no authority to roll anything back: the stage is reported and kept.
+    assert result.action == "none"
+    assert result.restored == 0
+    assert result.unresolved == ()
+    assert result.orphans == (retained[0].name,)
+    assert result.is_incomplete
+    assert destination.read_bytes() == b"new bytes"
+    assert _file_snapshot(tmp_path) == crash_tree
+
+
+def test_restored_journal_helper_cleanup_failure_leaves_a_recoverable_prepared_journal(
+    tmp_path: Path, monkeypatch
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    real_unlink = persistence.durable_unlink
+    helper_stages: list[Path] = []
+    restores: list[Path] = []
+    marker_failed = False
+
+    def _lose_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        nonlocal marker_failed
+        marker_failed = True
+        path.unlink()
+        raise OSError("committed marker replace failed")
+
+    def _fail_restored_helper_cleanup(path: Path) -> None:
+        # Only the restore's helper, never the preparation's: the fault has to land on the
+        # far side of publication for this to be a post-publication crash state.
+        if marker_failed and path != journal and path.name.startswith(f"{RECONCILE_JOURNAL_NAME}."):
+            helper_stages.append(path)
+            raise OSError("restored journal staging cleanup failed")
+        real_unlink(path)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
+    monkeypatch.setattr(persistence, "durable_unlink", _fail_restored_helper_cleanup)
+    _record_before_restores(monkeypatch, restores)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+
+    message = str(caught.value)
+    assert "restoring prepared journal" in message
+    assert "restored journal staging cleanup failed" in message
+    assert "rollback was not attempted" in message
+    assert restores == []
+    assert destination.read_bytes() == b"new bytes"
+    # The create linked and synced the journal before its helper cleanup failed, so this
+    # crash lands on the published side: prepared journal plus one orphaned helper.
+    assert json.loads(journal.read_bytes())["state"] == "prepared"
+    assert len(helper_stages) == 1
+    assert helper_stages[0].exists()
+
+    monkeypatch.undo()
+
+    result = _recover_transaction(tmp_path)
+
+    assert result.action == "rolled_back"
+    assert result.restored == 1
+    assert result.already_before == 0
+    assert result.unresolved == ()
+    assert result.orphans == (helper_stages[0].name,)
+    assert result.is_incomplete
+    assert destination.read_bytes() == b"old bytes"
+    assert not journal.exists()
+    # The orphan is reported, never deleted, so it survives the run that reported it.
+    assert list(tmp_path.rglob("*.tmp")) == helper_stages
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses file read permissions")
+def test_unreadable_journal_refuses_the_reset_and_preserves_its_bytes(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    prepared_bytes: list[bytes] = []
+    restores: list[Path] = []
+
+    def _seal_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        prepared_bytes.append(path.read_bytes())
+        path.chmod(0o000)
+        raise OSError("committed marker replace failed")
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _seal_journal_then_fail)
+    _record_before_restores(monkeypatch, restores)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+    journal.chmod(0o600)
+
+    message = str(caught.value)
+    assert "reading journal for reset" in message
+    assert "rollback was not attempted" in message
+    assert "run 'doc-lattice reconcile --recover'" in message
+    # A journal it could not read is a journal it must not act on: no rollback, the
+    # destination stays at its after image, and the unreadable bytes are left intact.
+    assert restores == []
+    assert destination.read_bytes() == b"new bytes"
+    assert journal.read_bytes() == prepared_bytes[0]
+    assert json.loads(journal.read_bytes())["state"] == "prepared"
+    assert list(tmp_path.rglob("*.tmp"))
+
+
+def test_foreign_journal_bytes_refuse_the_reset_and_are_preserved_exactly(
+    tmp_path: Path, monkeypatch
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    foreign_bytes = b"bytes from neither journal image\n"
+    restores: list[Path] = []
+
+    def _overwrite_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        path.write_bytes(foreign_bytes)
+        raise OSError("committed marker replace failed")
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _overwrite_journal_then_fail)
+    _record_before_restores(monkeypatch, restores)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+
+    message = str(caught.value)
+    assert "the visible journal contains unexpected bytes" in message
+    assert "rollback was not attempted" in message
+    assert "run 'doc-lattice reconcile --recover'" in message
+    # Bytes matching neither image belong to something this transaction does not own, so
+    # they are evidence to preserve byte for byte rather than a journal to overwrite.
+    assert restores == []
+    assert destination.read_bytes() == b"new bytes"
+    assert journal.read_bytes() == foreign_bytes
+    assert list(tmp_path.rglob("*.tmp"))
+
+
+def test_reset_writing_wrong_bytes_is_caught_by_the_exact_byte_postcondition(
+    tmp_path: Path, monkeypatch
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    written: list[bytes] = []
+    restores: list[Path] = []
+    marker_calls = 0
+
+    def _fail_marker_then_reset_inexactly(
+        path: Path,
+        data: bytes,
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        nonlocal marker_calls
+        marker_calls += 1
+        if marker_calls == 1:
+            path.write_bytes(data)
+            raise OSError("marker sync failed after visible replace")
+        # The reset write reports success while publishing bytes that are not the exact
+        # prepared image, which only the postcondition can catch.
+        written.append(data + b"\n")
+        path.write_bytes(written[0])
+
+    monkeypatch.setattr(
+        reconcile_transaction, "atomic_replace_bytes", _fail_marker_then_reset_inexactly
+    )
+    _record_before_restores(monkeypatch, restores)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+
+    message = str(caught.value)
+    assert "resetting prepared journal" in message
+    assert "contains different bytes" in message
+    assert "rollback was not attempted" in message
+    assert "run 'doc-lattice reconcile --recover'" in message
+    assert restores == []
+    assert destination.read_bytes() == b"new bytes"
+    # Refusing leaves exactly what the failed reset published; nothing rewrites it after.
+    assert journal.read_bytes() == written[0]
+    assert list(tmp_path.rglob("*.tmp"))
+
+
+def test_reset_failure_after_publication_leaves_a_prepared_journal_recovery_rolls_back(
+    tmp_path: Path, monkeypatch
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    restores: list[Path] = []
+    marker_calls = 0
+
+    def _fail_marker_then_reset_after_publication(
+        path: Path,
+        data: bytes,
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        nonlocal marker_calls
+        marker_calls += 1
+        path.write_bytes(data)
+        if marker_calls == 1:
+            raise OSError("marker sync failed after visible replace")
+        raise OSError("prepared journal reset sync failed after visible replace")
+
+    monkeypatch.setattr(
+        reconcile_transaction, "atomic_replace_bytes", _fail_marker_then_reset_after_publication
+    )
+    _record_before_restores(monkeypatch, restores)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+        )
+
+    message = str(caught.value)
+    assert "resetting prepared journal" in message
+    assert "prepared journal reset sync failed after visible replace" in message
+    assert "rollback was not attempted" in message
+    assert restores == []
+    assert destination.read_bytes() == b"new bytes"
+    # The same reset call site as the pre-rename failure, but the prepared bytes are
+    # already visible. Which side of publication it landed on is what decides the next
+    # run: this one rolls back, while the pre-rename failure cleans a committed journal.
+    assert json.loads(journal.read_bytes())["state"] == "prepared"
+
+    monkeypatch.undo()
+
+    result = _recover_transaction(tmp_path)
+
+    assert result.action == "rolled_back"
+    assert result.restored == 1
+    assert result.already_before == 0
+    assert result.unresolved == ()
+    assert result.orphans == ()
+    assert not result.is_incomplete
+    assert destination.read_bytes() == b"old bytes"
     _assert_no_transaction_artifacts(tmp_path)
 
 
