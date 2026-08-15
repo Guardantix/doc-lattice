@@ -28,6 +28,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `markdown-it-py` stays exact-pinned at 4.2.0 despite the transitive constraint that places on
   `rich`.
 
+### Fixed
+
+- `linear stale-shipped` no longer hard-wraps its human output at the terminal width, and no
+  longer leaks terminal escapes when styling is off. Each finding and the all-clear line are now
+  one record on one line at any width, so a ticket ref, node id, or drifted ref stays intact for
+  a line-oriented pipeline instead of breaking mid-token on a narrow console. The renderer also
+  opts out of Rich's automatic highlighter, which bolds bare numbers and survives `no_color`, so
+  a ticket ref (`GTX-96`) or a numbered id (`adr-001`) no longer emits escapes under
+  `--no-color`. This was the one renderer the 4.0.0 `impact` fix and the 4.1.0 `check`, `lint`,
+  and `--no-color` fixes did not reach; no renderer now relies on Rich's default
+  auto-highlighting. `--format json` output is unchanged.
+
 ## [4.1.0] - 2026-08-14
 
 ### Changed
