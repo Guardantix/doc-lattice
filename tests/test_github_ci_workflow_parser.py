@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from ruamel.yaml import YAML
 from ruamel.yaml.parser import Parser
 
 import doc_lattice.github_ci.workflow_parser as workflow_parser_module
@@ -675,6 +676,32 @@ def test_parse_workflow_wraps_oversized_numeric_scalar_conversion():
     assert "malformed YAML" in message
     assert "999999999999" not in message
     assert "ValueError" not in message
+
+
+@pytest.mark.parametrize(
+    ("scalar", "builtin_raised"),
+    [("!!bool nope", KeyError), ("!!int oops", ValueError), ("!!float bad", ValueError)],
+)
+def test_parse_workflow_wraps_a_rejected_tagged_scalar(scalar, builtin_raised):
+    # The safe constructor raises the builtin whose type rejected the value, not a YAMLError,
+    # and which builtin depends on the tag: !!bool reaches the parser as a bare KeyError while
+    # the numeric tags raise ValueError. Only the ValueError shape used to be handled, so a
+    # user's !!bool typo escaped as an uncaught crash. Both shapes must arrive as a ConfigError
+    # like every other malformed workflow.
+    path = Path(".github/workflows/tagged.yml")
+    document = f"on: push\njobs:\n  audit:\n    runs-on: {scalar}\n"
+
+    # Positive control: the raw loader really does raise the builtin this case is named for,
+    # so the test still means something if ruamel changes which one it picks.
+    with pytest.raises(builtin_raised):
+        YAML(typ="safe", pure=True).load(document)
+
+    with pytest.raises(ConfigError) as exc:
+        parse_workflow(path, document)
+
+    assert str(path) in str(exc.value)
+    assert "malformed YAML" in str(exc.value)
+    assert builtin_raised.__name__ not in str(exc.value)
 
 
 def test_parse_workflow_wraps_invalid_unicode_encoding():

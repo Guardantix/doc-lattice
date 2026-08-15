@@ -9,10 +9,11 @@ a reused loader has to clear before each document. Both live here so one module 
 below, because AD-26 makes the pure Python parser part of their compatibility surface: they
 read source marks, resolver state, and directive state that a plain safe loader gives up the
 moment the optional `ruamel.yaml.clib` accelerator is installed. Do not route either through
-`SafeYamlLoader`; it would silently drop `pure=True`. `reconcile` does still catch
-`YAML_LOAD_ERRORS`, which is why the tuple lives here rather than inside one loader.
-`github_ci/workflow_parser` is the exception on both counts: it spells its own handlers and
-does not import the tuple at all.
+`SafeYamlLoader`; it would silently drop `pure=True`. They still answer for this failure
+family, which is why it lives here rather than inside one loader: `reconcile` catches the
+tuple directly, and `github_ci/workflow_parser` tracks the same members by hand because it
+separates the `YAMLError` subfamilies for their own diagnoses. A member added below therefore
+has to be checked against that module's handlers too.
 
 What does not live here is policy. Each caller keeps its own error translation, because a
 malformed config and a malformed frontmatter block are different errors to the user, and
