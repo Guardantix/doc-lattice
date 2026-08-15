@@ -852,19 +852,20 @@ def _project_relative(paths: tuple[Path, ...], canonical_root: Path) -> tuple[st
 
 
 def _scan_orphan_artifacts(
-    project_root: Path,
+    canonical_root: Path,
     referenced: frozenset[Path],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Find transaction artifacts that no retained journal accounts for.
 
     Args:
-        project_root: The configured project root to enumerate without following symlinks.
+        canonical_root: The resolved project root to enumerate without following symlinks.
+            Journal entries resolve against this same root, so orphan and retained paths
+            are directly comparable.
         referenced: Artifacts a retained journal still owns, which are never orphans.
 
     Returns:
         Sorted project-relative orphan paths and sorted enumeration-failure diagnostics.
     """
-    canonical_root = project_root.resolve()
     orphans: list[Path] = []
     scan_errors: list[str] = []
 
@@ -1100,17 +1101,19 @@ def _abort_prepared(
     prepared: _PreparedTransaction,
     primary: ReconcileConflictError | ReconcilePersistenceError,
     *,
+    candidates: frozenset[Path],
     authenticate_all: bool = True,
-    candidates: frozenset[Path] = frozenset(),
 ) -> NoReturn:
     """Roll back a prepared transaction, preserving the primary failure.
 
     Args:
         prepared: The published prepared transaction to roll back.
         primary: The conflict or persistence failure that triggered the abort.
-        authenticate_all: Whether to authenticate every stage before mutating.
         candidates: Destinations whose replacement this process already entered, and
-            which therefore may already hold the after image.
+            which therefore may already hold the after image. Required rather than
+            defaulted, because an empty set claims the run applied nothing and would let
+            cleanup delete the very journal an unresolved destination still needs.
+        authenticate_all: Whether to authenticate every stage before mutating.
 
     Raises:
         ReconcileConflictError: The primary conflict, once rollback completed in full.
@@ -1498,11 +1501,12 @@ def recover_transaction(
 def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
     """Recover one journal while the public API holds its capability lease."""
     journal = _journal_path(project_root)
+    canonical_root = project_root.resolve()
     # Orphan scanning runs after journal handling in every branch, not only when no journal
     # was found. An interrupted journal publication can leave both the canonical journal and
     # its helper stage, so recovering the journal first is what exposes the helper.
     if not _journal_is_present(journal):
-        orphans, scan_errors = _scan_orphan_artifacts(project_root, frozenset())
+        orphans, scan_errors = _scan_orphan_artifacts(canonical_root, frozenset())
         return RecoveryResult(
             action="none",
             journal=journal,
@@ -1513,7 +1517,7 @@ def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
     _authenticate_transaction_artifacts(_staged_artifacts(entries), journal, journal_bytes)
     if loaded.state != "prepared":
         _cleanup_transaction_artifacts(entries, journal, journal_bytes)
-        orphans, scan_errors = _scan_orphan_artifacts(project_root, frozenset())
+        orphans, scan_errors = _scan_orphan_artifacts(canonical_root, frozenset())
         return RecoveryResult(
             action="cleaned_committed",
             journal=journal,
@@ -1522,13 +1526,13 @@ def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
         )
     outcome = _rollback_prepared(entries, journal, journal_bytes)
     retained = _retained_artifacts(entries, journal) if outcome.unresolved else frozenset()
-    orphans, scan_errors = _scan_orphan_artifacts(project_root, retained)
+    orphans, scan_errors = _scan_orphan_artifacts(canonical_root, retained)
     return RecoveryResult(
         action="partially_rolled_back" if outcome.unresolved else "rolled_back",
         journal=journal,
         restored=len(outcome.restored),
         already_before=len(outcome.already_before),
-        unresolved=_project_relative(outcome.unresolved, project_root.resolve()),
+        unresolved=_project_relative(outcome.unresolved, canonical_root),
         orphans=orphans,
         scan_errors=scan_errors,
     )

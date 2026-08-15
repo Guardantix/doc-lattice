@@ -114,9 +114,13 @@ After an interrupted run, use this workflow:
 
 1. Stop any other reconcile and run `doc-lattice reconcile --recover` from the project root. A safe
    rerun of a normal real reconcile also performs this recovery before lattice loading.
-2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`; a valid
-   `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
-   reports `nothing to recover: JOURNAL`. All three outcomes exit 0.
+2. A valid `prepared` journal reports `rolled back reconcile transaction: JOURNAL`, or
+   `partially rolled back reconcile transaction: JOURNAL` when a destination stayed unresolved; a
+   valid `committed` journal reports `cleaned committed reconcile transaction: JOURNAL`; no journal
+   reports `nothing to recover: JOURNAL`, or `no reconcile journal to recover: JOURNAL` when the
+   scan reported an orphan or a failure. A full rollback, a committed cleanup, and a clean
+   no-journal run exit 0. A partial rollback, any orphaned artifact, and any scan failure exit 2,
+   whichever journal state the run started from.
 3. For machine-readable recovery, add `--format json`. The complete stdout object contains exactly
    `action`, `journal`, `restored`, `already_before`, `unresolved`, `orphans`, and `scan_errors`,
    with no additional keys, for example `{"action": "none", "journal": "PATH", "restored": 0,

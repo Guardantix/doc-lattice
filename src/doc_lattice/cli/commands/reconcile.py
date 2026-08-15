@@ -13,6 +13,7 @@ from ...path_utils import safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
 from ...reconcile import reconcile as plan_reconcile
 from ...reconcile_transaction import (
+    RecoveryAction,
     RecoveryResult,
     commit_rewrites,
     ensure_dry_run_safe,
@@ -85,7 +86,7 @@ def _report_reconcile(
         runtime.stdout.print("nothing to reconcile")
 
 
-_RECOVERY_SUMMARIES = {
+_RECOVERY_SUMMARIES: dict[RecoveryAction, str] = {
     "none": "nothing to recover",
     "rolled_back": "rolled back reconcile transaction",
     "partially_rolled_back": "partially rolled back reconcile transaction",
