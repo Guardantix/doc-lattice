@@ -35,10 +35,11 @@ from ruamel.yaml.tokens import (
 )
 
 from .error_types import BrokenRefError, UnreadableDocError, ValidationError
-from .frontmatter_parser import YAML_LOAD_ERRORS, split_frontmatter_parts
+from .frontmatter_parser import split_frontmatter_parts
 from .hashing import normalize_newlines
 from .model import Lattice, TargetId, parse_ref
 from .resolve import cached_target_hash
+from .yaml_boundary import YAML_LOAD_ERRORS
 
 # Characters that end or reinterpret a plain scalar in block or flow context, and the
 # indicators that only do so in first position. A replacement carrying any of them is

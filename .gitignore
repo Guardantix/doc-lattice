@@ -18,6 +18,8 @@ dist/
 .coverage
 htmlcov/
 .ruff_cache/
+.pytest_cache/
+.hypothesis/
 # uv.lock and .python-version are intentionally committed (not ignored).
 
 # Secrets

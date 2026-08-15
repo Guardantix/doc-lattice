@@ -5,22 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
-from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
 
 from .error_types import ConfigError, UnreadableDocError
 from .model import NodeMeta
+from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
-_YAML = YAML(typ="safe")
-
-# Everything a safe load of user-authored YAML can raise. Beyond the YAMLError family the
-# scanner and parser raise, a constructor building a tagged scalar its type cannot accept
-# raises the builtin that construction failed with, so `!!int oops` reaches a caller as a bare
-# ValueError. Every module loading a user's YAML catches this family and reports a
-# ProjectError, so the same typo is a clean error wherever the user writes it.
-YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
+_LOADER = SafeYamlLoader()
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,11 +112,8 @@ def parse_meta(raw_meta: str | None, source: Path) -> NodeMeta | None:
     """
     if raw_meta is None:
         return None
-    # A YAML directive can update the reusable parser's version even when parsing fails. Reset it
-    # so each document starts with default YAML semantics, matching a fresh safe loader.
-    _YAML.version = None
     try:
-        data: Any = _YAML.load(raw_meta)
+        data: Any = _LOADER.load(raw_meta)
     except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse frontmatter in {source}: {exc}"
         raise UnreadableDocError(msg) from exc

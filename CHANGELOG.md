@@ -39,6 +39,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--no-color`. This was the one renderer the 4.0.0 `impact` fix and the 4.1.0 `check`, `lint`,
   and `--no-color` fixes did not reach; no renderer now relies on Rich's default
   auto-highlighting. `--format json` output is unchanged.
+- The `ci` commands no longer crash on a workflow whose scalar carries a YAML tag its type
+  rejects. A value such as `runs-on: !!bool nope` in a repository's own
+  `.github/workflows/*.yml` escaped the workflow parser as an uncaught `KeyError` and printed a
+  traceback; it is now reported as a malformed-YAML `ConfigError` naming the file, like every
+  other unparseable workflow. The gap was tag-dependent and so easy to miss: the safe
+  constructor raises whichever builtin the target type rejected the value with, and only the
+  `ValueError` that `!!int` and `!!float` raise was handled, while the `KeyError` from `!!bool`
+  was not. Duplicate-key and reused-anchor workflows keep their own more specific messages.
+- A `%YAML 1.1` directive in one document's frontmatter no longer changes how the documents read
+  after it in the same run. The shared safe loader cleared `YAML.version` between loads, which is
+  enough on `ruamel.yaml` 0.19 but not on 0.18, where the versioned resolver is built once and
+  never rebuilt; the declared range admits both. On 0.18 without the optional `ruamel.yaml.clib`
+  accelerator that left every later document resolving under 1.1, so an unquoted `on`, `yes`, or
+  `no` became a boolean and a leading-zero number became octal, silently and only for documents
+  parsed after the one carrying the directive. The loader is now discarded outright whenever a
+  directive touched it, which is version independent. The `yaml-compatibility` CI leg gained the
+  accelerator-absent half of its matrix, since the C parser ignores directives entirely and so
+  hid this on both of the ruamel versions it tested.
 
 ## [4.1.0] - 2026-08-14
 

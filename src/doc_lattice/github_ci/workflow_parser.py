@@ -152,9 +152,19 @@ def _compose_yaml(yaml: YAML, text: str, workflow_path: Path) -> Node | None:
 
 
 def _load_yaml(yaml: YAML, text: str, workflow_path: Path) -> Any:
+    # A constructor that cannot build a tagged scalar raises the builtin whose type rejected the
+    # value rather than a YAMLError, so `runs-on: !!bool nope` arrives as a bare KeyError and
+    # `!!int oops` as a ValueError. The caller already handles ValueError; these two complete the
+    # family `yaml_boundary.YAML_LOAD_ERRORS` names, which this module tracks by hand because it
+    # needs the YAMLError subfamilies separated for their own diagnoses.
+    #
+    # Caught at the load call rather than on the caller's outer block so that a KeyError or
+    # TypeError raised while shaping the loaded document stays a crash instead of being reported
+    # as a malformed workflow. Neither DuplicateKeyError nor ReusedAnchorWarning derives from
+    # KeyError or TypeError, so their more specific diagnoses are unaffected.
     try:
         return yaml.load(text)
-    except AssertionError as exc:
+    except (AssertionError, KeyError, TypeError) as exc:
         raise _parse_error(workflow_path, "malformed YAML") from exc
 
 

@@ -80,9 +80,12 @@ do not coordinate with each other.
 **Context:** Document frontmatter YAML, workflow YAML, and Linear JSON arrive untyped.
 **Decision:** `typing.Any`/`typing.cast` are allowed only in boundary modules
 (`scripts/check_typing_boundaries.py`); the real boundaries are `frontmatter_parser`
-(document frontmatter YAML), `linear_parser` (Linear JSON), and
-`github_ci/workflow_parser` (workflow YAML), which validate into typed models.
-Everywhere else passes typed values.
+(document frontmatter YAML), `linear_parser` (Linear JSON), `github_ci/workflow_parser`
+(workflow YAML), and `yaml_boundary` (the shared ruamel safe-load mechanics the first of
+those and `config` both read through), which validate into typed models. Everywhere else
+passes typed values. `yaml_boundary` is the narrowest of the four: it returns the loaded
+value still untyped and each caller validates it, which is why the untyped return does not
+widen the boundary past the module that produces it.
 **Consequences:** Untyped data cannot leak past the named boundary modules; CI enforces
 it.
 
@@ -458,13 +461,21 @@ written tag first opens at its anchor rather than at its tag, so the tag token, 
 scalar token that follows it, is what bounds an edit that has to overwrite or reproduce one. Each
 read builds its own loader, since a shared instance carries document state (`YAML.version`, and
 the reader and scanner bound to one document) whose reset behavior is itself version dependent.
-The boundary loaders in `frontmatter_parser.py` and `config.py` may keep shared module-level
-instances despite that, because they consume only loaded values and never a source mark. A shared
-instance does retain state across loads: `YAML.version`, the piece that steers a later parse, is
-reset explicitly before each load, and the `DocInfo` record each load appends to `doc_infos` is
-write-only metadata the loader never consults, one small record per document for the life of the
-process, with no effect on any later parse; the cross-document directive-leakage tests pin that
-a directive in one document does not steer the next.
+The boundary loaders behind `frontmatter_parser.py` and `config.py` may keep shared module-level
+instances despite that, because they consume only loaded values and never a source mark. Those
+mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the reset, and its
+`YAML_LOAD_ERRORS` names the failure family both of those modules and `reconcile.py` catch.
+Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
+than becoming one cross-module instance whose document state a second boundary could observe. A
+shared instance does retain state across loads: `YAML.version`, the piece that steers a later
+parse, is cleared before each load by discarding the underlying loader whenever a directive set
+it, since clearing the attribute alone does not rebuild the versioned resolver at the declared
+floor and would leave the previous document's version in force there. The `DocInfo` record each
+load appends to `doc_infos` is write-only metadata the loader never consults, one small record
+per document for the life of the process, with no effect on any later parse; the cross-document
+directive-leakage tests pin that a directive in one document does not steer the next, and the
+compatibility leg runs them with and without the accelerator, since the C parser ignores
+directives outright and would otherwise pass them vacuously.
 Every rewrite is reparsed and compared against the intended document before it is staged, so a
 mis-measured span is refused rather than published.
 **Consequences:** A ruamel major or minor bump is a compatibility review with the reconcile source
