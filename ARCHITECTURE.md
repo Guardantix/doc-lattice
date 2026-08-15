@@ -661,7 +661,7 @@ bytes, recovery artifacts, and the before-image rollback sink are deliberately p
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
 
-Fifteen near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
+Eighteen near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
 guard and each was reproduced against it before being closed. The gate must be its own
 unconditional top-level statement, since a gate merely contained in an earlier statement can sit
 inside a conditional and skip the path a later changed return takes. Both operands of the
@@ -671,9 +671,13 @@ of ending characters, since replacing one newline with two opens a blank line af
 the gate verified. The envelope fields a rewrite may reattach are whitelisted, excluding
 `raw_meta`, which holds the pre-edit YAML the gate never verified, and the literals it may
 contribute are restricted the same way, since text spliced into the reassembly f-string is
-published byte for byte. Producer and publication scans resolve module-qualified references and
-every kind of alias, by import or by assignment, since `Rewrite as R`, `R = Rewrite`, and
-`persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
+published byte for byte. The reassembly is pinned as a complete envelope, each piece reattached
+exactly once and in order around the verified metadata, since requiring only that some verified
+value appear accepts an assembly that emits nothing but gate-verified bytes while dropping the
+fences and the entire body. Producer and publication scans resolve module-qualified references
+and every kind of alias, by import, by assignment, or by parameter default, since `Rewrite as R`,
+`R = Rewrite`, `def build(..., constructor=Rewrite)`, and `persistence.replace_staged(...)` are
+each a complete route past a bare-name scan. The
 publication-reach rule reads every mention of the identifier rather than only its imports, and
 follows both composite primitives: the one that reaches the helper without naming it, and the
 descriptor-relative variant that publishes without calling it at all. The staging scan reads the

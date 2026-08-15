@@ -236,10 +236,22 @@ COMPOSITE_PUBLISH_USERS: dict[str, frozenset[str]] = {
     "atomic_replace_bytes": frozenset({"cache/store.py"}),
     "atomic_replace_bytes_at": frozenset({"github_ci/filesystem.py"}),
 }
-# The envelope pieces a rewrite may reattach verbatim. `raw_meta` is deliberately absent: it
-# holds the pre-edit YAML the gate never verified, so admitting it would let the mis-splice
-# check pass on a document that reintroduces exactly the bytes the gate was meant to replace.
-ENVELOPE_FIELDS = frozenset({"prefix", "open_fence", "close_fence", "close_fence_newline", "body"})
+# The whole document a rewrite may reassemble, as the exact order it reattaches. Requiring only
+# that some verified value appears would accept `f"{new_meta}"`, which drops the fences and the
+# entire body while every byte it does emit is still gate-verified, so the reassembly is pinned
+# as a complete envelope: each piece exactly once, in this order, around the verified metadata.
+# `raw_meta` is deliberately absent, since it holds the pre-edit YAML the gate never verified and
+# admitting it would let the check pass on a document reintroducing the bytes the gate replaced.
+GATED_SLOT = "<gate-verified metadata>"
+ENVELOPE_ORDER = (
+    "prefix",
+    "open_fence",
+    GATED_SLOT,
+    "close_fence",
+    "close_fence_newline",
+    "body",
+)
+ENVELOPE_FIELDS = frozenset(ENVELOPE_ORDER) - {GATED_SLOT}
 
 
 def _gate_msg(detail: str) -> str:
@@ -333,14 +345,45 @@ def _call_sites(trees: dict[str, ast.Module], callee: str | None = None) -> list
     return sites
 
 
-def _assigned_names(tree: ast.Module) -> list[tuple[list[ast.expr], ast.expr]]:
-    """Every assignment in a module, as its target list paired with its assigned value."""
-    pairs: list[tuple[list[ast.expr], ast.expr]] = []
+def _default_bindings(tree: ast.Module) -> list[tuple[str, ast.expr]]:
+    """Every parameter carrying a default, paired with the default expression.
+
+    A default binds a name inside the function just as an assignment does, so
+    ``def build(..., constructor=Rewrite)`` renames a guarded symbol without ever assigning it.
+    """
+    pairs: list[tuple[str, ast.expr]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        arguments = node.args
+        positional = [*arguments.posonlyargs, *arguments.args]
+        defaulted = positional[len(positional) - len(arguments.defaults) :]
+        pairs.extend(
+            (parameter.arg, default)
+            for parameter, default in zip(defaulted, arguments.defaults, strict=True)
+        )
+        pairs.extend(
+            (parameter.arg, default)
+            for parameter, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True)
+            if default is not None
+        )
+    return pairs
+
+
+def _rebindings(tree: ast.Module) -> list[tuple[list[str], ast.expr]]:
+    """Every name a module rebinds, by assignment or by parameter default."""
+    pairs: list[tuple[list[str], ast.expr]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            pairs.append((node.targets, node.value))
+            targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            pairs.append(([node.target], node.value))
+            targets, value = [node.target], node.value
+        else:
+            continue
+        names = [target.id for target in targets if isinstance(target, ast.Name)]
+        if names:
+            pairs.append((names, value))
+    pairs.extend(([name], default) for name, default in _default_bindings(tree))
     return pairs
 
 
@@ -348,9 +391,10 @@ def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
     """Every local name in a module that refers to ``symbol``, however it was bound.
 
     Imports are not the only way to rename a guarded symbol. ``R = Rewrite`` followed by
-    ``R(...)``, or ``publish = persistence.replace_staged``, rebinds it under a name an
-    import-only scan never sees, leaving the original site as the apparent sole one. Assignments
-    are followed to a fixpoint so a chain of renames resolves too.
+    ``R(...)``, ``publish = persistence.replace_staged``, and a ``constructor=Rewrite``
+    parameter default each rebind it under a name an import-only scan never sees, leaving the
+    original site as the apparent sole one. Every rebinding is followed to a fixpoint, so a
+    chain of renames resolves too.
     """
     aliases: set[str] = set()
     for node in ast.walk(tree):
@@ -360,19 +404,19 @@ def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
             )
         elif isinstance(node, ast.ClassDef | ast.FunctionDef) and node.name == symbol:
             aliases.add(symbol)
-    assignments = _assigned_names(tree)
+    rebindings = _rebindings(tree)
     growing = True
     while growing:
         growing = False
-        for targets, value in assignments:
+        for names, value in rebindings:
             renames = (isinstance(value, ast.Name) and value.id in aliases) or (
                 isinstance(value, ast.Attribute) and value.attr == symbol
             )
             if not renames:
                 continue
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id not in aliases:
-                    aliases.add(target.id)
+            for name in names:
+                if name not in aliases:
+                    aliases.add(name)
                     growing = True
     return frozenset(aliases)
 
@@ -566,10 +610,16 @@ def _traces_name(expr: ast.Name, context: _TraceContext, seen: tuple[str, ...]) 
 def _reassembles_envelope(
     expr: ast.JoinedStr, context: _TraceContext, seen: tuple[str, ...]
 ) -> bool:
-    """True when an f-string rebuilds the document from verified meta plus envelope parts."""
+    """True when an f-string rebuilds the whole document envelope around the verified meta.
+
+    Recording only that some verified value appears is not enough: ``f"{new_meta}"`` emits
+    nothing but gate-verified bytes and still drops the fences and the entire body. The
+    interpolations must therefore match ``ENVELOPE_ORDER`` exactly, so each piece is reattached
+    once, in place, with the verified metadata between the fences.
+    """
     if context.envelope_root is None:
         return False
-    carried = False
+    order: list[str] = []
     for value in expr.values:
         if isinstance(value, ast.Constant):
             if not _is_envelope_literal(value):
@@ -579,11 +629,14 @@ def _reassembles_envelope(
             return False
         if value.conversion != -1 or value.format_spec is not None:
             return False
-        if _traces_to(value.value, context, seen):
-            carried = True
-        elif not _is_envelope_part(value.value, context.envelope_root):
+        part = value.value
+        if _traces_to(part, context, seen):
+            order.append(GATED_SLOT)
+        elif isinstance(part, ast.Attribute) and _is_envelope_part(part, context.envelope_root):
+            order.append(part.attr)
+        else:
             return False
-    return carried
+    return tuple(order) == ENVELOPE_ORDER
 
 
 def _gated_result_names(bindings: dict[str, list[_Binding]]) -> frozenset[str]:
@@ -1163,6 +1216,29 @@ def publish(directory_fd: int, destination_name: str, data: bytes) -> None:
 FORWARD_SINK_CALL = "replace_staged(entry.after_path, entry.destination)"
 SINK_INDENT = " " * 12
 
+# The production envelope reassembly, as the two implicitly concatenated pieces it is written in,
+# so a control can bend the whole document assembly rather than one interpolation of it.
+ENVELOPE_ASSEMBLY = (
+    'f"{parts.prefix}{parts.open_fence}\\n{new_meta}"\n'
+    '        f"{parts.close_fence}{parts.close_fence_newline}{parts.body}"'
+)
+REORDERED_ENVELOPE_ASSEMBLY = (
+    'f"{parts.prefix}{parts.open_fence}\\n{new_meta}"\n'
+    '        f"{parts.body}{parts.close_fence}{parts.close_fence_newline}"'
+)
+
+PARAMETER_DEFAULT_PRODUCER_MODULE = '''"""A producer hidden behind a parameter default."""
+
+from pathlib import Path
+
+from .reconcile import Rewrite
+
+
+def build(path: Path, before: bytes, data: bytes, constructor=Rewrite) -> Rewrite:
+    """Mint a Rewrite the gate never saw, naming the class only as a default."""
+    return constructor(path, before, data, frozenset())
+'''
+
 ASSIGNED_ALIAS_PRODUCER_MODULE = '''"""A producer hidden behind an assigned alias."""
 
 from pathlib import Path
@@ -1223,7 +1299,10 @@ def _positive_controls() -> dict[str, dict[str, str]]:
     ``os.replace``, a destination overwritten through its own write method, and a producer
     behind an alias introduced by assignment rather than by import. The last records a
     destination into something that is not a provable local collection, pinning that the
-    bookkeeping exemption cannot be borrowed by anything that merely answers to ``append``.
+    bookkeeping exemption cannot be borrowed by anything that merely answers to ``append``. The
+    final three came from a further review pass: the whole document envelope dropped around the
+    verified metadata, the envelope reattached out of order, and a producer behind an alias bound
+    as a parameter default.
 
     Cached alongside the source read so the parametrized run builds this mapping once.
     """
@@ -1341,6 +1420,16 @@ def _positive_controls() -> dict[str, dict[str, str]]:
         "rewrite-minted-behind-an-assigned-alias": {
             **sources,
             "rogue_assigned_alias_producer.py": ASSIGNED_ALIAS_PRODUCER_MODULE,
+        },
+        "document-envelope-dropped-around-the-verified-metadata": _patched(
+            sources, RECONCILE_MODULE, ENVELOPE_ASSEMBLY, 'f"{new_meta}"'
+        ),
+        "document-envelope-reattached-out-of-order": _patched(
+            sources, RECONCILE_MODULE, ENVELOPE_ASSEMBLY, REORDERED_ENVELOPE_ASSEMBLY
+        ),
+        "rewrite-minted-behind-a-parameter-default": {
+            **sources,
+            "rogue_parameter_default_producer.py": PARAMETER_DEFAULT_PRODUCER_MODULE,
         },
     }
 
