@@ -97,6 +97,17 @@ def test_rawedge_seen_defaults_none():
     assert RawEdge.model_validate({"ref": "a#b"}).seen is None
 
 
+@pytest.mark.parametrize(
+    "seen", [12, 12.5, True, ["h"], {"h": 1}], ids=["int", "float", "bool", "list", "mapping"]
+)
+def test_rawedge_rejects_a_non_string_seen(seen):
+    # Strict mode is what keeps `seen: 12` out of the accepted input subset while a tagged
+    # `!!str 12` stays in it: the constructed type decides, not the spelling. Reconcile's
+    # tolerance for a non-string `seen` at write time is defensive recovery, not acceptance.
+    with pytest.raises(PydanticValidationError):
+        RawEdge.model_validate({"ref": "a#b", "seen": seen})
+
+
 def test_dataclasses_are_frozen():
     edge = Edge(target_ref="a#b", target_id=TargetId("a", "b"), seen=None)
     with pytest.raises(AttributeError):

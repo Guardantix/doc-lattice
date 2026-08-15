@@ -1210,7 +1210,11 @@ def _derives_from_occurrences(
         msg = f"frontmatter of {context.source} is not written as a mapping; cannot reconcile"
         raise UnreadableDocError(msg)  # pragma: no cover
     occurrences = _resolved_member(context.anchors, root, "derives_from")
-    if not isinstance(occurrences, _SequenceOccurrence):
+    if not isinstance(occurrences, _SequenceOccurrence):  # pragma: no cover
+        # Only a sequence occurrence loads as the list the caller has already seen: an
+        # ordered map written here loads as a mapping and is refused before planning, and
+        # every alias and merge spelling resolves through to the sequence it was defined on.
+        # So this refuses a source shape only a mark-accounting change could produce.
         msg = (
             f"frontmatter derives_from of {context.source} is not written as a list;"
             " cannot reconcile"

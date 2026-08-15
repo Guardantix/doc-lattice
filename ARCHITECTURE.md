@@ -624,8 +624,9 @@ time and deliberately tolerates shapes that validation rejects, because a concur
 those two reads is the case it exists to survive. Nothing separated the two, so a shape the write
 path merely tolerates was indistinguishable from one the project accepts as input.
 **Decision:** The supported subset is declared here, in five layers, because the layers carry
-different guarantees and flattening them into one list is what made the boundary unreadable. This
-record adds no code and asserts no preflight classifier.
+different guarantees and flattening them into one list is what made the boundary unreadable. The
+record declares the subset rather than implementing one: it adds no preflight classifier and no
+refusal that did not already exist.
 
 **Layer 1: semantic schema.** The validated shape a tracked document must load as is owned by
 `NodeMeta` and `RawEdge` in `model.py`, under `strict=True` and `extra="forbid"`. Public `seen` is
@@ -639,46 +640,49 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 
 | Position | Dimension | Strict tracked-document load accepts | Fresh reread additionally handles |
 |---|---|---|---|
-| Root | Carrier shape | A block or flow mapping, or an `!!omap` in either style | Nothing more; a root that is not written as a collection is refused |
-| Root | Key spelling | Exactly the `NodeMeta` keys, `id` required; a key may be spelled through an alias; members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
-| `derives_from` | Carrier shape | A block or flow sequence, written inline, reached through an alias, or supplied by a merge | Nothing more; a member that loads as a list but whose source is not a sequence is refused |
+| Root | Carrier shape | A block or flow mapping, or an `!!omap` in either style | Nothing more; a root that does not load as a mapping is refused, a plain sequence included |
+| Root | Key spelling | Exactly the `NodeMeta` keys, `id` required; a key may be spelled through an alias or written as an explicit `? key` / `: value` pair; members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
+| `derives_from` | Carrier shape | A block or flow sequence, written inline or supplied by a merge | Additionally one reached through an alias, which is not strictly reachable because the anchor needs a carrier key `NodeMeta` forbids |
 | Entry | Carrier shape | A block or flow mapping, or an `!!omap` in either style, written inline or as an alias to a node elsewhere | Nothing more |
 | Entry | Key spelling | `ref` and an optional `seen` and nothing else; either may be an explicit `? key` / `: value` pair; a key may be spelled through an alias; members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
 | Entry | Node properties | An anchor, a tag, or both opening the entry, including on the sequence line above and left of its first key | Nothing more |
-| Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, or a flow entry written with or without a trailing comma | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
+| Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, a flow entry written with or without a trailing comma, or a `ref` spanning lines as a block scalar in either style, a multi-line double-quoted scalar, or a multi-line plain scalar | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
 | Entry `ref` | Value | A string | Nothing more; a non-string `ref` is refused whenever planning is reached |
 | Entry `seen` | Carrier shape | A scalar or null, never a collection | Nothing more; a collection-valued `seen` at a targeted entry is refused |
 | Entry `seen` | Scalar and key spelling | Any scalar spelling whose constructed value is a string or null: plain, single or double quoted, a block scalar in either style with any chomping or explicit indentation indicator, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` written with or without its `:`; the key itself may be spelled through an alias | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included |
 | Entry `seen` | Node properties | An anchor, a tag, or both, in either order, on the value's own line or on lines of their own, with the author's comments between a property and the value | Nothing more |
 
-Three behaviors of the loaded shape are recorded with the matrix rather than inside a cell.
+Four behaviors of the loaded shape are recorded with the matrix rather than inside a cell.
 `!!omap` is handled wherever the loaded shape is a mapping, at the root and at an entry alike.
 A merge is deliberately not followed inside an ordered map, because the loader builds one from its
-items rather than through mapping construction and refuses a merge written there. Alias detachment
-may expand an alias site into a local mapping, or into a local one-pair item for an ordered map,
-rather than editing the shared node behind it.
+items rather than through mapping construction. Alias detachment may expand an alias site into a
+local mapping, or into a local one-pair item for an ordered map, rather than editing the shared
+node behind it. An anchor name may be defined more than once, which the loader warns about: a
+later definition rebinds the name, so each alias reads the nearest definition above it and a
+relocated value lands only on the alias sites still bound to the anchor it displaces.
 
 **Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
-exactly `---`, so trailing space on either fence is accepted. A leading UTF-8 byte-order mark may
-precede the opening fence; it is stripped for fence detection and reattached verbatim. A `%YAML`
-directive is supported, but only alongside a document-start line that does not strip to `---`,
-because `frontmatter_parser.py` closes the block at the first line that does. The directive's own
-document start therefore has to be spelled otherwise, and `--- !!map` is the form the suite pins.
-A file written entirely in CRLF, entirely in LF, or entirely in lone CR is read and rewritten in
-that ending.
+exactly `---`, so space on either side of either fence is accepted, leading indentation included.
+A leading run of UTF-8 byte-order marks may precede the opening fence; the whole run is stripped
+for fence detection and reattached verbatim. A `%YAML` directive is supported, but only alongside
+a document-start line that does not strip to `---`, because `frontmatter_parser.py` closes the
+block at the first line that does. The directive's own document start therefore has to be spelled
+otherwise, and `--- !!map` is the form the suite pins.
 
 **Layer 3: preservation envelope.** For a document inside layer 2, a rewrite puts back exactly as
-they were read: a leading byte-order mark, both `---` fences including their own trailing space,
-the newline after the closing fence or its absence at end of file, the body, key order, comments,
-indentation, collection style, and a declared `%YAML` version. A file written entirely in CRLF or
-in lone CR is rewritten in that same ending. Preservation of everything the rewriter does not
-touch follows from the edits being byte local, not from a whole-document guarantee.
+they were read: a leading run of byte-order marks, both `---` fences including the space around
+them, the newline after the closing fence or its absence at end of file, the body, key order,
+comments, indentation, collection style, and a declared `%YAML` version. A file written entirely
+in CRLF, entirely in LF, or entirely in lone CR is read and rewritten in that same ending.
+Preservation of everything the rewriter does not touch follows from the edits being byte local,
+not from a whole-document guarantee.
 
 **Layer 4: allowed mutation footprint.** Beyond the `seen` scalar itself, a rewrite may replace a
 `seen` or insert one that is missing; write the `:` an explicit `? seen` key lacks; replace a
-tagged `seen` together with its tag; drop the anchor and tag tokens of a replaced `seen`, along
-with the run of space they leave and the line break opening a line they alone occupied; move a
+tagged `seen` together with its tag; drop the anchor and tag tokens of a replaced `seen` along
+with the run of space they leave, and, when the value being replaced is the empty scalar, the line
+break opening a line those tokens alone occupied; move a
 block scalar's header comment onto the line the new hash is written on; relocate an anchor and its
 old value to an alias site another key still reads through; land an edit at an alias site rather
 than in a shared node, which may expand that site into a local mapping or a local one-pair item;
@@ -701,18 +705,22 @@ each guarantee is scoped to how far the reread got, because there is no prefligh
 shape the run never reaches is a no-op rather than an error:
 
 - On any reread: an opening fence with no closing fence, frontmatter that does not parse, and
-  frontmatter that does not load as a mapping.
+  frontmatter that loads as anything other than a mapping or a null. A null root, which an empty
+  document and an explicit `null` or `~` both produce, is a no-op rather than a refusal.
+- Once the root has loaded as a mapping, and before any planning: a `derives_from` that does not
+  load as a list.
 - Whenever planning is reached, meaning the document carries a `derives_from` list, and
-  independent of whether any planned ref still matches: a `derives_from` whose source is not a
-  sequence, an entry that does not load as a mapping, and an entry whose `ref` is not a string.
-- When the targeted entry matches an applicable update: a collection-valued `seen`.
+  independent of whether any planned ref still matches: an entry that does not load as a mapping,
+  and an entry whose `ref` is not a string.
+- When the targeted entry matches an applicable update: a collection-valued `seen`. A
+  collection-valued `seen` at an entry no update targets is not reached and returns unchanged.
 - When at least one update is applied: self-referential frontmatter, which compares without bound
   and so cannot be verified; a rewrite that fails to reload; and a rewrite that does not reproduce
   the whole planned frontmatter, edges and every other key alike.
 
 Returning the text unchanged is not a refusal and is the correct outcome for a file with no
-opening fence, an empty document, an absent or null `derives_from`, no planned ref still matching,
-or a ref already holding its planned hash.
+opening fence, an empty document, a null root, an absent or null `derives_from`, no planned ref
+still matching, or a ref already holding its planned hash.
 
 The second is non-contractual defensive recovery that may succeed. The fresh reread tolerates
 shapes strict validation rejects and may rewrite them rather than refusing: extra keys at the root
@@ -727,14 +735,15 @@ The third is non-contractual input protected only by the equivalence gate. Synta
 that the rewriter never touches is unsupported, and is neither classified nor refused up front.
 The gate compares loaded values, so it catches a rewrite that fails to parse or that reloads as an
 unequal document. It is not type identity, and it promises no universal syntax or type
-preservation for out-of-subset input. AD-26 already describes the gate in those terms.
+preservation for out-of-subset input.
 
 **`!!omap` is a commitment, not an accident.** It carries dedicated lookup and planning behavior
 for roots and for entries, with block, flow, and alias coverage in the reconcile source suite.
 Dropping it later would be a compatibility decision of its own rather than a correction to this
-record. The refusal of a malformed ordered map, meaning an item that is not a one-pair mapping, is
-current bounded-loader behavior rather than a guaranteed refusal, because no test pins it today.
-Pinning it belongs with the round-trip fuzz gate in GTX-100.
+record. Two ordered-map refusals are current bounded-loader behavior rather than guaranteed
+refusals, because no test pins either today: a malformed ordered map, meaning an item that is not
+a one-pair mapping, and a merge written inside one. Pinning them belongs with a future round-trip
+fuzz gate.
 
 **Consequences:** "Is the rewriter complete" is now a finite question about this subset. A
 spelling outside layer 2 is not a completeness defect, and admitting one is a deliberate widening

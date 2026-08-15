@@ -449,6 +449,32 @@ def test_lattice_loading_commands_exit_2_on_unclosed_frontmatter(
 
 @pytest.mark.parametrize(
     "args",
+    [["check"], ["lint"], ["impact", "d"], ["reconcile", "d"], ["graph"], ["linear"]],
+    ids=["check", "lint", "impact", "reconcile", "graph", "linear"],
+)
+def test_lattice_loading_commands_exit_2_on_a_duplicate_ordered_map_key(
+    tmp_path: Path, args: list[str]
+):
+    # The safe constructor rejects a repeated `!!omap` key with a bare `assert`, which is
+    # neither a YAMLError nor one of the builtins a tagged scalar raises. Before it joined
+    # the load-error family it escaped every handler and printed as an AssertionError
+    # traceback rather than a tool error naming the file.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    broken = docs / "broken.md"
+    broken.write_text("---\nid: d\nextra: !!omap\n- a: 1\n- a: 2\n---\nbody\n", encoding="utf-8")
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1", "COLUMNS": "240"}
+
+    result = _run(args, tmp_path, env)
+
+    assert result.exit_code == 2
+    assert "UNREADABLE_DOC" in result.stderr
+    assert str(broken) in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
     [
         ["lint"],
         ["impact", "art-direction#accent"],

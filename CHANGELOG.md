@@ -11,10 +11,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The frontmatter syntax `reconcile` supports is now declared rather than implied. AD-30 in
   ARCHITECTURE.md records it as five layers: the validated schema, the spellings accepted per
   writable position and per load phase, what a rewrite preserves, what it may mutate beyond the
-  `seen` scalar, and when a refusal is guaranteed. RECONCILE.md links to it for the normative
-  matrix and keeps its operational guidance. No behavior changes and no code was added: this
-  documents what the rewriter already does, so that a spelling outside the subset is a known
-  boundary rather than an open question.
+  `seen` scalar, and when a refusal is guaranteed. RECONCILE.md now links to it for those rules
+  and keeps only what they mean for a run, so no contract is stated in both. The subset itself is
+  unchanged: the record documents what the rewriter already does, so that a spelling outside it is
+  a known boundary rather than an open question. Writing the guarantees down did surface one place
+  the code did not honor them, fixed below.
 - Regenerating and verifying the generated slug data is now reproducible offline and no longer
   breaks when Node's ICU advances. `scripts/generate_github_slugger_data.py --check` previously
   hard-failed on any Node reporting a JavaScript Unicode version other than 17.0, recorded the
@@ -78,6 +79,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- No command crashes any more on frontmatter whose `!!omap` repeats a key. A block such as
+  `extra: !!omap` followed by two items spelling the same key escaped every YAML boundary as an
+  uncaught `AssertionError` and printed a traceback, from `check`, `lint`, `impact`, `graph`,
+  `linear`, and `reconcile` alike; it is now the ordinary `UNREADABLE_DOC` tool error naming the
+  file, and exits 2. This is the same gap as the `!!bool` `KeyError` above and was missed the same
+  way: ruamel's safe `construct_yaml_omap` enforces key uniqueness with a bare `assert` rather
+  than raising a `YAMLError`, so `AssertionError` was the one member the shared load-error family
+  did not name. `github_ci`'s workflow parser already caught it and is unaffected. No shape that
+  loaded before loads differently, and no document that was already refused changes its message.
 - `linear stale-shipped` no longer hard-wraps its human output at the terminal width, and no
   longer leaks terminal escapes when styling is off. Each finding and the all-clear line are now
   one record on one line at any width, so a ticket ref, node id, or drifted ref stays intact for

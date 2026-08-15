@@ -32,9 +32,12 @@ from ruamel.yaml.error import YAMLError
 # Everything a safe load of user-authored YAML can raise. Beyond the YAMLError family the
 # scanner and parser raise, a constructor building a tagged scalar its type cannot accept
 # raises the builtin that construction failed with, so `!!int oops` reaches a caller as a bare
-# ValueError. Every module loading a user's YAML catches this family and reports a
-# ProjectError, so the same typo is a clean error wherever the user writes it.
-YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError)
+# ValueError. AssertionError is here for the same reason and not as a broad catch: ruamel's
+# safe `construct_yaml_omap` enforces `!!omap` key uniqueness with a bare `assert`, so a
+# duplicate key inside an ordered map arrives as an AssertionError rather than a YAMLError.
+# Every module loading a user's YAML catches this family and reports a ProjectError, so the
+# same typo is a clean error wherever the user writes it.
+YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError, AssertionError)
 
 
 class SafeYamlLoader:
