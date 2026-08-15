@@ -305,7 +305,7 @@ maintenance, never at runtime.
 runtime updates, and unsupported Markdown constructs stay deliberately unaddressable. Parser,
 slugger, or Unicode target changes require an explicit compatibility review, regeneration,
 parity verification, and benchmark validation. The shipped Python package has no Node
-dependency.
+dependency. AD-28 records how the maintenance path stays runnable.
 
 ### AD-14: Documentation ownership is one-way
 
@@ -523,3 +523,41 @@ bound, so the policy covers dependencies this record does not name. The standing
 maintenance: a new upstream major is unavailable to adopters until this project reviews it and
 ships, and the `markdown-it-py` pin can block a `rich` upgrade outright until both are reviewed
 together.
+
+### AD-28: Slug regeneration pins the exact Node version and vendors its upstream input
+
+**Date:** 2026-08-15
+**Status:** Accepted
+**Context:** AD-13 makes Node a maintenance-only dependency for regenerating and verifying
+`_github_slugger_data.py`, but left the maintenance path itself unreproducible in two ways. The
+generator accepted any Node whose ICU reported JavaScript Unicode 17.0, so the exact generating
+runtime was recorded nowhere and could not be re-established later; ICU advancing to Unicode 18
+would have turned that check into a hard failure with no pinned runtime to fall back to. Upstream
+input arrived through `npm install github-slugger@2.0.0` at generation time, so `--check` needed
+the network and the npm registry to still serve that version.
+**Decision:** The exact generating runtime is pinned in `.nvmrc` as `v24.13.1`, all three
+components. The generator validates that exact version alongside the existing Unicode check and
+renders it into the artifact as `GENERATED_NODE_VERSION`. Upstream input is the unmodified npm
+registry tarball vendored at `vendor/github-slugger-2.0.0.tgz`, verified against a pinned SHA-512
+before extraction and resolved by default; `--package-root` remains an explicit override and the
+implicit `npm install` fallback is gone.
+- The pin is the full patch version, not the major. nvm resolves a partial `.nvmrc` to the latest
+  matching patch, and Node 24.13.1 itself carried an ICU update, so anything looser lets the
+  Unicode table move while the pin appears unchanged. Since the artifact now records the version,
+  a drifting runtime would also change the artifact bytes.
+- The tarball digest, not the regex digest, is the upstream-input identity. The Node evaluator
+  imports `index.js`, which imports `regex.js` and implements the lowercase and replace operation,
+  so hashing the regex alone never covered everything executed. `UPSTREAM_REGEX_SHA256` is kept as
+  the narrower artifact-level record of the behavior behind the stripping pattern.
+- The vendored tarball is a repository-only maintenance asset. The sdist include list and the
+  wheel package list in `pyproject.toml` both enumerate their contents, and neither names
+  `vendor/`, so AD-13's no-Node-runtime boundary holds by construction rather than by convention.
+  Upstream's ISC license travels inside the tarball and is copied out beside it.
+
+**Consequences:** Regeneration and `--check` run offline, on a machine that is not the one the
+artifact was first generated on, for as long as the vendored bytes and a Node 24.13.1 build remain
+obtainable. Node's ICU advancing no longer breaks the maintenance path, because the pinned runtime
+is what the generator asks for. The costs are a checked-in binary and a second pin to move: raising
+either the Node version or the upstream tarball is now an explicit edit to `.nvmrc`,
+`UPSTREAM_NODE_VERSION`, and `VENDORED_TARBALL_SHA512`, followed by the regeneration, parity
+verification, and benchmark validation AD-13 already prescribes.
