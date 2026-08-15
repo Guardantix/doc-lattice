@@ -470,12 +470,20 @@ implicit timestamps as strings nor the version and anchor state its `%YAML` dire
 duplicate-anchor rejections inspect, so all three of those guards degrade together wherever the
 accelerator is installed. The `yaml-compatibility` CI leg runs the suite at the declared floor and
 at the resolved ceiling of the range with that accelerator present, so both the range and the
-choice of implementation are verified rather than asserted. Where an event mark and a
-token mark disagree, the token is authoritative: a node's own mark starts at an anchor or a tag,
-while the scanner's block-mapping start, key indicator, and value indicator give the indentation,
-the pair boundary, and the `:` an edit has to align to. A node's properties are part of that
-surface too. A parsed node reports an explicit tag as its resolved URI and reports none for a
-scalar the loader resolves implicitly, which is how this module recognizes a merge key and a
+choice of implementation are verified rather than asserted. The installed parser is one axis of
+that degradation and the interpreter is the other. ruamel enforces `!!omap` key uniqueness and the
+`%YAML` version range with bare `assert` statements rather than raised errors, so `python -O` or
+`PYTHONOPTIMIZE` compiles both checks out: a repeated `!!omap` key then loads last-wins instead of
+being refused, and an unsupported `%YAML 1.3` reaches `github_ci/workflow_parser.py` as a `KeyError`
+that its `AssertionError` handler does not catch. Enabled assertions are therefore a condition of
+every guard this project layers on ruamel, this engine is supported only in that default mode, and
+`yaml_boundary.py` reimplements neither check to escape the dependence, since doing so would put
+constructor internals into the one boundary that consumes loaded values alone. Where an event mark
+and a token mark disagree, the token is authoritative: a node's own mark starts at an anchor or a
+tag, while the scanner's block-mapping start, key indicator, and value indicator give the
+indentation, the pair boundary, and the `:` an edit has to align to. A node's properties are part
+of that surface too. A parsed node reports an explicit tag as its resolved URI and reports none
+for a scalar the loader resolves implicitly, which is how this module recognizes a merge key and a
 tagged scalar the way the constructor does rather than by re-resolving either itself. A node
 written tag first opens at its anchor rather than at its tag, so the tag token, paired with the
 scalar token that follows it, is what bounds an edit that has to overwrite or reproduce one. Each
