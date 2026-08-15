@@ -645,7 +645,7 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 | Entry | Carrier shape | A block or flow mapping, or an `!!omap` in either style, written inline or as an alias to a node elsewhere | Nothing more |
 | Entry | Key spelling | `ref` and an optional `seen` and nothing else; either may be an explicit `? key` / `: value` pair; a key may be spelled through an alias; members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
 | Entry | Node properties | An anchor, a tag, or both opening the entry, including on the sequence line above and left of its first key | Nothing more |
-| Entry | Member layout | Any layout an appended `seen` has to land after: a trailing block scalar, a multi-line flow collection, an implicit or explicit null, a trailing comment, the next indented item of the enclosing sequence, or a flow entry written with or without a trailing comma | Nothing more |
+| Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, or a flow entry written with or without a trailing comma | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
 | Entry `ref` | Value | A string | Nothing more; a non-string `ref` is refused whenever planning is reached |
 | Entry `seen` | Carrier shape | A scalar or null, never a collection | Nothing more; a collection-valued `seen` at a targeted entry is refused |
 | Entry `seen` | Scalar and key spelling | Any scalar spelling whose constructed value is a string or null: plain, single or double quoted, a block scalar in either style with any chomping or explicit indentation indicator, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` written with or without its `:`; the key itself may be spelled through an alias | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included |
@@ -716,9 +716,12 @@ or a ref already holding its planned hash.
 
 The second is non-contractual defensive recovery that may succeed. The fresh reread tolerates
 shapes strict validation rejects and may rewrite them rather than refusing: extra keys at the root
-or in an entry survive untouched, and a non-string or explicitly tagged `seen` arriving from a
-concurrent edit is replaced or relocated under the tag lifecycle above. That is recovery rather
-than refusal, and it is not a supported input either.
+or in an entry survive untouched, and a `seen` whose constructed value is neither a string nor
+null, arriving from a concurrent edit, is replaced or relocated under the tag lifecycle above.
+That is recovery rather than refusal, and it is not a supported input either. An explicit tag is
+not what puts a `seen` in this behavior, since a tagged scalar constructing to a string or null,
+such as `!!str 12` or `!!null ~`, satisfies `RawEdge` and sits in layer 2's strict column; what
+puts it here is the constructed type, whether it was reached through a tag or not.
 
 The third is non-contractual input protected only by the equivalence gate. Syntax outside layer 2
 that the rewriter never touches is unsupported, and is neither classified nor refused up front.
