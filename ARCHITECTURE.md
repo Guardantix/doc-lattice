@@ -607,3 +607,39 @@ load emits are now cache-visible state: any future one has to be derivable from 
 rendered at the shared site, or the warm path will not reproduce it. `title` and `layer` stay in the warning tier deliberately: deriving the fatal set
 from `NodeMeta`'s fields instead of declaring it would turn ordinary descriptive frontmatter into
 an exit 2.
+
+### AD-30: Only gate-verified bytes may reach a reconcile destination
+
+**Date:** 2026-08-15
+**Status:** Accepted
+**Context:** AD-5 makes the commit transaction durable but not self-checking: it stages
+`Rewrite.after` and publishes those exact bytes without ever reparsing them, so
+`reconcile.py::_verify_reconciled_meta` is the last point at which a mis-spliced rewrite can be
+refused instead of written durably. The chain that reaches the gate held only by convention.
+`Rewrite` is an ordinary frozen dataclass, and the staging and publication helpers are ordinary
+functions, so a future producer or sink could route around the gate and the suite would stay
+green. Reachability alone is too weak a property to assert: a producer can call the gate and
+then build its output from a different buffer, the gate can verify one value while the changed
+return is assembled from another, and a new publication route can bypass the `Rewrite` and
+after-image-infix anchors entirely.
+**Decision:** The invariant is that every byte published over a reconcile destination on the
+forward path originates in the value `_verify_reconciled_meta` verified. It is enforced
+mechanically by an AST convention test in `tests/test_conventions.py`, keyed to function, callee,
+and value provenance rather than to line numbers, which pins: the sole production `Rewrite(...)`
+site; the `plan_rewrites` to `apply_reconcile` to `_verify_reconciled_meta` chain; that the
+changed-output text derives from the exact argument the gate verified, through frontmatter
+envelope reassembly only; that `Rewrite.after` derives from what `apply_reconcile` returned,
+through line-ending restoration and UTF-8 encoding only; that every possibly changed return
+follows the gate; the single after-image staging site and the bytes it stages; and the single
+forward publication sink, with the publication helper reachable from no module but
+`reconcile_transaction.py`. Positive controls prove the detector rejects each bypass rather than
+passing vacuously. The invariant covers transaction after images only. Before images, journal
+bytes, recovery artifacts, and the before-image rollback sink are deliberately published without
+passing through the gate, and a negative control pins that exemption so the guard does not fail
+on correct code.
+**Consequences:** A genuinely new producer, staging site, or publication route fails closed and
+forces a conscious audit, instead of silently widening the set of bytes that can reach a
+document. The guard is a tripwire on the current AST shape, not a general dataflow analysis:
+restructuring these functions is expected to fail it, and the resolution is to re-derive the
+invariant, never to loosen the matcher until it passes. What the gate compares stays a behavior
+assertion in `tests/test_reconcile.py`; this decision governs only which bytes reach it.
