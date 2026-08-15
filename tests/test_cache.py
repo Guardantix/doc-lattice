@@ -71,6 +71,7 @@ def test_version_1_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, mon
                 file_sha256=hashlib.sha256(doc.read_bytes()).hexdigest(),
                 stats={root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)},
                 node=None,
+                disposition="untracked",
             )
         },
     )

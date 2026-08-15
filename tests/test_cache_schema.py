@@ -4,8 +4,10 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from doc_lattice import __version__
 from doc_lattice.cache.schema import (
@@ -20,7 +22,7 @@ from doc_lattice.cache.schema import (
 )
 from doc_lattice.constants import CACHE_VERSION
 from doc_lattice.loader import derive_file_sections
-from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
+from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
 
 ROOT = "/abs/current-root"
 
@@ -44,11 +46,19 @@ def _sample_cache_file() -> CacheFile:
                     total_lines=1,
                     sections=[SectionRecordModel(anchor="a-top", start=1, end=1)],
                 ),
+                disposition="tracked",
             ),
             "docs/plain.md": Entry(
                 file_sha256="b" * 64,
                 stats={"/abs/root": StatRecord(size=3, mtime_ns=456)},
                 node=None,
+                disposition="untracked",
+            ),
+            "docs/id-less.md": Entry(
+                file_sha256="c" * 64,
+                stats={"/abs/root": StatRecord(size=5, mtime_ns=789)},
+                node=None,
+                disposition="id-less",
             ),
         },
     )
@@ -81,7 +91,7 @@ def test_make_entry_hashes_bytes_resets_stats_and_preserves_node_payload() -> No
 
     entry = make_entry(
         data,
-        meta,
+        ParsedMeta(meta=meta, disposition="tracked"),
         "# A\nbody\n",
         sections,
         _fake_stat(),  # ty: ignore[invalid-argument-type]
@@ -90,6 +100,7 @@ def test_make_entry_hashes_bytes_resets_stats_and_preserves_node_payload() -> No
 
     assert entry.file_sha256 == sha256(data).hexdigest()
     assert entry.stats == {ROOT: StatRecord(size=10, mtime_ns=123)}
+    assert entry.disposition == "tracked"
     assert entry.node == NodePayload(
         meta=meta,
         body="# A\nbody\n",
@@ -98,16 +109,36 @@ def test_make_entry_hashes_bytes_resets_stats_and_preserves_node_payload() -> No
     )
 
 
-def test_make_entry_non_node_stores_none() -> None:
+@pytest.mark.parametrize("disposition", ["untracked", "id-less"])
+def test_make_entry_non_node_stores_none_but_keeps_why(disposition: str) -> None:
     entry = make_entry(
         b"plain",
-        None,
+        ParsedMeta(meta=None, disposition=disposition),  # ty: ignore[invalid-argument-type]
         "plain",
         None,
         _fake_stat(),  # ty: ignore[invalid-argument-type]
         ROOT,
     )
     assert entry.node is None
+    assert entry.disposition == disposition
+
+
+def test_entry_requires_a_disposition_rather_than_defaulting_one() -> None:
+    # A default would let an entry written before this field existed decode as an ordinary
+    # skip, which is the silent drop the field exists to end. CACHE_VERSION is bumped with it
+    # so those entries are discarded instead of reinterpreted.
+    with pytest.raises(ValidationError) as exc:
+        Entry.model_validate(
+            {
+                "file_sha256": "b" * 64,
+                "stats": {ROOT: {"size": 3, "mtime_ns": 456}},
+                "node": None,
+            }
+        )
+
+    assert exc.value.error_count() == 1
+    assert exc.value.errors()[0]["loc"] == ("disposition",)
+    assert exc.value.errors()[0]["type"] == "missing"
 
 
 def test_reconstruct_doc_rebuilds_parsed_doc_at_supplied_path() -> None:
@@ -122,6 +153,7 @@ def test_reconstruct_doc_rebuilds_parsed_doc_at_supplied_path() -> None:
             total_lines=2,
             sections=[SectionRecordModel(anchor="a-top", start=1, end=2)],
         ),
+        disposition="tracked",
     )
 
     assert reconstruct_doc(entry, path) == ParsedDoc(
@@ -140,6 +172,7 @@ def test_reconstruct_doc_non_node_returns_none() -> None:
         file_sha256="b" * 64,
         stats={ROOT: StatRecord(size=3, mtime_ns=456)},
         node=None,
+        disposition="untracked",
     )
     assert reconstruct_doc(entry, Path("docs/plain.md")) is None
 
@@ -168,7 +201,7 @@ def test_file_sections_survive_cache_codec_round_trip(body: str) -> None:
     original = derive_file_sections(body)
     entry = make_entry(
         body.encode(),
-        NodeMeta.model_validate({"id": "x"}),
+        ParsedMeta(meta=NodeMeta.model_validate({"id": "x"}), disposition="tracked"),
         body,
         original,
         _fake_stat(size=len(body.encode())),  # ty: ignore[invalid-argument-type]

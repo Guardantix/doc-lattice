@@ -15,6 +15,7 @@ from doc_lattice.constants import (
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
+    VALID_FRONTMATTER_DISPOSITIONS,
     VALID_LAYERS,
     VALID_LINEAR_STATE_TYPES,
     VALID_LOCATION_KINDS,
@@ -24,6 +25,7 @@ from doc_lattice.constants import (
     Authority,
     BlockedReason,
     EdgeState,
+    FrontmatterDisposition,
     Layer,
     LinearStateType,
     LocationKind,
@@ -58,6 +60,11 @@ def test_edge_states_keep_literal_declaration_order():
 def test_location_kinds_match_literal():
     assert frozenset(get_args(LocationKind)) == VALID_LOCATION_KINDS
     assert {"file", "section"} == set(VALID_LOCATION_KINDS)
+
+
+def test_frontmatter_dispositions_match_literal():
+    assert frozenset(get_args(FrontmatterDisposition)) == VALID_FRONTMATTER_DISPOSITIONS
+    assert {"tracked", "untracked", "id-less"} == set(VALID_FRONTMATTER_DISPOSITIONS)
 
 
 def test_report_formats_match_literal():

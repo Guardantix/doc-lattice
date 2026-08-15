@@ -1,4 +1,9 @@
-"""Boundary module: split and validate untyped YAML frontmatter into typed NodeMeta."""
+"""Boundary module: split and validate untyped YAML frontmatter into typed NodeMeta.
+
+Parsing classifies a file and raises on a malformed one, but never reports a benign skip. The
+disposition it returns is what the caller reports from, so the cache-free, cold-cache, and
+warm-cache paths can all warn from a single site.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,13 +11,17 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from .constants import LATTICE_INTENT_KEYS
 from .error_types import ConfigError, UnreadableDocError
-from .model import NodeMeta
+from .model import NodeMeta, ParsedMeta
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 _LOADER = SafeYamlLoader()
+# The two node-free outcomes are immutable and carry no per-file state, so they are shared.
+_UNTRACKED = ParsedMeta(meta=None, disposition="untracked")
+_ID_LESS = ParsedMeta(meta=None, disposition="id-less")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,31 +105,68 @@ def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
     return (None, text) if parts is None else (parts.raw_meta, parts.body)
 
 
-def parse_meta(raw_meta: str | None, source: Path) -> NodeMeta | None:
-    """Validate a raw frontmatter block into NodeMeta, or None if not a lattice node.
+def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
+    """Classify a raw frontmatter block, validating it into NodeMeta when it names a node.
+
+    A block with no ``id`` is graded by what else it declares. Carrying any of
+    ``LATTICE_INTENT_KEYS`` means the file meant to be a node and lost its ``id`` to a typo or
+    an edit, which would silently drop it and every edge it declares, so that is a hard error.
+    Anything else is metadata this engine does not own, and is skipped as ``"id-less"`` for the
+    caller to warn about. A file that never opened a fence is ``"untracked"`` and says nothing.
 
     Args:
-        raw_meta: The YAML frontmatter text, or None.
+        raw_meta: The YAML frontmatter text, or None when the file opened no fence.
         source: The file the frontmatter came from, for error messages.
 
     Returns:
-        A validated NodeMeta, or None when there is no frontmatter or no ``id`` key.
+        The validated node and its disposition, or a null node and the reason it was skipped.
 
     Raises:
         UnreadableDocError: If the YAML cannot be parsed.
-        ConfigError: If the frontmatter has an unknown or malformed key.
+        ConfigError: If the frontmatter has an unknown or malformed key, or declares lattice
+            intent with no ``id``.
     """
     if raw_meta is None:
-        return None
+        return _UNTRACKED
     try:
         data: Any = _LOADER.load(raw_meta)
     except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse frontmatter in {source}: {exc}"
         raise UnreadableDocError(msg) from exc
-    if not isinstance(data, dict) or "id" not in data:
-        return None
+    # A fenced block holding no mapping (empty, a scalar, a list) declares no keys at all, so it
+    # is the same untracked prose as a file with no fence. Warning on it would fire on any
+    # document that merely opens with a thematic break.
+    if not isinstance(data, dict):
+        return _UNTRACKED
+    if "id" not in data:
+        return _id_less(data, source)
     try:
-        return NodeMeta.model_validate(data)
+        return ParsedMeta(meta=NodeMeta.model_validate(data), disposition="tracked")
     except ValidationError as exc:
         msg = f"invalid lattice frontmatter in {source}: {exc}"
         raise ConfigError(msg) from exc
+
+
+def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
+    """Grade an id-less frontmatter mapping into the error tier or the warning tier.
+
+    Args:
+        data: The loaded frontmatter mapping, already known to have no ``id`` key.
+        source: The file the frontmatter came from, for error messages.
+
+    Returns:
+        The id-less disposition with a null node, when the block declares no lattice intent.
+
+    Raises:
+        ConfigError: If the block declares any lattice intent key.
+    """
+    declared = sorted(LATTICE_INTENT_KEYS.intersection(data))
+    if not declared:
+        return _ID_LESS
+    keys = ", ".join(repr(key) for key in declared)
+    msg = (
+        f"frontmatter in {source} declares {keys} but has no 'id' key, so the file and every "
+        "edge it declares would be dropped from the lattice; add an 'id' (check it for a typo) "
+        "or remove the lattice keys"
+    )
+    raise ConfigError(msg)

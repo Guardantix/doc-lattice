@@ -9,7 +9,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from ..model import FileSections, NodeMeta, ParsedDoc, SectionRecord
+from ..constants import FrontmatterDisposition
+from ..model import FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
 
 
 class StatRecord(BaseModel):
@@ -43,13 +44,22 @@ class NodePayload(BaseModel):
 
 
 class Entry(BaseModel):
-    """One cached file: its content hash, per-root stat hints, and node payload (or null)."""
+    """One cached file: its content hash, per-root stat hints, node payload, and disposition.
+
+    ``disposition`` is required rather than defaulted. A default would let an entry written
+    before the field existed decode as an ordinary skip, which is exactly the silent drop this
+    field exists to end; ``CACHE_VERSION`` is bumped alongside it so those entries are discarded
+    instead of reinterpreted. It records why a file has no ``node`` so a warm run can replay the
+    diagnostic a cold run emitted, and it stores the kind rather than rendered warning text
+    because a cache slot is shared across checkouts and the message names the current path.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     file_sha256: str
     stats: dict[str, StatRecord]
     node: NodePayload | None
+    disposition: FrontmatterDisposition
 
 
 class CacheFile(BaseModel):
@@ -97,7 +107,7 @@ def reconstruct_doc(entry: Entry, path: Path) -> ParsedDoc | None:
 
 def make_entry(  # noqa: PLR0913
     data: bytes,
-    meta: NodeMeta | None,
+    parsed: ParsedMeta,
     body: str,
     sections: FileSections | None,
     st: os.stat_result,
@@ -107,18 +117,19 @@ def make_entry(  # noqa: PLR0913
 
     Args:
         data: The raw file bytes hashed for ``file_sha256``.
-        meta: The validated NodeMeta, or None for a discovered non-node file.
-        body: The verbatim body (unused when ``meta`` is None).
-        sections: The pre-derived sections (present when ``meta`` is not None).
+        parsed: The fresh parse outcome, whose disposition is recorded whether or not it
+            produced a node.
+        body: The verbatim body (unused when ``parsed`` carries no node).
+        sections: The pre-derived sections (present when ``parsed`` carries a node).
         st: The stat captured alongside ``data``, stored as the fresh stat hint.
         current_root: The current project's resolved root used as the sole stat key.
 
     Returns:
         A replacement cache entry whose stats are reset to the current root.
     """
-    has_node_payload = meta is not None and sections is not None
+    meta = parsed.meta
     node: NodePayload | None = None
-    if has_node_payload:
+    if meta is not None and sections is not None:
         node = NodePayload(
             meta=meta,
             body=body,
@@ -132,4 +143,5 @@ def make_entry(  # noqa: PLR0913
         file_sha256=hashlib.sha256(data).hexdigest(),
         stats={current_root: stat_record(st)},
         node=node,
+        disposition=parsed.disposition,
     )

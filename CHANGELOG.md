@@ -25,7 +25,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ref, or Unicode behavior changes. AD-28 in ARCHITECTURE.md records the reasoning. This is a
   maintenance-path change only: the shipped package still has no Node dependency, and `vendor/`
   is excluded from both the sdist and the wheel.
-
+- **BREAKING:** frontmatter with no `id` is no longer silently dropped. A file whose fenced
+  frontmatter declares any of `derives_from`, `authority`, or `tickets` but no `id` is now a tool
+  error naming the file and the keys it declared, and exits 2. Any other id-less fenced block is
+  still skipped, but now warns on stderr naming the file; the exit status is unchanged. A file with
+  no opening `---` fence stays silent, as does a fence holding no YAML mapping. Previously all of
+  these were the same silent omission, so a one-character typo in the `id` key removed a document
+  **and every edge it declared** from the gate while `check` stayed green and said nothing.
+  Migration for the new exit 2: run any lattice command once; the message names the file and the
+  key. Restore the `id` (checking it for a typo) or, if the file is genuinely untracked, delete the
+  lattice keys. Migration for the new stderr warning: it is expected on a docs root that carries
+  frontmatter belonging to another tool, and it does not fail a gate. Silence it with
+  `PYTHONWARNINGS=ignore`, or drop the file from discovery with `ignore_globs`. Those three keys are
+  an exact set, not "every frontmatter field except `id`": a block carrying only `title` or `layer`
+  warns rather than failing. AD-29 in ARCHITECTURE.md records the decision, including why the
+  disposition is cached rather than recomputed.
+- The load cache records why a file is not a lattice node, not just that it is not one, and
+  `CACHE_VERSION` rises to 4 so entries written before the field are discarded rather than read as
+  ordinary skips. Without this, the warning above would appear on a cache-free or cold run and
+  vanish on a warm one, since a warm run returns before parsing; AD-12 requires the cached and
+  uncached tiers to report the same thing. What is stored is the reason, never the rendered
+  message, because a cache slot is shared across worktrees and the message names the path the
+  current run discovered. No action is needed: the version bump discards the old file and the next
+  run rebuilds it.
 - **BREAKING:** human-format `check` output now lists problem edges only. The per-edge `OK`
   rows are gone from the default listing, so a problem-free lattice prints its verdict line
   alone. This matches `lint`, which has always printed violations only, and keeps the default

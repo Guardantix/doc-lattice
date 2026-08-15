@@ -561,3 +561,33 @@ is what the generator asks for. The costs are a checked-in binary and a second p
 either the Node version or the upstream tarball is now an explicit edit to `.nvmrc`,
 `UPSTREAM_NODE_VERSION`, and `VENDORED_TARBALL_SHA512`, followed by the regeneration, parity
 verification, and benchmark validation AD-13 already prescribes.
+
+### AD-29: A skipped file's reason is cached data, and is reported from one site
+
+**Date:** 2026-08-15
+**Status:** Accepted
+**Context:** Parsing answered "is this a node?" with a node or nothing, so a file whose `id` key
+was mistyped left the lattice with its declared edges and no diagnostic, indistinguishable from
+prose the engine never tracked. Reporting the skip is only half the fix. AD-12 requires the
+default tier to match uncached results, but the cached path returns before parsing and
+`Entry.node = null` recorded both kinds of skip identically, so a diagnostic raised as a parse
+side effect would appear on a cold run and vanish on the warm run that replays it.
+**Decision:** Parsing classifies and never reports. It returns a disposition alongside the
+optional node, distinguishing a tracked node, untracked content, and a fenced block with no `id`,
+and raises instead when such a block declares any key from the exact intent set
+(`derives_from`, `authority`, `tickets`) that would take real edges down with it. The cache
+stores that disposition as a required `Entry` field, so a hit replays what the miss concluded;
+`CACHE_VERSION` rises with it so entries predating the field are discarded rather than defaulted
+into the silent skip. What is stored is the kind, never the rendered message: a cache slot is
+shared across worktrees, so the text is rendered per run from the path that run discovered.
+Every load path (cache-free, cache-miss, and cache-hit) reports through one function in
+`orchestrate.py` at the default `stacklevel`, because Python renders a warning with its raising
+location and filters repeats by it, so a second call site would change both the line a user sees
+and when it is shown.
+**Consequences:** A typo'd `id` is a tool error naming the file, and unrecognized frontmatter is a
+named skip rather than a silent one, at the cost of a new warning for corpora carrying non-lattice
+frontmatter under a docs root. Diagnostics a load emits are now cache-visible state: any future
+one has to be derivable from an `Entry` and rendered at the shared site, or the warm path will not
+reproduce it. `title` and `layer` stay in the warning tier deliberately: deriving the fatal set
+from `NodeMeta`'s fields instead of declaring it would turn ordinary descriptive frontmatter into
+an exit 2.

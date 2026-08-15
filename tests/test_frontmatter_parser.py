@@ -7,12 +7,14 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 import doc_lattice.frontmatter_parser as frontmatter_parser_module
+from doc_lattice.constants import LATTICE_INTENT_KEYS
 from doc_lattice.error_types import ConfigError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
     parse_meta,
     split_frontmatter,
     split_frontmatter_parts,
 )
+from doc_lattice.model import NodeMeta
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
@@ -108,9 +110,9 @@ def test_split_frontmatter_unclosed_fence_raises_source_naming_error():
 def test_split_frontmatter_detects_crlf_fences():
     raw, _body = split_frontmatter("---\r\nid: x\r\n---\r\nbody\r\n", Path("a.md"))
     assert raw is not None
-    meta = parse_meta(raw, Path("a.md"))
-    assert meta is not None
-    assert meta.id == "x"
+    parsed = parse_meta(raw, Path("a.md"))
+    assert parsed.meta is not None
+    assert parsed.meta.id == "x"
 
 
 @given(st.text())
@@ -123,9 +125,10 @@ def test_split_frontmatter_identity_when_no_opening_fence(text):
 
 
 def test_parse_meta_returns_node():
-    meta = parse_meta("id: pc\ntitle: PC\n", Path("a.md"))
-    assert meta is not None
-    assert meta.id == "pc"
+    parsed = parse_meta("id: pc\ntitle: PC\n", Path("a.md"))
+    assert parsed.disposition == "tracked"
+    assert parsed.meta is not None
+    assert parsed.meta.id == "pc"
 
 
 def test_parse_meta_reuses_safe_yaml_loader(monkeypatch):
@@ -140,9 +143,9 @@ def test_parse_meta_reuses_safe_yaml_loader(monkeypatch):
 
     monkeypatch.setattr(frontmatter_parser_module, "_LOADER", TrackingLoader())
 
-    metas = [parse_meta(raw, Path(f"{index}.md")) for index, raw in enumerate(raw_documents)]
+    parsed = [parse_meta(raw, Path(f"{index}.md")) for index, raw in enumerate(raw_documents)]
 
-    assert [meta.id for meta in metas if meta is not None] == ["first", "second"]
+    assert [p.meta.id for p in parsed if p.meta is not None] == ["first", "second"]
     assert calls == raw_documents
 
 
@@ -152,7 +155,7 @@ def test_parse_meta_maps_all_fields():
         "derives_from:\n  - ref: art-direction#accent\n    seen: abc\n  - ref: motion\n"
         "tickets: [PC-1, PC-2]\n"
     )
-    meta = parse_meta(raw, Path("pc-design.md"))
+    meta = parse_meta(raw, Path("pc-design.md")).meta
     assert meta is not None
     assert meta.id == "pc-design"
     assert meta.title == "PC Design"
@@ -164,15 +167,75 @@ def test_parse_meta_maps_all_fields():
     assert meta.tickets == ["PC-1", "PC-2"]
 
 
-def test_parse_meta_none_without_id():
-    assert parse_meta("title: no id here\n", Path("a.md")) is None
-    assert parse_meta(None, Path("a.md")) is None
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "title: no id here\n",
+        "name: some-skill\ndescription: non-lattice frontmatter\n",
+        "layer: design\n",  # `layer` describes a doc without wiring it into the graph
+        "title: t\nlayer: technical\n",
+    ],
+)
+def test_parse_meta_id_less_metadata_is_a_reportable_skip(raw):
+    # A fenced block with no `id` and no lattice intent is metadata this engine does not own.
+    # It is skipped, but the skip is named so it can be reported rather than vanishing.
+    parsed = parse_meta(raw, Path("a.md"))
+    assert parsed.meta is None
+    assert parsed.disposition == "id-less"
+
+
+def test_parse_meta_no_fence_is_untracked_prose():
+    parsed = parse_meta(None, Path("a.md"))
+    assert parsed.meta is None
+    assert parsed.disposition == "untracked"
 
 
 @pytest.mark.parametrize("raw", ["", "just a scalar\n", "- a\n- b\n"])
-def test_parse_meta_none_for_non_mapping_yaml(raw):
-    # YAML that parses to None / scalar / list is not a mapping -> not a lattice node
-    assert parse_meta(raw, Path("a.md")) is None
+def test_parse_meta_non_mapping_yaml_is_untracked_not_a_skip(raw):
+    # YAML that parses to None / scalar / list declares no keys at all, so it is the same
+    # untracked prose as a file with no fence. Grading it as a skip would report every
+    # document that merely opens with a thematic break.
+    parsed = parse_meta(raw, Path("a.md"))
+    assert parsed.meta is None
+    assert parsed.disposition == "untracked"
+
+
+@pytest.mark.parametrize(
+    ("raw", "declared"),
+    [
+        ("idd: down\nderives_from:\n  - ref: up\n", "'derives_from'"),
+        ("id_: down\nauthority: binding\n", "'authority'"),
+        ("title: t\ntickets: [PC-1]\n", "'tickets'"),
+        # Presence, not truth: an empty list or a null still declares lattice intent, and a
+        # truthiness check would let all three of these back through as a silent skip.
+        ("derives_from: []\n", "'derives_from'"),
+        ("tickets: []\n", "'tickets'"),
+        ("authority:\n", "'authority'"),
+        # Every declared key is named, in a stable sorted order.
+        (
+            "idd: x\ntickets: []\nderives_from: []\nauthority:\n",
+            "'authority', 'derives_from', 'tickets'",
+        ),
+    ],
+)
+def test_parse_meta_id_less_lattice_intent_raises_naming_file_and_keys(raw: str, declared: str):
+    with pytest.raises(ConfigError) as exc:
+        parse_meta(raw, Path("typo.md"))
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert str(exc.value) == (
+        f"frontmatter in typo.md declares {declared} but has no 'id' key, so the file and "
+        "every edge it declares would be dropped from the lattice; add an 'id' (check it for "
+        "a typo) or remove the lattice keys"
+    )
+
+
+def test_parse_meta_intent_keys_are_an_exact_set_not_every_node_meta_field():
+    # NodeMeta also recognizes `title` and `layer`. Deriving the hard-error tier mechanically
+    # from its fields would pull those in and turn ordinary non-lattice frontmatter into an
+    # exit 2, so the trigger set is declared rather than computed.
+    assert {"authority", "derives_from", "tickets"} == LATTICE_INTENT_KEYS
+    assert {"layer", "title"} == set(NodeMeta.model_fields) - LATTICE_INTENT_KEYS - {"id"}
 
 
 def test_parse_meta_unknown_key_raises():
@@ -221,7 +284,7 @@ def test_safe_yaml_loader_resets_version_after_malformed_frontmatter():
     with pytest.raises(UnreadableDocError):
         parse_meta("%YAML 1.1\nid: [unclosed\n", Path("broken.md"))
 
-    meta = parse_meta("id: on\n", Path("next.md"))
+    meta = parse_meta("id: on\n", Path("next.md")).meta
 
     assert meta is not None
     assert meta.id == "on"

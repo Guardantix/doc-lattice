@@ -103,6 +103,13 @@ A Markdown file without an opening `---` fence is valid untracked prose. Once a 
 frontmatter with `---`, it must include a closing `---` fence; otherwise every lattice-loading
 command names the file, asks for the missing close, and exits 2 instead of omitting the node.
 
+Fenced frontmatter with no `id` is graded by what else it declares, since dropping a node also
+drops every edge it declares. A block carrying any of `derives_from`, `authority`, or `tickets`
+meant to be a node, so the missing `id` is a tool error that names the file and exits 2 rather
+than a silent omission. Any other id-less block is frontmatter this engine does not own, so the
+file is skipped with a warning on stderr naming it, and the exit status is unchanged. The two
+tiers are described in full under [Frontmatter reference](#frontmatter-reference).
+
 ### The authority ladder
 
 Separately from drift, `lint` enforces a structural rule: authority only flows downhill.
@@ -345,6 +352,30 @@ selector details, dry-run and JSON output, the durability contract, and recovery
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
 
+### Files with no `id`
+
+Only a file declaring an `id` joins the lattice. How the rest are treated depends on what they
+wrote, because silently dropping a file also silently drops every edge it declares:
+
+| The file | Treatment |
+|----------|-----------|
+| No opening `---` fence | Untracked prose. Silent; nothing is reported. |
+| Fenced, but the block holds no YAML mapping (empty, a scalar, a list) | The same as untracked prose. Silent. |
+| Fenced with an id-less mapping declaring none of `derives_from`, `authority`, or `tickets` | Skipped, with a warning on stderr naming the file. The exit status is unchanged. |
+| Fenced with an id-less mapping declaring any of `derives_from`, `authority`, or `tickets` | A tool error naming the file and the keys it declared. Exits 2. |
+
+Those three keys are the exact set that wires a file into the graph, so an id-less block carrying
+one is a node that lost its `id` (to a typo like `idd:`, or to an edit) rather than metadata
+belonging to another tool. `title` and `layer` are not in the set: they describe a document
+without wiring it into the graph, so a block carrying only those is a warning, not an error.
+
+The warning exists because a docs root can legitimately hold frontmatter this engine does not own,
+such as a tool's own `name`/`description` block. It is a Python warning, so the usual
+[`PYTHONWARNINGS`](https://docs.python.org/3/using/cmdline.html#envvar-PYTHONWARNINGS) filters
+silence it (`PYTHONWARNINGS=ignore`), and `ignore_globs` removes the file from discovery entirely.
+The report is identical whether the load was accelerated by the
+[load cache](#load-cache-opt-in) or not.
+
 Section ids are optional: a heading is addressed by its GitHub slug by default (e.g.
 `## Error Handling` resolves to `error-handling`). An explicit marker must be the trailing heading
 token and match `{#[A-Za-z0-9][A-Za-z0-9_-]*}`; a whitespace-separated ATX closing sequence may
@@ -410,7 +441,10 @@ project shares one warm cache with no per-checkout setup, which an in-repo cache
 
 By default the cache re-reads and re-hashes each file's bytes every run, so its output is always
 byte-identical to an uncached run under any cache state (cold, warm, stale, structurally corrupt, or
-wrong version); only timing differs. A structurally corrupt cache (unreadable, non-JSON, wrong
+wrong version); only timing differs. That covers stderr as well as stdout: an entry records why a
+file is not a node, not just that it is not one, so the skip warning above reproduces on a warm run
+that never re-reads the file. Because two checkouts can share a slot, an entry stores the reason
+rather than the rendered sentence, and each run names the path it discovered. A structurally corrupt cache (unreadable, non-JSON, wrong
 version, or schema-invalid) is discarded wholesale and rebuilt; the cache is a trusted single-writer
 file under your own cache home, so it is not hardened against hand-edited tampering that stays
 schema-valid. Setting `cache_trust_stat: true` adds a faster tier for read-only commands that trusts
@@ -531,6 +565,17 @@ command. Confirm the ticket id exists and that `linear_team` targets the right t
 **`unclosed YAML frontmatter ...` exits 2.** A file beginning with `---` must add another `---`
 line after its YAML metadata. The message names the malformed file; a file with no opening fence
 remains ordinary untracked Markdown.
+
+**`frontmatter in ... declares 'derives_from' but has no 'id' key` exits 2.** The file wired itself
+into the graph but never named itself, so it and every edge it declares would leave the lattice
+together. Almost always a typo in the `id` key (`idd:`, `Id:`) or an edit that dropped it: add the
+`id` back, or remove the lattice keys if the file is not meant to be tracked. The same message
+lists `authority` and `tickets` when those are what the block declared.
+
+**`skipping ... its frontmatter declares no 'id'` on stderr.** Not an error: a file with fenced
+frontmatter that declares no `id` and no lattice keys is left out of the lattice, and the exit
+status is unchanged. Expected when a docs root holds frontmatter belonging to another tool. Silence
+it with `PYTHONWARNINGS=ignore`, or exclude the file from discovery with `ignore_globs`.
 
 **`duplicate id ...` exits 2.** A duplicate id makes the index incoherent, so loading the lattice
 fails with exit 2 (a tool error, distinct from the exit 1 that `check` and `lint` use for drift).
