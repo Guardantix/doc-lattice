@@ -637,6 +637,17 @@ passing vacuously. The invariant covers transaction after images only. Before im
 bytes, recovery artifacts, and the before-image rollback sink are deliberately published without
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
+
+Five near-miss shapes are pinned explicitly, because each defeated an earlier draft of the guard
+and each was reproduced against it before being closed. The gate must be its own unconditional
+top-level statement, since a gate merely contained in an earlier statement can sit inside a
+conditional and skip the path a later changed return takes. Both operands of the line-ending
+restoration are constrained, since checking only the searched text admits a replacement that
+rewrites verified content. The envelope fields a rewrite may reattach are whitelisted, excluding
+`raw_meta`, which holds the pre-edit YAML the gate never verified. Producer and publication scans
+resolve import aliases and module-qualified references, since `Rewrite as R` and
+`persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
+publication-reach rule reads every mention of the identifier rather than only its imports.
 **Consequences:** A genuinely new producer, staging site, or publication route fails closed and
 forces a conscious audit, instead of silently widening the set of bytes that can reach a
 document. The guard is a tripwire on the current AST shape, not a general dataflow analysis:

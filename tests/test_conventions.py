@@ -194,8 +194,14 @@ TRANSACTION_MODULE = "reconcile_transaction.py"
 AFTER_FIELD_INDEX = list(Rewrite.__dataclass_fields__).index("after")
 FORWARD_IMAGE_FIELD = "after_path"
 ROLLBACK_IMAGE_FIELD = "before_path"
+LINE_ENDING_CALLEE = "_line_ending"
 LINE_ENDING_CHARS = frozenset("\r\n")
 OPAQUE_BINDING = -1
+PUBLICATION_OWNERS = frozenset({"persistence.py", TRANSACTION_MODULE})
+# The envelope pieces a rewrite may reattach verbatim. `raw_meta` is deliberately absent: it
+# holds the pre-edit YAML the gate never verified, so admitting it would let the mis-splice
+# check pass on a document that reintroduces exactly the bytes the gate was meant to replace.
+ENVELOPE_FIELDS = frozenset({"prefix", "open_fence", "close_fence", "close_fence_newline", "body"})
 
 
 def _gate_msg(detail: str) -> str:
@@ -284,6 +290,52 @@ def _call_sites(trees: dict[str, ast.Module], callee: str | None = None) -> list
     return sites
 
 
+def _local_aliases(tree: ast.Module, symbol: str) -> frozenset[str]:
+    """Every local name in a module that refers to ``symbol``, import aliases included."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            aliases.update(
+                alias.asname or alias.name for alias in node.names if alias.name == symbol
+            )
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef) and node.name == symbol:
+            aliases.add(symbol)
+    return frozenset(aliases)
+
+
+def _symbol_call_sites(trees: dict[str, ast.Module], symbol: str) -> list[_Site]:
+    """Every call to ``symbol``, resolving import aliases and module-qualified references.
+
+    A bare-name scan would miss both ``from .reconcile import Rewrite as R`` followed by
+    ``R(...)`` and ``from . import persistence`` followed by ``persistence.replace_staged(...)``,
+    each of which is a complete route around the anchors this guard pins.
+    """
+    sites: list[_Site] = []
+    for module, tree in sorted(trees.items()):
+        owner = _enclosing_functions(tree)
+        aliases = _local_aliases(tree, symbol)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            named = isinstance(node.func, ast.Name) and node.func.id in aliases
+            qualified = isinstance(node.func, ast.Attribute) and node.func.attr == symbol
+            if named or qualified:
+                sites.append(_Site(module, owner.get(id(node)), node))
+    return sites
+
+
+def _mentions_symbol(tree: ast.Module, symbol: str) -> bool:
+    """True when a module names ``symbol`` anywhere: import, bare reference, or attribute."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(a.name == symbol for a in node.names):
+            return True
+        if isinstance(node, ast.Name) and node.id == symbol:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == symbol:
+            return True
+    return False
+
+
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef | None:
     """The function definition named ``name``, or None when the module no longer has one."""
     for node in ast.walk(tree):
@@ -350,30 +402,42 @@ def _argument(call: ast.Call, name: str, index: int) -> ast.expr | None:
     return call.args[index] if len(call.args) > index else None
 
 
-def _is_restoration(call: ast.Call) -> bool:
-    """True for a line-ending-only ``.replace()`` or a UTF-8 ``.encode()``."""
+def _is_line_ending_operand(expr: ast.expr, context: _TraceContext) -> bool:
+    """True for a literal line-ending run, or a local holding the source's own ending."""
+    if isinstance(expr, ast.Constant):
+        if not (isinstance(expr.value, str) and expr.value):
+            return False
+        return set(expr.value) <= LINE_ENDING_CHARS
+    if isinstance(expr, ast.Name):
+        binding = _sole_binding(context.bindings, expr.id)
+        return binding is not None and _is_call_to(binding.value, LINE_ENDING_CALLEE)
+    return False
+
+
+def _is_restoration(call: ast.Call, context: _TraceContext) -> bool:
+    """True for a line-ending-only ``.replace()`` or a UTF-8 ``.encode()``.
+
+    Both ``replace`` operands are constrained. Checking only the searched text would admit
+    ``new_text.replace("\\n", "CORRUPT")``, which rewrites gate-verified content rather than
+    restoring the ending the source was written with.
+    """
     if not isinstance(call.func, ast.Attribute):
         return False
     if call.func.attr == "encode":
         first = call.args[0] if call.args else None
-        return isinstance(first, ast.Constant) and first.value == "utf-8"
+        return len(call.args) == 1 and isinstance(first, ast.Constant) and first.value == "utf-8"
     if call.func.attr == "replace":
-        first = call.args[0] if call.args else None
-        return (
-            len(call.args) == 2
-            and isinstance(first, ast.Constant)
-            and isinstance(first.value, str)
-            and bool(first.value)
-            and set(first.value) <= LINE_ENDING_CHARS
+        return len(call.args) == 2 and all(
+            _is_line_ending_operand(argument, context) for argument in call.args
         )
     return False
 
 
 def _is_envelope_part(expr: ast.expr, root: str) -> bool:
-    """True for ``<root>.<attr>``, a piece of the frontmatter envelope split off the source."""
+    """True for one of the immutable envelope fields split off the original source."""
     if not (isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name)):
         return False
-    return expr.value.id == root
+    return expr.value.id == root and expr.attr in ENVELOPE_FIELDS
 
 
 def _traces_to(expr: ast.expr, context: _TraceContext, seen: tuple[str, ...] = ()) -> bool:
@@ -383,7 +447,7 @@ def _traces_to(expr: ast.expr, context: _TraceContext, seen: tuple[str, ...] = (
     if isinstance(expr, ast.IfExp):
         return _traces_to(expr.body, context, seen) and _traces_to(expr.orelse, context, seen)
     if isinstance(expr, ast.Call):
-        if not (context.restoration and _is_restoration(expr)):
+        if not (context.restoration and _is_restoration(expr, context)):
             return False
         return _traces_to(expr.func.value, context, seen)  # ty: ignore[unresolved-attribute]
     if isinstance(expr, ast.JoinedStr):
@@ -472,7 +536,7 @@ def _returns_no_change(node: ast.Return) -> bool:
 def _rewrite_producer_violations(trees: dict[str, ast.Module]) -> list[str]:
     """The sole ``Rewrite(...)`` must live in the producer and carry the gated text."""
     expected = f"{RECONCILE_MODULE}::{PRODUCER}"
-    sites = _call_sites(trees, Rewrite.__name__)
+    sites = _symbol_call_sites(trees, Rewrite.__name__)
     located = sorted(site.located for site in sites)
     if located != [expected]:
         return [_gate_msg(f"production Rewrite(...) sites are {located}, expected only {expected}")]
@@ -507,9 +571,17 @@ def _gated_text_violations(trees: dict[str, ast.Module]) -> list[str]:
         ]
     gate_index = _top_level_index(func, gates[0])
     verified = gates[0].args[0] if gates[0].args else None
-    if gate_index is None or not isinstance(verified, ast.Name):
+    # The gate must be its own unconditional top-level statement. Accepting a gate merely
+    # contained in an earlier statement would pass a gate nested in a conditional, which does
+    # not run on every path that reaches a later changed return.
+    statement = func.body[gate_index] if gate_index is not None else None
+    unconditional = isinstance(statement, ast.Expr) and statement.value is gates[0]
+    if gate_index is None or not unconditional or not isinstance(verified, ast.Name):
         return [
-            _gate_msg(f"{GATE} is not called on a plain local at the top level of {GATED_CALLEE}()")
+            _gate_msg(
+                f"{GATE} is not an unconditional top-level statement of {GATED_CALLEE}() called "
+                "on a plain local, so it does not dominate every later return"
+            )
         ]
     bindings = _bindings(func)
     if _sole_binding(bindings, verified.id) is None:
@@ -598,22 +670,24 @@ def _publication_reach_violations(trees: dict[str, ast.Module]) -> list[str]:
     ``persistence.py`` owns ``replace_staged`` and calls it internally as the generic
     atomic-write primitive, so the sink rules below read only the transaction module. That
     scoping is sound exactly while no other module can reach the helper, which is what this
-    check pins: a new importer is a new publication route and fails here instead of slipping
-    past a sink audit that never looked at it.
+    check pins: a new module naming it at all is a new publication route and fails here instead
+    of slipping past a sink audit that never looked at it.
+
+    The check reads every mention of the identifier, not just a ``from ... import`` of it. A
+    module can reach the helper as ``from . import persistence`` followed by
+    ``persistence.replace_staged(...)``, which no import-name scan would see.
     """
-    importers = sorted(
+    reaching = sorted(
         module
         for module, tree in trees.items()
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and any(alias.name == PUBLISH_CALLEE for alias in node.names)
+        if module not in PUBLICATION_OWNERS and _mentions_symbol(tree, PUBLISH_CALLEE)
     )
-    if importers == [TRANSACTION_MODULE]:
+    if not reaching:
         return []
     return [
         _gate_msg(
-            f"modules importing {PUBLISH_CALLEE}() are {importers}, expected only "
-            f"[{TRANSACTION_MODULE!r}]"
+            f"modules reaching {PUBLISH_CALLEE}() outside {sorted(PUBLICATION_OWNERS)} are "
+            f"{reaching}, expected none"
         )
     ]
 
@@ -623,7 +697,7 @@ def _publication_violations(trees: dict[str, ast.Module]) -> list[str]:
     problems = _publication_reach_violations(trees)
     roles: dict[str, list[str]] = {FORWARD_IMAGE_FIELD: [], ROLLBACK_IMAGE_FIELD: []}
     scoped = {TRANSACTION_MODULE: trees[TRANSACTION_MODULE]}
-    for site in _call_sites(scoped, PUBLISH_CALLEE):
+    for site in _symbol_call_sites(scoped, PUBLISH_CALLEE):
         staged = site.call.args[0] if site.call.args else None
         destination = site.call.args[1] if len(site.call.args) > 1 else None
         role = staged.attr if isinstance(staged, ast.Attribute) else None
@@ -715,6 +789,28 @@ def publish(entry: object) -> None:
     replace_staged(entry.after_path, entry.destination)
 '''
 
+QUALIFIED_PUBLISHER_MODULE = '''"""A module reaching the publication helper through its module."""
+
+from . import persistence
+
+
+def publish(entry: object) -> None:
+    """Publish a document over its destination through a qualified call."""
+    persistence.replace_staged(entry.after_path, entry.destination)
+'''
+
+ALIASED_PRODUCER_MODULE = '''"""A reconcile producer hiding behind an import alias."""
+
+from pathlib import Path
+
+from .reconcile import Rewrite as R
+
+
+def build(path: Path, before: bytes, data: bytes) -> R:
+    """Construct a Rewrite under an alias, without consulting the reparse gate."""
+    return R(path, before, data, frozenset())
+'''
+
 
 def _patched(sources: dict[str, str], module: str, old: str, new: str) -> dict[str, str]:
     """Sources with one anchored edit applied, asserting the anchor still exists."""
@@ -731,8 +827,13 @@ def _extended(sources: dict[str, str], module: str, addition: str) -> dict[str, 
 def _positive_controls() -> dict[str, dict[str, str]]:
     """Each named control bends production source into one distinct bypass of the gate.
 
-    Six failure modes, seven controls: the second-forward-publication mode is exercised both
-    inside the transaction module and from a fresh module that reaches the helper directly.
+    The first seven cover the modes the issue enumerated; the second-forward-publication mode
+    is exercised both inside the transaction module and from a fresh module. The last five were
+    found by adversarial review of this guard and each was reproduced against it before being
+    closed: a gate nested in a conditional, a line-ending restoration that corrupts through its
+    replacement operand, unverified ``raw_meta`` reattached to the envelope, the publication
+    helper reached through its module rather than by name, and a producer hidden behind an
+    import alias.
     """
     sources = _production_sources()
     return {
@@ -764,6 +865,36 @@ def _positive_controls() -> dict[str, dict[str, str]]:
             "    return rewritten, set(plan.applied)",
             "    rewritten = current_file_text\n    return rewritten, set(plan.applied)",
         ),
+        "gate-nested-in-a-conditional": _patched(
+            sources,
+            RECONCILE_MODULE,
+            "    _verify_reconciled_meta("
+            "new_meta, _expected_frontmatter(data, plan.entry_updates), source)",
+            "    if plan.entry_updates:\n"
+            "        _verify_reconciled_meta(\n"
+            "            new_meta, _expected_frontmatter(data, plan.entry_updates), source\n"
+            "        )",
+        ),
+        "line-ending-restoration-that-corrupts": _patched(
+            sources,
+            RECONCILE_MODULE,
+            'after = new_text if ending == "\\n" else new_text.replace("\\n", ending)',
+            'after = new_text.replace("\\n", "CORRUPT")',
+        ),
+        "unverified-raw-meta-reattached-to-the-envelope": _patched(
+            sources,
+            RECONCILE_MODULE,
+            'f"{parts.prefix}{parts.open_fence}\\n{new_meta}"',
+            'f"{parts.prefix}{parts.open_fence}\\n{new_meta}{parts.raw_meta}"',
+        ),
+        "publication-helper-reached-through-its-module": {
+            **sources,
+            "rogue_qualified_publisher.py": QUALIFIED_PUBLISHER_MODULE,
+        },
+        "rewrite-producer-hidden-behind-an-alias": {
+            **sources,
+            "rogue_aliased_producer.py": ALIASED_PRODUCER_MODULE,
+        },
     }
 
 
