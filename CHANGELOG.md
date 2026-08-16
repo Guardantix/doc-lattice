@@ -8,17 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- A Hypothesis round-trip fuzz gate for the reconcile frontmatter rewriter,
-  `tests/test_reconcile_fuzz.py`. AD-31 declares the supported subset, but the only standing
-  evidence for it was hand-written cases, so rewriter edge cases were found by review iteration on
-  a change rather than by CI. The gate now generates documents across the declared subset and
-  checks each rewrite against an independent model-derived oracle, layer 3 preservation, and the
-  layer 4 mutation footprint, with layer 5 outcomes generated at the exact scope each is guaranteed
-  at. It enforces AD-31 exactly rather than a stricter contract: documented no-ops stay no-ops, and
-  defensive recovery is held to a union of safe outcomes rather than required to succeed. The two
-  ordered-map behaviors AD-31 recorded as current bounded behavior, a malformed `!!omap` item and a
-  merge written inside one, are now pinned by it. The gate is derandomized and runs in about ten
-  seconds.
+- Internal: a Hypothesis round-trip fuzz gate for the reconcile frontmatter rewriter,
+  `tests/test_reconcile_fuzz.py`. The subset AD-31 declares had only hand-written cases as standing
+  evidence, so rewriter edge cases were found by review iteration on a change rather than by CI.
+  The gate generates documents across that subset and checks each rewrite against an independent
+  model-derived oracle, enforcing the record exactly rather than a stricter contract. It is
+  derandomized and runs in about ten seconds. See
+  [AD-31](ARCHITECTURE.md#ad-31-the-reconcile-rewriter-supports-a-declared-frontmatter-subset).
 
 ### Changed
 
