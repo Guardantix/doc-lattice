@@ -763,15 +763,15 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 | Position | Dimension | Strict tracked-document load accepts | Fresh reread additionally handles |
 |---|---|---|---|
 | Root | Carrier shape | A block or flow mapping, or an `!!omap` in either style | Nothing more; a root that loads as neither a mapping nor a null is refused, a plain sequence included, while a null root returns the file unchanged |
-| Root | Key spelling | Exactly the `NodeMeta` keys, `id` required; a key may be spelled through an alias or written as an explicit `? key` / `: value` pair; members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
+| Root | Key spelling | Exactly the `NodeMeta` keys, `id` required. A key may be written plainly, or as an explicit `? key` / `: value` pair. A key spelled through an alias needs one of two forms, the explicit `? *name` pair or `*name : value` with a space before its `:`, because the bare `*name:` form does not scan. Members may arrive through a `<<` merge in either spelling (a plain `<<`, or any key carrying an explicit `!!merge` tag) | Any extra key, which is tolerated and left alone; only `derives_from` is read |
 | `derives_from` | Carrier shape | A block or flow sequence, written inline or supplied by a merge | Additionally one reached through an alias, which is not strictly reachable because the anchor needs a carrier key `NodeMeta` forbids |
 | Entry | Carrier shape | A block or flow mapping, or an `!!omap` in either style, written inline or as an alias to a node elsewhere | Nothing more |
-| Entry | Key spelling | `ref` and an optional `seen` and nothing else; either may be an explicit `? key` / `: value` pair; a key may be spelled through an alias; members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
+| Entry | Key spelling | `ref` and an optional `seen` and nothing else. Either key may be written plainly, or as an explicit `? key` / `: value` pair. A key spelled through an alias needs one of two forms, the explicit `? *name` pair or `*name : value` with a space before its `:`, because the bare `*name:` form does not scan. Members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
 | Entry | Node properties | An anchor, a tag, or both opening the entry, including on the sequence line above and left of its first key | Nothing more |
 | Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, a flow entry written with or without a trailing comma, or a `ref` spanning lines as a block scalar in either style, a multi-line double-quoted scalar, or a multi-line plain scalar | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
 | Entry `ref` | Value | A string | Nothing more; a non-string `ref` is refused whenever planning is reached |
 | Entry `seen` | Carrier shape | A scalar or null, never a collection | Nothing more; a collection-valued `seen` at a targeted entry is refused |
-| Entry `seen` | Scalar and key spelling | Any scalar spelling whose constructed value is a string or null: plain, single or double quoted, a block scalar in either style with any chomping or explicit indentation indicator, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` written with or without its `:`; the key itself may be spelled through an alias | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included |
+| Entry `seen` | Scalar spelling | Any scalar spelling whose constructed value is a string or null: plain, single or double quoted, a block scalar in either style with any chomping or explicit indentation indicator, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` left without its `:`, which constructs null. How the key itself may be written is the `Entry` `Key spelling` row above | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included |
 | Entry `seen` | Node properties | An anchor, a tag, or both, in either order, on the value's own line or on lines of their own, with the author's comments between a property and the value | Nothing more |
 
 Four behaviors of the loaded shape are recorded with the matrix rather than inside a cell.
@@ -779,9 +779,13 @@ Four behaviors of the loaded shape are recorded with the matrix rather than insi
 A merge is deliberately not followed inside an ordered map, because the loader builds one from its
 items rather than through mapping construction. Alias detachment may expand an alias site into a
 local mapping, or into a local one-pair item for an ordered map, rather than editing the shared
-node behind it. An anchor name may be defined more than once, which the loader warns about: a
-later definition rebinds the name, so each alias reads the nearest definition above it and a
-relocated value lands only on the alias sites still bound to the anchor it displaces.
+node behind it. An anchor name may be defined more than once under the pure Python parser, which
+warns about it: a later definition rebinds the name, so each alias reads the nearest definition
+above it and a relocated value lands only on the alias sites still bound to the anchor it
+displaces. That acceptance is parser-conditional: with the optional `ruamel.yaml.clib` accelerator
+installed the strict tracked-document load refuses a reused name outright as a duplicate anchor,
+while the reread inside `apply_reconcile`, pure by AD-26, still handles it, so the spelling is
+reread-only there.
 
 **Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
@@ -865,9 +869,12 @@ preservation for out-of-subset input.
 for roots and for entries, with block, flow, and alias coverage in the reconcile source suite.
 Dropping it later would be a compatibility decision of its own rather than a correction to this
 record. Two ordered-map refusals are current bounded-loader behavior rather than guaranteed
-refusals, because no test pins either today: a malformed ordered map, meaning an item that is not
-a one-pair mapping, and a merge written inside one. Pinning them belongs with a future round-trip
-fuzz gate.
+refusals: a malformed ordered map, meaning an item that is not a one-pair mapping, and a merge
+written inside one. The round-trip fuzz gate in `tests/test_reconcile_fuzz.py` pins both at the
+project error type and its code, unconditionally, so either one changing turns CI red. That is
+deliberate and it is what pinning means here: the behavior stays changeable, but only by editing
+this record and its pin in the same change, never by a loader upgrade moving it quietly. Neither
+becomes a refusal a user may rely on.
 
 **Consequences:** "Is the rewriter complete" is now a finite question about this subset. A
 spelling outside layer 2 is not a completeness defect, and admitting one is a deliberate widening

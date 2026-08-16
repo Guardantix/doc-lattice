@@ -26,6 +26,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   triggers, and PyPI operator continuity. A new "Who can release" section separates landing a
   version bump, approving the `pypi` environment, and operating the PyPI project, which are
   three authorities that do not gate each other.
+- Internal: a Hypothesis round-trip fuzz gate for the reconcile frontmatter rewriter,
+  `tests/test_reconcile_fuzz.py`. The subset AD-31 declares had only hand-written cases as standing
+  evidence, so rewriter edge cases were found by review iteration on a change rather than by CI.
+  The gate generates documents across that subset and checks each rewrite against an independent
+  model-derived oracle, enforcing the record exactly rather than a stricter contract. It is
+  derandomized and runs in about ten seconds. See
+  [AD-31](ARCHITECTURE.md#ad-31-the-reconcile-rewriter-supports-a-declared-frontmatter-subset).
 
 ### Changed
 
