@@ -2094,9 +2094,24 @@ def test_ordered_map_and_flow_roots_round_trip(data) -> None:
 @FUZZ_SETTINGS
 @given(data=st.data())
 def test_alias_and_merge_shapes_round_trip(data) -> None:
+    """Rewrite one entry of a shared-node shape, or every entry of it.
+
+    Updating every entry is what reaches the case where an anchored value has nowhere to be
+    relocated to, because the alias that would have received it is being rewritten in the same
+    pass. The rewriter drops the anchor there rather than republishing a value nothing reads,
+    and with a single target that arm was unreachable. Drawn against the single-target case
+    rather than replacing it, so the commoner shape keeps half the examples.
+    """
     document = data.draw(alias_and_merge_documents())
     target = data.draw(st.integers(min_value=0, max_value=len(document.entries) - 1))
-    updates = {document.entries[target].ref: "new0000beef"}
+    refs = (
+        tuple(entry.ref for entry in document.entries)
+        if data.draw(st.booleans())
+        else (document.entries[target].ref,)
+    )
+    # dict.fromkeys, not a set: the aliased-entry shape gives its two entries the same ref, and
+    # the hash written has to stay a function of position rather than of iteration order.
+    updates = {ref: f"new{index:04x}beef" for index, ref in enumerate(dict.fromkeys(refs))}
     _assert_supported_round_trip(document, updates)
 
 
