@@ -14,6 +14,7 @@ for the shape it generated, never against a universal one-line diff, and syntax 
 is never required to be refused.
 """
 
+import re
 import warnings
 from dataclasses import dataclass, replace
 from datetime import date
@@ -31,11 +32,20 @@ from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DOC = Path("doc.md")
 BOM = chr(0xFEFF)
-# The spacing every flow carrier in this file writes between two entries. It is named because
-# the untouched-neighbour assertion reconstructs source text with it, so the separator the
-# generator writes and the one that assertion expects have to be the same string by
-# construction rather than by two literals agreeing.
+# The spacing every flow carrier in this file writes between two entries. It is named so that
+# every generator writes the same one, which is what lets the flow-line assertion recover the
+# carrier's own source by cutting the entries it knows out of the line it rendered.
 FLOW_SEPARATOR = ", "
+# The characters that punctuate a flow collection. A rewrite that adds or drops one of these
+# outside the value it was asked to write has restyled source layer 3 says it may not touch,
+# even where the document still loads as the very same mapping.
+FLOW_INDICATORS = ",{}[]"
+# The flow indicators each layer 4 edit legitimately writes into the entry it lands in. An edit
+# that lands on a value already written, or just after a separator the source already carries,
+# adds none. An appended pair writes the separator in front of it. An appended sequence item
+# writes its own braces as well, and lands inside the sequence bracket rather than the mapping
+# one, so it is the only kind that leaves a single bracket rather than the whole run behind it.
+FLOW_EDIT_INDICATORS = {"none": "", "separator": ",", "item": ",{}"}
 
 # One named settings object per this file, applied as a decorator to each property. A registered
 # profile would be suite-global and would retune the Hypothesis tests other modules already own.
@@ -141,6 +151,9 @@ class WholeForm:
         value: How the loaded ``seen`` relates to the written text, as for ``SeenForm``.
         present: Whether a ``seen`` member is written at all.
         anchored: Whether the entry anchors its ``seen`` value.
+        writes: Which ``FLOW_EDIT_INDICATORS`` kind a rewrite of this flow spelling is, meaning
+            the punctuation its edit is allowed to write. Meaningless for a block-only form,
+            which has no flow source to pin.
     """
 
     name: str
@@ -149,6 +162,25 @@ class WholeForm:
     value: str
     present: bool
     anchored: bool
+    writes: str = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class FlowPin:
+    """What an edited flow entry's own source still has to look like afterwards.
+
+    Attributes:
+        pattern: The entry's source as a regular expression whose one group is the region the
+            edit lands in, bounded by the marker before it and the brackets the entry closes
+            on after it.
+        budget: Every flow indicator that region is allowed to hold once the edit has landed,
+            as one character per occurrence. It is the punctuation the spelling already wrote
+            there plus the punctuation the edit itself has to write, so an inert separator or
+            a restyled bracket is over budget even where the document still loads the same.
+    """
+
+    pattern: str
+    budget: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +209,8 @@ class Entry:
             allowed rather than being modelled line by line.
         appends: Whether a rewrite may insert a line just past the entry, which is how a
             missing ``seen`` pair and the ``:`` an explicit ``? seen`` lacks are written.
+        pin: For a flow entry, what its source still has to look like once it is edited. None
+            for a block entry, whose source the line footprint pins instead.
     """
 
     name: str
@@ -191,6 +225,7 @@ class Entry:
     marker: str | None = None
     edits: tuple[int, ...] | None = None
     appends: bool = False
+    pin: FlowPin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,11 +266,6 @@ class Document:
         notes: Every comment text written in the frontmatter.
         mirrors: Root keys the loader gives the very same list object as ``derives_from``,
             which an alias spelling produces and which therefore follow every update.
-        markers: Carrier-level openings of the source, meaning the collection carrying the
-            entries, that share a line with an editable entry and so have to come back
-            verbatim under layer 3. A carrier written in block style needs no marker, because
-            its own line sits outside the allowed footprint and the footprint check already
-            asserts it verbatim.
     """
 
     meta_lines: tuple[str, ...]
@@ -246,7 +276,6 @@ class Document:
     envelope: Envelope
     notes: tuple[str, ...]
     mirrors: tuple[str, ...] = ()
-    markers: tuple[str, ...] = ()
 
     def render(self) -> str:
         """Return the exact document text, envelope and line ending included."""
@@ -318,51 +347,51 @@ class Document:
             allowed.update(index for index, line in enumerate(self.meta_lines) if alias in line)
         return allowed, inserts
 
-    def untouched_neighbours(self, updates: dict[str, str]) -> list[str]:
-        """Return the exact source of untouched entries sharing a line with an editable one.
+    def flow_lines(self, updates: dict[str, str]) -> list[tuple[str, tuple[str, ...]]]:
+        """Return one pin per edited line whose entries are written in flow style.
 
-        A flow carrier writes several entries onto one line, so the smallest footprint the
-        line model can express is that whole line, and every entry on it shares the span. That
-        allowance is far wider than layer 3 permits, and nothing else narrows it: the semantic
-        oracle reads only loaded values, and the markers pin openings rather than whole
-        entries. The line is therefore pinned here at character level instead.
+        A flow entry shares its line with its carrier, and with its neighbours whenever the
+        carrier is a flow sequence too, so the smallest footprint the line model can express
+        is that whole line. That allowance is far wider than layer 3 permits and nothing else
+        narrows it: the semantic oracle reads only loaded values, and an entry marker pins an
+        opening rather than a whole entry. The line is therefore pinned here at character
+        level instead, as the pattern its rewritten form still has to match in full.
 
-        What an edit may reach inside a flow entry is bounded by that entry's own brackets: a
-        replacement lands on its ``seen`` member, and an appended member is written just
-        inside the bracket it closes on. Everything else on the line is carrier source, the
-        separators between two entries included, so the protected segments are the whole line
-        with the edited entries cut out of it and each separator left attached to the
-        neighbour that survives.
+        The pattern is the rendered line with the edit region of each edited entry cut out of
+        it, which is what leaves the carrier's own source fixed at both ends: its opening
+        bracket and everything before it, the separators between two entries, and the brackets
+        it closes on. An untouched neighbour is fixed as well, since no edit may reach it. Each
+        region that was cut carries the budget from that entry's ``FlowPin``, so what an edit
+        may write inside one is bounded rather than surrendered along with the line.
 
         Returns:
-            One source segment per maximal run of line source no edit may reach.
+            One full-line regular expression per edited line carrying flow entries, each with
+            the punctuation budget of its groups in the order the groups appear.
         """
         applied = self.applied(updates)
-        shared: dict[tuple[int, int], list[int]] = {}
-        for index, span in enumerate(self.spans):
-            shared.setdefault(span, []).append(index)
-        segments: list[str] = []
-        for indices in shared.values():
-            if len(indices) < 2:
+        shared: dict[tuple[int, int], list[Entry]] = {}
+        for entry, span in zip(self.entries, self.spans, strict=True):
+            shared.setdefault(span, []).append(entry)
+        pins: list[tuple[str, tuple[str, ...]]] = []
+        for (start, stop), entries in shared.items():
+            if stop - start != 1 or any(entry.pin is None for entry in entries):
                 continue
-            run: list[str] = []
-            for position, index in enumerate(indices):
-                entry = self.entries[index]
-                survives = entry.inline is not None and entry.ref not in applied
-                # The separator opening this position belongs to whichever of the two entries
-                # it sits between survives, so it joins the run both when the run continues
-                # into an untouched entry and when it closes on an edited one.
-                if position and (survives or run):
-                    run.append(FLOW_SEPARATOR)
-                if survives:
-                    run.append(entry.inline or "")
-                    continue
-                if run:
-                    segments.append("".join(run))
-                    run = []
-            if run:
-                segments.append("".join(run))
-        return segments
+            if not any(entry.ref in applied for entry in entries):
+                continue
+            line = self.meta_lines[start]
+            pattern, budgets, cursor = "", [], 0
+            for entry in entries:
+                inline, pin = entry.inline or "", entry.pin
+                found = line.index(inline, cursor)
+                pattern += re.escape(line[cursor:found])
+                if pin is not None and entry.ref in applied:
+                    pattern += pin.pattern
+                    budgets.append(pin.budget)
+                else:
+                    pattern += re.escape(inline)
+                cursor = found + len(inline)
+            pins.append((pattern + re.escape(line[cursor:]), tuple(budgets)))
+        return pins
 
 
 # --------------------------------------------------------------------------------------------
@@ -485,7 +514,9 @@ WHOLE_FORMS = (
         True,
     ),
     WholeForm("flow-plain", (), "{{ref: {ref}, seen: {old}}}", "old", True, False),
-    WholeForm("flow-absent", (), "{{ref: {ref}}}", "null", False, False),
+    WholeForm("flow-absent", (), "{{ref: {ref}}}", "null", False, False, "separator"),
+    # The trailing comma this spelling already writes sits inside the entry's marker, so the
+    # appended pair lands after a separator that is already there and writes none of its own.
     WholeForm("flow-trailing-comma", (), "{{ref: {ref}, }}", "null", False, False),
     WholeForm("flow-empty-seen", (), "{{ref: {ref}, seen: }}", "null", True, False),
     WholeForm("flow-explicit-key", (), "{{ref: {ref}, ? seen}}", "null", True, False),
@@ -493,7 +524,7 @@ WHOLE_FORMS = (
     WholeForm("flow-tagged", (), "{{ref: {ref}, seen: !!str {old}}}", "old", True, False),
     WholeForm("flow-anchored", (), "{{ref: {ref}, seen: &{anchor} {old}}}", "old", True, True),
     WholeForm("flow-omap", (), "!!omap [{{ref: {ref}}}, {{seen: {old}}}]", "old", True, False),
-    WholeForm("flow-omap-absent", (), "!!omap [{{ref: {ref}}}]", "null", False, False),
+    WholeForm("flow-omap-absent", (), "!!omap [{{ref: {ref}}}]", "null", False, False, "item"),
 )
 
 FLOW_FORMS = tuple(form for form in WHOLE_FORMS if form.inline is not None)
@@ -599,6 +630,38 @@ def _style_marker(opening: str) -> str | None:
     return opening[:cut] or None
 
 
+def _flow_pin(inline: str, writes: str) -> FlowPin:
+    """Return what an edited flow entry's source still has to look like.
+
+    Three parts, and the middle one is the only place an edit may land. The marker fixes the
+    opening, the brackets the entry closes on fix the end, and between them sits the region
+    the edit is free inside of. Which brackets stay behind the edit follows from what it
+    writes, which is what ``FLOW_EDIT_INDICATORS`` records.
+
+    Free inside is not unbounded: the region carries a punctuation budget, so a rewrite that
+    spelled an inert separator into an entry, or restyled a bracket the loaded value does not
+    depend on, is caught even though every semantic oracle would accept it. The budget is
+    counted rather than positioned, because what an edit may add is known exactly while where
+    inside the region it writes is the rewriter's own choice.
+
+    Args:
+        inline: The entry's flow source as the generator wrote it.
+        writes: Which ``FLOW_EDIT_INDICATORS`` kind an edit of this spelling is.
+
+    Returns:
+        The pattern the source has to match and the budget its edit region has to keep.
+    """
+    closing = inline[len(inline.rstrip("}]")) :]
+    if writes == "item":
+        closing = closing[-1:]
+    marker = _style_marker(inline) or ""
+    region = inline[len(marker) : len(inline) - len(closing)]
+    written = "".join(char for char in region if char in FLOW_INDICATORS)
+    return FlowPin(
+        f"{re.escape(marker)}(.*?){re.escape(closing)}", written + FLOW_EDIT_INDICATORS[writes]
+    )
+
+
 def _whole_entry(index: int, form: WholeForm) -> Entry:
     """Build an entry written as one indivisible spelling, block or flow."""
     fields = _fields(index)
@@ -627,6 +690,7 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
         _style_marker(inline if inline is not None else lines[0]),
         edits,
         appends,
+        None if inline is None else _flow_pin(inline, form.writes),
     )
 
 
@@ -807,19 +871,28 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
 def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
     """Assert layer 3 byte-local preservation for the parts the line footprint cannot pin.
 
-    Three claims, each about source the semantic oracle would let a rewrite restyle freely:
-    an entry's opening keeps the punctuation its collection style is recognized by, so does
-    its carrier's, and an entry sharing a line with an editable one is not merely semantically
-    but byte for byte what it was.
+    Two claims, both about source the semantic oracle would let a rewrite restyle freely. An
+    entry's opening keeps the punctuation its collection style is recognized by. And a line
+    written in flow style, which the footprint can only allow or forbid whole, comes back
+    matching character for character everywhere no edit was allowed to land: its carrier's
+    brackets and separators, its untouched entries, and the punctuation around the value each
+    edited entry was rewritten at.
     """
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
         if entry.marker is not None:
             assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
-    for marker in document.markers:
-        assert marker in raw_meta, f"carrier was restyled: {marker!r}"
-    for segment in document.untouched_neighbours(updates):
-        assert segment in raw_meta, f"an untouched entry was rewritten: {segment!r}"
+    lines = _meta_lines(after)
+    for pattern, budgets in document.flow_lines(updates):
+        matches = (re.fullmatch(pattern, line) for line in lines)
+        match = next((found for found in matches if found is not None), None)
+        assert match is not None, f"a flow line was restyled: no line matches {pattern!r}"
+        for region, budget in zip(match.groups(), budgets, strict=True):
+            spent = "".join(char for char in region if char in FLOW_INDICATORS)
+            assert sorted(spent) == sorted(budget), (
+                f"an edit restyled flow punctuation: wrote {region!r}, "
+                f"whose indicators {spent!r} are not the allowed {budget!r}"
+            )
 
 
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
@@ -923,13 +996,11 @@ def block_root_documents(draw) -> Document:
     body, spans = _block_sequence(entries, pad)
     offset = len(lines) + 1
     # A flow carrier shares its line with the entries it holds, so the whole line is inside the
-    # allowed footprint and its opening needs a marker of its own. A block carrier sits on a
+    # allowed footprint and the flow-line assertion is what pins it. A block carrier sits on a
     # line of its own outside that footprint, which the footprint assertion already pins.
-    markers: tuple[str, ...] = ()
     if carrier == "flow":
         lines.extend(_member_lines("derives_from", entries, "flow", pad))
         spans = [(offset - 1, offset)] * count
-        markers = ("derives_from: [",)
     else:
         lines.append("derives_from:")
         lines.extend(body)
@@ -943,14 +1014,7 @@ def block_root_documents(draw) -> Document:
     for entry in entries:
         notes.extend(entry.notes)
     assembled = Document(
-        tuple(lines),
-        entries,
-        tuple(spans),
-        root,
-        order,
-        _flat_envelope(),
-        tuple(notes),
-        markers=markers,
+        tuple(lines), entries, tuple(spans), root, order, _flat_envelope(), tuple(notes)
     )
     return _finish(draw, assembled)
 
@@ -977,17 +1041,13 @@ def ordered_map_root_documents(draw) -> Document:
     inlines = FLOW_SEPARATOR.join(entry.inline or "" for entry in entries)
     if style == "omap-flow":
         line = f"!!omap [{{id: doc}}, {{derives_from: [{inlines}]}}]"
-        markers = ("!!omap [{id: doc}, {derives_from: [",)
     else:
         line = f"{{id: doc, derives_from: [{inlines}]}}"
-        markers = ("{id: doc, derives_from: [",)
     spans = tuple((0, 1) for _ in entries)
     order = ("id", "derives_from")
     return _finish(
         draw,
-        Document(
-            (line,), entries, spans, {"id": "doc"}, order, _flat_envelope(), (), markers=markers
-        ),
+        Document((line,), entries, spans, {"id": "doc"}, order, _flat_envelope(), ()),
     )
 
 
@@ -1144,16 +1204,12 @@ def _merge_document(draw, shape: str) -> Document:
         (),
         (),
         _style_marker(inline),
+        None,
+        False,
+        _flow_pin(inline, "none"),
     )
     assembled = Document(
-        tuple(lines),
-        (merged,),
-        ((1, 2),),
-        {"id": "doc"},
-        None,
-        _flat_envelope(),
-        (),
-        markers=(f"{key}: {{derives_from: [",),
+        tuple(lines), (merged,), ((1, 2),), {"id": "doc"}, None, _flat_envelope(), ()
     )
     return _finish(draw, assembled)
 
