@@ -39,10 +39,11 @@ check its current state.
    `## [X.Y.Z] - YYYY-MM-DD` so it becomes the first versioned heading, which is the heading
    the version-sync guard reads.
 
-   Those five files are the whole set. `.gx-new-version` is not one of them: it records the
-   version of the scaffolding tool that generated the project, it is gitignored, and it is never
-   bumped on release. `scripts/check_version_sync.py` does not read it, so nothing catches the
-   mistake.
+   Those five are the whole set you edit by hand. `uv.lock` records the same version for the
+   local package and picks it up in step 2. `.gx-new-version` is not in either group: it records
+   the version of the scaffolding tool that generated the project, it is gitignored, and it is
+   never bumped on release. `scripts/check_version_sync.py` does not read it, so nothing catches
+   the mistake.
 2. Run `uv lock` and commit the refreshed `uv.lock`.
 3. Confirm the new changelog section is nonempty. The release job checks this too, before it
    pushes the tag, but failing there costs a release run.
@@ -114,7 +115,7 @@ irreversible in the `publish` job. Find your stage first.
 | Stage | State | Action |
 |-------|-------|--------|
 | Before the version bump merges | Nothing exists | Fix the pull request. No release happened. |
-| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI, no announcement surface | Create the Release by hand to carry the withdrawal notice, then treat it as the row below. |
+| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI; the `release` job already failed, so no run is waiting and no `pypi` approval is pending | Create the Release by hand to carry the withdrawal notice, then resume at step 4 below. |
 | Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI | Withhold approval. Cancel the run. Cut the next version. |
 | Published, non-security regression | On PyPI, installable | Hotfix as the next version. Yank only if the release is broken enough to be worse than nothing. |
 | Published, broken or incompatible enough to mislead installers | On PyPI, installable | Yank, then release the fix. |
@@ -148,19 +149,25 @@ naming the withdrawn version so the withdrawal is searchable from outside the Re
 `Create and push the tag` and `Publish release notes` are separate steps, so a run that dies
 between them leaves the tag with no Release and step 3 with nothing to edit. Do not rerun the
 workflow to produce one: rerunning replays a payload you already know is bad and walks it back
-up to the `pypi` approval. Create the Release directly instead, which is the same call the
+up to the `pypi` approval. Create the Release directly instead, which is very nearly the call the
 workflow would have made:
 
 ```bash
-gh release create vX.Y.Z --title vX.Y.Z --verify-tag \
+gh release create vX.Y.Z --title vX.Y.Z --verify-tag --latest=false \
   --notes 'Withdrawn before publication. Not on PyPI. Superseded by vX.Y.Z+1.'
 ```
 
-This is safe to run by hand because the workflow triggers only on a push to `main` and on pull
-requests, so publishing a Release starts no CI run and advances nothing toward PyPI. It does
-reach Releases subscribers, which is the one upside of arriving at this stage by the tag-only
-path: the withdrawal notice goes out as a publication rather than as a silent edit. Then
-continue at step 4.
+`--latest=false` is the one difference from the call the workflow makes. Left off, `gh` infers
+the Latest release from tag date and version, so the withdrawn version would take the repository
+landing page's **Latest release** slot and the `/releases/latest` API with it, advertising the
+version nobody should install until the fix ships.
+
+This is safe to run by hand because neither workflow in `.github/workflows/` triggers on a
+release: `ci.yml` runs on a push to `main` and on pull requests, and `claude.yml` runs on issue
+and review events. Publishing a Release therefore starts no CI run and advances nothing toward
+PyPI. It does reach Releases subscribers, which is the one upside of arriving at this stage by
+the tag-only path: the withdrawal notice goes out as a publication rather than as a silent edit.
+Then continue at step 4.
 
 ### Yanking a published release
 
@@ -184,11 +191,13 @@ web UI, performed by a person with a role on the project:
 4. Verify it landed:
 
    ```bash
-   curl -s https://pypi.org/pypi/doc-lattice/X.Y.Z/json | python3 -c \
-     'import json,sys; d=json.load(sys.stdin)["urls"][0]; print(d["yanked"], repr(d.get("yanked_reason")))'
+   curl -sf https://pypi.org/pypi/doc-lattice/X.Y.Z/json | python3 -c \
+     'import json,sys; d=json.load(sys.stdin)["info"]; print(d["yanked"], repr(d["yanked_reason"]))'
    ```
 
-   It must print `True` and your reason. The release page also shows a yanked banner.
+   It must print `True` and your reason. The release page also shows a yanked banner. Read
+   `info`, which carries the release-level state a yank sets, and pass curl `-f` so a 404 fails
+   outright instead of piping an error document into a confusing traceback.
 
 5. Announce it, per the section below.
 
@@ -221,7 +230,8 @@ disclosure timeline reporters are asked to follow.
 * **GitHub Security Advisories** carry security announcements and feed Dependabot.
 * **The PyPI yank reason** reaches whoever runs an install that skips the version.
 * **[CHANGELOG.md](CHANGELOG.md)** carries the durable record. A yanked or withdrawn version
-  needs a line saying so, since the release notes come from it.
+  needs a line saying so. That edit reaches no already-published Release: notes are extracted
+  from the changelog once, at release time, so the Release itself has to be edited separately.
 
 Adopters can subscribe to Releases and security alerts specifically through the repository's
 **Watch** menu, under **Custom**. That is worth telling them once external adoption starts,
@@ -283,10 +293,12 @@ from [SECURITY.md](SECURITY.md); the file alone does not create the channel. Ena
 not enough on its own, since a report nobody is notified about is a report nobody reads: at
 least one administrator or security manager must watch the repository for security alerts.
 
-On a transfer, branch protection and environment configuration travel with the repository, and
-so do its secrets. That is the trap: the secrets keep working under the new owner without any
-decision being made about whether they should. Audit and rotate them deliberately as part of the
-move, alongside re-registering the PyPI publisher.
+On a transfer, secrets travel with the repository. That is the trap: they keep working under the
+new owner without any decision being made about whether they should. Audit and rotate them
+deliberately as part of the move, alongside re-registering the PyPI publisher. Do not assume the
+protections came across intact either, since a change of owner or plan can leave `main`
+unprotected or an environment rule unenforced without saying so. Rerun the three commands above
+after any transfer and read the answers.
 
 ### `CLAUDE_CODE_OAUTH_TOKEN`
 

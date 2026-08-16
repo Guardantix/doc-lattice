@@ -45,8 +45,9 @@ A report is actionable when it carries enough to reproduce the behavior:
 * Progress updates on the advisory thread as the fix develops.
 
 doc-lattice is maintained by one person, so these are targets rather than a contractual SLA. If
-7 days pass with no acknowledgement, the report may not have reached anyone; follow up on the
-advisory thread.
+7 days pass with no acknowledgement, assume the report reached nobody rather than following up in
+the same unread thread. Use the fallback above: open a public issue saying only that you have an
+unacknowledged security report and asking for a private channel, with no technical detail.
 
 ### Coordinated disclosure
 
