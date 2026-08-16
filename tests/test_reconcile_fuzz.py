@@ -824,10 +824,17 @@ def _assert_strict_tracked(text: str) -> None:
     assert parse_meta(parts.raw_meta, DOC).disposition == "tracked"
 
 
-def _find_run(haystack: list[str], needle: tuple[str, ...], start: int) -> int | None:
-    """Return the first index at or after ``start`` where ``needle`` appears in ``haystack``."""
+def _find_run(haystack: list[str], needle: tuple[str, ...], start: int, budget: int) -> int | None:
+    """Return where ``needle`` reappears, no further past ``start`` than ``budget`` lines.
+
+    Searching forward without a bound would let a line the model never allowed be spliced in
+    ahead of protected source and then skipped over as if it were part of the replacement. The
+    bound is what the model predicts can stand in that gap: one line per allowed line the
+    rewrite consumed, since a replacement may shrink a member but never grows past the lines
+    it was given, plus one per insert point declared there.
+    """
     width = len(needle)
-    for index in range(start, len(haystack) - width + 1):
+    for index in range(start, min(start + budget, len(haystack) - width) + 1):
         if tuple(haystack[index : index + width]) == needle:
             return index
     return None
@@ -864,20 +871,31 @@ def _assert_footprint_confined(
 ) -> None:
     """Assert every line outside the predicted footprint survives, in order and unchanged.
 
-    Nothing is asserted about the allowed regions themselves: layer 4 permits several
-    different edits there, and the semantic oracle is what decides whether the right one
-    landed. What is asserted is that no other line changed, disappeared, or had anything
-    spliced into the middle of it.
+    Little is asserted about the allowed regions themselves: layer 4 permits several different
+    edits there, and the semantic oracle is what decides whether the right one landed. What is
+    asserted is that no other line changed, disappeared, or had anything spliced into the
+    middle of it, and that each protected run comes back no further along than the lines the
+    model handed the rewrite could have pushed it. That last bound is what stops a line
+    appearing where the model declared no insert point, which is otherwise indistinguishable
+    from source the search simply walked past.
+
+    Inside a member the rewrite shrank, that bound still leaves room a blank line could sit in
+    unnoticed, so the blank lines are counted as well. Every value written here is a one-line
+    plain scalar, so a replaced member keeps none of the blanks it was written with and the
+    rewrite writes none of its own: the blanks left are exactly the ones outside the footprint.
     """
-    position = 0
+    blank = sum(1 for index, line in enumerate(before) if not line.strip() and index not in allowed)
+    assert sum(1 for line in after if not line.strip()) == blank, (
+        f"the rewrite changed how many blank lines the block carries: {blank} survive the edit"
+    )
+    position, consumed = 0, 0
     for start, run in _unallowed_runs(before, allowed, inserts):
-        if start == 0:
-            assert tuple(after[: len(run)]) == run, f"leading lines changed: {run!r}"
-            position = len(run)
-            continue
-        found = _find_run(after, run, position)
+        gap = range(consumed, start)
+        budget = len(allowed & set(gap)) + len(inserts & set(range(consumed, start + 1)))
+        found = _find_run(after, run, position, budget)
         assert found is not None, f"lines outside the allowed footprint changed: {run!r}"
         position = found + len(run)
+        consumed = start + len(run)
     trailing_is_fixed = (
         bool(before) and (len(before) - 1) not in allowed and len(before) not in inserts
     )
