@@ -498,6 +498,12 @@ class Document:
 
 REF_FORMS = (
     RefForm("plain", ("- ref: {ref}",), 2, False, "", False),
+    # A quoted ``ref`` is a layer 2 spelling like any other whose constructed value is a string,
+    # and the ``seen`` table carries both quote styles, so the asymmetry here was an oversight
+    # rather than a decision. The escape a double-quoted scalar can carry matters as much as the
+    # quotes: it is the spelling where locating the value means decoding it first.
+    RefForm("single-quoted", ("- ref: '{ref}'",), 2, False, "", False),
+    RefForm("double-quoted", ('- ref: "{ref}"',), 2, False, "", False),
     RefForm("explicit-pair", ("- ? ref", "  : {ref}"), 2, False, "", False),
     RefForm("trailing-comment", ("- ref: {ref} # {note}",), 2, False, "", True),
     RefForm("literal-block-scalar", ("- ref: |-", "    {ref}"), 2, False, "", False),
@@ -1045,9 +1051,19 @@ def _entry_regions(document: Document, raw_meta: str) -> list[str | None]:
         document: The generated model.
         raw_meta: The rewritten frontmatter block.
 
+    None means one thing only, that the model declared no site for this entry. A site the model
+    did declare and the rewrite then destroyed is a failure here rather than a None, because the
+    two are indistinguishable to the caller and the second is exactly the case a skip must not
+    absorb: an entry located by its ``ref`` head, which no layer 4 edit may touch, cannot lose it
+    to a correct rewrite.
+
     Returns:
         One slice per entry, in order, and None for an entry with no site to locate it by.
     """
+    for entry in document.entries:
+        assert entry.site is None or entry.site in raw_meta, (
+            f"{entry.name} lost the text it is located by: {entry.site!r}"
+        )
     sites = [-1 if entry.site is None else raw_meta.find(entry.site) for entry in document.entries]
     regions: list[str | None] = []
     for position, start in enumerate(sites):
@@ -2107,14 +2123,53 @@ def _single_entry_document(entry: Entry, root_lines: tuple[str, ...] = ("id: doc
 # Family 2a: refusals, generated at the exact scope AD-31 layer 5 guarantees each one at.
 # --------------------------------------------------------------------------------------------
 
+# Each row carries the message its refusal has to give, because this pool produces three
+# different ones and a single shared pattern would let any row answer for any other. Only the
+# project's own prose is pinned: everything after ``to reconcile: `` is the loader's, and it is
+# worded differently across the ruamel releases and accelerator cells CI runs.
 UNREADABLE_ON_ANY_REREAD = (
-    ("unclosed-fence", "id: doc\nderives_from:\n  - ref: up-0#s0\n", False),
-    ("unparseable-flow", "id: doc\nderives_from: [1, 2\n", True),
-    ("unparseable-indent", "id: doc\n  stray: 1\nderives_from: []\n", True),
-    ("root-block-sequence", "- one\n- two\n", True),
-    ("root-flow-sequence", "[one, two]\n", True),
-    ("root-bare-scalar", "just prose\n", True),
-    ("root-quoted-scalar", '"just prose"\n', True),
+    (
+        "unclosed-fence",
+        "id: doc\nderives_from:\n  - ref: up-0#s0\n",
+        False,
+        r"unclosed YAML frontmatter in doc\.md",
+    ),
+    (
+        "unparseable-flow",
+        "id: doc\nderives_from: [1, 2\n",
+        True,
+        r"cannot parse frontmatter of doc\.md to reconcile: ",
+    ),
+    (
+        "unparseable-indent",
+        "id: doc\n  stray: 1\nderives_from: []\n",
+        True,
+        r"cannot parse frontmatter of doc\.md to reconcile: ",
+    ),
+    (
+        "root-block-sequence",
+        "- one\n- two\n",
+        True,
+        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+    ),
+    (
+        "root-flow-sequence",
+        "[one, two]\n",
+        True,
+        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+    ),
+    (
+        "root-bare-scalar",
+        "just prose\n",
+        True,
+        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+    ),
+    (
+        "root-quoted-scalar",
+        '"just prose"\n',
+        True,
+        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+    ),
 )
 
 NON_LIST_DERIVES_FROM = (
@@ -2138,6 +2193,31 @@ NON_STRING_REFS = (
 COLLECTION_SEENS = ("[1, 2]", "{a: b}", "!!omap [{a: b}]")
 
 
+# A leaked internal: a bare ``_name`` that is not reached through an attribute or a module path.
+_INTERNAL_NAME = re.compile(r"(?<![\w.])_[A-Za-z]\w*")
+
+
+def _assert_clean_refusal(error: UnreadableDocError, name: str = "") -> None:
+    """Assert a refusal is a project sentence about this document, not a leaked internal.
+
+    ``UnreadableDocError`` carries its code from its own constructor, so asserting the code says
+    nothing that the exception type has not already said. What is worth pinning is the property
+    the code stands for: that the refusal names the document and reads as prose a user can act
+    on. A refusal with no message at all, or one carrying an internal type name, satisfies every
+    type-level claim and fails a reader.
+
+    A ``<`` cannot be banned outright: the loader's own tail, which the project prefix hands
+    through, contains ``in "<unicode string>"``.
+    """
+    message = str(error)
+    where = f" [{name}]" if name else ""
+    assert message.strip(), f"a refusal carried no message at all{where}"
+    assert "doc.md" in message, f"a refusal did not name the document{where}: {message!r}"
+    assert not _INTERNAL_NAME.search(message), f"a refusal leaked an internal name: {message!r}"
+    assert "<class " not in message, f"a refusal leaked a class repr: {message!r}"
+    assert "object at 0x" not in message, f"a refusal leaked an object repr: {message!r}"
+
+
 def _fenced(meta: str, envelope: Envelope) -> str:
     """Render an arbitrary frontmatter block inside a layer 2a envelope."""
     text = f"{envelope.open_fence}\n{meta}{envelope.close_fence}"
@@ -2149,14 +2229,14 @@ def _fenced(meta: str, envelope: Envelope) -> str:
 @FUZZ_SETTINGS
 @given(data=st.data())
 def test_any_reread_refuses_a_broken_block(data) -> None:
-    name, meta, closed = data.draw(st.sampled_from(UNREADABLE_ON_ANY_REREAD))
+    name, meta, closed, message = data.draw(st.sampled_from(UNREADABLE_ON_ANY_REREAD))
     envelope = data.draw(envelopes(endings=("\n", "\r\n", "\r")))
     text = _fenced(meta, envelope) if closed else _with_ending(f"---\n{meta}body\n", "\n")
 
-    with pytest.raises(UnreadableDocError) as error:
+    with pytest.raises(UnreadableDocError, match=message) as error:
         _rewrite_bytes(text, {"up-0#s0": "new0000beef"})
 
-    assert error.value.code == "UNREADABLE_DOC", name
+    _assert_clean_refusal(error.value, name)
 
 
 @FUZZ_SETTINGS
@@ -2173,10 +2253,14 @@ def test_a_mapping_root_refuses_a_derives_from_that_is_not_a_list(data) -> None:
 @FUZZ_SETTINGS
 @given(data=st.data())
 def test_reached_planning_refuses_a_malformed_entry(data) -> None:
-    bad = data.draw(
+    # The two pools refuse for different reasons and say so differently, so each carries the
+    # message it has to give rather than sharing one pattern loose enough to cover both.
+    not_a_mapping = r"frontmatter derives_from entry in doc\.md is not a mapping"
+    not_a_string = r"frontmatter derives_from entry ref in doc\.md is not a string"
+    bad, message = data.draw(
         st.one_of(
-            st.sampled_from(NON_MAPPING_ENTRIES).map(lambda line: (line,)),
-            st.sampled_from(NON_STRING_REFS),
+            st.sampled_from(NON_MAPPING_ENTRIES).map(lambda line: ((line,), not_a_mapping)),
+            st.sampled_from(NON_STRING_REFS).map(lambda rows: (rows, not_a_string)),
         )
     )
     good = ("- ref: up-9#s9", "  seen: old0009")
@@ -2190,10 +2274,10 @@ def test_reached_planning_refuses_a_malformed_entry(data) -> None:
         data.draw(envelopes()),
     )
 
-    with pytest.raises(UnreadableDocError) as error:
+    with pytest.raises(UnreadableDocError, match=message) as error:
         _rewrite_bytes(text, updates)
 
-    assert error.value.code == "UNREADABLE_DOC"
+    _assert_clean_refusal(error.value)
 
 
 @FUZZ_SETTINGS
@@ -2648,12 +2732,13 @@ def test_a_malformed_ordered_map_is_reported_as_an_unreadable_document(
     """
     text = f"---\n{meta}---\nbody\n"
 
-    with pytest.raises(UnreadableDocError) as error:
+    with pytest.raises(
+        UnreadableDocError, match=r"cannot parse frontmatter of doc\.md to reconcile: "
+    ) as error:
         apply_reconcile(text, updates, DOC)
 
-    assert error.value.code == "UNREADABLE_DOC"
     assert isinstance(error.value, ProjectError)
-    assert "doc.md" in str(error.value)
+    _assert_clean_refusal(error.value)
 
 
 @pytest.mark.parametrize("meta", MERGES_INSIDE_ORDERED_MAPS)
@@ -2667,10 +2752,12 @@ def test_a_merge_inside_an_ordered_map_is_reported_as_an_unreadable_document(met
     """
     text = f"---\n{meta}---\nbody\n"
 
-    with pytest.raises(UnreadableDocError) as error:
+    with pytest.raises(
+        UnreadableDocError, match=r"cannot parse frontmatter of doc\.md to reconcile: "
+    ) as error:
         apply_reconcile(text, {"up-0#s0": "new0000beef"}, DOC)
 
-    assert error.value.code == "UNREADABLE_DOC"
+    _assert_clean_refusal(error.value)
 
 
 # --------------------------------------------------------------------------------------------
