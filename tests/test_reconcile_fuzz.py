@@ -596,6 +596,44 @@ SEEN_FORMS = (
         True,
         2,
     ),
+    # An empty value with its properties written below it. Layer 4 has replacement consume those
+    # properties, and where the value is the empty scalar there is no value text to write over,
+    # so the removal has to reach a line the member occupies alone and take the line break with
+    # it. Every row above writes a value, so none of them reaches that arm.
+    #
+    # A tagged empty scalar constructs to the empty string rather than null, and the empty string
+    # is a ``str``, so these sit in the strict column exactly as the untagged ones do.
+    #
+    # The three commented rows are the ones that reach the break removal. Without a comment the
+    # value edit already runs up to the first property and consumes the break itself, so the
+    # removal has nothing left to widen; the comment stops the value edit short and leaves the
+    # break to the removal. Both are generated, since they are different paths to one outcome.
+    SeenForm("empty-anchor-on-its-own-line", ("seen:", "  &{anchor}"), "null", True, True, False),
+    SeenForm("empty-tag-on-its-own-line", ("seen:", "  !!str"), "empty-string", True, False, False),
+    SeenForm(
+        "empty-comment-then-anchor-below",
+        ("seen: # {seen_note}", "  &{anchor}"),
+        "null",
+        True,
+        True,
+        True,
+    ),
+    SeenForm(
+        "empty-comment-then-tag-below",
+        ("seen: # {seen_note}", "  !!str"),
+        "empty-string",
+        True,
+        False,
+        True,
+    ),
+    SeenForm(
+        "empty-comment-then-both-below",
+        ("seen: # {seen_note}", "  !!str", "  &{anchor}"),
+        "empty-string",
+        True,
+        True,
+        True,
+    ),
 )
 
 WHOLE_FORMS = (
@@ -666,12 +704,21 @@ def _fields(index: int) -> dict[str, str]:
 
 
 def _seen_value(kind: str, old: str) -> str | None:
-    """Return the value a ``seen`` spelling of ``kind`` loads as."""
-    if kind == "null":
-        return None
-    if kind == "old-newline":
-        return f"{old}\n"
-    return f"{old}\n\n" if kind == "old-blank-line" else old
+    """Return the value a ``seen`` spelling of ``kind`` loads as.
+
+    A dict rather than a chain of comparisons, so a kind no row declares raises here instead of
+    falling through to the plain text. The fall-through was the quiet failure: a typo in a new
+    row's ``value`` made the oracle expect the old value, which is what most spellings load to
+    anyway, so the row passed while claiming nothing.
+    """
+    values: dict[str, str | None] = {
+        "null": None,
+        "empty-string": "",
+        "old": old,
+        "old-newline": f"{old}\n",
+        "old-blank-line": f"{old}\n\n",
+    }
+    return values[kind]
 
 
 def _ref_value(fields: dict[str, str], ref_form: RefForm) -> str:
