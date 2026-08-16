@@ -152,9 +152,17 @@ with `uvx --from git+...@vX.Y.Z`. If you arrived here by the tag-only path below
 apply, because creating that Release was itself a publication and it already reached
 subscribers. Otherwise the window is tolerable when the fix follows promptly and nothing is on
 PyPI. It is not tolerable if you know someone is already installing from that git ref, or if the
-defect is dangerous rather than merely wrong. In either case, do not wait for the
-next release to carry the news: tell the affected adopters directly, and open a GitHub issue
-naming the withdrawn version so the withdrawal is searchable from outside the Releases page.
+defect is dangerous rather than merely wrong. In either case, tell the affected adopters
+directly rather than waiting for the next release to carry the news. Direct contact is not
+public disclosure and stays available whatever the defect turns out to be.
+
+Whether the withdrawal also gets a public GitHub issue depends on which kind of defect it is.
+For an ordinary one, open an issue naming the withdrawn version, so the withdrawal is
+searchable from outside the Releases page. For a vulnerability that is not already public, do
+not. No fix has shipped at this stage, and an issue naming a withdrawn version that is still
+installable from its git ref points at an unfixed artifact anyone can still fetch. Run that
+case on the sequence under "Security vulnerabilities" below, which holds the public record
+until the advisory publishes.
 
 `Create and push the tag` and `Publish release notes` are separate steps, so a run that dies
 between them leaves the tag with no Release and step 3 with nothing to edit. Do not rerun the
