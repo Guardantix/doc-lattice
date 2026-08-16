@@ -2169,9 +2169,12 @@ def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> None:
     assert rewrites[0].applied == document.applied(updates)
     assert _reload(after) == document.expected(updates)
     # Layer 3 is a claim about layer 2 documents, so recovery is held only to the layer 4
-    # footprint and to meaning the same thing afterwards.
+    # footprint and to meaning the same thing afterwards. Consuming the replaced value's node
+    # properties is part of that footprint rather than of layer 3, and this column is where a
+    # tagged non-string ``seen`` is generated, so the bare-hash claim is made here too.
     allowed, inserts = document.footprint(updates)
     _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
+    _assert_replacements_stay_bare(after, updates)
 
 
 @FUZZ_SETTINGS
