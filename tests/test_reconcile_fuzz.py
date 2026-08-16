@@ -26,7 +26,7 @@ from hypothesis import strategies as st
 from doc_lattice.error_types import ConfigError, ProjectError, UnreadableDocError
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
 from doc_lattice.hashing import normalize_newlines
-from doc_lattice.reconcile import apply_reconcile, plan_rewrites
+from doc_lattice.reconcile import Rewrite, apply_reconcile, plan_rewrites
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DOC = Path("doc.md")
@@ -80,8 +80,11 @@ class RefForm:
         name: Identifier used in failure messages.
         templates: Entry lines up to and including ``ref``, the first opening with ``- ``.
         key_indent: Column the entry's own keys sit at, relative to the sequence item.
-        split: Whether the ref is written across two lines, which makes its value the two
-            halves joined by a space.
+        split: Whether the ref is written across two lines. A plain, double-quoted or folded
+            scalar all fold the break into a single space, so the value is the two halves
+            joined by one.
+        trailing: What the spelling's chomping indicator leaves after the last line, which is
+            a newline for a clipped block scalar and nothing for a stripped one.
         note: Whether the spelling carries a trailing comment.
     """
 
@@ -89,6 +92,7 @@ class RefForm:
     templates: tuple[str, ...]
     key_indent: int
     split: bool
+    trailing: str
     note: bool
 
 
@@ -151,10 +155,18 @@ class Entry:
         anchor: The anchor name written on the ``seen`` value, when it carries one.
         notes: Comment texts written inside the entry.
         extras: Members beyond ``ref`` and ``seen``, which only the fresh reread tolerates.
-        marker: The opening of the entry's source, up to the point an allowed edit may reach.
-            Layer 3 keeps the collection style the author wrote, so this text has to come back
-            verbatim. It is None for an entry whose whole site layer 4 may replace, which is
-            what an alias site expansion does.
+        marker: The opening of the entry's source, up to the point an allowed edit may reach,
+            carrying the punctuation that tells its collection style apart: a block entry
+            keeps its sequence dash, a flow entry keeps the bracket it opens on. Layer 3 keeps
+            the style the author wrote, so this text has to come back verbatim. It is None for
+            an entry whose whole site layer 4 may replace, which is what an alias site
+            expansion does.
+        edits: Offsets into ``lines`` a rewrite of this entry may change, which for most
+            spellings is the ``seen`` member and nothing else. None means the shape's layer 4
+            mutation families genuinely spread across the entry, so the whole span stays
+            allowed rather than being modelled line by line.
+        appends: Whether a rewrite may insert a line just past the entry, which is how a
+            missing ``seen`` pair and the ``:`` an explicit ``? seen`` lacks are written.
     """
 
     name: str
@@ -167,6 +179,8 @@ class Entry:
     notes: tuple[str, ...]
     extras: tuple[tuple[str, object], ...] = ()
     marker: str | None = None
+    edits: tuple[int, ...] | None = None
+    appends: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,26 +267,40 @@ class Document:
             expected[key] = entries
         return expected
 
-    def allowed_lines(self, updates: dict[str, str]) -> set[int]:
-        """Return the ``meta_lines`` indices a rewrite of ``updates`` may touch.
+    def footprint(self, updates: dict[str, str]) -> tuple[set[int], set[int]]:
+        """Return the layer 4 footprint of ``updates`` as changeable lines and insert points.
 
-        The allowance is the layer 4 footprint for this shape: the source of every entry the
-        run targets, plus every alias site an anchored ``seen`` being replaced may be
-        relocated onto. It is deliberately a superset within those regions, since layer 4
-        permits several edits there and pinning which one landed would assert more than
-        AD-31 does.
+        The allowance is modelled per spelling rather than per entry wherever the model can
+        predict it exactly: an ordinary in-place replacement may touch the ``seen`` member's
+        own lines and nothing else, so an edit that also restyled the ``ref``, reindented the
+        entry or disturbed an extra member is caught even though the loaded value is
+        unchanged. Only the shapes whose mutation families genuinely spread keep the whole
+        entry span, which is what ``Entry.edits`` being None marks. An alias site an anchored
+        ``seen`` may be relocated onto is added wherever it is written, since layer 4 allows
+        that edit to land outside the entry entirely.
+
+        Returns:
+            The indices whose line may change or disappear, and the indices a rewrite may
+            insert new lines immediately before.
         """
         applied = self.applied(updates)
         allowed: set[int] = set()
+        inserts: set[int] = set()
         for entry, (start, stop) in zip(self.entries, self.spans, strict=True):
             if entry.ref not in applied:
                 continue
-            allowed.update(range(start, stop))
+            if entry.edits is None:
+                allowed.update(range(start, stop))
+                inserts.add(stop)
+            else:
+                allowed.update(start + offset for offset in entry.edits)
+                if entry.appends:
+                    inserts.add(stop)
             if entry.anchor is None:
                 continue
             alias = f"*{entry.anchor}"
             allowed.update(index for index, line in enumerate(self.meta_lines) if alias in line)
-        return allowed
+        return allowed, inserts
 
 
 # --------------------------------------------------------------------------------------------
@@ -280,15 +308,28 @@ class Document:
 # --------------------------------------------------------------------------------------------
 
 REF_FORMS = (
-    RefForm("plain", ("- ref: {ref}",), 2, False, False),
-    RefForm("explicit-pair", ("- ? ref", "  : {ref}"), 2, False, False),
-    RefForm("trailing-comment", ("- ref: {ref} # note{index}",), 2, False, True),
-    RefForm("block-scalar", ("- ref: |-", "    {ref}"), 2, False, False),
-    RefForm("multi-line-double-quoted", ('- ref: "{head}', '    {tail}"'), 2, True, False),
-    RefForm("multi-line-plain", ("- ref: {head}", "    {tail}"), 2, True, False),
-    RefForm("entry-anchor", ("- &entry{index}", "    ref: {ref}"), 4, False, False),
-    RefForm("entry-tag", ("- !!map", "    ref: {ref}"), 4, False, False),
-    RefForm("entry-anchor-and-tag", ("- &entry{index} !!map", "    ref: {ref}"), 4, False, False),
+    RefForm("plain", ("- ref: {ref}",), 2, False, "", False),
+    RefForm("explicit-pair", ("- ? ref", "  : {ref}"), 2, False, "", False),
+    RefForm("trailing-comment", ("- ref: {ref} # note{index}",), 2, False, "", True),
+    RefForm("literal-block-scalar", ("- ref: |-", "    {ref}"), 2, False, "", False),
+    RefForm("clipped-block-scalar", ("- ref: |", "    {ref}"), 2, False, "\n", False),
+    RefForm("folded-block-scalar", ("- ref: >-", "    {ref}"), 2, False, "", False),
+    RefForm("clipped-folded-block-scalar", ("- ref: >", "    {ref}"), 2, False, "\n", False),
+    RefForm(
+        "multi-line-folded-block-scalar",
+        ("- ref: >-", "    {head}", "    {tail}"),
+        2,
+        True,
+        "",
+        False,
+    ),
+    RefForm("multi-line-double-quoted", ('- ref: "{head}', '    {tail}"'), 2, True, "", False),
+    RefForm("multi-line-plain", ("- ref: {head}", "    {tail}"), 2, True, "", False),
+    RefForm("entry-anchor", ("- &entry{index}", "    ref: {ref}"), 4, False, "", False),
+    RefForm("entry-tag", ("- !!map", "    ref: {ref}"), 4, False, "", False),
+    RefForm(
+        "entry-anchor-and-tag", ("- &entry{index} !!map", "    ref: {ref}"), 4, False, "", False
+    ),
 )
 
 SEEN_FORMS = (
@@ -402,42 +443,61 @@ def _seen_value(kind: str, old: str) -> str | None:
     return f"{old}\n" if kind == "old-newline" else old
 
 
+def _ref_value(fields: dict[str, str], ref_form: RefForm) -> str:
+    """Return the value a ``ref`` spelling loads as, its folding and chomping applied."""
+    written = f"{fields['head']} {fields['tail']}" if ref_form.split else fields["ref"]
+    return f"{written}{ref_form.trailing}"
+
+
 def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry:
     """Build an entry from one ``ref`` spelling and one ``seen`` spelling."""
     fields = _fields(index)
     pad = " " * ref_form.key_indent
     lines = [template.format(**fields) for template in ref_form.templates]
     lines.extend(f"{pad}{template.format(**fields)}" for template in seen_form.templates)
-    ref = f"{fields['head']} {fields['tail']}" if ref_form.split else fields["ref"]
     notes = [f"# {fields['note']}"] if ref_form.note or seen_form.note else []
+    # Every edit an in-place replacement plans lands on the member's own lines: the value, the
+    # properties written above it, and the block-scalar header comment that moves onto the
+    # replacement. A member that is absent, or an explicit key with no `:` to write after,
+    # takes a line of its own just past the entry instead.
+    written = len(ref_form.templates)
+    edits = tuple(range(written, written + len(seen_form.templates)))
+    appends = not seen_form.present or seen_form.name == "explicit-key-no-value"
     return Entry(
         f"{ref_form.name}+{seen_form.name}",
         tuple(lines),
         None,
-        ref,
+        _ref_value(fields, ref_form),
         _seen_value(seen_form.value, fields["old"]),
         seen_form.present,
         fields["anchor"] if seen_form.anchored else None,
         tuple(notes),
         (),
         _style_marker(lines[0]),
+        edits,
+        appends,
     )
 
 
-def _style_marker(first_line: str) -> str | None:
+def _style_marker(opening: str) -> str | None:
     """Return the opening of an entry's source that no allowed edit may restyle.
 
     The run stops at the first place an edit can reach, which is the ``seen`` member or the
     bracket a flow collection closes on, since an appended member is written just inside it.
-    The sequence dash is dropped so one marker serves an entry written as a block sequence
-    item and the same entry written inside a flow sequence.
+    The punctuation that opens the entry is kept rather than trimmed, because that is what
+    tells the two collection styles apart: a block entry is recognized by the sequence dash
+    its keys hang off, and a flow entry by the bracket it opens on, so restyling either into
+    the other loses the marker instead of leaving it as a substring of the replacement.
     """
-    body = first_line.removeprefix("- ")
     cut = min(
-        (index for index in (body.find("seen"), body.find("}"), body.find("]")) if index != -1),
-        default=len(body),
+        (
+            index
+            for index in (opening.find("seen"), opening.find("}"), opening.find("]"))
+            if index != -1
+        ),
+        default=len(opening),
     )
-    return body[:cut] or None
+    return opening[:cut] or None
 
 
 def _whole_entry(index: int, form: WholeForm) -> Entry:
@@ -446,7 +506,15 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
     lines = tuple(template.format(**fields) for template in form.templates)
     inline = None if form.inline is None else form.inline.format(**fields)
     if inline is not None:
+        # A flow entry is one line however its sequence carries it, so its own line is both
+        # the whole span and the only place an edit can land: even an appended member is
+        # written just inside the bracket rather than on a line of its own.
         lines = (f"- {inline}",)
+        edits: tuple[int, ...] = (0,)
+        appends = False
+    else:
+        edits = tuple(offset for offset, line in enumerate(lines) if "seen" in line)
+        appends = not form.present or "explicit-key" in form.name
     return Entry(
         form.name,
         lines,
@@ -457,7 +525,9 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
         fields["anchor"] if form.anchored else None,
         (),
         (),
-        _style_marker(lines[0]),
+        _style_marker(inline if inline is not None else lines[0]),
+        edits,
+        appends,
     )
 
 
@@ -565,16 +635,23 @@ def _find_run(haystack: list[str], needle: tuple[str, ...], start: int) -> int |
     return None
 
 
-def _unallowed_runs(lines: list[str], allowed: set[int]) -> list[tuple[int, tuple[str, ...]]]:
-    """Group the lines outside the allowed footprint into contiguous runs."""
+def _unallowed_runs(
+    lines: list[str], allowed: set[int], inserts: set[int]
+) -> list[tuple[int, tuple[str, ...]]]:
+    """Group the lines outside the allowed footprint into contiguous runs.
+
+    A run also breaks at a permitted insert point, so a line spliced into the middle of
+    otherwise untouched source has to be accounted for by the model rather than absorbed as
+    if it had landed in a gap.
+    """
     runs: list[tuple[int, tuple[str, ...]]] = []
     current: list[str] = []
     start = 0
     for index, line in enumerate(lines):
+        if current and (index in allowed or index in inserts):
+            runs.append((start, tuple(current)))
+            current = []
         if index in allowed:
-            if current:
-                runs.append((start, tuple(current)))
-                current = []
             continue
         if not current:
             start = index
@@ -584,15 +661,18 @@ def _unallowed_runs(lines: list[str], allowed: set[int]) -> list[tuple[int, tupl
     return runs
 
 
-def _assert_footprint_confined(before: list[str], after: list[str], allowed: set[int]) -> None:
+def _assert_footprint_confined(
+    before: list[str], after: list[str], allowed: set[int], inserts: set[int]
+) -> None:
     """Assert every line outside the predicted footprint survives, in order and unchanged.
 
     Nothing is asserted about the allowed regions themselves: layer 4 permits several
     different edits there, and the semantic oracle is what decides whether the right one
-    landed.
+    landed. What is asserted is that no other line changed, disappeared, or had anything
+    spliced into the middle of it.
     """
     position = 0
-    for start, run in _unallowed_runs(before, allowed):
+    for start, run in _unallowed_runs(before, allowed, inserts):
         if start == 0:
             assert tuple(after[: len(run)]) == run, f"leading lines changed: {run!r}"
             position = len(run)
@@ -600,7 +680,10 @@ def _assert_footprint_confined(before: list[str], after: list[str], allowed: set
         found = _find_run(after, run, position)
         assert found is not None, f"lines outside the allowed footprint changed: {run!r}"
         position = found + len(run)
-    if before and (len(before) - 1) not in allowed:
+    trailing_is_fixed = (
+        bool(before) and (len(before) - 1) not in allowed and len(before) not in inserts
+    )
+    if trailing_is_fixed:
         assert position == len(after), "content changed after the last allowed line"
 
 
@@ -645,9 +728,8 @@ def _assert_supported_round_trip(document: Document, updates: dict[str, str]) ->
     assert _reload(after) == document.expected(updates)
     _assert_envelope_preserved(document, text, after)
     _assert_styles_preserved(document, after)
-    _assert_footprint_confined(
-        _meta_lines(text), _meta_lines(after), document.allowed_lines(updates)
-    )
+    allowed, inserts = document.footprint(updates)
+    _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
     if document.key_order is not None:
         reloaded = _reload(after)
         assert isinstance(reloaded, dict)
@@ -1514,9 +1596,8 @@ def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> None:
     assert _reload(after) == document.expected(updates)
     # Layer 3 is a claim about layer 2 documents, so recovery is held only to the layer 4
     # footprint and to meaning the same thing afterwards.
-    _assert_footprint_confined(
-        _meta_lines(text), _meta_lines(after), document.allowed_lines(updates)
-    )
+    allowed, inserts = document.footprint(updates)
+    _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
 
 
 @FUZZ_SETTINGS
@@ -1654,19 +1735,37 @@ def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
 
     Which AD-31 column this document sits in depends on the parser the strict boundary runs:
     the optional ``ruamel.yaml.clib`` composer rejects a duplicate anchor definition, while
-    the pure one warns and rebinds. The rewrite path pins the pure parser either way, so the
-    rebinding behavior itself is asserted on every leg and only the column changes.
+    the pure one warns and rebinds.
+
+    Where the strict load accepts it the document is a layer 2 one, so the rewrite is
+    mandatory and the two rebinding invariants below are asserted unconditionally. Where the
+    strict load refuses it the document is reread-only, and layer 5 admits a clean refusal or
+    a no-op as readily as a rewrite; the invariants are then asserted only on a rewrite that
+    was actually produced, because demanding one would promote non-contractual recovery into
+    a commitment. The safe-outcome union above has already judged the other two outcomes.
     """
     document = _reused_anchor_document(None, "reused-anchor")
     updates = {document.entries[0].ref: "new0000beef"}
 
     if REUSED_ANCHORS_ARE_STRICT:
         _assert_supported_round_trip(document, updates)
-    else:
-        _assert_not_strictly_tracked(document.render())
-        _assert_safe_recovery(document, updates)
+        _assert_anchor_rebinding_survived(_rewrite_bytes(document.render(), updates))
+        return
 
-    after = _rewrite_bytes(document.render(), updates)[0].after.decode("utf-8")
+    _assert_not_strictly_tracked(document.render())
+    _assert_safe_recovery(document, updates)
+    try:
+        rewrites = _rewrite_bytes(document.render(), updates)
+    except UnreadableDocError:
+        return
+    _assert_anchor_rebinding_survived(rewrites)
+
+
+def _assert_anchor_rebinding_survived(rewrites: list[Rewrite]) -> None:
+    """Assert a rewrite left the alias reading the later definition of a reused anchor name."""
+    if not rewrites:
+        return
+    after = rewrites[0].after.decode("utf-8")
     # The relocation must not land on the alias site, which reads the second definition.
     assert "seen: &shared old0001" in after
     assert "seen: *shared" in after
