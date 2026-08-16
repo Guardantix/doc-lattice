@@ -198,9 +198,10 @@ class Entry:
         notes: Comment texts written inside the entry.
         extras: Members beyond ``ref`` and ``seen``, which only the fresh reread tolerates.
         site: Text that occurs in this entry's source and nowhere else in the document, which
-            is what locates the entry in the rewritten block so its comments can be looked for
-            inside it rather than anywhere in the frontmatter. It is None for the entries whose
-            source is spelled out by hand, none of which carry a comment.
+            is what locates the entry in the rewritten block so a claim about its own source is
+            read inside it rather than anywhere in the frontmatter: where its comments came
+            back, and what the member an edit landed on still opens with. It is None for an
+            entry no such claim is made about.
         marker: The opening of the entry's source, up to the point an allowed edit may reach,
             carrying the punctuation that tells its collection style apart: a block entry
             keeps its sequence dash, a flow entry keeps the bracket it opens on. Layer 3 keeps
@@ -1022,15 +1023,20 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
     only allow or forbid, still opens with the key the author spelled it with and the spaces
     they left after it, since layer 4 replaces that member's value rather than the line it
     sits on.
+
+    The block claim is made of every entry the model gives a member to read it off, rather than
+    only of the entries an update was applied to. An entry no edit may reach satisfies it for
+    free, since nothing inside it may change, and restricting it to the applied ones would miss
+    the case in between: a relocated anchor definition is written onto a member of an entry no
+    update named, whose key and separator are the author's source just the same.
     """
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
         if entry.marker is not None:
             assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
-    applied = document.applied(updates)
     for entry, region in zip(document.entries, _entry_regions(document, raw_meta), strict=True):
         head = _member_head(entry)
-        if head is None or region is None or entry.ref not in applied:
+        if head is None or region is None:
             continue
         followed = [
             line.lstrip()[len(head) :]
@@ -1318,22 +1324,55 @@ SCALAR_CONTENTS = (
 )
 
 
-def _relocating_anchor_document(draw, _shape: str) -> Document:
-    """An anchored ``seen`` whose replacement relocates the old value onto its alias site."""
-    content = draw(st.sampled_from(SCALAR_CONTENTS))
-    value = content.encode("utf-8").decode("unicode_escape")
+def _relocating_anchor_pair(written: str, value: str) -> Document:
+    """Build an anchored ``seen`` and the alias site its old value is relocated onto.
+
+    The anchored entry is modelled member by member, the way a table-built block entry is: its
+    ``seen`` is the one line an edit may land on, and the opening it hangs off comes back
+    verbatim. Leaving it to the whole-span allowance instead would let a rewrite restyle the
+    ``ref`` beside it, which no claim here would see: the relocation is what this shape is
+    generated for, and it reaches the ``seen`` member alone.
+
+    The alias site is modelled the same way, since only its value is an alias: layer 4 replaces
+    that node with the value the anchored member displaced, and writes it past the ``seen`` key
+    the author spelled there like any other member it rewrites.
+
+    Args:
+        written: The anchored ``seen`` value as the author spelled it, quoting included.
+        value: The value that source loads as, at both sites.
+
+    Returns:
+        The two-entry document, with the footprint of a relocation modelled on it.
+    """
+    aliased = ("- ref: up-1#s1", "  seen: *shared")
+    anchored = ("- ref: up-0#s0", f"  seen: &shared {written}")
     first = Entry(
         "anchored-seen",
-        ("- ref: up-0#s0", f'  seen: &shared "{content}"'),
+        anchored,
         None,
         "up-0#s0",
         value,
         True,
         "shared",
         (),
+        (),
+        _style_marker(anchored[0]),
+        (1,),
+        site="up-0#s0",
     )
     second = Entry(
-        "alias-seen", ("- ref: up-1#s1", "  seen: *shared"), None, "up-1#s1", value, True, None, ()
+        "alias-seen",
+        aliased,
+        None,
+        "up-1#s1",
+        value,
+        True,
+        None,
+        (),
+        (),
+        _style_marker(aliased[0]),
+        (1,),
+        site="up-1#s1",
     )
     lines = ["id: doc", "derives_from:", *first.lines, *second.lines]
     return Document(
@@ -1345,6 +1384,13 @@ def _relocating_anchor_document(draw, _shape: str) -> Document:
         _flat_envelope(),
         (),
     )
+
+
+def _relocating_anchor_document(draw, _shape: str) -> Document:
+    """An anchored ``seen`` whose replacement relocates the old value onto its alias site."""
+    content = draw(st.sampled_from(SCALAR_CONTENTS))
+    value = content.encode("utf-8").decode("unicode_escape")
+    return _relocating_anchor_pair(f'"{content}"', value)
 
 
 def _merge_document(draw, shape: str) -> Document:
@@ -2226,29 +2272,7 @@ RELOCATED_CONTENTS = (
 @pytest.mark.parametrize(("written", "value"), RELOCATED_CONTENTS)
 def test_an_anchored_seen_relocates_as_escapes_and_reparses(written: str, value: str) -> None:
     """A displaced anchored value is re-emitted escape-only, so the alias site still reparses."""
-    first = Entry(
-        "anchored-seen",
-        ("- ref: up-0#s0", f"  seen: &shared {written}"),
-        None,
-        "up-0#s0",
-        value,
-        True,
-        "shared",
-        (),
-    )
-    second = Entry(
-        "alias-seen", ("- ref: up-1#s1", "  seen: *shared"), None, "up-1#s1", value, True, None, ()
-    )
-    lines = ("id: doc", "derives_from:", *first.lines, *second.lines)
-    document = Document(
-        lines,
-        (first, second),
-        ((2, 4), (4, 6)),
-        {"id": "doc"},
-        ("id", "derives_from"),
-        _flat_envelope(),
-        (),
-    )
+    document = _relocating_anchor_pair(written, value)
 
     _assert_supported_round_trip(document, {"up-0#s0": "new0000beef"})
 
