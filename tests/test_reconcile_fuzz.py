@@ -419,7 +419,22 @@ SEEN_FORMS = (
     SeenForm(
         "folded-keep-blank-line", ("seen: >+", "  {old}", ""), "old-blank-line", True, False, False
     ),
+    # AD-31 declares an explicit indentation indicator on a block scalar in either style, and
+    # YAML lets the two header indicators be written in either order, so all four headers are
+    # spelled out rather than left to stand for one another. A clipped one joins them because
+    # the indicator has to compose with a retained line break as well as a stripped one.
     SeenForm("literal-indent-indicator", ("seen: |2-", "  {old}"), "old", True, False, False),
+    SeenForm("folded-indent-indicator", ("seen: >2-", "  {old}"), "old", True, False, False),
+    SeenForm("literal-indent-after-chomp", ("seen: |-2", "  {old}"), "old", True, False, False),
+    SeenForm("folded-indent-after-chomp", ("seen: >-2", "  {old}"), "old", True, False, False),
+    SeenForm(
+        "literal-indent-indicator-clipped",
+        ("seen: |2", "  {old}"),
+        "old-newline",
+        True,
+        False,
+        False,
+    ),
     SeenForm(
         "literal-header-comment", ("seen: |- # {seen_note}", "  {old}"), "old", True, False, True
     ),
