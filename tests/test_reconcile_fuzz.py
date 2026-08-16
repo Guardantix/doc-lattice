@@ -221,6 +221,11 @@ class Document:
         notes: Every comment text written in the frontmatter.
         mirrors: Root keys the loader gives the very same list object as ``derives_from``,
             which an alias spelling produces and which therefore follow every update.
+        markers: Carrier-level openings of the source, meaning the collection carrying the
+            entries, that share a line with an editable entry and so have to come back
+            verbatim under layer 3. A carrier written in block style needs no marker, because
+            its own line sits outside the allowed footprint and the footprint check already
+            asserts it verbatim.
     """
 
     meta_lines: tuple[str, ...]
@@ -231,6 +236,7 @@ class Document:
     envelope: Envelope
     notes: tuple[str, ...]
     mirrors: tuple[str, ...] = ()
+    markers: tuple[str, ...] = ()
 
     def render(self) -> str:
         """Return the exact document text, envelope and line ending included."""
@@ -706,11 +712,13 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
 
 
 def _assert_styles_preserved(document: Document, after: str) -> None:
-    """Assert layer 3 collection style: an entry comes back written the way it was read."""
+    """Assert layer 3 collection style: an entry and its carrier come back as they were read."""
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
         if entry.marker is not None:
             assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
+    for marker in document.markers:
+        assert marker in raw_meta, f"carrier was restyled: {marker!r}"
 
 
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
@@ -813,9 +821,14 @@ def block_root_documents(draw) -> Document:
         lines.extend(extra_lines)
     body, spans = _block_sequence(entries, pad)
     offset = len(lines) + 1
+    # A flow carrier shares its line with the entries it holds, so the whole line is inside the
+    # allowed footprint and its opening needs a marker of its own. A block carrier sits on a
+    # line of its own outside that footprint, which the footprint assertion already pins.
+    markers: tuple[str, ...] = ()
     if carrier == "flow":
         lines.extend(_member_lines("derives_from", entries, "flow", pad))
         spans = [(offset - 1, offset)] * count
+        markers = ("derives_from: [",)
     else:
         lines.append("derives_from:")
         lines.extend(body)
@@ -829,7 +842,14 @@ def block_root_documents(draw) -> Document:
     for entry in entries:
         notes.extend(entry.notes)
     assembled = Document(
-        tuple(lines), entries, tuple(spans), root, order, _flat_envelope(), tuple(notes)
+        tuple(lines),
+        entries,
+        tuple(spans),
+        root,
+        order,
+        _flat_envelope(),
+        tuple(notes),
+        markers=markers,
     )
     return _finish(draw, assembled)
 
@@ -856,12 +876,17 @@ def ordered_map_root_documents(draw) -> Document:
     inlines = ", ".join(entry.inline or "" for entry in entries)
     if style == "omap-flow":
         line = f"!!omap [{{id: doc}}, {{derives_from: [{inlines}]}}]"
+        markers = ("!!omap [{id: doc}, {derives_from: [",)
     else:
         line = f"{{id: doc, derives_from: [{inlines}]}}"
+        markers = ("{id: doc, derives_from: [",)
     spans = tuple((0, 1) for _ in entries)
     order = ("id", "derives_from")
     return _finish(
-        draw, Document((line,), entries, spans, {"id": "doc"}, order, _flat_envelope(), ())
+        draw,
+        Document(
+            (line,), entries, spans, {"id": "doc"}, order, _flat_envelope(), (), markers=markers
+        ),
     )
 
 
@@ -896,7 +921,9 @@ def alias_and_merge_documents(draw) -> Document:
         "entry-merge": _entry_merge_document,
         "tagged-entry-merge": _entry_merge_document,
         "alias-spelled-entry-key": _alias_spelled_key_document,
+        "alias-spelled-ref-key": _alias_spelled_key_document,
         "alias-spelled-root-key": _alias_spelled_key_document,
+        "alias-spelled-derives-key": _alias_spelled_key_document,
     }
     if REUSED_ANCHORS_ARE_STRICT:
         builders["reused-anchor"] = _reused_anchor_document
@@ -1003,19 +1030,29 @@ def _merge_document(draw, shape: str) -> Document:
     """A ``derives_from`` supplied by a merge key, in the plain and the tagged spelling."""
     key = "<<" if shape == "merge" else "!!merge inherited"
     inner = "ref: up-0#s0, seen: old0000"
-    lines = ["id: doc", f"{key}: {{derives_from: [{{{inner}}}]}}"]
+    inline = f"{{{inner}}}"
+    lines = ["id: doc", f"{key}: {{derives_from: [{inline}]}}"]
     merged = Entry(
         "merge-supplied",
         (),
-        f"{{{inner}}}",
+        inline,
         "up-0#s0",
         "old0000",
         True,
         None,
         (),
+        (),
+        _style_marker(inline),
     )
     assembled = Document(
-        tuple(lines), (merged,), ((1, 2),), {"id": "doc"}, None, _flat_envelope(), ()
+        tuple(lines),
+        (merged,),
+        ((1, 2),),
+        {"id": "doc"},
+        None,
+        _flat_envelope(),
+        (),
+        markers=(f"{key}: {{derives_from: [",),
     )
     return _finish(draw, assembled)
 
@@ -1036,6 +1073,8 @@ def _entry_merge_document(draw, shape: str) -> Document:
         spelled,
         None,
         (),
+        (),
+        _style_marker(entry_lines[0]),
     )
     lines = ("id: doc", "derives_from:", *_indent(entry.lines, 2))
     order = ("id", "derives_from")
@@ -1046,7 +1085,12 @@ def _entry_merge_document(draw, shape: str) -> Document:
 
 
 def _alias_spelled_key_document(draw, shape: str) -> Document:
-    """A mapping key spelled through an alias, at an entry and at the root.
+    """A mapping key spelled through an alias, at every position AD-31 declares one at.
+
+    The four positions are the entry's ``seen`` key, the entry's ``ref`` key, the root ``id``
+    key and the root ``derives_from`` key, each drawn in both spellings the subset admits: the
+    explicit ``? *name`` and ``: value`` pair, and ``*name : value`` with the space before the
+    colon. The bare ``*name:`` form does not scan and so is not generated.
 
     The anchor a key alias reads has to be defined on a value ``NodeMeta`` allows, which is
     what keeps this spelling inside the strict column rather than the reread-only one.
@@ -1069,6 +1113,37 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
         root["title"] = "seen"
         order: tuple[str, ...] = ("id", "title", "derives_from")
         spans = ((3, len(lines)),)
+    elif shape == "alias-spelled-ref-key":
+        entry_lines = (
+            ("- ? *keyname", "  : up-0#s0", "  seen: old0000")
+            if explicit
+            else ("- *keyname : up-0#s0", "  seen: old0000")
+        )
+        entry = Entry(
+            "alias-spelled-ref-key",
+            entry_lines,
+            None,
+            "up-0#s0",
+            "old0000",
+            True,
+            None,
+            (),
+            (),
+            _style_marker(entry_lines[0]),
+        )
+        lines = ("id: doc", "title: &keyname ref", "derives_from:", *_indent(entry.lines, 2))
+        root["title"] = "ref"
+        order = ("id", "title", "derives_from")
+        spans = ((3, len(lines)),)
+    elif shape == "alias-spelled-derives-key":
+        entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
+        # The block sequence hangs under the aliased key, so the entry is indented beneath it
+        # rather than sitting at the root column the plain spelling puts it at.
+        head = ("? *dfkey", ":") if explicit else ("*dfkey :",)
+        lines = ("id: doc", "title: &dfkey derives_from", *head, *_indent(entry.lines, 2))
+        root["title"] = "derives_from"
+        order = ("id", "title", "derives_from")
+        spans = ((2 + len(head), len(lines)),)
     else:
         entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
         head = ("? *idkey", ": doc") if explicit else ("*idkey : doc",)
