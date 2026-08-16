@@ -129,6 +129,11 @@ class SeenForm:
             spelling writes, because a ``seen`` comment sits inside the allowed footprint while
             a ``ref`` comment does not: sharing one text would let the pinned copy satisfy the
             layer 3 assertion for a rewrite that dropped the copy actually at risk.
+        written_lines: How many lines the member is written on once an edit has landed on it.
+            Every value a rewrite writes is a one-line plain scalar, so this is one line for
+            most spellings and two for the ones carrying source above the value that survives
+            the edit: an explicit key on its own line, and a comment the author left between
+            the key and the value.
     """
 
     name: str
@@ -137,6 +142,7 @@ class SeenForm:
     present: bool
     anchored: bool
     note: bool
+    written_lines: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +160,9 @@ class WholeForm:
         writes: Which ``FLOW_EDIT_INDICATORS`` kind a rewrite of this flow spelling is, meaning
             the punctuation its edit is allowed to write. Meaningless for a block-only form,
             which has no flow source to pin.
+        written_lines: How many lines the ``seen`` member is written on once an edit has landed
+            on it, as for ``SeenForm``. A flow form is always one, since the whole entry shares
+            a line however its edit lands.
     """
 
     name: str
@@ -163,6 +172,7 @@ class WholeForm:
     present: bool
     anchored: bool
     writes: str = "none"
+    written_lines: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +226,12 @@ class Entry:
             missing ``seen`` pair and the ``:`` an explicit ``? seen`` lacks are written.
         pin: For a flow entry, what its source still has to look like once it is edited. None
             for a block entry, whose source the line footprint pins instead.
+        written_lines: How many lines this entry's ``seen`` member is written on once an edit
+            has landed on it, which is what says how far a member the rewrite shrank is allowed
+            to have pulled the rest of the block up. None where the shape's layer 4 mutation
+            families spread rather than replacing one member, which is the same case ``edits``
+            being None marks: how many lines such an edit settles on is the rewriter's to
+            choose, so the model claims nothing about it.
     """
 
     name: str
@@ -232,6 +248,7 @@ class Entry:
     appends: bool = False
     pin: FlowPin | None = None
     site: str | None = None
+    written_lines: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +370,42 @@ class Document:
             allowed.update(index for index, line in enumerate(self.meta_lines) if alias in line)
         return allowed, inserts
 
+    def written_lines(self, updates: dict[str, str]) -> int | None:
+        """Return how many lines the rewritten block holds, or None when that is not predictable.
+
+        The footprint says which lines a rewrite may replace but not how many it writes back, so
+        a member spelled over several lines hands the edit as many lines as it took. That is what
+        an in-place replacement needs, since it may shrink a member and pull the rest of the
+        block up, but as a bound it also lets an edit write a line of its own for every source
+        line it consumed. Nothing else would see that: the surviving source is found in order
+        either way, and a spare line written past the last of it has nothing behind it at all.
+
+        What the model can say exactly is how many lines each edited member is written on
+        afterwards, since every value written here is a one-line plain scalar and what surrounds
+        it is the source the spelling declares. The block's own length follows: the lines it was
+        read with, less the ones the footprint hands to an edit, plus the ones those edits write.
+        An alias site an anchored value is relocated onto writes one line for the one it takes,
+        since layer 4 re-emits a displaced value on the line its alias sat on however it was
+        spelled. Entries written on one shared flow line are one edit for this purpose, since
+        the line is written once however many of them land on it.
+
+        Returns:
+            The line count the rewritten block has to have, or None when any edited entry's
+            layer 4 families spread rather than replacing one member.
+        """
+        applied = self.applied(updates)
+        allowed, _ = self.footprint(updates)
+        regions: dict[tuple[int, int], int] = {}
+        claimed: set[int] = set()
+        for entry, span in zip(self.entries, self.spans, strict=True):
+            if entry.ref not in applied:
+                continue
+            if entry.written_lines is None:
+                return None
+            claimed.update(span[0] + offset for offset in entry.edits or ())
+            regions[span] = max(regions.get(span, 0), entry.written_lines)
+        return len(self.meta_lines) - len(allowed) + sum(regions.values()) + len(allowed - claimed)
+
     def flow_lines(self, updates: dict[str, str]) -> list[tuple[str, tuple[str, ...]]]:
         """Return one pin per edited line whose entries are written in flow style.
 
@@ -473,8 +526,8 @@ SEEN_FORMS = (
     SeenForm(
         "literal-header-comment", ("seen: |- # {seen_note}", "  {old}"), "old", True, False, True
     ),
-    SeenForm("explicit-pair", ("? seen", ": {old}"), "old", True, False, False),
-    SeenForm("explicit-key-no-value", ("? seen",), "null", True, False, False),
+    SeenForm("explicit-pair", ("? seen", ": {old}"), "old", True, False, False, 2),
+    SeenForm("explicit-key-no-value", ("? seen",), "null", True, False, False, 2),
     SeenForm("anchored", ("seen: &{anchor} {old}",), "old", True, True, False),
     SeenForm("tagged", ("seen: !!str {old}",), "old", True, False, False),
     SeenForm("anchor-then-tag", ("seen: &{anchor} !!str {old}",), "old", True, True, False),
@@ -486,8 +539,9 @@ SEEN_FORMS = (
         True,
         True,
         True,
+        2,
     ),
-    SeenForm("tag-on-its-own-line", ("seen:", "  !!str {old}"), "old", True, False, False),
+    SeenForm("tag-on-its-own-line", ("seen:", "  !!str {old}"), "old", True, False, False, 2),
     SeenForm(
         "both-properties-on-their-own-lines",
         ("seen: &{anchor} # {seen_note}", "  !!str", "  {old}"),
@@ -495,6 +549,7 @@ SEEN_FORMS = (
         True,
         True,
         True,
+        2,
     ),
 )
 
@@ -510,6 +565,7 @@ WHOLE_FORMS = (
         "null",
         True,
         False,
+        written_lines=2,
     ),
     WholeForm(
         "omap-block-anchored",
@@ -613,6 +669,7 @@ def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry
         edits,
         appends,
         site=fields["head"],
+        written_lines=seen_form.written_lines,
     )
 
 
@@ -735,6 +792,7 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
         appends,
         None if inline is None else _flow_pin(inline, form.writes),
         fields["head"],
+        form.written_lines,
     )
 
 
@@ -1171,6 +1229,11 @@ def _assert_supported_round_trip(document: Document, updates: dict[str, str]) ->
     _assert_replacements_stay_bare(after, updates)
     allowed, inserts = document.footprint(updates)
     _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
+    written = document.written_lines(updates)
+    assert written is None or len(_meta_lines(after)) == written, (
+        f"the rewrite left the block {len(_meta_lines(after))} lines long, "
+        f"where the edits it was allowed write {written}"
+    )
     if document.key_order is not None:
         reloaded = _reload(after)
         assert isinstance(reloaded, dict)
@@ -1406,6 +1469,7 @@ def _entry(
         edits if len(written) > 1 else None,
         pin=None if inline is None else _flow_pin(inline, "none"),
         site=fields["head"],
+        written_lines=1 if len(written) > 1 else None,
     )
 
 
@@ -1440,6 +1504,7 @@ def _reused_anchor_document(_draw, _shape: str) -> Document:
         None,
         (),
         edits=(1,),
+        written_lines=1,
     )
     lines = ["id: doc", "derives_from:", *first.lines, *second.lines, *third.lines]
     entries = (first, second, third)
@@ -1493,6 +1558,7 @@ def _relocating_anchor_pair(written: str, value: str) -> Document:
         _style_marker(anchored[0]),
         (1,),
         site="up-0#s0",
+        written_lines=1,
     )
     second = Entry(
         "alias-seen",
@@ -1507,6 +1573,7 @@ def _relocating_anchor_pair(written: str, value: str) -> Document:
         _style_marker(aliased[0]),
         (1,),
         site="up-1#s1",
+        written_lines=1,
     )
     lines = ["id: doc", "derives_from:", *first.lines, *second.lines]
     return Document(
@@ -1582,6 +1649,7 @@ def _entry_merge_document(draw, shape: str) -> Document:
         (1,) if spelled else (),
         not spelled,
         site="up-0#s0",
+        written_lines=1,
     )
     lines = ("id: doc", "derives_from:", *_indent(entry.lines, 2))
     order = ("id", "derives_from")
@@ -1623,6 +1691,9 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             # untouched, and the whole entry is not the rewriter's to restyle.
             tuple(range(1, len(entry_lines))),
             site="up-0#s0",
+            # The explicit spelling keeps the aliased key on a line of its own, so the member is
+            # written on two lines afterwards the way any explicit pair is.
+            written_lines=2 if explicit else 1,
         )
         lines = ("id: doc", "title: &keyname seen", "derives_from:", *_indent(entry.lines, 2))
         root["title"] = "seen"
@@ -1649,6 +1720,7 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             # spelling, stays exactly as it was written.
             (len(entry_lines) - 1,),
             site="up-0#s0",
+            written_lines=1,
         )
         lines = ("id: doc", "title: &keyname ref", "derives_from:", *_indent(entry.lines, 2))
         root["title"] = "ref"
