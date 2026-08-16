@@ -1313,7 +1313,14 @@ def alias_and_merge_documents(draw) -> Document:
     return builders[shape](draw, shape)
 
 
-def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | None) -> Entry:
+def _entry(
+    index: int,
+    lines: tuple[str, ...],
+    seen: str | None,
+    anchor: str | None,
+    *,
+    flow: bool = False,
+) -> Entry:
     """Build an entry whose source is spelled out rather than composed from the tables.
 
     An entry written across several lines is modelled the way a table-built one is: the ``seen``
@@ -1321,14 +1328,31 @@ def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | N
     outside the footprint whether or not a marker or a style claim also covers them. An entry
     written on one line has no narrower footprint than its span, so it keeps the whole-span
     allowance and its opening is what the marker pins.
+
+    A one-line entry written in flow style needs more than that allowance, since the whole line
+    is inside it and the marker stops where the edit begins: everything between the ``seen`` key
+    and the bracket the entry closes on would be the rewriter's to restyle. Such an entry carries
+    its own flow pin instead, the way a table-built flow entry does, which is what holds the
+    member syntax around the value it replaces.
+
+    Args:
+        index: The entry's position, which its substituted fields are numbered by.
+        lines: The entry's source lines, as templates.
+        seen: The value its ``seen`` member loads as, or None when it writes none.
+        anchor: The anchor name written on its ``seen`` value, when it carries one.
+        flow: Whether the one line it is written on is a flow collection to be pinned.
+
+    Returns:
+        The modelled entry.
     """
     fields = _fields(index)
     written = tuple(line.format(**fields) for line in lines)
     edits = tuple(offset for offset, line in enumerate(written) if "seen" in line)
+    inline = written[0][len("- ") :] if flow else None
     return Entry(
         "explicit",
         written,
-        None,
+        inline,
         fields["ref"],
         seen,
         seen is not None,
@@ -1337,6 +1361,7 @@ def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | N
         (),
         _style_marker(written[0]),
         edits if len(written) > 1 else None,
+        pin=None if inline is None else _flow_pin(inline, "none"),
         site=fields["head"],
     )
 
@@ -1345,7 +1370,7 @@ def _aliased_entry_document(draw, _shape: str) -> Document:
     """An entry written as an alias to another entry, which shares its loaded mapping."""
     style = draw(st.sampled_from(("flow", "block")))
     if style == "flow":
-        first = _entry(0, ("- &edge {{ref: {ref}, seen: {old}}}",), "old0000", None)
+        first = _entry(0, ("- &edge {{ref: {ref}, seen: {old}}}",), "old0000", None, flow=True)
     else:
         first = _entry(0, ("- &edge", "    ref: {ref}", "    seen: {old}"), "old0000", None)
     second = Entry("alias-entry", ("- *edge",), None, first.ref, first.seen, True, None, ())
