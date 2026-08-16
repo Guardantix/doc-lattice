@@ -1077,6 +1077,34 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
             )
 
 
+def _assert_replacements_stay_bare(after: str, updates: dict[str, str]) -> None:
+    """Assert every hash a rewrite wrote lands bare, with no node property in front of it.
+
+    Layer 4 has replacement consume the replaced value's node properties: the anchor and tag
+    opening a ``seen`` are dropped with the run of space they leave, since a tag kept would
+    retype the new hash and an anchor kept would bind a name to a value the author never wrote.
+    Nothing else in the suite sees that. The semantic oracle loads ``!!str hash`` and
+    ``&name hash`` to the same string a bare hash gives, the footprint leaves the whole line an
+    edit lands on to the rewriter, and the style claims read the source a rewrite wrote past
+    rather than the text it wrote.
+
+    The claim is made of the hash rather than of the line it sits on, because a line may carry a
+    property the rewrite is entitled to write: a relocated anchor opens the displaced old value,
+    and a key may be spelled through an alias. Only the run between the hash and the separator in
+    front of it is pinned, and it has to be spaces alone. A hash with no separator before it sits
+    on a line of its own, whose whole opening is the indentation its member was written at.
+    """
+    raw_meta = _parts(after).raw_meta
+    for value in updates.values():
+        for match in re.finditer(re.escape(value), raw_meta):
+            opening = raw_meta[raw_meta.rfind("\n", 0, match.start()) + 1 : match.start()]
+            written = opening[opening.rfind(":") + 1 :]
+            assert not written.strip(" "), (
+                f"a rewrite wrote {written!r} in front of the hash replacing {value!r}, "
+                "whose node properties layer 4 has it consume"
+            )
+
+
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
     """Assert a layer 2 document rewrites correctly, preserving layer 3 and confining layer 4."""
     text = document.render()
@@ -1092,6 +1120,7 @@ def _assert_supported_round_trip(document: Document, updates: dict[str, str]) ->
     assert _reload(after) == document.expected(updates)
     _assert_envelope_preserved(document, text, after)
     _assert_styles_preserved(document, after, updates)
+    _assert_replacements_stay_bare(after, updates)
     allowed, inserts = document.footprint(updates)
     _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
     if document.key_order is not None:
