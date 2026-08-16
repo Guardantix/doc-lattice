@@ -11,7 +11,10 @@ doc-lattice is a deterministic traceability engine for dependencies between Mark
   recovery contract.
 - [ARCHITECTURE.md](ARCHITECTURE.md) owns durable decisions and pure/impure module boundaries.
 - [CHANGELOG.md](CHANGELOG.md) owns release history and migrations.
-- [RELEASING.md](RELEASING.md) owns the release procedure.
+- [RELEASING.md](RELEASING.md) owns the release procedure, release authority, the bad-release
+  playbook, and the accounts and access surface.
+- [SECURITY.md](SECURITY.md) owns supported versions, the private vulnerability reporting path,
+  and the disclosure expectation.
 - [roadmap.md](roadmap.md) owns future direction.
 
 When behavior or policy changes, update its owner and link to it. Do not restate the same contract
