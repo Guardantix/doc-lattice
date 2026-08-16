@@ -641,9 +641,10 @@ def _flow_key_head(inline: str, marker: str) -> str:
 
     The marker stops where an edit can first reach, which for a ``seen`` member the author
     already wrote is that member's key. The key is source rather than something the edit
-    supplies, so a replacement of the value has to write past it: the key and the ``:`` that
-    follows it join the fixed opening, which leaves the region starting at the value itself
-    and a respelled key caught rather than absorbed.
+    supplies, so a replacement of the value has to write past it: the key, the ``:`` that
+    follows it and the spaces the author left between that colon and the value all join the
+    fixed opening, which leaves the region starting at the value itself and a respelled key or
+    a widened separator caught rather than absorbed.
 
     An entry whose ``seen`` member is absent has no key to preserve, since the edit writes the
     whole pair, so its region begins where the marker ends and the punctuation budget is what
@@ -660,7 +661,10 @@ def _flow_key_head(inline: str, marker: str) -> str:
     if key == -1:
         return marker
     stop = key + len("seen")
-    return inline[: stop + 1] if inline[stop : stop + 1] == ":" else inline[:stop]
+    if inline[stop : stop + 1] != ":":
+        return inline[:stop]
+    rest = inline[stop + 1 :]
+    return inline[: stop + 1 + len(rest) - len(rest.lstrip(" "))]
 
 
 def _flow_pin(inline: str, writes: str) -> FlowPin:
@@ -691,8 +695,12 @@ def _flow_pin(inline: str, writes: str) -> FlowPin:
     head = _flow_key_head(inline, _style_marker(inline) or "")
     region = inline[len(head) : len(inline) - len(closing)]
     written = "".join(char for char in region if char in FLOW_INDICATORS)
+    # A head that ends in a space ends on a separator the author wrote, and an edit writes past
+    # a separator rather than over it, so what follows starts the value rather than widening
+    # the run in front of it. A head that ends anywhere else is followed by the edit's own text.
+    opening = r"(\S.*?)" if head.endswith(" ") else "(.*?)"
     return FlowPin(
-        f"{re.escape(head)}(.*?){re.escape(closing)}", written + FLOW_EDIT_INDICATORS[writes]
+        f"{re.escape(head)}{opening}{re.escape(closing)}", written + FLOW_EDIT_INDICATORS[writes]
     )
 
 
@@ -980,18 +988,26 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
 
 
 def _member_head(entry: Entry) -> str | None:
-    """Return the opening of the member a block edit lands on: its key and the colon after it.
+    """Return the opening of the member a block edit lands on, up to where the value starts.
 
-    The line the edit starts on is the one the model already names, so the head is read off
-    that line rather than tracked separately. It is None where there is no such line to read:
-    an entry whose whole span the model leaves to the rewriter, one with no ``seen`` member
-    written for an edit to land on, and a flow entry, whose key its own pin carries instead.
+    The key, the colon after it and the spaces the author left before the value, all of which
+    a replacement of that value has to write past. The line the edit starts on is the one the
+    model already names, so the head is read off that line rather than tracked separately. Its
+    own indentation is dropped, since a carrier indents an entry by whatever its shape needs
+    and a member indented wrong loads differently or not at all.
+
+    It is None where there is no such line to read: an entry whose whole span the model leaves
+    to the rewriter, one with no ``seen`` member written for an edit to land on, and a flow
+    entry, whose key its own pin carries instead.
     """
     if entry.pin is not None or not entry.edits:
         return None
-    line = entry.lines[entry.edits[0]]
+    line = entry.lines[entry.edits[0]].lstrip()
     colon = line.find(":")
-    return (line if colon == -1 else line[: colon + 1]).strip()
+    if colon == -1:
+        return line
+    rest = line[colon + 1 :]
+    return line[: colon + 1 + len(rest) - len(rest.lstrip(" "))]
 
 
 def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
@@ -1003,8 +1019,9 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
     character for character everywhere no edit was allowed to land: its carrier's brackets and
     separators, its untouched entries, and the member key and the punctuation around the value
     each edited entry was rewritten at. And a block member, whose whole line the footprint can
-    only allow or forbid, still opens with the key the author spelled it with, since layer 4
-    replaces that member's value rather than the line it sits on.
+    only allow or forbid, still opens with the key the author spelled it with and the spaces
+    they left after it, since layer 4 replaces that member's value rather than the line it
+    sits on.
     """
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
@@ -1015,8 +1032,15 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
         head = _member_head(entry)
         if head is None or region is None or entry.ref not in applied:
             continue
-        opened = (line.strip().startswith(head) for line in region.split("\n"))
-        assert any(opened), f"{entry.name} restyled the key it rewrote past: {head!r}"
+        followed = [
+            line.lstrip()[len(head) :]
+            for line in region.split("\n")
+            if line.lstrip().startswith(head)
+        ]
+        assert followed, f"{entry.name} restyled the key it rewrote past: {head!r}"
+        assert not head.endswith(" ") or not followed[0].startswith(" "), (
+            f"{entry.name} widened the separator it wrote its value after: {head!r}"
+        )
     lines = _meta_lines(after)
     for pattern, budgets in document.flow_lines(updates):
         matches = (re.fullmatch(pattern, line) for line in lines)
