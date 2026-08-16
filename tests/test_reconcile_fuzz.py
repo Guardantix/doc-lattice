@@ -2370,12 +2370,45 @@ def test_a_document_with_no_opening_fence_produces_no_rewrite(text: str) -> None
 # --------------------------------------------------------------------------------------------
 
 
-def _recovery_documents() -> tuple[Document, ...]:
+@dataclass(frozen=True, slots=True)
+class RecoveryShape:
+    """One reread-only shape, and which arm of the safe-outcome union it takes today.
+
+    ``arm`` is characterization, not contract. AD-31 layer 5 deliberately does not guarantee that
+    recovery succeeds, so the union stays the pass or fail claim and this records only which arm
+    each shape currently lands on. Without it the union is unfalsifiable in the direction that
+    matters: a change that stopped recovering anything at all would take every shape to the no-op
+    arm, which the union admits, and pass in silence.
+
+    Changing a row is therefore a deliberate re-record to be argued for in the commit, exactly as
+    family 3 treats the two ordered-map behaviors, and never a way to make a red suite green.
+
+    Attributes:
+        name: How the shape is named in a failure, since a ``Document`` carries no name and two
+            shapes give their first entry the same one.
+        document: The generated model.
+        arm: The outcome this shape takes today, one of ``ARMS``.
+        message: For a row recorded as a refusal, the message the refusal has to give.
+    """
+
+    name: str
+    document: Document
+    arm: str
+    message: str | None = None
+
+
+ARMS = ("rewrite", "refusal", "no-op")
+
+
+def _recovery_shapes() -> tuple[RecoveryShape, ...]:
     """Build the reread-only shapes strict validation rejects, each with its own model.
 
     A reused anchor name joins this pool exactly where the strict boundary refuses it, which
     is where the optional accelerator is installed. That keeps the shape generated on every
-    leg: family 1 owns it under the pure parser, this union owns it under the C one.
+    leg: family 1 owns it under the pure parser, this union owns it under the C one. Only its
+    membership is parser-conditional, not its arm: the reread inside ``apply_reconcile`` asks
+    for the pure parser unconditionally by AD-26, so what it does with the shape once it is here
+    is the same on both legs and the row below is not leg-dependent.
 
     Every shape here but one models the footprint of its update member by member rather than
     taking the whole-span allowance. Recovery is held to the footprint alone, since layer 3 is a
@@ -2390,23 +2423,39 @@ def _recovery_documents() -> tuple[Document, ...]:
     than edit the shared node behind it. There is no narrower member-level claim to make about a
     site the contract says may be replaced outright.
     """
-    conditional = () if REUSED_ANCHORS_ARE_STRICT else (_reused_anchor_pair(),)
+    conditional = (
+        ()
+        if REUSED_ANCHORS_ARE_STRICT
+        else (RecoveryShape("reused-anchor", _reused_anchor_pair(), "rewrite"),)
+    )
     return (
         *conditional,
-        _recovery_extra_root_key(),
-        _recovery_extra_entry_key(),
-        _recovery_non_string_seen("!!int 5", 5),
-        _recovery_non_string_seen("5", 5),
-        _recovery_non_string_seen("true", True),
-        _recovery_non_string_seen("1.5", 1.5),
-        _recovery_non_string_seen("2026-01-01", date(2026, 1, 1)),
-        _recovery_relocated_non_string_seen(),
-        _recovery_aliased_derives_from(),
-        _recovery_aliased_entry(),
-        _recovery_trailing_block_scalar_member(),
-        _recovery_multi_line_flow_member(),
-        _recovery_null_member("note:", None),
-        _recovery_null_member("note: null", None),
+        RecoveryShape("extra-root-key", _recovery_extra_root_key(), "rewrite"),
+        RecoveryShape("extra-entry-key", _recovery_extra_entry_key(), "rewrite"),
+        RecoveryShape(
+            "non-string-seen-tagged-int", _recovery_non_string_seen("!!int 5", 5), "rewrite"
+        ),
+        RecoveryShape("non-string-seen-int", _recovery_non_string_seen("5", 5), "rewrite"),
+        RecoveryShape("non-string-seen-bool", _recovery_non_string_seen("true", True), "rewrite"),
+        RecoveryShape("non-string-seen-float", _recovery_non_string_seen("1.5", 1.5), "rewrite"),
+        RecoveryShape(
+            "non-string-seen-date",
+            _recovery_non_string_seen("2026-01-01", date(2026, 1, 1)),
+            "rewrite",
+        ),
+        RecoveryShape(
+            "relocated-non-string-seen", _recovery_relocated_non_string_seen(), "rewrite"
+        ),
+        RecoveryShape("aliased-derives-from", _recovery_aliased_derives_from(), "rewrite"),
+        RecoveryShape("aliased-entry", _recovery_aliased_entry(), "rewrite"),
+        RecoveryShape(
+            "trailing-block-scalar-member", _recovery_trailing_block_scalar_member(), "rewrite"
+        ),
+        RecoveryShape("multi-line-flow-member", _recovery_multi_line_flow_member(), "rewrite"),
+        RecoveryShape("null-member-empty", _recovery_null_member("note:", None), "rewrite"),
+        RecoveryShape(
+            "null-member-explicit-null", _recovery_null_member("note: null", None), "rewrite"
+        ),
     )
 
 
@@ -2641,22 +2690,30 @@ def _assert_not_strictly_tracked(text: str) -> None:
     assert disposition != "tracked", "a recovery shape must not pass strict validation"
 
 
-def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> None:
+def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> str:
     """Assert a reread-only shape lands on one of the three outcomes the union admits.
 
     Requiring success would promote non-contractual recovery into a commitment, so this only
     rejects a crash, a wrong value, and an edit outside the layer 4 footprint.
+
+    Returns:
+        Which arm of the union the shape took, so the caller can pin it. Two of the three admit
+        anything by design, and an assertion that admits anything cannot report a regression, so
+        the arm has to leave this function for the claim to be worth making.
     """
     text = document.render()
     try:
         rewrites = _rewrite_bytes(text, updates)
-    except UnreadableDocError:
+    except UnreadableDocError as error:
         # A clean project-level refusal is one of the three outcomes the union admits; any
-        # other exception type escapes here and fails the caller as the crash it is.
-        return
+        # other exception type escapes here and fails the caller as the crash it is. Clean is
+        # asserted rather than assumed, since an empty or internal-leaking message would
+        # otherwise satisfy this arm.
+        _assert_clean_refusal(error)
+        return "refusal"
 
     if not rewrites:
-        return
+        return "no-op"
     after = rewrites[0].after.decode("utf-8")
     assert rewrites[0].applied == document.applied(updates)
     assert _reload(after) == document.expected(updates)
@@ -2667,17 +2724,41 @@ def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> None:
     allowed, inserts = document.footprint(updates)
     _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
     _assert_replacements_stay_bare(after, updates)
+    return "rewrite"
 
 
 @EXPECT_REUSED_ANCHOR
 @FUZZ_SETTINGS
 @given(data=st.data())
 def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
-    """A reread-only shape may no-op, refuse cleanly, or rewrite correctly, and nothing else."""
-    document = data.draw(st.sampled_from(_recovery_documents()))
-    updates = {document.entries[0].ref: "new0000beef"}
-    _assert_not_strictly_tracked(document.render())
-    _assert_safe_recovery(document, updates)
+    """A reread-only shape may no-op, refuse cleanly, or rewrite correctly, and nothing else.
+
+    The union is the contract. The recorded arm alongside it is what makes the union observable:
+    losing defensive recovery altogether takes every shape to the no-op arm, which the union
+    admits, so without the record the strongest thing this file asserts could stop being
+    asserted with nothing to show for it.
+    """
+    shape = data.draw(st.sampled_from(_recovery_shapes()))
+    updates = {shape.document.entries[0].ref: "new0000beef"}
+    _assert_not_strictly_tracked(shape.document.render())
+
+    observed = _assert_safe_recovery(shape.document, updates)
+
+    assert observed == shape.arm, (
+        f"{shape.name} now recovers by {observed!r} where this table records {shape.arm!r}. "
+        "The union above is the contract and it still holds, so this is not a rewriter defect "
+        "on its own; re-record the row deliberately and say why, rather than widening it."
+    )
+
+
+def test_the_recovery_table_records_a_known_arm_for_every_shape() -> None:
+    """Keep the arm a real claim, with no wildcard and no shape left unrecorded."""
+    shapes = _recovery_shapes()
+    assert shapes, "the recovery pool must not be empty"
+    unknown = sorted({shape.arm for shape in shapes} - set(ARMS))
+    assert not unknown, f"these are not arms of the union: {unknown}"
+    names = [shape.name for shape in shapes]
+    assert len(names) == len(set(names)), f"two recovery shapes share a name: {names}"
 
 
 # --------------------------------------------------------------------------------------------
@@ -2828,12 +2909,10 @@ def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
         return
 
     _assert_not_strictly_tracked(document.render())
-    _assert_safe_recovery(document, updates)
-    try:
-        rewrites = _rewrite_bytes(document.render(), updates)
-    except UnreadableDocError:
-        return
-    _assert_anchor_rebinding_survived(rewrites)
+    # The same arm the recovery table records for this shape, asserted the same way, so the
+    # rebinding invariants below are reached rather than skipped past on this leg too.
+    assert _assert_safe_recovery(document, updates) == "rewrite"
+    _assert_anchor_rebinding_survived(_rewrite_bytes(document.render(), updates))
 
 
 def test_the_pure_reread_warns_about_a_reused_anchor_name() -> None:
