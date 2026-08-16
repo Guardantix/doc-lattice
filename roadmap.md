@@ -54,11 +54,13 @@ work under duress.
 
 ## Simplify: retire the managed CI product
 
-The managed GitHub and Linear CI surface has zero installations, and the hand-installable
-snippet already delivers the same gates. Retire the product to a documented recipe in a
-staged deprecate-then-remove (GTX-109), then consolidate the persistence primitives its
-removal orphans and record the filesystem threat model (GTX-110). [MANAGED_CI.md](MANAGED_CI.md)
-remains the owner of whatever survives as the recipe.
+The managed GitHub and Linear CI surface has zero installations. Its check and lint gate is
+already what plain `init` scaffolds; the Linear gate and the protected-environment secret
+boundary are not, so the recipe has to carry that workflow itself and say plainly which
+guarantees it keeps. Retire the product to a documented recipe in a staged
+deprecate-then-remove (GTX-109, deprecating in 4.x and removing in 5.0), then consolidate the
+persistence primitives its removal orphans and record the filesystem threat model (GTX-110).
+[MANAGED_CI.md](MANAGED_CI.md) remains the owner of whatever survives as the recipe.
 
 ## Deferred enhancements
 
