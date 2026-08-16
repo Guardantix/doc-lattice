@@ -58,8 +58,9 @@ The managed GitHub and Linear CI surface has zero installations. Its check and l
 already what plain `init` scaffolds; the Linear gate and the protected-environment secret
 boundary are not, so the recipe has to carry that workflow itself and say plainly which
 guarantees it keeps. Retire the product to a documented recipe in a staged
-deprecate-then-remove (GTX-109, deprecating in 4.x and removing in 5.0), then consolidate the
-persistence primitives its removal orphans and record the filesystem threat model (GTX-110).
+deprecate-then-remove: GTX-109 publishes the recipe and deprecates the commands in 4.x, and
+GTX-163 removes the code and repairs the documentation owners in 5.0. Then consolidate the
+persistence primitives that removal orphans and record the filesystem threat model (GTX-110).
 [MANAGED_CI.md](MANAGED_CI.md) remains the owner of whatever survives as the recipe.
 
 ## Deferred enhancements
