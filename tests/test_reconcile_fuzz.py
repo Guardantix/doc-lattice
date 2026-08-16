@@ -883,6 +883,10 @@ def _assert_footprint_confined(
     unnoticed, so the blank lines are counted as well. Every value written here is a one-line
     plain scalar, so a replaced member keeps none of the blanks it was written with and the
     rewrite writes none of its own: the blanks left are exactly the ones outside the footprint.
+
+    Past the last protected run the same bound applies rather than nothing at all. A document
+    whose last line is the member being rewritten, which is the commonest shape there is, has
+    no protected run to end on, and without the bound anything at all could follow the edit.
     """
     blank = sum(1 for index, line in enumerate(before) if not line.strip() and index not in allowed)
     assert sum(1 for line in after if not line.strip()) == blank, (
@@ -896,11 +900,9 @@ def _assert_footprint_confined(
         assert found is not None, f"lines outside the allowed footprint changed: {run!r}"
         position = found + len(run)
         consumed = start + len(run)
-    trailing_is_fixed = (
-        bool(before) and (len(before) - 1) not in allowed and len(before) not in inserts
-    )
-    if trailing_is_fixed:
-        assert position == len(after), "content changed after the last allowed line"
+    tail = len(allowed & set(range(consumed, len(before))))
+    tail += len(inserts & set(range(consumed, len(before) + 1)))
+    assert len(after) - position <= tail, "content was added after the last protected line"
 
 
 def _entry_regions(document: Document, raw_meta: str) -> list[str | None]:
