@@ -185,6 +185,9 @@ class SeenForm:
             most spellings and two for the ones carrying source above the value that survives
             the edit: an explicit key on its own line, and a comment the author left between
             the key and the value.
+        appends_own_line: Whether a rewrite of this spelling writes a line just past the member
+            rather than over it, which an explicit key with no ``:`` needs because there is no
+            value written for the hash to replace. A present member otherwise writes in place.
     """
 
     name: str
@@ -194,6 +197,7 @@ class SeenForm:
     anchored: bool
     note: bool
     written_lines: int = 1
+    appends_own_line: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +218,9 @@ class WholeForm:
         written_lines: How many lines the ``seen`` member is written on once an edit has landed
             on it, as for ``SeenForm``. A flow form is always one, since the whole entry shares
             a line however its edit lands.
+        appends_own_line: As for ``SeenForm``, and read only on the block branch. A flow entry
+            is one line however its member is written, so its append lands inside the bracket
+            rather than on a line of its own and this says nothing about it.
     """
 
     name: str
@@ -224,6 +231,7 @@ class WholeForm:
     anchored: bool
     writes: FlowEditKind = "none"
     written_lines: int = 1
+    appends_own_line: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -622,7 +630,7 @@ SEEN_FORMS = (
         "literal-header-comment", ("seen: |- # {seen_note}", "  {old}"), "old", True, False, True
     ),
     SeenForm("explicit-pair", ("? seen", ": {old}"), "old", True, False, False, 2),
-    SeenForm("explicit-key-no-value", ("? seen",), "null", True, False, False, 2),
+    SeenForm("explicit-key-no-value", ("? seen",), "null", True, False, False, 2, True),
     SeenForm("anchored", ("seen: &{anchor} {old}",), "old", True, True, False),
     SeenForm("tagged", ("seen: !!str {old}",), "old", True, False, False),
     SeenForm("anchor-then-tag", ("seen: &{anchor} !!str {old}",), "old", True, True, False),
@@ -699,6 +707,11 @@ WHOLE_FORMS = (
         True,
         False,
         written_lines=2,
+        # The explicit key writes no value, so the hash goes on a line of its own past it. The
+        # flow spelling of the same key does not get this: `_whole_entry` takes the flow branch
+        # first and writes the append inside the bracket, so setting it there would hand the
+        # footprint an insert point no rewrite ever uses and widen the claim for nothing.
+        appends_own_line=True,
     ),
     WholeForm(
         "omap-block-anchored",
@@ -753,6 +766,21 @@ def _fields(index: int) -> dict[str, str]:
     }
 
 
+def _seen_member_offsets(lines: tuple[str, ...]) -> tuple[int, ...]:
+    """Return which of ``lines`` hold the ``seen`` member, which is what an edit may reach.
+
+    Read off the source rather than declared, because it is an observation about text this file
+    just wrote rather than a claim about the rewriter. Its one precondition is that no generated
+    line holds the text ``seen`` unless it is part of the member: the note placeholders spell
+    ``seen-note``, and those only ever appear on a line that is already a ``seen`` line.
+
+    The other three places ``edits`` is set stay as they are. It is the model's independent claim
+    about one shape's layer 4 footprint, and a single derivation shared across shapes is exactly
+    what would let one shape's wrong claim be covered by another shape's being right.
+    """
+    return tuple(offset for offset, line in enumerate(lines) if "seen" in line)
+
+
 def _seen_value(kind: SeenKind, old: str) -> str | None:
     """Return the value a ``seen`` spelling of ``kind`` loads as.
 
@@ -796,7 +824,7 @@ def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry
     # takes a line of its own just past the entry instead.
     written = len(ref_form.templates)
     edits = tuple(range(written, written + len(seen_form.templates)))
-    appends = not seen_form.present or seen_form.name == "explicit-key-no-value"
+    appends = not seen_form.present or seen_form.appends_own_line
     return Entry(
         f"{ref_form.name}+{seen_form.name}",
         tuple(lines),
@@ -917,8 +945,8 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
         edits: tuple[int, ...] = (0,)
         appends = False
     else:
-        edits = tuple(offset for offset, line in enumerate(lines) if "seen" in line)
-        appends = not form.present or "explicit-key" in form.name
+        edits = _seen_member_offsets(lines)
+        appends = not form.present or form.appends_own_line
     return Entry(
         form.name,
         lines,
@@ -1694,7 +1722,7 @@ def _entry(
     """
     fields = _fields(index)
     written = tuple(line.format(**fields) for line in lines)
-    edits = tuple(offset for offset, line in enumerate(written) if "seen" in line)
+    edits = _seen_member_offsets(written)
     inline = written[0][len("- ") :] if flow else None
     return Entry(
         "explicit",
