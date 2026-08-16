@@ -381,6 +381,41 @@ class Document:
     notes: tuple[str, ...]
     mirrors: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Check each span really is the source of the entry it is paired with.
+
+        A drifted span does not fail anything on its own, it quietly moves the oracle: the
+        footprint widens or narrows around the wrong lines, and ``flow_lines`` skips the entry
+        outright rather than pinning it, because a span that is no longer one line long fails
+        the test that decides a flow entry has a line to pin. Spans are hand-written at more
+        than a dozen sites, one of them a literal, so the drift is a live possibility and it is
+        the only silent-disable path the model has.
+
+        What can be checked is containment: the text an entry is located by, and its flow
+        source, have to occur inside the lines the span names. Not the line count, since a
+        merge-supplied entry legitimately has no lines of its own and several flow entries
+        legitimately share one line. An entry with neither a site nor an inline gets the range
+        check alone, which is the honest limit of this.
+
+        ``dataclasses.replace`` re-runs it, so ``_finish`` shifting every span past a ``%YAML``
+        directive is checked as well as the original assembly.
+        """
+        assert len(self.spans) == len(self.entries), (
+            f"{len(self.entries)} entries carry {len(self.spans)} spans"
+        )
+        for entry, (start, stop) in zip(self.entries, self.spans, strict=True):
+            assert 0 <= start < stop <= len(self.meta_lines), (
+                f"{entry.name} has span ({start}, {stop}) outside a "
+                f"{len(self.meta_lines)}-line block"
+            )
+            region = "\n".join(self.meta_lines[start:stop])
+            assert entry.site is None or entry.site in region, (
+                f"{entry.name} is located by {entry.site!r}, which its span does not hold"
+            )
+            assert entry.inline is None or entry.inline in region, (
+                f"{entry.name} is written {entry.inline!r}, which its span does not hold"
+            )
+
     def render(self) -> str:
         """Return the exact document text, envelope and line ending included."""
         env = self.envelope
@@ -2336,6 +2371,25 @@ def test_the_spelling_tables_still_carry_every_dimension_the_assertions_read() -
         "no flow spelling makes the rewrite write an indicator, so the budget is never spent"
     )
     assert COMMENTED_PAIRS, "no spelling pair carries a comment for the site claim to be made of"
+
+
+def test_every_flow_spelling_produces_a_pin_that_bounds_something() -> None:
+    """Keep the flow claim from going quiet through a shape whose spans are merely right.
+
+    ``Document.__post_init__`` catches a span that is wrong. It cannot catch a shape whose
+    spans are right and whose entries all carry no pin, which disables the flow-line assertion
+    just as completely and just as silently, because ``flow_lines`` returns nothing to check
+    rather than failing. This asserts each flow spelling really does produce one, and that the
+    pin bounds something rather than matching anything.
+    """
+    for form in FLOW_FORMS:
+        entry = _whole_entry(0, form)
+        document = _single_entry_document(entry)
+        pins = document.flow_lines({entry.ref: "new0000beef"})
+        assert pins, f"{form.name} produced no flow pin, so its line is unbounded"
+        for pattern, budgets in pins:
+            assert "(" in pattern, f"{form.name} pinned no editable region: {pattern!r}"
+            assert budgets, f"{form.name} pinned a region with no indicator budget"
 
 
 def test_the_declared_vocabularies_and_the_ones_the_tables_use_are_the_same() -> None:
