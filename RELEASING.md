@@ -123,8 +123,19 @@ as a version nobody can install.
 2. Leave the tag alone. Moving or deleting a release tag breaks every ref already pointing at
    it, and `uvx --from git+...@vX.Y.Z` installs resolve against it.
 3. Edit the GitHub Release to say the version was withdrawn before publication and name the
-   version that supersedes it. The Release is the announcement channel adopters watch.
+   version that supersedes it. This is a durable record for anyone who reaches the tag, not an
+   announcement: GitHub's release notifications fire when a release is *published*, and an edit
+   to an already-published one is not documented to notify anybody. Treat the edit as silent.
 4. Fix the defect and cut the next version. That version number is now burned; do not reuse it.
+   Name the withdrawn version in the new release's notes. Publishing that release is the event
+   that actually reaches subscribers, so it is where the withdrawal gets announced.
+
+Between steps 3 and 4 the withdrawal is recorded but unannounced, and the tag stays installable
+with `uvx --from git+...@vX.Y.Z`. That window is tolerable when the fix follows promptly and
+nothing is on PyPI. It is not tolerable if you know someone is already installing from that git
+ref, or if the defect is dangerous rather than merely wrong. In either case, do not wait for the
+next release to carry the news: tell the affected adopters directly, and open a GitHub issue
+naming the withdrawn version so the withdrawal is searchable from outside the Releases page.
 
 `Create and push the tag` and `Publish release notes` are separate steps, so a run that dies
 between them leaves the tag with no Release and step 3 with nothing to edit. Do not rerun the
@@ -138,8 +149,10 @@ gh release create vX.Y.Z --title vX.Y.Z --verify-tag \
 ```
 
 This is safe to run by hand because the workflow triggers only on a push to `main` and on pull
-requests. Publishing a Release fires nothing, so nothing advances toward PyPI. Then continue at
-step 4.
+requests, so publishing a Release starts no CI run and advances nothing toward PyPI. It does
+reach Releases subscribers, which is the one upside of arriving at this stage by the tag-only
+path: the withdrawal notice goes out as a publication rather than as a silent edit. Then
+continue at step 4.
 
 ### Yanking a published release
 
@@ -193,8 +206,10 @@ disclosure timeline reporters are asked to follow.
 ### Where adopters watch for announcements
 
 * **GitHub Releases**, which the pipeline already publishes for every version, is the channel for
-  non-security announcements. Editing the affected version's Release and describing the problem
-  in the fix's Release notes puts it where anyone watching the repository sees it.
+  non-security announcements, but only on publication. Subscribers are notified when a release
+  is published; editing an already-published one is not documented to notify anyone. So editing
+  the bad version's Release records the problem, and describing it in the *fix's* release notes
+  is what announces it. Never rely on the edit alone to reach anybody.
 * **GitHub Security Advisories** carry security announcements and feed Dependabot.
 * **The PyPI yank reason** reaches whoever runs an install that skips the version.
 * **[CHANGELOG.md](CHANGELOG.md)** carries the durable record. A yanked or withdrawn version
