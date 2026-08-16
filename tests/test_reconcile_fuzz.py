@@ -903,8 +903,32 @@ def _assert_footprint_confined(
         assert position == len(after), "content changed after the last allowed line"
 
 
+def _entry_regions(document: Document, raw_meta: str) -> list[str | None]:
+    """Return the slice of the rewritten block each entry occupies.
+
+    An entry's line numbers do not survive a rewrite, since a replaced member may take fewer
+    lines than it was written on and an appended one takes an extra, so the entries are located
+    by their sites instead: a text each one writes and no other line in the document does. The
+    slice runs to the next entry's site, which is what makes a claim about an entry's own
+    source rather than about the block as a whole.
+
+    Args:
+        document: The generated model.
+        raw_meta: The rewritten frontmatter block.
+
+    Returns:
+        One slice per entry, in order, and None for an entry with no site to locate it by.
+    """
+    sites = [-1 if entry.site is None else raw_meta.find(entry.site) for entry in document.entries]
+    regions: list[str | None] = []
+    for position, start in enumerate(sites):
+        later = (found for found in sites[position + 1 :] if found > start)
+        regions.append(None if start == -1 else raw_meta[start : min(later, default=len(raw_meta))])
+    return regions
+
+
 def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
-    """Assert every comment comes back, each entry's own inside the entry that wrote it.
+    """Assert the block's comments come back, each entry's own inside the entry that wrote it.
 
     Surviving somewhere in the block is too weak a claim once two entries carry comments and
     both are rewritten. Their texts differ, so a dropped comment is caught, but one lifted off
@@ -913,22 +937,27 @@ def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
     a comment at all. Each entry's comments are therefore looked for between that entry's own
     site and the next entry's, which is the span the author wrote them in.
 
+    Preserving what the author wrote leaves the other half of the claim open, which is that a
+    rewrite writes no comment of its own. Nothing this generator puts in a value carries a
+    ``#``, so every one in the block either separates a ref from its section or opens a
+    comment, and a rewrite that neither drops nor invents one leaves that count alone.
+
     Args:
         document: The generated model, whose entries carry the comments they were written with.
         raw_meta: The rewritten frontmatter block.
     """
     for note in document.notes:
         assert note in raw_meta, f"comment {note!r} was dropped"
-    sites = [-1 if entry.site is None else raw_meta.find(entry.site) for entry in document.entries]
-    for position, entry in enumerate(document.entries):
+    written = sum(line.count("#") for line in document.meta_lines)
+    assert raw_meta.count("#") == written, (
+        f"the rewrite changed how many comments the block opens: {written} were written"
+    )
+    for entry, region in zip(document.entries, _entry_regions(document, raw_meta), strict=True):
         if not entry.notes:
             continue
-        start = sites[position]
-        assert start != -1, f"{entry.name} lost the site its comments hang off"
-        later = (found for found in sites[position + 1 :] if found > start)
-        stop = min(later, default=len(raw_meta))
+        assert region is not None, f"{entry.name} lost the site its comments hang off"
         for note in entry.notes:
-            assert note in raw_meta[start:stop], f"comment {note!r} left the entry that wrote it"
+            assert note in region, f"comment {note!r} left the entry that wrote it"
 
 
 def _assert_envelope_preserved(document: Document, before: str, after: str) -> None:
@@ -948,20 +977,44 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
     _assert_comments_kept_in_place(document, new.raw_meta)
 
 
+def _member_head(entry: Entry) -> str | None:
+    """Return the opening of the member a block edit lands on: its key and the colon after it.
+
+    The line the edit starts on is the one the model already names, so the head is read off
+    that line rather than tracked separately. It is None where there is no such line to read:
+    an entry whose whole span the model leaves to the rewriter, one with no ``seen`` member
+    written for an edit to land on, and a flow entry, whose key its own pin carries instead.
+    """
+    if entry.pin is not None or not entry.edits:
+        return None
+    line = entry.lines[entry.edits[0]]
+    colon = line.find(":")
+    return (line if colon == -1 else line[: colon + 1]).strip()
+
+
 def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
     """Assert layer 3 byte-local preservation for the parts the line footprint cannot pin.
 
-    Two claims, both about source the semantic oracle would let a rewrite restyle freely. An
-    entry's opening keeps the punctuation its collection style is recognized by. And a line
-    written in flow style, which the footprint can only allow or forbid whole, comes back
-    matching character for character everywhere no edit was allowed to land: its carrier's
-    brackets and separators, its untouched entries, and the member key and the punctuation
-    around the value each edited entry was rewritten at.
+    Three claims, all about source the semantic oracle would let a rewrite restyle freely. An
+    entry's opening keeps the punctuation its collection style is recognized by. A line written
+    in flow style, which the footprint can only allow or forbid whole, comes back matching
+    character for character everywhere no edit was allowed to land: its carrier's brackets and
+    separators, its untouched entries, and the member key and the punctuation around the value
+    each edited entry was rewritten at. And a block member, whose whole line the footprint can
+    only allow or forbid, still opens with the key the author spelled it with, since layer 4
+    replaces that member's value rather than the line it sits on.
     """
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
         if entry.marker is not None:
             assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
+    applied = document.applied(updates)
+    for entry, region in zip(document.entries, _entry_regions(document, raw_meta), strict=True):
+        head = _member_head(entry)
+        if head is None or region is None or entry.ref not in applied:
+            continue
+        opened = (line.strip().startswith(head) for line in region.split("\n"))
+        assert any(opened), f"{entry.name} restyled the key it rewrote past: {head!r}"
     lines = _meta_lines(after)
     for pattern, budgets in document.flow_lines(updates):
         matches = (re.fullmatch(pattern, line) for line in lines)
@@ -1187,6 +1240,7 @@ def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | N
         (),
         (),
         _style_marker(written[0]),
+        site=fields["head"],
     )
 
 
@@ -1352,6 +1406,7 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             # same way it does for an ordinary explicit pair: the `ref` line above it is
             # untouched, and the whole entry is not the rewriter's to restyle.
             tuple(range(1, len(entry_lines))),
+            site="up-0#s0",
         )
         lines = ("id: doc", "title: &keyname seen", "derives_from:", *_indent(entry.lines, 2))
         root["title"] = "seen"
@@ -1377,6 +1432,7 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             # Only the `seen` member is rewritten; the aliased `ref` key above it, in either
             # spelling, stays exactly as it was written.
             (len(entry_lines) - 1,),
+            site="up-0#s0",
         )
         lines = ("id: doc", "title: &keyname ref", "derives_from:", *_indent(entry.lines, 2))
         root["title"] = "ref"
