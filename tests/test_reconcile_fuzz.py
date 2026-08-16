@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from ruamel.yaml.error import ReusedAnchorWarning
 
 from doc_lattice.error_types import ConfigError, ProjectError, UnreadableDocError
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
@@ -57,6 +58,14 @@ FLOW_EDIT_INDICATORS = {"none": "", "separator": ",", "item": ",{}"}
 # derandomize keeps CI reproducible without a fixed seed, and the deadline is off because one
 # example parses YAML several times.
 FUZZ_SETTINGS = settings(max_examples=300, derandomize=True, deadline=None)
+
+# A reused anchor name is a supported spelling under the pure parser, so the warning it raises is
+# expected output of the shapes that write one rather than a fault worth surfacing in the summary.
+# It is silenced per test rather than repo-wide, and the warning is itself asserted by
+# ``test_the_pure_reread_warns_about_a_reused_anchor_name``, so nothing is hidden by silencing it.
+# Which of these tests actually raises it depends on the leg, since the strict boundary refuses
+# the shape where the accelerator is installed and the shape moves pools with it.
+EXPECT_REUSED_ANCHOR = pytest.mark.filterwarnings("ignore::ruamel.yaml.error.ReusedAnchorWarning")
 
 
 def _strict_load_accepts_reused_anchors() -> bool:
@@ -1904,6 +1913,7 @@ def test_ordered_map_and_flow_roots_round_trip(data) -> None:
     _assert_supported_round_trip(document, updates)
 
 
+@EXPECT_REUSED_ANCHOR
 @FUZZ_SETTINGS
 @given(data=st.data())
 def test_alias_and_merge_shapes_round_trip(data) -> None:
@@ -2464,6 +2474,7 @@ def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> None:
     _assert_replacements_stay_bare(after, updates)
 
 
+@EXPECT_REUSED_ANCHOR
 @FUZZ_SETTINGS
 @given(data=st.data())
 def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
@@ -2595,6 +2606,7 @@ def test_a_document_that_mixes_line_endings_is_normalized_to_lf() -> None:
     assert after == f"---\n{PLAIN_REWRITTEN}---\nbody\n"
 
 
+@EXPECT_REUSED_ANCHOR
 def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
     """A later definition rebinds the name, so relocating the first value must pass the alias by.
 
@@ -2624,6 +2636,21 @@ def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
     except UnreadableDocError:
         return
     _assert_anchor_rebinding_survived(rewrites)
+
+
+def test_the_pure_reread_warns_about_a_reused_anchor_name() -> None:
+    """Assert the warning the column probe reads as its answer is really raised.
+
+    ``_strict_load_accepts_reused_anchors`` decides which AD-31 column the reused-anchor shape
+    sits in by whether the strict load raises, and it silences this warning to get there. That
+    makes the warning an unasserted premise of the whole split, and the tests above silence it
+    too. Pinning it here keeps the silencing honest: the reread inside ``apply_reconcile`` is
+    pure by AD-26 on every leg, so the pure parser is what raises this and it raises it always.
+    """
+    document = _reused_anchor_document(None, "reused-anchor")
+
+    with pytest.warns(ReusedAnchorWarning):
+        _rewrite_bytes(document.render(), {document.entries[0].ref: "new0000beef"})
 
 
 def _assert_anchor_rebinding_survived(rewrites: list[Rewrite]) -> None:
