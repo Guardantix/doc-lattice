@@ -961,9 +961,16 @@ def _flow_pin(inline: str, writes: FlowEditKind) -> FlowPin:
     # A head that ends in a space ends on a separator the author wrote, and an edit writes past
     # a separator rather than over it, so what follows starts the value rather than widening
     # the run in front of it. A head that ends anywhere else is followed by the edit's own text.
-    opening = r"(\S.*?)" if head.endswith(" ") else "(.*?)"
+    # Both forms end on a non-space for the same reason at the other end: the region closes on
+    # the last character the edit emitted, so space between that and the bracket the entry
+    # closes on is source the rewrite added. The budget cannot see it, since space is not an
+    # indicator, and no semantic oracle can either, since a flow scalar loads the same with or
+    # without it. Every region a rewrite writes here is at least one character wide, which is
+    # what lets the two ends be claimed of the same group.
+    region_pattern = r"(\S(?:.*?\S)?)" if head.endswith(" ") else r"(.*?\S)"
     return FlowPin(
-        f"{re.escape(head)}{opening}{re.escape(closing)}", written + FLOW_EDIT_INDICATORS[writes]
+        f"{re.escape(head)}{region_pattern}{re.escape(closing)}",
+        written + FLOW_EDIT_INDICATORS[writes],
     )
 
 
@@ -1232,8 +1239,40 @@ def _entry_regions(document: Document, raw_meta: str) -> list[str | None]:
     return regions
 
 
+def _note_opening(entry: Entry, note: str) -> str:
+    """Return the source a comment is written after, up to the nearest point an edit may reach.
+
+    Membership of an entry is as far as a region can pin a comment, and a comment can move
+    inside one: it is written at the end of a member's line, and the line below it is the
+    member's value, which is a line an edit may land on. A rewrite that lifted the comment onto
+    a line of its own under the member would keep the entry's comment count and the entry it
+    sits in, so what pins it is the source in front of it instead.
+
+    How much of that source is the author's differs by line. A comment on the ``ref`` line sits
+    outside the footprint, so everything before it has to come back; one on a ``seen`` line sits
+    past the member head and in front of a value the edit replaces, so the head is all of it
+    that survives the edit and all this may claim.
+
+    Either way the run is read back no further than the entry's own site, since that is where
+    the region the comment is looked for in begins and source above it is another claim's.
+
+    Args:
+        entry: The entry that wrote the comment.
+        note: The comment text, which each spelling writes its own of.
+
+    Returns:
+        The text the comment has to be written after, its own indentation dropped.
+    """
+    offset = next(index for index, line in enumerate(entry.lines) if note in line)
+    line = entry.lines[offset]
+    head = _member_head(line) if entry.edits is not None and offset in entry.edits else None
+    opening = head if head is not None else line[: line.index(note)].lstrip()
+    site = entry.site
+    return opening[opening.index(site) :] if site is not None and site in opening else opening
+
+
 def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
-    """Assert the block's comments come back, each entry's own inside the entry that wrote it.
+    """Assert the block's comments come back, each at the position in its entry it was written.
 
     Surviving somewhere in the block is too weak a claim once two entries carry comments and
     both are rewritten. Their texts differ, so a dropped comment is caught, but one lifted off
@@ -1241,6 +1280,10 @@ def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
     line it moved to is inside the allowed footprint as well, and the loaded mapping never sees
     a comment at all. Each entry's comments are therefore looked for between that entry's own
     site and the next entry's, which is the span the author wrote them in.
+
+    Landing in the right entry leaves the position inside it open, and a comment can move there
+    too, so each one is also read against the source it was written after, which
+    ``_note_opening`` derives.
 
     Preserving what the author wrote leaves the other half of the claim open, which is that a
     rewrite writes no comment of its own. A ``#`` opens a comment only at the start of a line or
@@ -1265,6 +1308,14 @@ def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
         assert region is not None, f"{entry.name} lost the site its comments hang off"
         for note in entry.notes:
             assert note in region, f"comment {note!r} left the entry that wrote it"
+            opening = _note_opening(entry, note)
+            written = [
+                line[: line.index(note)].lstrip() for line in region.split("\n") if note in line
+            ]
+            assert any(before.startswith(opening) for before in written), (
+                f"comment {note!r} moved off the source it was written after: {opening!r} "
+                f"opens none of the lines carrying it, which open {written!r}"
+            )
             _CLAIMS["comment-at-its-own-site"] += 1
 
 
@@ -1285,24 +1336,37 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
     _assert_comments_kept_in_place(document, new.raw_meta)
 
 
-def _member_heads(entry: Entry) -> tuple[str, ...]:
-    """Return the openings of the member lines a block edit lands on, up to where a value starts.
+def _member_head(line: str) -> str | None:
+    """Return one member line's opening, up to where its value starts, or None if it opens none.
 
     The key, the colon after it and the spaces the author left before the value, all of which a
-    replacement of that value has to write past. A head is read off every line the edit may land
-    on rather than off the first one alone, because a member written as an explicit pair spreads
-    that opening over two lines: the ``? seen`` key on one, and on the next the ``:`` its value
-    is written after. Reading only the first would leave that separator unclaimed, which is the
-    one an in-place replacement actually writes past. Each head's own indentation is dropped,
-    since a carrier indents an entry by whatever its shape needs and a member indented wrong
-    loads differently or not at all.
+    replacement of that value has to write past. The line's own indentation is dropped, since a
+    carrier indents an entry by whatever its shape needs and a member indented wrong loads
+    differently or not at all.
 
     An allowed line either opens a member or continues a value the rewrite replaces outright,
     and only the first kind has an opening to pin: requiring a value line to come back would
     forbid the very edit layer 4 allows. The two are told apart by the indicators, since no
     value this generator writes carries a ``:`` or a ``?``, so a line with neither is scalar
-    content. One that did would be claimed here as a key and fail loudly, rather than quietly
+    content. One that did would be read here as a key and fail loudly, rather than quietly
     widening what the claim lets a rewrite do.
+    """
+    line = line.lstrip()
+    colon = line.find(":")
+    if colon == -1:
+        return line if "?" in line else None
+    rest = line[colon + 1 :]
+    return line[: colon + 1 + len(rest) - len(rest.lstrip(" "))]
+
+
+def _member_heads(entry: Entry) -> tuple[str, ...]:
+    """Return the openings of the member lines a block edit lands on.
+
+    A head is read off every line the edit may land on rather than off the first one alone,
+    because a member written as an explicit pair spreads that opening over two lines: the
+    ``? seen`` key on one, and on the next the ``:`` its value is written after. Reading only
+    the first would leave that separator unclaimed, which is the one an in-place replacement
+    actually writes past.
 
     Returns nothing where there is no such line to read: an entry whose whole span the model
     leaves to the rewriter, one with no ``seen`` member written for an edit to land on, and a
@@ -1310,23 +1374,14 @@ def _member_heads(entry: Entry) -> tuple[str, ...]:
     """
     if entry.pin is not None or not entry.edits:
         return ()
-    heads: list[str] = []
-    for offset in entry.edits:
-        line = entry.lines[offset].lstrip()
-        colon = line.find(":")
-        if colon == -1:
-            if "?" in line:
-                heads.append(line)
-            continue
-        rest = line[colon + 1 :]
-        heads.append(line[: colon + 1 + len(rest) - len(rest.lstrip(" "))])
-    return tuple(heads)
+    heads = (_member_head(entry.lines[offset]) for offset in entry.edits)
+    return tuple(head for head in heads if head is not None)
 
 
 def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
     """Assert layer 3 byte-local preservation for the parts the line footprint cannot pin.
 
-    Three claims, all about source the semantic oracle would let a rewrite restyle freely. An
+    Four claims, all about source the semantic oracle would let a rewrite restyle freely. An
     entry's opening keeps the punctuation its collection style is recognized by. A line written
     in flow style, which the footprint can only allow or forbid whole, comes back matching
     character for character everywhere no edit was allowed to land: its carrier's brackets and
@@ -1334,9 +1389,19 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
     each edited entry was rewritten at. And a block member, whose whole line the footprint can
     only allow or forbid, still opens with the key the author spelled it with and the spaces
     they left after it, since layer 4 replaces that member's value rather than the line it
-    sits on. That last claim is made of every line an edit may land on, since a member spelled
-    as an explicit pair carries its key on one line and the separator its value follows on the
-    next.
+    sits on. That claim is made of every line an edit may land on, since a member spelled as an
+    explicit pair carries its key on one line and the separator its value follows on the next.
+
+    The fourth closes the other end of a block edit. An in-place replacement writes the value
+    the member ends on, so space left past it is source the rewrite added rather than source it
+    wrote over, and nothing else here sees it: the head claim pins the opening and stops, the
+    footprint hands the whole line to the rewriter, and a plain scalar loads the same whether or
+    not space follows it. It is made of the whole block rather than of the edited lines alone,
+    because the source writes no content followed by space for it to be read against, which is
+    the premise asserted alongside it rather than left to a reader. A line of nothing but space
+    is outside the claim, since a keep-chomped scalar's blank line is written at the entry's own
+    indentation and carries no value for a rewrite to have written past; the footprint counts
+    those lines instead.
 
     The block claim is made of every entry the model gives a member to read it off, rather than
     only of the entries an update was applied to. An entry no edit may reach satisfies it for
@@ -1377,6 +1442,11 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
             )
             _CLAIMS["member-head"] += 1
     lines = _meta_lines(after)
+    assert not [line for line in document.meta_lines if line.strip() and line != line.rstrip()], (
+        "a spelling writes content followed by space, which the claim below reads as absent"
+    )
+    padded = [line for line in lines if line.strip() and line != line.rstrip()]
+    assert not padded, f"a rewrite left space past the value it wrote: {padded!r}"
     for pattern, budgets in document.flow_lines(updates):
         matches = (re.fullmatch(pattern, line) for line in lines)
         match = next((found for found in matches if found is not None), None)
@@ -1386,6 +1456,23 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
             assert sorted(spent) == sorted(budget), (
                 f"an edit restyled flow punctuation: wrote {region!r}, "
                 f"whose indicators {spent!r} are not the allowed {budget!r}"
+            )
+            # The budget cannot see space, since space is no indicator, and neither can the
+            # semantic oracle, since a flow scalar loads the same however much of it surrounds
+            # the scalar. What bounds it is where it may sit: an edit writes a space only as
+            # the one separating a pair it appended from what came before, or the one after
+            # the key indicator it wrote, so every space in the region follows the punctuation
+            # it was written after. Space anywhere else is source the edit added around a value
+            # rather than the value itself, which the region's own ends catch only at its far
+            # edge and not inside an appended item.
+            loose = [
+                index
+                for index, char in enumerate(region)
+                if char == " " and (index == 0 or region[index - 1] not in ",:")
+            ]
+            assert not loose, (
+                "an edit wrote space around the value rather than after the punctuation it "
+                f"follows: {region!r} carries loose space at {loose}"
             )
             _CLAIMS["flow-line"] += 1
 
