@@ -1946,15 +1946,45 @@ def test_envelopes_and_line_endings_round_trip(data) -> None:
     _assert_supported_round_trip(document, _updates(data.draw, entries))
 
 
+@pytest.mark.parametrize("seen_form", SEEN_FORMS, ids=lambda form: form.name)
 @pytest.mark.parametrize("ref_form", REF_FORMS, ids=lambda form: form.name)
-def test_every_ref_and_seen_spelling_pair_round_trips(ref_form: RefForm) -> None:
+def test_every_ref_and_seen_spelling_pair_round_trips(
+    ref_form: RefForm, seen_form: SeenForm
+) -> None:
     """Cover the layer 2 spelling tables exhaustively, which sampling alone cannot promise."""
-    for seen_form in SEEN_FORMS:
-        entry = _combined_entry(0, ref_form, seen_form)
-        _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
+    entry = _combined_entry(0, ref_form, seen_form)
+    _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
 
 
-def test_every_commented_spelling_keeps_its_comment_at_its_own_site() -> None:
+def _commented_pairs() -> tuple[tuple[RefForm, SeenForm], ...]:
+    """Return every spelling pair where at least one side writes a comment.
+
+    Built at collection time so each pair is its own test item and a failure names the two
+    spellings that produced it. The plain form is drawn in on each side as the neutral partner,
+    so a commented spelling is exercised against an uncommented one as well as against another
+    commented one, but the pair where neither carries a comment has nothing to observe.
+    """
+    refs = tuple(form for form in REF_FORMS if form.note or form.name == "plain")
+    seens = tuple(form for form in SEEN_FORMS if form.note or form.name == "plain")
+    return tuple(
+        (ref_form, seen_form)
+        for ref_form in refs
+        for seen_form in seens
+        if ref_form.note or seen_form.note
+    )
+
+
+COMMENTED_PAIRS = _commented_pairs()
+
+
+@pytest.mark.parametrize(
+    ("ref_form", "seen_form"),
+    COMMENTED_PAIRS,
+    ids=lambda form: form.name,
+)
+def test_every_commented_spelling_keeps_its_comment_at_its_own_site(
+    ref_form: RefForm, seen_form: SeenForm
+) -> None:
     """Rewrite two commented members at once, the only shape a comment can move inside of.
 
     One entry cannot tell a comment that moved from one that was kept: the only place it could
@@ -1962,22 +1992,16 @@ def test_every_commented_spelling_keeps_its_comment_at_its_own_site() -> None:
     each carry a comment is what makes the site an observable, so every spelling that writes
     one is generated at both positions and both entries are updated in the same pass.
     """
-    ref_forms = tuple(form for form in REF_FORMS if form.note or form.name == "plain")
-    seen_forms = tuple(form for form in SEEN_FORMS if form.note or form.name == "plain")
-    for ref_form in ref_forms:
-        for seen_form in seen_forms:
-            if not (ref_form.note or seen_form.note):
-                continue
-            entries = tuple(_combined_entry(index, ref_form, seen_form) for index in range(2))
-            updates = {entry.ref: f"new{index:04x}beef" for index, entry in enumerate(entries)}
-            _assert_supported_round_trip(_entry_pair_document(entries), updates)
+    entries = tuple(_combined_entry(index, ref_form, seen_form) for index in range(2))
+    updates = {entry.ref: f"new{index:04x}beef" for index, entry in enumerate(entries)}
+    _assert_supported_round_trip(_entry_pair_document(entries), updates)
 
 
-def test_every_whole_entry_spelling_round_trips() -> None:
+@pytest.mark.parametrize("form", WHOLE_FORMS, ids=lambda form: form.name)
+def test_every_whole_entry_spelling_round_trips(form: WholeForm) -> None:
     """Cover every entry spelling that is written as one indivisible shape."""
-    for form in WHOLE_FORMS:
-        entry = _whole_entry(0, form)
-        _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
+    entry = _whole_entry(0, form)
+    _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
 
 
 def _anchor_definitions(lines: tuple[str, ...]) -> list[str]:
@@ -1999,6 +2023,7 @@ def test_the_spelling_tables_never_define_one_anchor_name_twice() -> None:
     parser is in use and fail wherever the optional accelerator is installed. Two entries are
     built so the per-entry naming scheme is checked as well as each spelling on its own.
     """
+    offenders: list[str] = []
     for ref_form in REF_FORMS:
         for seen_form in SEEN_FORMS:
             pair = tuple(
@@ -2007,11 +2032,17 @@ def test_the_spelling_tables_never_define_one_anchor_name_twice() -> None:
                 for line in _combined_entry(index, ref_form, seen_form).lines
             )
             names = _anchor_definitions(pair)
-            assert len(names) == len(set(names)), f"{ref_form.name}+{seen_form.name}: {names}"
+            if len(names) != len(set(names)):
+                offenders.append(f"{ref_form.name}+{seen_form.name}: {names}")
     for form in WHOLE_FORMS:
         pair = tuple(line for index in (0, 1) for line in _whole_entry(index, form).lines)
         names = _anchor_definitions(pair)
-        assert len(names) == len(set(names)), f"{form.name}: {names}"
+        if len(names) != len(set(names)):
+            offenders.append(f"{form.name}: {names}")
+    # Accumulated rather than asserted in the loop: this guard is about the tables as a whole,
+    # and a naming scheme that broke would break for many spellings at once, so stopping at the
+    # first would name one and hide the rest. It stays a single test for the same reason.
+    assert not offenders, f"these spellings define one anchor name twice: {offenders}"
 
 
 def _entry_pair_document(entries: tuple[Entry, ...]) -> Document:
