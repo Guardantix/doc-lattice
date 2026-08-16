@@ -253,6 +253,13 @@ class Entry:
             when it spells none of its own. Writing a hash at that entry changes this one too,
             with nothing written here, so the semantic oracle has to expect it. None for an
             entry whose ``seen`` follows nothing but its own updates.
+        displaced: The exact source an anchored value being replaced has to be re-emitted as at
+            the alias site it is relocated onto. None makes no relocation claim, which is the
+            default because the rule is not the same for every anchor: a reused name rebinds,
+            so the first alias below the definition is the wrong answer there. This is the one
+            layer 4 claim the semantic oracle cannot make, since it compares loaded values and
+            a relocated ``&name ~`` reloads exactly as ``&name null`` does, and a multi-line
+            tagged scalar re-emitted without its quoting reloads as the number it always was.
     """
 
     name: str
@@ -271,6 +278,7 @@ class Entry:
     site: str | None = None
     written_lines: int | None = None
     inherits: str | None = None
+    displaced: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1345,6 +1353,54 @@ def _assert_replacements_stay_bare(after: str, updates: dict[str, str]) -> None:
             )
 
 
+def _assert_relocation(document: Document, raw_meta: str, updates: dict[str, str]) -> None:
+    """Assert a displaced anchored value landed where layer 4 says, spelled as it says.
+
+    Two outcomes, and which one applies is decided by the model rather than read off the result,
+    so neither can stand in for the other. Where an alias below the definition is not itself
+    being rewritten, the displaced value is re-emitted at it and the anchor is defined once more.
+    Where every alias in scope is itself being rewritten there is nothing left reading the old
+    value, so the anchor goes with it and neither the definition nor an alias survives.
+
+    The claim is opt-in through ``Entry.displaced`` because "the first alias below the
+    definition" is not the rule everywhere: a reused anchor name rebinds at each definition, so
+    that shape declares nothing here and is pinned by its own test.
+
+    Args:
+        document: The generated model.
+        raw_meta: The rewritten frontmatter block.
+        updates: The updates the rewrite was asked for.
+    """
+    applied = document.applied(updates)
+    regions = _entry_regions(document, raw_meta)
+    for entry in document.entries:
+        if entry.anchor is None or entry.displaced is None or entry.ref not in applied:
+            continue
+        alias = f"*{entry.anchor}"
+        readers = [
+            other
+            for other in document.entries
+            if other is not entry and any(alias in line for line in other.lines)
+        ]
+        surviving = [other for other in readers if other.ref not in applied]
+        if not surviving:
+            dropped = f"{entry.name} kept the anchor {entry.anchor!r} after every alias reading "
+            dropped += "it was rewritten too, so nothing is left for it to name"
+            assert f"&{entry.anchor}" not in raw_meta, dropped
+            assert alias not in raw_meta, dropped
+            continue
+        landed = regions[document.entries.index(surviving[0])]
+        assert landed is not None, f"{surviving[0].name} lost the site it is located by"
+        assert entry.displaced in landed, (
+            f"{entry.name} did not relocate {entry.displaced!r} onto "
+            f"{surviving[0].name}, whose source is now {landed!r}"
+        )
+        assert raw_meta.count(f"&{entry.anchor}") == 1, (
+            f"the anchor {entry.anchor!r} is defined "
+            f"{raw_meta.count(f'&{entry.anchor}')} times after the relocation"
+        )
+
+
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
     """Assert a layer 2 document rewrites correctly, preserving layer 3 and confining layer 4."""
     text = document.render()
@@ -1361,6 +1417,7 @@ def _assert_supported_round_trip(document: Document, updates: dict[str, str]) ->
     _assert_envelope_preserved(document, text, after)
     _assert_styles_preserved(document, after, updates)
     _assert_replacements_stay_bare(after, updates)
+    _assert_relocation(document, _parts(after).raw_meta, updates)
     allowed, inserts = document.footprint(updates)
     _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
     written = document.written_lines(updates)
@@ -1538,6 +1595,7 @@ def alias_and_merge_documents(draw) -> Document:
     builders = {
         "aliased-entry": _aliased_entry_document,
         "relocating-anchor": _relocating_anchor_document,
+        "relocating-null": _relocating_null_document,
         "merge": _merge_document,
         "tagged-merge": _merge_document,
         "entry-merge": _entry_merge_document,
@@ -1674,7 +1732,9 @@ RELOCATED_CONTENTS = (
 )
 
 
-def _relocating_anchor_pair(written: str, value: str) -> Document:
+def _relocating_anchor_pair(
+    written: str, value: object, *, source: str | None = None, displaced: str | None = None
+) -> Document:
     """Build an anchored ``seen`` and the alias site its old value is relocated onto.
 
     The anchored entry is modelled member by member, the way a table-built block entry is: its
@@ -1690,12 +1750,19 @@ def _relocating_anchor_pair(written: str, value: str) -> Document:
     Args:
         written: The anchored ``seen`` value as the author spelled it, quoting included.
         value: The value that source loads as, at both sites.
+        source: The whole anchored member value, for the spellings ``&shared {written}`` cannot
+            write. The bare anchor is the one that needs it, since it carries no value at all
+            and would otherwise be written with a trailing space.
+        displaced: What the relocation has to re-emit at the alias site. Defaults to the source
+            as written, which is right wherever the value comes back spelled as the author wrote
+            it, and is given explicitly where layer 4 re-spells it.
 
     Returns:
         The two-entry document, with the footprint of a relocation modelled on it.
     """
     aliased = ("- ref: up-1#s1", "  seen: *shared")
-    anchored = ("- ref: up-0#s0", f"  seen: &shared {written}")
+    member = source if source is not None else f"&shared {written}"
+    anchored = ("- ref: up-0#s0", f"  seen: {member}")
     first = Entry(
         "anchored-seen",
         anchored,
@@ -1710,6 +1777,7 @@ def _relocating_anchor_pair(written: str, value: str) -> Document:
         (1,),
         site="up-0#s0",
         written_lines=1,
+        displaced=displaced if displaced is not None else f"&shared {written}",
     )
     second = Entry(
         "alias-seen",
@@ -1742,6 +1810,23 @@ def _relocating_anchor_document(draw, _shape: str) -> Document:
     """An anchored ``seen`` whose replacement relocates the old value onto its alias site."""
     written, value, _ = draw(st.sampled_from(RELOCATED_CONTENTS))
     return _finish(draw, _relocating_anchor_pair(written, value))
+
+
+# The three ways a null is written under an anchor. Layer 4 re-emits a displaced null in its own
+# spelling rather than through the tag lifecycle, so all three relocate as `&shared null` however
+# they were written, and the semantic oracle cannot tell the three apart: each loads as None at
+# both sites whichever of them the rewrite emitted.
+NULL_ANCHOR_SOURCES = ("&shared null", "&shared ~", "&shared")
+
+
+def _relocating_null_document(draw, _shape: str) -> Document:
+    """An anchored null whose replacement relocates it onto its alias site.
+
+    Strict-column, unlike the bool and the multi-line tagged scalar in the recovery pool, because
+    ``RawEdge.seen`` admits null at both the anchored member and the alias site.
+    """
+    source = draw(st.sampled_from(NULL_ANCHOR_SOURCES))
+    return _finish(draw, _relocating_anchor_pair("", None, source=source, displaced="&shared null"))
 
 
 def _merge_document(draw, shape: str) -> Document:
@@ -2493,6 +2578,12 @@ def _recovery_shapes() -> tuple[RecoveryShape, ...]:
         RecoveryShape(
             "relocated-non-string-seen", _recovery_relocated_non_string_seen(), "rewrite"
         ),
+        RecoveryShape("relocated-bool-seen", _recovery_relocated_bool_seen(), "rewrite"),
+        RecoveryShape(
+            "relocated-multi-line-tagged-seen",
+            _recovery_relocated_multi_line_tagged_seen(),
+            "rewrite",
+        ),
         RecoveryShape("aliased-derives-from", _recovery_aliased_derives_from(), "rewrite"),
         RecoveryShape("aliased-entry", _recovery_aliased_entry(), "rewrite"),
         RecoveryShape(
@@ -2602,6 +2693,72 @@ def _recovery_relocated_non_string_seen() -> Document:
         lines,
         (first, second),
         ((2, 4), (4, 6)),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+
+def _recovery_relocated_bool_seen() -> Document:
+    """An anchored bool ``seen``, relocated in its own spelling rather than under its tag.
+
+    Reread-only because ``RawEdge.seen`` is ``str | None``. Layer 4 gives a bool and a null the
+    arm before the tag lifecycle: they carry their type in their own spelling, so re-emitting a
+    tag would only add a token the reload does not need. The semantic oracle cannot see the
+    difference, since ``&shared true`` and a quoted or tagged spelling of it reload alike.
+    """
+    return _relocating_anchor_pair("true", True, displaced="&shared true")
+
+
+def _recovery_relocated_multi_line_tagged_seen() -> Document:
+    """An anchored multi-line tagged scalar, re-emitted quoted under the same tag.
+
+    Reread-only for the same ``RawEdge.seen`` reason. This is the far arm of the tag lifecycle:
+    a multi-line scalar cannot be relocated as written into the one line the alias site holds,
+    so layer 4 re-emits it quoted and keeps the tag, which is what stops the value being retyped
+    to a string. Reload-equal to the unquoted spelling, so only ``displaced`` sees it.
+    """
+    anchored = ("- ref: up-0#s0", "  seen: &shared !!int |", "    42")
+    aliased = ("- ref: up-1#s1", "  seen: *shared")
+    first = Entry(
+        "anchored-multi-line-tagged-seen",
+        anchored,
+        None,
+        "up-0#s0",
+        42,
+        True,
+        "shared",
+        (),
+        (),
+        _style_marker(anchored[0]),
+        # Both lines of the scalar, since the replacement consumes the whole member it stands
+        # for, not just the line its header is written on.
+        (1, 2),
+        site="up-0#s0",
+        written_lines=1,
+        displaced='&shared !!int "42\\n"',
+    )
+    second = Entry(
+        "alias-multi-line-tagged-seen",
+        aliased,
+        None,
+        "up-1#s1",
+        42,
+        True,
+        None,
+        (),
+        (),
+        _style_marker(aliased[0]),
+        (1,),
+        site="up-1#s1",
+        written_lines=1,
+    )
+    lines = ("id: doc", "derives_from:", *first.lines, *second.lines)
+    return Document(
+        lines,
+        (first, second),
+        ((2, 5), (5, 7)),
         {"id": "doc"},
         ("id", "derives_from"),
         _flat_envelope(),
