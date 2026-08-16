@@ -756,13 +756,18 @@ def _block_sequence(
     return lines, spans
 
 
-def _member_lines(name: str, entries: tuple[Entry, ...], carrier: str, pad: int) -> list[str]:
-    """Render the ``derives_from`` member in the requested carrier shape."""
+def _member_lines(head: list[str], entries: tuple[Entry, ...], carrier: str, pad: int) -> list[str]:
+    """Render the ``derives_from`` member under ``head``, in the requested carrier shape.
+
+    The head is the key as its own lines, since layer 2 lets a root key be written either
+    plainly or as an explicit ``? key`` / ``: value`` pair, which spreads it over two. A flow
+    carrier is written onto the last of them, the line carrying the ``:`` its value follows.
+    """
     if carrier == "flow":
         inlines = FLOW_SEPARATOR.join(entry.inline or "" for entry in entries)
-        return [f"{name}: [{inlines}]"]
+        return [*head[:-1], f"{head[-1]} [{inlines}]"]
     body, _ = _block_sequence(entries, pad)
-    return [f"{name}:", *body]
+    return [*head, *body]
 
 
 def _root_key_value(extra: tuple[str, tuple[str, ...], object], index: int) -> object:
@@ -1195,6 +1200,11 @@ def block_root_documents(draw) -> Document:
     carrier = "flow" if all(entry.inline for entry in entries) and draw(st.booleans()) else "block"
     pad = draw(st.sampled_from((0, 2)))
     id_lines = draw(st.sampled_from((["id: doc"], ["? id", ": doc"])))
+    # Layer 2 allows the explicit pair at any root key, so it is drawn for the key the entries
+    # are located under as well as for ``id``. The two are not the same claim: locating a
+    # sequence under a key spelled that way is what the rewriter has to keep doing, and no
+    # other generator writes the spelling with the literal key, only through an alias.
+    key_lines = draw(st.sampled_from((["derives_from:"], ["? derives_from", ":"])))
     members = _root_members(draw, count)
     comment = draw(st.sampled_from(("", "# root note")))
 
@@ -1205,15 +1215,15 @@ def block_root_documents(draw) -> Document:
     for _, extra_lines, _ in members:
         lines.extend(extra_lines)
     body, spans = _block_sequence(entries, pad)
-    offset = len(lines) + 1
+    offset = len(lines) + len(key_lines)
     # A flow carrier shares its line with the entries it holds, so the whole line is inside the
     # allowed footprint and the flow-line assertion is what pins it. A block carrier sits on a
     # line of its own outside that footprint, which the footprint assertion already pins.
     if carrier == "flow":
-        lines.extend(_member_lines("derives_from", entries, "flow", pad))
+        lines.extend(_member_lines(key_lines, entries, "flow", pad))
         spans = [(offset - 1, offset)] * count
     else:
-        lines.append("derives_from:")
+        lines.extend(key_lines)
         lines.extend(body)
         spans = [(start + offset, stop + offset) for start, stop in spans]
 
