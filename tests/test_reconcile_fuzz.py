@@ -29,7 +29,7 @@ from hypothesis import strategies as st
 from ruamel.yaml.error import ReusedAnchorWarning
 
 from doc_lattice.error_types import ConfigError, ProjectError, UnreadableDocError
-from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
+from doc_lattice.frontmatter_parser import FrontmatterParts, parse_meta, split_frontmatter_parts
 from doc_lattice.hashing import normalize_newlines
 from doc_lattice.reconcile import Rewrite, apply_reconcile, plan_rewrites
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
@@ -906,7 +906,7 @@ def _document_ending(text: str) -> str:
     return "mixed" if "\r" in text else "\n"
 
 
-def _parts(text: str):
+def _parts(text: str) -> FrontmatterParts:
     """Split a document into its frontmatter pieces after normalizing its line endings."""
     parts = split_frontmatter_parts(normalize_newlines(text), DOC)
     assert parts is not None
@@ -924,7 +924,7 @@ def _reload(text: str) -> object:
     return SafeYamlLoader().load(_parts(text).raw_meta)
 
 
-def _rewrite_bytes(text: str, updates: dict[str, str]):
+def _rewrite_bytes(text: str, updates: dict[str, str]) -> list[Rewrite]:
     """Drive the production planner over one in-memory document."""
     before = text.encode("utf-8")
     return plan_rewrites({DOC: updates}, lambda _path: before)
@@ -2298,6 +2298,12 @@ def _recovery_documents() -> tuple[Document, ...]:
 
 
 def _recovery_extra_root_key() -> Document:
+    """A root carrying a key ``NodeMeta`` does not declare.
+
+    ``NodeMeta`` is built with ``extra="forbid"``, so any key beyond its own fails strict
+    validation. The reread reads only ``derives_from`` and leaves the rest alone, which is what
+    makes the extra key a recovery shape rather than a refusal.
+    """
     entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
     lines = ("id: doc", "extra: kept", "derives_from:", *_indent(entry.lines, 2))
     return Document(
@@ -2312,6 +2318,11 @@ def _recovery_extra_root_key() -> Document:
 
 
 def _recovery_extra_entry_key() -> Document:
+    """An entry carrying a member beyond ``ref`` and ``seen``.
+
+    ``RawEdge`` forbids extras too, so the entry fails strict validation while the reread
+    tolerates the member and has to write past it without disturbing it.
+    """
     entry = Entry(
         "entry-extra-key",
         ("- ref: up-0#s0", "  seen: old0000", "  extra: kept"),
@@ -2328,6 +2339,12 @@ def _recovery_extra_entry_key() -> Document:
 
 
 def _recovery_non_string_seen(written: str, value: object) -> Document:
+    """A ``seen`` whose constructed value is not a string.
+
+    ``RawEdge.seen`` is ``str | None`` under ``strict=True``, so an int, a bool, a float, a date
+    or an explicitly tagged scalar is refused by the strict load however it is spelled. The
+    reread accepts whatever the safe constructor builds, which is the concurrent-edit case.
+    """
     entry = Entry(
         f"non-string-seen-{written}",
         ("- ref: up-0#s0", f"  seen: {written}"),
@@ -2343,6 +2360,12 @@ def _recovery_non_string_seen(written: str, value: object) -> Document:
 
 
 def _recovery_relocated_non_string_seen() -> Document:
+    """A non-string ``seen`` under an anchor, with an alias site its old value relocates onto.
+
+    Reread-only for the same ``RawEdge.seen`` reason as the plain non-string shapes, and it
+    additionally reaches the tag lifecycle: the displaced value has to be re-emitted at the
+    alias site under its own type rather than through ``str``.
+    """
     first = Entry(
         "anchored-int-seen",
         ("- ref: up-0#s0", "  seen: &shared !!int 5"),
@@ -2378,6 +2401,12 @@ def _recovery_relocated_non_string_seen() -> Document:
 
 
 def _recovery_aliased_derives_from() -> Document:
+    """A ``derives_from`` reached through an alias to a sequence defined elsewhere.
+
+    Not strictly reachable at all: the anchor has to be defined under some carrier key, and
+    ``NodeMeta`` forbids the extra key that would hold it. AD-31 records this as reread-only for
+    exactly that reason. The carrier key is a mirror, so it follows every update.
+    """
     entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
     lines = ("base: &edges", *_indent(entry.lines, 2), "id: doc", "derives_from: *edges")
     return Document(
@@ -2393,6 +2422,13 @@ def _recovery_aliased_derives_from() -> Document:
 
 
 def _recovery_aliased_entry() -> Document:
+    """An entry spelled as an alias to a mapping defined under another root key.
+
+    The entry itself is a layer 2 spelling, but the node it names has to live somewhere, and the
+    root key holding it is one ``NodeMeta`` forbids. This is the shape that keeps the whole-span
+    allowance, since layer 4 lets the rewrite expand the alias site rather than edit the shared
+    node behind it.
+    """
     entry = Entry(
         "alias-to-a-node-elsewhere",
         ("- *edge",),
@@ -2416,6 +2452,11 @@ def _recovery_aliased_entry() -> Document:
 
 
 def _recovery_trailing_block_scalar_member() -> Document:
+    """An entry whose extra member is a block scalar running to the end of the entry.
+
+    Reread-only twice over: the member is an extra ``RawEdge`` forbids, and it is the landing
+    layout an appended ``seen`` has to follow, which the strict column excludes.
+    """
     entry = Entry(
         "trailing-block-scalar-member",
         ("- ref: up-0#s0", "  note: |-", "    two", "    lines"),
@@ -2433,6 +2474,11 @@ def _recovery_trailing_block_scalar_member() -> Document:
 
 
 def _recovery_multi_line_flow_member() -> Document:
+    """An entry whose extra member is a flow collection written across several lines.
+
+    The same extra-member refusal as the trailing block scalar, with the landing point for an
+    appended ``seen`` spread over the lines the collection closes on.
+    """
     entry = Entry(
         "multi-line-flow-member",
         ("- ref: up-0#s0", "  tags: [", "    one,", "    two", "  ]"),
@@ -2450,6 +2496,11 @@ def _recovery_multi_line_flow_member() -> Document:
 
 
 def _recovery_null_member(written: str, value: object) -> Document:
+    """An entry whose extra member is an implicit or explicit null.
+
+    An extra ``RawEdge`` forbids, and the one whose written form gives an appended ``seen`` the
+    least to land after, since the member occupies a key and no value.
+    """
     entry = Entry(
         f"null-member-{written}",
         ("- ref: up-0#s0", f"  {written}"),
