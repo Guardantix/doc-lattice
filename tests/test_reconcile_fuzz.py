@@ -988,27 +988,42 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
     _assert_comments_kept_in_place(document, new.raw_meta)
 
 
-def _member_head(entry: Entry) -> str | None:
-    """Return the opening of the member a block edit lands on, up to where the value starts.
+def _member_heads(entry: Entry) -> tuple[str, ...]:
+    """Return the openings of the member lines a block edit lands on, up to where a value starts.
 
-    The key, the colon after it and the spaces the author left before the value, all of which
-    a replacement of that value has to write past. The line the edit starts on is the one the
-    model already names, so the head is read off that line rather than tracked separately. Its
-    own indentation is dropped, since a carrier indents an entry by whatever its shape needs
-    and a member indented wrong loads differently or not at all.
+    The key, the colon after it and the spaces the author left before the value, all of which a
+    replacement of that value has to write past. A head is read off every line the edit may land
+    on rather than off the first one alone, because a member written as an explicit pair spreads
+    that opening over two lines: the ``? seen`` key on one, and on the next the ``:`` its value
+    is written after. Reading only the first would leave that separator unclaimed, which is the
+    one an in-place replacement actually writes past. Each head's own indentation is dropped,
+    since a carrier indents an entry by whatever its shape needs and a member indented wrong
+    loads differently or not at all.
 
-    It is None where there is no such line to read: an entry whose whole span the model leaves
-    to the rewriter, one with no ``seen`` member written for an edit to land on, and a flow
-    entry, whose key its own pin carries instead.
+    An allowed line either opens a member or continues a value the rewrite replaces outright,
+    and only the first kind has an opening to pin: requiring a value line to come back would
+    forbid the very edit layer 4 allows. The two are told apart by the indicators, since no
+    value this generator writes carries a ``:`` or a ``?``, so a line with neither is scalar
+    content. One that did would be claimed here as a key and fail loudly, rather than quietly
+    widening what the claim lets a rewrite do.
+
+    Returns nothing where there is no such line to read: an entry whose whole span the model
+    leaves to the rewriter, one with no ``seen`` member written for an edit to land on, and a
+    flow entry, whose key its own pin carries instead.
     """
     if entry.pin is not None or not entry.edits:
-        return None
-    line = entry.lines[entry.edits[0]].lstrip()
-    colon = line.find(":")
-    if colon == -1:
-        return line
-    rest = line[colon + 1 :]
-    return line[: colon + 1 + len(rest) - len(rest.lstrip(" "))]
+        return ()
+    heads: list[str] = []
+    for offset in entry.edits:
+        line = entry.lines[offset].lstrip()
+        colon = line.find(":")
+        if colon == -1:
+            if "?" in line:
+                heads.append(line)
+            continue
+        rest = line[colon + 1 :]
+        heads.append(line[: colon + 1 + len(rest) - len(rest.lstrip(" "))])
+    return tuple(heads)
 
 
 def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
@@ -1022,7 +1037,9 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
     each edited entry was rewritten at. And a block member, whose whole line the footprint can
     only allow or forbid, still opens with the key the author spelled it with and the spaces
     they left after it, since layer 4 replaces that member's value rather than the line it
-    sits on.
+    sits on. That last claim is made of every line an edit may land on, since a member spelled
+    as an explicit pair carries its key on one line and the separator its value follows on the
+    next.
 
     The block claim is made of every entry the model gives a member to read it off, rather than
     only of the entries an update was applied to. An entry no edit may reach satisfies it for
@@ -1035,18 +1052,18 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
         if entry.marker is not None:
             assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
     for entry, region in zip(document.entries, _entry_regions(document, raw_meta), strict=True):
-        head = _member_head(entry)
-        if head is None or region is None:
+        if region is None:
             continue
-        followed = [
-            line.lstrip()[len(head) :]
-            for line in region.split("\n")
-            if line.lstrip().startswith(head)
-        ]
-        assert followed, f"{entry.name} restyled the key it rewrote past: {head!r}"
-        assert not head.endswith(" ") or not followed[0].startswith(" "), (
-            f"{entry.name} widened the separator it wrote its value after: {head!r}"
-        )
+        for head in _member_heads(entry):
+            followed = [
+                line.lstrip()[len(head) :]
+                for line in region.split("\n")
+                if line.lstrip().startswith(head)
+            ]
+            assert followed, f"{entry.name} restyled the key it rewrote past: {head!r}"
+            assert not head.endswith(" ") or not followed[0].startswith(" "), (
+                f"{entry.name} widened the separator it wrote its value after: {head!r}"
+            )
     lines = _meta_lines(after)
     for pattern, budgets in document.flow_lines(updates):
         matches = (re.fullmatch(pattern, line) for line in lines)
