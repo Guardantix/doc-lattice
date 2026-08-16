@@ -673,7 +673,8 @@ collision. Equal anchors in different files do not collide.
 | [CLAUDE.md](https://github.com/Guardantix/doc-lattice/blob/main/CLAUDE.md) | Short contributor and agent guide |
 | [roadmap.md](https://github.com/Guardantix/doc-lattice/blob/main/roadmap.md) | Future direction |
 | [CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md) | Release history and migrations |
-| [RELEASING.md](https://github.com/Guardantix/doc-lattice/blob/main/RELEASING.md) | Release checklist and version-tag procedure |
+| [RELEASING.md](https://github.com/Guardantix/doc-lattice/blob/main/RELEASING.md) | Release checklist, version-tag procedure, release authority and access, and the bad-release playbook |
+| [SECURITY.md](https://github.com/Guardantix/doc-lattice/blob/main/SECURITY.md) | Supported versions, what is in and out of scope, and how to report a vulnerability privately |
 
 ## Project structure
 
