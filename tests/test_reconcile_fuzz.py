@@ -232,6 +232,10 @@ class Entry:
             families spread rather than replacing one member, which is the same case ``edits``
             being None marks: how many lines such an edit settles on is the rewriter's to
             choose, so the model claims nothing about it.
+        inherits: The ref of the entry this one takes its ``seen`` from through a merge key,
+            when it spells none of its own. Writing a hash at that entry changes this one too,
+            with nothing written here, so the semantic oracle has to expect it. None for an
+            entry whose ``seen`` follows nothing but its own updates.
     """
 
     name: str
@@ -249,6 +253,7 @@ class Entry:
     pin: FlowPin | None = None
     site: str | None = None
     written_lines: int | None = None
+    inherits: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,13 +323,25 @@ class Document:
         )
 
     def expected(self, updates: dict[str, str]) -> dict[str, object]:
-        """Return the mapping the rewritten frontmatter has to load as."""
+        """Return the mapping the rewritten frontmatter has to load as.
+
+        An entry reading its ``seen`` through a merge key takes whatever its source holds
+        afterwards, so a hash written at the source lands here as well with nothing written at
+        this entry at all. An update naming this entry is what stops that: the rewriter writes
+        it a ``seen`` of its own, which shadows the merged one from then on.
+        """
+        sources = {entry.ref: entry for entry in self.entries}
         entries: list[dict[str, object]] = []
         for entry in self.entries:
             seen, present = entry.seen, entry.present
             planned = updates.get(entry.ref)
             if planned is not None and planned != seen:
                 seen, present = planned, True
+            elif entry.inherits is not None:
+                source = sources[entry.inherits]
+                supplied = updates.get(source.ref)
+                if supplied is not None and supplied != source.seen:
+                    seen, present = supplied, True
             item: dict[str, object] = {"ref": entry.ref}
             if present:
                 item["seen"] = seen
@@ -1408,6 +1425,8 @@ def alias_and_merge_documents(draw) -> Document:
         "tagged-merge": _merge_document,
         "entry-merge": _entry_merge_document,
         "tagged-entry-merge": _entry_merge_document,
+        "entry-inherits-seen": _inherited_seen_document,
+        "tagged-entry-inherits-seen": _inherited_seen_document,
         "alias-spelled-entry-key": _alias_spelled_key_document,
         "alias-spelled-ref-key": _alias_spelled_key_document,
         "alias-spelled-root-key": _alias_spelled_key_document,
@@ -1621,40 +1640,123 @@ def _merge_document(draw, shape: str) -> Document:
     return _finish(draw, assembled)
 
 
+# One row per way an entry's members can be split between a merge key and the entry itself,
+# which layer 2 declares at the `Entry` key spelling row: either member may arrive through a
+# merge, and an own member shadows a merged one of the same name. Each row is the entry's source
+# lines, the `seen` it loads as, the offsets an edit may land on, and whether the edit instead
+# takes a line of its own past the entry. A merged `seen` is written to rather than edited in
+# place: the rewriter gives the entry a `seen` of its own that shadows the merge, which leaves
+# the merge source alone and so leaves every other entry reading it alone too.
+ENTRY_MERGE_SHAPES = (
+    ("own-seen", ("- {key}: {{ref: {ref}}}", "  seen: {old}"), "old0000", (1,), False),
+    ("no-seen", ("- {key}: {{ref: {ref}}}",), None, (), True),
+    ("merged-seen", ("- {key}: {{seen: {old}}}", "  ref: {ref}"), "old0000", (), True),
+    ("merged-pair", ("- {key}: {{ref: {ref}, seen: {old}}}",), "old0000", (), True),
+    (
+        "merged-seen-shadowed",
+        ("- {key}: {{seen: merged00}}", "  ref: {ref}", "  seen: {old}"),
+        "old0000",
+        (2,),
+        False,
+    ),
+)
+
+
 def _entry_merge_document(draw, shape: str) -> Document:
-    """An entry whose ``ref`` arrives through a merge key, in either merge spelling.
+    """An entry whose members arrive through a merge key, in either merge spelling.
 
     The merge line is the entry's own source and no part of what an update rewrites: the value
     it names lives in the mapping the merge pulls in, and the ``seen`` this update lands on is
     either a member of the entry itself or one written on a line of its own just past it. The
     footprint is modelled that way rather than left to the whole-span allowance, which would
     let a rewrite restyle the merge key beside the edit with nothing here to see it.
+
+    Which members the merge supplies is drawn rather than fixed, since layer 2 declares both of
+    them at that row and they reach planning differently: an entry spelling its own ``seen`` is
+    edited where it stands, while one reading a merged ``seen`` is written a member that shadows
+    it. Generating only the first would leave the second's planning path unreached from here.
     """
     key = "<<" if shape == "entry-merge" else "!!merge inherited"
-    spelled = draw(st.booleans())
-    entry_lines = [f"- {key}: {{ref: up-0#s0}}"]
-    if spelled:
-        entry_lines.append("  seen: old0000")
+    name, templates, seen, edits, appends = draw(st.sampled_from(ENTRY_MERGE_SHAPES))
+    fields = _fields(0)
+    entry_lines = tuple(line.format(key=key, **fields) for line in templates)
     entry = Entry(
-        f"{shape}-{'with' if spelled else 'without'}-own-seen",
-        tuple(entry_lines),
+        f"{shape}-{name}",
+        entry_lines,
         None,
-        "up-0#s0",
-        "old0000" if spelled else None,
-        spelled,
+        fields["ref"],
+        seen,
+        seen is not None,
         None,
         (),
         (),
         _style_marker(entry_lines[0]),
-        (1,) if spelled else (),
-        not spelled,
-        site="up-0#s0",
+        edits,
+        appends,
+        site=fields["head"],
         written_lines=1,
     )
     lines = ("id: doc", "derives_from:", *_indent(entry.lines, 2))
     order = ("id", "derives_from")
     assembled = Document(
         lines, (entry,), ((2, len(lines)),), {"id": "doc"}, order, _flat_envelope(), ()
+    )
+    return _finish(draw, assembled)
+
+
+def _inherited_seen_document(draw, shape: str) -> Document:
+    """Two entries where the second reads the first's ``seen`` through a merge key.
+
+    This is the one shape where writing a hash at one entry changes another, since the loader
+    flattens a merge into a copy rather than sharing the object an alias would. Updating only
+    the source therefore has to leave the second entry alone in source and still change what it
+    loads as, while an update naming the second writes it a ``seen`` that shadows the merged one
+    from then on. Both are drawn, since ``_updates`` decides whether the second is named.
+    """
+    key = "<<" if shape == "entry-inherits-seen" else "!!merge inherited"
+    source = Entry(
+        "merge-source",
+        ("- &source", "  ref: up-0#s0", "  seen: old0000"),
+        None,
+        "up-0#s0",
+        "old0000",
+        True,
+        None,
+        (),
+        (),
+        _style_marker("- &source"),
+        (2,),
+        False,
+        site="up-0#s0",
+        written_lines=1,
+    )
+    inheritor = Entry(
+        "merge-inheritor",
+        (f"- {key}: *source", "  ref: up-1#s1"),
+        None,
+        "up-1#s1",
+        "old0000",
+        True,
+        None,
+        (),
+        (),
+        _style_marker(f"- {key}: *source"),
+        (),
+        True,
+        site="up-1#s1",
+        written_lines=1,
+        inherits="up-0#s0",
+    )
+    lines = (
+        "id: doc",
+        "derives_from:",
+        *_indent(source.lines, 2),
+        *_indent(inheritor.lines, 2),
+    )
+    spans = ((2, 2 + len(source.lines)), (2 + len(source.lines), len(lines)))
+    order = ("id", "derives_from")
+    assembled = Document(
+        lines, (source, inheritor), spans, {"id": "doc"}, order, _flat_envelope(), ()
     )
     return _finish(draw, assembled)
 
