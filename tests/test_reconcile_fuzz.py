@@ -1275,9 +1275,17 @@ def alias_and_merge_documents(draw) -> Document:
 
 
 def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | None) -> Entry:
-    """Build an entry whose source is spelled out rather than composed from the tables."""
+    """Build an entry whose source is spelled out rather than composed from the tables.
+
+    An entry written across several lines is modelled the way a table-built one is: the ``seen``
+    member is the only line an edit may land on, so the lines the caller wrote above it stay
+    outside the footprint whether or not a marker or a style claim also covers them. An entry
+    written on one line has no narrower footprint than its span, so it keeps the whole-span
+    allowance and its opening is what the marker pins.
+    """
     fields = _fields(index)
     written = tuple(line.format(**fields) for line in lines)
+    edits = tuple(offset for offset, line in enumerate(written) if "seen" in line)
     return Entry(
         "explicit",
         written,
@@ -1289,6 +1297,7 @@ def _entry(index: int, lines: tuple[str, ...], seen: str | None, anchor: str | N
         (),
         (),
         _style_marker(written[0]),
+        edits if len(written) > 1 else None,
         site=fields["head"],
     )
 
@@ -1323,6 +1332,7 @@ def _reused_anchor_document(_draw, _shape: str) -> Document:
         True,
         None,
         (),
+        edits=(1,),
     )
     lines = ["id: doc", "derives_from:", *first.lines, *second.lines, *third.lines]
     entries = (first, second, third)
@@ -1901,6 +1911,14 @@ def _recovery_documents() -> tuple[Document, ...]:
     A reused anchor name joins this pool exactly where the strict boundary refuses it, which
     is where the optional accelerator is installed. That keeps the shape generated on every
     leg: family 1 owns it under the pure parser, this union owns it under the C one.
+
+    Every shape here models the footprint of its update member by member rather than taking the
+    whole-span allowance. Recovery is held to the footprint alone, since layer 3 is a claim
+    about layer 2 documents, so the whole-span allowance is the only thing standing between a
+    rewrite and the source beside the member it edits: the ``ref`` it is found by, an extra
+    member the contract says survives untouched, and the member an appended ``seen`` is written
+    after. What the union leaves open is whether the rewrite happens at all, not how far it
+    reaches once it does.
     """
     conditional = () if REUSED_ANCHORS_ARE_STRICT else (_reused_anchor_document(None, ""),)
     return (
@@ -1947,6 +1965,7 @@ def _recovery_extra_entry_key() -> Document:
         None,
         (),
         (("extra", "kept"),),
+        edits=(1,),
     )
     return _single_entry_document(entry)
 
@@ -1961,6 +1980,7 @@ def _recovery_non_string_seen(written: str, value: object) -> Document:
         True,
         None,
         (),
+        edits=(1,),
     )
     return _single_entry_document(entry)
 
@@ -1975,9 +1995,18 @@ def _recovery_relocated_non_string_seen() -> Document:
         True,
         "shared",
         (),
+        edits=(1,),
     )
     second = Entry(
-        "alias-int-seen", ("- ref: up-1#s1", "  seen: *shared"), None, "up-1#s1", 5, True, None, ()
+        "alias-int-seen",
+        ("- ref: up-1#s1", "  seen: *shared"),
+        None,
+        "up-1#s1",
+        5,
+        True,
+        None,
+        (),
+        edits=(1,),
     )
     lines = ("id: doc", "derives_from:", *first.lines, *second.lines)
     return Document(
@@ -2040,6 +2069,8 @@ def _recovery_trailing_block_scalar_member() -> Document:
         None,
         (),
         (("note", "two\nlines"),),
+        edits=(),
+        appends=True,
     )
     return _single_entry_document(entry)
 
@@ -2055,6 +2086,8 @@ def _recovery_multi_line_flow_member() -> Document:
         None,
         (),
         (("tags", ["one", "two"]),),
+        edits=(),
+        appends=True,
     )
     return _single_entry_document(entry)
 
@@ -2070,6 +2103,8 @@ def _recovery_null_member(written: str, value: object) -> Document:
         None,
         (),
         (("note", value),),
+        edits=(),
+        appends=True,
     )
     return _single_entry_document(entry)
 
