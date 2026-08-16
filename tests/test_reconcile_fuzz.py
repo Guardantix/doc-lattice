@@ -171,8 +171,8 @@ class FlowPin:
 
     Attributes:
         pattern: The entry's source as a regular expression whose one group is the region the
-            edit lands in, bounded by the marker before it and the brackets the entry closes
-            on after it.
+            edit lands in, bounded by the source before it, up to and including the ``seen``
+            key an edit writes past, and by the brackets the entry closes on after it.
         budget: Every flow indicator that region is allowed to hold once the edit has landed,
             as one character per occurrence. It is the punctuation the spelling already wrote
             there plus the punctuation the edit itself has to write, so an inert separator or
@@ -630,13 +630,41 @@ def _style_marker(opening: str) -> str | None:
     return opening[:cut] or None
 
 
+def _flow_key_head(inline: str, marker: str) -> str:
+    """Return the flow source an edit may only start writing after.
+
+    The marker stops where an edit can first reach, which for a ``seen`` member the author
+    already wrote is that member's key. The key is source rather than something the edit
+    supplies, so a replacement of the value has to write past it: the key and the ``:`` that
+    follows it join the fixed opening, which leaves the region starting at the value itself
+    and a respelled key caught rather than absorbed.
+
+    An entry whose ``seen`` member is absent has no key to preserve, since the edit writes the
+    whole pair, so its region begins where the marker ends and the punctuation budget is what
+    bounds what lands there.
+
+    Args:
+        inline: The entry's flow source as the generator wrote it.
+        marker: The opening of that source no allowed edit may restyle.
+
+    Returns:
+        The prefix of ``inline`` that has to come back verbatim.
+    """
+    key = inline.find("seen", len(marker))
+    if key == -1:
+        return marker
+    stop = key + len("seen")
+    return inline[: stop + 1] if inline[stop : stop + 1] == ":" else inline[:stop]
+
+
 def _flow_pin(inline: str, writes: str) -> FlowPin:
     """Return what an edited flow entry's source still has to look like.
 
-    Three parts, and the middle one is the only place an edit may land. The marker fixes the
-    opening, the brackets the entry closes on fix the end, and between them sits the region
-    the edit is free inside of. Which brackets stay behind the edit follows from what it
-    writes, which is what ``FLOW_EDIT_INDICATORS`` records.
+    Three parts, and the middle one is the only place an edit may land. The head fixes the
+    opening and the ``seen`` key an in-place edit writes past, the brackets the entry closes
+    on fix the end, and between them sits the region the edit is free inside of. Which
+    brackets stay behind the edit follows from what it writes, which is what
+    ``FLOW_EDIT_INDICATORS`` records.
 
     Free inside is not unbounded: the region carries a punctuation budget, so a rewrite that
     spelled an inert separator into an entry, or restyled a bracket the loaded value does not
@@ -654,11 +682,11 @@ def _flow_pin(inline: str, writes: str) -> FlowPin:
     closing = inline[len(inline.rstrip("}]")) :]
     if writes == "item":
         closing = closing[-1:]
-    marker = _style_marker(inline) or ""
-    region = inline[len(marker) : len(inline) - len(closing)]
+    head = _flow_key_head(inline, _style_marker(inline) or "")
+    region = inline[len(head) : len(inline) - len(closing)]
     written = "".join(char for char in region if char in FLOW_INDICATORS)
     return FlowPin(
-        f"{re.escape(marker)}(.*?){re.escape(closing)}", written + FLOW_EDIT_INDICATORS[writes]
+        f"{re.escape(head)}(.*?){re.escape(closing)}", written + FLOW_EDIT_INDICATORS[writes]
     )
 
 
@@ -875,8 +903,8 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
     entry's opening keeps the punctuation its collection style is recognized by. And a line
     written in flow style, which the footprint can only allow or forbid whole, comes back
     matching character for character everywhere no edit was allowed to land: its carrier's
-    brackets and separators, its untouched entries, and the punctuation around the value each
-    edited entry was rewritten at.
+    brackets and separators, its untouched entries, and the member key and the punctuation
+    around the value each edited entry was rewritten at.
     """
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
