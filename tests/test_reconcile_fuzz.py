@@ -23,6 +23,7 @@ from collections import Counter
 from dataclasses import KW_ONLY, dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import Literal, get_args
 
 import pytest
 from hypothesis import given, settings
@@ -116,6 +117,26 @@ REUSED_ANCHORS_ARE_STRICT = _strict_load_accepts_reused_anchors()
 # The typed syntax model: spellings by writable position, and the documents built from them.
 # --------------------------------------------------------------------------------------------
 
+# The vocabularies the model is written in, spelled the way `constants.py` spells a shared string
+# domain. They stay here rather than there because they have no production counterpart: the rule
+# exists to stop a production domain being duplicated, and moving a test vocabulary into the
+# engine's constants would invert the ownership it protects.
+#
+# What each one buys is a table row that cannot quietly mean nothing. A misspelled value used to
+# fall through to a default that most spellings load to anyway, so the row passed while asserting
+# something other than what it declared.
+SeenKind = Literal["old", "old-newline", "old-blank-line", "null", "empty-string"]
+SEEN_KINDS = frozenset(get_args(SeenKind))
+
+FlowEditKind = Literal["none", "separator", "item"]
+FLOW_EDIT_KINDS = frozenset(get_args(FlowEditKind))
+
+# "mixed" is how a document was written, not an ending it can be restored to; `_document_ending`
+# answers with it and `_with_ending` writes it, while production's own rule has three values and
+# normalizes the fourth away. The extra value is what keeps the two from being mistaken for one.
+EnvelopeEnding = Literal["\n", "\r\n", "\r", "mixed"]
+ENVELOPE_ENDINGS = frozenset(get_args(EnvelopeEnding))
+
 
 @dataclass(frozen=True, slots=True)
 class RefForm:
@@ -168,7 +189,7 @@ class SeenForm:
 
     name: str
     templates: tuple[str, ...]
-    value: str
+    value: SeenKind
     present: bool
     anchored: bool
     note: bool
@@ -198,10 +219,10 @@ class WholeForm:
     name: str
     templates: tuple[str, ...]
     inline: str | None
-    value: str
+    value: SeenKind
     present: bool
     anchored: bool
-    writes: str = "none"
+    writes: FlowEditKind = "none"
     written_lines: int = 1
 
 
@@ -321,7 +342,7 @@ class Envelope:
     close_fence: str
     trailing_newline: bool
     body: str
-    ending: str
+    ending: EnvelopeEnding
     directive: str | None
 
 
@@ -732,7 +753,7 @@ def _fields(index: int) -> dict[str, str]:
     }
 
 
-def _seen_value(kind: str, old: str) -> str | None:
+def _seen_value(kind: SeenKind, old: str) -> str | None:
     """Return the value a ``seen`` spelling of ``kind`` loads as.
 
     A dict rather than a chain of comparisons, so a kind no row declares raises here instead of
@@ -846,7 +867,7 @@ def _flow_key_head(inline: str, marker: str) -> str:
     return inline[: stop + 1 + len(rest) - len(rest.lstrip(" "))]
 
 
-def _flow_pin(inline: str, writes: str) -> FlowPin:
+def _flow_pin(inline: str, writes: FlowEditKind) -> FlowPin:
     """Return what an edited flow entry's source still has to look like.
 
     Three parts, and the middle one is the only place an edit may land. The head fixes the
@@ -960,14 +981,14 @@ def _root_key_value(extra: tuple[str, tuple[str, ...], object], index: int) -> o
 # --------------------------------------------------------------------------------------------
 
 
-def _with_ending(text: str, ending: str) -> str:
+def _with_ending(text: str, ending: EnvelopeEnding) -> str:
     """Return ``text`` rewritten in the requested document line ending."""
     if ending == "mixed":
         return text.replace("\n", "\r\n", 1)
     return text if ending == "\n" else text.replace("\n", ending)
 
 
-def _document_ending(text: str) -> str:
+def _document_ending(text: str) -> EnvelopeEnding:
     """Return the ending a document is written in, by the same rule the rewriter classifies by.
 
     This is the one helper here whose body is the rewriter's, and it is not a mirror of it. The
@@ -2289,6 +2310,22 @@ def test_the_spelling_tables_still_carry_every_dimension_the_assertions_read() -
     assert COMMENTED_PAIRS, "no spelling pair carries a comment for the site claim to be made of"
 
 
+def test_the_declared_vocabularies_and_the_ones_the_tables_use_are_the_same() -> None:
+    """Catch a declared kind no row uses, and a row using a kind nothing declares.
+
+    ``_seen_value`` raises on a kind it does not know, so the second direction already fails
+    loudly at build time. The first is the quiet one: a value left in the ``Literal`` after the
+    last row using it was cut reads as covered and is not.
+    """
+    used = {form.value for form in SEEN_FORMS} | {form.value for form in WHOLE_FORMS}
+    assert used == SEEN_KINDS, f"declared {sorted(SEEN_KINDS)}, used {sorted(used)}"
+    written = {form.writes for form in WHOLE_FORMS}
+    assert written == FLOW_EDIT_KINDS, f"declared {sorted(FLOW_EDIT_KINDS)}, used {sorted(written)}"
+    assert set(FLOW_EDIT_INDICATORS) == FLOW_EDIT_KINDS, (
+        "the indicator table and the flow-edit vocabulary have drifted apart"
+    )
+
+
 def _entry_pair_document(entries: tuple[Entry, ...]) -> Document:
     """Wrap several entries in one block sequence under the plainest supported root."""
     body, spans = _block_sequence(entries, 2)
@@ -3125,7 +3162,7 @@ PLAIN_REWRITTEN = "id: doc\nderives_from:\n  - ref: up-0#s0\n    seen: new0000be
     "ending",
     [pytest.param("\n", id="uniform-lf"), pytest.param("\r\n", id="uniform-crlf")],
 )
-def test_a_uniform_line_ending_survives_the_rewrite(ending: str) -> None:
+def test_a_uniform_line_ending_survives_the_rewrite(ending: EnvelopeEnding) -> None:
     before = _with_ending(f"---\n{PLAIN_META}---\nbody\n", ending)
 
     rewrites = _rewrite_bytes(before, {"up-0#s0": "new0000beef"})
