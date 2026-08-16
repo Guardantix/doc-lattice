@@ -3174,6 +3174,89 @@ def test_an_anchored_seen_relocates_as_escapes_and_reparses(written: str, value:
     assert not any(0x7F <= ord(char) <= 0x9F for char in after)
 
 
+def _omap_item_alias_document() -> Document:
+    """Two ordered-map entries, the second spelling its ``seen`` through the first's anchor."""
+    first = Entry(
+        "omap-anchor-definition",
+        ("- !!omap", "  - ref: up-0#s0", "  - &shared_pair {seen: old0000}"),
+        None,
+        "up-0#s0",
+        "old0000",
+        True,
+        None,
+        (),
+        (),
+        "- !!omap",
+        (2,),
+        site="up-0#s0",
+        written_lines=1,
+    )
+    second = Entry(
+        "omap-item-alias",
+        ("- !!omap", "  - ref: up-1#s1", "  - *shared_pair"),
+        None,
+        "up-1#s1",
+        "old0000",
+        True,
+        None,
+        (),
+        (),
+        "- !!omap",
+        (2,),
+        site="up-1#s1",
+        written_lines=1,
+    )
+    lines = ("id: doc", "derives_from:", *_indent(first.lines, 2), *_indent(second.lines, 2))
+    return Document(
+        lines,
+        (first, second),
+        ((2, 5), (5, 8)),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        (),
+    )
+
+
+def test_an_ordered_map_item_alias_is_expanded_into_a_local_pair() -> None:
+    """Layer 4's other alias detachment: a one-pair item written where the alias stood.
+
+    An ordered map item holds exactly one pair, and a merge cannot stand in for one the way it
+    can for a whole aliased entry, so the rewrite writes the pair out at the item and leaves the
+    shared definition alone.
+
+    Deterministic rather than drawn, and the reason is a real limit of the pool. Targeting the
+    *definition* entry of this shape is a layer 5 reproduce refusal, since writing into the
+    shared node would change the aliasing entry too, and the property above draws its target
+    freely. Expressing that would need a way to say which of a shape's entries may be targeted,
+    used by this shape alone. The refusal is pinned below instead.
+    """
+    document = _omap_item_alias_document()
+    updates = {"up-1#s1": "new0001beef"}
+
+    _assert_supported_round_trip(document, updates)
+
+    after = _rewrite_bytes(document.render(), updates)[0].after.decode("utf-8")
+    assert "  - {seen: new0001beef}" in after
+    assert "  - &shared_pair {seen: old0000}" in after
+
+
+def test_targeting_the_definition_an_ordered_map_item_aliases_is_refused() -> None:
+    """The layer 5 reproduce refusal that keeps the shape above out of the drawn pool.
+
+    Writing at the definition would change the entry aliasing it as well, so the planned
+    frontmatter is not what the edits reproduce and the rewrite is refused rather than published.
+    """
+    document = _omap_item_alias_document()
+
+    with pytest.raises(
+        UnreadableDocError, match=r"would not reproduce the derives_from entries"
+    ) as error:
+        _rewrite_bytes(document.render(), {"up-0#s0": "new0000beef"})
+
+    _assert_clean_refusal(error.value)
+
+
 def test_a_byte_order_mark_run_is_reattached_verbatim() -> None:
     for count in (1, 2, 3):
         before = f"{BOM * count}---\n{PLAIN_META}---\nbody\n"
