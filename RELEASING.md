@@ -201,12 +201,15 @@ web UI, performed by a person with a role on the project:
 
 5. Announce it, per the section below.
 
-**A yank does not protect exact-pinned adopters.** PyPI's rule is that a yanked release is
-ignored by installers *unless it is the only release matching the version specifier*. An adopter
-pinned with `==X.Y.Z` or `===X.Y.Z` on the yanked version keeps installing it, silently and
-indefinitely. A yank is a signal to resolvers, not a recall. If the defect is serious enough
-that exact-pinned adopters must not keep running it, the yank is not sufficient on its own and
-the announcement has to reach them directly.
+**A yank does not protect exact-pinned adopters.** An installer must ignore a yanked release
+whenever the constraint can be satisfied by a non-yanked version, and the exception is narrower
+than *no other match*: PEP 592 permits selecting the yanked version only for an explicit exact
+pin, `==X.Y.Z` without a wildcard or `===X.Y.Z`, and for a version already recorded in a lock
+file. A range gets no such exemption, so an adopter on `>=4.1,<4.2` is protected even when the
+yanked release is the only version that range currently matches. Everyone holding an exact pin or
+a lock entry keeps installing it, silently and indefinitely. A yank is a signal to resolvers, not
+a recall. If the defect is serious enough that those adopters must not keep running it, the yank
+is not sufficient on its own and the announcement has to reach them directly.
 
 Never delete a published release or replace a published file. PyPI does not allow reuploading a
 filename, so a deletion strands the version permanently rather than fixing it.
