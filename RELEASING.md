@@ -284,15 +284,35 @@ the point of the release procedure where that becomes visible.
 | Private vulnerability reporting | Settings, Code security |
 | Administrator access | Settings, Collaborators and teams |
 
-Verify the release-relevant ones from the command line:
+Verify the release-relevant ones from the command line. Project down to the values the claims in
+"Who can release" rest on, not merely to the presence of a rule: an environment keeps its
+`required_reviewers` rule after the reviewer it names stops being the right account, and a branch
+can keep its protection entry after the required checks are gone.
 
 ```bash
-gh api repos/Guardantix/doc-lattice/environments/pypi \
-  --jq '{can_admins_bypass, rules: [.protection_rules[].type]}'
-gh api repos/Guardantix/doc-lattice/branches/main/protection \
-  --jq '{admins: .enforce_admins.enabled, reviews: .required_pull_request_reviews.required_approving_review_count}'
+gh api repos/Guardantix/doc-lattice/environments/pypi --jq \
+  '{can_admins_bypass, branch_policy: .deployment_branch_policy,
+    rules: [.protection_rules[] | {type, prevent_self_review,
+                                   reviewers: [.reviewers[]?.reviewer.login]}]}'
+gh api repos/Guardantix/doc-lattice/environments/pypi/deployment-branch-policies \
+  --jq '[.branch_policies[].name]'
+gh api repos/Guardantix/doc-lattice/branches/main/protection --jq \
+  '{admins: .enforce_admins.enabled, strict: .required_status_checks.strict,
+    checks: .required_status_checks.contexts,
+    reviews: .required_pull_request_reviews.required_approving_review_count}'
 gh api repos/Guardantix/doc-lattice/private-vulnerability-reporting --jq .enabled
 ```
+
+The environment response reports only that custom branch policies are in use, which is why the
+allowed branches take their own query. Read every answer against what this document claims rather
+than against the absence of an error:
+
+| Answer | Expected today |
+|--------|----------------|
+| `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false |
+| `branch_policy` | `custom_branch_policies` true, and the policy list exactly `["main"]` |
+| `checks` and `strict` | Every required CI context, `strict` true |
+| `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
 
 Private vulnerability reporting must report `true`. The button is a repository setting separate
 from [SECURITY.md](SECURITY.md); the file alone does not create the channel. Enabling it is also
@@ -303,8 +323,8 @@ On a transfer, secrets travel with the repository. That is the trap: they keep w
 new owner without any decision being made about whether they should. Audit and rotate them
 deliberately as part of the move, alongside re-registering the PyPI publisher. Do not assume the
 protections came across intact either, since a change of owner or plan can leave `main`
-unprotected or an environment rule unenforced without saying so. Rerun the three commands above
-after any transfer and read the answers.
+unprotected or an environment rule unenforced without saying so. Rerun the queries above after any
+transfer and read the answers against that table.
 
 ### `CLAUDE_CODE_OAUTH_TOKEN`
 
