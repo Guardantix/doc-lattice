@@ -88,7 +88,9 @@ After verifying, refresh any installed tool with `uv tool install doc-lattice@la
 - An ordinary merge that leaves the version unchanged is a no-op.
 - Rerunning the workflow for the commit already referenced by the matching tag resumes any
   missing GitHub Release or PyPI publication steps. Publication uses `skip-existing`, so a
-  retry neither re-uploads existing PyPI files nor fails because they already exist.
+  retry neither re-uploads existing PyPI files nor fails because they already exist. That is
+  the mechanical-failure path only. Never rerun to complete a release you already know is bad;
+  see "If a release is bad" below.
 - A commit with an unchanged version whose tag points to an older commit is a no-op.
 - A matching tag that points to a source with a different version fails the release.
 - When the tag is absent, a push whose pre-push source declares a different version may create it.
@@ -102,10 +104,10 @@ timeout, an expired cache. Rerunning replays the pipeline against the same commi
 whatever did not finish.
 
 Do not rerun, and do not approve the `pypi` environment, when the failure told you the release
-payload itself is wrong. Rerunning a bad payload publishes it. Never move a release tag or
-delete or replace files already published to PyPI. If the release source is wrong, fix it and
-cut the next version, and see "If a release is bad" below for the procedure that goes with the
-stage you are in.
+payload itself is wrong. Rerunning a bad payload publishes it. Never move a release tag, and
+never delete or replace published PyPI files outside the narrow escalation described under
+"Yanking a published release". If the release source is wrong, fix it and cut the next version,
+and see "If a release is bad" below for the procedure that goes with the stage you are in.
 
 ## If a release is bad
 
@@ -116,11 +118,16 @@ irreversible in the `publish` job. Find your stage first.
 | Stage | State | Action |
 |-------|-------|--------|
 | Before the version bump merges | Nothing exists | Fix the pull request. No release happened. |
-| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI; the `release` job already failed, so no run is waiting and no `pypi` approval is pending | Create the Release by hand to carry the withdrawal notice, then resume at step 4 below. |
-| Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI | Withhold approval. Cancel the run. Cut the next version. |
-| Published, non-security regression | On PyPI, installable | Hotfix as the next version. Yank only if the release is broken enough to be worse than nothing. |
-| Published, broken or incompatible enough to mislead installers | On PyPI, installable | Yank, then release the fix. |
-| Published, security vulnerability | On PyPI, installable | Draft the advisory privately, release the fix, then publish the advisory with affected and fixed ranges. Yank if there is no safe way to use the affected version. |
+| Merged, `release` job running, tag not yet created | Nothing immutable yet | Cancel the run now. Every check that can fail the release runs before the tag, so this is the one stage that costs nothing. Revert on `main`, then confirm no `vX.Y.Z` tag exists before assuming you won the race. |
+| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI; the `release` job already failed, so no run is waiting and no `pypi` approval is pending | Create the Release by hand with the command under "Defect found after the tag, before PyPI approval", then continue at step 4 there. |
+| Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI. A run may or may not be waiting: if `build-release` failed there is nothing pending to cancel, and the tag and Release are still the problem | Withhold approval, cancel any waiting run, record the withdrawal on the Release, then cut the next version. Full procedure under "Defect found after the tag, before PyPI approval". |
+| `publish` interrupted, some files on PyPI | Partially uploaded, and what landed is permanent | A payload you still trust is completed by rerunning, since `skip-existing` makes that safe. A payload you do not trust is never completed: treat it as published and go to the yank decision below. |
+| Published, non-security defect | On PyPI, installable | Hotfix as the next version. Yank as well only if the release is worse than nothing; "Yanking a published release" gives the threshold. |
+| Published, security vulnerability | On PyPI, installable | Draft the advisory privately, release the fix, yank if there is no safe way to use the affected version, then publish the advisory with affected and fixed ranges. "Security vulnerabilities" gives the ordering and why it matters. |
+
+There is deliberately no row for a published release whose GitHub Release failed. The `release`
+job publishes the Release before `build-release` and `publish` run at all, so nothing can reach
+PyPI without it.
 
 ### Defect found after the tag, before PyPI approval
 
@@ -141,9 +148,11 @@ as a version nobody can install.
    that actually reaches subscribers, so it is where the withdrawal gets announced.
 
 Between steps 3 and 4 the withdrawal is recorded but unannounced, and the tag stays installable
-with `uvx --from git+...@vX.Y.Z`. That window is tolerable when the fix follows promptly and
-nothing is on PyPI. It is not tolerable if you know someone is already installing from that git
-ref, or if the defect is dangerous rather than merely wrong. In either case, do not wait for the
+with `uvx --from git+...@vX.Y.Z`. If you arrived here by the tag-only path below this does not
+apply, because creating that Release was itself a publication and it already reached
+subscribers. Otherwise the window is tolerable when the fix follows promptly and nothing is on
+PyPI. It is not tolerable if you know someone is already installing from that git ref, or if the
+defect is dangerous rather than merely wrong. In either case, do not wait for the
 next release to carry the news: tell the affected adopters directly, and open a GitHub issue
 naming the withdrawn version so the withdrawal is searchable from outside the Releases page.
 
@@ -158,17 +167,26 @@ gh release create vX.Y.Z --title vX.Y.Z --verify-tag --latest=false \
   --notes 'Withdrawn before publication. Not on PyPI. Superseded by vX.Y.Z+1.'
 ```
 
-`--latest=false` is the one difference from the call the workflow makes. Left off, `gh` infers
+`--latest=false` is the one behavioral difference from the call the workflow makes, which passes
+`--notes-file release-notes.md` where this one takes `--notes` inline. Left off, `gh` infers
 the Latest release from tag date and version, so the withdrawn version would take the repository
 landing page's **Latest release** slot and the `/releases/latest` API with it, advertising the
 version nobody should install until the fix ships.
 
-This is safe to run by hand because neither workflow in `.github/workflows/` triggers on a
-release: `ci.yml` runs on a push to `main` and on pull requests, and `claude.yml` runs on issue
-and review events. Publishing a Release therefore starts no CI run and advances nothing toward
-PyPI. It does reach Releases subscribers, which is the one upside of arriving at this stage by
-the tag-only path: the withdrawal notice goes out as a publication rather than as a silent edit.
-Then continue at step 4.
+This is safe to run by hand only while no workflow triggers on a release. Confirm that before
+running it, rather than trusting this paragraph to have aged well:
+
+```bash
+grep -rn -A15 '^on:' .github/workflows/
+```
+
+Read the trigger blocks it prints; none may contain a `release:` key. Grepping for `release:`
+on its own is not the check, because `ci.yml` also has a job by that name. Today `ci.yml`
+triggers on a push to `main` and on pull requests, and `claude.yml` on issue and review events,
+so publishing a Release starts no CI run and advances nothing toward PyPI. It does reach
+Releases subscribers, which is the one upside of arriving at this stage by the tag-only path:
+the withdrawal notice goes out as a publication rather than as a silent edit. Then continue at
+step 4.
 
 ### Yanking a published release
 
@@ -188,7 +206,9 @@ web UI, performed by a person with a role on the project:
 3. Provide a reason in the confirmation dialog. It is optional and you should always give one:
    PyPI shows it on the release page and serves it through the index API, so it is what an
    adopter sees when their resolver skips the version. Keep it one line, factual, and pointing
-   forward, for example: `Broken reconcile rollback; upgrade to 4.1.2.`
+   forward, for example: `Broken reconcile rollback; upgrade to 4.1.2.` If you are yanking
+   before the fix exists, describe the defect and say a fix is coming rather than inventing a
+   version number, and remember the reason is public the moment you save it.
 4. Verify it landed:
 
    ```bash
