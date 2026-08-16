@@ -553,9 +553,14 @@ uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init
 
 Replace your whole block with the printed one instead of hand-editing the pinned version in its
 two `entry:` lines. The block carries generated structure beyond those two commands, so bumping
-only the pins silently keeps an outdated hook shape. This run is safe against an existing
-install: `init` writes `.doc-lattice.yml` only when it is absent, and otherwise reports that the
-config already exists, leaves it untouched, and prints.
+only the pins silently keeps an outdated hook shape.
+
+Run this from the directory that holds your existing `.doc-lattice.yml`, normally the repository
+root. Plain `init` resolves that file against the current directory rather than the Git root, so
+a run from a subdirectory does not see your config and scaffolds a second, nested one carrying
+default settings. From the right directory the run is safe against an existing install: `init`
+writes `.doc-lattice.yml` only when it is absent, and otherwise reports that the config already
+exists, leaves it untouched, and prints.
 
 ### Ordinary installs
 
