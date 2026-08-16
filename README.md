@@ -478,6 +478,13 @@ your documents, then run `doc-lattice reconcile --all` once before enabling the 
 uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
 ```
 
+Commit the annotated input state and start from an otherwise clean working tree before running
+this command, so its reconcile-only diff can be reviewed and reverted with `git`. That undo is
+separate from reconcile's own failure rollback, which restores an interrupted run but does not
+reverse a successful baseline you later decide was wrong; see
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) for what that
+rollback does cover.
+
 This acknowledges the current state of every STALE and UNRECONCILED edge, so the gates start
 from a known baseline instead of reporting the whole backlog on their first run. Do this only
 on a first adoption: `init` is rerunnable against an existing config, and on an established
@@ -521,6 +528,70 @@ artifacts are committed to your repository, and no step is automated on your beh
 
 See [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for
 requirements, migration, the installation procedure, and the security model.
+
+## Upgrading
+
+Upgrades are hand-applied: nothing in your repository updates itself. Both generators render from
+the version of doc-lattice actually running, so every command below has to name the release you
+are moving to, and an old binary regenerates the old artifacts. Substitute the target release for
+`NEW_VERSION` throughout. Read that release's section in
+[CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md) first: a release
+that changes generated output carries a `### Migration` subsection with the steps specific to it.
+
+Which paths apply depends on how you installed, because ownership differs. The pre-commit snippet
+is yours in both setups. The ordinary workflow is yours. The four managed artifacts are not.
+
+### The pre-commit snippet (every install)
+
+The pre-commit block is printed guidance rather than a managed artifact in both setups, so no
+command updates your `.pre-commit-config.yaml` for you. Print the block from the target release
+and compare it against the one you checked in:
+
+```bash
+uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init
+```
+
+Replace your whole block with the printed one instead of hand-editing the pinned version in its
+two `entry:` lines. The block carries generated structure beyond those two commands, so bumping
+only the pins silently keeps an outdated hook shape.
+
+Run this from the directory that holds your existing `.doc-lattice.yml`, normally the repository
+root. Plain `init` resolves that file against the current directory rather than the Git root, so
+a run from a subdirectory does not see your config and scaffolds a second, nested one carrying
+default settings. From the right directory the run is safe against an existing install: `init`
+writes `.doc-lattice.yml` only when it is absent, and otherwise reports that the config already
+exists, leaves it untouched, and prints.
+
+### Ordinary installs
+
+The same `init` run also prints the GitHub Actions workflow. Diff it against your checked-in
+`.github/workflows/doc-lattice.yml`, replace the file with the printed version, and commit it
+together with the refreshed pre-commit block.
+
+### Managed installs
+
+Take the pre-commit block from the plain `init` run above and ignore the ordinary workflow it
+prints alongside it, which is not the managed workflow and does not belong in a managed
+repository. Do not re-run `init --github` to upgrade: it is create-only and refuses outright when
+an existing managed artifact's bytes differ from the ones it would write.
+
+The four managed artifacts (`.github/workflows/doc-lattice.yml`,
+`.github/workflows/doc-lattice-linear.yml`, `.github/doc-lattice-bootstrap.sh`, and
+`.github/.gitattributes`) are upgraded by `ci refresh`, which is deliberately two-stage. The
+preview only prints the pending diff; the separate `--apply` run is the one that writes, and it
+requires typing the repository identity to confirm:
+
+```bash
+uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice ci refresh \
+  --repository OWNER/REPO
+uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice ci refresh \
+  --repository OWNER/REPO --apply
+```
+
+Review and commit the resulting diff, and do not hand-edit the four artifacts. See
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for the refresh
+contract, including its exit codes, its ownership markers, and its refusal to move an installed
+artifact backward.
 
 ## Linear integration
 
