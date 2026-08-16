@@ -197,6 +197,10 @@ class Entry:
         anchor: The anchor name written on the ``seen`` value, when it carries one.
         notes: Comment texts written inside the entry.
         extras: Members beyond ``ref`` and ``seen``, which only the fresh reread tolerates.
+        site: Text that occurs in this entry's source and nowhere else in the document, which
+            is what locates the entry in the rewritten block so its comments can be looked for
+            inside it rather than anywhere in the frontmatter. It is None for the entries whose
+            source is spelled out by hand, none of which carry a comment.
         marker: The opening of the entry's source, up to the point an allowed edit may reach,
             carrying the punctuation that tells its collection style apart: a block entry
             keeps its sequence dash, a flow entry keeps the bracket it opens on. Layer 3 keeps
@@ -226,6 +230,7 @@ class Entry:
     edits: tuple[int, ...] | None = None
     appends: bool = False
     pin: FlowPin | None = None
+    site: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -606,6 +611,7 @@ def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry
         _style_marker(lines[0]),
         edits,
         appends,
+        site=fields["head"],
     )
 
 
@@ -719,6 +725,7 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
         edits,
         appends,
         None if inline is None else _flow_pin(inline, form.writes),
+        fields["head"],
     )
 
 
@@ -878,6 +885,34 @@ def _assert_footprint_confined(
         assert position == len(after), "content changed after the last allowed line"
 
 
+def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
+    """Assert every comment comes back, each entry's own inside the entry that wrote it.
+
+    Surviving somewhere in the block is too weak a claim once two entries carry comments and
+    both are rewritten. Their texts differ, so a dropped comment is caught, but one lifted off
+    a rewritten member and written onto the other leaves both texts behind and would pass: the
+    line it moved to is inside the allowed footprint as well, and the loaded mapping never sees
+    a comment at all. Each entry's comments are therefore looked for between that entry's own
+    site and the next entry's, which is the span the author wrote them in.
+
+    Args:
+        document: The generated model, whose entries carry the comments they were written with.
+        raw_meta: The rewritten frontmatter block.
+    """
+    for note in document.notes:
+        assert note in raw_meta, f"comment {note!r} was dropped"
+    sites = [-1 if entry.site is None else raw_meta.find(entry.site) for entry in document.entries]
+    for position, entry in enumerate(document.entries):
+        if not entry.notes:
+            continue
+        start = sites[position]
+        assert start != -1, f"{entry.name} lost the site its comments hang off"
+        later = (found for found in sites[position + 1 :] if found > start)
+        stop = min(later, default=len(raw_meta))
+        for note in entry.notes:
+            assert note in raw_meta[start:stop], f"comment {note!r} left the entry that wrote it"
+
+
 def _assert_envelope_preserved(document: Document, before: str, after: str) -> None:
     """Assert layer 3: the envelope, comments, key order and line ending come back as read."""
     env = document.envelope
@@ -892,8 +927,7 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
     if env.directive is not None:
         assert f"%YAML {env.directive}" in new.raw_meta
         assert "--- !!map" in new.raw_meta
-    for note in document.notes:
-        assert note in new.raw_meta, f"comment {note!r} was dropped"
+    _assert_comments_kept_in_place(document, new.raw_meta)
 
 
 def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
@@ -1416,6 +1450,25 @@ def test_every_ref_and_seen_spelling_pair_round_trips(ref_form: RefForm) -> None
         _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
 
 
+def test_every_commented_spelling_keeps_its_comment_at_its_own_site() -> None:
+    """Rewrite two commented members at once, the only shape a comment can move inside of.
+
+    One entry cannot tell a comment that moved from one that was kept: the only place it could
+    move to is outside the block, and mere presence catches that. Two rewritten members that
+    each carry a comment is what makes the site an observable, so every spelling that writes
+    one is generated at both positions and both entries are updated in the same pass.
+    """
+    ref_forms = tuple(form for form in REF_FORMS if form.note or form.name == "plain")
+    seen_forms = tuple(form for form in SEEN_FORMS if form.note or form.name == "plain")
+    for ref_form in ref_forms:
+        for seen_form in seen_forms:
+            if not (ref_form.note or seen_form.note):
+                continue
+            entries = tuple(_combined_entry(index, ref_form, seen_form) for index in range(2))
+            updates = {entry.ref: f"new{index:04x}beef" for index, entry in enumerate(entries)}
+            _assert_supported_round_trip(_entry_pair_document(entries), updates)
+
+
 def test_every_whole_entry_spelling_round_trips() -> None:
     """Cover every entry spelling that is written as one indivisible shape."""
     for form in WHOLE_FORMS:
@@ -1455,6 +1508,20 @@ def test_the_spelling_tables_never_define_one_anchor_name_twice() -> None:
         pair = tuple(line for index in (0, 1) for line in _whole_entry(index, form).lines)
         names = _anchor_definitions(pair)
         assert len(names) == len(set(names)), f"{form.name}: {names}"
+
+
+def _entry_pair_document(entries: tuple[Entry, ...]) -> Document:
+    """Wrap several entries in one block sequence under the plainest supported root."""
+    body, spans = _block_sequence(entries, 2)
+    return Document(
+        ("id: doc", "derives_from:", *body),
+        entries,
+        tuple((start + 2, stop + 2) for start, stop in spans),
+        {"id": "doc"},
+        ("id", "derives_from"),
+        _flat_envelope(),
+        tuple(note for entry in entries for note in entry.notes),
+    )
 
 
 def _single_entry_document(entry: Entry, root_lines: tuple[str, ...] = ("id: doc",)) -> Document:
