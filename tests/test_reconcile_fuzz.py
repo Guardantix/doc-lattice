@@ -1082,6 +1082,50 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
             )
 
 
+def _uncommented(line: str) -> str:
+    """Return ``line`` with any comment it ends on cut off.
+
+    A ``#`` opens one only at the start of a line or after space, which is what keeps the one
+    inside a ``ref`` from reading as a comment. No value written anywhere in this file carries a
+    ``#`` after a space, so nothing a rewrite writes is cut here.
+    """
+    for index, char in enumerate(line):
+        if char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+    return line
+
+
+def _value_opening(raw_meta: str, start: int) -> str:
+    """Return the source opening the value written at ``start``, back to its own separator.
+
+    A node property does not have to share a line with the value it opens, so reading the hash's
+    own line answers only for the properties written there. The run is followed back across line
+    breaks instead, to the ``:`` the member's value is written after, which is the point past
+    which everything belongs to the value rather than to the key.
+
+    Comments are cut out of it rather than counted. Layer 4 lets the author's comment stay
+    between a key and the value under it, so a comment there is preserved source, while a
+    property hidden in front of one is not: cutting the comment is what leaves the property
+    visible instead of ending the search at it.
+
+    Args:
+        raw_meta: The rewritten frontmatter block.
+        start: Where in it the written value begins.
+
+    Returns:
+        The source between the value and the separator opening it, comments removed.
+    """
+    opening: list[str] = []
+    for line in reversed(raw_meta[:start].split("\n")):
+        bare = _uncommented(line)
+        separator = bare.rfind(":")
+        if separator != -1:
+            opening.append(bare[separator + 1 :])
+            break
+        opening.append(bare)
+    return "".join(reversed(opening))
+
+
 def _assert_replacements_stay_bare(after: str, updates: dict[str, str]) -> None:
     """Assert every hash a rewrite wrote lands bare, with no node property in front of it.
 
@@ -1095,16 +1139,15 @@ def _assert_replacements_stay_bare(after: str, updates: dict[str, str]) -> None:
 
     The claim is made of the hash rather than of the line it sits on, because a line may carry a
     property the rewrite is entitled to write: a relocated anchor opens the displaced old value,
-    and a key may be spelled through an alias. Only the run between the hash and the separator in
-    front of it is pinned, and it has to be spaces alone. A hash with no separator before it sits
-    on a line of its own, whose whole opening is the indentation its member was written at.
+    and a key may be spelled through an alias. What is pinned is the whole opening of the value
+    node, which layer 2 lets a property be written anywhere in: the run from the hash back to the
+    ``:`` its member's value follows, line breaks included, has to be blank.
     """
     raw_meta = _parts(after).raw_meta
     for value in updates.values():
         for match in re.finditer(re.escape(value), raw_meta):
-            opening = raw_meta[raw_meta.rfind("\n", 0, match.start()) + 1 : match.start()]
-            written = opening[opening.rfind(":") + 1 :]
-            assert not written.strip(" "), (
+            written = _value_opening(raw_meta, match.start())
+            assert not written.strip(), (
                 f"a rewrite wrote {written!r} in front of the hash replacing {value!r}, "
                 "whose node properties layer 4 has it consume"
             )
