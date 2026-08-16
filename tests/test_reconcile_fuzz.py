@@ -8,7 +8,10 @@ is guaranteed at, and accepts a safe outcome union for the defensive reread colu
 pins the two ordered-map behaviors AD-31 assigns to this gate as current bounded behavior.
 
 Every expectation is computed from the generated model, never from production planning code, so
-a rewriter defect cannot make its own oracle agree with it. No property asserts anything
+a rewriter defect cannot make its own oracle agree with it. The one helper that shares a rule
+with production is ``_document_ending``, which classifies the rewritten output where production
+classifies the input, and its docstring records why that is not a mirror. No property asserts
+anything
 stricter than AD-31: the mutation footprint is checked against the allowances the model predicts
 for the shape it generated, never against a universal one-line diff, and syntax outside layer 2
 is never required to be refused.
@@ -32,9 +35,11 @@ from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DOC = Path("doc.md")
 BOM = chr(0xFEFF)
-# The spacing every flow carrier in this file writes between two entries. It is named so that
-# every generator writes the same one, which is what lets the flow-line assertion recover the
-# carrier's own source by cutting the entries it knows out of the line it rendered.
+# The spacing every flow carrier in this file writes between two entries. It is named so the
+# generators do not each spell their own and the rendered documents stay comparable by eye. The
+# flow-line assertion does not depend on the value: it recovers the carrier's own source by
+# cutting the entries it knows out of the line it rendered, so whatever sits between them comes
+# back as literal text. Changing this is a readability change, not a coverage one.
 FLOW_SEPARATOR = ", "
 # The characters that punctuate a flow collection. A rewrite that adds or drops one of these
 # outside the value it was asked to write has restyled source layer 3 says it may not touch,
@@ -228,10 +233,12 @@ class Entry:
             for a block entry, whose source the line footprint pins instead.
         written_lines: How many lines this entry's ``seen`` member is written on once an edit
             has landed on it, which is what says how far a member the rewrite shrank is allowed
-            to have pulled the rest of the block up. None where the shape's layer 4 mutation
-            families spread rather than replacing one member, which is the same case ``edits``
-            being None marks: how many lines such an edit settles on is the rewriter's to
-            choose, so the model claims nothing about it.
+            to have pulled the rest of the block up. None means the model makes no line-count
+            claim for this entry, which covers two cases. One is a shape whose layer 4 mutation
+            families spread rather than replacing one member, the case ``edits`` being None also
+            marks, where how many lines the edit settles on is the rewriter's to choose. The
+            other is a reread-only shape, which is asserted only through the safe-outcome union
+            and never has its block length read at all.
         inherits: The ref of the entry this one takes its ``seen`` from through a merge key,
             when it spells none of its own. Writing a hash at that entry changes this one too,
             with nothing written here, so the semantic oracle has to expect it. None for an
@@ -288,8 +295,9 @@ class Document:
         entries: The generated entries, in ``derives_from`` order.
         spans: Half-open ``meta_lines`` ranges each entry occupies.
         root: The root members other than ``derives_from``, as the loader builds them.
-        key_order: The root key order the reload has to show, or None when a merge makes the
-            order a loader detail rather than a preservation claim.
+        key_order: The root key order the reload has to show, or None where no order claim is
+            made: a merge makes the order a loader detail rather than a preservation claim, and
+            a reread-only shape is outside layer 3, which is what makes the order a claim.
         envelope: The layer 2a choices this document was rendered with.
         notes: Every comment text written in the frontmatter.
         mirrors: Root keys the loader gives the very same list object as ``derives_from``,
@@ -399,7 +407,11 @@ class Document:
 
         What the model can say exactly is how many lines each edited member is written on
         afterwards, since every value written here is a one-line plain scalar and what surrounds
-        it is the source the spelling declares. The block's own length follows: the lines it was
+        it is the source the spelling declares. That premise characterizes the writer rather than
+        the record: AD-31 layer 3 promises the surrounding source back, not a scalar style, so a
+        writer that one day replaces a block scalar with a block scalar would be inside the
+        record and outside this count. Updating it then is a re-record, not a regression fixed.
+        The block's own length follows: the lines it was
         read with, less the ones the footprint hands to an edit, plus the ones those edits write.
         An alias site an anchored value is relocated onto writes one line for the one it takes,
         since layer 4 re-emits a displaced value on the line its alias sat on however it was
@@ -864,7 +876,20 @@ def _with_ending(text: str, ending: str) -> str:
 
 
 def _document_ending(text: str) -> str:
-    """Return the ending a document is written in, mirroring the rewriter's own rule."""
+    """Return the ending a document is written in, by the same rule the rewriter classifies by.
+
+    This is the one helper here whose body is the rewriter's, and it is not a mirror of it. The
+    two consume different arguments and answer different questions: production reads the
+    **input** to decide which ending to restore, while this reads the **output** and the answer
+    is compared against ``env.ending``, which the model declared before the document was ever
+    rendered. An inverted rule in production still fails that comparison.
+
+    The bodies also differ where it matters. Production returns ``"\\n"`` for a file written with
+    mixed endings, because normalizing is the outcome it wants; this returns ``"mixed"``, because
+    "how was this document written" is what the envelope assertion asks. Collapsing that last
+    line into production's would make the mixed-normalization claim vacuous, so the two are kept
+    apart deliberately rather than by oversight.
+    """
     if "\r\n" in text and not set(text.replace("\r\n", "")) & {"\r", "\n"}:
         return "\r\n"
     if "\r" in text and "\n" not in text:
@@ -972,6 +997,9 @@ def _assert_footprint_confined(
     unnoticed, so the blank lines are counted as well. Every value written here is a one-line
     plain scalar, so a replaced member keeps none of the blanks it was written with and the
     rewrite writes none of its own: the blanks left are exactly the ones outside the footprint.
+    That premise characterizes the current writer rather than AD-31, which promises the source
+    around a member back without saying what style the member itself is rewritten in, so a
+    writer that emitted a multi-line value would need this count re-recorded rather than fixed.
 
     Past the last protected run the same bound applies rather than nothing at all. A document
     whose last line is the member being rewritten, which is the commonest shape there is, has
@@ -1029,9 +1057,11 @@ def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
     site and the next entry's, which is the span the author wrote them in.
 
     Preserving what the author wrote leaves the other half of the claim open, which is that a
-    rewrite writes no comment of its own. Nothing this generator puts in a value carries a
-    ``#``, so every one in the block either separates a ref from its section or opens a
-    comment, and a rewrite that neither drops nor invents one leaves that count alone.
+    rewrite writes no comment of its own. A ``#`` opens a comment only at the start of a line or
+    after a space, the rule ``_uncommented`` reads by, and no value this file writes carries a
+    ``#`` after a space; the ones inside a ``ref`` separate it from its section and open nothing.
+    So the count of comment-opening hashes is fixed, and a rewrite that neither drops nor invents
+    one leaves it alone.
 
     Args:
         document: The generated model, whose entries carry the comments they were written with.
@@ -1207,7 +1237,7 @@ def _assert_replacements_stay_bare(after: str, updates: dict[str, str]) -> None:
     Layer 4 has replacement consume the replaced value's node properties: the anchor and tag
     opening a ``seen`` are dropped with the run of space they leave, since a tag kept would
     retype the new hash and an anchor kept would bind a name to a value the author never wrote.
-    Nothing else in the suite sees that. The semantic oracle loads ``!!str hash`` and
+    No other assertion in this file sees that. The semantic oracle loads ``!!str hash`` and
     ``&name hash`` to the same string a bare hash gives, the footprint leaves the whole line an
     edit lands on to the rewriter, and the style claims read the source a rewrite wrote past
     rather than the text it wrote.
@@ -2193,13 +2223,18 @@ def _recovery_documents() -> tuple[Document, ...]:
     is where the optional accelerator is installed. That keeps the shape generated on every
     leg: family 1 owns it under the pure parser, this union owns it under the C one.
 
-    Every shape here models the footprint of its update member by member rather than taking the
-    whole-span allowance. Recovery is held to the footprint alone, since layer 3 is a claim
-    about layer 2 documents, so the whole-span allowance is the only thing standing between a
-    rewrite and the source beside the member it edits: the ``ref`` it is found by, an extra
+    Every shape here but one models the footprint of its update member by member rather than
+    taking the whole-span allowance. Recovery is held to the footprint alone, since layer 3 is a
+    claim about layer 2 documents, so the whole-span allowance is the only thing standing between
+    a rewrite and the source beside the member it edits: the ``ref`` it is found by, an extra
     member the contract says survives untouched, and the member an appended ``seen`` is written
     after. What the union leaves open is whether the rewrite happens at all, not how far it
     reaches once it does.
+
+    The exception is the aliased entry, which keeps the whole-span allowance a family 1 alias
+    site keeps, because layer 4 lets a rewrite expand an alias site into a local mapping rather
+    than edit the shared node behind it. There is no narrower member-level claim to make about a
+    site the contract says may be replaced outright.
     """
     conditional = () if REUSED_ANCHORS_ARE_STRICT else (_reused_anchor_document(None, ""),)
     return (
@@ -2482,11 +2517,12 @@ MERGES_INSIDE_ORDERED_MAPS = (
 def test_a_malformed_ordered_map_is_reported_as_an_unreadable_document(
     meta: str, updates: dict[str, str]
 ) -> None:
-    """Pin current bounded loader behavior: the safe constructor's refusal reaches the CLI clean.
+    """Pin current bounded loader behavior: the safe constructor's refusal surfaces as ours.
 
     AD-31 records this as current behavior rather than a guaranteed refusal, so the pin is the
-    stable observable, the project error type and its code, not the loader's own message, which
-    differs across the ``ruamel.yaml`` releases and accelerator cells CI runs.
+    stable observable: a ``ProjectError`` subtype carrying its code and naming the document,
+    which is what the CLI's handler renders an exit from. The loader's own message is not
+    pinned, since it differs across the ``ruamel.yaml`` releases and accelerator cells CI runs.
     """
     text = f"---\n{meta}---\nbody\n"
 
