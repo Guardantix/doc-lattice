@@ -286,6 +286,25 @@ while leaving adopters nothing to upgrade to, and the advisory cannot name a fix
 does not exist yet. Hold the draft until the fix ships unless the vulnerability is already
 public, in which case publishing what adopters can do to protect themselves beats silence.
 
+"Release the fix" is the step that leaks if you run it the ordinary way. This repository is
+public and the checklist routes every change through a pull request and a merge to `main`, so
+the fix commit is readable the moment it lands, while the fixed distribution is still a CI run
+and one manual approval away. Holding the advisory draft does nothing about that, because the
+diff is the disclosure. Develop the fix in the temporary private fork the draft advisory
+offers, and merge it from the advisory page rather than as an ordinary pull request.
+
+Two properties of that fork matter before you are inside it. CI cannot reach it, so no status
+check runs there and GitHub enforces none of `main`'s protection rules on the merge, which
+leaves the local verification set as the only gate the fix gets: run all of it. And the merge
+is itself the release trigger, so the fork's branch has to carry everything the checklist's
+first steps produce, the version bump, the refreshed `uv.lock`, and the promoted changelog
+section. A branch carrying only the code fix merges into a `main` that cannot release it, and
+repairing that costs a second public commit at the moment the window should be closing.
+
+The merge, not the advisory, is where the embargo actually ends. Do it when you can approve the
+`pypi` environment immediately afterwards, because that approval is the last gate between a
+public fix commit and an installable fix, and it waits indefinitely for a human.
+
 The yank sits inside that sequence rather than ahead of it, because a yank is itself a
 disclosure: PyPI serves the reason through the index API the moment you save it. If you have to
 yank before the advisory publishes, write a reason that names the fixed version and says nothing
