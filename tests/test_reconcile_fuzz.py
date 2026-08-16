@@ -1591,13 +1591,23 @@ def _reused_anchor_pair() -> Document:
     return Document(tuple(lines), entries, spans, {"id": "doc"}, order, _flat_envelope(), ())
 
 
-SCALAR_CONTENTS = (
-    "old0000",
-    "p\\u0085q",
-    "a\\u009bb",
-    'has \\"quote\\"',
-    "back\\\\slash",
-    "tab\\there",
+NEL = "\u0085"
+CSI = "\u009b"
+
+# The values an anchored ``seen`` is relocated as, each written the way the author spelled it and
+# paired with what it constructs to. The loaded value is written out rather than derived: the
+# obvious derivation, ``unicode_escape``, is not a YAML double-quoted decoder, since it has no
+# ``\/``, ``\N``, ``\_``, ``\L`` or ``\P`` and reads non-ASCII as latin-1, so it happens to agree
+# with YAML for the rows below and would quietly disagree for a row using any of those.
+# One table rather than two: the deterministic test and the drawn shape make the same claim about
+# the same builder, and they had drifted into deriving the expected value two different ways.
+RELOCATED_CONTENTS = (
+    ('"old0000"', "old0000", "plain"),
+    ('"p\\u0085q"', f"p{NEL}q", "nel"),
+    ('"a\\u009bb"', f"a{CSI}b", "c1-control"),
+    ('"p\\u0085q\\u009b\\tr"', f"p{NEL}q{CSI}\tr", "nel-and-c1-and-tab"),
+    ('"has \\"quote\\" and \\\\ slash"', 'has "quote" and \\ slash', "quotes-and-backslashes"),
+    ('"tab\\there"', "tab\there", "tab"),
 )
 
 
@@ -1667,9 +1677,8 @@ def _relocating_anchor_pair(written: str, value: str) -> Document:
 
 def _relocating_anchor_document(draw, _shape: str) -> Document:
     """An anchored ``seen`` whose replacement relocates the old value onto its alias site."""
-    content = draw(st.sampled_from(SCALAR_CONTENTS))
-    value = content.encode("utf-8").decode("unicode_escape")
-    return _finish(draw, _relocating_anchor_pair(f'"{content}"', value))
+    written, value, _ = draw(st.sampled_from(RELOCATED_CONTENTS))
+    return _finish(draw, _relocating_anchor_pair(written, value))
 
 
 def _merge_document(draw, shape: str) -> Document:
@@ -2765,22 +2774,10 @@ def _assert_anchor_rebinding_survived(rewrites: list[Rewrite]) -> None:
     assert "seen: *shared" in after
 
 
-NEL = "\u0085"
-CSI = "\u009b"
-
-RELOCATED_CONTENTS = (
-    pytest.param('"p\\u0085q"', f"p{NEL}q", id="nel"),
-    pytest.param('"a\\u009bb"', f"a{CSI}b", id="c1-control"),
-    pytest.param('"p\\u0085q\\u009b\\tr"', f"p{NEL}q{CSI}\tr", id="nel-and-c1-and-tab"),
-    pytest.param(
-        '"has \\"quote\\" and \\\\ slash"',
-        'has "quote" and \\ slash',
-        id="quotes-and-backslashes",
-    ),
+@pytest.mark.parametrize(
+    ("written", "value"),
+    [pytest.param(written, value, id=name) for written, value, name in RELOCATED_CONTENTS],
 )
-
-
-@pytest.mark.parametrize(("written", "value"), RELOCATED_CONTENTS)
 def test_an_anchored_seen_relocates_as_escapes_and_reparses(written: str, value: str) -> None:
     """A displaced anchored value is re-emitted escape-only, so the alias site still reparses."""
     document = _relocating_anchor_pair(written, value)
