@@ -31,6 +31,11 @@ from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DOC = Path("doc.md")
 BOM = chr(0xFEFF)
+# The spacing every flow carrier in this file writes between two entries. It is named because
+# the untouched-neighbour assertion reconstructs source text with it, so the separator the
+# generator writes and the one that assertion expects have to be the same string by
+# construction rather than by two literals agreeing.
+FLOW_SEPARATOR = ", "
 
 # One named settings object per this file, applied as a decorator to each property. A registered
 # profile would be suite-global and would retune the Hypothesis tests other modules already own.
@@ -105,7 +110,9 @@ class SeenForm:
         templates: Member lines, the first at the entry's key column and every continuation
             line already carrying the extra indentation it needs.
         value: How the loaded value relates to the written text: ``"old"``, ``"old-newline"``
-            for a clipped block scalar, or ``"null"``.
+            for a block scalar whose chomping retains the final line break,
+            ``"old-blank-line"`` for a keep-chomped one that retains a trailing blank line as
+            well, or ``"null"``.
         present: Whether a ``seen`` member is written at all.
         anchored: Whether the member anchors its value, which makes relocation possible.
         note: Whether the spelling carries a comment. Its text differs from the one a ``ref``
@@ -311,6 +318,48 @@ class Document:
             allowed.update(index for index, line in enumerate(self.meta_lines) if alias in line)
         return allowed, inserts
 
+    def untouched_neighbours(self, updates: dict[str, str]) -> list[str]:
+        """Return the exact source of untouched entries sharing a line with an editable one.
+
+        A flow carrier writes several entries onto one line, so the smallest footprint the
+        line model can express is that whole line, and every entry on it shares the span. That
+        allowance is far wider than layer 3 permits, and nothing else narrows it: the semantic
+        oracle reads only loaded values, and the markers pin openings rather than whole
+        entries. The line is therefore pinned here at character level instead.
+
+        What an edit may reach inside a flow entry is bounded by that entry's own brackets: a
+        replacement lands on its ``seen`` member, and an appended member is written just
+        inside the bracket it closes on. Everything else on the line is carrier source, the
+        separators between two entries included, so the protected segments are the whole line
+        with the edited entries cut out of it and each separator left attached to the
+        neighbour that survives.
+
+        Returns:
+            One source segment per maximal run of line source no edit may reach.
+        """
+        applied = self.applied(updates)
+        shared: dict[tuple[int, int], list[int]] = {}
+        for index, span in enumerate(self.spans):
+            shared.setdefault(span, []).append(index)
+        segments: list[str] = []
+        for indices in shared.values():
+            if len(indices) < 2:
+                continue
+            run: list[str] = []
+            for position, index in enumerate(indices):
+                entry = self.entries[index]
+                if entry.inline is None or entry.ref in applied:
+                    if run:
+                        segments.append("".join(run))
+                        run = []
+                    continue
+                if position:
+                    run.append(FLOW_SEPARATOR)
+                run.append(entry.inline)
+            if run:
+                segments.append("".join(run))
+        return segments
+
 
 # --------------------------------------------------------------------------------------------
 # Layer 2 spellings, one table per writable position.
@@ -352,7 +401,20 @@ SEEN_FORMS = (
     SeenForm("empty-with-comment", ("seen: # {seen_note}",), "null", True, False, True),
     SeenForm("literal-strip", ("seen: |-", "  {old}"), "old", True, False, False),
     SeenForm("literal-clip", ("seen: |", "  {old}"), "old-newline", True, False, False),
+    SeenForm("literal-keep", ("seen: |+", "  {old}"), "old-newline", True, False, False),
     SeenForm("folded-strip", ("seen: >-", "  {old}"), "old", True, False, False),
+    SeenForm("folded-clip", ("seen: >", "  {old}"), "old-newline", True, False, False),
+    SeenForm("folded-keep", ("seen: >+", "  {old}"), "old-newline", True, False, False),
+    # A keep-chomped block with a blank line under it is the one chomping spelling whose
+    # retained newlines differ from the clipped form's, so it is written out separately: the
+    # blank belongs to the scalar, which makes it part of the member a rewrite replaces rather
+    # than untouched source between two entries.
+    SeenForm(
+        "literal-keep-blank-line", ("seen: |+", "  {old}", ""), "old-blank-line", True, False, False
+    ),
+    SeenForm(
+        "folded-keep-blank-line", ("seen: >+", "  {old}", ""), "old-blank-line", True, False, False
+    ),
     SeenForm("literal-indent-indicator", ("seen: |2-", "  {old}"), "old", True, False, False),
     SeenForm(
         "literal-header-comment", ("seen: |- # {seen_note}", "  {old}"), "old", True, False, True
@@ -450,7 +512,9 @@ def _seen_value(kind: str, old: str) -> str | None:
     """Return the value a ``seen`` spelling of ``kind`` loads as."""
     if kind == "null":
         return None
-    return f"{old}\n" if kind == "old-newline" else old
+    if kind == "old-newline":
+        return f"{old}\n"
+    return f"{old}\n\n" if kind == "old-blank-line" else old
 
 
 def _ref_value(fields: dict[str, str], ref_form: RefForm) -> str:
@@ -568,7 +632,7 @@ def _block_sequence(
 def _member_lines(name: str, entries: tuple[Entry, ...], carrier: str, pad: int) -> list[str]:
     """Render the ``derives_from`` member in the requested carrier shape."""
     if carrier == "flow":
-        inlines = ", ".join(entry.inline or "" for entry in entries)
+        inlines = FLOW_SEPARATOR.join(entry.inline or "" for entry in entries)
         return [f"{name}: [{inlines}]"]
     body, _ = _block_sequence(entries, pad)
     return [f"{name}:", *body]
@@ -721,14 +785,22 @@ def _assert_envelope_preserved(document: Document, before: str, after: str) -> N
         assert note in new.raw_meta, f"comment {note!r} was dropped"
 
 
-def _assert_styles_preserved(document: Document, after: str) -> None:
-    """Assert layer 3 collection style: an entry and its carrier come back as they were read."""
+def _assert_styles_preserved(document: Document, after: str, updates: dict[str, str]) -> None:
+    """Assert layer 3 byte-local preservation for the parts the line footprint cannot pin.
+
+    Three claims, each about source the semantic oracle would let a rewrite restyle freely:
+    an entry's opening keeps the punctuation its collection style is recognized by, so does
+    its carrier's, and an entry sharing a line with an editable one is not merely semantically
+    but byte for byte what it was.
+    """
     raw_meta = _parts(after).raw_meta
     for entry in document.entries:
         if entry.marker is not None:
             assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
     for marker in document.markers:
         assert marker in raw_meta, f"carrier was restyled: {marker!r}"
+    for segment in document.untouched_neighbours(updates):
+        assert segment in raw_meta, f"an untouched entry was rewritten: {segment!r}"
 
 
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
@@ -745,7 +817,7 @@ def _assert_supported_round_trip(document: Document, updates: dict[str, str]) ->
     assert rewrites[0].applied == expected_applied
     assert _reload(after) == document.expected(updates)
     _assert_envelope_preserved(document, text, after)
-    _assert_styles_preserved(document, after)
+    _assert_styles_preserved(document, after, updates)
     allowed, inserts = document.footprint(updates)
     _assert_footprint_confined(_meta_lines(text), _meta_lines(after), allowed, inserts)
     if document.key_order is not None:
@@ -883,7 +955,7 @@ def ordered_map_root_documents(draw) -> Document:
         entries = tuple(draw(block_entries(index)) for index in range(count))
         return _ordered_map_block(draw, entries)
     entries = tuple(draw(flow_entries(index)) for index in range(count))
-    inlines = ", ".join(entry.inline or "" for entry in entries)
+    inlines = FLOW_SEPARATOR.join(entry.inline or "" for entry in entries)
     if style == "omap-flow":
         line = f"!!omap [{{id: doc}}, {{derives_from: [{inlines}]}}]"
         markers = ("!!omap [{id: doc}, {derives_from: [",)
