@@ -48,6 +48,10 @@ FLOW_SEPARATOR = ", "
 # outside the value it was asked to write has restyled source layer 3 says it may not touch,
 # even where the document still loads as the very same mapping.
 FLOW_INDICATORS = ",{}[]"
+# The characters YAML separates nodes inside a flow collection with. Both are whitespace the
+# loader discards, so an edit that swapped one for the other, or wrote either where the author
+# wrote none, changes source without changing the document.
+FLOW_SEPARATION = " \t"
 # The flow indicators each layer 4 edit legitimately writes into the entry it lands in. An edit
 # that lands on a value already written, or just after a separator the source already carries,
 # adds none. An appended pair writes the separator in front of it. An appended sequence item
@@ -152,6 +156,9 @@ class RefForm:
         trailing: What the spelling's chomping indicator leaves after the last line, which is
             a newline for a clipped block scalar and nothing for a stripped one.
         note: Whether the spelling carries a trailing comment.
+        site: Text to locate the entry by, for a spelling whose source does not write its ref
+            value literally. It is a template like the others and defaults to the ref itself,
+            which every spelling but an escaped one spells out somewhere in its source.
     """
 
     name: str
@@ -160,6 +167,8 @@ class RefForm:
     split: bool
     trailing: str
     note: bool
+    _: KW_ONLY
+    site: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +606,25 @@ REF_FORMS = (
     # quotes: it is the spelling where locating the value means decoding it first.
     RefForm("single-quoted", ("- ref: '{ref}'",), 2, False, "", False),
     RefForm("double-quoted", ('- ref: "{ref}"',), 2, False, "", False),
+    # The escape is the half of the quoted spelling the quotes alone do not reach. A row that
+    # merely quotes an unescaped ref is still source the ref is written literally in, so a
+    # rewrite could find and hand back the member by looking for the ref itself; this is the
+    # one spelling where the value appears nowhere in the source and the entry can only be
+    # located by what the loader constructed. The escape decodes to the same ``up-N#sN``, so
+    # nothing else in the model moves and the row is the source difference alone.
+    #
+    # There is no single-quoted counterpart. That style escapes one character, the apostrophe,
+    # by doubling it, so a row carrying an escape would have to put an apostrophe in the ref
+    # itself, and a ref is a document id and a section slug rather than free text.
+    RefForm(
+        "double-quoted-escape",
+        (r'- ref: "\x75p-{index}#s{index}"',),
+        2,
+        False,
+        "",
+        False,
+        site="p-{index}#s{index}",
+    ),
     RefForm("explicit-pair", ("- ? ref", "  : {ref}"), 2, False, "", False),
     RefForm("trailing-comment", ("- ref: {ref} # {note}",), 2, False, "", True),
     RefForm("literal-block-scalar", ("- ref: |-", "    {ref}"), 2, False, "", False),
@@ -646,16 +674,45 @@ SEEN_FORMS = (
         "folded-keep-blank-line", ("seen: >+", "  {old}", ""), "old-blank-line", True, False, False
     ),
     # AD-31 declares an explicit indentation indicator on a block scalar in either style, and
-    # YAML lets the two header indicators be written in either order, so all four headers are
-    # spelled out rather than left to stand for one another. A clipped one joins them because
-    # the indicator has to compose with a retained line break as well as a stripped one.
+    # YAML lets the two header indicators be written in either order, so the headers are
+    # spelled out rather than left to stand for one another. The cross product is style by
+    # chomping by order: the two chomping indicators a header writes compose with the
+    # indentation one in either order, and a clipped header writes no chomping indicator at
+    # all, so it has one spelling per style rather than two. Ten rows, and none of them stands
+    # in for another, because what the scanner hands back is the span the whole header opens
+    # and the line break its chomping retained rather than the indicators one at a time.
     SeenForm("literal-indent-indicator", ("seen: |2-", "  {old}"), "old", True, False, False),
     SeenForm("folded-indent-indicator", ("seen: >2-", "  {old}"), "old", True, False, False),
     SeenForm("literal-indent-after-chomp", ("seen: |-2", "  {old}"), "old", True, False, False),
     SeenForm("folded-indent-after-chomp", ("seen: >-2", "  {old}"), "old", True, False, False),
     SeenForm(
+        "literal-indent-indicator-kept",
+        ("seen: |2+", "  {old}"),
+        "old-newline",
+        True,
+        False,
+        False,
+    ),
+    SeenForm(
+        "folded-indent-indicator-kept", ("seen: >2+", "  {old}"), "old-newline", True, False, False
+    ),
+    SeenForm(
+        "literal-indent-after-keep", ("seen: |+2", "  {old}"), "old-newline", True, False, False
+    ),
+    SeenForm(
+        "folded-indent-after-keep", ("seen: >+2", "  {old}"), "old-newline", True, False, False
+    ),
+    SeenForm(
         "literal-indent-indicator-clipped",
         ("seen: |2", "  {old}"),
+        "old-newline",
+        True,
+        False,
+        False,
+    ),
+    SeenForm(
+        "folded-indent-indicator-clipped",
+        ("seen: >2", "  {old}"),
         "old-newline",
         True,
         False,
@@ -873,7 +930,7 @@ def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry
         marker=_style_marker(lines[0]),
         edits=edits,
         appends=appends,
-        site=fields["head"],
+        site=(ref_form.site or "{head}").format(**fields),
         written_lines=seen_form.written_lines,
     )
 
@@ -1465,14 +1522,21 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
             # it was written after. Space anywhere else is source the edit added around a value
             # rather than the value itself, which the region's own ends catch only at its far
             # edge and not inside an appended item.
+            #
+            # A tab is separation YAML accepts in a flow collection exactly where a space is,
+            # so it loads the same and no oracle above sees it, but it is not what an edit
+            # writes: the separation a rewrite emits is one space. It is therefore out of
+            # place everywhere rather than merely outside the two positions a space is in,
+            # which is why the two characters are tested by one rule and not one predicate.
             loose = [
                 index
                 for index, char in enumerate(region)
-                if char == " " and (index == 0 or region[index - 1] not in ",:")
+                if char in FLOW_SEPARATION
+                and (char != " " or index == 0 or region[index - 1] not in ",:")
             ]
             assert not loose, (
-                "an edit wrote space around the value rather than after the punctuation it "
-                f"follows: {region!r} carries loose space at {loose}"
+                "an edit wrote separation the source does not carry: "
+                f"{region!r} is loose at {loose}"
             )
             _CLAIMS["flow-line"] += 1
 
@@ -2445,6 +2509,10 @@ def test_the_spelling_tables_still_carry_every_dimension_the_assertions_read() -
     claim of.
     """
     assert any(form.note for form in REF_FORMS), "no ref spelling writes a comment"
+    assert any(form.site is not None for form in REF_FORMS), (
+        "no ref spelling escapes its value, so every entry is locatable by source that spells "
+        "its ref out and nothing reads what the loader constructed instead"
+    )
     assert any(form.note for form in SEEN_FORMS), "no seen spelling writes a comment"
     assert any(form.anchored for form in SEEN_FORMS), "no seen spelling carries an anchor"
     assert any(form.written_lines == 2 for form in SEEN_FORMS), (
