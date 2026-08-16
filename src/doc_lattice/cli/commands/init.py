@@ -20,8 +20,13 @@ from ...persistence import atomic_create_bytes
 from ...scaffold import build_scaffold
 from ...text_utils import strip_control_chars
 from ..errors import exit_on_project_error
-from ..git_repository import resolve_git_repository_root
-from ..runtime import get_runtime
+from ..git_repository import (
+    DEFAULT_BRANCH_FALLBACK,
+    probe_default_branch,
+    resolve_git_repository_root,
+    validate_default_branch,
+)
+from ..runtime import CliRuntime, get_runtime
 
 if TYPE_CHECKING:
     from ...github_ci.model import ArtifactChange
@@ -47,6 +52,15 @@ _BASELINE_GUIDANCE = (
 )
 
 
+# Narrated on stderr next to the generated workflow so a wrong probe result is visible when it
+# happens, rather than buried in YAML nobody re-reads. The probe is a local hint that cannot
+# detect an upstream rename whose old target still exists, so naming the source is what makes
+# the difference between "detected" and "fell back" legible to an adopter.
+_BRANCH_SOURCE_FLAG = "--default-branch"
+_BRANCH_SOURCE_ORIGIN_HEAD = "origin/HEAD"
+_BRANCH_SOURCE_FALLBACK = "fallback"
+
+
 @dataclass(frozen=True, slots=True)
 class _GithubInitPlan:
     """Preflighted inputs for explicit managed GitHub artifact creation."""
@@ -55,15 +69,54 @@ class _GithubInitPlan:
     changes: tuple[ArtifactChange, ...]
 
 
-def _validate_github_options(github: bool, repository: str | None) -> str | None:
+def _validate_github_options(
+    github: bool,
+    repository: str | None,
+    default_branch: str | None,
+) -> str | None:
     """Validate explicit GitHub option pairing and return the required identity."""
     if github:
         if repository is None:
             raise ConfigError("--repository is required with --github")
+        if default_branch is not None:
+            raise ConfigError(
+                "--default-branch cannot be combined with --github: every managed artifact is "
+                f"pinned to the exact {DEFAULT_BRANCH_FALLBACK} branch as a security control, "
+                "so the flag would have no effect. Run init without --github to generate an "
+                "ordinary workflow for another branch."
+            )
         return repository
     if repository is not None:
         raise ConfigError("--repository requires --github")
     return None
+
+
+def _resolve_default_branch(default_branch: str | None, cwd: Path) -> tuple[str, str]:
+    """Resolve the ordinary workflow's trigger branch and record where it came from.
+
+    Precedence is deterministic: an explicit ``--default-branch`` wins, otherwise the local
+    ``origin/HEAD`` probe, otherwise the fixed fallback. Discovery failure and policy rejection
+    stay separate. A probe that finds nothing degrades to the fallback and does not error, which
+    is what keeps ordinary ``init`` runnable with no remote and no Git at all; a name that was
+    actually supplied or discovered and then fails the branch policy raises instead, because
+    rendering it would produce a workflow whose filter is wrong or is a pattern.
+
+    Args:
+        default_branch: The explicit flag value, or None when it was not passed.
+        cwd: Invocation directory the probe reads Git state from.
+
+    Returns:
+        The validated branch name and the source label to narrate.
+
+    Raises:
+        ConfigError: If a supplied or discovered name is outside the supported domain.
+    """
+    if default_branch is not None:
+        return validate_default_branch(default_branch), _BRANCH_SOURCE_FLAG
+    probed = probe_default_branch(cwd)
+    if probed is not None:
+        return validate_default_branch(probed), _BRANCH_SOURCE_ORIGIN_HEAD
+    return DEFAULT_BRANCH_FALLBACK, _BRANCH_SOURCE_FALLBACK
 
 
 def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -> None:
@@ -105,6 +158,40 @@ def _prepare_github_init(root: Path, repository: str) -> _GithubInitPlan:
     return _GithubInitPlan(repository=identity.display, changes=changes)
 
 
+def _print_unmanaged_guidance(runtime: CliRuntime, ci_text: str) -> None:
+    """Print the ordinary workflow and the instructions for placing every printed block."""
+    runtime.write_stdout("# ===== .github/workflows/doc-lattice.yml (new file) =====")
+    runtime.write_stdout(ci_text)
+    runtime.stderr.print(
+        "Append the .gitignore block, add the pre-commit block under `repos:`, "
+        "save the workflow as "
+        ".github/workflows/doc-lattice.yml, and make sure the "
+        f"exact pinned version {__version__} is published on PyPI so the "
+        "snippets resolve."
+    )
+    runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
+
+
+def _print_managed_guidance(runtime: CliRuntime, plan: _GithubInitPlan) -> None:
+    """Print review instructions and the bootstrap command for the created managed artifacts."""
+    offline_path, linear_path, bootstrap_path, attributes_path = (
+        escape(change.artifact.relative_path.as_posix()) for change in plan.changes
+    )
+    runtime.stderr.print(
+        "Append the .gitignore block and add the pre-commit block under `repos:`. "
+        f"Review {offline_path}, {linear_path}, and "
+        f"{bootstrap_path}, plus {attributes_path}, before enabling or running them, "
+        "and make sure "
+        f"the exact pinned version {__version__} is published on PyPI so the "
+        "generated workflows resolve."
+    )
+    runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
+    runtime.stderr.print(
+        f"bash {bootstrap_path} plan {escape(plan.repository)}",
+        soft_wrap=True,
+    )
+
+
 def register_init(app: typer.Typer) -> None:
     """Register the ``init`` command on an application.
 
@@ -113,7 +200,7 @@ def register_init(app: typer.Typer) -> None:
     """
 
     @app.command()
-    def init(
+    def init(  # noqa: PLR0913
         ctx: typer.Context,
         docs_root: Annotated[
             list[str] | None,
@@ -140,19 +227,36 @@ def register_init(app: typer.Typer) -> None:
                 help="Exact GitHub OWNER/REPO for generated guards.",
             ),
         ] = None,
+        default_branch: Annotated[
+            str | None,
+            typer.Option(
+                "--default-branch",
+                help=(
+                    "Branch the printed workflow triggers on. Defaults to the local "
+                    f"origin/HEAD, then {DEFAULT_BRANCH_FALLBACK}. Rejected with --github."
+                ),
+            ),
+        ] = None,
     ) -> None:
         """Scaffold .doc-lattice.yml and print ignore, pre-commit, and CI guidance."""
         runtime = get_runtime(ctx)
         with exit_on_project_error(runtime):
-            github_repository = _validate_github_options(github, repository)
+            github_repository = _validate_github_options(github, repository, default_branch)
             roots = tuple(docs_root) if docs_root else ("docs",)
             _validate_init_flags(roots, linear_team)
             github_plan = None
             root = runtime.cwd
+            # Managed mode never probes: its artifacts are pinned to the exact fallback branch
+            # by the security control MANAGED_CI.md describes, and probing there would couple
+            # the managed path to unreliable local Git state for no gain. The value below only
+            # reaches ci_text, which managed mode builds and never prints.
+            branch, branch_source = DEFAULT_BRANCH_FALLBACK, _BRANCH_SOURCE_FALLBACK
             if github_repository is not None:
                 root = resolve_git_repository_root(runtime.cwd)
                 github_plan = _prepare_github_init(root, github_repository)
-            scaffold = build_scaffold(roots, linear_team, __version__)
+            else:
+                branch, branch_source = _resolve_default_branch(default_branch, runtime.cwd)
+            scaffold = build_scaffold(roots, linear_team, __version__, default_branch=branch)
             target = root / DEFAULT_CONFIG_NAME
             try:
                 atomic_create_bytes(
@@ -181,37 +285,16 @@ def register_init(app: typer.Typer) -> None:
                 runtime.stderr.print(f"wrote {escape(target.name)}")
             if github_plan is not None:
                 apply_changes(github_plan.changes)
+            else:
+                runtime.stderr.print(
+                    f"workflow triggers on branch {escape(branch)} ({branch_source})"
+                )
             runtime.write_stdout("# ===== .gitignore (append these lines) =====")
             runtime.write_stdout(scaffold.gitignore_text)
             runtime.write_stdout("# ===== .pre-commit-config.yaml (add under `repos:`) =====")
             runtime.write_stdout(scaffold.precommit_text)
             if github_plan is None:
-                runtime.write_stdout("# ===== .github/workflows/doc-lattice.yml (new file) =====")
-                runtime.write_stdout(scaffold.ci_text)
-                runtime.stderr.print(
-                    "Append the .gitignore block, add the pre-commit block under `repos:`, "
-                    "save the workflow as "
-                    ".github/workflows/doc-lattice.yml, and make sure the "
-                    f"exact pinned version {__version__} is published on PyPI so the "
-                    "snippets resolve."
-                )
-                runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
+                _print_unmanaged_guidance(runtime, scaffold.ci_text)
             else:
-                offline_path, linear_path, bootstrap_path, attributes_path = (
-                    escape(change.artifact.relative_path.as_posix())
-                    for change in github_plan.changes
-                )
-                runtime.stderr.print(
-                    "Append the .gitignore block and add the pre-commit block under `repos:`. "
-                    f"Review {offline_path}, {linear_path}, and "
-                    f"{bootstrap_path}, plus {attributes_path}, before enabling or running them, "
-                    "and make sure "
-                    f"the exact pinned version {__version__} is published on PyPI so the "
-                    "generated workflows resolve."
-                )
-                runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
-                runtime.stderr.print(
-                    f"bash {bootstrap_path} plan {escape(github_plan.repository)}",
-                    soft_wrap=True,
-                )
+                _print_managed_guidance(runtime, github_plan)
         raise typer.Exit(0)

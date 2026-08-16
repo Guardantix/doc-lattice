@@ -132,6 +132,9 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
     assert result.stdout == _legacy_stdout(__version__)
     assert result.stderr == (
         "wrote .doc-lattice.yml\n"
+        # The fixture repository has no remote, so the probe finds nothing and the fixed
+        # fallback is used. Naming the source is what makes a silent fallback visible.
+        "workflow triggers on branch main (fallback)\n"
         "Append the .gitignore block, add the pre-commit block under `repos:`, save the \n"
         "workflow as .github/workflows/doc-lattice.yml, and make sure the exact pinned \n"
         f"version {__version__} is published on PyPI so the snippets resolve.\n"
@@ -159,6 +162,149 @@ def test_init_repository_requires_github_before_any_write(tmp_path: Path, monkey
     assert result.exit_code == 2
     assert "--repository requires --github" in result.stderr
     assert {path.name for path in tmp_path.iterdir()} == {".git"}
+
+
+def _origin_head(cwd: Path, branch: str) -> None:
+    """Point the fixture repository's cached origin/HEAD at a real remote-tracking branch."""
+    for arguments in (
+        (
+            "-c",
+            "user.name=doc-lattice tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "seed",
+        ),
+        ("update-ref", f"refs/remotes/origin/{branch}", "HEAD"),
+        ("symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}"),
+    ):
+        subprocess.run(  # noqa: S603 - arguments are test-local literals
+            ["git", *arguments],  # noqa: S607 - tests require the local git executable
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_init_uses_the_probed_default_branch_and_names_its_source(tmp_path: Path, monkeypatch):
+    _origin_head(tmp_path, "trunk")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert "    branches: [trunk]\n" in result.stdout
+    assert "[main]" not in result.stdout
+    assert "workflow triggers on branch trunk (origin/HEAD)\n" in result.stderr
+
+
+def test_init_default_branch_flag_beats_the_probe(tmp_path: Path, monkeypatch):
+    # Precedence is flag, then probe, then fallback. The probe is a local hint that cannot see
+    # an upstream rename, so the explicit flag has to win outright.
+    _origin_head(tmp_path, "trunk")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--default-branch", "develop"])
+
+    assert result.exit_code == 0
+    assert "    branches: [develop]\n" in result.stdout
+    assert "[trunk]" not in result.stdout
+    assert "workflow triggers on branch develop (--default-branch)\n" in result.stderr
+
+
+def test_init_falls_back_to_main_without_a_probe_result(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert "    branches: [main]\n" in result.stdout
+    assert "workflow triggers on branch main (fallback)\n" in result.stderr
+
+
+def test_init_reports_the_branch_before_the_copy_paste_guidance(tmp_path: Path, monkeypatch):
+    # Stdout owns the artifacts; the branch and its source belong on stderr, ahead of the
+    # instructions that tell an adopter where to paste them.
+    _origin_head(tmp_path, "trunk")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.stderr.index("workflow triggers on branch trunk") < result.stderr.index(
+        "Append the .gitignore block"
+    )
+    assert "workflow triggers on branch" not in result.stdout
+
+
+@pytest.mark.parametrize("branch", ["release/*", "main branch", "!main", "..", "réf", "main."])
+def test_init_rejects_hostile_default_branch_before_any_write(
+    tmp_path: Path,
+    monkeypatch,
+    branch: str,
+):
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--default-branch", branch])
+
+    assert result.exit_code == 2
+    assert "must be an ASCII Git branch name" in result.stderr
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+
+
+def test_init_rejects_a_probed_branch_outside_the_supported_domain(tmp_path: Path, monkeypatch):
+    # Discovery failure falls back silently; a name that was actually discovered and then fails
+    # policy is reported instead, because rendering it would produce a filter that is wrong.
+    monkeypatch.setattr(init_command, "probe_default_branch", lambda _cwd: "release/*")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert "must be an ASCII Git branch name" in result.stderr
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+
+
+def test_init_rejects_default_branch_with_github_before_any_write(tmp_path: Path, monkeypatch):
+    # Accepting the flag and silently ignoring it would be misleading: every managed artifact is
+    # pinned to the exact main branch as a security control, not as an unparameterized template.
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--github",
+            "--repository",
+            "Guardantix/doc-lattice",
+            "--default-branch",
+            "trunk",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--default-branch cannot be combined with --github" in result.stderr
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+
+
+def test_init_github_never_probes_the_local_default_branch(tmp_path: Path, monkeypatch):
+    def unexpected_probe(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("managed init must not probe local Git state for a branch")
+
+    _origin_head(tmp_path, "trunk")
+    monkeypatch.setattr(init_command, "probe_default_branch", unexpected_probe)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--github", "--repository", "Guardantix/doc-lattice"])
+
+    assert result.exit_code == 0
+    assert "workflow triggers on branch" not in result.stderr
+    assert "workflow triggers on branch" not in result.stdout
+    for name in ("doc-lattice.yml", "doc-lattice-linear.yml"):
+        assert "branches: [main]" in (tmp_path / ".github/workflows" / name).read_text()
+        assert "trunk" not in (tmp_path / ".github/workflows" / name).read_text()
 
 
 def test_init_github_creates_managed_artifacts_and_prints_review_guidance(

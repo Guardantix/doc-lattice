@@ -21,6 +21,7 @@ from doc_lattice.constants import (
 )
 from doc_lattice.scaffold import (
     build_scaffold,
+    render_ci,
     render_config,
     render_gitignore,
 )
@@ -68,7 +69,7 @@ def test_render_gitignore_derives_patterns_from_shared_naming_constants(monkeypa
 
 
 def test_build_scaffold_includes_exact_gitignore_text():
-    scaffold = build_scaffold(("docs",), None, "1.0.0")
+    scaffold = build_scaffold(("docs",), None, "1.0.0", default_branch="main")
 
     assert scaffold.gitignore_text == render_gitignore()
 
@@ -135,7 +136,7 @@ def test_render_config_round_trips_any_docs_root(root):
 
 
 def test_snippets_pin_pypi_version_and_python():
-    scaffold = build_scaffold(("docs",), None, "0.2.0")
+    scaffold = build_scaffold(("docs",), None, "0.2.0", default_branch="main")
     for text in (scaffold.precommit_text, scaffold.ci_text):
         assert "--from doc-lattice==0.2.0" in text
         assert "--python 3.13" in text
@@ -150,7 +151,7 @@ def test_snippets_pin_pypi_version_and_python():
 def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
     # A floating tag re-resolves on every run, which is what the managed workflows exist to
     # avoid; the printed snippet has to match that posture.
-    ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+    ci = build_scaffold(("docs",), None, "0.2.0", default_branch="main").ci_text
 
     assert "actions/checkout@v4" not in ci
     assert "astral-sh/setup-uv@v6" not in ci
@@ -165,7 +166,7 @@ def test_ci_snippet_carries_the_managed_least_privilege_posture():
     # checkout resolves and executes third-party packages. Without these settings the job's
     # token stays in .git/config and is writable while that happens, and a persistent cache any
     # other workflow on the repository can populate is restored into the gate job.
-    ci = build_scaffold(("docs",), None, "0.2.0").ci_text
+    ci = build_scaffold(("docs",), None, "0.2.0", default_branch="main").ci_text
     workflow = YAML(typ="safe").load(ci)
     steps = workflow["jobs"]["check"]["steps"]
 
@@ -177,14 +178,14 @@ def test_ci_snippet_carries_the_managed_least_privilege_posture():
 
 
 def test_invocation_installs_from_exact_pypi_requirement():
-    scaffold = build_scaffold(("docs",), None, "0.2.0")
+    scaffold = build_scaffold(("docs",), None, "0.2.0", default_branch="main")
     for text in (scaffold.precommit_text, scaffold.ci_text):
         assert "--from doc-lattice==0.2.0 doc-lattice check" in text
         assert "--from doc-lattice==0.2.0 doc-lattice lint" in text
 
 
 def test_generated_gates_run_check_and_lint():
-    scaffold = build_scaffold(("docs",), None, "0.3.0")
+    scaffold = build_scaffold(("docs",), None, "0.3.0", default_branch="main")
     assert "id: doc-lattice-check" in scaffold.precommit_text
     assert "id: doc-lattice-lint" in scaffold.precommit_text
     assert "doc-lattice check" in scaffold.precommit_text
@@ -193,11 +194,65 @@ def test_generated_gates_run_check_and_lint():
     assert "doc-lattice lint" in scaffold.ci_text
 
 
+def test_ci_snippet_filters_both_triggers_on_the_requested_branch():
+    # A repository on a non-main default branch previously installed a workflow that read as
+    # correct, installed cleanly, and never triggered. Both filters have to move together.
+    ci = render_ci("0.3.0", default_branch="trunk")
+    workflow = YAML(typ="safe").load(ci)
+
+    assert workflow["on"]["push"]["branches"] == ["trunk"]
+    assert workflow["on"]["pull_request"]["branches"] == ["trunk"]
+    assert "[main]" not in ci
+
+
+def test_ci_snippet_keeps_the_exact_main_spelling_it_always_emitted():
+    # main stays byte-identical so an established adopter diffing the regenerated workflow sees
+    # no churn from parameterization alone.
+    assert "  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n" in render_ci(
+        "0.3.0", default_branch="main"
+    )
+
+
+@pytest.mark.parametrize("branch", ["release/2.x", "feature/a-b_c", "v1.0"])
+def test_ci_snippet_round_trips_slashed_and_dotted_branches(branch):
+    workflow = YAML(typ="safe").load(render_ci("0.3.0", default_branch=branch))
+
+    assert workflow["on"]["push"]["branches"] == [branch]
+
+
+@pytest.mark.parametrize("branch", ["on", "yes", "No", "OFF", "Y", "1.0", "0755"])
+def test_ci_snippet_quotes_branches_a_yaml_reader_would_retype(branch):
+    # Validation and output escaping are independent invariants. GitHub reads workflows under
+    # YAML 1.1 boolean resolution, so an unquoted `on` would arrive as a boolean rather than a
+    # branch name; the emitter, not hand-written interpolation, has to decide the quoting.
+    text = render_ci("0.3.0", default_branch=branch)
+    workflow = YAML(typ="safe").load(text)
+
+    assert workflow["on"]["push"]["branches"] == [branch]
+    assert workflow["on"]["pull_request"]["branches"] == [branch]
+
+
+def test_ci_snippet_keeps_a_long_branch_filter_on_one_line():
+    # ruamel wraps flow sequences at 80 columns by default, which would split the filter across
+    # lines and corrupt the hand-assembled text around it.
+    branch = "release/" + "a" * 200
+    ci = render_ci("0.3.0", default_branch=branch)
+
+    assert f"    branches: [{branch}]\n" in ci
+    assert YAML(typ="safe").load(ci)["on"]["push"]["branches"] == [branch]
+
+
+def test_build_scaffold_requires_the_branch_as_a_keyword():
+    # Required and keyword-only so no future caller can silently restore a hard-wired main.
+    with pytest.raises(TypeError):
+        build_scaffold(("docs",), None, "0.3.0")  # ty: ignore[missing-argument]
+
+
 def test_ci_runs_both_commands_in_one_step():
     # A second GitHub Actions run step would be skipped after check exits nonzero,
     # so both commands share one step that captures each exit code and fails if
     # either failed.
-    ci = build_scaffold(("docs",), None, "0.3.0").ci_text
+    ci = build_scaffold(("docs",), None, "0.3.0", default_branch="main").ci_text
     assert ci.count("- run:") == 1
     assert "rc_check=$?" in ci
     assert "rc_lint=$?" in ci

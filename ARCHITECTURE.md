@@ -239,9 +239,21 @@ moving durable reconcile mutation into the CLI.
 registers Typer; `cli/runtime.py` creates a frozen runtime for each invocation with
 stdout, stderr, cwd, and config and lattice loaders; and `cli/output.py` centralizes
 format validation, indentation, exact output, and GitHub annotations. The package also
-holds `options.py` (shared Typer option types) and `git_repository.py` (Git top-level
-resolution for the `ci` and GitHub-mode `init` adapters). Each module under
-`cli/commands/` is a narrow command adapter. There are no
+holds `options.py` (shared Typer option types) and `git_repository.py` (local Git discovery
+for the `ci` adapters, GitHub-mode `init`, and ordinary `init`). Each module under
+`cli/commands/` is a narrow command adapter.
+
+`git_repository.py` owns two discovery contracts that fail differently on purpose. Git
+top-level resolution is a prerequisite of the managed commands, so every failure is a
+`ConfigError`. Default-branch discovery for ordinary `init` is a hint: that command has no
+Git prerequisite at all, so a missing executable, a directory outside a worktree, a missing
+or dangling `origin/HEAD`, a timeout, and unusable output all yield no candidate and the
+adapter falls back to `main`. Only a branch name that was actually supplied or discovered and
+then fails the module's ASCII branch-name policy raises, because a GitHub `branches:` filter
+is a glob pattern rather than a literal and must never receive a pattern. The module stays the
+sole owner of the Git subprocess boundary and its timeout: `scaffold.py` remains pure and
+receives the resolved name as a required keyword argument, and precedence and narration stay
+in the `init` adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
 
 `cli/errors.py` owns diagnostic rendering, exit constants, and command-level
