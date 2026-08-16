@@ -162,8 +162,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   directive touched it, which is version independent. The `yaml-compatibility` CI leg gained the
   accelerator-absent half of its matrix, since the C parser ignores directives entirely and so
   hid this on both of the ruamel versions it tested.
+- Adopters now have upgrade guidance. README.md gained an Upgrading section split by install kind,
+  since ownership differs: the printed pre-commit block is hand-maintained in both setups and must
+  be replaced wholesale rather than pin-bumped, an ordinary install replaces its workflow from
+  fresh `init` output, and a managed install previews and applies `ci refresh` for the four managed
+  artifacts instead of re-running create-only `init --github`. Every command names the target
+  release explicitly, because both generators render from the running version, so an old binary
+  regenerates the old artifacts.
+- Both `reconcile --all` adoption sites now say to commit the annotated input state and start from
+  an otherwise clean working tree, so the baseline diff is reviewable and revertible with `git`.
+  Neither document previously offered git as the safety net, and reconcile's own failure rollback
+  does not reverse a successful but mistaken baseline. README.md owns the rule and MANAGED_CI.md
+  links to it at the command site.
+- RELEASING.md's checklist now requires a `### Migration` subsection in the changelog section of
+  any release that changes generated output in shape or behavior, excluding the version-pin and
+  ownership-marker substitution every release performs. The 4.1.0 section gained that subsection
+  retroactively; it is the release whose printed and managed workflow output changed.
 
 ## [4.1.0] - 2026-08-14
+
+### Migration
+
+This release changed generated output in both setups, so an adopter that stays on the 4.0.0
+artifacts keeps running the older workflow shape. Recorded retroactively: it was added to `main`
+after v4.1.0 was published, so it is absent from the immutable v4.1.0 tag and from that release's
+GitHub Release notes, which are never rewritten.
+
+- Every install: reprint the pre-commit block with
+  `uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init` and replace your checked-in
+  block with it. Do not bump only the version in the two `entry:` lines.
+- Ordinary installs: replace `.github/workflows/doc-lattice.yml` with the workflow the same
+  `init` run prints. It gained SHA-pinned actions, `permissions: contents: read`,
+  `persist-credentials: false`, and `enable-cache: false`, none of which a pin bump introduces.
+- Managed installs: run `uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice ci refresh
+  --repository OWNER/REPO`, then the same command with `--apply`, and commit the diff. Do not
+  hand-edit the four managed artifacts, and do not re-run `init --github`.
 
 ### Changed
 
