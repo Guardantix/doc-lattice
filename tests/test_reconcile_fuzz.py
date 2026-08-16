@@ -19,6 +19,7 @@ is never required to be refused.
 
 import re
 import warnings
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -1167,9 +1168,23 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
     update named, whose key and separator are the author's source just the same.
     """
     raw_meta = _parts(after).raw_meta
-    for entry in document.entries:
-        if entry.marker is not None:
-            assert entry.marker in raw_meta, f"{entry.name} was restyled: {entry.marker!r}"
+    # Counted rather than merely looked for, because a marker is not unique to the entry that
+    # declared it: every block ``!!omap`` entry opens ``- !!omap``, so two of them in one
+    # document would satisfy each other's claim and one could be restyled away unseen. The
+    # claim is a count rather than a position because a region cannot serve here: it begins at
+    # an entry's site, which for a multi-line entry is written after its marker and for an omap
+    # entry is a line below it entirely. Layer 3 forbids the rewrite reducing the count, and
+    # anything above it passes. No mutation isolates this claim today: every marker the tables
+    # write sits on a line outside the footprint, so the footprint assertion reaches a restyled
+    # one first. The count is what keeps the claim true on its own terms for a marker that one
+    # day opens a line an edit may land on.
+    for marker, count in Counter(
+        entry.marker for entry in document.entries if entry.marker is not None
+    ).items():
+        assert raw_meta.count(marker) >= count, (
+            f"an entry was restyled: {marker!r} is written {raw_meta.count(marker)} times "
+            f"where {count} entries opened with it"
+        )
     for entry, region in zip(document.entries, _entry_regions(document, raw_meta), strict=True):
         if region is None:
             continue
