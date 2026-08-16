@@ -25,9 +25,10 @@ Two properties of this arrangement matter during an incident:
 * **The three authorities are one person today.** The repository has a single administrator, the
   `pypi` environment names that same account as its required reviewer with self-review permitted,
   `main` requires passing checks but zero approving reviews, and branch protection does not apply
-  to administrators. There is no separation of duties to rely on, and the environment approval is
-  a deliberate pause rather than a second pair of eyes. Treat it as one: read what you are about
-  to approve.
+  to administrators. The environment protection does not bind them either: administrator bypass
+  is enabled, so the approval can be skipped outright rather than merely self-granted. There is
+  no separation of duties to rely on, and the environment approval is a deliberate pause rather
+  than a second pair of eyes. Treat it as one: read what you are about to approve.
 
 The "Accounts and access" section below records where each of these is configured and how to
 check its current state.
@@ -311,8 +312,13 @@ than against the absence of an error:
 |--------|----------------|
 | `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false |
 | `branch_policy` | `custom_branch_policies` true, and the policy list exactly `["main"]` |
+| `can_admins_bypass` | `true`, the administrator bypass described under "Who can release" |
 | `checks` and `strict` | Every required CI context, `strict` true |
 | `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
+
+`can_admins_bypass` is the one row whose expected value is the weaker setting. It records what is
+true today, not what is desirable. If it ever reads `false` the protection has been tightened, and
+the authority description above is what needs correcting rather than the setting.
 
 Private vulnerability reporting must report `true`. The button is a repository setting separate
 from [SECURITY.md](SECURITY.md); the file alone does not create the channel. Enabling it is also
