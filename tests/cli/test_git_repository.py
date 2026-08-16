@@ -23,6 +23,16 @@ def _git(cwd: Path, *arguments: str) -> None:
     )
 
 
+def _plant_fake_git(directory: Path) -> tuple[Path, Path]:
+    """Write an executable named ``git`` into a directory, plus the marker it leaves when run."""
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory / "planted-git-ran"
+    planted = directory / "git"
+    planted.write_text(f'#!/bin/sh\ntouch "{marker}"\necho refs/remotes/origin/pwned\n')
+    planted.chmod(0o755)
+    return planted, marker
+
+
 def _repository_with_origin_head(tmp_path: Path, branch: str, *, dangling: bool = False) -> Path:
     """Build a repository whose origin/HEAD names ``branch``, optionally without the target."""
     _git(tmp_path, "init", "--quiet")
@@ -73,6 +83,42 @@ def test_resolve_git_repository_root_reports_missing_git(tmp_path: Path, monkeyp
 
     with pytest.raises(ConfigError, match="git executable not found"):
         resolve_git_repository_root(tmp_path)
+
+
+def test_resolve_git_repository_root_reports_git_missing_from_every_trusted_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(git_repository, "which", lambda _name: None)
+
+    with pytest.raises(ConfigError, match="git executable not found"):
+        resolve_git_repository_root(tmp_path)
+
+
+def test_resolve_git_repository_root_refuses_a_git_planted_in_the_worktree(
+    tmp_path: Path,
+    monkeypatch,
+):
+    planted, marker = _plant_fake_git(tmp_path)
+    monkeypatch.setattr(git_repository, "which", lambda _name: str(planted))
+
+    with pytest.raises(ConfigError, match="git executable not found"):
+        resolve_git_repository_root(tmp_path)
+
+    assert not marker.exists()
+
+
+def test_resolve_git_repository_root_runs_git_from_an_absolute_path(tmp_path: Path, monkeypatch):
+    recorded: list[list[str]] = []
+
+    def record(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        recorded.append(command)
+        return subprocess.CompletedProcess(command, 0, f"{tmp_path}\n".encode(), b"")
+
+    monkeypatch.setattr(git_repository, "run", record)
+
+    assert resolve_git_repository_root(tmp_path) == tmp_path.resolve()
+    assert Path(recorded[0][0]).is_absolute()
 
 
 @pytest.mark.parametrize(
@@ -128,6 +174,74 @@ def test_probe_default_branch_returns_none_when_git_is_missing(tmp_path: Path, m
     monkeypatch.setattr(git_repository, "run", missing)
 
     assert probe_default_branch(tmp_path) is None
+
+
+def test_probe_default_branch_returns_none_when_git_is_not_on_a_trusted_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(git_repository, "which", lambda _name: None)
+
+    assert probe_default_branch(tmp_path) is None
+
+
+def test_probe_default_branch_refuses_a_git_planted_in_the_checkout(tmp_path: Path, monkeypatch):
+    # The planted-binary case SECURITY.md's scope promises cannot happen. Ordinary init runs in
+    # freshly cloned repositories, so a repository carrying its own git must never be the program
+    # this module executes, and no candidate is a better answer than a poisoned one.
+    repository = _repository_with_origin_head(tmp_path, "trunk")
+    planted, marker = _plant_fake_git(repository)
+    monkeypatch.setattr(git_repository, "which", lambda _name: str(planted))
+
+    assert probe_default_branch(repository) is None
+    assert not marker.exists()
+
+
+def test_probe_default_branch_refuses_a_git_planted_in_the_process_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # Distinct from the case above: the probe targets one directory while the process stands in
+    # another. That second one is what shutil.which prepends to its own search on Windows, and
+    # what CreateProcess searches ahead of PATH.
+    process_directory = tmp_path / "process"
+    planted, marker = _plant_fake_git(process_directory)
+    target = tmp_path / "target"
+    target.mkdir()
+    _repository_with_origin_head(target, "trunk")
+    monkeypatch.chdir(process_directory)
+    monkeypatch.setattr(git_repository, "which", lambda _name: str(planted))
+
+    assert probe_default_branch(target) is None
+    assert not marker.exists()
+
+
+def test_probe_default_branch_returns_none_when_the_resolved_git_vanishes(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # which() reported a path and nothing is there by the time it is resolved. The candidate sits
+    # outside the invocation directory, so the resolution failure is the only thing that can be
+    # returning no candidate here.
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(git_repository, "which", lambda _name: str(tmp_path / "elsewhere/git"))
+
+    assert probe_default_branch(work) is None
+
+
+def test_probe_default_branch_runs_git_from_an_absolute_path(tmp_path: Path, monkeypatch):
+    recorded: list[list[str]] = []
+
+    def record(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        recorded.append(command)
+        return subprocess.CompletedProcess(command, 0, b"refs/remotes/origin/trunk\n", b"")
+
+    monkeypatch.setattr(git_repository, "run", record)
+
+    assert probe_default_branch(tmp_path) == "trunk"
+    assert recorded
+    assert all(Path(command[0]).is_absolute() for command in recorded)
 
 
 def test_probe_default_branch_returns_none_on_timeout(tmp_path: Path, monkeypatch):

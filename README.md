@@ -525,7 +525,9 @@ target that is still present locally is indistinguishable from a current one wit
 access. Reading the reported source line is how you catch that, and `--default-branch` is how you
 fix it. Prefer passing it explicitly whenever you want a reproducible result, such as in an
 upgrade you intend to repeat. A missing remote, a missing `git`, or a directory outside a worktree
-all fall back quietly; ordinary `init` has no Git requirement. A branch name that is supplied or
+all fall back quietly; ordinary `init` has no Git requirement. The probe runs `git` only from an
+absolute path outside the directory being scaffolded, so a checkout carrying its own `git` falls
+back rather than running it, as does a `git` reachable only through a relative `PATH` entry. A branch name that is supplied or
 detected but is not a supported literal name is a different case and is rejected with an error:
 names are limited to ASCII letters, digits, `.`, `_`, and `-` in `/`-separated parts, because a
 GitHub `branches:` filter is a glob pattern rather than a literal and `*`, `?`, `[`, `]`, and `!`

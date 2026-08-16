@@ -256,6 +256,18 @@ receives the resolved name as a required keyword argument, and precedence and na
 in the `init` adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
 
+Both contracts resolve the Git executable to an absolute path before running it, and reject a
+candidate inside either the invocation directory or the process's own working directory. The
+earlier decision to run a bare `git` from the maintainer's `PATH` is withdrawn. It was defensible
+while only the managed commands shelled out, since those run inside a repository the maintainer
+already trusts, but ordinary `init` runs in freshly cloned ones, and Windows searches the
+invoking process's current directory ahead of `PATH`. A repository carrying its own `git.exe`
+would have been executed, which SECURITY.md's scope says cannot happen. Resolution failure keeps
+each contract's existing shape rather than introducing a third: no candidate for the probe, a
+`ConfigError` for the managed resolver. The project root is deliberately not part of the
+containment check, because the managed contract has not resolved it yet at that point and neither
+platform search path reaches above the invocation directory anyway.
+
 `cli/errors.py` owns diagnostic rendering, exit constants, and command-level
 `ProjectError` context conversion. `cli/__init__.py` preserves
 `doc_lattice.cli:main`, loads the compatibility `app` export lazily, and owns

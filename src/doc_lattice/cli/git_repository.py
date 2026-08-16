@@ -6,15 +6,29 @@ worktree, so every failure becomes a ``ConfigError``. ``probe_default_branch`` i
 ordinary ``init`` has no Git prerequisite at all, so every discovery failure yields ``None``
 and the caller falls back. Only a candidate that was actually supplied or discovered and then
 fails the branch-name policy raises, through ``validate_default_branch``.
+
+Both contracts run Git through ``_resolve_git_executable`` rather than by name, so the program
+this module executes can never come from the directory it was pointed at. SECURITY.md states
+that doc-lattice executes no code from the project directory, and running a bare ``git`` would
+break that promise: Windows searches the invoking process's current directory ahead of ``PATH``,
+so a repository carrying its own ``git.exe`` would run it, and a relative ``PATH`` entry does the
+same on POSIX. Ordinary ``init`` is why this matters now. The managed commands are run by a
+maintainer inside their own repository, but ``init`` is run in freshly cloned ones.
 """
 
 import re
 from pathlib import Path
+from shutil import which
 from subprocess import CompletedProcess, TimeoutExpired, run
 
 from ..error_types import ConfigError
 
 _GIT_TIMEOUT_SECONDS = 5
+_GIT_EXECUTABLE_NAME = "git"
+_MISSING_GIT_MESSAGE = (
+    "git executable not found outside the invocation directory; install Git on PATH, or remove "
+    "the current directory from PATH, before using managed GitHub CI commands"
+)
 
 # The ordinary workflow's branch filter when nothing better is known. Deliberately not shared
 # with the ``main`` literals in ``github_ci/render.py``: those are a security control that pins
@@ -51,25 +65,23 @@ def resolve_git_repository_root(cwd: Path) -> Path:
         The canonical absolute Git worktree root containing ``cwd``.
 
     Raises:
-        ConfigError: If Git is unavailable, the directory is outside a worktree, or Git's
-            top-level result cannot be validated safely.
+        ConfigError: If Git is unavailable outside the invocation directory, the directory is
+            outside a worktree, or Git's top-level result cannot be validated safely.
     """
+    git = _resolve_git_executable(cwd)
+    if git is None:
+        raise ConfigError(_MISSING_GIT_MESSAGE)
     try:
-        completed = run(
-            [  # noqa: S607 - git is intentionally resolved from the maintainer's PATH
-                "git",
-                "rev-parse",
-                "--show-toplevel",
-            ],
+        completed = run(  # noqa: S603 - resolved executable, arguments are module-local literals
+            [git, "rev-parse", "--show-toplevel"],
             cwd=cwd,
             capture_output=True,
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
-        raise ConfigError(
-            "git executable not found; install Git before using managed GitHub CI commands"
-        ) from exc
+        # Resolution succeeded, so this is the narrow race where Git disappeared in between.
+        raise ConfigError(_MISSING_GIT_MESSAGE) from exc
     except (OSError, TimeoutExpired) as exc:
         raise ConfigError("cannot resolve Git repository root") from exc
     if completed.returncode != 0:
@@ -134,26 +146,63 @@ def probe_default_branch(cwd: Path) -> str | None:
 
     Returns:
         The branch name ``origin/HEAD`` resolves to, or None when no candidate is available.
-        Git being absent, ``cwd`` being outside a worktree, no remote or no ``origin/HEAD``, a
-        timeout, undecodable or unexpected output, and a dangling target all return None. The
-        returned name is unvalidated; callers pass it through ``validate_default_branch``.
+        Git being absent or resolvable only from inside the invocation directory, ``cwd`` being
+        outside a worktree, no remote or no ``origin/HEAD``, a timeout, undecodable or unexpected
+        output, and a dangling target all return None. The returned name is unvalidated; callers
+        pass it through ``validate_default_branch``.
     """
-    target = _git_stdout_line(cwd, ["symbolic-ref", "--quiet", _ORIGIN_HEAD_REF])
+    # Resolved once and threaded through, so both calls of a single probe run the same program.
+    git = _resolve_git_executable(cwd)
+    if git is None:
+        return None
+    target = _git_stdout_line(git, cwd, ["symbolic-ref", "--quiet", _ORIGIN_HEAD_REF])
     if target is None or not target.startswith(_ORIGIN_BRANCH_PREFIX):
         return None
     branch = target.removeprefix(_ORIGIN_BRANCH_PREFIX)
     if not branch:
         return None
-    if not _git_succeeded(cwd, ["show-ref", "--quiet", "--verify", "--", target]):
+    if not _git_succeeded(git, cwd, ["show-ref", "--quiet", "--verify", "--", target]):
         return None
     return branch
 
 
-def _run_git(cwd: Path, arguments: list[str]) -> CompletedProcess[bytes] | None:
+def _resolve_git_executable(cwd: Path) -> str | None:
+    """Resolve ``git`` to an absolute path outside any directory the invocation can control.
+
+    Rejecting rather than falling back to a bare name is the point: an executable found inside
+    the directory being operated on is exactly the planted-binary case, and running it would be
+    worse than reporting no Git at all. Two directories are treated as untrusted. ``cwd`` is
+    where the child process is placed, which is what a relative ``PATH`` entry resolves against,
+    and the process's own working directory is what ``shutil.which`` prepends to the search on
+    Windows and what ``CreateProcess`` searches ahead of ``PATH``. The project root is not
+    checked because the managed contract has not resolved it yet at this point, and a plant
+    above ``cwd`` is not reachable through either of those two search paths anyway.
+
+    Args:
+        cwd: Invocation directory the resolved executable will be run in.
+
+    Returns:
+        The absolute path to run Git as, or None when no trusted candidate exists.
+    """
+    found = which(_GIT_EXECUTABLE_NAME)
+    if found is None:
+        return None
+    try:
+        # strict resolution also defeats a trusted PATH entry holding a symlink into the project.
+        executable = Path(found).resolve(strict=True)
+        untrusted = [directory.resolve(strict=True) for directory in (cwd, Path.cwd())]
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if any(executable.is_relative_to(directory) for directory in untrusted):
+        return None
+    return str(executable)
+
+
+def _run_git(git: str, cwd: Path, arguments: list[str]) -> CompletedProcess[bytes] | None:
     """Run one Git command, returning None instead of raising when it cannot run at all."""
     try:
-        return run(  # noqa: S603 - arguments are module-local literals, never user input
-            ["git", *arguments],  # noqa: S607 - git is intentionally resolved from PATH
+        return run(  # noqa: S603 - resolved executable, arguments are module-local literals
+            [git, *arguments],
             cwd=cwd,
             capture_output=True,
             check=False,
@@ -163,9 +212,9 @@ def _run_git(cwd: Path, arguments: list[str]) -> CompletedProcess[bytes] | None:
         return None
 
 
-def _git_stdout_line(cwd: Path, arguments: list[str]) -> str | None:
+def _git_stdout_line(git: str, cwd: Path, arguments: list[str]) -> str | None:
     """Return the single non-empty stdout line of a successful Git command, else None."""
-    completed = _run_git(cwd, arguments)
+    completed = _run_git(git, cwd, arguments)
     if completed is None or completed.returncode != 0:
         return None
     try:
@@ -178,9 +227,9 @@ def _git_stdout_line(cwd: Path, arguments: list[str]) -> str | None:
     return lines[0]
 
 
-def _git_succeeded(cwd: Path, arguments: list[str]) -> bool:
+def _git_succeeded(git: str, cwd: Path, arguments: list[str]) -> bool:
     """Report whether a Git command ran and exited zero."""
-    completed = _run_git(cwd, arguments)
+    completed = _run_git(git, cwd, arguments)
     return completed is not None and completed.returncode == 0
 
 
