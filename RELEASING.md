@@ -13,7 +13,7 @@ other. Answering it as one role is how a bad version reaches PyPI.
 |-----------|----------------|----------------------|
 | Land a version bump on `main` | Creates the immutable `vX.Y.Z` tag and its GitHub Release | GitHub branch protection on `main` |
 | Approve the `pypi` environment | Releases the built distributions to PyPI | GitHub environment protection |
-| Operate the PyPI project | Yanks a release, manages the Trusted Publisher and project roles | A human PyPI account with a role on the project |
+| Operate the PyPI project | Yanks a release, manages the Trusted Publisher and project roles | A human PyPI account holding the Owner role on the project |
 
 Two properties of this arrangement matter during an incident:
 
@@ -212,11 +212,11 @@ installs beats a version that vanishes.
 
 The publish job is upload-only OIDC with no stored PyPI token, so there is no yank command in
 this repository and none is added by running the pipeline. A yank is a human action in the PyPI
-web UI, performed by a person with a role on the project:
+web UI, performed by a project Owner:
 
 1. Go to <https://pypi.org/manage/project/doc-lattice/releases/>. This requires signing in with
-   a PyPI account that holds a project role; Trusted Publishing covers uploads only and grants
-   nobody the ability to yank.
+   a PyPI account holding the Owner role. Trusted Publishing covers uploads only and grants
+   nobody the ability to yank, and neither does the Maintainer role, which carries upload alone.
 2. Find the release, open its **Options** menu, and choose **Yank**.
 3. Provide a reason in the confirmation dialog. It is optional and you should always give one:
    PyPI shows it on the release page and serves it through the index API, so it is what an
@@ -322,19 +322,26 @@ The binding matches four values exactly:
 another owner, renaming `ci.yml`, or renaming the `pypi` environment all break the match, and
 the failure appears at upload time as a rejected OIDC claim rather than as a warning beforehand.
 There is no way to edit a binding: the fix is to delete the stale publisher on PyPI and add a
-new one with the new values, which requires a human account with a project role. Plan the
+new one with the new values, which requires a human account holding the Owner role. Plan the
 re-registration as part of any such move, not as cleanup afterwards, and do not assume it is
 always self-service. Re-registering a publisher whose values were registered before can be
 rejected as already registered and need PyPI admin intervention to clear, which is a support
 round trip you do not want to discover mid-migration.
 
 Trusted Publishing does not cover anything but uploads. Yanking, managing project roles, and
-re-registering the publisher all need a human PyPI account with a role on the project. Record,
-outside this repository, who the primary and backup operators are, which role each holds
-(verify it at <https://pypi.org/manage/project/doc-lattice/collaboration/> rather than assuming),
-and where the account's 2FA recovery codes are kept. A single operator with no backup and no
-recovery-code custody is an incident away from being unable to yank a bad release, and this is
-the point of the release procedure where that becomes visible.
+re-registering the publisher all need a human PyPI account holding the Owner role, and holding
+any role is not the same thing. PyPI's two project roles are not graded versions of each other:
+an Owner can do all three, while a Maintainer can only upload, so a Maintainer cannot yank a bad
+release, cannot promote a replacement operator, and cannot re-register the publisher after a
+rename or transfer.
+
+Record, outside this repository, who the primary and backup operators are, the exact role each
+holds (read it at <https://pypi.org/manage/project/doc-lattice/collaboration/> rather than
+assuming), and where each account's 2FA recovery codes are kept. The backup has to be an Owner.
+A backup Maintainer satisfies a "someone else has a role" check while leaving nobody able to
+act, which is the worse failure of the two because it reads as covered. A single Owner with no
+backup Owner and no recovery-code custody is an incident away from being unable to yank a bad
+release, and this is the point of the release procedure where that becomes visible.
 
 ### GitHub repository controls
 
