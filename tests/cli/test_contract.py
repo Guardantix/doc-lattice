@@ -18,6 +18,8 @@ from doc_lattice import __version__
 from doc_lattice.cli import app
 from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
+from doc_lattice.github_ci.filesystem import apply_changes, preflight_create
+from doc_lattice.github_ci.render import render_managed_artifacts
 
 from .helpers import _run, runner
 
@@ -326,7 +328,10 @@ def test_global_help_lists_ci():
     assert result.exit_code == 0
     output = Text.from_ansi(result.stdout).plain
     assert "ci" in output
-    assert "Audit or refresh managed GitHub CI artifacts." in output
+    # Matched a fragment at a time: the group's help now carries the 5.0 deprecation notice
+    # and Rich wraps it across several rows of the commands table.
+    assert "Deprecated, removed in 5.0" in output
+    assert "audit or refresh managed GitHub CI" in output
 
 
 def test_ci_help_lists_audit_and_refresh():
@@ -626,3 +631,156 @@ def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, a
     assert cold.exit_code == uncached.exit_code
     assert warm.stdout == uncached.stdout
     assert warm.exit_code == uncached.exit_code
+
+
+# --- Deprecated managed GitHub CI commands: machine-facing output compatibility ---
+#
+# `init --github`, `ci audit`, and `ci refresh` are deprecated and removed in 5.0. AD-10
+# records why the notice is documentation and help text only: a stderr warning cannot be made
+# compatibility-safe for a script that already parses these channels. So the contract for the
+# whole 4.x line is that invocation stdout, stderr, and exit codes do not move.
+#
+# The expectations below are literal on purpose. Deriving them from the same strings the
+# adapters print would pass no matter what the deprecation did to them. `COLUMNS` is pinned
+# because Rich wraps console output to the terminal width, so an inherited width would move
+# where stderr breaks with no code change involved.
+_WIDE_CONSOLE_ENV = {"NO_COLOR": "1", "COLUMNS": "1000"}
+_DEPRECATION_MARKERS = ("Deprecated", "deprecated", "5.0")
+_MANAGED_REPOSITORY = "Guardantix/doc-lattice"
+
+_INIT_GITHUB_STDOUT = (
+    "# ===== .gitignore (append these lines) =====\n"
+    ".doc-lattice-reconcile.json\n"
+    ".doc-lattice-reconcile.json.*.tmp\n"
+    ".*.doc-lattice-before.*.tmp\n"
+    ".*.doc-lattice-after.*.tmp\n"
+    "\n"
+    "# ===== .pre-commit-config.yaml (add under `repos:`) =====\n"
+    "  - repo: local\n"
+    "    hooks:\n"
+    "      - id: doc-lattice-check\n"
+    "        name: doc-lattice check\n"
+    f"        entry: uvx --python 3.13 --from doc-lattice=={__version__} doc-lattice check\n"
+    "        language: system\n"
+    "        files: \\.md$\n"
+    "        pass_filenames: false\n"
+    "      - id: doc-lattice-lint\n"
+    "        name: doc-lattice lint\n"
+    f"        entry: uvx --python 3.13 --from doc-lattice=={__version__} doc-lattice lint\n"
+    "        language: system\n"
+    "        files: \\.md$\n"
+    "        pass_filenames: false\n"
+    "\n"
+)
+
+_INIT_GITHUB_STDERR = (
+    "wrote .doc-lattice.yml\n"
+    "Append the .gitignore block and add the pre-commit block under `repos:`. Review "
+    ".github/workflows/doc-lattice.yml, .github/workflows/doc-lattice-linear.yml, and "
+    ".github/doc-lattice-bootstrap.sh, plus .github/.gitattributes, before enabling or "
+    f"running them, and make sure the exact pinned version {__version__} is published on "
+    "PyPI so the generated workflows resolve.\n"
+    "For an initial adoption with no established baseline, run `doc-lattice reconcile --all` "
+    "once after annotating documents and before enabling the gates. It acknowledges the "
+    "current state so the gates start from a known baseline; BROKEN edges are skipped and "
+    "remain findings, so this does not by itself make CI green.\n"
+    "bash .github/doc-lattice-bootstrap.sh plan Guardantix/doc-lattice\n"
+)
+
+_AUDIT_FINDINGS_STDOUT = (
+    ".github/.gitattributes: MISSING_MANAGED_ARTIFACT: managed attributes artifact is missing\n"
+    ".github/doc-lattice-bootstrap.sh: MISSING_MANAGED_ARTIFACT: "
+    "managed bootstrap artifact is missing\n"
+    ".github/workflows: MISSING_WORKFLOW_DIRECTORY: managed GitHub workflow directory is missing\n"
+    ".github/workflows/doc-lattice-linear.yml: MISSING_MANAGED_ARTIFACT: "
+    "managed linear artifact is missing\n"
+    ".github/workflows/doc-lattice.yml: MISSING_MANAGED_ARTIFACT: "
+    "managed offline artifact is missing\n"
+)
+
+
+def _git_worktree(tmp_path: Path) -> Path:
+    subprocess.run(
+        ["git", "init", "--quiet"],  # noqa: S607 - tests require the local git executable
+        cwd=tmp_path,
+        check=True,
+    )
+    return tmp_path
+
+
+def _install_managed_artifacts(root: Path) -> None:
+    artifacts = render_managed_artifacts(_MANAGED_REPOSITORY, __version__)
+    apply_changes(preflight_create(root, artifacts))
+
+
+def _assert_no_deprecation_notice(result) -> None:
+    for channel in (result.stdout, result.stderr):
+        for marker in _DEPRECATION_MARKERS:
+            assert marker not in channel, (
+                f"the deprecation notice must not reach invocation output; found {marker!r}"
+            )
+
+
+def test_init_github_invocation_output_is_unchanged_by_the_deprecation(tmp_path: Path):
+    root = _git_worktree(tmp_path)
+
+    result = _run(
+        ["init", "--github", "--repository", _MANAGED_REPOSITORY],
+        root,
+        _WIDE_CONSOLE_ENV,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == _INIT_GITHUB_STDOUT
+    assert result.stderr == _INIT_GITHUB_STDERR
+    _assert_no_deprecation_notice(result)
+
+
+def test_ci_audit_invocation_output_is_unchanged_by_the_deprecation(tmp_path: Path):
+    root = _git_worktree(tmp_path)
+    _install_managed_artifacts(root)
+
+    result = _run(["ci", "audit", "--repository", _MANAGED_REPOSITORY], root, _WIDE_CONSOLE_ENV)
+
+    assert result.exit_code == 0
+    assert result.stdout == "doc-lattice ci audit: ok\n"
+    assert result.stderr == ""
+    _assert_no_deprecation_notice(result)
+
+
+def test_ci_audit_finding_output_is_unchanged_by_the_deprecation(tmp_path: Path):
+    root = _git_worktree(tmp_path)
+
+    result = _run(["ci", "audit", "--repository", _MANAGED_REPOSITORY], root, _WIDE_CONSOLE_ENV)
+
+    assert result.exit_code == 1
+    assert result.stdout == _AUDIT_FINDINGS_STDOUT
+    assert result.stderr == ""
+    _assert_no_deprecation_notice(result)
+
+
+def test_ci_refresh_invocation_output_is_unchanged_by_the_deprecation(tmp_path: Path):
+    root = _git_worktree(tmp_path)
+    _install_managed_artifacts(root)
+
+    result = _run(["ci", "refresh", "--repository", _MANAGED_REPOSITORY], root, _WIDE_CONSOLE_ENV)
+
+    assert result.exit_code == 0
+    assert result.stdout == "doc-lattice ci refresh: current\n"
+    assert result.stderr == ""
+    _assert_no_deprecation_notice(result)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["init", "--help"], ["ci", "audit", "--help"], ["ci", "refresh", "--help"]],
+    ids=["init-github", "ci-audit", "ci-refresh"],
+)
+def test_deprecated_command_help_names_the_removal_release(tmp_path: Path, args):
+    # The other half of the same contract. The notice has to reach users somewhere, and help
+    # output is the only channel AD-10 leaves available.
+    result = _run(args, _git_worktree(tmp_path), _WIDE_CONSOLE_ENV)
+
+    assert result.exit_code == 0
+    assert "Deprecated" in result.stdout
+    assert "5.0" in result.stdout

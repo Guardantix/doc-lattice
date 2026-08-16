@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- A hand-installable recipe for protected Linear reporting in CI, published in `MANAGED_CI.md`.
+  It is the successor to the managed GitHub and Linear setup, and it is complete: the offline
+  workflow plain `init` scaffolds, the trusted-main Linear workflow as copyable text, the exact
+  `gh` sequence that creates the `main`-only environment and its dedicated secret along with the
+  readbacks that prove each step, the manual review that replaces `ci audit`, and the upgrade and
+  conversion procedures. A reader can install the protected setup from it without running
+  `init --github`, `ci audit`, or `ci refresh`. `SECURITY.md` now names that published workflow
+  in its in-scope boundary, and a test parses the documented workflow and enforces its trigger
+  set, guards, environment binding, final-step-only secret mapping, and action-pin parity.
 - A security policy in `SECURITY.md`, linked from README's documentation table, covering
   supported versions (the latest release only), the private reporting path, what a report should
   carry, response targets, the coordinated-disclosure expectation, and what is in and out of
@@ -140,6 +149,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reasoning, including why `ruamel.yaml` additionally gets the `yaml-compatibility` CI leg and why
   `markdown-it-py` stays exact-pinned at 4.2.0 despite the transitive constraint that places on
   `rich`.
+
+### Deprecated
+
+- `init --github`, `ci audit`, and `ci refresh` are deprecated and will be removed in 5.0. They
+  are unchanged in this release: invocation stdout, stderr, and exit codes are byte-identical,
+  because a stderr warning cannot be made compatibility-safe for a script that already parses
+  those channels, so the notice lives in `--help` output and documentation only. AD-10 in
+  ARCHITECTURE.md records that reasoning. A test pins all three channels for the three commands
+  so the deprecation cannot leak into machine-facing output.
+
+  The replacement is the hand-installable recipe now published in `MANAGED_CI.md`, which reaches
+  the same protected boundary with workflows you own. It keeps the GitHub environment as the
+  authoritative secret boundary, the `main`-only deployment allow list, the trusted job's
+  repository, ref, and event guards, and final-step-only mapping of `DOC_LATTICE_LINEAR_API_KEY`
+  onto `LINEAR_API_KEY`. It drops repository-wide audit, drift detection, byte-level refresh, the
+  scripted bootstrap readback, and the managed ownership markers; `MANAGED_CI.md` states that
+  trade in full.
+
+  **If you have a managed installation**, convert it while 4.x is still supported. Nothing breaks
+  on its own when 5.0 ships, which is the trap: the installed workflows keep running the 4.x
+  version they pin, and pinning them forward to 5.0 is what actually fails, because the managed
+  offline workflow runs `ci audit`. Conversion changes no remote state. The environment, its
+  `main`-only policy, and `DOC_LATTICE_LINEAR_API_KEY` stay exactly as they are. Locally you
+  replace `.github/workflows/doc-lattice.yml` with the workflow plain `init` prints, convert
+  `.github/workflows/doc-lattice-linear.yml` by deleting its four ownership marker comment lines,
+  delete `.github/doc-lattice-bootstrap.sh` and the `.gitattributes` rule that existed only for
+  it, and adopt the manual `gh` readback in place of `ci audit` and bootstrap `verify`.
+  `MANAGED_CI.md` carries the step-by-step procedure.
+
+  Upgrading a recipe installation replaces the Linear workflow block whole from the target
+  release's `MANAGED_CI.md`, rather than bumping only its `doc-lattice==` pin. Plain `init` cannot
+  regenerate that second workflow, and its structure and action pins can change independently of
+  the version it installs.
 
 ### Fixed
 

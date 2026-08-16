@@ -64,9 +64,10 @@ documents from a project directory, and `reconcile` writes back into that direct
 no code from the project directory; the only program it runs is `git`, with fixed arguments. Its
 only network use is the `linear` command's ticket lookup, which talks to
 `https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. It also renders GitHub
-Actions workflows through `ci refresh`, which is the one output of the tool that handles a
+Actions workflows through `ci refresh`, and publishes one in [MANAGED_CI.md](MANAGED_CI.md) for
+users to install by hand; those workflows are the one output of the project that handles a
 secret. So the security-relevant surface is what the engine does with the paths and file
-contents it was pointed at, plus that one credentialed call and what it renders.
+contents it was pointed at, plus that one credentialed call and what it renders or publishes.
 
 In scope, as examples rather than an exhaustive list:
 
@@ -85,7 +86,15 @@ In scope, as examples rather than an exhaustive list:
 * A workflow rendered by `ci refresh` that mishandles the Linear API key, for example by
   widening where the secret is readable or exposing it in a log.
   [MANAGED_CI.md](MANAGED_CI.md) owns that security model and is the place to read what the
-  generated artifacts are meant to guarantee.
+  generated artifacts are meant to guarantee. The managed commands are deprecated and removed in
+  5.0, but a rendered workflow remains in scope for as long as they ship.
+* The trusted Linear workflow published in [MANAGED_CI.md](MANAGED_CI.md) as the hand-installable
+  recipe, if installing it as documented mishandles the Linear API key. A missing or ineffective
+  guard in that published text counts, for example a trigger set or `if:` condition that lets an
+  untrusted event reach the environment, or a secret mapping that makes the key readable earlier
+  or more widely than the final step. It is published, security-sensitive project output, so a
+  defect in it is a vulnerability in the same sense a rendered artifact is. A recipe installation
+  the user then edited is out of scope, because the recipe transfers ownership of those files.
 
 Out of scope:
 

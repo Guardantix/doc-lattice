@@ -241,9 +241,9 @@ Contributor commands, gates, and the full verification set live in
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the four managed GitHub artifacts at the Git top-level. | 2 on tool error or unsafe existing artifact |
-| `ci audit [--repository OWNER/REPO]` | Audit repository-global workflow prohibitions and the managed GitHub installation without loading the lattice or using the network. | 1 on findings, 2 on unreadable or ambiguous state |
-| `ci refresh --repository OWNER/REPO [--apply]` | Preview a managed artifact upgrade or rename, then optionally apply it after exact interactive confirmation. | 1 when a preview has updates, 2 on refusal, unsafe state, or tool error |
+| `init [--docs-root ...] [--linear-team KEY] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the four managed GitHub artifacts at the Git top-level. `--github` is deprecated and removed in 5.0. | 2 on tool error or unsafe existing artifact |
+| `ci audit [--repository OWNER/REPO]` | Audit repository-global workflow prohibitions and the managed GitHub installation without loading the lattice or using the network. Deprecated, removed in 5.0. | 1 on findings, 2 on unreadable or ambiguous state |
+| `ci refresh --repository OWNER/REPO [--apply]` | Preview a managed artifact upgrade or rename, then optionally apply it after exact interactive confirmation. Deprecated, removed in 5.0. | 1 when a preview has updates, 2 on refusal, unsafe state, or tool error |
 
 `check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
 `ci audit` uses the same finding code for a coherent policy violation, and a read-only `ci refresh`
@@ -515,19 +515,25 @@ To test an unreleased commit, replace the PyPI requirement with a Git source suc
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should
 keep the exact PyPI version pin.
 
-### Managed GitHub and Linear setup
+### Protected Linear setup in CI
 
-To add protected Linear reporting in CI, a human maintainer generates and reviews four committed,
-create-only managed artifacts: two GitHub Actions workflows, a bootstrap script that configures the
-protected GitHub environment, and a scoped `.gitattributes` file.
+To run `linear` in CI without exposing its API key to every workflow in the repository, install
+the hand-installable recipe in
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md). You add two
+workflows you own, plus a GitHub environment whose deployment allow list is exactly `main` and
+which holds one dedicated secret. That secret is mapped onto `LINEAR_API_KEY` only on the final
+step of the trusted job. The environment is the boundary; the workflows are ordinary files in your
+repository.
 
-`doc-lattice ci audit` then checks repository-global workflow prohibitions and the managed
-installation offline, and `doc-lattice ci refresh` previews and applies managed artifact upgrades,
-renames, and repairs. Setup itself is a reviewed human-maintainer procedure: the generated
-artifacts are committed to your repository, and no step is automated on your behalf.
+The recipe replaces the **managed setup**, in which `init --github` generated four create-only
+artifacts, `ci audit` checked repository-global workflow prohibitions and the installation
+offline, and `ci refresh` previewed and applied byte-level upgrades and renames. All three are
+deprecated and removed in 5.0; they behave exactly as before through 4.x. The same document
+carries the conversion procedure, which changes no remote state.
 
-See [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for
-requirements, migration, the installation procedure, and the security model.
+See [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for the
+recipe, what it keeps and drops relative to the managed setup, requirements, migration, and the
+security model.
 
 ## Upgrading
 
@@ -539,7 +545,8 @@ are moving to, and an old binary regenerates the old artifacts. Substitute the t
 that changes generated output carries a `### Migration` subsection with the steps specific to it.
 
 Which paths apply depends on how you installed, because ownership differs. The pre-commit snippet
-is yours in both setups. The ordinary workflow is yours. The four managed artifacts are not.
+is yours in all three setups. The ordinary workflow is yours. A recipe installation's Linear
+workflow is yours too. The four managed artifacts are not.
 
 ### The pre-commit snippet (every install)
 
@@ -568,7 +575,22 @@ The same `init` run also prints the GitHub Actions workflow. Diff it against you
 `.github/workflows/doc-lattice.yml`, replace the file with the printed version, and commit it
 together with the refreshed pre-commit block.
 
+### Recipe installs
+
+Take the pre-commit block and the ordinary workflow from the plain `init` run above, then replace
+your Linear workflow whole from the target release's
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) step 2. Do not
+bump only its `doc-lattice==` pin: its structure and action pins can change between releases
+independently of the version it installs, which is the same reason the ordinary workflow is
+replaced whole.
+
 ### Managed installs
+
+Deprecated. `init --github`, `ci audit`, and `ci refresh` are removed in 5.0, and the managed
+offline workflow runs `ci audit`, so a managed installation cannot simply be pinned forward to
+5.0. Convert it to the recipe while 4.x is still supported;
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) carries that
+procedure, and it changes no remote state. Until you convert, the upgrade path is unchanged:
 
 Take the pre-commit block from the plain `init` run above and ignore the ordinary workflow it
 prints alongside it, which is not the managed workflow and does not belong in a managed
@@ -605,7 +627,7 @@ wait 1 second and then 2 seconds. A non-negative integer `Retry-After` is honore
 30-second cap; negative, date-form, and invalid values use the fallback delay.
 
 > **Security note:** If `linear` is used in CI, use the
-> [managed protected GitHub setup](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md).
+> [protected GitHub setup](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md).
 > The command processes
 > repository-controlled `tickets` and `linear_team` while `LINEAR_API_KEY` is present. Untrusted
 > pull-request workflows should use only offline commands.
@@ -668,7 +690,7 @@ collision. Equal anchors in different files do not collide.
 | Document | Purpose |
 |----------|---------|
 | [ARCHITECTURE.md](https://github.com/Guardantix/doc-lattice/blob/main/ARCHITECTURE.md) | System design and the decision log |
-| [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) | Managed GitHub and Linear CI setup and its security model |
+| [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) | The protected Linear CI recipe, the deprecated managed setup, and their shared security model |
 | [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) | Reconcile selectors, transaction durability, and recovery |
 | [CLAUDE.md](https://github.com/Guardantix/doc-lattice/blob/main/CLAUDE.md) | Short contributor and agent guide |
 | [roadmap.md](https://github.com/Guardantix/doc-lattice/blob/main/roadmap.md) | Future direction |

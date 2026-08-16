@@ -130,7 +130,11 @@ def register_init(app: typer.Typer) -> None:
             bool,
             typer.Option(
                 "--github",
-                help="Create managed GitHub Actions and bootstrap artifacts.",
+                help=(
+                    "Deprecated, removed in 5.0: create managed GitHub Actions and bootstrap "
+                    "artifacts. MANAGED_CI.md carries the hand-installable recipe that "
+                    "replaces this mode."
+                ),
             ),
         ] = False,
         repository: Annotated[
