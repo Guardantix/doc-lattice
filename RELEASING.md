@@ -202,15 +202,23 @@ web UI, performed by a person with a role on the project:
 
 5. Announce it, per the section below.
 
-**A yank does not protect exact-pinned adopters.** An installer must ignore a yanked release
-whenever the constraint can be satisfied by a non-yanked version, and the exception is narrower
-than *no other match*: PEP 592 permits selecting the yanked version only for an explicit exact
-pin, `==X.Y.Z` without a wildcard or `===X.Y.Z`, and for a version already recorded in a lock
-file. A range gets no such exemption, so an adopter on `>=4.1,<4.2` is protected even when the
-yanked release is the only version that range currently matches. Everyone holding an exact pin or
-a lock entry keeps installing it, silently and indefinitely. A yank is a signal to resolvers, not
-a recall. If the defect is serious enough that those adopters must not keep running it, the yank
-is not sufficient on its own and the announcement has to reach them directly.
+**A yank does not protect exact-pinned adopters.** PEP 592 requires an installer to ignore a
+yanked release whenever the constraint can be satisfied by a non-yanked version. Past that point
+the standard stops requiring anything: when the constraint cannot be satisfied without the yanked
+release, PEP 592 only says an installer *may* refuse it, and the familiar exceptions, an explicit
+non-wildcard `==X.Y.Z` or `===X.Y.Z` pin and a version already recorded in a lock file, are two
+suggested approaches it leaves to each installer rather than a boundary it enforces.
+
+In practice the tooling this project targets does refuse. pip has rejected a yanked release whose
+range has no other match since 22.0, and uv rejects it today, so an adopter on `>=4.1,<4.2` is
+protected even when the yanked release is the only version that range currently matches. Treat
+that as installer behavior worth re-checking against the resolver an adopter actually runs, not
+as a guarantee the standard gives you: an adopter on pip older than 22.0 is not protected.
+
+Everyone holding an exact pin or a lock entry keeps installing it, silently and indefinitely. A
+yank is a signal to resolvers, not a recall. If the defect is serious enough that those adopters
+must not keep running it, the yank is not sufficient on its own and the announcement has to reach
+them directly.
 
 Never delete a published release or replace a published file. PyPI does not allow reuploading a
 filename, so a deletion strands the version permanently rather than fixing it.
