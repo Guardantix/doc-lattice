@@ -47,8 +47,14 @@ _ORIGIN_BRANCH_PREFIX = "refs/remotes/origin/"
 # second property is the load-bearing one: a GitHub ``branches:`` filter is a glob pattern
 # rather than a literal, so "*", "?", "[", "]", and "!" must never reach it. Consecutive dots
 # survive the component pattern, so ".." is excluded separately below; Git rejects it anywhere
-# in a ref name, and accepting it would render a filter no real branch can ever match.
+# in a ref name, and accepting it would render a filter no real branch can ever match. The bare
+# name "HEAD" is excluded for that same reason: Git reserves it, so no such branch can exist.
+# Only that exact spelling. A differential sweep of every name this allowlist accepts against
+# "git check-ref-format --branch" found "HEAD" to be the sole divergence, and "head", "Head",
+# "HEADx", and "release/HEAD" are all branch names Git will create, so rejecting more than the
+# reserved spelling would turn a usable branch into a false error.
 _MAX_DEFAULT_BRANCH_CHARACTERS = 255
+_RESERVED_BRANCH_NAME = "HEAD"
 _BRANCH_COMPONENT = r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"
 _DEFAULT_BRANCH_RE = re.compile(
     rf"{_BRANCH_COMPONENT}(?:/{_BRANCH_COMPONENT})*",
@@ -125,6 +131,7 @@ def validate_default_branch(value: str) -> str:
         or len(value) > _MAX_DEFAULT_BRANCH_CHARACTERS
         or _DEFAULT_BRANCH_RE.fullmatch(value) is None
         or ".." in value
+        or value == _RESERVED_BRANCH_NAME
         or any(component.endswith(".lock") for component in value.split("/"))
     ):
         raise ConfigError(_default_branch_error(value))
@@ -248,6 +255,8 @@ def _default_branch_error(value: str) -> str:
         f"default branch {value!r} must be an ASCII Git branch name built from letters, digits, "
         "'.', '_', and '-', in '/'-separated parts, for example main or release/2.x. Glob and "
         "pattern characters such as '*', '?', '[', ']', and '!' are rejected because a GitHub "
-        "branches filter is a glob pattern rather than a literal. Pass --default-branch with a "
-        "supported name to set the generated workflow's trigger."
+        "branches filter is a glob pattern rather than a literal. Names Git itself refuses are "
+        "rejected too, including '..' anywhere, a leading or trailing '.' on any part, a '.lock' "
+        "suffix, and the reserved name HEAD, because no branch can carry one. Pass "
+        "--default-branch with a supported name to set the generated workflow's trigger."
     )

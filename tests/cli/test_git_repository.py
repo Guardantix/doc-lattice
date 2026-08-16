@@ -33,13 +33,17 @@ def _plant_fake_git(directory: Path) -> tuple[Path, Path]:
     return planted, marker
 
 
-def _repository_with_origin_head(tmp_path: Path, branch: str, *, dangling: bool = False) -> Path:
-    """Build a repository whose origin/HEAD names ``branch``, optionally without the target."""
-    _git(tmp_path, "init", "--quiet")
+def _seeded_repository(path: Path) -> Path:
+    """Initialize a repository carrying one empty commit.
+
+    The initial branch is pinned to a name no test uses, so the local branch cannot collide with
+    one a test creates and the repository does not depend on Git's default-branch configuration.
+    """
+    _git(path, "init", "--quiet", "--initial-branch=seed-base")
     # -c rather than the ambient config: the seed commit must not depend on a global identity
     # that a CI runner does not have.
     _git(
-        tmp_path,
+        path,
         "-c",
         "user.name=doc-lattice tests",
         "-c",
@@ -50,6 +54,12 @@ def _repository_with_origin_head(tmp_path: Path, branch: str, *, dangling: bool 
         "-m",
         "seed",
     )
+    return path
+
+
+def _repository_with_origin_head(tmp_path: Path, branch: str, *, dangling: bool = False) -> Path:
+    """Build a repository whose origin/HEAD names ``branch``, optionally without the target."""
+    _seeded_repository(tmp_path)
     if not dangling:
         _git(tmp_path, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
     _git(tmp_path, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}")
@@ -322,7 +332,25 @@ def test_probe_default_branch_returns_none_on_unusable_output(
 
 @pytest.mark.parametrize(
     "branch",
-    ["main", "master", "trunk", "develop", "release/2.x", "a", "v1.0.0", "a_b-c.d", "x" * 255],
+    [
+        "main",
+        "master",
+        "trunk",
+        "develop",
+        "release/2.x",
+        "a",
+        "v1.0.0",
+        "a_b-c.d",
+        "x" * 255,
+        # Only the exact reserved spelling is refused. Git creates every one of these, so
+        # rejecting them would turn a usable branch into a false error.
+        "head",
+        "Head",
+        "HEADx",
+        "xHEAD",
+        "release/HEAD",
+        "HEAD/x",
+    ],
 )
 def test_validate_default_branch_accepts_supported_names(branch: str):
     assert validate_default_branch(branch) == branch
@@ -362,6 +390,7 @@ def test_validate_default_branch_accepts_supported_names(branch: str):
         "release/2..x",
         "main.lock",
         "a/b.lock",
+        "HEAD",
         "main@{1}",
         "@",
         "-main",
@@ -372,6 +401,27 @@ def test_validate_default_branch_accepts_supported_names(branch: str):
     ],
 )
 def test_validate_default_branch_rejects_unsupported_names(branch: str):
+    with pytest.raises(ConfigError, match="must be an ASCII Git branch name"):
+        validate_default_branch(branch)
+
+
+@pytest.mark.parametrize("branch", ["main", "release/2.x", "head", "release/HEAD", "a_b-c.d"])
+def test_accepted_names_are_branch_names_git_will_create(tmp_path: Path, branch: str):
+    # Pins the policy to Git's own rules rather than to a reading of them, in both directions.
+    # Over-rejection turns a usable branch into a false error just as surely as under-rejection
+    # renders a filter that can never match.
+    _seeded_repository(tmp_path)
+    _git(tmp_path, "branch", branch)
+
+    assert validate_default_branch(branch) == branch
+
+
+@pytest.mark.parametrize("branch", ["HEAD", "a..b", "main.lock", "ma~in"])
+def test_structurally_rejected_names_are_ones_git_refuses(tmp_path: Path, branch: str):
+    _seeded_repository(tmp_path)
+    with pytest.raises(subprocess.CalledProcessError):
+        _git(tmp_path, "branch", branch)
+
     with pytest.raises(ConfigError, match="must be an ASCII Git branch name"):
         validate_default_branch(branch)
 

@@ -532,8 +532,10 @@ detected but is not a supported literal name is a different case and is rejected
 names are limited to ASCII letters, digits, `.`, `_`, and `-` in `/`-separated parts, because a
 GitHub `branches:` filter is a glob pattern rather than a literal and `*`, `?`, `[`, `]`, and `!`
 would be matched as patterns. Git's own structural exclusions are rejected too, including `..`
-anywhere in the name, a leading or trailing `.` on any part, and a `.lock` suffix: no branch can
-carry such a name, so a filter built from one would never match.
+anywhere in the name, a leading or trailing `.` on any part, a `.lock` suffix, and the reserved
+name `HEAD`: no branch can carry such a name, so a filter built from one would never match. Only
+that exact spelling of `HEAD` is reserved, so `head`, `release/HEAD`, and similar names are
+ordinary branch names and are accepted.
 
 `--default-branch` applies only to this printed workflow and is rejected outright when combined
 with `--github`. The managed artifacts are pinned to the exact `main` branch as a security
