@@ -11,7 +11,7 @@ Three named commands cover it.
 `/linear-finalize` has no modes and is the one skill that auto-invokes, on an open `ABC-N` PR.
 For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
 
-This orientation matches colinear 0.47.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
+This orientation matches colinear 0.51.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
 ## The pipeline
