@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- A security policy in `SECURITY.md`, linked from README's documentation table, covering
+  supported versions (the latest release only), the private reporting path, what a report should
+  carry, response targets, the coordinated-disclosure expectation, and what is in and out of
+  scope. GitHub private vulnerability reporting is enabled on the repository, which is the
+  channel itself; the file describes it but does not create it.
+- A bad-release playbook and an accounts-and-access record in `RELEASING.md`. The playbook is
+  stage-aware, because the pipeline crosses two one-way doors: it separates a mechanical failure
+  that should be rerun from a bad payload that must not be, covers the window where the
+  immutable tag and GitHub Release exist but PyPI publication has not been approved, and gives
+  the operator procedure for a PyPI yank along with the caveat that a yank does not stop an
+  adopter pinned with `==` or `===`, and the narrow escalation path for an artifact that has to
+  stop being downloadable at all. A security response is ordered fix first, then yank, then
+  advisory, because a yank reason is public as soon as it is saved. The access record covers
+  the Trusted Publisher binding and
+  what a rename or transfer breaks, the `CLAUDE_CODE_OAUTH_TOKEN` rotation procedure and its
+  triggers, and PyPI operator continuity. A new "Who can release" section separates landing a
+  version bump, approving the `pypi` environment, and operating the PyPI project, which are
+  three authorities that do not gate each other.
 - Internal: a Hypothesis round-trip fuzz gate for the reconcile frontmatter rewriter,
   `tests/test_reconcile_fuzz.py`. The subset AD-31 declares had only hand-written cases as standing
   evidence, so rewriter edge cases were found by review iteration on a change rather than by CI.
