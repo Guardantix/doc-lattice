@@ -14,6 +14,7 @@ for the shape it generated, never against a universal one-line diff, and syntax 
 is never required to be refused.
 """
 
+import warnings
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -26,7 +27,7 @@ from doc_lattice.error_types import ConfigError, ProjectError, UnreadableDocErro
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
 from doc_lattice.hashing import normalize_newlines
 from doc_lattice.reconcile import apply_reconcile, plan_rewrites
-from doc_lattice.yaml_boundary import SafeYamlLoader
+from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DOC = Path("doc.md")
 BOM = chr(0xFEFF)
@@ -36,6 +37,34 @@ BOM = chr(0xFEFF)
 # derandomize keeps CI reproducible without a fixed seed, and the deadline is off because one
 # example parses YAML several times.
 FUZZ_SETTINGS = settings(max_examples=300, derandomize=True, deadline=None)
+
+
+def _strict_load_accepts_reused_anchors() -> bool:
+    """Report whether the strict load accepts a document defining one anchor name twice.
+
+    The two reads AD-31 layer 2 splits its columns by do not run on the same parser. The
+    reread inside ``apply_reconcile`` pins the pure Python one, which AD-26 makes part of the
+    compatibility surface, and it warns about a reused anchor name and rebinds it. The strict
+    load goes through ``SafeYamlLoader``, which is deliberately not pinned and switches to the
+    optional ``ruamel.yaml.clib`` accelerator whenever anything installs it; that composer
+    rejects a duplicate anchor definition outright. So a reused-anchor document sits in the
+    strict column only where the accelerator is absent, and is reread-only where it is not.
+    An alias reading a name defined once is accepted by both and needs no probe.
+
+    Returns:
+        True when a duplicate anchor definition loads through the strict boundary.
+    """
+    with warnings.catch_warnings():
+        # The pure parser warns on the duplicate it accepts, which is the answer, not a fault.
+        warnings.simplefilter("ignore")
+        try:
+            SafeYamlLoader().load("first: &name 1\nsecond: &name 2\n")
+        except YAML_LOAD_ERRORS:
+            return False
+    return True
+
+
+REUSED_ANCHORS_ARE_STRICT = _strict_load_accepts_reused_anchors()
 
 
 # --------------------------------------------------------------------------------------------
@@ -770,10 +799,15 @@ def _ordered_map_block(draw, entries: tuple[Entry, ...]) -> Document:
 
 @st.composite
 def alias_and_merge_documents(draw) -> Document:
-    """Draw the alias-, anchor- and merge-heavy shapes layer 2 keeps in its strict column."""
+    """Draw the alias-, anchor- and merge-heavy shapes layer 2 keeps in its strict column.
+
+    The reused-anchor shape is the one entry here whose column depends on which parser the
+    strict boundary is running, so it joins the pool only where the probe says it is strictly
+    loadable. Everywhere else it is generated through the family 2c safe-outcome union
+    instead, which is where a reread-only shape belongs, rather than being dropped.
+    """
     builders = {
         "aliased-entry": _aliased_entry_document,
-        "reused-anchor": _reused_anchor_document,
         "relocating-anchor": _relocating_anchor_document,
         "merge": _merge_document,
         "tagged-merge": _merge_document,
@@ -782,6 +816,8 @@ def alias_and_merge_documents(draw) -> Document:
         "alias-spelled-entry-key": _alias_spelled_key_document,
         "alias-spelled-root-key": _alias_spelled_key_document,
     }
+    if REUSED_ANCHORS_ARE_STRICT:
+        builders["reused-anchor"] = _reused_anchor_document
     shape = draw(st.sampled_from(tuple(builders)))
     return builders[shape](draw, shape)
 
@@ -1035,6 +1071,40 @@ def test_every_whole_entry_spelling_round_trips() -> None:
         _assert_supported_round_trip(_single_entry_document(entry), {entry.ref: "new0000beef"})
 
 
+def _anchor_definitions(lines: tuple[str, ...]) -> list[str]:
+    """Return every anchor name a frontmatter block defines, in source order."""
+    names: list[str] = []
+    for line in lines:
+        for piece in line.split("&")[1:]:
+            name = piece.split(" ")[0].split(",")[0].split("}")[0].split("]")[0]
+            if name:
+                names.append(name)
+    return names
+
+
+def test_the_spelling_tables_never_define_one_anchor_name_twice() -> None:
+    """Guard the tables against growing a duplicate anchor definition by accident.
+
+    A reused anchor name is the one construct whose AD-31 column depends on which parser the
+    strict boundary runs, so a table entry that introduced one would pass wherever the pure
+    parser is in use and fail wherever the optional accelerator is installed. Two entries are
+    built so the per-entry naming scheme is checked as well as each spelling on its own.
+    """
+    for ref_form in REF_FORMS:
+        for seen_form in SEEN_FORMS:
+            pair = tuple(
+                line
+                for index in (0, 1)
+                for line in _combined_entry(index, ref_form, seen_form).lines
+            )
+            names = _anchor_definitions(pair)
+            assert len(names) == len(set(names)), f"{ref_form.name}+{seen_form.name}: {names}"
+    for form in WHOLE_FORMS:
+        pair = tuple(line for index in (0, 1) for line in _whole_entry(index, form).lines)
+        names = _anchor_definitions(pair)
+        assert len(names) == len(set(names)), f"{form.name}: {names}"
+
+
 def _single_entry_document(entry: Entry, root_lines: tuple[str, ...] = ("id: doc",)) -> Document:
     """Wrap one entry in the plainest supported block-mapping root and LF envelope."""
     lines = [*root_lines, "derives_from:", *_indent(entry.lines, 2)]
@@ -1234,8 +1304,15 @@ def test_a_document_with_no_opening_fence_produces_no_rewrite(text: str) -> None
 
 
 def _recovery_documents() -> tuple[Document, ...]:
-    """Build the reread-only shapes strict validation rejects, each with its own model."""
+    """Build the reread-only shapes strict validation rejects, each with its own model.
+
+    A reused anchor name joins this pool exactly where the strict boundary refuses it, which
+    is where the optional accelerator is installed. That keeps the shape generated on every
+    leg: family 1 owns it under the pure parser, this union owns it under the C one.
+    """
+    conditional = () if REUSED_ANCHORS_ARE_STRICT else (_reused_anchor_document(None, ""),)
     return (
+        *conditional,
         _recovery_extra_root_key(),
         _recovery_extra_entry_key(),
         _recovery_non_string_seen("!!int 5", 5),
@@ -1416,24 +1493,18 @@ def _assert_not_strictly_tracked(text: str) -> None:
     assert disposition != "tracked", "a recovery shape must not pass strict validation"
 
 
-@FUZZ_SETTINGS
-@given(data=st.data())
-def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
-    """A reread-only shape may no-op, refuse cleanly, or rewrite correctly, and nothing else.
+def _assert_safe_recovery(document: Document, updates: dict[str, str]) -> None:
+    """Assert a reread-only shape lands on one of the three outcomes the union admits.
 
-    Requiring success here would promote non-contractual recovery into a commitment, so the
-    property only rejects a crash, a wrong value, and an edit outside the layer 4 footprint.
+    Requiring success would promote non-contractual recovery into a commitment, so this only
+    rejects a crash, a wrong value, and an edit outside the layer 4 footprint.
     """
-    document = data.draw(st.sampled_from(_recovery_documents()))
-    updates = {document.entries[0].ref: "new0000beef"}
     text = document.render()
-    _assert_not_strictly_tracked(text)
-
     try:
         rewrites = _rewrite_bytes(text, updates)
     except UnreadableDocError:
         # A clean project-level refusal is one of the three outcomes the union admits; any
-        # other exception type escapes here and fails the property as the crash it is.
+        # other exception type escapes here and fails the caller as the crash it is.
         return
 
     if not rewrites:
@@ -1446,6 +1517,16 @@ def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
     _assert_footprint_confined(
         _meta_lines(text), _meta_lines(after), document.allowed_lines(updates)
     )
+
+
+@FUZZ_SETTINGS
+@given(data=st.data())
+def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
+    """A reread-only shape may no-op, refuse cleanly, or rewrite correctly, and nothing else."""
+    document = data.draw(st.sampled_from(_recovery_documents()))
+    updates = {document.entries[0].ref: "new0000beef"}
+    _assert_not_strictly_tracked(document.render())
+    _assert_safe_recovery(document, updates)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1569,11 +1650,23 @@ def test_a_document_that_mixes_line_endings_is_normalized_to_lf() -> None:
 
 
 def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
+    """A later definition rebinds the name, so relocating the first value must pass the alias by.
+
+    Which AD-31 column this document sits in depends on the parser the strict boundary runs:
+    the optional ``ruamel.yaml.clib`` composer rejects a duplicate anchor definition, while
+    the pure one warns and rebinds. The rewrite path pins the pure parser either way, so the
+    rebinding behavior itself is asserted on every leg and only the column changes.
+    """
     document = _reused_anchor_document(None, "reused-anchor")
+    updates = {document.entries[0].ref: "new0000beef"}
 
-    _assert_supported_round_trip(document, {document.entries[0].ref: "new0000beef"})
+    if REUSED_ANCHORS_ARE_STRICT:
+        _assert_supported_round_trip(document, updates)
+    else:
+        _assert_not_strictly_tracked(document.render())
+        _assert_safe_recovery(document, updates)
 
-    after = _rewrite_bytes(document.render(), {"up-0#s0": "new0000beef"})[0].after.decode("utf-8")
+    after = _rewrite_bytes(document.render(), updates)[0].after.decode("utf-8")
     # The relocation must not land on the alias site, which reads the second definition.
     assert "seen: &shared old0001" in after
     assert "seen: *shared" in after

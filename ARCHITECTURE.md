@@ -779,9 +779,13 @@ Four behaviors of the loaded shape are recorded with the matrix rather than insi
 A merge is deliberately not followed inside an ordered map, because the loader builds one from its
 items rather than through mapping construction. Alias detachment may expand an alias site into a
 local mapping, or into a local one-pair item for an ordered map, rather than editing the shared
-node behind it. An anchor name may be defined more than once, which the loader warns about: a
-later definition rebinds the name, so each alias reads the nearest definition above it and a
-relocated value lands only on the alias sites still bound to the anchor it displaces.
+node behind it. An anchor name may be defined more than once under the pure Python parser, which
+warns about it: a later definition rebinds the name, so each alias reads the nearest definition
+above it and a relocated value lands only on the alias sites still bound to the anchor it
+displaces. That acceptance is parser-conditional: with the optional `ruamel.yaml.clib` accelerator
+installed the strict tracked-document load refuses a reused name outright as a duplicate anchor,
+while the reread inside `apply_reconcile`, pure by AD-26, still handles it, so the spelling is
+reread-only there.
 
 **Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
