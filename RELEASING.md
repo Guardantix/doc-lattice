@@ -106,6 +106,7 @@ irreversible in the `publish` job. Find your stage first.
 | Stage | State | Action |
 |-------|-------|--------|
 | Before the version bump merges | Nothing exists | Fix the pull request. No release happened. |
+| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI, no announcement surface | Create the Release by hand to carry the withdrawal notice, then treat it as the row below. |
 | Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI | Withhold approval. Cancel the run. Cut the next version. |
 | Published, non-security regression | On PyPI, installable | Hotfix as the next version. Yank only if the release is broken enough to be worse than nothing. |
 | Published, broken or incompatible enough to mislead installers | On PyPI, installable | Yank, then release the fix. |
@@ -124,6 +125,21 @@ as a version nobody can install.
 3. Edit the GitHub Release to say the version was withdrawn before publication and name the
    version that supersedes it. The Release is the announcement channel adopters watch.
 4. Fix the defect and cut the next version. That version number is now burned; do not reuse it.
+
+`Create and push the tag` and `Publish release notes` are separate steps, so a run that dies
+between them leaves the tag with no Release and step 3 with nothing to edit. Do not rerun the
+workflow to produce one: rerunning replays a payload you already know is bad and walks it back
+up to the `pypi` approval. Create the Release directly instead, which is the same call the
+workflow would have made:
+
+```bash
+gh release create vX.Y.Z --title vX.Y.Z --verify-tag \
+  --notes 'Withdrawn before publication. Not on PyPI. Superseded by vX.Y.Z+1.'
+```
+
+This is safe to run by hand because the workflow triggers only on a push to `main` and on pull
+requests. Publishing a Release fires nothing, so nothing advances toward PyPI. Then continue at
+step 4.
 
 ### Yanking a published release
 
