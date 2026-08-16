@@ -20,7 +20,7 @@ is never required to be refused.
 import re
 import warnings
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import KW_ONLY, dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -237,11 +237,6 @@ class Entry:
         anchor: The anchor name written on the ``seen`` value, when it carries one.
         notes: Comment texts written inside the entry.
         extras: Members beyond ``ref`` and ``seen``, which only the fresh reread tolerates.
-        site: Text that occurs in this entry's source and nowhere else in the document, which
-            is what locates the entry in the rewritten block so a claim about its own source is
-            read inside it rather than anywhere in the frontmatter: where its comments came
-            back, and what the member an edit landed on still opens with. It is None for an
-            entry no such claim is made about.
         marker: The opening of the entry's source, up to the point an allowed edit may reach,
             carrying the punctuation that tells its collection style apart: a block entry
             keeps its sequence dash, a flow entry keeps the bracket it opens on. Layer 3 keeps
@@ -256,6 +251,11 @@ class Entry:
             missing ``seen`` pair and the ``:`` an explicit ``? seen`` lacks are written.
         pin: For a flow entry, what its source still has to look like once it is edited. None
             for a block entry, whose source the line footprint pins instead.
+        site: Text that occurs in this entry's source and nowhere else in the document, which
+            is what locates the entry in the rewritten block so a claim about its own source is
+            read inside it rather than anywhere in the frontmatter: where its comments came
+            back, and what the member an edit landed on still opens with. It is None for an
+            entry no such claim is made about.
         written_lines: How many lines this entry's ``seen`` member is written on once an edit
             has landed on it, which is what says how far a member the rewrite shrank is allowed
             to have pulled the rest of the block up. None means the model makes no line-count
@@ -286,6 +286,12 @@ class Entry:
     anchor: str | None
     notes: tuple[str, ...]
     extras: tuple[tuple[str, object], ...] = ()
+    # Everything above describes what the entry is and reads clearly in order. Everything below
+    # is footprint modelling, and it holds two adjacent `str | None` fields, `marker` and `site`,
+    # that feed different assertions and were listed in the wrong order in this docstring until
+    # now. Passing those by position is how a reader following the docstring silently swaps two
+    # live fields with no type error, so from here they are keyword-only.
+    _: KW_ONLY
     marker: str | None = None
     edits: tuple[int, ...] | None = None
     appends: bool = False
@@ -780,9 +786,9 @@ def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry
         fields["anchor"] if seen_form.anchored else None,
         tuple(notes),
         (),
-        _style_marker(lines[0]),
-        edits,
-        appends,
+        marker=_style_marker(lines[0]),
+        edits=edits,
+        appends=appends,
         site=fields["head"],
         written_lines=seen_form.written_lines,
     )
@@ -902,12 +908,12 @@ def _whole_entry(index: int, form: WholeForm) -> Entry:
         fields["anchor"] if form.anchored else None,
         (),
         (),
-        _style_marker(inline if inline is not None else lines[0]),
-        edits,
-        appends,
-        None if inline is None else _flow_pin(inline, form.writes),
-        fields["head"],
-        form.written_lines,
+        marker=_style_marker(inline if inline is not None else lines[0]),
+        edits=edits,
+        appends=appends,
+        pin=None if inline is None else _flow_pin(inline, form.writes),
+        site=fields["head"],
+        written_lines=form.written_lines,
     )
 
 
@@ -1679,8 +1685,8 @@ def _entry(
         anchor,
         (),
         (),
-        _style_marker(written[0]),
-        edits if len(written) > 1 else None,
+        marker=_style_marker(written[0]),
+        edits=edits if len(written) > 1 else None,
         pin=None if inline is None else _flow_pin(inline, "none"),
         site=fields["head"],
         written_lines=1 if len(written) > 1 else None,
@@ -1793,8 +1799,8 @@ def _relocating_anchor_pair(
         "shared",
         (),
         (),
-        _style_marker(anchored[0]),
-        (1,),
+        marker=_style_marker(anchored[0]),
+        edits=(1,),
         site="up-0#s0",
         written_lines=1,
         displaced=displaced if displaced is not None else f"&shared {written}",
@@ -1809,8 +1815,8 @@ def _relocating_anchor_pair(
         None,
         (),
         (),
-        _style_marker(aliased[0]),
-        (1,),
+        marker=_style_marker(aliased[0]),
+        edits=(1,),
         site="up-1#s1",
         written_lines=1,
     )
@@ -1865,10 +1871,10 @@ def _merge_document(draw, shape: str) -> Document:
         None,
         (),
         (),
-        _style_marker(inline),
-        None,
-        False,
-        _flow_pin(inline, "none"),
+        marker=_style_marker(inline),
+        edits=None,
+        appends=False,
+        pin=_flow_pin(inline, "none"),
     )
     assembled = Document(
         tuple(lines), (merged,), ((1, 2),), {"id": "doc"}, None, _flat_envelope(), ()
@@ -1926,9 +1932,9 @@ def _entry_merge_document(draw, shape: str) -> Document:
         None,
         (),
         (),
-        _style_marker(entry_lines[0]),
-        edits,
-        appends,
+        marker=_style_marker(entry_lines[0]),
+        edits=edits,
+        appends=appends,
         site=fields["head"],
         written_lines=1,
     )
@@ -1960,9 +1966,9 @@ def _inherited_seen_document(draw, shape: str) -> Document:
         None,
         (),
         (),
-        _style_marker("- &source"),
-        (2,),
-        False,
+        marker=_style_marker("- &source"),
+        edits=(2,),
+        appends=False,
         site="up-0#s0",
         written_lines=1,
     )
@@ -1976,9 +1982,9 @@ def _inherited_seen_document(draw, shape: str) -> Document:
         None,
         (),
         (),
-        _style_marker(f"- {key}: *source"),
-        (),
-        True,
+        marker=_style_marker(f"- {key}: *source"),
+        edits=(),
+        appends=True,
         site="up-1#s1",
         written_lines=1,
         inherits="up-0#s0",
@@ -2023,11 +2029,11 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             None,
             (),
             (),
-            _style_marker(entry_lines[0]),
+            marker=_style_marker(entry_lines[0]),
             # The alias spells the key, not the value, so the rewrite lands on the member the
             # same way it does for an ordinary explicit pair: the `ref` line above it is
             # untouched, and the whole entry is not the rewriter's to restyle.
-            tuple(range(1, len(entry_lines))),
+            edits=tuple(range(1, len(entry_lines))),
             site="up-0#s0",
             # The explicit spelling keeps the aliased key on a line of its own, so the member is
             # written on two lines afterwards the way any explicit pair is.
@@ -2053,10 +2059,10 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             None,
             (),
             (),
-            _style_marker(entry_lines[0]),
+            marker=_style_marker(entry_lines[0]),
             # Only the `seen` member is rewritten; the aliased `ref` key above it, in either
             # spelling, stays exactly as it was written.
-            (len(entry_lines) - 1,),
+            edits=(len(entry_lines) - 1,),
             site="up-0#s0",
             written_lines=1,
         )
@@ -2792,10 +2798,10 @@ def _recovery_relocated_multi_line_tagged_seen() -> Document:
         "shared",
         (),
         (),
-        _style_marker(anchored[0]),
+        marker=_style_marker(anchored[0]),
         # Both lines of the scalar, since the replacement consumes the whole member it stands
         # for, not just the line its header is written on.
-        (1, 2),
+        edits=(1, 2),
         site="up-0#s0",
         written_lines=1,
         displaced='&shared !!int "42\\n"',
@@ -2810,8 +2816,8 @@ def _recovery_relocated_multi_line_tagged_seen() -> Document:
         None,
         (),
         (),
-        _style_marker(aliased[0]),
-        (1,),
+        marker=_style_marker(aliased[0]),
+        edits=(1,),
         site="up-1#s1",
         written_lines=1,
     )
@@ -3233,8 +3239,8 @@ def _omap_item_alias_document() -> Document:
         None,
         (),
         (),
-        "- !!omap",
-        (2,),
+        marker="- !!omap",
+        edits=(2,),
         site="up-0#s0",
         written_lines=1,
     )
@@ -3248,8 +3254,8 @@ def _omap_item_alias_document() -> Document:
         None,
         (),
         (),
-        "- !!omap",
-        (2,),
+        marker="- !!omap",
+        edits=(2,),
         site="up-1#s1",
         written_lines=1,
     )
