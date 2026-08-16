@@ -243,17 +243,31 @@ them directly.
 Never delete a published release or replace a published file. PyPI does not allow reuploading a
 filename, so a deletion strands the version permanently rather than fixing it.
 
+The one exception is an artifact that must stop being downloadable at all, such as a
+distribution carrying malware or a live credential. A yank does not achieve that, since exact
+pins and lock entries still resolve it. Escalate rather than acting alone: mail
+<security@pypi.org>, and use **Report project as malware** at the bottom of the project page
+sidebar when that is what it is. Do not describe the problem in a public issue or discussion on
+the way. Deletion burns the filename permanently, so it is a last resort for an artifact that is
+dangerous rather than merely wrong, never a tool for an ordinary regression.
+
 ### Security vulnerabilities
 
-A vulnerability follows the yank decision above, plus an advisory, in this order: draft the
-advisory privately from the repository's **Security** tab, release the fix, then publish the
-advisory with affected and fixed version ranges, so Dependabot and the GitHub Advisory Database
-can alert adopters who never read a release note. The order is the point. Publishing before a
-fixed version exists tells attackers where to look while leaving adopters nothing to upgrade to,
-and the advisory cannot name a fixed range that does not exist yet. Hold the draft until the fix
-ships unless the vulnerability is already public, in which case publishing what adopters can do
-to protect themselves beats silence. [SECURITY.md](SECURITY.md) owns how a vulnerability is
-reported and what disclosure timeline reporters are asked to follow.
+A vulnerability runs in this order: draft the advisory privately from the repository's
+**Security** tab, release the fix, yank the affected version if there is no safe way to use it,
+then publish the advisory with affected and fixed version ranges, so Dependabot and the GitHub
+Advisory Database can alert adopters who never read a release note.
+
+The order is the point. Publishing before a fixed version exists tells attackers where to look
+while leaving adopters nothing to upgrade to, and the advisory cannot name a fixed range that
+does not exist yet. Hold the draft until the fix ships unless the vulnerability is already
+public, in which case publishing what adopters can do to protect themselves beats silence.
+
+The yank sits inside that sequence rather than ahead of it, because a yank is itself a
+disclosure: PyPI serves the reason through the index API the moment you save it. If you have to
+yank before the advisory publishes, write a reason that names the fixed version and says nothing
+about the defect. [SECURITY.md](SECURITY.md) owns how a vulnerability is reported and what
+disclosure timeline reporters are asked to follow.
 
 ### Where adopters watch for announcements
 
