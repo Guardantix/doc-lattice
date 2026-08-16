@@ -348,14 +348,18 @@ class Document:
             run: list[str] = []
             for position, index in enumerate(indices):
                 entry = self.entries[index]
-                if entry.inline is None or entry.ref in applied:
-                    if run:
-                        segments.append("".join(run))
-                        run = []
-                    continue
-                if position:
+                survives = entry.inline is not None and entry.ref not in applied
+                # The separator opening this position belongs to whichever of the two entries
+                # it sits between survives, so it joins the run both when the run continues
+                # into an untouched entry and when it closes on an edited one.
+                if position and (survives or run):
                     run.append(FLOW_SEPARATOR)
-                run.append(entry.inline)
+                if survives:
+                    run.append(entry.inline or "")
+                    continue
+                if run:
+                    segments.append("".join(run))
+                    run = []
             if run:
                 segments.append("".join(run))
         return segments
