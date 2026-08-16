@@ -83,16 +83,18 @@ Run this human-maintainer sequence from reviewed, trusted project state:
 2. Establish the reconcile baseline, on an initial adoption only.
 
    Annotate your documents, then run this once in the same reviewed change, before the generated
-   workflows reach `main` and the gates begin running:
+   workflows reach `main` and the gates begin running. Commit the annotated input state first and
+   run from an otherwise clean working tree, so the reconcile-only diff stays reviewable and
+   revertible:
 
    ```bash
    uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
    ```
 
    An installation migrated per `## Migrating an existing installation` above skips this step.
-   When this step applies and what it does not promise are owned by
-   [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the selector semantics are
-   owned by [RECONCILE.md](RECONCILE.md).
+   When this step applies, what the clean-tree precondition buys you, and what the step does not
+   promise are owned by [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the
+   selector semantics are owned by [RECONCILE.md](RECONCILE.md).
 
 3. Inspect the remote repository, plan eligibility, environment, and visible secret names.
 
