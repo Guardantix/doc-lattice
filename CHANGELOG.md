@@ -18,7 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that should be rerun from a bad payload that must not be, covers the window where the
   immutable tag and GitHub Release exist but PyPI publication has not been approved, and gives
   the operator procedure for a PyPI yank along with the caveat that a yank does not stop an
-  adopter pinned with `==` or `===`. The access record covers the Trusted Publisher binding and
+  adopter pinned with `==` or `===`, and the narrow escalation path for an artifact that has to
+  stop being downloadable at all. A security response is ordered fix first, then yank, then
+  advisory, because a yank reason is public as soon as it is saved. The access record covers
+  the Trusted Publisher binding and
   what a rename or transfer breaks, the `CLAUDE_CODE_OAUTH_TOKEN` rotation procedure and its
   triggers, and PyPI operator continuity. A new "Who can release" section separates landing a
   version bump, approving the `pypi` environment, and operating the PyPI project, which are

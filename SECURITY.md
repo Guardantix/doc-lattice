@@ -44,26 +44,29 @@ A report is actionable when it carries enough to reproduce the behavior:
 * An initial assessment, including whether it is accepted as a vulnerability, within 14 days.
 * Progress updates on the advisory thread as the fix develops.
 
-doc-lattice is maintained by one person, so these are targets rather than a contractual SLA. If
-7 days pass with no acknowledgement, assume the report reached nobody rather than following up in
-the same unread thread. Use the fallback above: open a public issue saying only that you have an
-unacknowledged security report and asking for a private channel, with no technical detail.
+doc-lattice is maintained by one person today, so these are targets rather than a contractual
+SLA. If 7 days pass with no acknowledgement, assume the report reached nobody rather than
+following up in the same unread thread. Use the fallback above: open a public issue saying only
+that you have an unacknowledged security report and asking for a private channel, with no
+technical detail.
 
 ### Coordinated disclosure
 
 Please give us a chance to ship a fix before disclosing publicly. We ask that you hold public
 details until the advisory is published or 90 days have passed, whichever comes first. We will
-publish a GitHub Security Advisory with affected and fixed version ranges when the fix releases,
-and credit you by the name or handle you prefer unless you ask us not to.
+publish a GitHub Security Advisory with affected and fixed version ranges once the fix has
+released, and credit you by the name or handle you prefer unless you ask us not to.
 
 ## Scope
 
 doc-lattice is a local command-line tool. It reads a YAML configuration file and Markdown
-documents from a project directory, and `reconcile` writes back into that directory. It runs no
-user-supplied code. Its only network use is the `linear` command's ticket lookup, which talks to
-`https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. So the
-security-relevant surface is what the engine does with the paths and file contents it was
-pointed at, plus that one credentialed call.
+documents from a project directory, and `reconcile` writes back into that directory. It executes
+no code from the project directory; the only program it runs is `git`, with fixed arguments. Its
+only network use is the `linear` command's ticket lookup, which talks to
+`https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. It also renders GitHub
+Actions workflows through `ci refresh`, which is the one output of the tool that handles a
+secret. So the security-relevant surface is what the engine does with the paths and file
+contents it was pointed at, plus that one credentialed call and what it renders.
 
 In scope, as examples rather than an exhaustive list:
 
@@ -79,6 +82,10 @@ In scope, as examples rather than an exhaustive list:
 * Anything that sends `LINEAR_API_KEY` somewhere other than the Linear GraphQL endpoint, or that
   leaks it into output, an error message, or a log. The client pins that URL over HTTPS and
   refuses every redirect specifically to prevent this, so a way around either is a vulnerability.
+* A workflow rendered by `ci refresh` that mishandles the Linear API key, for example by
+  widening where the secret is readable or exposing it in a log.
+  [MANAGED_CI.md](MANAGED_CI.md) owns that security model and is the place to read what the
+  generated artifacts are meant to guarantee.
 
 Out of scope:
 
@@ -94,10 +101,3 @@ Out of scope:
 * Vulnerabilities in a dependency, with no doc-lattice-specific exploit path. Report those
   upstream. If doc-lattice's use of the dependency is what makes it exploitable, that is in
   scope and worth reporting here.
-
-## Receiving reports
-
-Private reports and Dependabot alerts notify repository administrators who watch the repository
-for security alerts. At least one administrator must have security alert notifications enabled,
-or reports arrive with nobody reading them. RELEASING.md's "Accounts and access" section records
-where administrator access and the other release controls are configured, and how to check them.
