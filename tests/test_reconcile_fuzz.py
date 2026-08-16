@@ -1438,7 +1438,14 @@ def _merge_document(draw, shape: str) -> Document:
 
 
 def _entry_merge_document(draw, shape: str) -> Document:
-    """An entry whose ``ref`` arrives through a merge key, in either merge spelling."""
+    """An entry whose ``ref`` arrives through a merge key, in either merge spelling.
+
+    The merge line is the entry's own source and no part of what an update rewrites: the value
+    it names lives in the mapping the merge pulls in, and the ``seen`` this update lands on is
+    either a member of the entry itself or one written on a line of its own just past it. The
+    footprint is modelled that way rather than left to the whole-span allowance, which would
+    let a rewrite restyle the merge key beside the edit with nothing here to see it.
+    """
     key = "<<" if shape == "entry-merge" else "!!merge inherited"
     spelled = draw(st.booleans())
     entry_lines = [f"- {key}: {{ref: up-0#s0}}"]
@@ -1455,6 +1462,9 @@ def _entry_merge_document(draw, shape: str) -> Document:
         (),
         (),
         _style_marker(entry_lines[0]),
+        (1,) if spelled else (),
+        not spelled,
+        site="up-0#s0",
     )
     lines = ("id: doc", "derives_from:", *_indent(entry.lines, 2))
     order = ("id", "derives_from")
