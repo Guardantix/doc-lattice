@@ -236,14 +236,16 @@ cleanly and never triggered, and this is the release that fixes it.
 
 ### Security
 
-- Every `git` invocation now resolves to an absolute path outside the directory being operated on,
-  and a candidate found inside the invocation directory or the process's own working directory is
-  refused rather than run. Earlier versions ran a bare `git`, which on Windows searches the
-  invoking process's current directory ahead of `PATH`, so a repository carrying its own `git.exe`
-  could have been executed by the `ci` commands and `init --github`. `init` gained the default
-  branch probe in this release, which would have widened that to the ordinary command run in
-  freshly cloned repositories, so it is fixed before it ships. On POSIX the same applies to a
-  relative `PATH` entry. When no trusted `git` is found, the managed commands report it as a
+- Every `git` invocation now resolves to an absolute path outside the directory being operated on.
+  A `PATH` lookup returning a relative result is refused, which covers every relative entry from
+  `.` to any ancestor, and an absolute result resolving inside the invocation directory or the
+  process's own working directory is refused too. Earlier versions ran a bare `git`, which on
+  Windows searches the invoking process's current directory ahead of `PATH`, so a repository
+  carrying its own `git.exe` could have been executed by the `ci` commands and `init --github`.
+  `init` gained the default branch probe in this release, which would have widened that to the
+  ordinary command run in freshly cloned repositories, so it is fixed before it ships. On POSIX
+  the same applies to a relative `PATH` entry. When no trusted `git` is found, the managed
+  commands report it as a
   missing executable and the `init` probe falls back to `main`, unchanged from any other
   discovery failure. SECURITY.md's scope states the promise this keeps.
 

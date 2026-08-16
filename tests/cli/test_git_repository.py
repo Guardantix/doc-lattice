@@ -108,6 +108,23 @@ def test_resolve_git_repository_root_refuses_a_git_planted_in_the_worktree(
     assert not marker.exists()
 
 
+def test_resolve_git_repository_root_refuses_a_git_reached_through_a_relative_path_entry(
+    tmp_path: Path,
+    monkeypatch,
+):
+    checkout = tmp_path / "checkout"
+    nested = checkout / "nested"
+    nested.mkdir(parents=True)
+    _, marker = _plant_fake_git(checkout)
+    monkeypatch.chdir(nested)
+    monkeypatch.setenv("PATH", "..")
+
+    with pytest.raises(ConfigError, match="git executable not found"):
+        resolve_git_repository_root(nested)
+
+    assert not marker.exists()
+
+
 def test_resolve_git_repository_root_runs_git_from_an_absolute_path(tmp_path: Path, monkeypatch):
     recorded: list[list[str]] = []
 
@@ -213,6 +230,25 @@ def test_probe_default_branch_refuses_a_git_planted_in_the_process_directory(
     monkeypatch.setattr(git_repository, "which", lambda _name: str(planted))
 
     assert probe_default_branch(target) is None
+    assert not marker.exists()
+
+
+def test_probe_default_branch_refuses_a_git_reached_through_a_relative_path_entry(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # A relative PATH entry such as ".." makes which() return a relative result, which resolves
+    # against the process directory and reaches a plant in a parent of the invocation directory
+    # that no containment check on that directory can see. Uses the real PATH and the real
+    # shutil.which rather than a stub, since the relative return value is the behavior under test.
+    checkout = tmp_path / "checkout"
+    nested = checkout / "nested"
+    nested.mkdir(parents=True)
+    _, marker = _plant_fake_git(checkout)
+    monkeypatch.chdir(nested)
+    monkeypatch.setenv("PATH", "..")
+
+    assert probe_default_branch(nested) is None
     assert not marker.exists()
 
 

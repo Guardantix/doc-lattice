@@ -26,8 +26,9 @@ from ..error_types import ConfigError
 _GIT_TIMEOUT_SECONDS = 5
 _GIT_EXECUTABLE_NAME = "git"
 _MISSING_GIT_MESSAGE = (
-    "git executable not found outside the invocation directory; install Git on PATH, or remove "
-    "the current directory from PATH, before using managed GitHub CI commands"
+    "git executable not found on an absolute PATH entry outside the invocation directory; "
+    "install Git, or remove relative entries such as '.' and '..' from PATH, before using "
+    "managed GitHub CI commands"
 )
 
 # The ordinary workflow's branch filter when nothing better is known. Deliberately not shared
@@ -169,14 +170,23 @@ def probe_default_branch(cwd: Path) -> str | None:
 def _resolve_git_executable(cwd: Path) -> str | None:
     """Resolve ``git`` to an absolute path outside any directory the invocation can control.
 
-    Rejecting rather than falling back to a bare name is the point: an executable found inside
-    the directory being operated on is exactly the planted-binary case, and running it would be
-    worse than reporting no Git at all. Two directories are treated as untrusted. ``cwd`` is
-    where the child process is placed, which is what a relative ``PATH`` entry resolves against,
-    and the process's own working directory is what ``shutil.which`` prepends to the search on
-    Windows and what ``CreateProcess`` searches ahead of ``PATH``. The project root is not
-    checked because the managed contract has not resolved it yet at this point, and a plant
-    above ``cwd`` is not reachable through either of those two search paths anyway.
+    Rejecting rather than falling back to a bare name is the point: an executable found through
+    a directory the invocation can control is exactly the planted-binary case, and running it
+    would be worse than reporting no Git at all. Two independent conditions reject a candidate.
+
+    A relative result is refused outright. ``shutil.which`` joins the matched name onto the
+    ``PATH`` entry it came from, so a relative return value means, exactly, that the entry was
+    relative. That covers every reachable plant rather than one directory of them: ``.`` reaches
+    the process directory, ``..`` reaches its parent, and the Windows search that prepends the
+    process directory to ``PATH`` yields ``.`` as well. Trying instead to enumerate untrusted
+    directories cannot work here, since a relative entry can name any ancestor and the managed
+    contract has not resolved the project root at this point.
+
+    An absolute result is then refused when it resolves inside ``cwd`` or the process's own
+    working directory. This is the residual case where a ``PATH`` entry is absolute but points
+    into the tree being operated on, including one holding a symlink into it, which is why the
+    resolution is strict. An absolute ``PATH`` entry elsewhere in the project is a directory the
+    user has explicitly chosen to trust, and no repository can put itself on ``PATH``.
 
     Args:
         cwd: Invocation directory the resolved executable will be run in.
@@ -185,10 +195,9 @@ def _resolve_git_executable(cwd: Path) -> str | None:
         The absolute path to run Git as, or None when no trusted candidate exists.
     """
     found = which(_GIT_EXECUTABLE_NAME)
-    if found is None:
+    if found is None or not Path(found).is_absolute():
         return None
     try:
-        # strict resolution also defeats a trusted PATH entry holding a symlink into the project.
         executable = Path(found).resolve(strict=True)
         untrusted = [directory.resolve(strict=True) for directory in (cwd, Path.cwd())]
     except (OSError, RuntimeError, ValueError):

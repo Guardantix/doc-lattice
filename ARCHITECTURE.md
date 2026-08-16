@@ -256,17 +256,28 @@ receives the resolved name as a required keyword argument, and precedence and na
 in the `init` adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
 
-Both contracts resolve the Git executable to an absolute path before running it, and reject a
-candidate inside either the invocation directory or the process's own working directory. The
-earlier decision to run a bare `git` from the maintainer's `PATH` is withdrawn. It was defensible
-while only the managed commands shelled out, since those run inside a repository the maintainer
-already trusts, but ordinary `init` runs in freshly cloned ones, and Windows searches the
-invoking process's current directory ahead of `PATH`. A repository carrying its own `git.exe`
+Both contracts resolve the Git executable before running it, through two independent rejections.
+A `PATH` lookup that returns a relative result is refused outright, because the result is the
+matched name joined onto the entry it came from, so a relative result means the entry was
+relative; that covers `.`, `..`, any deeper ancestor, and the Windows search that prepends the
+process directory. An absolute result is then refused when it resolves inside the invocation
+directory or the process's own working directory, which catches an absolute entry pointing into
+the tree being operated on, including one holding a symlink into it.
+
+The earlier decision to run a bare `git` from the maintainer's `PATH` is withdrawn. It was
+defensible while only the managed commands shelled out, since those run inside a repository the
+maintainer already trusts, but ordinary `init` runs in freshly cloned ones, and Windows searches
+the invoking process's current directory ahead of `PATH`. A repository carrying its own `git.exe`
 would have been executed, which SECURITY.md's scope says cannot happen. Resolution failure keeps
 each contract's existing shape rather than introducing a third: no candidate for the probe, a
-`ConfigError` for the managed resolver. The project root is deliberately not part of the
-containment check, because the managed contract has not resolved it yet at that point and neither
-platform search path reaches above the invocation directory anyway.
+`ConfigError` for the managed resolver.
+
+Enumerating untrusted directories is deliberately not how the relative case is handled. A
+relative entry can name any ancestor, and the managed contract has not resolved the project root
+at the point the executable is chosen, so rejecting relative results is the only form of the
+check that is complete. What remains accepted is an absolute `PATH` entry somewhere in the
+project, which is a directory the user explicitly chose to trust and that no repository can put
+on `PATH` itself.
 
 `cli/errors.py` owns diagnostic rendering, exit constants, and command-level
 `ProjectError` context conversion. `cli/__init__.py` preserves
