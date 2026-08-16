@@ -719,9 +719,13 @@ def _install_managed_artifacts(root: Path) -> None:
 
 
 def _assert_no_deprecation_notice(result) -> None:
+    # The install pin is legitimate output, and some 4.x versions contain the removal release as
+    # a substring: `4.5.0` and `4.15.0` both carry `5.0`. Scanning the raw channel would fail
+    # those releases on their own version string, so drop the pin before looking for a notice.
     for channel in (result.stdout, result.stderr):
+        scanned = channel.replace(__version__, "")
         for marker in _DEPRECATION_MARKERS:
-            assert marker not in channel, (
+            assert marker not in scanned, (
                 f"the deprecation notice must not reach invocation output; found {marker!r}"
             )
 
