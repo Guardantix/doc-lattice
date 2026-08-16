@@ -308,7 +308,10 @@ another owner, renaming `ci.yml`, or renaming the `pypi` environment all break t
 the failure appears at upload time as a rejected OIDC claim rather than as a warning beforehand.
 There is no way to edit a binding: the fix is to delete the stale publisher on PyPI and add a
 new one with the new values, which requires a human account with a project role. Plan the
-re-registration as part of any such move, not as cleanup afterwards.
+re-registration as part of any such move, not as cleanup afterwards, and do not assume it is
+always self-service. Re-registering a publisher whose values were registered before can be
+rejected as already registered and need PyPI admin intervention to clear, which is a support
+round trip you do not want to discover mid-migration.
 
 Trusted Publishing does not cover anything but uploads. Yanking, managing project roles, and
 re-registering the publisher all need a human PyPI account with a role on the project. Record,
@@ -338,7 +341,7 @@ gh api repos/Guardantix/doc-lattice/environments/pypi --jq \
     rules: [.protection_rules[] | {type, prevent_self_review,
                                    reviewers: [.reviewers[]?.reviewer.login]}]}'
 gh api repos/Guardantix/doc-lattice/environments/pypi/deployment-branch-policies \
-  --jq '[.branch_policies[].name]'
+  --jq '[.branch_policies[] | {name, type}]'
 gh api repos/Guardantix/doc-lattice/branches/main/protection --jq \
   '{admins: .enforce_admins.enabled, strict: .required_status_checks.strict,
     checks: .required_status_checks.contexts,
@@ -347,20 +350,30 @@ gh api repos/Guardantix/doc-lattice/private-vulnerability-reporting --jq .enable
 ```
 
 The environment response reports only that custom branch policies are in use, which is why the
-allowed branches take their own query. Read every answer against what this document claims rather
-than against the absence of an error:
+allowed branches take their own query. That query keeps `type` because the name alone does not
+identify a branch policy: a *tag* policy named `main` prints the same name and authorizes
+nothing. The repository's own bootstrap verifier reads the same pair and accepts only
+`main` with type `branch`, so this check matches the one the tooling already enforces.
+
+Read every answer against what this document claims rather than against the absence of an error:
 
 | Answer | Expected today |
 |--------|----------------|
-| `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false |
-| `branch_policy` | `custom_branch_policies` true, and the policy list exactly `["main"]` |
+| `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false. A second `branch_policy` entry with no reviewers is normal and carries nothing |
+| `branch_policy` | `custom_branch_policies` true, `protected_branches` false, and the policy list exactly one entry, name `main` and type `branch` |
 | `can_admins_bypass` | `true`, the administrator bypass described under "Who can release" |
-| `checks` and `strict` | Every required CI context, `strict` true |
+| `checks` and `strict` | `strict` true, and `checks` exactly `Security scan`, `Tests (3.13)`, `Tests (3.14)`, `Code quality (3.13)`, `Code quality (3.14)` |
 | `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
 
-`can_admins_bypass` is the one row whose expected value is the weaker setting. It records what is
-true today, not what is desirable. If it ever reads `false` the protection has been tightened, and
-the authority description above is what needs correcting rather than the setting.
+The `checks` row names its contexts because "every required check is present" is not a testable
+claim: any non-empty list satisfies it, including one a dropped context has already shortened.
+Compare the names. Note that `yaml-compatibility` gates the `release` job but is not a required
+check, so it can fail without blocking a merge.
+
+`can_admins_bypass`, `reviews`, and `admins` are the rows whose expected values are the weaker
+settings. They record what is true today, not what is desirable. If any of them ever reads the
+stricter value the protection has been tightened, and the authority description above is what
+needs correcting rather than the setting.
 
 Private vulnerability reporting must report `true`. The button is a repository setting separate
 from [SECURITY.md](SECURITY.md); the file alone does not create the channel. Enabling it is also
