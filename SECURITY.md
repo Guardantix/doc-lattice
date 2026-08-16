@@ -61,7 +61,9 @@ released, and credit you by the name or handle you prefer unless you ask us not 
 
 doc-lattice is a local command-line tool. It reads a YAML configuration file and Markdown
 documents from a project directory, and `reconcile` writes back into that directory. It executes
-no code from the project directory; the only program it runs is `git`, with fixed arguments. Its
+no code from the project directory; the only program it runs is `git`, with fixed arguments and
+resolved to an absolute path outside the directory it was pointed at, so a `git` carried by the
+project itself is refused rather than run. Its
 only network use is the `linear` command's ticket lookup, which talks to
 `https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. It also renders GitHub
 Actions workflows through `ci refresh`, which is the one output of the tool that handles a

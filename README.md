@@ -241,7 +241,7 @@ Contributor commands, gates, and the full verification set live in
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the four managed GitHub artifacts at the Git top-level. | 2 on tool error or unsafe existing artifact |
+| `init [--docs-root ...] [--linear-team KEY] [--default-branch NAME] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the four managed GitHub artifacts at the Git top-level. | 2 on tool error or unsafe existing artifact |
 | `ci audit [--repository OWNER/REPO]` | Audit repository-global workflow prohibitions and the managed GitHub installation without loading the lattice or using the network. | 1 on findings, 2 on unreadable or ambiguous state |
 | `ci refresh --repository OWNER/REPO [--apply]` | Preview a managed artifact upgrade or rename, then optionally apply it after exact interactive confirmation. | 1 when a preview has updates, 2 on refusal, unsafe state, or tool error |
 
@@ -257,7 +257,8 @@ The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, an
 `init`, `ci audit`, and `ci refresh` deliberately do not accept config or load the lattice.
 GitHub-mode `init` and both `ci` commands require a Git working tree and resolve its top-level
 before inspecting or writing managed files, even when invoked from a subdirectory. Ordinary
-`init` retains its current-directory behavior and does not require Git.
+`init` retains its current-directory behavior and does not require Git: it reads local Git state
+only to guess the workflow's default branch, and falls back when that read finds nothing.
 Run `uv run doc-lattice <command> --help` for the full flag list.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
@@ -511,6 +512,36 @@ where the output says. `init` only prints `.gitignore` guidance and never modifi
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
 
+The printed workflow triggers on one branch, and `init` resolves which one by a fixed precedence:
+an explicit `--default-branch` wins; otherwise the local `origin/HEAD` remote-tracking ref is read;
+otherwise it falls back to `main`. The run always names the branch it used and where that came
+from on stderr, for example `workflow triggers on branch trunk (origin/HEAD)`, so a repository on
+`master`, `trunk`, or `develop` does not silently install a workflow that never runs.
+
+Treat the probe as a hint rather than an authority. `origin/HEAD` is cached local state: it is
+often absent in fresh or shallow clones, and after an upstream default-branch rename it can still
+name the old branch. `init` detects a target that no longer exists and falls back, but a stale
+target that is still present locally is indistinguishable from a current one without network
+access. Reading the reported source line is how you catch that, and `--default-branch` is how you
+fix it. Prefer passing it explicitly whenever you want a reproducible result, such as in an
+upgrade you intend to repeat. A missing remote, a missing `git`, or a directory outside a worktree
+all fall back quietly; ordinary `init` has no Git requirement. The probe runs `git` only from an
+absolute path outside the directory being scaffolded, so a checkout carrying its own `git` falls
+back rather than running it, as does a `git` reachable only through a relative `PATH` entry. A branch name that is supplied or
+detected but is not a supported literal name is a different case and is rejected with an error:
+names are limited to ASCII letters, digits, `.`, `_`, and `-` in `/`-separated parts, because a
+GitHub `branches:` filter is a glob pattern rather than a literal and `*`, `?`, `[`, `]`, and `!`
+would be matched as patterns. Git's own structural exclusions are rejected too, including `..`
+anywhere in the name, a leading or trailing `.` on any part, a `.lock` suffix, and the reserved
+name `HEAD`: no branch can carry such a name, so a filter built from one would never match. Only
+that exact spelling of `HEAD` is reserved, so `head`, `release/HEAD`, and similar names are
+ordinary branch names and are accepted.
+
+`--default-branch` applies only to this printed workflow and is rejected outright when combined
+with `--github`. The managed artifacts are pinned to the exact `main` branch as a security
+control, not as an unparameterized template; see
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md).
+
 To test an unreleased commit, replace the PyPI requirement with a Git source such as
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should
 keep the exact PyPI version pin.
@@ -567,6 +598,11 @@ exists, leaves it untouched, and prints.
 The same `init` run also prints the GitHub Actions workflow. Diff it against your checked-in
 `.github/workflows/doc-lattice.yml`, replace the file with the printed version, and commit it
 together with the refreshed pre-commit block.
+
+The printed workflow's trigger branch is resolved per run, so pass `--default-branch` with the
+branch you actually gate on to make the upgrade reproducible rather than dependent on the local
+`origin/HEAD` of whichever checkout you ran it in. Either way, check the reported branch on stderr
+against your workflow before committing the replacement.
 
 ### Managed installs
 

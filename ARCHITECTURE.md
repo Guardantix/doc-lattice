@@ -239,10 +239,45 @@ moving durable reconcile mutation into the CLI.
 registers Typer; `cli/runtime.py` creates a frozen runtime for each invocation with
 stdout, stderr, cwd, and config and lattice loaders; and `cli/output.py` centralizes
 format validation, indentation, exact output, and GitHub annotations. The package also
-holds `options.py` (shared Typer option types) and `git_repository.py` (Git top-level
-resolution for the `ci` and GitHub-mode `init` adapters). Each module under
-`cli/commands/` is a narrow command adapter. There are no
+holds `options.py` (shared Typer option types) and `git_repository.py` (local Git discovery
+for the `ci` adapters, GitHub-mode `init`, and ordinary `init`). Each module under
+`cli/commands/` is a narrow command adapter.
+
+`git_repository.py` owns two discovery contracts that fail differently on purpose. Git
+top-level resolution is a prerequisite of the managed commands, so every failure is a
+`ConfigError`. Default-branch discovery for ordinary `init` is a hint: that command has no
+Git prerequisite at all, so a missing executable, a directory outside a worktree, a missing
+or dangling `origin/HEAD`, a timeout, and unusable output all yield no candidate and the
+adapter falls back to `main`. Only a branch name that was actually supplied or discovered and
+then fails the module's ASCII branch-name policy raises, because a GitHub `branches:` filter
+is a glob pattern rather than a literal and must never receive a pattern. The module stays the
+sole owner of the Git subprocess boundary and its timeout: `scaffold.py` remains pure and
+receives the resolved name as a required keyword argument, and precedence and narration stay
+in the `init` adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
+
+Both contracts resolve the Git executable before running it, through two independent rejections.
+A `PATH` lookup that returns a relative result is refused outright, because the result is the
+matched name joined onto the entry it came from, so a relative result means the entry was
+relative; that covers `.`, `..`, any deeper ancestor, and the Windows search that prepends the
+process directory. An absolute result is then refused when it resolves inside the invocation
+directory or the process's own working directory, which catches an absolute entry pointing into
+the tree being operated on, including one holding a symlink into it.
+
+The earlier decision to run a bare `git` from the maintainer's `PATH` is withdrawn. It was
+defensible while only the managed commands shelled out, since those run inside a repository the
+maintainer already trusts, but ordinary `init` runs in freshly cloned ones, and Windows searches
+the invoking process's current directory ahead of `PATH`. A repository carrying its own `git.exe`
+would have been executed, which SECURITY.md's scope says cannot happen. Resolution failure keeps
+each contract's existing shape rather than introducing a third: no candidate for the probe, a
+`ConfigError` for the managed resolver.
+
+Enumerating untrusted directories is deliberately not how the relative case is handled. A
+relative entry can name any ancestor, and the managed contract has not resolved the project root
+at the point the executable is chosen, so rejecting relative results is the only form of the
+check that is complete. What remains accepted is an absolute `PATH` entry somewhere in the
+project, which is a directory the user explicitly chose to trust and that no repository can put
+on `PATH` itself.
 
 `cli/errors.py` owns diagnostic rendering, exit constants, and command-level
 `ProjectError` context conversion. `cli/__init__.py` preserves
