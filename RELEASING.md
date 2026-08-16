@@ -177,16 +177,31 @@ This is safe to run by hand only while no workflow triggers on a release. Confir
 running it, rather than trusting this paragraph to have aged well:
 
 ```bash
-grep -rn -A15 '^on:' .github/workflows/
+uv run python - <<'PY'
+import pathlib
+from ruamel.yaml import YAML
+
+yaml = YAML(typ="safe")
+for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+    on = yaml.load(path.read_text())["on"]
+    events = [on] if isinstance(on, str) else list(on)
+    print(f"{path.name}:", *events)
+PY
 ```
 
-Read the trigger blocks it prints; none may contain a `release:` key. Grepping for `release:`
-on its own is not the check, because `ci.yml` also has a job by that name. Today `ci.yml`
-triggers on a push to `main` and on pull requests, and `claude.yml` on issue and review events,
-so publishing a Release starts no CI run and advances nothing toward PyPI. It does reach
-Releases subscribers, which is the one upside of arriving at this stage by the tag-only path:
-the withdrawal notice goes out as a publication rather than as a silent edit. Then continue at
-step 4.
+It prints one line per workflow holding that workflow's complete event list, and none of them
+may contain `release`. Parse rather than grep, for two reasons. Grepping for `release:` alone
+matches `ci.yml`'s job of that name, since a job key and a trigger key sit at the same
+indentation. And grepping `on:` with a fixed window of trailing context, such as `-A15`, prints
+only that many lines and silently truncates any longer trigger block, which is the drift this
+check exists to catch. The parse has no such window, and it raises rather than printing a
+reassuring nothing if a workflow ever stops having a readable `on:` key.
+
+Today `ci.yml` triggers on a push to `main` and on pull requests, and `claude.yml` on issue and
+review events, so publishing a Release starts no CI run and advances nothing toward PyPI. It
+does reach Releases subscribers, which is the one upside of arriving at this stage by the
+tag-only path: the withdrawal notice goes out as a publication rather than as a silent edit.
+Then continue at step 4.
 
 ### Yanking a published release
 
