@@ -230,6 +230,11 @@ def test_ci_snippet_quotes_branches_a_yaml_reader_would_retype(branch):
 
     assert workflow["on"]["push"]["branches"] == [branch]
     assert workflow["on"]["pull_request"]["branches"] == [branch]
+    # The round-trip above is loaded under YAML 1.2, where `on` and `yes` are already plain
+    # strings, so it cannot see the hazard on its own. GitHub resolves them as booleans, so
+    # assert on the emitted text that the scalar carries quotes rather than trusting a loader
+    # that shares this emitter's YAML version.
+    assert f"    branches: [{branch}]\n" not in text
 
 
 def test_ci_snippet_keeps_a_long_branch_filter_on_one_line():

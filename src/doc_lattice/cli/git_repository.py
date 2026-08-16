@@ -30,7 +30,9 @@ _ORIGIN_BRANCH_PREFIX = "refs/remotes/origin/"
 # which covers Git's own structural exclusions (no leading dot, no empty or "." component, no
 # trailing dot) while excluding every glob and pattern metacharacter by construction. That
 # second property is the load-bearing one: a GitHub ``branches:`` filter is a glob pattern
-# rather than a literal, so "*", "?", "[", "]", and "!" must never reach it.
+# rather than a literal, so "*", "?", "[", "]", and "!" must never reach it. Consecutive dots
+# survive the component pattern, so ".." is excluded separately below; Git rejects it anywhere
+# in a ref name, and accepting it would render a filter no real branch can ever match.
 _MAX_DEFAULT_BRANCH_CHARACTERS = 255
 _BRANCH_COMPONENT = r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?"
 _DEFAULT_BRANCH_RE = re.compile(
@@ -109,6 +111,7 @@ def validate_default_branch(value: str) -> str:
         not value
         or len(value) > _MAX_DEFAULT_BRANCH_CHARACTERS
         or _DEFAULT_BRANCH_RE.fullmatch(value) is None
+        or ".." in value
         or any(component.endswith(".lock") for component in value.split("/"))
     ):
         raise ConfigError(_default_branch_error(value))

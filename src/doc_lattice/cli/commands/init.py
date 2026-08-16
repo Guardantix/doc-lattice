@@ -79,11 +79,15 @@ def _validate_github_options(
         if repository is None:
             raise ConfigError("--repository is required with --github")
         if default_branch is not None:
+            # The branch named here is the one github_ci/render.py hard-wires, not the ordinary
+            # fallback. They spell the same word today, but interpolating DEFAULT_BRANCH_FALLBACK
+            # is exactly the coupling that constant's own comment forbids: changing the ordinary
+            # fallback would silently rewrite this description of the managed security control.
             raise ConfigError(
                 "--default-branch cannot be combined with --github: every managed artifact is "
-                f"pinned to the exact {DEFAULT_BRANCH_FALLBACK} branch as a security control, "
-                "so the flag would have no effect. Run init without --github to generate an "
-                "ordinary workflow for another branch."
+                "pinned to the exact main branch as a security control, so the flag would have "
+                "no effect. Run init without --github to generate an ordinary workflow for "
+                "another branch."
             )
         return repository
     if repository is not None:

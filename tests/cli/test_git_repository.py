@@ -208,6 +208,8 @@ def test_validate_default_branch_accepts_supported_names(branch: str):
         "main/",
         "main.",
         "a/.b",
+        "a..b",
+        "release/2..x",
         "main.lock",
         "a/b.lock",
         "main@{1}",
