@@ -119,7 +119,7 @@ irreversible in the `publish` job. Find your stage first.
 |-------|-------|--------|
 | Before the version bump merges | Nothing exists | Fix the pull request. No release happened. |
 | Merged, `release` job running, tag not yet created | Nothing immutable yet | Cancel the run now. Every check that can fail the release runs before the tag, so this is the one stage that costs nothing. Revert on `main`, then confirm no `vX.Y.Z` tag exists before assuming you won the race. |
-| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI; the `release` job already failed, so no run is waiting and no `pypi` approval is pending | Create the Release by hand with the command under "Defect found after the tag, before PyPI approval", then continue at step 4 there. |
+| Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI. Whether a run is still live is not visible from this state: the tag push and the Release publish are consecutive steps, so the run either died between them or is seconds from publishing its own Release and continuing to the `pypi` gate | Check the run first, then use "Defect found after the tag, before PyPI approval". A dead run starts at the manual Release command and step 4 there. A live one starts at step 1, which cancels it and withholds the approval. |
 | Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI. A run may or may not be waiting: if `build-release` failed there is nothing pending to cancel, and the tag and Release are still the problem | Withhold approval, cancel any waiting run, record the withdrawal on the Release, then cut the next version. Full procedure under "Defect found after the tag, before PyPI approval". |
 | `publish` interrupted, some files on PyPI | Partially uploaded, and what landed is permanent | A payload you still trust is completed by rerunning, since `skip-existing` makes that safe. A payload you do not trust is never completed: treat it as published and go to the yank decision below. |
 | Published, non-security defect | On PyPI, installable | Hotfix as the next version. Yank as well only if the release is worse than nothing; "Yanking a published release" gives the threshold. |
@@ -167,7 +167,17 @@ until the advisory publishes.
 `Create and push the tag` and `Publish release notes` are separate steps, so a run that dies
 between them leaves the tag with no Release and step 3 with nothing to edit. Do not rerun the
 workflow to produce one: rerunning replays a payload you already know is bad and walks it back
-up to the `pypi` approval. Create the Release directly instead, which is very nearly the call the
+up to the `pypi` approval.
+
+Confirm the run is actually dead first. A missing Release also describes a run that is still
+between those two steps, and that run is not waiting for you: it makes the same
+`gh release create` call itself and then continues into `build-release` and the `pypi`
+approval. The workflow checks `gh release view` before creating one and leaves an existing
+Release alone, so the race itself costs nothing worse than a failed step, but the version keeps
+moving toward PyPI while you believe you are cleaning up after a run that stopped. Step 1 of
+this section is what stops it.
+
+With the run confirmed dead, create the Release directly, which is very nearly the call the
 workflow would have made:
 
 ```bash
