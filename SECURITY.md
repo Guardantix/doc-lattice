@@ -96,8 +96,11 @@ Out of scope:
 * The extracted shell linter. Report anything about `doc-lattice-shell-lint` to
   [its own repository](https://github.com/Guardantix/doc-lattice-shell-lint); the two projects
   are fully severed and share no code.
-* Consequences of pointing doc-lattice at a project you do not trust while intending it to be
-  safe to do so. Running it on a directory grants it that directory.
+* Effects the invocation authorized, when a project you do not trust is what drove them. Running
+  doc-lattice on a directory grants it that directory, so `reconcile` rewriting documents the way
+  that repository's own configuration asked is the tool working. The boundaries above hold
+  whoever authored the input: a crafted repository that escapes the project root, reaches code
+  execution through a parser, or gets `LINEAR_API_KEY` out is in scope and worth reporting.
 * Vulnerabilities in a dependency, with no doc-lattice-specific exploit path. Report those
   upstream. If doc-lattice's use of the dependency is what makes it exploitable, that is in
   scope and worth reporting here.
