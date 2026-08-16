@@ -108,7 +108,10 @@ class SeenForm:
             for a clipped block scalar, or ``"null"``.
         present: Whether a ``seen`` member is written at all.
         anchored: Whether the member anchors its value, which makes relocation possible.
-        note: Whether the spelling carries a comment.
+        note: Whether the spelling carries a comment. Its text differs from the one a ``ref``
+            spelling writes, because a ``seen`` comment sits inside the allowed footprint while
+            a ``ref`` comment does not: sharing one text would let the pinned copy satisfy the
+            layer 3 assertion for a rewrite that dropped the copy actually at risk.
     """
 
     name: str
@@ -316,7 +319,7 @@ class Document:
 REF_FORMS = (
     RefForm("plain", ("- ref: {ref}",), 2, False, "", False),
     RefForm("explicit-pair", ("- ? ref", "  : {ref}"), 2, False, "", False),
-    RefForm("trailing-comment", ("- ref: {ref} # note{index}",), 2, False, "", True),
+    RefForm("trailing-comment", ("- ref: {ref} # {note}",), 2, False, "", True),
     RefForm("literal-block-scalar", ("- ref: |-", "    {ref}"), 2, False, "", False),
     RefForm("clipped-block-scalar", ("- ref: |", "    {ref}"), 2, False, "\n", False),
     RefForm("folded-block-scalar", ("- ref: >-", "    {ref}"), 2, False, "", False),
@@ -346,13 +349,13 @@ SEEN_FORMS = (
     SeenForm("explicit-null", ("seen: null",), "null", True, False, False),
     SeenForm("tilde-null", ("seen: ~",), "null", True, False, False),
     SeenForm("empty", ("seen:",), "null", True, False, False),
-    SeenForm("empty-with-comment", ("seen: # note{index}",), "null", True, False, True),
+    SeenForm("empty-with-comment", ("seen: # {seen_note}",), "null", True, False, True),
     SeenForm("literal-strip", ("seen: |-", "  {old}"), "old", True, False, False),
     SeenForm("literal-clip", ("seen: |", "  {old}"), "old-newline", True, False, False),
     SeenForm("folded-strip", ("seen: >-", "  {old}"), "old", True, False, False),
     SeenForm("literal-indent-indicator", ("seen: |2-", "  {old}"), "old", True, False, False),
     SeenForm(
-        "literal-header-comment", ("seen: |- # note{index}", "  {old}"), "old", True, False, True
+        "literal-header-comment", ("seen: |- # {seen_note}", "  {old}"), "old", True, False, True
     ),
     SeenForm("explicit-pair", ("? seen", ": {old}"), "old", True, False, False),
     SeenForm("explicit-key-no-value", ("? seen",), "null", True, False, False),
@@ -362,7 +365,7 @@ SEEN_FORMS = (
     SeenForm("tag-then-anchor", ("seen: !!str &{anchor} {old}",), "old", True, True, False),
     SeenForm(
         "anchor-with-comment-above-value",
-        ("seen: &{anchor} # note{index}", "  {old}"),
+        ("seen: &{anchor} # {seen_note}", "  {old}"),
         "old",
         True,
         True,
@@ -371,7 +374,7 @@ SEEN_FORMS = (
     SeenForm("tag-on-its-own-line", ("seen:", "  !!str {old}"), "old", True, False, False),
     SeenForm(
         "both-properties-on-their-own-lines",
-        ("seen: &{anchor} # note{index}", "  !!str", "  {old}"),
+        ("seen: &{anchor} # {seen_note}", "  !!str", "  {old}"),
         "old",
         True,
         True,
@@ -439,6 +442,7 @@ def _fields(index: int) -> dict[str, str]:
         "old": f"old{index:04d}",
         "anchor": f"seen{index}",
         "note": f"note{index}",
+        "seen_note": f"seen-note{index}",
     }
 
 
@@ -461,7 +465,13 @@ def _combined_entry(index: int, ref_form: RefForm, seen_form: SeenForm) -> Entry
     pad = " " * ref_form.key_indent
     lines = [template.format(**fields) for template in ref_form.templates]
     lines.extend(f"{pad}{template.format(**fields)}" for template in seen_form.templates)
-    notes = [f"# {fields['note']}"] if ref_form.note or seen_form.note else []
+    # Each position writes its own comment text, so the layer 3 comment assertion is a claim
+    # about that position rather than about either copy of one shared text. The `ref` comment
+    # sits outside the allowed footprint and the `seen` comment inside it, so a single text
+    # would let the pinned copy answer for the one a rewrite can actually drop.
+    notes = [f"# {fields['note']}"] if ref_form.note else []
+    if seen_form.note:
+        notes.append(f"# {fields['seen_note']}")
     # Every edit an in-place replacement plans lands on the member's own lines: the value, the
     # properties written above it, and the block-scalar header comment that moves onto the
     # replacement. A member that is absent, or an explicit key with no `:` to write after,
@@ -1099,15 +1109,22 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
     root: dict[str, object] = {"id": "doc"}
     if shape == "alias-spelled-entry-key":
         member = ["? *keyname", ": old0000"] if explicit else ["*keyname : old0000"]
+        entry_lines = ("- ref: up-0#s0", *(f"  {line}" for line in member))
         entry = Entry(
             "alias-spelled-seen-key",
-            ("- ref: up-0#s0", *(f"  {line}" for line in member)),
+            entry_lines,
             None,
             "up-0#s0",
             "old0000",
             True,
             None,
             (),
+            (),
+            _style_marker(entry_lines[0]),
+            # The alias spells the key, not the value, so the rewrite lands on the member the
+            # same way it does for an ordinary explicit pair: the `ref` line above it is
+            # untouched, and the whole entry is not the rewriter's to restyle.
+            tuple(range(1, len(entry_lines))),
         )
         lines = ("id: doc", "title: &keyname seen", "derives_from:", *_indent(entry.lines, 2))
         root["title"] = "seen"
@@ -1130,6 +1147,9 @@ def _alias_spelled_key_document(draw, shape: str) -> Document:
             (),
             (),
             _style_marker(entry_lines[0]),
+            # Only the `seen` member is rewritten; the aliased `ref` key above it, in either
+            # spelling, stays exactly as it was written.
+            (len(entry_lines) - 1,),
         )
         lines = ("id: doc", "title: &keyname ref", "derives_from:", *_indent(entry.lines, 2))
         root["title"] = "ref"
