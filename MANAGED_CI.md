@@ -1,4 +1,4 @@
-# Managed GitHub and Linear setup
+# Protected Linear reporting in CI
 
 > **Deprecated in 4.x, removed in 5.0.** `init --github`, `ci audit`, and `ci refresh` are
 > deprecated. They keep working, byte for byte, through every 4.x release, and 5.0 removes them.
@@ -13,9 +13,9 @@
 
 This document covers two setups that produce the same protected Linear reporting.
 
-The **recipe** is the supported one. You install three files by hand, you own them, and the
-protection comes from a GitHub environment whose deployment allow list is exactly `main` plus a
-workflow that maps the dedicated secret only onto its final step.
+The **recipe** is the supported one. You add two workflows that you own, and the protection comes
+from a GitHub environment whose deployment allow list is exactly `main`, together with a workflow
+that maps the dedicated secret only onto its final step.
 
 The **managed setup** is the deprecated product. A human maintainer generated and reviewed four
 committed, create-only artifacts: two GitHub Actions workflows, a bootstrap script that configures
@@ -31,15 +31,19 @@ below.
 ### What you install
 
 - `.doc-lattice.yml`, scaffolded by plain `init`.
+- The reconcile-artifact `.gitignore` lines and the pre-commit hooks that plain `init` prints
+  alongside the workflow. [README.md](README.md#ordinary-offline-setup) owns what those blocks are
+  and where each one goes; this recipe assumes you install them as it describes.
 - `.github/workflows/doc-lattice.yml`, the offline check and lint gate that plain `init` prints.
-  You own it, and it runs no network command and touches no secret.
+  You own it, and it runs only `check` and `lint`, so it neither requires nor receives
+  `LINEAR_API_KEY`.
 - `.github/workflows/doc-lattice-linear.yml`, the trusted Linear gate. Plain `init` does not print
   this one, so this document supplies it in full below.
 - A `doc-lattice-linear` GitHub environment whose deployment allow list is exactly the `main`
   branch, holding one secret named `DOC_LATTICE_LINEAR_API_KEY`.
 
-There is no bootstrap script and no `.github/.gitattributes` rule in the recipe. Both existed to
-support the managed bootstrap script, and the recipe has none.
+The recipe has no bootstrap script, and no `.github/.gitattributes` rule, which existed only to
+hold that script at LF line endings after checkout.
 
 Run every step from reviewed, trusted project state, and land the whole setup as one reviewed
 change.
@@ -51,11 +55,15 @@ uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init
 ```
 
 Do not pass `--github`. Plain `init` writes `.doc-lattice.yml` when it is absent and prints three
-blocks: the `.gitignore` lines, the pre-commit hooks, and the offline workflow. Save the printed
-workflow as `.github/workflows/doc-lattice.yml`.
+blocks: the `.gitignore` lines, the pre-commit hooks, and the offline workflow. Install all three.
+Save the printed workflow as `.github/workflows/doc-lattice.yml`, and follow
+[README.md](README.md#ordinary-offline-setup) for the other two. The `.gitignore` block is needed
+before step 5, which runs `reconcile` and writes the artifacts that block covers.
 
-That workflow carries the two pinned `uses:` lines the release ships. The Linear workflow in the
-next step must carry the same two pins, so keep this output until step 2 is done.
+That workflow carries the two pinned `uses:` lines the release ships, and the Linear workflow in
+the next step carries the same two. Keep this output until step 2 is done and confirm they match:
+a difference means this document and the release you are installing have diverged, so stop rather
+than reconciling it by hand.
 
 ### 2. Add the trusted Linear workflow
 
@@ -110,17 +118,45 @@ Every line of that job is load-bearing, and no part of it is checked for you aft
   removes access.
 - The secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final step. Do not promote it
   to a job-level or workflow-level `env:`, and do not add steps after it.
-- The install step runs before the secret exists in the environment, so package resolution never
-  happens with the key present.
+- The install step declares no `env:`, so the key is absent from its process environment while
+  packages are resolved and installed. That property is scope, not timing: `environment:` binds at
+  the job level, so the secret is resolvable from the job's first step, and promoting it to a
+  job-level `env:` would place it in every step including this one.
 - Both actions are pinned by commit SHA with a trailing version comment, `persist-credentials:
   false` keeps the job token out of `.git/config`, and `enable-cache: false` keeps a cross-run
   cache another workflow could populate out of the gate.
-- `permissions: contents: read` is the whole token scope this job needs.
+- `permissions: contents: read` is the whole token scope this job needs, and it is declared at the
+  workflow level. A job-level `permissions:` block would override it wholesale, so do not add one.
+- There is no `continue-on-error:` anywhere in the file, and none belongs there. On the final step
+  it would turn every DANGER or BLOCKED finding into a green run, suppressing the one signal this
+  gate exists to raise.
 
 ### 3. Create the protected environment
 
 Requires an authenticated `gh` and repository owner or administrator authority. Substitute your
 canonical `OWNER/REPO` throughout.
+
+Check both preconditions before creating anything:
+
+```bash
+gh api --hostname github.com "repos/OWNER/REPO" --jq '.default_branch'
+
+gh api --hostname github.com --paginate \
+  "repos/OWNER/REPO/environments" \
+  --jq '.environments[].name | select(. == "doc-lattice-linear")'
+```
+
+The first must print `main`. This design hard-codes that branch in the workflow trigger, the `if:`
+guard, and the deployment allow list, so on any other default branch the gate never runs even
+though every readback below still comes back exactly as documented.
+
+The second must print nothing. An environment named `doc-lattice-linear` that already exists is a
+stop, not something to run the commands below over: the create call rewrites its deployment branch
+policy, and the readback that follows reports only the state that call just wrote, so it can never
+show you what the environment was protected by beforehand. Inspect it, decide deliberately whether
+it is yours to take over or remove, and only then continue.
+
+Only once both preconditions hold:
 
 ```bash
 gh api --hostname github.com --method PUT \
@@ -138,37 +174,52 @@ Read the policy back before going near the secret:
 ```bash
 gh api --hostname github.com \
   "repos/OWNER/REPO/environments/doc-lattice-linear" \
-  --jq '[.deployment_branch_policy.protected_branches,
-         .deployment_branch_policy.custom_branch_policies] | @tsv'
+  --jq '.deployment_branch_policy
+        | if . == null then "NO-BRANCH-POLICY"
+          else [.protected_branches, .custom_branch_policies] | @tsv end'
 
 gh api --hostname github.com --paginate \
   "repos/OWNER/REPO/environments/doc-lattice-linear/deployment-branch-policies" \
   --jq '.branch_policies[] | [.name, .type] | @tsv'
 ```
 
-The first command must print `false` then `true`. The second must print exactly one row, `main`
-then `branch`. Anything else means the policy is not the one this design depends on: stop, and do
-not continue to step 4. If the environment already existed with broader or ambiguous rules, do not
-narrow it blindly. Decide deliberately whether that environment is yours to take over.
+The first command must print `false` then `true`. `NO-BRANCH-POLICY` names the state where the
+environment carries no policy at all and every branch may deploy, which is the least protected it
+can be; the jq spells it out because an unnamed null would otherwise print as a bare tab. The
+second must print exactly one row, `main` then `branch`. Anything else means the policy is not the
+one this design depends on: stop, and do not continue to step 4.
 
 ### 4. Set the environment secret and remove repository-scoped copies
 
 Only after the readback above is exactly right:
 
 ```bash
-gh secret set DOC_LATTICE_LINEAR_API_KEY --env doc-lattice-linear --repo OWNER/REPO
+gh secret set DOC_LATTICE_LINEAR_API_KEY \
+  --env doc-lattice-linear --repo github.com/OWNER/REPO
 ```
 
 `gh secret set` prompts for the value or reads it from stdin, so the key is never part of the
 command arguments.
 
+Every `gh secret` command here carries the `github.com/` host prefix on `--repo`. Unlike `gh api`,
+these subcommands take no `--hostname`, so without the prefix they follow whichever host `gh` is
+currently authenticated against. That matters most for the deletions below: against the wrong host
+they return the same not-found result as a secret that was already absent, which is exactly the
+outcome you are told to expect.
+
 A repository-scoped Linear key defeats the whole boundary, because every workflow in the
-repository can read it. List what exists and delete both names if either is present:
+repository can read it. List what exists first:
 
 ```bash
-gh secret list --repo OWNER/REPO
-gh secret delete LINEAR_API_KEY --repo OWNER/REPO
-gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo OWNER/REPO
+gh secret list --repo github.com/OWNER/REPO
+```
+
+Then run a deletion only for a name that listing actually reported, so a not-found result is never
+mistaken for a successful cleanup:
+
+```bash
+gh secret delete LINEAR_API_KEY --repo github.com/OWNER/REPO
+gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo github.com/OWNER/REPO
 ```
 
 If you are converting an existing installation that used a repository-scoped `LINEAR_API_KEY`,
@@ -201,12 +252,43 @@ policy, visibility, plan, rename, or transfer change:
 gh api --hostname github.com --paginate \
   "repos/OWNER/REPO/environments/doc-lattice-linear/secrets" --jq '.secrets[].name'
 
-gh secret list --repo OWNER/REPO
+gh secret list --repo github.com/OWNER/REPO
+
+gh api --hostname github.com --paginate \
+  "repos/OWNER/REPO/actions/organization-secrets" --jq '.secrets[].name'
 ```
 
 The first must print `DOC_LATTICE_LINEAR_API_KEY` and nothing else that carries a Linear key. The
-second must not list `LINEAR_API_KEY` or `DOC_LATTICE_LINEAR_API_KEY` at repository scope. Then
-repeat the two policy readbacks from step 3.
+second must not list `LINEAR_API_KEY` or `DOC_LATTICE_LINEAR_API_KEY` at repository scope. The
+third lists the organization secrets exposed to this repository, and must not carry a Linear key
+either: an organization secret is readable by every workflow here and appears nowhere in the
+repository-scoped listing, so without this call the check looks clean while the boundary is open.
+As in step 4, repository administrators cannot always inspect organization secret visibility, so
+obtain organization-owner confirmation rather than treating an empty result as proof. Then repeat
+the two policy readbacks from step 3.
+
+Confirm the gate is not merely installed but running:
+
+```bash
+gh run list --repo github.com/OWNER/REPO \
+  --workflow doc-lattice-linear.yml --branch main --limit 1 \
+  --json conclusion,databaseId
+
+gh run view --repo github.com/OWNER/REPO RUN_ID \
+  --json jobs --jq '.jobs[] | [.name, .conclusion] | @tsv'
+```
+
+The job's conclusion must be `success`. A `skipped` job is a failed installation, not a passing
+one: a job whose `if:` guard is false is skipped, and a run whose only job is skipped concludes
+successfully. An `OWNER/REPO` left unsubstituted in the workflow does exactly that, silently, where
+the same omission in the `gh` commands above would have failed loudly. So does a repository rename,
+which breaks the `github.repository` literal while leaving the environment, its policy, and its
+secret untouched, and therefore invisible to every other check in this step.
+
+A `success` conclusion does not by itself prove the secret works. `linear` returns before it
+constructs a client when no valid ticket identifier remains, and never reads `LINEAR_API_KEY` in
+that case, so a repository with no `tickets:` annotations yet passes with the secret absent or
+misnamed. Once a valid ticket ref exists, a missing key fails closed with a tool error and exit 2.
 
 Review the rest by reading, because no command checks it:
 
@@ -222,9 +304,10 @@ Review the rest by reading, because no command checks it:
 It keeps the boundary. The GitHub environment is still the authoritative control: it allows only
 the exact `main` branch, the dedicated secret exists only inside it, and that secret reaches
 `LINEAR_API_KEY` only on the final step of the trusted job. The workflow-level guards, the action
-pins, the least-privilege token, the disabled caching, and the rule that no generated workflow
-runs real `reconcile` are all unchanged. Everything in [Security model](#security-model) below
-applies to a recipe installation.
+pins, the least-privilege token, the disabled caching, and the rule that neither workflow runs
+real `reconcile` are all unchanged. The [security model](#security-model) below describes that
+boundary, and it holds here; the parts of it that name `ci audit` or the bootstrap script describe
+the machinery this recipe drops, listed next.
 
 It drops the machinery that watched that boundary for you:
 
@@ -239,6 +322,10 @@ It drops the machinery that watched that boundary for you:
   run. The `gh` commands in steps 3 and 6 are the manual replacement, and running them is on you.
 - **Ownership markers.** The two workflows are ordinary repository files with no managed identity,
   no version marker, and no create-only protection.
+- **Guarded, resumable setup.** The bootstrap script classified the remote state before touching
+  it, refused to narrow or take over an environment it did not create, and named which command to
+  rerun after a partial run. Step 3 replaces that with preconditions you check and honor yourself,
+  and a half-completed step 3 is yours to read back and finish by hand.
 
 That is a real reduction in assurance, and it is the deliberate trade: the managed product had no
 installations to justify maintaining it. The boundary the design actually rests on is the GitHub
@@ -268,9 +355,15 @@ change between releases independently of the version it installs.
 ### Converting a managed installation to the recipe
 
 Nothing remote changes. The environment, its `main`-only policy, and
-`DOC_LATTICE_LINEAR_API_KEY` are already exactly what the recipe wants, so leave them alone.
+`DOC_LATTICE_LINEAR_API_KEY` should already be exactly what the recipe wants.
 
-The local files change ownership from the tool to you, in one reviewed change:
+Confirm that before you begin, by running the [step 6](#6-verify-by-hand) checks while
+`.github/doc-lattice-bootstrap.sh` and `ci audit` are both still present to explain a
+disagreement. A managed installation whose bootstrap `apply` never ran, or ran only partially, has
+remote state that premise does not hold for, and the steps below delete the two tools that could
+diagnose it.
+
+The local files then change ownership from the tool to you, in one reviewed change:
 
 1. Replace `.github/workflows/doc-lattice.yml`. The managed offline workflow runs `ci audit`,
    which 5.0 removes, so it cannot simply be carried forward. Run plain `init` at your current
@@ -278,16 +371,19 @@ The local files change ownership from the tool to you, in one reviewed change:
 2. Convert `.github/workflows/doc-lattice-linear.yml` by deleting its four ownership marker
    comment lines, the ones beginning `# doc-lattice-managed:`, `# doc-lattice-artifact:`,
    `# doc-lattice-version:`, and `# doc-lattice-repository:`. What remains is the step 2 workflow
-   for the release you have installed. Compare it against step 2 in this document before
-   committing.
+   for the release you have installed. Compare it against step 2 of `MANAGED_CI.md` at that
+   release rather than this copy, since the pins and the structure move between releases. Treat
+   any structural difference as a stop, and do not reconcile one by bumping the `doc-lattice==`
+   pin alone.
 3. Delete `.github/doc-lattice-bootstrap.sh`. Its remote work is already done, and its readback is
    replaced by the `gh` commands in step 6.
-4. Delete `.github/.gitattributes` if it exists only for the bootstrap LF rule. Keep the file if
-   your repository uses it for anything else, and drop just the
-   `doc-lattice-bootstrap.sh text eol=lf` line.
+4. Convert `.github/.gitattributes`, which is a managed artifact carrying the same four ownership
+   marker lines as the workflow, followed by the `doc-lattice-bootstrap.sh text eol=lf` rule.
+   Delete the file outright if it holds only those five lines. If your repository added rules of
+   its own, delete the rule line and the four marker lines and keep the rest.
 5. Stop running `ci audit` and `ci refresh`, and adopt the manual review in step 6 in their place.
 
-Run the step 6 verification once when the change lands.
+Run the step 6 verification once more when the change lands.
 
 ## What the managed setup installs
 
@@ -312,24 +408,29 @@ file itself.
 
 ## Requirements
 
-These apply to both setups, because they are GitHub's rules for environments rather than the
-tool's. The recipe's `gh` steps assume the same authority the bootstrap script required.
+The eligibility and authority rules below are GitHub's own, and both setups need them. The
+platform and shell rules are the bootstrap script's, and a recipe installation, which runs `gh`
+alone, is not bound by them.
 
-The initial script supports GitHub.com repositories whose default branch is exactly `main`. It
-requires Bash 3.2 or later and an authenticated GitHub CLI. The authenticated maintainer must be a
-repository owner or administrator with authority to manage environments and inspect repository
-secret names. Reading organization-plan metadata can require organization-owner or equivalent
-`admin:org` authority; unavailable authority fails closed. Run the script on macOS or Linux, or on
-Windows through Git Bash or WSL. Native PowerShell is not supported.
+**Both setups.** GitHub.com repositories whose default branch is exactly `main`, and an
+authenticated GitHub CLI. The authenticated maintainer must be a repository owner or administrator
+with authority to manage environments and inspect repository secret names. Reading
+organization-plan metadata can require organization-owner or equivalent `admin:org` authority;
+unavailable authority fails closed.
 
 GitHub's [deployment and environment documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 defines environment availability and protection behavior. Public repositories are eligible on
 current GitHub plans. Private repositories owned by a user require GitHub Pro; private or internal
-organization repositories require GitHub Team or Enterprise. The script fails closed if
-visibility, plan eligibility, canonical repository casing, the exact `main` default branch,
-repository secret metadata, or environment policy cannot be verified. A recipe installation has no
-script to fail closed for you: check eligibility before step 3, and treat an unexpected readback
-in step 3 as a stop.
+organization repositories require GitHub Team or Enterprise.
+
+**The managed setup only.** The bootstrap script requires Bash 3.2 or later. Run it on macOS or
+Linux, or on Windows through Git Bash or WSL; native PowerShell is not supported. It fails closed
+if visibility, plan eligibility, canonical repository casing, the exact `main` default branch,
+repository secret metadata, or environment policy cannot be verified.
+
+**The recipe.** No script fails closed for you. Step 3 opens with the default-branch and
+existing-environment preconditions that stand in for those checks; confirm plan and visibility
+eligibility yourself before running it, and treat any unexpected readback as a stop.
 
 Older GitHub Enterprise Server versions are unsupported pending a separate compatibility review.
 
@@ -414,15 +515,15 @@ Run this human-maintainer sequence from reviewed, trusted project state:
    ```bash
    # Continue only after apply prints: environment policy verified
    gh secret set DOC_LATTICE_LINEAR_API_KEY \
-     --env doc-lattice-linear --repo OWNER/REPO
+     --env doc-lattice-linear --repo github.com/OWNER/REPO
    ```
 
 6. Complete secret migration in the same reviewed change. Run either deletion only when `plan` or
    `apply` reported that repository-scoped name.
 
    ```bash
-   gh secret delete LINEAR_API_KEY --repo OWNER/REPO
-   gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo OWNER/REPO
+   gh secret delete LINEAR_API_KEY --repo github.com/OWNER/REPO
+   gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo github.com/OWNER/REPO
    ```
 
 7. Verify both the remote environment state and the committed local workflow policy.
@@ -533,11 +634,12 @@ read-only path take no lock.
 
 ## Security model
 
-This section describes the boundary both setups share. Everything in it is true of a recipe
-installation, because the recipe installs the same workflow shape into the same environment. What
-differs is only that nothing checks it for you.
+This section describes the boundary both setups share. The recipe installs the same workflow shape
+into the same environment, so the boundary itself and the trusted job's own guards hold identically
+in either. Where a paragraph below names `ci audit`, bootstrap `verify`, or a generator release, it
+is describing managed machinery a recipe installation does not have, and says so as it arises.
 
-The generated environment is the authoritative secret boundary. It allows only the exact `main`
+The environment is the authoritative secret boundary. It allows only the exact `main`
 branch, and the dedicated environment-only secret is mapped to `LINEAR_API_KEY` only on the final
 step of the trusted workflow. Removing the environment binding removes secret access. Current
 ordinary `pull_request`, `pull_request_review`, and `pull_request_review_comment` runs use
@@ -545,9 +647,9 @@ ordinary `pull_request`, `pull_request_review`, and `pull_request_review_comment
 uses the default branch ref, so the environment can authorize it while it handles untrusted input.
 For that reason audit bans `pull_request_target` repository-wide, the trusted job's own event
 allowlist refuses it a second time, and trusted default-branch review remains a load-bearing
-control. A recipe installation has only the second of those three, which is why step 2 forbids
-adding a pull-request-family trigger and step 6 asks you to check the rest of the repository by
-hand. GitHub's
+control. A recipe installation keeps the second and third of those three and loses only the first,
+which is why step 2 forbids adding a pull-request-family trigger and step 6 asks you to check the
+rest of the repository by hand. GitHub's
 [December 2025 ref-semantics changelog](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/)
 records this behavior change.
 
@@ -557,14 +659,15 @@ was load-bearing under those semantics: relaxing it to a pattern such as `releas
 authorize attacker-chosen matching head branches. Even the exact name could be attacker-chosen, so
 this design does not claim that the rule repairs the older behavior.
 
-No generated workflow runs real `reconcile`; the offline workflow does not run even
-`reconcile --dry-run` in this release. The exact managed triggers also omit `merge_group`, so merge
-queues are unsupported until a generator release adds that event. Both managed workflows disable
+Neither workflow runs real `reconcile`; the offline workflow does not run even
+`reconcile --dry-run` in this release. Both trigger sets deliberately omit `merge_group`, so merge
+queues are unsupported in either setup. In a recipe installation adding that event is an edit you
+own, and it needs the same security review as any other trigger widening. Both workflows disable
 persistent cross-run setup-uv and Actions caching; `uv` may still use its ephemeral job-local cache
 while one runner job is active. Introducing persistent caching requires a separate security review.
 Optional required environment reviewers and disabled administrator bypass can add manual approval
-to each Linear run, but they are administered manually outside the initial generated script and
-depend on repository visibility and plan support.
+to each Linear run, but they are administered manually outside either setup and depend on
+repository visibility and plan support.
 
 The boundary does not protect malicious code already reviewed and admitted to `main`. Other
 residual risks include a compromised maintainer workstation or `gh` binary, pinned action, package
@@ -577,18 +680,16 @@ that much.
 
 ## Why the managed product is being retired
 
-The managed setup had no installations. Maintaining a generator, an offline auditor, a byte-level
-refresher, and a bootstrap script for a boundary that a documented recipe reaches directly was not
-a trade worth continuing, and the check and lint half of it is already what plain `init`
-scaffolds.
+[AD-32](ARCHITECTURE.md#ad-32-the-managed-github-ci-product-retires-to-a-documented-recipe) owns
+that decision: why the product retires, the alternatives it rejected, and what the two stages are.
 
-The deprecation is documentation and help text only. Invocation stdout, stderr, and exit codes for
-`init --github`, `ci audit`, and `ci refresh` are unchanged in 4.x, because a stderr warning
-cannot be made compatibility-safe for a script that already parses those channels.
+The consequence for you is that the deprecation is documentation and help text only. Invocation
+stdout, stderr, and exit codes for `init --github`, `ci audit`, and `ci refresh` are unchanged in
+4.x, because a stderr warning cannot be made compatibility-safe for a script that already parses
+those channels;
 [AD-10](ARCHITECTURE.md#ad-10-output-selector-compatibility-converges-in-20) records that
-reasoning and the same documentation-only migration notice it produced before.
-[AD-25](ARCHITECTURE.md#ad-25-the-ci-shell-scanner-is-extracted-to-doc-lattice-shell-lint) records
-the earlier extraction of the shell scanner out of the same subsystem.
+reasoning and the same documentation-only migration notice it produced before. A script that
+parses those channels keeps working through every 4.x release.
 
 ## Out of scope: shell run-body linting
 

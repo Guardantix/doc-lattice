@@ -65,7 +65,7 @@ no code from the project directory; the only program it runs is `git`, with fixe
 only network use is the `linear` command's ticket lookup, which talks to
 `https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. It also renders GitHub
 Actions workflows through `ci refresh`, and publishes one in [MANAGED_CI.md](MANAGED_CI.md) for
-users to install by hand; those workflows are the one output of the project that handles a
+users to install by hand; those workflows are the only output of the project that handles a
 secret. So the security-relevant surface is what the engine does with the paths and file
 contents it was pointed at, plus that one credentialed call and what it renders or publishes.
 
@@ -93,8 +93,10 @@ In scope, as examples rather than an exhaustive list:
   guard in that published text counts, for example a trigger set or `if:` condition that lets an
   untrusted event reach the environment, or a secret mapping that makes the key readable earlier
   or more widely than the final step. It is published, security-sensitive project output, so a
-  defect in it is a vulnerability in the same sense a rendered artifact is. A recipe installation
-  the user then edited is out of scope, because the recipe transfers ownership of those files.
+  defect in it is a vulnerability in the same sense a rendered artifact is. Applying the
+  substitutions the recipe calls for, the repository identity and the version pin, leaves it in
+  scope. A recipe installation changed beyond those is out of scope, because the recipe transfers
+  ownership of those files.
 
 Out of scope:
 

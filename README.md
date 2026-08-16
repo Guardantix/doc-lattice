@@ -550,7 +550,7 @@ workflow is yours too. The four managed artifacts are not.
 
 ### The pre-commit snippet (every install)
 
-The pre-commit block is printed guidance rather than a managed artifact in both setups, so no
+The pre-commit block is printed guidance rather than a managed artifact in all three setups, so no
 command updates your `.pre-commit-config.yaml` for you. Print the block from the target release
 and compare it against the one you checked in:
 

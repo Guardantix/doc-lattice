@@ -23,6 +23,11 @@ from doc_lattice.github_ci.render import render_managed_artifacts
 
 from .helpers import _run, runner
 
+# Rich wraps console output to the terminal width, so any assertion against rendered text has to
+# pin that width or it moves with whatever the surrounding environment happens to set. Shared by
+# the help-text tests and by the literal invocation-output expectations further down.
+_WIDE_CONSOLE_ENV = {"NO_COLOR": "1", "COLUMNS": "1000"}
+
 
 def test_cli_imports_when_fcntl_is_unavailable():
     project_root = Path(__file__).resolve().parents[2]
@@ -324,14 +329,15 @@ def test_global_help_lists_no_color(monkeypatch):
 
 
 def test_global_help_lists_ci():
-    result = runner.invoke(app, ["--help"])
+    # The console width is pinned because the group's help now carries the 5.0 deprecation
+    # notice, and Rich wraps it across rows of the commands table at a narrow width, splitting
+    # the fragments below wherever the break happens to land.
+    result = runner.invoke(app, ["--help"], env=_WIDE_CONSOLE_ENV)
     assert result.exit_code == 0
     output = Text.from_ansi(result.stdout).plain
     assert "ci" in output
-    # Matched a fragment at a time: the group's help now carries the 5.0 deprecation notice
-    # and Rich wraps it across several rows of the commands table.
     assert "Deprecated, removed in 5.0" in output
-    assert "audit or refresh managed GitHub CI" in output
+    assert "audit or refresh managed GitHub CI artifacts" in output
 
 
 def test_ci_help_lists_audit_and_refresh():
@@ -641,10 +647,9 @@ def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, a
 # whole 4.x line is that invocation stdout, stderr, and exit codes do not move.
 #
 # The expectations below are literal on purpose. Deriving them from the same strings the
-# adapters print would pass no matter what the deprecation did to them. `COLUMNS` is pinned
-# because Rich wraps console output to the terminal width, so an inherited width would move
-# where stderr breaks with no code change involved.
-_WIDE_CONSOLE_ENV = {"NO_COLOR": "1", "COLUMNS": "1000"}
+# adapters print would pass no matter what the deprecation did to them. They run under the
+# module-level `_WIDE_CONSOLE_ENV`, since an inherited console width would move where stderr
+# breaks with no code change involved.
 _DEPRECATION_MARKERS = ("Deprecated", "deprecated", "5.0")
 _MANAGED_REPOSITORY = "Guardantix/doc-lattice"
 

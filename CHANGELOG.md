@@ -11,12 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A hand-installable recipe for protected Linear reporting in CI, published in `MANAGED_CI.md`.
   It is the successor to the managed GitHub and Linear setup, and it is complete: the offline
   workflow plain `init` scaffolds, the trusted-main Linear workflow as copyable text, the exact
-  `gh` sequence that creates the `main`-only environment and its dedicated secret along with the
-  readbacks that prove each step, the manual review that replaces `ci audit`, and the upgrade and
-  conversion procedures. A reader can install the protected setup from it without running
-  `init --github`, `ci audit`, or `ci refresh`. `SECURITY.md` now names that published workflow
-  in its in-scope boundary, and a test parses the documented workflow and enforces its trigger
-  set, guards, environment binding, final-step-only secret mapping, and action-pin parity.
+  `gh` sequence that creates the `main`-only environment and its dedicated secret, the
+  preconditions and readbacks that gate it, the manual review that replaces `ci audit`, and the
+  upgrade and conversion procedures. A reader can install the protected setup from it without
+  running `init --github`, `ci audit`, or `ci refresh`. `SECURITY.md` now names that published
+  workflow in its in-scope boundary, and tests parse both the documented workflow and the
+  documented `gh` procedure, enforcing the trigger set, the whole `if:` guard, the environment
+  binding, final-step-only secret mapping, action-pin parity, and the branch policy and host
+  pinning the shell steps establish.
 - A security policy in `SECURITY.md`, linked from README's documentation table, covering
   supported versions (the latest release only), the private reporting path, what a report should
   carry, response targets, the coordinated-disclosure expectation, and what is in and out of
@@ -156,8 +158,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are unchanged in this release: invocation stdout, stderr, and exit codes are byte-identical,
   because a stderr warning cannot be made compatibility-safe for a script that already parses
   those channels, so the notice lives in `--help` output and documentation only. AD-10 in
-  ARCHITECTURE.md records that reasoning. A test pins all three channels for the three commands
-  so the deprecation cannot leak into machine-facing output.
+  ARCHITECTURE.md records that reasoning, and AD-32 records the retirement itself. A test pins all
+  three channels for the three commands so the deprecation cannot leak into machine-facing output.
 
   The replacement is the hand-installable recipe now published in `MANAGED_CI.md`, which reaches
   the same protected boundary with workflows you own. It keeps the GitHub environment as the
@@ -170,18 +172,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **If you have a managed installation**, convert it while 4.x is still supported. Nothing breaks
   on its own when 5.0 ships, which is the trap: the installed workflows keep running the 4.x
   version they pin, and pinning them forward to 5.0 is what actually fails, because the managed
-  offline workflow runs `ci audit`. Conversion changes no remote state. The environment, its
-  `main`-only policy, and `DOC_LATTICE_LINEAR_API_KEY` stay exactly as they are. Locally you
-  replace `.github/workflows/doc-lattice.yml` with the workflow plain `init` prints, convert
-  `.github/workflows/doc-lattice-linear.yml` by deleting its four ownership marker comment lines,
-  delete `.github/doc-lattice-bootstrap.sh` and the `.gitattributes` rule that existed only for
-  it, and adopt the manual `gh` readback in place of `ci audit` and bootstrap `verify`.
-  `MANAGED_CI.md` carries the step-by-step procedure.
-
-  Upgrading a recipe installation replaces the Linear workflow block whole from the target
-  release's `MANAGED_CI.md`, rather than bumping only its `doc-lattice==` pin. Plain `init` cannot
-  regenerate that second workflow, and its structure and action pins can change independently of
-  the version it installs.
+  offline workflow runs `ci audit`. Conversion changes no remote state, and is a local change of
+  file ownership from the tool to you. `MANAGED_CI.md` carries the procedure, and the upgrade path
+  for a recipe installation once you are on it.
 
 ### Fixed
 
