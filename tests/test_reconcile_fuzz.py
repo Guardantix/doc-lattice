@@ -68,6 +68,21 @@ FUZZ_SETTINGS = settings(max_examples=300, derandomize=True, deadline=None)
 # the shape where the accelerator is installed and the shape moves pools with it.
 EXPECT_REUSED_ANCHOR = pytest.mark.filterwarnings("ignore::ruamel.yaml.error.ReusedAnchorWarning")
 
+# How many times each conditional claim actually fired this session, counted where it fires
+# rather than where it is attempted. The table floor further down keeps a spelling in the corpus
+# for each of these; this keeps the claim itself from going quiet for some other reason, a
+# generator that stopped producing the shape or a model field that stopped being set. Measured
+# vacuity is high and legitimate: most documents carry no comment and most entries are not flow.
+_CLAIMS: Counter[str] = Counter()
+_REQUIRED_CLAIMS = (
+    "comment-at-its-own-site",
+    "flow-line",
+    "member-head",
+    "relocation",
+    "relocation-drop",
+    "recovery-arm",
+)
+
 
 def _strict_load_accepts_reused_anchors() -> bool:
     """Report whether the strict load accepts a document defining one anchor name twice.
@@ -1160,6 +1175,7 @@ def _assert_comments_kept_in_place(document: Document, raw_meta: str) -> None:
         assert region is not None, f"{entry.name} lost the site its comments hang off"
         for note in entry.notes:
             assert note in region, f"comment {note!r} left the entry that wrote it"
+            _CLAIMS["comment-at-its-own-site"] += 1
 
 
 def _assert_envelope_preserved(document: Document, before: str, after: str) -> None:
@@ -1269,6 +1285,7 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
             assert not head.endswith(" ") or not followed[0].startswith(" "), (
                 f"{entry.name} widened the separator it wrote its value after: {head!r}"
             )
+            _CLAIMS["member-head"] += 1
     lines = _meta_lines(after)
     for pattern, budgets in document.flow_lines(updates):
         matches = (re.fullmatch(pattern, line) for line in lines)
@@ -1280,6 +1297,7 @@ def _assert_styles_preserved(document: Document, after: str, updates: dict[str, 
                 f"an edit restyled flow punctuation: wrote {region!r}, "
                 f"whose indicators {spent!r} are not the allowed {budget!r}"
             )
+            _CLAIMS["flow-line"] += 1
 
 
 def _uncommented(line: str) -> str:
@@ -1388,6 +1406,7 @@ def _assert_relocation(document: Document, raw_meta: str, updates: dict[str, str
             dropped += "it was rewritten too, so nothing is left for it to name"
             assert f"&{entry.anchor}" not in raw_meta, dropped
             assert alias not in raw_meta, dropped
+            _CLAIMS["relocation-drop"] += 1
             continue
         landed = regions[document.entries.index(surviving[0])]
         assert landed is not None, f"{surviving[0].name} lost the site it is located by"
@@ -1399,6 +1418,7 @@ def _assert_relocation(document: Document, raw_meta: str, updates: dict[str, str
             f"the anchor {entry.anchor!r} is defined "
             f"{raw_meta.count(f'&{entry.anchor}')} times after the relocation"
         )
+        _CLAIMS["relocation"] += 1
 
 
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
@@ -2237,6 +2257,32 @@ def test_the_spelling_tables_never_define_one_anchor_name_twice() -> None:
     assert not offenders, f"these spellings define one anchor name twice: {offenders}"
 
 
+def test_the_spelling_tables_still_carry_every_dimension_the_assertions_read() -> None:
+    """Keep each conditional claim from going vacuous because the last row feeding it was cut.
+
+    Most of the layer 3 claims are made only of the shapes that can carry them: a comment is
+    checked where a spelling writes one, a flow line where an entry is written in flow style, a
+    member head where the model gives an entry one to read. Each skip is right for its shape,
+    and together they mean a claim can stop being made everywhere without a single test going
+    red. This is the floor under that: the corpus still has to contain something to make each
+    claim of.
+    """
+    assert any(form.note for form in REF_FORMS), "no ref spelling writes a comment"
+    assert any(form.note for form in SEEN_FORMS), "no seen spelling writes a comment"
+    assert any(form.anchored for form in SEEN_FORMS), "no seen spelling carries an anchor"
+    assert any(form.written_lines == 2 for form in SEEN_FORMS), (
+        "no seen spelling keeps source above its value, so nothing exercises a two-line member"
+    )
+    assert any(form.value in {"null", "empty-string"} for form in SEEN_FORMS), (
+        "no seen spelling writes an empty value, so the property-removal edits are unreached"
+    )
+    assert FLOW_FORMS, "no entry spelling is written in flow style"
+    assert any(form.writes != "none" for form in FLOW_FORMS), (
+        "no flow spelling makes the rewrite write an indicator, so the budget is never spent"
+    )
+    assert COMMENTED_PAIRS, "no spelling pair carries a comment for the site claim to be made of"
+
+
 def _entry_pair_document(entries: tuple[Entry, ...]) -> Document:
     """Wrap several entries in one block sequence under the plainest supported root."""
     body, spans = _block_sequence(entries, 2)
@@ -2968,6 +3014,7 @@ def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
         "The union above is the contract and it still holds, so this is not a rewriter defect "
         "on its own; re-record the row deliberately and say why, rather than widening it."
     )
+    _CLAIMS["recovery-arm"] += 1
 
 
 def test_the_recovery_table_records_a_known_arm_for_every_shape() -> None:
@@ -3277,3 +3324,30 @@ def test_the_yaml_directive_envelope_survives_the_rewrite(version: str) -> None:
     assert len(rewrites) == 1
     after = rewrites[0].after.decode("utf-8")
     assert after == f"---\n%YAML {version}\n--- !!map\n{PLAIN_REWRITTEN}---\nbody\n"
+
+
+# --------------------------------------------------------------------------------------------
+# The corpus floor. Last in the file, so it reads what everything above it actually asserted.
+# --------------------------------------------------------------------------------------------
+
+
+def test_every_claim_the_assertions_make_fires_somewhere_in_this_corpus() -> None:
+    """Fail when a conditional claim is made nowhere, which no other test here can see.
+
+    Most layer 3 claims are guarded by the shape they apply to, so each one is skipped far more
+    often than it fires and every skip is correct on its own. What no single test can notice is
+    all of them skipping: a generator that stopped producing flow entries, or a model field that
+    stopped being set, would take a claim to zero with the suite still green.
+
+    This depends on session state, which is the honest cost of measuring the corpus rather than
+    a shape. Running a subset with ``-k`` can leave a claim at zero for a reason that is not a
+    defect, so it skips when nothing above it ran at all, and the table floor further up is the
+    guard that holds under any selection.
+    """
+    if not _CLAIMS:
+        pytest.skip("this floor measures the properties above; none of them were selected")
+    missing = sorted(name for name in _REQUIRED_CLAIMS if not _CLAIMS[name])
+    assert not missing, (
+        f"{missing} is asserted nowhere in the generated corpus, so every shape that could "
+        "carry it skipped it and a rewriter defect in it would pass unseen"
+    )
