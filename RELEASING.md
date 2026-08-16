@@ -119,7 +119,7 @@ irreversible in the `publish` job. Find your stage first.
 | Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI | Withhold approval. Cancel the run. Cut the next version. |
 | Published, non-security regression | On PyPI, installable | Hotfix as the next version. Yank only if the release is broken enough to be worse than nothing. |
 | Published, broken or incompatible enough to mislead installers | On PyPI, installable | Yank, then release the fix. |
-| Published, security vulnerability | On PyPI, installable | Publish a GHSA with affected and fixed ranges, release the fix, and yank if there is no safe way to use the affected version. |
+| Published, security vulnerability | On PyPI, installable | Draft the advisory privately, release the fix, then publish the advisory with affected and fixed ranges. Yank if there is no safe way to use the affected version. |
 
 ### Defect found after the tag, before PyPI approval
 
@@ -213,12 +213,15 @@ filename, so a deletion strands the version permanently rather than fixing it.
 
 ### Security vulnerabilities
 
-A vulnerability follows the yank decision above, plus an advisory. Publish a GitHub Security
-Advisory from the repository's **Security** tab with affected and fixed version ranges, so
-Dependabot and the GitHub Advisory Database can alert adopters who never read a release note.
-Release the fix first when the schedule allows, so the advisory names a version people can
-already upgrade to. [SECURITY.md](SECURITY.md) owns how a vulnerability is reported and what
-disclosure timeline reporters are asked to follow.
+A vulnerability follows the yank decision above, plus an advisory, in this order: draft the
+advisory privately from the repository's **Security** tab, release the fix, then publish the
+advisory with affected and fixed version ranges, so Dependabot and the GitHub Advisory Database
+can alert adopters who never read a release note. The order is the point. Publishing before a
+fixed version exists tells attackers where to look while leaving adopters nothing to upgrade to,
+and the advisory cannot name a fixed range that does not exist yet. Hold the draft until the fix
+ships unless the vulnerability is already public, in which case publishing what adopters can do
+to protect themselves beats silence. [SECURITY.md](SECURITY.md) owns how a vulnerability is
+reported and what disclosure timeline reporters are asked to follow.
 
 ### Where adopters watch for announcements
 
