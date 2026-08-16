@@ -1563,7 +1563,12 @@ def _aliased_entry_document(draw, _shape: str) -> Document:
     )
 
 
-def _reused_anchor_document(_draw, _shape: str) -> Document:
+def _reused_anchor_document(draw, _shape: str) -> Document:
+    """Draw the reused-anchor shape under an envelope."""
+    return _finish(draw, _reused_anchor_pair())
+
+
+def _reused_anchor_pair() -> Document:
     """A reused anchor name whose later definition rebinds the alias sites below it."""
     first = _entry(0, ("- ref: {ref}", "  seen: &shared {old}"), "old0000", "shared")
     second = _entry(1, ("- ref: {ref}", "  seen: &shared {old}"), "old0001", "shared")
@@ -1664,7 +1669,7 @@ def _relocating_anchor_document(draw, _shape: str) -> Document:
     """An anchored ``seen`` whose replacement relocates the old value onto its alias site."""
     content = draw(st.sampled_from(SCALAR_CONTENTS))
     value = content.encode("utf-8").decode("unicode_escape")
-    return _relocating_anchor_pair(f'"{content}"', value)
+    return _finish(draw, _relocating_anchor_pair(f'"{content}"', value))
 
 
 def _merge_document(draw, shape: str) -> Document:
@@ -2292,7 +2297,7 @@ def _recovery_documents() -> tuple[Document, ...]:
     than edit the shared node behind it. There is no narrower member-level claim to make about a
     site the contract says may be replaced outright.
     """
-    conditional = () if REUSED_ANCHORS_ARE_STRICT else (_reused_anchor_document(None, ""),)
+    conditional = () if REUSED_ANCHORS_ARE_STRICT else (_reused_anchor_pair(),)
     return (
         *conditional,
         _recovery_extra_root_key(),
@@ -2718,7 +2723,7 @@ def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
     was actually produced, because demanding one would promote non-contractual recovery into
     a commitment. The safe-outcome union above has already judged the other two outcomes.
     """
-    document = _reused_anchor_document(None, "reused-anchor")
+    document = _reused_anchor_pair()
     updates = {document.entries[0].ref: "new0000beef"}
 
     if REUSED_ANCHORS_ARE_STRICT:
@@ -2744,7 +2749,7 @@ def test_the_pure_reread_warns_about_a_reused_anchor_name() -> None:
     too. Pinning it here keeps the silencing honest: the reread inside ``apply_reconcile`` is
     pure by AD-26 on every leg, so the pure parser is what raises this and it raises it always.
     """
-    document = _reused_anchor_document(None, "reused-anchor")
+    document = _reused_anchor_pair()
 
     with pytest.warns(ReusedAnchorWarning):
         _rewrite_bytes(document.render(), {document.entries[0].ref: "new0000beef"})
