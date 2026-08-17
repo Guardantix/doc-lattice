@@ -284,13 +284,14 @@ newest run first, trigger one, then verify the run that appears:
 
 ```bash
 gh run list --repo github.com/OWNER/REPO \
-  --workflow doc-lattice-linear.yml --branch main --limit 1 --json databaseId
+  --workflow doc-lattice-linear.yml --branch main --event workflow_dispatch \
+  --limit 1 --json databaseId
 
 gh workflow run --repo github.com/OWNER/REPO doc-lattice-linear.yml --ref main
 
 gh run list --repo github.com/OWNER/REPO \
-  --workflow doc-lattice-linear.yml --branch main --limit 1 \
-  --json databaseId,status,conclusion
+  --workflow doc-lattice-linear.yml --branch main --event workflow_dispatch \
+  --limit 1 --json databaseId,status,conclusion
 ```
 
 The third call must report a `databaseId` the first call did not, and `status` `completed`. Until
@@ -298,7 +299,15 @@ both hold, the dispatch has not registered or has not finished, so rerun that th
 than reading the entry above it. The run identifier is the discriminator on purpose: a rename
 leaves `main` at the same commit, so a head SHA cannot separate the run you just triggered from
 one that ran before the break. A first call that lists nothing at all is fine, and makes any run
-the third one reports the new one. That new `databaseId` is `RUN_ID` below:
+the third one reports the new one.
+
+Both listings filter to `workflow_dispatch` because `--limit 1` bounds how many runs are fetched,
+not which one. This workflow also runs on every push to `main`, so without that filter a push
+landing between the first two commands puts an unrelated run at the top, and the third call reads
+a `databaseId` the first did not report while answering for a dispatch that never registered. The
+filter leaves one gap it cannot close, a second manual dispatch of this workflow while yours is in
+flight, so run this check when you are the only one dispatching it. That new `databaseId` is
+`RUN_ID` below:
 
 ```bash
 gh run view --repo github.com/OWNER/REPO RUN_ID \

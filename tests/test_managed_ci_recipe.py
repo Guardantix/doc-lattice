@@ -384,6 +384,12 @@ def test_gh_procedure_triggers_a_run_before_it_verifies_one():
     )
     assert view > dispatch, "step 6 must verify the dispatched run, not a preexisting one"
 
+    for index in listings:
+        assert "--event workflow_dispatch" in commands[index], (
+            "step 6's listings must exclude push runs of this same workflow, or a push landing "
+            "mid-check supplies the new databaseId the comparison accepts"
+        )
+
 
 def test_every_intra_document_anchor_resolves():
     """The deprecation banners are navigational, so a stale anchor strands the reader.
