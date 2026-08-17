@@ -440,14 +440,23 @@ moment. No two-step order achieves that, because the workflow moves by a merge a
 list moves by an API call, so whichever goes first opens a window: changing the matrix first leaves
 open pull requests waiting on contexts nothing emits any more, and dropping the contexts first
 leaves an interval where a failing compatibility leg blocks nothing and an unrelated pull request
-can merge past it. Take three steps instead, against
-[.github/workflows/ci.yml](.github/workflows/ci.yml):
+can merge past it. Take three steps instead:
 
-1. Land a matrix change that adds the new range ends **alongside** the old ones. The old contexts
-   stay required and keep reporting, so nothing is gated any more loosely than before.
+1. Land a matrix change in [.github/workflows/ci.yml](.github/workflows/ci.yml) that adds the new
+   range ends **alongside** the old ones. The old contexts stay required and keep reporting, so
+   nothing is gated any more loosely than before.
 2. Move the required list to the new names, dropping the old ones in the same call. The previous
    step already emits the new contexts, so they report from the moment they are required.
-3. Land a second matrix change removing the old ends, which nothing requires by then.
+3. Land a second matrix change removing the old ends, which nothing requires by then, carrying the
+   `ruamel.yaml` range edit in `pyproject.toml` itself.
+
+The declared range moves in that last step, never the first, and the ordering is the point rather
+than a tidiness preference. A widening that rides along with step 1 admits a version whose legs
+exist but are not required yet, so a red leg on the newly admitted end would not stop the widening
+from merging, which is the same enforcement gap in a smaller window. Nothing may enter the declared
+range before a required context covers it. The matrix can run ahead of the declaration safely,
+because the job installs its version with `uv pip install` after the locked sync and that install
+does not consult the range.
 
 Re-read the `checks` answer against this table afterwards, and treat a leftover context naming a
 version the matrix no longer builds as the same defect rather than as clutter.
