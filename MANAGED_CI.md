@@ -392,8 +392,8 @@ backlog one grades INFO, and a triage, canceled, or duplicate ticket yields no f
 Two of those five report a real drift on a run that still concludes successfully, so read the
 reported findings rather than the run conclusion.
 
-Two parts of the credential path are checkable now, and the third is not checkable at all until the
-gate has real work:
+All three parts of the credential path are checkable now, though the third takes a command the gate
+itself never runs:
 
 - **The secret is named and placed correctly.** Step 6's first read already proves the environment
   holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second and
@@ -401,16 +401,31 @@ gate has real work:
 - **The wiring is right.** Read the workflow. `environment: doc-lattice-linear` on the job is what
   grants access at all, and the secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final
   step.
-- **The value is the open one**, and it stays open by construction rather than by omission here.
-  `linear` reads `LINEAR_API_KEY` only when a stale-shipped finding gives it an identifier to
-  resolve, and a fresh installation has none: step 5's `reconcile --all` exists to acknowledge the
-  current state, so it is what guarantees there is nothing to collect. No command in this tool
-  exercises the credential unconditionally, so there is nothing you can run at install time that
-  separates a good value from a bad one. Checking the value itself against Linear, outside this
-  tool, is the only thing available in the meantime.
+- **The value takes one deliberate command**, because the gate's own invocation will not tell you.
+  The gate audits, so it collects identifiers only from stale-shipped findings, and step 5's
+  `reconcile --all` exists precisely to leave none. `--from` does not work that way: it asks what a
+  change to a node would affect, and collects identifiers from the downstream nodes in that impact
+  closure whether or not anything has drifted. Name an upstream node something derives from, on the
+  lattice step 5 annotated, and the query happens:
 
-So a wrong or stale value survives installation silently, and closes on the first real drift that
-actually reaches Linear, loudly, with a Linear error and a non-zero exit rather than a silent pass.
+  ```bash
+  doc-lattice linear --from SOME_UPSTREAM_ID
+  ```
+
+  On a fully reconciled lattice with no key, the plain command reports `no stale-shipped findings`
+  and exits 0 while that one exits 2 with `LINEAR_API_KEY is not set`. The difference is the point:
+  only the second reached the client. A working key reports the downstream findings with their
+  ticket states; a wrong one fails with a Linear HTTP error.
+
+  Two cautions on supplying the key to it, both of which this document already applies elsewhere.
+  Put the value in the environment rather than inline in the command, since an inline assignment
+  lands in shell history, which is why `gh secret set` prompts instead. And have the pinned
+  environment resolved before the key is present, so the credential is never exposed to package
+  resolution or a build running under it, which is the separation step 2's install step maintains.
+
+So a wrong or stale value need not survive installation. Skip the check and it does, silently, until
+the first real drift that actually reaches Linear, which fails loudly with a Linear error and a
+non-zero exit rather than passing.
 
 Not every drift reaches Linear, so do not read that as a guarantee attached to the next red run.
 The drifted document has to carry at least one identifier the tool will query: syntactically well
