@@ -6,8 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Migration
+
+Ordinary installs only; managed installs need no artifact change from this release. The workflow
+`doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
+`main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
+and replace the checked-in file, exactly as the ordinary upgrade path in README.md already
+describes. Check the branch the run reports on stderr against the branch you actually gate on
+before committing. Pass `--default-branch` explicitly to make the upgrade reproducible instead of
+dependent on the `origin/HEAD` of whichever checkout you ran it in; a repository already on `main`
+that regenerates from a checkout with a healthy `origin/HEAD` gets a byte-identical workflow.
+Adopters whose default branch is not `main` were previously running a workflow that installed
+cleanly and never triggered, and this is the release that fixes it.
+
 ### Added
 
+- `init` gained `--default-branch NAME`, and the workflow it prints now filters both its `push`
+  and `pull_request` triggers on a resolved branch instead of a hard-wired `main`. Precedence is
+  explicit flag, then the local `origin/HEAD` remote-tracking ref, then `main`, and the run names
+  the branch and its source on stderr so a wrong guess is visible rather than buried in generated
+  YAML. The probe is deliberately best-effort: no remote, no `git`, a directory outside a
+  worktree, a timeout, or an `origin/HEAD` whose target no longer exists all fall back quietly,
+  and ordinary `init` still has no Git requirement. A stale `origin/HEAD` whose target does still
+  exist locally cannot be detected without network access, which is the residual the reported
+  source line and the explicit flag exist to cover. A branch name that is supplied or detected but
+  is not a supported ASCII literal name is rejected with an actionable error rather than rendered,
+  because a GitHub `branches:` filter is a glob pattern and would match `*`, `?`, `[`, `]`, and
+  `!` as patterns. `--default-branch` is rejected outright with `--github`: the managed artifacts
+  stay pinned to the exact `main` branch as a security control, and are unchanged by this release.
+  See the `init` section of README.md.
 - A hand-installable recipe for protected Linear reporting in CI, published in `MANAGED_CI.md`.
   It is the successor to the managed GitHub and Linear setup, and it is complete: the offline
   workflow plain `init` scaffolds, the trusted-main Linear workflow as copyable text, the exact
@@ -241,6 +268,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   any release that changes generated output in shape or behavior, excluding the version-pin and
   ownership-marker substitution every release performs. The 4.1.0 section gained that subsection
   retroactively; it is the release whose printed and managed workflow output changed.
+
+### Security
+
+- Every `git` invocation now resolves to an absolute path outside the directory being operated on.
+  A `PATH` lookup returning a relative result is refused, which covers every relative entry from
+  `.` to any ancestor, and an absolute result resolving inside the invocation directory or the
+  process's own working directory is refused too. Earlier versions ran a bare `git`, which on
+  Windows searches the invoking process's current directory ahead of `PATH`, so a repository
+  carrying its own `git.exe` could have been executed by the `ci` commands and `init --github`.
+  `init` gained the default branch probe in this release, which would have widened that to the
+  ordinary command run in freshly cloned repositories, so it is fixed before it ships. On POSIX
+  the same applies to a relative `PATH` entry. When no trusted `git` is found, the managed
+  commands report it as a
+  missing executable and the `init` probe falls back to `main`, unchanged from any other
+  discovery failure. SECURITY.md's scope states the promise this keeps.
 
 ## [4.1.0] - 2026-08-14
 

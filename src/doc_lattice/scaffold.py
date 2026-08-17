@@ -9,6 +9,7 @@ import io
 from dataclasses import dataclass
 
 from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from .constants import (
     CHECKOUT_USES,
@@ -21,6 +22,17 @@ from .constants import (
 
 DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
 PYTHON_PIN = "3.13"
+
+# ruamel wraps flow sequences at 80 columns by default, which would split a long branch filter
+# across lines and corrupt the hand-assembled workflow text around it.
+_YAML_UNLIMITED_WIDTH = 1 << 30
+
+# ruamel emits under YAML 1.2, where these are plain strings, but GitHub Actions reads workflows
+# under YAML 1.1 boolean resolution -- the same rule that makes a bare `on:` key a boolean there.
+# A branch actually named `on` or `no` would otherwise emit unquoted and be read as a boolean, so
+# these are forced to a quoted scalar. Comparison is lowercased, which is wider than YAML 1.1's
+# three accepted casings; over-quoting an unaffected spelling is harmless.
+_YAML_11_BOOLEAN_WORDS = frozenset({"y", "yes", "n", "no", "true", "false", "on", "off"})
 
 _CONFIG_HEADER = f"# doc-lattice configuration. See {DOC_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/archive/**"\n'
@@ -100,12 +112,42 @@ def render_precommit(version: str) -> str:
     )
 
 
-def render_ci(version: str) -> str:
+def _render_branch_filter(default_branch: str) -> str:
+    """Serialize one branch name as a YAML flow sequence through the emitter.
+
+    The caller validates the name against a strict ASCII domain, but validation and output
+    escaping are independent invariants: the sequence is emitted by ruamel.yaml so a scalar
+    that would need quoting gets it from the library, never from hand-written interpolation.
+
+    Args:
+        default_branch: The branch name to place in the trigger filter.
+
+    Returns:
+        The filter as a single-line YAML flow sequence, for example ``[main]``.
+    """
+    scalar: str | DoubleQuotedScalarString = default_branch
+    if default_branch.lower() in _YAML_11_BOOLEAN_WORDS:
+        scalar = DoubleQuotedScalarString(default_branch)
+    yaml = YAML()
+    yaml.default_flow_style = True
+    yaml.width = _YAML_UNLIMITED_WIDTH
+    buf = io.StringIO()
+    yaml.dump([scalar], buf)
+    return buf.getvalue().strip()
+
+
+def render_ci(version: str, *, default_branch: str) -> str:
     """Render the GitHub Actions workflow that runs doc-lattice check and lint.
 
     Both commands run in one shell step so a check failure does not skip lint. set +e
     disables errexit so both exit codes are captured; the final test fails the step if
     either command failed.
+
+    ``default_branch`` is required and keyword-only so no caller can silently restore a
+    hard-wired ``main``: an adopting repository whose default branch is ``master``, ``trunk``,
+    or ``develop`` would otherwise install a workflow that reads as correct and never triggers.
+    This module stays pure, so the name arrives already resolved and validated by the CLI
+    adapter and nothing is probed here.
 
     Both actions are pinned by commit SHA with a trailing version comment, and the job carries
     the same least-privilege posture as the managed workflows: a read-only ``contents`` token,
@@ -117,13 +159,14 @@ def render_ci(version: str) -> str:
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")
+    branch_filter = _render_branch_filter(default_branch)
     return (
         "name: doc-lattice\n"
         "on:\n"
         "  push:\n"
-        "    branches: [main]\n"
+        f"    branches: {branch_filter}\n"
         "  pull_request:\n"
-        "    branches: [main]\n"
+        f"    branches: {branch_filter}\n"
         "permissions:\n"
         "  contents: read\n"
         "jobs:\n"
@@ -147,13 +190,21 @@ def render_ci(version: str) -> str:
     )
 
 
-def build_scaffold(docs_roots: tuple[str, ...], linear_team: str | None, version: str) -> Scaffold:
+def build_scaffold(
+    docs_roots: tuple[str, ...],
+    linear_team: str | None,
+    version: str,
+    *,
+    default_branch: str,
+) -> Scaffold:
     """Build all four init artifacts from typed inputs.
 
     Args:
         docs_roots: The docs roots for the config's docs_roots list.
         linear_team: The team key to bake in, or None.
         version: The exact PyPI package version the snippets install, for example "1.0.0".
+        default_branch: The already validated branch the workflow's triggers filter on.
+            Required and keyword-only for the reason ``render_ci`` documents.
 
     Returns:
         A Scaffold holding the config text and the three guidance snippets.
@@ -162,5 +213,5 @@ def build_scaffold(docs_roots: tuple[str, ...], linear_team: str | None, version
         config_text=render_config(docs_roots, linear_team),
         gitignore_text=render_gitignore(),
         precommit_text=render_precommit(version),
-        ci_text=render_ci(version),
+        ci_text=render_ci(version, default_branch=default_branch),
     )
