@@ -371,18 +371,30 @@ which breaks the `github.repository` literal while leaving the environment, its 
 secret untouched, and therefore invisible to every other check in this step.
 
 A `success` conclusion does not by itself prove the secret works, and on a fresh installation it
-never does. `linear` collects ticket identifiers from stale-shipped findings, not from every
-`tickets:` annotation in the repository, and it returns before constructing a client when no valid
-identifier remains, never reading `LINEAR_API_KEY` in that case. Step 5 is what guarantees the
-condition here: `reconcile --all` acknowledges the current state, so a just-installed repository
-has no stale edges, no finding carries a ticket reference, and this dispatch passes with the
-secret absent, misnamed, or wrong. Annotating documents does not change that; the annotations are
-read, but only a stale-shipped edge puts one in front of the client.
+never does. One property of the tool explains that and everything else in this section, so it is
+worth stating once rather than rediscovering per command.
+
+**`linear` reads `LINEAR_API_KEY` only when a collectable identifier survives to the client.** An
+identifier is collectable when a node in that run's trigger set carries it under `tickets:`, it is
+syntactically well formed, and it is in the configured team wherever `linear_team` is set. With
+none, the run returns before the client is constructed, never reads the key, and reports nothing.
+A malformed or cross-team reference is refused at the same point, so it grades BLOCKED without
+contacting anyone. Every invocation therefore raises exactly one question: which nodes land in its
+trigger set.
+
+The gate's own invocation audits, so its trigger set is the nodes carrying stale-shipped findings,
+and step 5 is what empties it. `reconcile --all` acknowledges the current state, so a
+just-installed repository has no stale edges and hence no collectable identifier, and this dispatch
+passes with the secret absent, misnamed, or wrong. Annotating documents does not change that: the
+annotations are read, but only a stale-shipped edge puts one in the trigger set.
 
 So treat the first green as proof the gate is installed and running, and not as proof the secret
 resolves. The key is first exercised when a real drift appears, which is also the first time the
-gate has anything to report. A stale-shipped edge with a missing key fails closed with
-`LINEAR_API_KEY is not set` and exit 2.
+gate has anything to report, and a stale-shipped edge with a missing key then fails closed with
+`LINEAR_API_KEY is not set` and exit 2. Not every drift does that. One on a document whose
+identifiers are absent, malformed, or cross-team leaves the trigger set with nothing collectable in
+it and the stored value untested, which is the first green's blind spot arriving later rather than
+a second one.
 
 What a working key produces then depends on the ticket, and only some of it gates the run.
 `--exit-code` exits 1 on a DANGER or BLOCKED finding, and this workflow does not pass
@@ -401,11 +413,10 @@ narrower sense than it first looks:
 - **The wiring is right.** Read the workflow. `environment: doc-lattice-linear` on the job is what
   grants access at all, and the secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final
   step.
-- **A Linear key can be checked, but the check is about your copy rather than GitHub's.** The
-  gate's own invocation will not do it: the gate audits, so it collects identifiers only from
-  stale-shipped findings, and step 5's `reconcile --all` exists precisely to leave none. `--from`
-  does not work that way. It asks what a change to a node would affect and collects identifiers
-  from the downstream nodes in that impact closure, whether or not anything has drifted:
+- **A Linear key can be checked, but the check is about your copy rather than GitHub's.** `--from`
+  builds its trigger set the other way: it asks what a change to a node would affect and takes the
+  downstream nodes of that impact closure, whether or not anything has drifted. Naming a node
+  something derives from therefore populates the trigger set with no drift anywhere in the lattice:
 
   ```bash
   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice linear --from SOME_UPSTREAM_ID
@@ -415,29 +426,19 @@ narrower sense than it first looks:
   findings` and exits 0 while this one exits 2 with `LINEAR_API_KEY is not set`. Only the second
   reached the client, which is what makes it usable at all.
 
-  Three conditions, each of which decides whether the result means anything. At least one node
-  downstream of the one you name has to carry a `tickets:` identifier the tool will actually query,
-  well formed and in the configured team where `linear_team` is set; with none, the run collects
-  nothing, returns before the key is read, and passes while telling you nothing. Export the key
-  beforehand rather than writing it inline, since an inline assignment lands in shell history,
-  which is why `gh secret set` prompts instead; and if you want the separation step 2's install
-  step keeps, run the pinned command once with no key present first, because on a cold cache `uvx`
-  resolves and installs in the same invocation. Most importantly, run it against the value before
-  `gh secret set` stores it. This reads your local `LINEAR_API_KEY`, so once the secret is stored a
-  pass proves only that the value in your hand works, never that GitHub holds the same one.
+  It is the same property, so at least one node in that closure still has to carry a collectable
+  identifier, or the run passes having tested nothing. Two conditions on top of that. Export the
+  key beforehand rather than writing it inline, since an inline assignment lands in shell history,
+  which is why `gh secret set` prompts instead, and run the pinned command once with no key present
+  first if you want the separation step 2's install step keeps, because on a cold cache `uvx`
+  resolves and installs in the same invocation. Then run it against the value before `gh secret
+  set` stores it: this reads your local `LINEAR_API_KEY`, so once the secret is stored a pass
+  proves only that the value in your hand works, never that GitHub holds the same one.
 
 That last gap is the residual, and this recipe's own ordering leaves it open: step 4 stores the
 secret before step 5 annotates the lattice this check needs. A wrong or stale stored value
-therefore survives installation silently, and closes on the first real drift that actually reaches
-Linear, loudly, with a Linear error and a non-zero exit rather than a pass.
-
-Not every drift reaches Linear, so do not read that as a guarantee attached to the next red run.
-The drifted document has to carry at least one identifier the tool will query: syntactically well
-formed, and in the configured team where `linear_team` is set. A drift on a document with no
-`tickets:` at all collects nothing and returns before the key is read, and one carrying only
-malformed or cross-team references is refused before the client is constructed and graded BLOCKED
-without contacting anyone. Both leave the stored value untested, which is the same blind spot as the
-first green arriving later rather than a different one.
+therefore survives installation silently, and closes on the first real drift that reaches the
+client, loudly, with a Linear error and a non-zero exit rather than a pass.
 
 Do not manufacture drift on `main` to force that confirmation earlier. Both outcomes are bad, and
 which one you get depends on setup you may not have checked. Step 1's pre-commit block runs
