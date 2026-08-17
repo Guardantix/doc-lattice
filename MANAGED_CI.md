@@ -427,13 +427,21 @@ narrower sense than it first looks:
   reached the client, which is what makes it usable at all.
 
   It is the same property, so at least one node in that closure still has to carry a collectable
-  identifier, or the run passes having tested nothing. Two conditions on top of that. Export the
-  key beforehand rather than writing it inline, since an inline assignment lands in shell history,
-  which is why `gh secret set` prompts instead, and run the pinned command once with no key present
-  first if you want the separation step 2's install step keeps, because on a cold cache `uvx`
-  resolves and installs in the same invocation. Then run it against the value before `gh secret
-  set` stores it: this reads your local `LINEAR_API_KEY`, so once the secret is stored a pass
-  proves only that the value in your hand works, never that GitHub holds the same one.
+  identifier, or the run passes having tested nothing. Three conditions on top of that.
+
+  The value must never appear in a command you type. `export LINEAR_API_KEY=...` is no safer than
+  writing the assignment inline on the command itself, because shell history keeps the whole line
+  either way, and that is the same reason `gh secret set` prompts rather than accepting an
+  argument. Read it from a prompt or a secret manager into the environment instead, and clear it
+  once the check is done, since an exported value otherwise reaches every later command in that
+  shell.
+
+  Run the pinned command once with no key present first if you want the separation step 2's install
+  step keeps, because on a cold cache `uvx` resolves and installs in the same invocation.
+
+  And run the check against the value before `gh secret set` stores it. It reads your local
+  `LINEAR_API_KEY`, so once the secret is stored a pass proves only that the value in your hand
+  works, never that GitHub holds the same one.
 
 That last gap is the residual, and this recipe's own ordering leaves it open: step 4 stores the
 secret before step 5 annotates the lattice this check needs. A wrong or stale stored value
