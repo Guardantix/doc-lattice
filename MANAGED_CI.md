@@ -401,9 +401,12 @@ worth stating once rather than rediscovering per command.
 identifier is collectable when a node in that run's trigger set carries it under `tickets:`, it is
 syntactically well formed, and it is in the configured team wherever `linear_team` is set. With no
 identifier at all, the run returns before the client is constructed, never reads the key, and
-reports nothing. A malformed or cross-team reference stops at the same point and never reaches the
-key either, but it is not silent: it grades BLOCKED without contacting anyone. Every invocation
-therefore raises exactly one question: which nodes land in its trigger set.
+reports nothing. A malformed or cross-team reference is refused on its own rather than stopping the
+run: the identifiers are partitioned, and the run returns before the client only when nothing valid
+survives. Reject every reference in the trigger set and the key is never read; leave one valid
+identifier beside them and the client is built and the key is read for it. Either way the refused
+reference grades BLOCKED without being queried, so it is never silent. Every invocation therefore
+raises exactly one question: which nodes land in its trigger set.
 
 The gate's own invocation audits, so its trigger set is the nodes carrying stale-shipped findings,
 and step 5 is what empties it. `reconcile --all` acknowledges the current state, so a
@@ -416,9 +419,11 @@ resolves. The key is first exercised when a real drift appears, which is also th
 gate has anything to report, and a stale-shipped edge with a missing key then fails closed with
 `LINEAR_API_KEY is not set` and exit 2. Not every drift does that. One on a document carrying no
 identifier at all leaves the trigger set with nothing collectable in it and the stored value
-untested, which is the first green's blind spot arriving later rather than a second one. A
-malformed or cross-team identifier leaves the value untested too, but loudly: it grades BLOCKED, so
-`--exit-code` fails that run and names the reference it refused.
+untested, which is the first green's blind spot arriving later rather than a second one. A drift
+whose identifiers are all malformed or cross-team leaves the value untested too, but loudly: they
+grade BLOCKED without being queried, so `--exit-code` fails that run and names what it refused. One
+valid identifier beside them is enough to reach the client, and that run both tests the stored
+value and reports the refusal.
 
 What a working key produces then depends on the ticket, and only some of it gates the run.
 `--exit-code` exits 1 on a DANGER or BLOCKED finding, and this workflow does not pass
