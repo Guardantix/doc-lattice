@@ -26,7 +26,14 @@ from .helpers import _run, runner
 # Rich wraps console output to the terminal width, so any assertion against rendered text has to
 # pin that width or it moves with whatever the surrounding environment happens to set. Shared by
 # the help-text tests and by the literal invocation-output expectations further down.
-_WIDE_CONSOLE_ENV = {"NO_COLOR": "1", "COLUMNS": "1000"}
+#
+# `TERM` is pinned alongside `COLUMNS` because Rich reports a hard 80x25 for a console it considers
+# a dumb terminal, ignoring `COLUMNS` entirely, and "dumb" or "unknown" is what non-interactive
+# shells commonly export. That path needs the console to also look like a terminal, which typer
+# decides once: `typer.rich_utils` freezes `FORCE_TERMINAL` from `FORCE_COLOR` and friends at
+# import, and the import happens on whichever test first renders rich help. So without this pin the
+# width these assertions depend on is a function of ambient `TERM` and test execution order.
+_WIDE_CONSOLE_ENV = {"NO_COLOR": "1", "COLUMNS": "1000", "TERM": "xterm-256color"}
 
 
 def test_cli_imports_when_fcntl_is_unavailable():
@@ -338,6 +345,23 @@ def test_global_help_lists_ci():
     assert "ci" in output
     assert "Deprecated, removed in 5.0" in output
     assert "audit or refresh managed GitHub CI artifacts" in output
+
+
+def test_wide_console_env_actually_widens_the_console():
+    """The pinned width has to hold whatever the ambient environment and test order are.
+
+    Every assertion against rendered text in this module rests on ``_WIDE_CONSOLE_ENV`` producing
+    a console wider than Rich's 80-column fallback. That fallback is reachable in more ways than a
+    missing ``COLUMNS``: a console Rich considers a dumb terminal reports a hard 80x25 and ignores
+    ``COLUMNS`` outright. Asserting the width directly fails here, once, instead of surfacing as a
+    fragment assertion that splits somewhere further down the file.
+    """
+    result = runner.invoke(app, ["--help"], env=_WIDE_CONSOLE_ENV)
+    assert result.exit_code == 0
+    output = Text.from_ansi(result.stdout).plain
+    widest = max((len(line) for line in output.splitlines()), default=0)
+
+    assert widest > 80, f"console fell back to its narrow default; widest line was {widest}"
 
 
 def test_ci_help_lists_audit_and_refresh():
