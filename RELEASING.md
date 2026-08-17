@@ -421,13 +421,28 @@ Read every answer against what this document claims rather than against the abse
 | `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false. A second `branch_policy` entry with no reviewers is normal and carries nothing |
 | `branch_policy` | `custom_branch_policies` true, `protected_branches` false, and the policy list exactly one entry, name `main` and type `branch` |
 | `can_admins_bypass` | `true`, the administrator bypass described under "Who can release" |
-| `checks` and `strict` | `strict` true, and `checks` exactly `Security scan`, `Tests (3.13)`, `Tests (3.14)`, `Code quality (3.13)`, `Code quality (3.14)` |
+| `checks` and `strict` | `strict` true, and `checks` exactly `Security scan`, `Tests (3.13)`, `Tests (3.14)`, `Code quality (3.13)`, `Code quality (3.14)`, `YAML parser compatibility (0.18.0, false)`, `YAML parser compatibility (0.18.0, true)`, `YAML parser compatibility (0.19.*, false)`, `YAML parser compatibility (0.19.*, true)` |
 | `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
 
 The `checks` row names its contexts because "every required check is present" is not a testable
 claim: any non-empty list satisfies it, including one a dropped context has already shortened.
-Compare the names. Note that `yaml-compatibility` gates the `release` job but is not a required
-check, so it can fail without blocking a merge.
+Compare the names.
+
+Eight of the nine are generated rather than written. GitHub builds a matrix job's context name from
+its matrix values, so `Tests` and `Code quality` carry the supported Python versions, and
+`yaml-compatibility` carries the ends of the `ruamel.yaml` range that AD-26 in
+[ARCHITECTURE.md](ARCHITECTURE.md) bounds, spelled `0.18.0` and `0.19.*`. Only `Security scan` is a
+fixed name. Each of those matrices is a second place a required-check name lives, so a matrix change
+in [.github/workflows/ci.yml](.github/workflows/ci.yml) and this rule have to move together. The
+invariant is set equality: the required list names exactly the contexts that `code-quality`,
+`security-scan`, `tests`, and `yaml-compatibility` emit. Both directions bite. A name required but
+not emitted is not a check that goes red, it is every pull request waiting on a report which never
+arrives; a name emitted but not required is the gap this issue closed. A change that renames a
+context therefore has to land on both sides, and dropping one from the list is a loosening even
+when the job it came from still runs. The remaining constraint is that `pyproject.toml` must never
+admit a version before a required context covers it, which is what decides the order the edits land
+in. Re-read the `checks` answer against this table after any matrix change, and treat a leftover
+context naming a value the matrix no longer builds as the same defect rather than as clutter.
 
 `can_admins_bypass`, `reviews`, and `admins` are the rows whose expected values are the weaker
 settings. They record what is true today, not what is desirable. If any of them ever reads the
