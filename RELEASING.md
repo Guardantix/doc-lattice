@@ -421,13 +421,23 @@ Read every answer against what this document claims rather than against the abse
 | `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false. A second `branch_policy` entry with no reviewers is normal and carries nothing |
 | `branch_policy` | `custom_branch_policies` true, `protected_branches` false, and the policy list exactly one entry, name `main` and type `branch` |
 | `can_admins_bypass` | `true`, the administrator bypass described under "Who can release" |
-| `checks` and `strict` | `strict` true, and `checks` exactly `Security scan`, `Tests (3.13)`, `Tests (3.14)`, `Code quality (3.13)`, `Code quality (3.14)` |
+| `checks` and `strict` | `strict` true, and `checks` exactly `Security scan`, `Tests (3.13)`, `Tests (3.14)`, `Code quality (3.13)`, `Code quality (3.14)`, `YAML parser compatibility (0.18.0, false)`, `YAML parser compatibility (0.18.0, true)`, `YAML parser compatibility (0.19.*, false)`, `YAML parser compatibility (0.19.*, true)` |
 | `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
 
 The `checks` row names its contexts because "every required check is present" is not a testable
 claim: any non-empty list satisfies it, including one a dropped context has already shortened.
-Compare the names. Note that `yaml-compatibility` gates the `release` job but is not a required
-check, so it can fail without blocking a merge.
+Compare the names.
+
+Four of them are generated rather than written. `yaml-compatibility` is a matrix job and GitHub
+builds each context name from the matrix values, so the ends of the `ruamel.yaml` range that
+AD-26 in [ARCHITECTURE.md](ARCHITECTURE.md) bounds appear in the required-check list literally,
+as `0.18.0` and `0.19.*`. That couples two settings kept in different places, and the failure it
+produces is not a check that goes red: a required context nothing emits leaves every pull request
+waiting on a report that never arrives. Sequence a range change so the rule is never ahead of the
+workflow. Drop the affected contexts from the required list first, land the matrix change in
+[.github/workflows/ci.yml](.github/workflows/ci.yml), then require the new names once a run has
+emitted them. Re-read the `checks` answer against this table afterwards, and treat a leftover
+context naming a version the matrix no longer builds as the same defect rather than as clutter.
 
 `can_admins_bypass`, `reviews`, and `admins` are the rows whose expected values are the weaker
 settings. They record what is true today, not what is desirable. If any of them ever reads the
