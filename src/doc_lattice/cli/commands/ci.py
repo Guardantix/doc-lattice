@@ -46,7 +46,10 @@ def register_ci(app: typer.Typer) -> None:
     app.add_typer(
         ci_app,
         name="ci",
-        help="Audit or refresh managed GitHub CI artifacts.",
+        help=(
+            "Deprecated, removed in 5.0: audit or refresh managed GitHub CI artifacts. "
+            "MANAGED_CI.md carries the hand-installable recipe that replaces them."
+        ),
     )
 
     @ci_app.command()
@@ -60,7 +63,11 @@ def register_ci(app: typer.Typer) -> None:
             ),
         ] = None,
     ) -> None:
-        """Audit repository workflows and the managed GitHub CI installation."""
+        """Audit repository workflows and the managed GitHub CI installation.
+
+        Deprecated, removed in 5.0. MANAGED_CI.md carries the hand-installable recipe that
+        replaces the managed setup, including the manual review this audit performed.
+        """
         runtime = get_runtime(ctx)
         exit_code = 0
         with exit_on_project_error(runtime):
@@ -96,7 +103,11 @@ def register_ci(app: typer.Typer) -> None:
             ),
         ] = False,
     ) -> None:
-        """Preview or interactively apply a managed GitHub CI artifact refresh."""
+        """Preview or interactively apply a managed GitHub CI artifact refresh.
+
+        Deprecated, removed in 5.0. MANAGED_CI.md carries the hand-installable recipe that
+        replaces the managed setup, and its whole-block upgrade procedure.
+        """
         runtime = get_runtime(ctx)
         exit_code = 0
         with exit_on_project_error(runtime):

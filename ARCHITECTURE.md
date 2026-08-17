@@ -416,7 +416,10 @@ ownership metadata rather than byte equality, plus the exact effective bootstrap
 while managed refresh owns byte-level comparison and replacement. None of the local checks can
 observe GitHub environment or organization-policy drift, so the bootstrap verifier remains
 necessary. Workflow and branch governance for trusted `main` remains the residual authorization
-boundary.
+boundary. AD-32 retires the generator side of this record: the environment boundary, its `main`-only
+allow list, and final-step-only secret mapping are unchanged and are now reached by the
+hand-installable recipe MANAGED_CI.md publishes, while the rendering, auditing, and refreshing
+described above are deprecated in 4.x and removed in 5.0.
 
 ### AD-17 through AD-23: Shell scanner decision history (removed)
 
@@ -920,3 +923,44 @@ as unsupported, or this record silently stops being the declared subset. If dete
 of out-of-subset input is ever wanted, that is separate work rather than part of this decision.
 RECONCILE.md keeps the user-facing operational consequences and links here for the normative
 matrix.
+
+### AD-32: The managed GitHub CI product retires to a documented recipe
+
+**Date:** 2026-08-16
+**Status:** Accepted
+**Context:** AD-16 established `doc_lattice.github_ci` to render, audit, and refresh four
+create-only artifacts around an external `gh` bootstrap, so a protected Linear gate could be
+installed without this package ever holding GitHub administration credentials. The boundary that
+design rests on is the GitHub environment, not the generator that produces files around it. After
+the shell scanner left under AD-25, a generator, an offline auditor, a byte-level refresher, and a
+bootstrap script remained in service of a product with zero installations, and the check and lint
+half of what it produced is already what plain `init` scaffolds.
+**Decision:** The managed product retires to a hand-installable recipe published in MANAGED_CI.md,
+in two stages. GTX-109 publishes the recipe and deprecates `init --github`, `ci audit`, and
+`ci refresh` in 4.x. GTX-163 removes those commands and the `github_ci` package in 5.0.
+
+The recipe supplies the trusted Linear workflow as copyable text, because plain `init` does not
+print it, together with the `gh` sequence that creates the `main`-only environment and its
+dedicated secret. It keeps the boundary exactly: the environment allow list, the dedicated
+`DOC_LATTICE_LINEAR_API_KEY`, final-step-only mapping onto `LINEAR_API_KEY`, the trusted job's
+repository, ref, and event guards, the pinned actions, and the least-privilege token. It drops the
+machinery that watched that boundary: repository-wide audit, drift detection, byte-level refresh,
+the scripted remote readback, the ownership markers, and the script's guarded, resumable setup.
+
+The 4.x deprecation is help text and documentation only. Invocation stdout, stderr, and exit codes
+are unchanged, for the reason AD-10 records: a stderr warning cannot be made compatibility-safe for
+a script that already parses those channels.
+
+Keeping the product was rejected because no installation justified maintaining four subsystems for
+a boundary a documented procedure reaches directly. Removing the commands outright in 4.x was
+rejected because they are a published CLI contract. Publishing the recipe without deprecating them
+was rejected because it would leave two supported paths to the same boundary, one unmaintained.
+**Consequences:** The published workflow becomes security-sensitive project output rather than an
+internal template, so SECURITY.md names it in scope and `tests/test_managed_ci_recipe.py` holds its
+trigger set, guards, environment binding, secret mapping, and action pins. Those structural checks
+are written to outlive the renderer they currently cross-check against. An installed managed setup
+does not break when 5.0 ships: it keeps running the exact 4.x version its workflows pin, and
+pinning it forward is what fails, because the managed offline workflow runs `ci audit`. Conversion
+changes no remote state and is a local file-ownership change, which MANAGED_CI.md owns. Removing
+the commands in 5.0 is a breaking change to a published CLI surface and therefore a major version.
+AD-16's environment boundary survives this record intact; only its generator side retires.
