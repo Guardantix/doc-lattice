@@ -320,8 +320,9 @@ precondition buys you and what the step does not promise are owned by
 [RECONCILE.md](RECONCILE.md).
 
 Enabling the gates is not initial-adoption-only, and it belongs here rather than in step 1. Step 1
-left the pasted pre-commit block inert. Activate it now, once the baseline is in hand and before
-you commit the reconcile diff:
+left the pasted pre-commit block inert. Activate it once the baseline is in hand and `check` and
+`lint` both come back clean, and before you commit the reconcile diff. A BROKEN edge survives the
+baseline and still exits 1, so activating with one outstanding blocks that commit:
 
 ```bash
 uv tool install pre-commit
@@ -757,24 +758,26 @@ Run this human-maintainer sequence from reviewed, trusted project state:
      --github --repository OWNER/REPO
    ```
 
-2. Establish the reconcile baseline, on an initial adoption only.
+2. Establish the reconcile baseline, then enable the gates.
 
-   Annotate your documents, then run this once in the same reviewed change, before the generated
-   workflows reach `main` and the gates begin running. Commit the annotated input state first and
-   run from an otherwise clean working tree, so the reconcile-only diff stays reviewable and
-   revertible:
+   The baseline is for an initial adoption only. Annotate your documents, then run this once in
+   the same reviewed change, before the generated workflows reach `main` and the gates begin
+   running. Commit the annotated input state first and run from an otherwise clean working tree,
+   so the reconcile-only diff stays reviewable and revertible:
 
    ```bash
    uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
    ```
 
-   An installation migrated per `## Migrating an existing installation` above skips this step.
-   When this step applies, what the clean-tree precondition buys you, and what the step does not
+   An installation migrated per `## Migrating an existing installation` above skips the baseline.
+   When it applies, what the clean-tree precondition buys you, and what the baseline does not
    promise are owned by [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the
    selector semantics are owned by [RECONCILE.md](RECONCILE.md).
 
-   Enable the gates here too, after the baseline and before you commit its diff. The pre-commit
-   block this setup prints is inert until activated, exactly as in the recipe;
+   Enabling the gates is not initial-adoption-only, so do it whether or not the baseline applied.
+   The pre-commit block this setup prints is inert until activated, exactly as in the recipe. An
+   initial adoption activates after the baseline, once `check` and `lint` come back clean, and
+   before committing the reconcile diff; a migrated installation activates immediately.
    [README.md](README.md#enabling-the-gates) owns the commands and both orders.
 
 3. Inspect the remote repository, plan eligibility, environment, and visible secret names.

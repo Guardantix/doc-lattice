@@ -588,8 +588,12 @@ baseline depends on. The order is:
 1. Paste the three blocks and commit them with the annotated input. The gates are inert, so this
    commit is not gated.
 2. Run `doc-lattice reconcile --all`.
-3. Enable the gates with the two commands above.
-4. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
+3. Run `check` and `lint`, and resolve whatever they still report. The baseline clears STALE and
+   UNRECONCILED edges and nothing else: `reconcile` skips BROKEN edges by design, `check` exits 1
+   on them all the same, and neither command touches a lint finding. Anything left standing here
+   is what the gate refuses in step 5.
+4. Enable the gates with the two commands above.
+5. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
    confirm activation worked.
 
 **An established installation enables them immediately.** A conversion, or any repository that
