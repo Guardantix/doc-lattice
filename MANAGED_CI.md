@@ -49,7 +49,7 @@ Run every step from reviewed, trusted project state, and land the whole setup as
 change.
 
 Push once, after step 5 and before step 6, and push step 5's own output with it. Steps 1, 2 and 5
-only change files in your working tree, steps 3 and 4 only change GitHub, and step 6 is the first
+only change local state, steps 3 and 4 only change GitHub, and step 6 is the first
 step that needs the workflows to exist on `main`, so the single push belongs between them.
 
 Step 5 deliberately stops with its reconcile diff uncommitted, so that diff stays reviewable on its
@@ -101,6 +101,12 @@ blocks: the `.gitignore` lines, the pre-commit hooks, and the offline workflow. 
 Save the printed workflow as `.github/workflows/doc-lattice.yml`, and follow
 [README.md](README.md#ordinary-offline-setup) for the other two. The `.gitignore` block is needed
 before step 5, which runs `reconcile` and writes the artifacts that block covers.
+
+Installing the pre-commit block means pasting it into `.pre-commit-config.yaml`, which leaves it
+inert: no Git hook is written, and nothing runs on commit yet. Enabling the gates is a separate
+act, and on an initial adoption it belongs in step 5 rather than here, because activating now
+would block the commit that step depends on. A conversion has no such constraint and enables them
+immediately. [README.md](README.md#enabling-the-gates) owns both orders and the commands.
 
 Do pass `--default-branch main`, and read the branch back off stderr: the run prints `workflow
 triggers on branch main (--default-branch)`. Without the flag `init` takes the trigger branch from
@@ -297,20 +303,35 @@ Repository administrators cannot always inspect organization secret visibility, 
 organization-owner confirmation that neither name is exposed to this repository, or have the owner
 remove or exclude it.
 
-### 5. Establish the reconcile baseline, on an initial adoption only
+### 5. Establish the reconcile baseline and enable the gates
 
-Annotate your documents, then run this once in the same reviewed change, before the workflows
-reach `main` and the gates begin running. Commit the annotated input state first and run from an
-otherwise clean working tree, so the reconcile-only diff stays reviewable and revertible:
+The baseline is for an initial adoption only. Annotate your documents, then run this once in the
+same reviewed change, before the workflows reach `main` and the gates begin running. Commit the
+annotated input state first and run from an otherwise clean working tree, so the reconcile-only
+diff stays reviewable and revertible:
 
 ```bash
 uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
 ```
 
-A conversion from an existing installation skips this step. When it applies, what the clean-tree
+A conversion from an existing installation skips the baseline. When it applies, what the clean-tree
 precondition buys you and what the step does not promise are owned by
 [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the selector semantics are owned by
 [RECONCILE.md](RECONCILE.md).
+
+Enabling the gates is not initial-adoption-only, and it belongs here rather than in step 1. Step 1
+left the pasted pre-commit block inert. Activate it now, once the baseline is in hand and before
+you commit the reconcile diff:
+
+```bash
+uv tool install pre-commit
+uv tool run pre-commit install
+```
+
+Committing that diff is then the first gated commit, and both hooks running on it is what shows
+the activation took. [README.md](README.md#enabling-the-gates) owns why this pair rather than
+`uvx pre-commit install`, what an established installation does instead, and why a commit that
+stages no Markdown does not confirm anything.
 
 ### 6. Verify by hand
 
@@ -528,7 +549,9 @@ check.
 Do not reach for that activation mid-adoption to close the gap, either. `check` exits 1 on
 unreconciled edges as well as stale ones, and an initial adoption commits exactly those: step 5
 has you commit the annotated input before `reconcile --all` acknowledges it. Activating the hooks
-before that baseline lands therefore blocks the commit step 5 depends on.
+before that baseline lands therefore blocks the commit step 5 depends on. Step 5 activates them at
+the one point in the sequence where that constraint has lifted; see
+[README.md](README.md#enabling-the-gates) for the commands and the established-installation case.
 
 Planting drift also means planting a `tickets:` reference for it to grade, and an annotation added
 for a test outlives the test and misattributes the next real finding on that document.
@@ -632,8 +655,13 @@ The local files then change ownership from the tool to you, in one reviewed chan
    Delete the file outright if it holds only those five lines. If your repository added rules of
    its own, delete the rule line and the four marker lines and keep the rest.
 5. Stop running `ci audit` and `ci refresh`, and adopt the manual review in step 6 in their place.
+6. Enable the gates if this installation never did. The managed setup printed the same pre-commit
+   block as guidance, so it may have been pasted at install time and never activated, in which
+   case no local commit has ever been gated. Activate immediately: a conversion has an established
+   baseline, so the ordering constraint that applies to a first adoption does not apply here. See
+   [README.md](README.md#enabling-the-gates).
 
-Run the step 6 verification once more when the change lands.
+Run the [step 6](#6-verify-by-hand) verification once more when the change lands.
 
 ## What the managed setup installs
 
@@ -744,6 +772,10 @@ Run this human-maintainer sequence from reviewed, trusted project state:
    When this step applies, what the clean-tree precondition buys you, and what the step does not
    promise are owned by [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the
    selector semantics are owned by [RECONCILE.md](RECONCILE.md).
+
+   Enable the gates here too, after the baseline and before you commit its diff. The pre-commit
+   block this setup prints is inert until activated, exactly as in the recipe;
+   [README.md](README.md#enabling-the-gates) owns the commands and both orders.
 
 3. Inspect the remote repository, plan eligibility, environment, and visible secret names.
 

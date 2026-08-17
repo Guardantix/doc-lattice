@@ -473,7 +473,8 @@ ignored: it does not change command results or exit codes.
 ## Adopting doc-lattice in your docs repo
 
 Both setups below share one rule. For an initial adoption with no established baseline, annotate
-your documents, then run `doc-lattice reconcile --all` once before enabling the gates:
+your documents, then run `doc-lattice reconcile --all` once before
+[enabling the gates](#enabling-the-gates):
 
 ```bash
 uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
@@ -507,7 +508,10 @@ This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-
 `.gitignore` block (see [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)),
 pre-commit hooks, and a GitHub Actions workflow that run `doc-lattice check` (drift) and
 `doc-lattice lint` (authority ladder) as your gates. Paste each
-where the output says. `init` only prints `.gitignore` guidance and never modifies that file. Pass
+where the output says. Pasting the pre-commit block installs no Git hook, so those two hooks stay
+inert until you [enable the gates](#enabling-the-gates), which is a separate step with an ordering
+constraint on a first adoption. `init` only prints `.gitignore` guidance and never modifies that
+file. Pass
 `--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
@@ -545,6 +549,61 @@ control, not as an unparameterized template; see
 To test an unreleased commit, replace the PyPI requirement with a Git source such as
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should
 keep the exact PyPI version pin.
+
+### Enabling the gates
+
+Pasting the pre-commit block installs no Git hook. It adds two hook definitions to
+`.pre-commit-config.yaml`, and nothing reads that file on commit until pre-commit has written
+`.git/hooks/pre-commit` in your repository. Until it has, the gates exist in CI only, and every
+local commit succeeds regardless of drift, including the one that introduces it. Enabling them is
+a separate, explicit act, and nothing earlier in this setup path performs it or provides the
+`pre-commit` runner it needs, because the path requires only `uv`:
+
+```bash
+uv tool install pre-commit
+uv tool run pre-commit install
+```
+
+`uv tool install` puts the runner in a persistent environment. `uv tool run` then invokes it
+without needing uv's tool bin directory on `PATH`, which in a fresh shell it often is not; uv
+warns when that applies. If the machine already has a durable `pre-commit` from another installer,
+plain `pre-commit install` does the same job, and there is no reason to force a uv tool
+installation over it.
+
+Prefer that pair over `uvx pre-commit install`. Pre-commit records the absolute path of the
+interpreter that installed the hook and runs it first, falling back to a `pre-commit` on `PATH`
+only when that path is gone. Installed through `uvx`, the recorded interpreter lives in uv's
+disposable cache, which uv is free to reclaim. On a machine whose only Python tooling is `uv`
+there is then no fallback either, and the hook fails closed: it exits 1 with a `pre-commit` not
+found error and blocks every commit until it is reinstalled. The hook records a path rather than
+resolving one each time, so re-run the install command after anything that moves or rebuilds the
+environment behind it, including renaming a parent directory.
+
+**On an initial adoption, enable them after the reconcile baseline**, not while pasting the
+blocks. `check` exits 1 on unreconciled edges as well as stale ones, and an initial adoption
+commits exactly that state, because the baseline above has you commit the annotated input before
+`reconcile --all` acknowledges it. Gates enabled during setup therefore refuse the very commit the
+baseline depends on. The order is:
+
+1. Paste the three blocks and commit them with the annotated input. The gates are inert, so this
+   commit is not gated.
+2. Run `doc-lattice reconcile --all`.
+3. Enable the gates with the two commands above.
+4. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
+   confirm activation worked.
+
+**An established installation enables them immediately.** A conversion, or any repository that
+already has a baseline, skips the reconcile step and with it the ordering constraint, so run the
+two commands as soon as you find the gates off.
+
+Confirm activation with a commit that stages at least one Markdown file. Both generated hook
+entries carry `files: \.md$`, so an empty or non-Markdown commit runs pre-commit and reports both
+doc-lattice hooks as `Skipped`. That looks like a working gate and proves nothing about it.
+
+The hook entries run `uvx --python 3.13 --from doc-lattice==4.1.0`, so the pinned release has to
+resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
+These gates are offline in the sense that matters for secrets, meaning they never require or
+receive `LINEAR_API_KEY`. That is not the same as running without a network.
 
 ### Protected Linear setup in CI
 
@@ -592,6 +651,10 @@ uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init
 Replace your whole block with the printed one instead of hand-editing the pinned version in its
 two `entry:` lines. The block carries generated structure beyond those two commands, so bumping
 only the pins silently keeps an outdated hook shape.
+
+Replacing the block does not need reactivation, because the installed hook reads
+`.pre-commit-config.yaml` on every commit rather than baking it in. An installation that never
+activated in the first place still has to; see [Enabling the gates](#enabling-the-gates).
 
 Run this from the directory that holds your existing `.doc-lattice.yml`, normally the repository
 root. Plain `init` resolves that file against the current directory rather than the Git root, so
