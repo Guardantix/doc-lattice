@@ -384,26 +384,31 @@ backlog one grades INFO, and a triage, canceled, or duplicate ticket yields no f
 Two of those five report a real drift on a run that still concludes successfully, so read the
 reported findings rather than the run conclusion.
 
-To confirm the credential at install time instead of waiting for a real drift, choose the test
-ticket deliberately. It has to resolve, so a live issue in a team the configuration permits, and it
-has to be in a state the table above grades: completed, started, unstarted, or backlog. Each half
-guards against a different false result. A malformed or cross-team identifier is refused before the
-client is constructed, yet still grades BLOCKED and still exits 1 with no key present, so a failing
-run on one of those confirms nothing. A triage, canceled, or duplicate ticket is the opposite trap:
-it resolves, but the grading skips it and prints no line at all, so a working key looks exactly
-like a broken one.
+You can confirm every part of the credential path except one without waiting, and without
+manufacturing drift to force the gate's hand. Take them separately, because each is checkable on its
+own:
 
-Annotate a document with that identifier, strand its `seen:` hash by editing the section it derives
-from, then commit and push both to `main`. The push is what makes the test real: the job checks out
-the repository at the ref it runs on, so an edit sitting in your working tree is invisible to it and
-the gate reads the reconciled content already on `main`. Pushing also triggers the gate by itself,
-so read that run rather than dispatching a second one on top of it.
+- **The key works.** Test the value before you store it, not after. Set `LINEAR_API_KEY` to it
+  locally and run `doc-lattice linear` against a lattice that has a stale shipped edge. A good key
+  reports the finding with the ticket's state; a bad one fails with a Linear HTTP error.
+- **The secret is named and placed correctly.** Step 6's first read already proves the environment
+  holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second and
+  third prove no copy sits at a broader scope.
+- **The wiring is right.** Read the workflow. `environment: doc-lattice-linear` on the job is what
+  grants access at all, and the secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final
+  step.
 
-The reported line must name the ticket's state in brackets, as in `GTX-1 [Done]`. Only a completed
-query can print that. A line ending in a parenthesized reason instead is a BLOCKED finding, and on
-a rejected reference that never reached the network. Afterwards restore the section, rerun
-`reconcile`, and push that too, or `main` keeps the drift you planted and every later run reports
-it.
+What none of that establishes is that the value stored in GitHub is the value you tested, which is a
+paste error and nothing else. That one closes on the first real drift, and it closes loudly: a
+stale-shipped edge with a missing or wrong key fails the run with a Linear error and a non-zero
+exit, never a silent pass.
+
+Do not manufacture drift on `main` to force that confirmation earlier. The pre-commit hook step 1
+installs runs `doc-lattice check`, which exits 1 on a stranded `seen:` hash, so this recipe's own
+tooling refuses the commit; where the offline workflow is a required check, the same drift cannot
+merge either. Planting drift also means planting a `tickets:` reference for it to grade, and an
+annotation added for a test outlives the test and misattributes the next real finding on that
+document.
 
 Review the rest by reading, because no command checks it:
 
