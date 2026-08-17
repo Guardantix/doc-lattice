@@ -53,9 +53,16 @@ tree, steps 3 and 4 only change GitHub, and step 6 is the first step that needs 
 exist on `main`, so the single push belongs between them. Do not push earlier to watch it work.
 This workflow triggers on every push to `main`, so the push that lands it is also the gate's first
 run, and everything that run depends on, the environment, its branch policy, and its secret, is
-created by steps 3 and 4. Push before those and the first run answers for a setup that is not the
-one this document describes, while step 3's own precondition then stops you on a
-`doc-lattice-linear` environment whose existence you have to account for.
+created by steps 3 and 4.
+
+Push before those and GitHub creates the environment for you, the moment the run starts, because
+the job names one. It arrives carrying no deployment branch policy and no protection rules at all,
+which is the `NO-BRANCH-POLICY` state step 3's readback calls out as the least protected an
+environment can be, under exactly the name this design depends on, and nothing warns you. Step 3's
+existence precondition then stops you on an environment you created yourself, so a check written to
+catch somebody else's environment has been spent on your own. If that has already happened, the
+environment is yours and step 3's create call rewrites its policy, so carry on from step 3 and
+confirm both readbacks before going anywhere near the secret.
 
 ### 1. Scaffold the config and the offline workflow
 
