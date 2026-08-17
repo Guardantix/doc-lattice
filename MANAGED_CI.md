@@ -445,8 +445,21 @@ narrower sense than it first looks:
   once the check is done, since an exported value otherwise reaches every later command in that
   shell.
 
-  Run the pinned command once with no key present first if you want the separation step 2's install
-  step keeps, because on a cold cache `uvx` resolves and installs in the same invocation.
+  Install before you supply it, if you want the separation step 2's install step keeps. `uvx`
+  resolves and installs in the same invocation, so whatever the environment holds is held while it
+  does. Priming its cache with a keyless run first does not settle that, because `uv tool run`
+  installs into an ephemeral environment in the uv cache and nothing holds that cache between two
+  invocations, so a prune or an eviction puts the install back inside the keyed run. Build the
+  environment yourself instead, with the two commands step 2's install step already runs:
+
+  ```bash
+  venv="$(mktemp -d)/venv"
+  uv venv --python 3.13 "$venv"
+  uv pip install --python "$venv/bin/python" doc-lattice==4.1.0
+  ```
+
+  Then supply the key and run `"$venv/bin/doc-lattice" linear --from SOME_UPSTREAM_ID`, which is
+  the invocation above against a binary that was installed before the key existed in that shell.
 
   And run the check against the value before `gh secret set` stores it. It reads your local
   `LINEAR_API_KEY`, so once the secret is stored a pass proves only that the value in your hand
