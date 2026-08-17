@@ -368,15 +368,26 @@ backlog one grades INFO, and a triage, canceled, or duplicate ticket yields no f
 Two of those five report a real drift on a run that still concludes successfully, so read the
 reported findings rather than the run conclusion.
 
-To confirm the credential at install time instead of waiting for a real drift, annotate a document
-with an identifier you know resolves: a live issue, in a team the configuration permits. That
-qualifier is the whole point of the exercise. A malformed or cross-team identifier is refused
-before the client is constructed, and it still grades BLOCKED and still exits 1 with no key
-present, so a run that fails on one of those has confirmed nothing. Strand that document's `seen:`
-hash by editing the section it derives from, dispatch, and read the reported line: it must name
-the ticket's state in brackets, as in `GTX-1 [Done]`. Only a completed query can print that. A
-line ending in a parenthesized reason instead is a BLOCKED finding, which on a rejected reference
-never reached the network at all. Restore the section and rerun `reconcile` afterwards.
+To confirm the credential at install time instead of waiting for a real drift, choose the test
+ticket deliberately. It has to resolve, so a live issue in a team the configuration permits, and it
+has to be in a state the table above grades: completed, started, unstarted, or backlog. Each half
+guards against a different false result. A malformed or cross-team identifier is refused before the
+client is constructed, yet still grades BLOCKED and still exits 1 with no key present, so a failing
+run on one of those confirms nothing. A triage, canceled, or duplicate ticket is the opposite trap:
+it resolves, but the grading skips it and prints no line at all, so a working key looks exactly
+like a broken one.
+
+Annotate a document with that identifier, strand its `seen:` hash by editing the section it derives
+from, then commit and push both to `main`. The push is what makes the test real: the job checks out
+the repository at the ref it runs on, so an edit sitting in your working tree is invisible to it and
+the gate reads the reconciled content already on `main`. Pushing also triggers the gate by itself,
+so read that run rather than dispatching a second one on top of it.
+
+The reported line must name the ticket's state in brackets, as in `GTX-1 [Done]`. Only a completed
+query can print that. A line ending in a parenthesized reason instead is a BLOCKED finding, and on
+a rejected reference that never reached the network. Afterwards restore the section, rerun
+`reconcile`, and push that too, or `main` keeps the drift you planted and every later run reports
+it.
 
 Review the rest by reading, because no command checks it:
 
