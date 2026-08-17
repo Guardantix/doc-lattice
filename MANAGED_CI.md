@@ -356,12 +356,27 @@ secret absent, misnamed, or wrong. Annotating documents does not change that; th
 read, but only a stale-shipped edge puts one in front of the client.
 
 So treat the first green as proof the gate is installed and running, and not as proof the secret
-resolves. The key is exercised the first time a real drift appears, which is also the first time
-the gate has anything to report: a stale-shipped edge with a missing key fails closed with
-`LINEAR_API_KEY is not set` and exit 2, and with a working key the run reports the finding and
-exits 1. If you want that confirmation at install time rather than on the first real drift, edit
-an upstream section to strand a downstream `seen:` hash, dispatch, confirm the run reports the
-finding, then restore the section and rerun `reconcile`.
+resolves. The key is first exercised when a real drift appears, which is also the first time the
+gate has anything to report. A stale-shipped edge with a missing key fails closed with
+`LINEAR_API_KEY is not set` and exit 2.
+
+What a working key produces then depends on the ticket, and only some of it gates the run.
+`--exit-code` exits 1 on a DANGER or BLOCKED finding, and this workflow does not pass
+`--warn-exit`, so WARNING does not gate and INFO never does. A ticket in a completed state grades
+DANGER, one that did not resolve grades BLOCKED, a started one grades WARNING, an unstarted or
+backlog one grades INFO, and a triage, canceled, or duplicate ticket yields no finding at all.
+Two of those five report a real drift on a run that still concludes successfully, so read the
+reported findings rather than the run conclusion.
+
+To confirm the credential at install time instead of waiting for a real drift, annotate a document
+with an identifier you know resolves: a live issue, in a team the configuration permits. That
+qualifier is the whole point of the exercise. A malformed or cross-team identifier is refused
+before the client is constructed, and it still grades BLOCKED and still exits 1 with no key
+present, so a run that fails on one of those has confirmed nothing. Strand that document's `seen:`
+hash by editing the section it derives from, dispatch, and read the reported line: it must name
+the ticket's state in brackets, as in `GTX-1 [Done]`. Only a completed query can print that. A
+line ending in a parenthesized reason instead is a BLOCKED finding, which on a rejected reference
+never reached the network at all. Restore the section and rerun `reconcile` afterwards.
 
 Review the rest by reading, because no command checks it:
 
