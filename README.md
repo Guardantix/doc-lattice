@@ -613,8 +613,11 @@ against your workflow before committing the replacement.
 
 ### Recipe installs
 
-Take the pre-commit block and the ordinary workflow from the plain `init` run above, then replace
-your Linear workflow whole from the target release's
+Take the pre-commit block and the ordinary workflow from the plain `init` run above, passing
+`--default-branch main` as the recipe does at install time, since a recipe installation is pinned
+to `main` throughout and an omitted flag resolves the trigger against whatever `origin/HEAD` the
+checkout you ran it in has cached. Then replace your Linear workflow whole from the target
+release's
 [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) step 2. Do not
 bump only its `doc-lattice==` pin: its structure and action pins can change between releases
 independently of the version it installs, which is the same reason the ordinary workflow is

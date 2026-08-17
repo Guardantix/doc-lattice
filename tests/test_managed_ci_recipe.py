@@ -307,12 +307,16 @@ def test_gh_procedure_reads_state_before_it_creates_the_environment():
     # The quoted path ends at `environments`, which distinguishes the listing call from every
     # call addressing `environments/doc-lattice-linear` underneath it.
     listing = f'"repos/{_PLACEHOLDER_REPOSITORY}/environments"'
-    environments_read = next(
+    environments_reads = [
         index
         for index, command in enumerate(commands)
         if command.startswith("gh api ") and listing in command
-    )
-    create = next(index for index, command in enumerate(commands) if "--method PUT" in command)
+    ]
+    creates = [index for index, command in enumerate(commands) if "--method PUT" in command]
+
+    assert environments_reads, "step 3 must list the repository's environments before creating one"
+    assert creates, "step 3 must create the environment with a PUT"
+    environments_read, create = environments_reads[0], creates[0]
 
     assert environments_read < create, (
         "step 3 must check for an existing environment before the PUT rewrites its policy"
