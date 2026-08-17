@@ -507,10 +507,7 @@ This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-
 `.gitignore` block (see [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)),
 pre-commit hooks, and a GitHub Actions workflow that run `doc-lattice check` (drift) and
 `doc-lattice lint` (authority ladder) as your gates. Paste each
-where the output says. Pasting is enough for two of the three: the pre-commit block is inert until
-you activate it, so run `pre-commit install` once in the repository, or the config sits in
-`.pre-commit-config.yaml` and no hook runs on commit.
-`init` only prints `.gitignore` guidance and never modifies that file. Pass
+where the output says. `init` only prints `.gitignore` guidance and never modifies that file. Pass
 `--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.

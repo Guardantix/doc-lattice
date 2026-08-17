@@ -410,8 +410,15 @@ this recipe's own tooling refuses the commit. Where they are not, the commit suc
 inert until `pre-commit install` has been run in the repository, and pasting it into
 `.pre-commit-config.yaml` does not do that. Then the drift reaches `main` unannounced, which is the
 worse half of the pair, and it is only caught on merge where the offline workflow is a required
-check. Planting drift also means planting a `tickets:` reference for it to grade, and an annotation
-added for a test outlives the test and misattributes the next real finding on that document.
+check.
+
+Do not reach for that activation mid-adoption to close the gap, either. `check` exits 1 on
+unreconciled edges as well as stale ones, and an initial adoption commits exactly those: step 5
+has you commit the annotated input before `reconcile --all` acknowledges it. Activating the hooks
+before that baseline lands therefore blocks the commit step 5 depends on.
+
+Planting drift also means planting a `tickets:` reference for it to grade, and an annotation added
+for a test outlives the test and misattributes the next real finding on that document.
 
 Review the rest by reading, because no command checks it:
 
