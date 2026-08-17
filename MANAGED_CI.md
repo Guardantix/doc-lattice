@@ -58,19 +58,21 @@ and you have published the unreconciled state: `check` gates on unreconciled edg
 does on stale ones, so the offline workflow's first run on `main` reports UNRECONCILED instead of
 the baseline this step exists to establish. Review the reconcile-only diff, commit it, then push.
 
-Do not push earlier to watch it work, either.
-This workflow triggers on every push to `main`, so the push that lands it is also the gate's first
-run, and everything that run depends on, the environment, its branch policy, and its secret, is
-created by steps 3 and 4.
+Do not push earlier to watch it work, either. This workflow triggers on every push to `main`, so
+the push that lands it is also the gate's first run, and everything that run depends on, the
+environment, its branch policy, and its secret, is created by steps 3 and 4.
 
 Push before those and GitHub creates the environment for you, the moment the run starts, because
 the job names one. It arrives carrying no deployment branch policy and no protection rules at all,
 which is the `NO-BRANCH-POLICY` state step 3's readback calls out as the least protected an
 environment can be, under exactly the name this design depends on, and nothing warns you. Step 3's
 existence precondition then stops you on an environment you created yourself, so a check written to
-catch somebody else's environment has been spent on your own. If that has already happened, the
-environment is yours and step 3's create call rewrites its policy, so carry on from step 3 and
-confirm both readbacks before going anywhere near the secret.
+catch somebody else's environment has been spent on your own. If that has already happened, inspect
+the environment before you continue rather than assuming it is the one your run created: step 3's
+create call rewrites the policy, and afterwards nothing can show you what was there before. An
+environment carrying no branch policy and no protection rules is the one that run created, and it
+is yours to take over, so carry on from step 3 and confirm both readbacks before going anywhere
+near the secret.
 
 ### 1. Scaffold the config and the offline workflow
 
@@ -93,12 +95,12 @@ readback in step 3 and step 6, which look only at the Linear gate, still comes b
 documented. Naming the branch costs nothing here, because this recipe is pinned to `main`
 throughout and step 3 stops outright on a repository whose default branch is anything else.
 
-`--default-branch` reaches `init` in 5.0. The version this command pins is the current release, so
-on any release before 5.0 the command above exits 2 with `No such option: --default-branch`, and
-this recipe is not installable from that release at all. Do not work around it by dropping the
-flag: the stale-`origin/HEAD` hazard the flag exists to close is the reason this step names the
-branch, and an installation that silently gates the wrong branch is the outcome this whole recipe
-is written to prevent. Install from a release whose `doc-lattice==` pin this document carries.
+`--default-branch` reaches `init` in 5.0, and so does this recipe, so install both from 5.0 or
+later: on any earlier release the command above exits 2 with `No such option: --default-branch`.
+Do not work around it by dropping the flag: the stale-`origin/HEAD` hazard the flag exists to close
+is the reason this step names the branch, and an installation that silently gates the wrong branch
+is the outcome this whole recipe is written to prevent. Read this document at the release you are
+installing, and use the `doc-lattice==` pin that copy carries.
 
 That workflow carries the two pinned `uses:` lines the release ships, and the Linear workflow in
 the next step carries the same two. Keep this output until step 2 is done and confirm they match:
@@ -247,6 +249,11 @@ gh secret set DOC_LATTICE_LINEAR_API_KEY \
 `gh secret set` prompts for the value or reads it from stdin, so the key is never part of the
 command arguments.
 
+The credential check in [step 6](#6-verify-by-hand) reads your local `LINEAR_API_KEY` rather than
+the copy GitHub ends up holding, so run it against the value before this command stores it if your
+lattice is already annotated. An initial adoption annotates in step 5, after this one, which is why
+step 6 records that gap as the residual rather than closing it.
+
 Every `gh secret` command here carries the `github.com/` host prefix on `--repo`. Unlike `gh api`,
 these subcommands take no `--hostname`, so without the prefix they follow whichever host `gh` is
 currently authenticated against. That matters most for the deletions below: against the wrong host
@@ -376,11 +383,11 @@ worth stating once rather than rediscovering per command.
 
 **`linear` reads `LINEAR_API_KEY` only when a collectable identifier survives to the client.** An
 identifier is collectable when a node in that run's trigger set carries it under `tickets:`, it is
-syntactically well formed, and it is in the configured team wherever `linear_team` is set. With
-none, the run returns before the client is constructed, never reads the key, and reports nothing.
-A malformed or cross-team reference is refused at the same point, so it grades BLOCKED without
-contacting anyone. Every invocation therefore raises exactly one question: which nodes land in its
-trigger set.
+syntactically well formed, and it is in the configured team wherever `linear_team` is set. With no
+identifier at all, the run returns before the client is constructed, never reads the key, and
+reports nothing. A malformed or cross-team reference stops at the same point and never reaches the
+key either, but it is not silent: it grades BLOCKED without contacting anyone. Every invocation
+therefore raises exactly one question: which nodes land in its trigger set.
 
 The gate's own invocation audits, so its trigger set is the nodes carrying stale-shipped findings,
 and step 5 is what empties it. `reconcile --all` acknowledges the current state, so a
@@ -391,10 +398,11 @@ annotations are read, but only a stale-shipped edge puts one in the trigger set.
 So treat the first green as proof the gate is installed and running, and not as proof the secret
 resolves. The key is first exercised when a real drift appears, which is also the first time the
 gate has anything to report, and a stale-shipped edge with a missing key then fails closed with
-`LINEAR_API_KEY is not set` and exit 2. Not every drift does that. One on a document whose
-identifiers are absent, malformed, or cross-team leaves the trigger set with nothing collectable in
-it and the stored value untested, which is the first green's blind spot arriving later rather than
-a second one.
+`LINEAR_API_KEY is not set` and exit 2. Not every drift does that. One on a document carrying no
+identifier at all leaves the trigger set with nothing collectable in it and the stored value
+untested, which is the first green's blind spot arriving later rather than a second one. A
+malformed or cross-team identifier leaves the value untested too, but loudly: it grades BLOCKED, so
+`--exit-code` fails that run and names the reference it refused.
 
 What a working key produces then depends on the ticket, and only some of it gates the run.
 `--exit-code` exits 1 on a DANGER or BLOCKED finding, and this workflow does not pass
@@ -408,8 +416,9 @@ Two parts of the credential path are checkable outright, and the third is checka
 narrower sense than it first looks:
 
 - **The secret is named and placed correctly.** Step 6's first read already proves the environment
-  holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second and
-  third prove no copy sits at a broader scope.
+  holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second proves
+  no copy sits at repository scope. The organization scope is the one part you cannot settle alone,
+  on the terms the third read is given there.
 - **The wiring is right.** Read the workflow. `environment: doc-lattice-linear` on the job is what
   grants access at all, and the secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final
   step.
@@ -453,8 +462,9 @@ which one you get depends on setup you may not have checked. Step 1's pre-commit
 `doc-lattice check`, which exits 1 on a stranded `seen:` hash, so where those hooks are installed
 this recipe's own tooling refuses the commit. Where they are not, the commit succeeds: the block is
 inert until `pre-commit install` has been run in the repository, and pasting it into
-`.pre-commit-config.yaml` does not do that. Then the drift reaches `main` unannounced, which is the
-worse half of the pair, and it is only caught on merge where the offline workflow is a required
+`.pre-commit-config.yaml` does not do that. Then the drift reaches `main`, which is the worse half
+of the pair: the offline workflow's own run there fails, so it is reported rather than hidden, but
+nothing stopped the commit, and it is blocked before landing only where that workflow is a required
 check.
 
 Do not reach for that activation mid-adoption to close the gap, either. `check` exits 1 on
