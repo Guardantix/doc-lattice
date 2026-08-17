@@ -24,9 +24,13 @@ Start at GTX-163 and GTX-126. They are the two items the rest of the release seq
 
 - Remove the managed GitHub and Linear CI code and repair every document that described it
   (GTX-163). It is 31 percent of `src` with zero installations, and the recipe in
-  [MANAGED_CI.md](MANAGED_CI.md) already replaces it. Removal is what makes the persistence
-  consolidation it orphans possible (GTX-110), and it frees the two recipe simplifications parked
-  in 5.x.
+  [MANAGED_CI.md](MANAGED_CI.md) already replaces it. Removal is what unblocks the persistence
+  consolidation below, and it frees the two recipe simplifications parked in 5.x.
+- Consolidate the persistence primitives that removal orphans, and record the filesystem threat
+  model in AD-2 (GTX-110). Roughly half of `persistence.py` is the same five operations written
+  twice, and the dirfd family's only consumer is the code GTX-163 deletes, so this is the release
+  where the duplicate family stops being load-bearing. Carrying it across a whole minor train
+  instead would leave a dead primitive family in the module for no benefit.
 - Move the reconcile journal to v2, so a crash journal records when, by what version, and from
   which selector it was written, with v1 journals still recoverable across the upgrade (GTX-126).
   A format bump is honest in a major and awkward in a minor, and two 5.x follow-ons read the new
