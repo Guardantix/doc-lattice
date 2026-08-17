@@ -51,7 +51,7 @@ change.
 ### 1. Scaffold the config and the offline workflow
 
 ```bash
-uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init
+uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init --default-branch main
 ```
 
 Do not pass `--github`. Plain `init` writes `.doc-lattice.yml` when it is absent and prints three
@@ -59,6 +59,15 @@ blocks: the `.gitignore` lines, the pre-commit hooks, and the offline workflow. 
 Save the printed workflow as `.github/workflows/doc-lattice.yml`, and follow
 [README.md](README.md#ordinary-offline-setup) for the other two. The `.gitignore` block is needed
 before step 5, which runs `reconcile` and writes the artifacts that block covers.
+
+Do pass `--default-branch main`, and read the branch back off stderr: the run prints `workflow
+triggers on branch main (--default-branch)`. Without the flag `init` takes the trigger branch from
+the local `origin/HEAD`, which is cached state, and a target that is stale but still exists in the
+clone cannot be told from a current one without the network. The offline workflow would then gate
+a branch this repository has moved off, leaving `check` and `lint` absent from `main` while every
+readback in step 3 and step 6, which look only at the Linear gate, still comes back exactly as
+documented. Naming the branch costs nothing here, because this recipe is pinned to `main`
+throughout and step 3 stops outright on a repository whose default branch is anything else.
 
 That workflow carries the two pinned `uses:` lines the release ships, and the Linear workflow in
 the next step carries the same two. Keep this output until step 2 is done and confirm they match:
@@ -267,18 +276,38 @@ As in step 4, repository administrators cannot always inspect organization secre
 obtain organization-owner confirmation rather than treating an empty result as proof. Then repeat
 the two policy readbacks from step 3.
 
-Confirm the gate is not merely installed but running:
+Confirm the gate is not merely installed but running. Trigger a run rather than reading whatever
+run happens to be newest, because a listing alone certifies the past: the failures this check
+exists to catch break the gate without producing a run, so the last green run from before the
+break stays at the top of the list and answers for a repository that is now broken. Note the
+newest run first, trigger one, then verify the run that appears:
 
 ```bash
 gh run list --repo github.com/OWNER/REPO \
-  --workflow doc-lattice-linear.yml --branch main --limit 1 \
-  --json conclusion,databaseId
+  --workflow doc-lattice-linear.yml --branch main --limit 1 --json databaseId
 
+gh workflow run --repo github.com/OWNER/REPO doc-lattice-linear.yml --ref main
+
+gh run list --repo github.com/OWNER/REPO \
+  --workflow doc-lattice-linear.yml --branch main --limit 1 \
+  --json databaseId,status,conclusion
+```
+
+The third call must report a `databaseId` the first call did not, and `status` `completed`. Until
+both hold, the dispatch has not registered or has not finished, so rerun that third call rather
+than reading the entry above it. The run identifier is the discriminator on purpose: a rename
+leaves `main` at the same commit, so a head SHA cannot separate the run you just triggered from
+one that ran before the break. A first call that lists nothing at all is fine, and makes any run
+the third one reports the new one. That new `databaseId` is `RUN_ID` below:
+
+```bash
 gh run view --repo github.com/OWNER/REPO RUN_ID \
   --json jobs --jq '.jobs[] | [.name, .conclusion] | @tsv'
 ```
 
-The job's conclusion must be `success`. A `skipped` job is a failed installation, not a passing
+The job's conclusion must be `success`. `gh workflow run` failing outright is itself a result: it
+means `main` carries no dispatchable `doc-lattice-linear.yml`, which is a failed installation
+reported loudly instead of as a stale green. A `skipped` job is a failed installation, not a passing
 one: a job whose `if:` guard is false is skipped, and a run whose only job is skipped concludes
 successfully. An `OWNER/REPO` left unsubstituted in the workflow does exactly that, silently, where
 the same omission in the `gh` commands above would have failed loudly. So does a repository rename,
@@ -339,8 +368,13 @@ because a release that changes generated output carries a `### Migration` subsec
 Print the target release's blocks and replace yours whole:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init
+uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init --default-branch main
 ```
+
+Carry `--default-branch main` here for the same reason step 1 does. An upgrade that omits it is
+resolved against whatever `origin/HEAD` the checkout you happen to run it in has cached, so the
+same release can print a workflow gating a different branch on two machines, and replacing a
+correct file with that one retargets the gate without changing anything you would think to review.
 
 Replace the pre-commit block and `.github/workflows/doc-lattice.yml` with the printed versions
 rather than hand-editing their pinned versions. The blocks carry generated structure beyond the
@@ -366,8 +400,10 @@ diagnose it.
 The local files then change ownership from the tool to you, in one reviewed change:
 
 1. Replace `.github/workflows/doc-lattice.yml`. The managed offline workflow runs `ci audit`,
-   which 5.0 removes, so it cannot simply be carried forward. Run plain `init` at your current
-   release and save the workflow it prints over the managed one.
+   which 5.0 removes, so it cannot simply be carried forward. Run plain `init --default-branch
+   main` at your current release and save the workflow it prints over the managed one. The managed
+   workflow you are replacing was pinned to `main`, so omitting the flag is what would change the
+   branch it gates.
 2. Convert `.github/workflows/doc-lattice-linear.yml` by deleting its four ownership marker
    comment lines, the ones beginning `# doc-lattice-managed:`, `# doc-lattice-artifact:`,
    `# doc-lattice-version:`, and `# doc-lattice-repository:`. What remains is the step 2 workflow

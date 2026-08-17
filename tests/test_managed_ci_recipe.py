@@ -47,6 +47,7 @@ _PLACEHOLDER_REPOSITORY = "OWNER/REPO"
 # and importing them would tie this module's import to a package 5.0 deletes.
 _ENVIRONMENT = "doc-lattice-linear"
 _JOB_ID = "linear"
+_DEFAULT_BRANCH = "main"
 _SECRET_NAME = "DOC_LATTICE_LINEAR_API_KEY"  # noqa: S105  # pragma: allowlist secret
 _SECRET_ENV_VAR = "LINEAR_API_KEY"  # noqa: S105  # pragma: allowlist secret
 _SECRET_REFERENCE = "${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}"  # noqa: S105  # pragma: allowlist secret
@@ -240,18 +241,18 @@ def test_published_workflow_installs_the_current_pins():
 def test_documented_gh_calls_are_pinned_to_github_com():
     """Every documented call names its host, by the only mechanism each subcommand offers.
 
-    ``gh api`` takes ``--hostname``; ``gh secret`` and ``gh run`` do not, and accept the host
-    only as a ``--repo`` prefix. Against a different active host the secret deletions return the
-    same not-found result as a secret that was already absent, which is the outcome the reader is
-    told to expect, so the repository-scoped key survives and the verification step confirms its
-    absence against a repository it never inspected.
+    ``gh api`` takes ``--hostname``; ``gh secret``, ``gh run``, and ``gh workflow`` do not, and
+    accept the host only as a ``--repo`` prefix. Against a different active host the secret
+    deletions return the same not-found result as a secret that was already absent, which is the
+    outcome the reader is told to expect, so the repository-scoped key survives and the
+    verification step confirms its absence against a repository it never inspected.
     """
     checked = 0
     for command in _shell_commands():
         if command.startswith("gh api "):
             assert "--hostname github.com" in command, command
             checked += 1
-        elif command.startswith(("gh secret ", "gh run ")):
+        elif command.startswith(("gh secret ", "gh run ", "gh workflow ")):
             assert "--repo github.com/" in command, command
             checked += 1
 
@@ -316,6 +317,68 @@ def test_gh_procedure_reads_state_before_it_creates_the_environment():
     assert environments_read < create, (
         "step 3 must check for an existing environment before the PUT rewrites its policy"
     )
+
+
+def test_documented_init_invocations_pin_the_default_branch():
+    """Every scaffold and upgrade call names the branch instead of letting ``init`` probe.
+
+    Without the flag the printed offline workflow triggers on whatever ``origin/HEAD`` the
+    reader's clone has cached, and a stale target that still exists locally is indistinguishable
+    from a current one without the network. The recipe is pinned to ``main`` end to end, so a
+    probed branch would install a `check` and `lint` gate that never runs on the branch every
+    other step in this document assumes, and no readback here would report it: they all inspect
+    the Linear gate.
+
+    The deprecated ``--github`` invocations are held to the opposite rule, because the CLI rejects
+    the two flags together: the managed artifacts are pinned to the exact ``main`` branch as a
+    security control, so there is nothing for the flag to select and passing it would make the
+    documented command exit non-zero.
+    """
+    invocations = [command for command in _shell_commands() if " doc-lattice init" in command]
+    recipe = [command for command in invocations if "--github" not in command]
+    managed = [command for command in invocations if "--github" in command]
+
+    assert recipe, "MANAGED_CI.md must document the recipe init invocations this test pins"
+    for command in recipe:
+        assert f"--default-branch {_DEFAULT_BRANCH}" in command, command
+    for command in managed:
+        assert "--default-branch" not in command, command
+
+
+def test_gh_procedure_triggers_a_run_before_it_verifies_one():
+    """Verification has to dispatch a run, not read whichever run is newest.
+
+    The failures step 6 exists to catch, a rename that breaks the ``if:`` guard above all, stop
+    the gate from producing runs at all rather than producing failing ones. So the last run from
+    before the break stays at the top of the listing, and reading it certifies a repository whose
+    gate is now dead. Ordered as documented, the reader compares a baseline listing against a
+    listing taken after an explicit ``workflow_dispatch`` and verifies only the run that appeared.
+    """
+    commands = _shell_commands()
+    dispatches = [
+        index for index, command in enumerate(commands) if command.startswith("gh workflow run ")
+    ]
+    listings = [
+        index for index, command in enumerate(commands) if command.startswith("gh run list ")
+    ]
+    views = [index for index, command in enumerate(commands) if command.startswith("gh run view ")]
+
+    assert len(dispatches) == 1, (
+        "step 6 must dispatch exactly one run; a listing alone reports only that the gate used "
+        "to work"
+    )
+    assert views, "step 6 must read the dispatched run's jobs back"
+    dispatch, view = dispatches[0], views[0]
+
+    assert commands[dispatch].endswith(f"--ref {_DEFAULT_BRANCH}"), commands[dispatch]
+    assert any(index < dispatch for index in listings), (
+        "step 6 must record the newest run before it dispatches, or the run it verifies is "
+        "indistinguishable from the one that was already there"
+    )
+    assert any(index > dispatch for index in listings), (
+        "step 6 must list runs again after the dispatch to identify the new one"
+    )
+    assert view > dispatch, "step 6 must verify the dispatched run, not a preexisting one"
 
 
 def test_every_intra_document_anchor_resolves():
