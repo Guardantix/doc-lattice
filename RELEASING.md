@@ -433,9 +433,13 @@ its matrix values, so `Tests` and `Code quality` carry the supported Python vers
 `yaml-compatibility` carries the ends of the `ruamel.yaml` range that AD-26 in
 [ARCHITECTURE.md](ARCHITECTURE.md) bounds, spelled `0.18.0` and `0.19.*`. Only `Security scan` is a
 fixed name. Each of those matrices is a second place a required-check name lives, so a matrix change
-in [.github/workflows/ci.yml](.github/workflows/ci.yml) and this rule have to move together, under
-two constraints. Never require a context no job emits: that failure is not a check that goes red
-but every pull request waiting on a report which never arrives. And never let `pyproject.toml`
+in [.github/workflows/ci.yml](.github/workflows/ci.yml) and this rule have to move together. The
+invariant is set equality: the required list names exactly the contexts that `code-quality`,
+`security-scan`, `tests`, and `yaml-compatibility` emit. Both directions bite. A name required but
+not emitted is not a check that goes red, it is every pull request waiting on a report which never
+arrives; a name emitted but not required is the gap this issue closed. A change that renames a
+context therefore has to land on both sides, and dropping one from the list is a loosening even
+when the job it came from still runs. The remaining constraint is that `pyproject.toml` must never
 admit a version before a required context covers it, which is what decides the order the edits land
 in. Re-read the `checks` answer against this table after any matrix change, and treat a leftover
 context naming a value the matrix no longer builds as the same defect rather than as clutter.
