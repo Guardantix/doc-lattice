@@ -48,6 +48,15 @@ hold that script at LF line endings after checkout.
 Run every step from reviewed, trusted project state, and land the whole setup as one reviewed
 change.
 
+Push once, after step 5 and before step 6. Steps 1, 2 and 5 only change files in your working
+tree, steps 3 and 4 only change GitHub, and step 6 is the first step that needs the workflows to
+exist on `main`, so the single push belongs between them. Do not push earlier to watch it work.
+This workflow triggers on every push to `main`, so the push that lands it is also the gate's first
+run, and everything that run depends on, the environment, its branch policy, and its secret, is
+created by steps 3 and 4. Push before those and the first run answers for a setup that is not the
+one this document describes, while step 3's own precondition then stops you on a
+`doc-lattice-linear` environment whose existence you have to account for.
+
 ### 1. Scaffold the config and the offline workflow
 
 ```bash
