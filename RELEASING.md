@@ -432,43 +432,13 @@ Eight of the nine are generated rather than written. GitHub builds a matrix job'
 its matrix values, so `Tests` and `Code quality` carry the supported Python versions, and
 `yaml-compatibility` carries the ends of the `ruamel.yaml` range that AD-26 in
 [ARCHITECTURE.md](ARCHITECTURE.md) bounds, spelled `0.18.0` and `0.19.*`. Only `Security scan` is a
-fixed name. Each of those matrices is therefore a second place a required-check name lives, and the
-failure that produces is not a check that goes red: a required context nothing emits leaves every
-pull request waiting on a report that never arrives.
-
-Sequence a change to any of those matrices so that a complete set is both required and emitted at
-every moment. No two-step order achieves that, because the workflow moves by a merge and the
-required list moves by an API call, so whichever goes first opens a window: changing the matrix
-first leaves open pull requests waiting on contexts nothing emits any more, and dropping the
-contexts first leaves an interval where a failing leg blocks nothing and an unrelated pull request
-can merge past it. Take three steps instead:
-
-1. Land a matrix change in [.github/workflows/ci.yml](.github/workflows/ci.yml) that adds the new
-   values **alongside** the old ones. The old contexts stay required and keep reporting, so
-   nothing is gated any more loosely than before.
-2. Move the required list to the new names, dropping the old ones in the same call. The previous
-   step already emits the new contexts, so they report from the moment they are required.
-3. Land a second matrix change removing the old values, which nothing requires by then, carrying
-   the declaration that admits them, the `ruamel.yaml` range or `requires-python` in
-   `pyproject.toml`, in the same pull request.
-
-The declaration moves in that last step, never the first, and the ordering is the point rather than
-a tidiness preference. A widening that rides along with step 1 admits a version whose legs exist but
-are not required yet, so a red leg on the newly admitted value would not stop the widening from
-merging, which is the same enforcement gap in a smaller window. Nothing may enter a declared range
-before a required context covers it.
-
-Whether the matrix can run ahead of its declaration at all depends on which declaration it is. It
-can for `ruamel.yaml`, because the compatibility job installs its version with `uv pip install`
-after the locked sync and that install does not consult the range. It cannot for a Python floor
-being lowered: `uv sync --locked` refuses an interpreter below `requires-python` outright, so the
-declaration has to widen before any job can run the new version. That one pull request is an
-unavoidable window, since its new legs report without being required yet, so read them by eye
-before merging it. Raising the floor has no such problem, because dropping a value never admits an
-untested one.
-
-Re-read the `checks` answer against this table afterwards, and treat a leftover context naming a
-version the matrix no longer builds as the same defect rather than as clutter.
+fixed name. Each of those matrices is a second place a required-check name lives, so a matrix change
+in [.github/workflows/ci.yml](.github/workflows/ci.yml) and this rule have to move together, under
+two constraints. Never require a context no job emits: that failure is not a check that goes red
+but every pull request waiting on a report which never arrives. And never let `pyproject.toml`
+admit a version before a required context covers it, which is what decides the order the edits land
+in. Re-read the `checks` answer against this table after any matrix change, and treat a leftover
+context naming a value the matrix no longer builds as the same defect rather than as clutter.
 
 `can_admins_bypass`, `reviews`, and `admins` are the rows whose expected values are the weaker
 settings. They record what is true today, not what is desirable. If any of them ever reads the
