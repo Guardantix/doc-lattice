@@ -69,6 +69,13 @@ readback in step 3 and step 6, which look only at the Linear gate, still comes b
 documented. Naming the branch costs nothing here, because this recipe is pinned to `main`
 throughout and step 3 stops outright on a repository whose default branch is anything else.
 
+`--default-branch` reaches `init` in 5.0. The version this command pins is the current release, so
+on any release before 5.0 the command above exits 2 with `No such option: --default-branch`, and
+this recipe is not installable from that release at all. Do not work around it by dropping the
+flag: the stale-`origin/HEAD` hazard the flag exists to close is the reason this step names the
+branch, and an installation that silently gates the wrong branch is the outcome this whole recipe
+is written to prevent. Install from a release whose `doc-lattice==` pin this document carries.
+
 That workflow carries the two pinned `uses:` lines the release ships, and the Linear workflow in
 the next step carries the same two. Keep this output until step 2 is done and confirm they match:
 a difference means this document and the release you are installing have diverged, so stop rather
@@ -268,19 +275,29 @@ gh api --hostname github.com --paginate \
   "repos/OWNER/REPO/environments/doc-lattice-linear/secrets" --jq '.secrets[].name'
 
 gh secret list --repo github.com/OWNER/REPO
+```
 
+The first must print `DOC_LATTICE_LINEAR_API_KEY` and nothing else that carries a Linear key. The
+second must not list `LINEAR_API_KEY` or `DOC_LATTICE_LINEAR_API_KEY` at repository scope.
+
+On an organization-owned repository, run the third read as well:
+
+```bash
 gh api --hostname github.com --paginate \
   "repos/OWNER/REPO/actions/organization-secrets" --jq '.secrets[].name'
 ```
 
-The first must print `DOC_LATTICE_LINEAR_API_KEY` and nothing else that carries a Linear key. The
-second must not list `LINEAR_API_KEY` or `DOC_LATTICE_LINEAR_API_KEY` at repository scope. The
-third lists the organization secrets exposed to this repository, and must not carry a Linear key
+It lists the organization secrets exposed to this repository, and must not carry a Linear key
 either: an organization secret is readable by every workflow here and appears nowhere in the
 repository-scoped listing, so without this call the check looks clean while the boundary is open.
 As in step 4, repository administrators cannot always inspect organization secret visibility, so
-obtain organization-owner confirmation rather than treating an empty result as proof. Then repeat
-the two policy readbacks from step 3.
+obtain organization-owner confirmation rather than treating an empty result as proof.
+
+That endpoint accepts organization-owned repositories only. On a user-owned repository it fails
+with `HTTP 422 Validation Failed`, which is not a finding and not a reason to stop: a user-owned
+repository has no organization scope, so there is no third scope for a Linear key to hide in and
+the check is vacuous rather than skipped. Skip it there and treat the first two reads as the whole
+secret-scope check. Then repeat the two policy readbacks from step 3.
 
 Confirm the gate is not merely installed but running. Trigger a run rather than reading whatever
 run happens to be newest, because a listing alone certifies the past: the failures this check
@@ -329,10 +346,22 @@ the same omission in the `gh` commands above would have failed loudly. So does a
 which breaks the `github.repository` literal while leaving the environment, its policy, and its
 secret untouched, and therefore invisible to every other check in this step.
 
-A `success` conclusion does not by itself prove the secret works. `linear` returns before it
-constructs a client when no valid ticket identifier remains, and never reads `LINEAR_API_KEY` in
-that case, so a repository with no `tickets:` annotations yet passes with the secret absent or
-misnamed. Once a valid ticket ref exists, a missing key fails closed with a tool error and exit 2.
+A `success` conclusion does not by itself prove the secret works, and on a fresh installation it
+never does. `linear` collects ticket identifiers from stale-shipped findings, not from every
+`tickets:` annotation in the repository, and it returns before constructing a client when no valid
+identifier remains, never reading `LINEAR_API_KEY` in that case. Step 5 is what guarantees the
+condition here: `reconcile --all` acknowledges the current state, so a just-installed repository
+has no stale edges, no finding carries a ticket reference, and this dispatch passes with the
+secret absent, misnamed, or wrong. Annotating documents does not change that; the annotations are
+read, but only a stale-shipped edge puts one in front of the client.
+
+So treat the first green as proof the gate is installed and running, and not as proof the secret
+resolves. The key is exercised the first time a real drift appears, which is also the first time
+the gate has anything to report: a stale-shipped edge with a missing key fails closed with
+`LINEAR_API_KEY is not set` and exit 2, and with a working key the run reports the finding and
+exits 1. If you want that confirmation at install time rather than on the first real drift, edit
+an upstream section to strand a downstream `seen:` hash, dispatch, confirm the run reports the
+finding, then restore the section and rerun `reconcile`.
 
 Review the rest by reading, because no command checks it:
 
