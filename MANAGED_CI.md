@@ -69,10 +69,26 @@ environment can be, under exactly the name this design depends on, and nothing w
 existence precondition then stops you on an environment you created yourself, so a check written to
 catch somebody else's environment has been spent on your own. If that has already happened, inspect
 the environment before you continue rather than assuming it is the one your run created: step 3's
-create call rewrites the policy, and afterwards nothing can show you what was there before. An
-environment carrying no branch policy and no protection rules is the one that run created, and it
-is yours to take over, so carry on from step 3 and confirm both readbacks before going anywhere
-near the secret.
+create call rewrites the policy, and afterwards nothing can show you what was there before.
+
+That inspection is about provenance, and how protected the environment looks does not carry it. One
+created by hand and left with its defaults holds no branch policy and no protection rules either,
+so the state your push produces and the state step 3's precondition exists to catch are the same
+state. Reading `NO-BRANCH-POLICY` back says nothing about who made it, and taking it for proof of
+ownership would hand over the takeover that precondition exists to stop. When it appeared is what
+separates them, and the environments endpoint step 3 already reads carries that:
+
+```bash
+gh api --hostname github.com \
+  "repos/OWNER/REPO/environments/doc-lattice-linear" \
+  --jq '.created_at'
+```
+
+Created when your push started its run, on a repository you know carried no such environment
+before it, it is yours to take over: carry on from step 3 and confirm both readbacks before going
+anywhere near the secret. Created earlier, or at a time you cannot account for, it is step 3's stop
+exactly as that step writes it, and the environment is somebody else's until you have established
+otherwise. Inspect it and decide deliberately rather than running the create call over it.
 
 ### 1. Scaffold the config and the offline workflow
 
