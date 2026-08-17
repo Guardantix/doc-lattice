@@ -482,14 +482,26 @@ narrower sense than it first looks:
   Then supply the key and run `"$venv/bin/doc-lattice" linear --from SOME_UPSTREAM_ID`, which is
   the invocation above against a binary that was installed before the key existed in that shell.
 
+  Read what it reports, not just that it succeeded. Nothing in the query names a workspace: it
+  filters on team key and issue number, and the key is what chooses the workspace those are looked
+  up in. A key belonging to a different workspace therefore resolves your identifier against a
+  same-keyed team there and reports that workspace's issue under your reference. The bracketed
+  state on the reported line is the discriminator you have, so confirm it against a ticket whose
+  state you know. No line at all is not a pass: a ticket in a state the grading does not cover
+  produces none, as above.
+
   And run the check against the value before `gh secret set` stores it. It reads your local
   `LINEAR_API_KEY`, so once the secret is stored a pass proves only that the value in your hand
   works, never that GitHub holds the same one.
 
 That last gap is the residual, and this recipe's own ordering leaves it open: step 4 stores the
-secret before step 5 annotates the lattice this check needs. A wrong or stale stored value
-therefore survives installation silently, and closes on the first real drift that reaches the
-client, loudly, with a Linear error and a non-zero exit rather than a pass.
+secret before step 5 annotates the lattice this check needs. A wrong stored value therefore
+survives installation silently, and what the first drift reaching the client does with it depends
+on how it is wrong. A value Linear rejects, or no value at all, closes loudly, with the error and
+exit 2 rather than a pass. A valid key for the wrong workspace need not: by the same absence of a
+workspace in the query, it resolves your identifier against a same-keyed team wherever that key
+belongs and grades whatever issue it finds, which gates only when that issue's state gates. Read
+the reported findings rather than the run conclusion, exactly as for the gate above.
 
 Do not manufacture drift on `main` to force that confirmation earlier. Both outcomes are bad, and
 which one you get depends on setup you may not have checked. Step 1's pre-commit block runs
