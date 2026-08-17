@@ -554,7 +554,7 @@ keep the exact PyPI version pin.
 
 Pasting the pre-commit block installs no Git hook. It adds two hook definitions to
 `.pre-commit-config.yaml`, and nothing reads that file on commit until pre-commit has written
-`.git/hooks/pre-commit` in your repository. Until it has, the gates exist in CI only, and every
+`.git/hooks/pre-commit` in your clone. Until it has, the gates exist in CI only, and every
 local commit succeeds regardless of drift, including the one that introduces it. Enabling them is
 a separate, explicit act, and nothing earlier in this setup path performs it or provides the
 `pre-commit` runner it needs, because the path requires only `uv`:
@@ -578,6 +578,13 @@ there is then no fallback either, and the hook fails closed: it exits 1 with a `
 found error and blocks every commit until it is reinstalled. The hook records a path rather than
 resolving one each time, so re-run the install command after anything that moves or rebuilds the
 environment behind it, including renaming a parent directory.
+
+`.git/hooks/` is neither tracked nor cloned, so activation belongs to a clone rather than to the
+repository. Committing `.pre-commit-config.yaml` enables nothing for anybody else: each
+contributor runs the install command once in their own clone, and again after re-cloning. A fresh
+clone of an already-gated repository commits drift locally without complaint, and the offline
+workflow is what catches it on the pull request. Such a clone is the established case below, so it
+activates immediately and has no ordering to observe.
 
 **On an initial adoption, enable them after the reconcile baseline**, not while pasting the
 blocks. `check` exits 1 on unreconciled edges as well as stale ones, and an initial adoption
