@@ -48,9 +48,17 @@ hold that script at LF line endings after checkout.
 Run every step from reviewed, trusted project state, and land the whole setup as one reviewed
 change.
 
-Push once, after step 5 and before step 6. Steps 1, 2 and 5 only change files in your working
-tree, steps 3 and 4 only change GitHub, and step 6 is the first step that needs the workflows to
-exist on `main`, so the single push belongs between them. Do not push earlier to watch it work.
+Push once, after step 5 and before step 6, and push step 5's own output with it. Steps 1, 2 and 5
+only change files in your working tree, steps 3 and 4 only change GitHub, and step 6 is the first
+step that needs the workflows to exist on `main`, so the single push belongs between them.
+
+Step 5 deliberately stops with its reconcile diff uncommitted, so that diff stays reviewable on its
+own, which makes committing it yours to do before you push. Publish the annotated input without it
+and you have published the unreconciled state: `check` gates on unreconciled edges exactly as it
+does on stale ones, so the offline workflow's first run on `main` reports UNRECONCILED instead of
+the baseline this step exists to establish. Review the reconcile-only diff, commit it, then push.
+
+Do not push earlier to watch it work, either.
 This workflow triggers on every push to `main`, so the push that lands it is also the gate's first
 run, and everything that run depends on, the environment, its branch policy, and its secret, is
 created by steps 3 and 4.
@@ -389,8 +397,11 @@ manufacturing drift to force the gate's hand. Take them separately, because each
 own:
 
 - **The key works.** Test the value before you store it, not after. Set `LINEAR_API_KEY` to it
-  locally and run `doc-lattice linear` against a lattice that has a stale shipped edge. A good key
-  reports the finding with the ticket's state; a bad one fails with a Linear HTTP error.
+  locally and run `uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice linear` against a lattice
+  that has a stale shipped edge. Use the pinned invocation: nothing in this recipe leaves a
+  `doc-lattice` executable on your `PATH`, because `uvx` resolves it into a throwaway environment
+  each time. A good key reports the finding with the ticket's state; a bad one fails with a Linear
+  HTTP error.
 - **The secret is named and placed correctly.** Step 6's first read already proves the environment
   holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second and
   third prove no copy sits at a broader scope.
@@ -399,9 +410,16 @@ own:
   step.
 
 What none of that establishes is that the value stored in GitHub is the value you tested, which is a
-paste error and nothing else. That one closes on the first real drift, and it closes loudly: a
-stale-shipped edge with a missing or wrong key fails the run with a Linear error and a non-zero
-exit, never a silent pass.
+paste error and nothing else. That one closes on the first real drift that actually reaches Linear,
+and then it closes loudly, with a Linear error and a non-zero exit rather than a silent pass.
+
+Not every drift reaches Linear, so do not read that as a guarantee attached to the next red run.
+The drifted document has to carry at least one identifier the tool will query: syntactically well
+formed, and in the configured team where `linear_team` is set. A drift on a document with no
+`tickets:` at all collects nothing and returns before the key is read, and one carrying only
+malformed or cross-team references is refused before the client is constructed and graded BLOCKED
+without contacting anyone. Both leave the stored value untested, which is the same blind spot as the
+first green arriving later rather than a different one.
 
 Do not manufacture drift on `main` to force that confirmation earlier. Both outcomes are bad, and
 which one you get depends on setup you may not have checked. Step 1's pre-commit block runs
