@@ -433,11 +433,24 @@ builds each context name from the matrix values, so the ends of the `ruamel.yaml
 AD-26 in [ARCHITECTURE.md](ARCHITECTURE.md) bounds appear in the required-check list literally,
 as `0.18.0` and `0.19.*`. That couples two settings kept in different places, and the failure it
 produces is not a check that goes red: a required context nothing emits leaves every pull request
-waiting on a report that never arrives. Sequence a range change so the rule is never ahead of the
-workflow. Drop the affected contexts from the required list first, land the matrix change in
-[.github/workflows/ci.yml](.github/workflows/ci.yml), then require the new names once a run has
-emitted them. Re-read the `checks` answer against this table afterwards, and treat a leftover
-context naming a version the matrix no longer builds as the same defect rather than as clutter.
+waiting on a report that never arrives.
+
+Sequence a range change so that a complete compatibility set is both required and emitted at every
+moment. No two-step order achieves that, because the workflow moves by a merge and the required
+list moves by an API call, so whichever goes first opens a window: changing the matrix first leaves
+open pull requests waiting on contexts nothing emits any more, and dropping the contexts first
+leaves an interval where a failing compatibility leg blocks nothing and an unrelated pull request
+can merge past it. Take three steps instead, against
+[.github/workflows/ci.yml](.github/workflows/ci.yml):
+
+1. Land a matrix change that adds the new range ends **alongside** the old ones. The old contexts
+   stay required and keep reporting, so nothing is gated any more loosely than before.
+2. Move the required list to the new names, dropping the old ones in the same call. The previous
+   step already emits the new contexts, so they report from the moment they are required.
+3. Land a second matrix change removing the old ends, which nothing requires by then.
+
+Re-read the `checks` answer against this table afterwards, and treat a leftover context naming a
+version the matrix no longer builds as the same defect rather than as clutter.
 
 `can_admins_bypass`, `reviews`, and `admins` are the rows whose expected values are the weaker
 settings. They record what is true today, not what is desirable. If any of them ever reads the
