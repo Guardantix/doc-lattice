@@ -485,10 +485,22 @@ narrower sense than it first looks:
   Read what it reports, not just that it succeeded. Nothing in the query names a workspace: it
   filters on team key and issue number, and the key is what chooses the workspace those are looked
   up in. A key belonging to a different workspace therefore resolves your identifier against a
-  same-keyed team there and reports that workspace's issue under your reference. The bracketed
-  state on the reported line is the discriminator you have, so confirm it against a ticket whose
-  state you know. No line at all is not a pass: a ticket in a state the grading does not cover
-  produces none, as above.
+  same-keyed team there and reports that workspace's issue under your reference. The human output
+  will not tell you which happened. It prints your own reference and the state's display name, and
+  two workspaces can spell a state the same, so a wrong resolution can render identically to a
+  right one.
+
+  Ask for the resolved ticket instead:
+
+  ```bash
+  "$venv/bin/doc-lattice" linear --from SOME_UPSTREAM_ID --format json
+  ```
+
+  Every finding there carries the ticket as Linear returned it, `url` and `title` included, rather
+  than the reference you asked with. The URL is the issue's own address in the workspace that
+  answered, so compare it against the issue you know and it settles which workspace the key reached.
+  A `null` ticket is not a pass, since the reference was refused or not found, and neither is an
+  empty findings list, since a ticket in a state the grading does not cover produces none, as above.
 
   And run the check against the value before `gh secret set` stores it. It reads your local
   `LINEAR_API_KEY`, so once the secret is stored a pass proves only that the value in your hand
