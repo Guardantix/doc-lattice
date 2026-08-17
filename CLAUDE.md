@@ -16,7 +16,7 @@ doc-lattice is a deterministic traceability engine for dependencies between Mark
   playbook, and the accounts and access surface.
 - [SECURITY.md](SECURITY.md) owns supported versions, the private vulnerability reporting path,
   the security scope boundary, and the disclosure expectation.
-- [roadmap.md](roadmap.md) owns future direction.
+- [ROADMAP.md](ROADMAP.md) owns future direction.
 
 When behavior or policy changes, update its owner and link to it. Do not restate the same contract
 in another maintained document.

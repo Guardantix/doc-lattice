@@ -190,6 +190,11 @@ cleanly and never triggered, and this is the release that fixes it.
   v10.0.0, and that `actions/checkout` v7.0.0 blocks checking out a fork pull request under
   `pull_request_target` and `workflow_run`. The published recipe sets both inputs explicitly and
   uses neither trigger, so it is unaffected.
+- `roadmap.md` is renamed to `ROADMAP.md`, matching every other maintained root document. The
+  rename is case-only, so a case-insensitive checkout sees no change and a case-sensitive one
+  needs the new spelling. README.md, CLAUDE.md, and ARCHITECTURE.md now reference the new name;
+  entries in earlier releases keep the spelling that was correct at the time. Its contents were
+  also rewritten to track the three release projects rather than the shipped 4.x work.
 
 ### Deprecated
 

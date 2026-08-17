@@ -371,7 +371,7 @@ and completed implementation documents creates conflicting sources of truth.
 **Decision:** README.md owns the user contract; ARCHITECTURE.md owns durable decisions and
 module boundaries; CLAUDE.md routes contributors and agents and lists enforced repository
 rules without restating behavior; CHANGELOG.md owns release history and migrations; and
-roadmap.md owns future direction. Maintained documents link to the owner instead of copying
+ROADMAP.md owns future direction. Maintained documents link to the owner instead of copying
 its content. Completed implementation specs and plans, duplicate convention guides, and
 incomplete history logs are deleted after durable content reaches its owner, rather than
 maintained or archived in the repository.
