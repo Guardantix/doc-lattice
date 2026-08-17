@@ -152,7 +152,7 @@ gh api --hostname github.com "repos/OWNER/REPO" --jq '.default_branch'
 
 gh api --hostname github.com --paginate \
   "repos/OWNER/REPO/environments" \
-  --jq '.environments[].name | select(. == "doc-lattice-linear")'
+  --jq '.environments[].name | select(ascii_downcase == "doc-lattice-linear")'
 ```
 
 The first must print `main`. This design hard-codes that branch in the workflow trigger, the `if:`
@@ -164,6 +164,12 @@ stop, not something to run the commands below over: the create call rewrites its
 policy, and the readback that follows reports only the state that call just wrote, so it can never
 show you what the environment was protected by beforehand. Inspect it, decide deliberately whether
 it is yours to take over or remove, and only then continue.
+
+The comparison is case-folded, and prints whatever casing the existing environment carries, because
+GitHub environment names are not case sensitive. A `Doc-Lattice-Linear` already on the repository is
+the same environment as far as the create call below is concerned, so an exact-match precondition
+would print nothing and then hand you a silent takeover of somebody else's environment: the one
+outcome this check exists to prevent.
 
 Only once both preconditions hold:
 

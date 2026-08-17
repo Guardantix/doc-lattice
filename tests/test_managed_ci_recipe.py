@@ -323,6 +323,32 @@ def test_gh_procedure_reads_state_before_it_creates_the_environment():
     )
 
 
+def test_gh_procedure_matches_environment_names_case_insensitively():
+    """The precondition has to recognize the environment GitHub would actually resolve.
+
+    GitHub environment names are not case sensitive, so the PUT in step 3 updates a
+    ``Doc-Lattice-Linear`` that already exists. An exact-match precondition therefore prints
+    nothing and clears the reader to take that environment over silently. ``render.py`` already
+    compares this name with ``contains_ascii_case_line`` for the managed path, and the hand
+    procedure that replaces it cannot be weaker.
+    """
+    commands = _shell_commands()
+    listing = f'"repos/{_PLACEHOLDER_REPOSITORY}/environments"'
+    reads = [
+        command
+        for command in commands
+        if command.startswith("gh api ") and listing in command and "--jq" in command
+    ]
+
+    assert reads, "step 3 must list the repository's environments"
+    for command in reads:
+        assert "ascii_downcase" in command, (
+            "step 3's existence check must case-fold the environment name, or an existing "
+            "environment in different casing reads as absent"
+        )
+        assert f'== "{_ENVIRONMENT}"' in command, command
+
+
 def test_documented_init_invocations_pin_the_default_branch():
     """Every scaffold and upgrade call names the branch instead of letting ``init`` probe.
 
