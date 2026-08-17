@@ -392,8 +392,8 @@ backlog one grades INFO, and a triage, canceled, or duplicate ticket yields no f
 Two of those five report a real drift on a run that still concludes successfully, so read the
 reported findings rather than the run conclusion.
 
-All three parts of the credential path are checkable now, though the third takes a command the gate
-itself never runs:
+Two parts of the credential path are checkable outright, and the third is checkable only in a
+narrower sense than it first looks:
 
 - **The secret is named and placed correctly.** Step 6's first read already proves the environment
   holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second and
@@ -401,31 +401,35 @@ itself never runs:
 - **The wiring is right.** Read the workflow. `environment: doc-lattice-linear` on the job is what
   grants access at all, and the secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final
   step.
-- **The value takes one deliberate command**, because the gate's own invocation will not tell you.
-  The gate audits, so it collects identifiers only from stale-shipped findings, and step 5's
-  `reconcile --all` exists precisely to leave none. `--from` does not work that way: it asks what a
-  change to a node would affect, and collects identifiers from the downstream nodes in that impact
-  closure whether or not anything has drifted. Name an upstream node something derives from, on the
-  lattice step 5 annotated, and the query happens:
+- **A Linear key can be checked, but the check is about your copy rather than GitHub's.** The
+  gate's own invocation will not do it: the gate audits, so it collects identifiers only from
+  stale-shipped findings, and step 5's `reconcile --all` exists precisely to leave none. `--from`
+  does not work that way. It asks what a change to a node would affect and collects identifiers
+  from the downstream nodes in that impact closure, whether or not anything has drifted:
 
   ```bash
-  doc-lattice linear --from SOME_UPSTREAM_ID
+  uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice linear --from SOME_UPSTREAM_ID
   ```
 
-  On a fully reconciled lattice with no key, the plain command reports `no stale-shipped findings`
-  and exits 0 while that one exits 2 with `LINEAR_API_KEY is not set`. The difference is the point:
-  only the second reached the client. A working key reports the downstream findings with their
-  ticket states; a wrong one fails with a Linear HTTP error.
+  On a fully reconciled lattice with no key, the gate's own command reports `no stale-shipped
+  findings` and exits 0 while this one exits 2 with `LINEAR_API_KEY is not set`. Only the second
+  reached the client, which is what makes it usable at all.
 
-  Two cautions on supplying the key to it, both of which this document already applies elsewhere.
-  Put the value in the environment rather than inline in the command, since an inline assignment
-  lands in shell history, which is why `gh secret set` prompts instead. And have the pinned
-  environment resolved before the key is present, so the credential is never exposed to package
-  resolution or a build running under it, which is the separation step 2's install step maintains.
+  Three conditions, each of which decides whether the result means anything. At least one node
+  downstream of the one you name has to carry a `tickets:` identifier the tool will actually query,
+  well formed and in the configured team where `linear_team` is set; with none, the run collects
+  nothing, returns before the key is read, and passes while telling you nothing. Export the key
+  beforehand rather than writing it inline, since an inline assignment lands in shell history,
+  which is why `gh secret set` prompts instead; and if you want the separation step 2's install
+  step keeps, run the pinned command once with no key present first, because on a cold cache `uvx`
+  resolves and installs in the same invocation. Most importantly, run it against the value before
+  `gh secret set` stores it. This reads your local `LINEAR_API_KEY`, so once the secret is stored a
+  pass proves only that the value in your hand works, never that GitHub holds the same one.
 
-So a wrong or stale value need not survive installation. Skip the check and it does, silently, until
-the first real drift that actually reaches Linear, which fails loudly with a Linear error and a
-non-zero exit rather than passing.
+That last gap is the residual, and this recipe's own ordering leaves it open: step 4 stores the
+secret before step 5 annotates the lattice this check needs. A wrong or stale stored value
+therefore survives installation silently, and closes on the first real drift that actually reaches
+Linear, loudly, with a Linear error and a non-zero exit rather than a pass.
 
 Not every drift reaches Linear, so do not read that as a guarantee attached to the next red run.
 The drifted document has to carry at least one identifier the tool will query: syntactically well
