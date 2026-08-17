@@ -83,11 +83,11 @@ def _legacy_stdout(version: str) -> str:
         # Spelled out rather than interpolated from constants, so this stays an independent
         # assertion of the exact bytes init prints.
         "      - uses: actions/checkout@"
-        "11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n"  # pragma: allowlist secret
+        "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"  # pragma: allowlist secret
         "        with:\n"
         "          persist-credentials: false\n"
         "      - uses: astral-sh/setup-uv@"
-        "d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0\n"  # pragma: allowlist secret
+        "20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1\n"  # pragma: allowlist secret
         "        with:\n"
         "          enable-cache: false\n"
         "      - run: |\n"
