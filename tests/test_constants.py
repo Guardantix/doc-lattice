@@ -112,8 +112,8 @@ def test_action_refs_are_approved_full_commit_shas():
     # The pin values themselves, asserted where constants.py's invariants live. A floating tag
     # re-resolves on every run, which is exactly what pinning by commit exists to prevent, so
     # both halves are checked here once rather than at each renderer that emits them.
-    assert CHECKOUT_REF == "11d5960a326750d5838078e36cf38b85af677262"  # pragma: allowlist secret
-    assert SETUP_UV_REF == "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
+    assert CHECKOUT_REF == "3d3c42e5aac5ba805825da76410c181273ba90b1"  # pragma: allowlist secret
+    assert SETUP_UV_REF == "20cfd1bf945f4377ade1205e4dbc17946fc9a30d"  # pragma: allowlist secret
     assert re.fullmatch(r"[0-9a-f]{40}", CHECKOUT_REF) is not None
     assert re.fullmatch(r"[0-9a-f]{40}", SETUP_UV_REF) is not None
     assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", CHECKOUT_VERSION) is not None

@@ -91,10 +91,10 @@ CACHE_FILE_NAME: str = "load-cache.json"
 # These are the same pins this repository's own workflows run, which
 # `tests/test_workflow_pinning.py` enforces: a frozen SHA cannot drift from a floating tag on
 # its own, so the shipped pin is kept current by being the pin our own CI depends on.
-CHECKOUT_REF: str = "11d5960a326750d5838078e36cf38b85af677262"  # pragma: allowlist secret
-CHECKOUT_VERSION: str = "v4.4.0"
-SETUP_UV_REF: str = "d0cc045d04ccac9d8b7881df0226f9e82c39688e"  # pragma: allowlist secret
-SETUP_UV_VERSION: str = "v6.8.0"
+CHECKOUT_REF: str = "3d3c42e5aac5ba805825da76410c181273ba90b1"  # pragma: allowlist secret
+CHECKOUT_VERSION: str = "v7.0.1"
+SETUP_UV_REF: str = "20cfd1bf945f4377ade1205e4dbc17946fc9a30d"  # pragma: allowlist secret
+SETUP_UV_VERSION: str = "v10.0.1"
 
 # The composed `uses:` fragment both renderers emit verbatim. Owning the assembled form here,
 # not just its halves, keeps the `@<sha> # vX.Y.Z` shape in one place rather than hand-spelled

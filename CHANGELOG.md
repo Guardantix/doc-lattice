@@ -178,6 +178,18 @@ cleanly and never triggered, and this is the release that fixes it.
   reasoning, including why `ruamel.yaml` additionally gets the `yaml-compatibility` CI leg and why
   `markdown-it-py` stays exact-pinned at 4.2.0 despite the transitive constraint that places on
   `rich`.
+- The shipped GitHub Actions pins move onto releases that target Node.js 24: `actions/checkout`
+  from `v4.4.0` to `v7.0.1`, and `astral-sh/setup-uv` from `v6.8.0` to `v10.0.1`. Both previous
+  pins target Node.js 20, which GitHub has deprecated on Actions runners and currently forces onto
+  Node.js 24; this moves off that forcing before it stops rather than after. The pins reach
+  adopters through the snippet `init` prints and the recipe in MANAGED_CI.md, and are the same
+  ones this repository's own workflows run, so all three moved in one change. No input either
+  workflow sets changed across the bump. Adopters who copied the recipe and then added inputs of
+  their own should note that `setup-uv` changed the `prune-cache` default to `false` in v9.0.0 and
+  now disables caching by default on `pull_request_target`, `workflow_run`, and `release` in
+  v10.0.0, and that `actions/checkout` v7.0.0 blocks checking out a fork pull request under
+  `pull_request_target` and `workflow_run`. The published recipe sets both inputs explicitly and
+  uses neither trigger, so it is unaffected.
 
 ### Deprecated
 
