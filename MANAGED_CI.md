@@ -237,20 +237,7 @@ one this design depends on: stop, and do not continue to step 4.
 
 ### 4. Set the environment secret and remove repository-scoped copies
 
-Test the key before you store it. Nothing downstream can tell a correctly wired setup holding a bad
-value from a misconfigured one, so this is the only cheap moment to separate them:
-
-```bash
-LINEAR_API_KEY=<the value you are about to store> \
-  uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice linear
-```
-
-Run it against a lattice that has a stale shipped edge, so the query actually happens. A good key
-reports the finding with the ticket's state; a bad one fails with a Linear HTTP error. The pinned
-invocation is deliberate: nothing in this recipe leaves a `doc-lattice` executable on your `PATH`,
-because `uvx` resolves it into a throwaway environment each time.
-
-Then, only after the readback above is exactly right:
+Only after the readback above is exactly right:
 
 ```bash
 gh secret set DOC_LATTICE_LINEAR_API_KEY \
@@ -405,24 +392,25 @@ backlog one grades INFO, and a triage, canceled, or duplicate ticket yields no f
 Two of those five report a real drift on a run that still concludes successfully, so read the
 reported findings rather than the run conclusion.
 
-You can confirm every part of the credential path except one without waiting, and without
-manufacturing drift to force the gate's hand. Take them separately, because each is checkable on its
-own:
+Two parts of the credential path are checkable now, and the third is not checkable at all until the
+gate has real work:
 
-- **The key works.** Step 4 had you run it locally against a stale shipped edge before storing it,
-  which is the only point in this recipe where a bad value is cheap to find. If you skipped that,
-  go back and do it now: the value is testable at any time, it is just no longer testable before
-  the storage it was meant to gate.
 - **The secret is named and placed correctly.** Step 6's first read already proves the environment
   holds `DOC_LATTICE_LINEAR_API_KEY` and nothing else carrying a Linear key, and its second and
   third prove no copy sits at a broader scope.
 - **The wiring is right.** Read the workflow. `environment: doc-lattice-linear` on the job is what
   grants access at all, and the secret is mapped to `LINEAR_API_KEY` only in the `env:` of the final
   step.
+- **The value is the open one**, and it stays open by construction rather than by omission here.
+  `linear` reads `LINEAR_API_KEY` only when a stale-shipped finding gives it an identifier to
+  resolve, and a fresh installation has none: step 5's `reconcile --all` exists to acknowledge the
+  current state, so it is what guarantees there is nothing to collect. No command in this tool
+  exercises the credential unconditionally, so there is nothing you can run at install time that
+  separates a good value from a bad one. Checking the value itself against Linear, outside this
+  tool, is the only thing available in the meantime.
 
-What none of that establishes is that the value stored in GitHub is the value you tested, which is a
-paste error and nothing else. That one closes on the first real drift that actually reaches Linear,
-and then it closes loudly, with a Linear error and a non-zero exit rather than a silent pass.
+So a wrong or stale value survives installation silently, and closes on the first real drift that
+actually reaches Linear, loudly, with a Linear error and a non-zero exit rather than a silent pass.
 
 Not every drift reaches Linear, so do not read that as a guarantee attached to the next red run.
 The drifted document has to carry at least one identifier the tool will query: syntactically well
