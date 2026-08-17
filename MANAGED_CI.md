@@ -403,12 +403,15 @@ paste error and nothing else. That one closes on the first real drift, and it cl
 stale-shipped edge with a missing or wrong key fails the run with a Linear error and a non-zero
 exit, never a silent pass.
 
-Do not manufacture drift on `main` to force that confirmation earlier. The pre-commit hook step 1
-installs runs `doc-lattice check`, which exits 1 on a stranded `seen:` hash, so this recipe's own
-tooling refuses the commit; where the offline workflow is a required check, the same drift cannot
-merge either. Planting drift also means planting a `tickets:` reference for it to grade, and an
-annotation added for a test outlives the test and misattributes the next real finding on that
-document.
+Do not manufacture drift on `main` to force that confirmation earlier. Both outcomes are bad, and
+which one you get depends on setup you may not have checked. Step 1's pre-commit block runs
+`doc-lattice check`, which exits 1 on a stranded `seen:` hash, so where those hooks are installed
+this recipe's own tooling refuses the commit. Where they are not, the commit succeeds: the block is
+inert until `pre-commit install` has been run in the repository, and pasting it into
+`.pre-commit-config.yaml` does not do that. Then the drift reaches `main` unannounced, which is the
+worse half of the pair, and it is only caught on merge where the offline workflow is a required
+check. Planting drift also means planting a `tickets:` reference for it to grade, and an annotation
+added for a test outlives the test and misattributes the next real finding on that document.
 
 Review the rest by reading, because no command checks it:
 
