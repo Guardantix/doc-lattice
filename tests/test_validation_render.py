@@ -8,6 +8,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from doc_lattice.validation_render import format_validation_error
 
 
+class _Nested(BaseModel):
+    """A stand-in for a model reached through a field of the root."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    ref: str = "r"
+
+
 class _Sample(BaseModel):
     """A stand-in model exercising every rendering branch in one place."""
 
@@ -15,6 +23,8 @@ class _Sample(BaseModel):
 
     name: str = "x"
     tags: list[str] = []
+    edges: list[_Nested] = []
+    single: _Nested | None = None
 
     @model_validator(mode="after")
     def _name_is_not_reserved(self) -> "_Sample":
@@ -80,7 +90,52 @@ def test_list_index_is_part_of_the_location():
 def test_forbidden_key_lists_the_models_accepted_keys():
     message = _render({"bogus": 1})
 
-    assert "(accepted keys: name, tags)" in message
+    assert "(accepted keys: edges, name, single, tags)" in message
+
+
+def test_forbidden_key_inside_a_list_of_models_lists_that_models_keys():
+    # The root's fields are invalid exactly where the user is editing, so offering them would
+    # send them from one error straight into the next.
+    message = _render({"edges": [{"ref": "a", "bogus": 1}]})
+
+    assert "  edges.0.bogus: " in message
+    assert "(accepted keys: ref)" in message
+
+
+def test_forbidden_key_inside_a_direct_nested_model_lists_that_models_keys():
+    message = _render({"single": {"ref": "a", "bogus": 1}})
+
+    assert "(accepted keys: ref)" in message
+
+
+def test_forbidden_key_under_an_unresolvable_path_offers_no_key_list():
+    # Better to say nothing than to name the wrong model's fields. A dict-valued field has no
+    # single model behind it, so the walk gives up rather than guessing.
+    class _Opaque(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+
+        payload: dict[str, "_Leaf"] = {}
+
+    class _Leaf(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+
+        value: int = 0
+
+    _Opaque.model_rebuild()
+
+    with pytest.raises(ValidationError) as exc:
+        _Opaque.model_validate({"payload": {"k": {"value": 1, "bogus": 2}}})
+
+    message = format_validation_error(
+        exc.value,
+        header="invalid:",
+        model=_Opaque,
+        root_label="<root>",
+    )
+
+    assert "  payload.k.bogus: Extra inputs are not permitted" in message
+    assert "accepted keys" not in message
+    assert "()" not in message  # no empty parenthetical left behind
 
 
 def test_extra_note_precedes_the_accepted_keys_for_the_key_it_matches():
@@ -89,7 +144,7 @@ def test_extra_note_precedes_the_accepted_keys_for_the_key_it_matches():
 
     message = _render({"bogus": 1}, note)
 
-    assert "(gone since 2.0. accepted keys: name, tags)" in message
+    assert "(gone since 2.0. accepted keys: edges, name, single, tags)" in message
 
 
 def test_extra_note_returning_none_adds_nothing():

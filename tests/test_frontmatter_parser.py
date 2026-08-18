@@ -14,7 +14,7 @@ from doc_lattice.frontmatter_parser import (
     split_frontmatter,
     split_frontmatter_parts,
 )
-from doc_lattice.model import NodeMeta
+from doc_lattice.model import NodeMeta, RawEdge
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
@@ -254,6 +254,18 @@ def test_parse_meta_unknown_key_lists_the_accepted_keys():
         "invalid lattice frontmatter in a.md:\n"
         f"  bogus: Extra inputs are not permitted (accepted keys: {accepted})"
     )
+
+
+def test_parse_meta_unknown_key_in_an_edge_lists_the_edge_keys_not_the_node_keys():
+    # derives_from holds RawEdge, so a key rejected inside one is answered by RawEdge's fields.
+    # Offering NodeMeta's would name keys that are invalid exactly where the user is editing.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: x\nderives_from:\n  - ref: a\n    bogus: 1\n", Path("a.md"))
+
+    message = str(exc.value)
+    assert "  derives_from.0.bogus: " in message
+    assert f"accepted keys: {', '.join(sorted(RawEdge.model_fields))}" in message
+    assert "authority" not in message
 
 
 def test_parse_meta_error_omits_pydantic_url_and_echoed_input():

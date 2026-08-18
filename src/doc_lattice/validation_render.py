@@ -8,6 +8,7 @@ module owns the replacement so the two boundaries cannot drift apart.
 """
 
 from collections.abc import Callable
+from typing import get_args
 
 from pydantic import BaseModel, ValidationError
 
@@ -34,14 +35,15 @@ def format_validation_error(
     The message is built from ``exc.errors()`` rather than ``str(exc)`` so the user contract is
     owned here: pydantic's ``url`` and ``input`` fields are dropped, its raise-path boilerplate
     prefix is stripped so a domain-authored sentence reads as written, and its human ``msg`` is
-    otherwise kept. A key rejected by ``extra="forbid"`` additionally lists the keys the model
-    does accept, derived from ``model.model_fields`` so a future field cannot make the
-    diagnostic stale.
+    otherwise kept. A key rejected by ``extra="forbid"`` additionally lists the keys that are
+    accepted where it was written, derived from the owning model's fields so a future field
+    cannot make the diagnostic stale.
 
     Args:
         exc: The validation error raised by the caller's ``model_validate``.
         header: The first line, naming what failed and the file it came from.
-        model: The model that rejected the input, whose fields are the accepted-key list.
+        model: The root model validation started from. A key rejected inside a nested model is
+            answered by that model's fields, not this one's.
         root_label: Rendered in place of a field path when pydantic reports no location.
         extra_note: Optional per-key migration note for a forbidden key, given that key's
             location. Returning None adds nothing. This keeps a caller's one-off migration
@@ -58,7 +60,9 @@ def format_validation_error(
         if prefix is not None:
             detail = detail.removeprefix(prefix)
         if error["type"] == "extra_forbidden":
-            detail = f"{detail} ({_accepted_key_help(error['loc'], model, extra_note)})"
+            help_text = _accepted_key_help(error["loc"], model, extra_note)
+            if help_text is not None:
+                detail = f"{detail} ({help_text})"
         lines.append(f"  {location}: {detail}")
     return "\n".join(lines)
 
@@ -85,18 +89,78 @@ def _accepted_key_help(
     location: tuple[int | str, ...],
     model: type[BaseModel],
     extra_note: Callable[[tuple[int | str, ...]], str | None] | None,
-) -> str:
+) -> str | None:
     """Build the parenthesized help that follows a forbidden-key message.
+
+    The key list comes from the model that owns the rejecting location, not from the root: a key
+    rejected inside a nested model is answered by that model's fields, and offering the root's
+    would send the user to fields that are invalid exactly where they are editing.
 
     Args:
         location: The ``loc`` tuple from one ``extra_forbidden`` error.
-        model: The model that rejected the key.
+        model: The root model validation started from.
         extra_note: Optional migration note for this key, or None.
 
     Returns:
-        The sorted accepted-key list, preceded by the caller's migration note when it supplies
-        one for this key.
+        The caller's migration note and the owning model's sorted key list, whichever of the two
+        is available, or None when neither is, so the message keeps no empty parenthetical.
     """
-    help_text = f"accepted keys: {', '.join(sorted(model.model_fields))}"
+    parts = []
     note = extra_note(location) if extra_note is not None else None
-    return f"{note} {help_text}" if note is not None else help_text
+    if note is not None:
+        parts.append(note)
+    owner = _owning_model(model, location)
+    if owner is not None:
+        parts.append(f"accepted keys: {', '.join(sorted(owner.model_fields))}")
+    return " ".join(parts) if parts else None
+
+
+def _owning_model(
+    model: type[BaseModel], location: tuple[int | str, ...]
+) -> type[BaseModel] | None:
+    """Walk a rejecting location back to the model whose fields answer it.
+
+    The final location part is the rejected key itself, so only the path before it is walked. An
+    integer part is a sequence index, which selects an element without changing the model that
+    element is validated against.
+
+    Args:
+        model: The root model validation started from.
+        location: The ``loc`` tuple from one ``extra_forbidden`` error.
+
+    Returns:
+        The model owning the rejected key, or None when the path leads somewhere with no single
+        model behind it, in which case no key list is offered rather than a wrong one.
+    """
+    current = model
+    for part in location[:-1]:
+        if isinstance(part, int):
+            continue
+        field = current.model_fields.get(part)
+        if field is None:
+            return None
+        nested = _model_in(field.annotation)
+        if nested is None:
+            return None
+        current = nested
+    return current
+
+
+def _model_in(annotation: object) -> type[BaseModel] | None:
+    """Find the model a field annotation ultimately holds, looking through generic wrappers.
+
+    ``list[RawEdge]`` and ``RawEdge | None`` both own ``RawEdge``; ``str | None`` owns no model.
+
+    Args:
+        annotation: A field's declared annotation.
+
+    Returns:
+        The single model the annotation carries, or None when it carries none.
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    for argument in get_args(annotation):
+        found = _model_in(argument)
+        if found is not None:
+            return found
+    return None
