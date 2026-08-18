@@ -1093,12 +1093,21 @@ on every run until it was fixed.
 So `parse_meta` captures the warning, returns the fact on `ParsedMeta`, and `orchestrate.py`
 reports it from a single site against the path the run discovered, exactly as it reports an id-less
 skip. `Entry` carries it as a required field and `CACHE_VERSION` rises with it. Every other warning
-raised during the load is re-emitted at its original location, so only this one category is
-intercepted. Two costs are real and accepted. The strict load's stderr is no longer byte-identical
-to what an accelerator-free environment printed before this record: the text names the file now,
-which is the point. And it no longer matches the reread inside `apply_reconcile`, which still lets
-ruamel's warning escape, because that path builds its own loaders per AD-26 and has neither a
-discovered path to name nor a cache entry to write.
+raised by a load that returns is re-emitted at its original location, so only this one category is
+intercepted. Three costs are real and accepted. The strict load's stderr is no longer
+byte-identical to what an accelerator-free environment printed before this record: the text names
+the file now, which is the point. It no longer matches the reread inside `apply_reconcile`, which
+still lets ruamel's warning escape, because that path builds its own loaders per AD-26 and has
+neither a discovered path to name nor a cache entry to write. And the reported category changes
+from `ReusedAnchorWarning` to the `UserWarning` every diagnostic this engine raises carries, so an
+embedder that escalates `UserWarning` to an error now fails the load on a document the pure parser
+merely warned about, and a filter naming ruamel's category no longer reaches this diagnostic.
+Carrying ruamel's category here is rejected for the same reason its warning is: nothing ruamel
+raised survives a warm cache hit, so a category borrowed from it would claim a provenance the
+replay does not have. Targetability is by message prefix under AD-29, which is why the wording of
+each site is chosen to be distinct, and the id-less skip and the symlink escape are already plain
+`UserWarning`; giving this one site a category the other two lack would fragment that surface
+rather than stabilise it.
 **Consequences:** Which files count as tracked is user-visible, so this is a breaking change and
 lands in a major. An adopter running with the accelerator installed sees a document that used to
 fail the load become a tracked node, which can add edges to a report and change a `check` exit
