@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
+from ruamel.yaml.error import ReusedAnchorWarning
 
 import doc_lattice.frontmatter_parser as frontmatter_parser_module
 from doc_lattice.constants import LATTICE_INTENT_KEYS
@@ -349,3 +350,40 @@ def test_safe_yaml_loader_resets_version_after_malformed_frontmatter():
 
     assert meta is not None
     assert meta.id == "on"
+
+
+# A frontmatter block defining one anchor name twice. Every alias reads the nearest definition
+# above it, so `*target` rebinds to the second `&target` and the third entry's ref is "second".
+# The strict load is pinned to the pure Python parser (AD-31), so this block is tracked whether
+# or not the optional `ruamel.yaml.clib` accelerator is installed; the `yaml-compatibility` CI
+# leg runs both answers and neither one is skipped or routed around here.
+REUSED_ANCHOR_FRONTMATTER = (
+    "id: pc\nderives_from:\n  - ref: &target first\n  - ref: &target second\n  - ref: *target\n"
+)
+
+
+def test_parse_meta_tracks_a_reused_anchor_name_under_either_installed_parser():
+    # The verdict is the whole point: before the pure pin this block was tracked without the
+    # accelerator and refused as a duplicate anchor with it, so `check` disagreed with itself
+    # across two environments holding the same file. Asserted unconditionally, on both legs.
+    with pytest.warns(ReusedAnchorWarning):
+        parsed = parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
+
+    assert parsed.disposition == "tracked"
+    assert parsed.meta is not None
+    assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]
+
+
+def test_parse_meta_tracks_a_reused_anchor_name_after_a_directive_reset():
+    # A `%YAML` directive makes `SafeYamlLoader` discard its underlying loader and build a
+    # replacement, which is a second construction site the parser choice has to reach. Pinning
+    # only the first one would restore the environment-dependent verdict for every document
+    # read after a directive rather than for none.
+    parse_meta("%YAML 1.1\n--- !!map\nid: first\n", Path("directive.md"))
+
+    with pytest.warns(ReusedAnchorWarning):
+        parsed = parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
+
+    assert parsed.disposition == "tracked"
+    assert parsed.meta is not None
+    assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]

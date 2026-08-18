@@ -12,7 +12,10 @@ from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
-_LOADER = SafeYamlLoader()
+# Deliberately not pinned to the pure parser, unlike the frontmatter boundary. Config parsing
+# has no declared spelling subset and no user-visible verdict riding on which parser reads it,
+# so it keeps ruamel's own default and its semantics are unchanged by that pin.
+_LOADER = SafeYamlLoader(pure=False)
 
 # A cache_key is one safe path segment: it must start with an alphanumeric (rejecting ".",
 # "..", and hidden-directory names) and thereafter allow only word, dot, and hyphen, so it can

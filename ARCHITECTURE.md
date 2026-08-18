@@ -535,7 +535,11 @@ scalar token that follows it, is what bounds an edit that has to overwrite or re
 read builds its own loader, since a shared instance carries document state (`YAML.version`, and
 the reader and scanner bound to one document) whose reset behavior is itself version dependent.
 The boundary loaders behind `frontmatter_parser.py` and `config.py` may keep shared module-level
-instances despite that, because they consume only loaded values and never a source mark. Those
+instances despite that, because they consume only loaded values and never a source mark. Not
+needing a mark is not the same as not needing a parser choice, though, and treating the two as one
+question is what let a tracked-document verdict depend on the environment: `SafeYamlLoader` takes
+the implementation as a required argument, `frontmatter_parser.py` asks for the pure one under
+AD-32 so its accepted document set is fixed, and `config.py` asks for the default one. Those
 mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the reset, and its
 `YAML_LOAD_ERRORS` names the failure family both of those modules and `reconcile.py` catch.
 Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
@@ -875,13 +879,16 @@ Four behaviors of the loaded shape are recorded with the matrix rather than insi
 A merge is deliberately not followed inside an ordered map, because the loader builds one from its
 items rather than through mapping construction. Alias detachment may expand an alias site into a
 local mapping, or into a local one-pair item for an ordered map, rather than editing the shared
-node behind it. An anchor name may be defined more than once under the pure Python parser, which
-warns about it: a later definition rebinds the name, so each alias reads the nearest definition
-above it and a relocated value lands only on the alias sites still bound to the anchor it
-displaces. That acceptance is parser-conditional: with the optional `ruamel.yaml.clib` accelerator
-installed the strict tracked-document load refuses a reused name outright as a duplicate anchor,
-while the reread inside `apply_reconcile`, pure by AD-26, still handles it, so the spelling is
-reread-only there.
+node behind it. An anchor name may be defined more than once, and the pure Python
+parser warns about it: a later definition rebinds the name, so each alias reads the nearest
+definition above it and a relocated value lands only on the alias sites still bound to the anchor
+it displaces. That acceptance is unconditional, in both columns. It was not always: a plain safe
+loader switches to the optional `ruamel.yaml.clib` accelerator wherever it is installed, and that
+composer refuses a reused name outright as a duplicate anchor, so the strict tracked-document load
+accepted the spelling in one environment and refused it in another while the reread inside
+`apply_reconcile`, pure by AD-26, handled it in both. The strict load now asks for the pure parser
+explicitly, which settles the spelling as supported rather than parser-conditional; AD-32 records
+that decision and the alternative it was chosen over.
 
 **Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
@@ -1028,3 +1035,55 @@ someone converts it, and pinning it forward is what fails, because its offline w
 MANAGED_CI.md owns and CHANGELOG.md announces. Removing the commands is a breaking change to a
 published CLI surface and therefore a major version.
 AD-16's environment boundary survives this record intact; only its generator side retired.
+
+### AD-32: The strict frontmatter load pins the pure Python parser
+
+**Date:** 2026-08-18
+**Status:** Accepted
+**Context:** Whether a document counted as tracked depended on which packages a user happened to
+have installed beside this engine. `frontmatter_parser.py` performs the strict tracked-document
+load through `yaml_boundary.SafeYamlLoader`, which asked ruamel for a plain safe loader and so
+took whichever parser ruamel picked. ruamel picks the C one whenever the optional
+`ruamel.yaml.clib` accelerator is present, and no lock of this project installs it but any other
+package in an environment may pull it in. The two parsers do not accept the same documents. A
+frontmatter block defining one anchor name twice is accepted by the pure parser, which warns and
+rebinds the name, and refused outright by the C composer as a duplicate anchor. So the same file
+was a tracked node on one machine and an unreadable document on another, with nothing in the
+project's own declared dependency range having changed, and `check` reached different verdicts for
+it. AD-31 recorded the split as observed rather than deciding it, and the suite carried a runtime
+capability probe that routed the shape between its strict and reread-only pools so both legs of the
+`yaml-compatibility` matrix would pass over the disagreement rather than fail on it.
+**Decision:** `SafeYamlLoader` takes the parser implementation as a required keyword argument with
+no default, and applies it at every construction, including the replacement `load` builds when a
+`%YAML` directive forces the reset. `frontmatter_parser.py` asks for the pure Python parser, so
+the set of documents that count as tracked is fixed by this project rather than by an adopter's
+environment. `config.py` asks for the default, deliberately: config has no declared spelling subset
+and no user-visible verdict riding on which parser reads it, so this record leaves its semantics
+alone rather than widening the change to a second boundary that did not need it.
+
+Reused anchor names are therefore supported, not refused. YAML 1.2.2 permits a non-unique anchor
+name and resolves an alias to the most recent preceding definition, `reconcile.py` already
+implements and tests that rule on the reread path, and AD-31 layer 2 already listed the spelling.
+Refusing it in both parsers was the alternative, and it was rejected because it would settle an
+environment split by shrinking a valid, already-modeled input surface down to what the weaker
+parser can read. Accepting the split and documenting it was not a candidate: it is the state this
+record replaces.
+
+Warning behavior is part of the decision rather than a side effect of it. The pure parser raises
+`ReusedAnchorWarning` on the spelling it accepts, and that warning is preserved: not suppressed at
+the boundary and not translated into a project error. Preserving it keeps the strict load's
+observable behavior identical to what an environment without the accelerator already had, which is
+the majority environment and the one every lock of this project produces, and it matches the reread
+inside `apply_reconcile`, which has always raised it. Suppressing it would have made this engine
+quieter about a rebinding the author may not have intended, at a boundary whose whole job is to
+report what a document says.
+**Consequences:** Which files count as tracked is user-visible, so this is a breaking change and
+lands in a major. An adopter running with the accelerator installed sees a document that used to
+fail the load become a tracked node, which can add edges to a report and change a `check` exit
+code; an adopter without it sees nothing change at all. The strict load gives up the accelerator's
+speed on frontmatter, which is a per-document cost on a parse of a block that is small by
+construction. The `yaml-compatibility` matrix keeps both `clib` legs, and they now assert the same
+verdict rather than two: the capability probe and the conditional corpus routing in
+`tests/test_reconcile_fuzz.py` are gone, and the reused-anchor shape is a strict-column shape on
+every leg. A future divergence between the two parsers reaches only `config.py`, which is the one
+boundary still declared as taking ruamel's default.

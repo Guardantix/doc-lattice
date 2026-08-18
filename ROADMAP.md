@@ -22,9 +22,10 @@ release from staying open indefinitely.
 
 Nothing in the release sequences behind a single item any more. GTX-163 has removed the managed
 GitHub and Linear CI code and repaired every document that described it, GTX-126 has moved the
-reconcile journal to v2, and GTX-110 has retired the orphaned dirfd persistence family and
-recorded the filesystem threat model in AD-2. Start with the diagnostics group below, since the
-error codes it settles are what GTX-113 waits on.
+reconcile journal to v2, GTX-110 has retired the orphaned dirfd persistence family and recorded
+the filesystem threat model in AD-2, and GTX-148 has stopped a document's tracked status depending
+on whether the optional `ruamel.yaml.clib` accelerator is installed. Start with the diagnostics
+group below, since the error codes it settles are what GTX-113 waits on.
 
 - Bring the diagnostics an external user meets first up to the standard the transaction layer
   already sets. The load boundary introduces a frontmatter-specific error code and so has to land
@@ -33,9 +34,6 @@ error codes it settles are what GTX-113 waits on.
   filename are the one repo-controlled string reaching a diagnostic without passing the parser,
   and the fix belongs at message construction so it survives whichever renderer prints it
   (GTX-125).
-- Stop a document's tracked status depending on whether the optional `ruamel.yaml.clib`
-  accelerator happens to be installed (GTX-148). Which files count as tracked is user-visible, so
-  settling it is a breaking change either way it is settled.
 - Make README describe what 5.0 actually prints and enforces (GTX-113). This lands last, once the
   error codes and the documentation owners above have stopped moving.
 - Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
