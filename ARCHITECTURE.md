@@ -687,7 +687,10 @@ work inside raises `OSError` for real read failures and those must keep propagat
 command is still computing, and it does that before any caller could catch. `CliConsole` overrides
 it to re-raise the `BrokenPipeError` instead, which also settles the identical exposure
 `cli/errors.py` carries: every CLI write now fails like an ordinary stream write, and the entry
-point's existing `OSError` handling governs it.
+point's existing `OSError` handling governs it. The one write that handling cannot govern is its
+own: an exception raised inside an `except` clause is never retried against a sibling clause, so
+the entry point suppresses `OSError` around the error report itself and keeps the tool-error
+exit, since a report to a stderr that refuses the write cannot be delivered anyway.
 Costs survive it. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
 `ProjectError` mapping entirely, printing a traceback and exiting 1, the code otherwise reserved
 for drift: it is raised before `showwarning` is consulted, so no hook can reach it, and that is

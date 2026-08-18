@@ -535,6 +535,33 @@ def test_main_maps_errors_to_exit_2(monkeypatch, exc):
     assert info.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [ConfigError("cfg"), RuntimeError("loop")],
+    ids=["project-error", "internal-error"],
+)
+def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, exc):
+    # An exception raised inside an `except` clause is never retried against a sibling
+    # clause of the same `try`, so an unguarded report to a dead stderr would escape
+    # main() as an unhandled BrokenPipeError instead of the clean tool-error exit.
+    class _DeadStream(io.StringIO):
+        def write(self, s: str) -> int:
+            del s
+            raise BrokenPipeError
+
+    def boom():
+        raise exc
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(cli_mod, "app", boom)
+    monkeypatch.setattr(runtime_module.typer, "get_text_stream", lambda _name: _DeadStream())
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2
+
+
 def test_main_maps_non_callable_app_to_internal_error(monkeypatch, capsys):
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setattr(cli_mod, "app", object())

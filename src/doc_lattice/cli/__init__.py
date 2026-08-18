@@ -2,6 +2,7 @@
 
 import os
 import sys
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -69,8 +70,14 @@ def main() -> None:
             raise RuntimeError(msg)
         application()
     except ProjectError as exc:
-        print_project_error(diagnostic_runtime(no_color=no_color), exc)
+        # A report to a stderr that refuses the write cannot be delivered, and `CliConsole`
+        # raises `BrokenPipeError` for one; an exception raised inside an `except` clause is
+        # never retried against a sibling clause, so without this containment it would escape
+        # `main()` as an unhandled traceback instead of the clean tool-error exit.
+        with suppress(OSError):
+            print_project_error(diagnostic_runtime(no_color=no_color), exc)
         raise SystemExit(EXIT_TOOL_ERROR) from exc
     except (OSError, RuntimeError, ValueError) as exc:
-        print_internal_error(diagnostic_runtime(no_color=no_color), exc)
+        with suppress(OSError):
+            print_internal_error(diagnostic_runtime(no_color=no_color), exc)
         raise SystemExit(EXIT_TOOL_ERROR) from exc

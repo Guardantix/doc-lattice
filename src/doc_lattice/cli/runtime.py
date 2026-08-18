@@ -160,8 +160,14 @@ class CliRuntime:
                 return
             try:
                 self._render_warning(message)
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError is what a closed (rather than broken) stream raises on write;
+                # an embedder can hand `CliRuntime` one, and the advisory must not abort the
+                # load either way. Rich clears a console's segment buffer only after a write
+                # succeeds, so the refused warning is discarded here: left queued, it would
+                # resurface prepended to the next successful print on this console.
                 unwritable = True
+                del self.stderr._buffer[:]
 
         previous = warnings.showwarning
         # typeshed declares `showwarning` with `def`, so ty types the attribute as that one
@@ -183,9 +189,11 @@ class CliRuntime:
         rather than a prefix with a trailing space. A message spanning several lines keeps
         the prefix on the first alone, and the rest render unprefixed and unindented.
 
-        ``emoji=False`` and ``highlight=False`` match the renderers in ``report_render.py``
-        and ``linear_render.py``: this text carries discovered paths verbatim, and Rich
-        would otherwise rewrite a legal ``:name:`` in one as an emoji and recolor the rest.
+        ``highlight=False`` matches the renderers in ``report_render.py`` and
+        ``linear_render.py``; ``emoji=False`` is also the console-wide default set in
+        ``_create_runtime`` and is repeated here so an injected plain ``Console`` renders
+        identically: this text carries discovered paths verbatim, and Rich would otherwise
+        rewrite a legal ``:name:`` in one as an emoji and recolor the rest.
 
         Args:
             message: Warning instance or message text Python is displaying.
@@ -265,12 +273,17 @@ def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
     disabled = no_color or os.environ.get("NO_COLOR", "") != ""
     highlight = not disabled
     color_system = None if disabled else "auto"
+    # `emoji=False` is console-wide rather than per-call: nearly every line this CLI prints
+    # can carry a discovered path, and a legal `:name:` in one is not an emoji request. A
+    # site that repeats the kwarg does so only to render identically through an injected
+    # plain `Console`.
     return CliRuntime(
         stdout=CliConsole(
             file=typer.get_text_stream("stdout"),
             no_color=disabled,
             highlight=highlight,
             color_system=color_system,
+            emoji=False,
         ),
         stderr=CliConsole(
             file=typer.get_text_stream("stderr"),
@@ -278,6 +291,7 @@ def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
             no_color=disabled,
             highlight=highlight,
             color_system=color_system,
+            emoji=False,
         ),
         cwd=cwd,
         load_config=load_config,

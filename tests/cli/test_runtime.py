@@ -256,9 +256,8 @@ def _warning_runtime(stderr: StringIO, tmp_path: Path, load_lattice: LatticeLoad
     )
 
 
-def test_lattice_renders_loader_warnings_through_the_invocation_stderr(tmp_path: Path):
-    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
-    lattice = Lattice({}, {}, {}, {}, {}, {})
+def _warning_loader(lattice: Lattice, *messages: str) -> LatticeLoader:
+    """Build a loader that raises each message as a warning in order, then succeeds."""
 
     def load_lattice(
         project: ProjectConfig,
@@ -267,11 +266,36 @@ def test_lattice_renders_loader_warnings_through_the_invocation_stderr(tmp_path:
         persist_cache: bool = True,
     ) -> Lattice:
         del project, require_verified, persist_cache
-        warnings.warn("skipping /docs/thing.md: no 'id'", stacklevel=1)
+        for message in messages:
+            warnings.warn(message, stacklevel=1)
         return lattice
 
+    return load_lattice
+
+
+def _unreachable_loader() -> LatticeLoader:
+    """Build a loader that fails the test if the config read ever reaches it."""
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        raise AssertionError("the config read must not reach the lattice loader")
+
+    return load_lattice
+
+
+def test_lattice_renders_loader_warnings_through_the_invocation_stderr(tmp_path: Path):
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+
     stderr = StringIO()
-    runtime = _warning_runtime(stderr, tmp_path, load_lattice)
+    runtime = _warning_runtime(
+        stderr, tmp_path, _warning_loader(lattice, "skipping /docs/thing.md: no 'id'")
+    )
 
     with warnings.catch_warnings():
         warnings.simplefilter("always")
@@ -288,22 +312,13 @@ def test_project_renders_config_load_warnings_through_the_invocation_stderr(tmp_
         warnings.warn("found duplicate anchor 'names'", stacklevel=1)
         return ProjectConfig(Config(), tmp_path, (tmp_path,))
 
-    def load_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project, require_verified, persist_cache
-        raise AssertionError("the config read must not reach the lattice loader")
-
     stderr = StringIO()
     runtime = CliRuntime(
         stdout=Console(file=StringIO()),
         stderr=Console(file=stderr, stderr=True, no_color=True, color_system=None),
         cwd=tmp_path,
         load_config=load_config,
-        load_lattice=load_lattice,
+        load_lattice=_unreachable_loader(),
     )
 
     with warnings.catch_warnings():
@@ -319,18 +334,12 @@ def test_lattice_warning_renderer_strips_a_message_that_opens_with_a_newline(tmp
     project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
     lattice = Lattice({}, {}, {}, {}, {}, {})
 
-    def load_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project, require_verified, persist_cache
-        warnings.warn("\nfound duplicate anchor 'shared'\nfirst occurrence\n", stacklevel=1)
-        return lattice
-
     stderr = StringIO()
-    runtime = _warning_runtime(stderr, tmp_path, load_lattice)
+    runtime = _warning_runtime(
+        stderr,
+        tmp_path,
+        _warning_loader(lattice, "\nfound duplicate anchor 'shared'\nfirst occurrence\n"),
+    )
 
     with warnings.catch_warnings():
         warnings.simplefilter("always")
@@ -343,18 +352,10 @@ def test_lattice_warning_renderer_escapes_rich_markup_in_the_message(tmp_path: P
     project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
     lattice = Lattice({}, {}, {}, {}, {}, {})
 
-    def load_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project, require_verified, persist_cache
-        warnings.warn("skipping [bold]docs/a.md[/bold]", stacklevel=1)
-        return lattice
-
     stderr = StringIO()
-    runtime = _warning_runtime(stderr, tmp_path, load_lattice)
+    runtime = _warning_runtime(
+        stderr, tmp_path, _warning_loader(lattice, "skipping [bold]docs/a.md[/bold]")
+    )
 
     with warnings.catch_warnings():
         warnings.simplefilter("always")
@@ -417,17 +418,19 @@ def test_lattice_restores_the_previous_showwarning_after_a_loader_exception(tmp_
 
 
 class _RefusingStream(StringIO):
-    """A stream that refuses every write, recording how many were attempted."""
+    """A stream that refuses the first ``refusals`` writes, recording how many were attempted."""
 
-    def __init__(self, error: OSError):
+    def __init__(self, error: OSError | ValueError, refusals: int | None = None):
         super().__init__()
         self.error = error
+        self.refusals = refusals
         self.attempts = 0
 
     def write(self, s: str) -> int:
-        del s
         self.attempts += 1
-        raise self.error
+        if self.refusals is None or self.attempts <= self.refusals:
+            raise self.error
+        return super().write(s)
 
 
 def _refusing_runtime(stream: _RefusingStream, tmp_path: Path, load_lattice: LatticeLoader):
@@ -443,29 +446,27 @@ def _refusing_runtime(stream: _RefusingStream, tmp_path: Path, load_lattice: Lat
 
 def _twice_warning_loader(lattice: Lattice) -> LatticeLoader:
     """Build a loader that raises two distinct warnings and then succeeds."""
-
-    def load_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project, require_verified, persist_cache
-        warnings.warn("skipping docs/one.md: no 'id'", stacklevel=1)
-        warnings.warn("skipping docs/two.md: no 'id'", stacklevel=1)
-        return lattice
-
-    return load_lattice
+    return _warning_loader(
+        lattice, "skipping docs/one.md: no 'id'", "skipping docs/two.md: no 'id'"
+    )
 
 
 @pytest.mark.parametrize(
     "error",
-    [BrokenPipeError(), OSError(5, "Input/output error"), OSError(28, "No space left on device")],
-    ids=["broken-pipe", "eio", "enospc"],
+    [
+        BrokenPipeError(),
+        OSError(5, "Input/output error"),
+        OSError(28, "No space left on device"),
+        ValueError("I/O operation on closed file"),
+    ],
+    ids=["broken-pipe", "eio", "enospc", "closed-file"],
 )
-def test_a_stderr_that_refuses_the_warning_does_not_abort_the_load(tmp_path: Path, error: OSError):
+def test_a_stderr_that_refuses_the_warning_does_not_abort_the_load(
+    tmp_path: Path, error: OSError | ValueError
+):
     # CPython's own warning printer swallows OSError for this reason: the load is
-    # succeeding, and its report is the whole point of the invocation.
+    # succeeding, and its report is the whole point of the invocation. A closed (rather
+    # than broken) stream raises ValueError from the write, and must not abort it either.
     project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
     lattice = Lattice({}, {}, {}, {}, {}, {})
     stream = _RefusingStream(error)
@@ -476,6 +477,25 @@ def test_a_stderr_that_refuses_the_warning_does_not_abort_the_load(tmp_path: Pat
         assert runtime.lattice(project) is lattice
 
     assert stream.attempts == 1  # the second warning is dropped, not retried on a dead stream
+
+
+def test_a_refused_warning_does_not_resurface_in_a_later_print(tmp_path: Path):
+    # Rich clears a console's segment buffer only after a successful write, so the refused
+    # warning's segments would otherwise stay queued and flush, prepended, with the next
+    # successful print on the same console.
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+    stream = _RefusingStream(OSError(28, "No space left on device"), refusals=1)
+    runtime = _refusing_runtime(
+        stream, tmp_path, _warning_loader(lattice, "skipping docs/one.md: no 'id'")
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        runtime.lattice(project)
+    runtime.stderr.print("error: something else entirely", soft_wrap=True)
+
+    assert stream.getvalue() == "error: something else entirely\n"
 
 
 def test_a_refusing_stderr_does_not_redirect_the_process_stdout(tmp_path: Path, capsys):
@@ -522,22 +542,12 @@ def _render_through(
     project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
     lattice = Lattice({}, {}, {}, {}, {}, {})
 
-    def load_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project, require_verified, persist_cache
-        warnings.warn(message, stacklevel=1)
-        return lattice
-
     runtime = CliRuntime(
         stdout=Console(file=StringIO()),
         stderr=Console(file=stderr, stderr=True, no_color=no_color, **console_kwargs),
         cwd=tmp_path,
         load_config=lambda _config, _cwd: ProjectConfig(Config(), tmp_path, (tmp_path,)),
-        load_lattice=load_lattice,
+        load_lattice=_warning_loader(lattice, message),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("always")
@@ -626,21 +636,12 @@ def test_project_restores_the_previous_showwarning_after_a_config_error(tmp_path
         msg = "config blew up"
         raise RuntimeError(msg)
 
-    def load_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project, require_verified, persist_cache
-        raise AssertionError("the config read must not reach the lattice loader")
-
     runtime = CliRuntime(
         stdout=Console(file=StringIO()),
         stderr=Console(file=StringIO(), stderr=True, no_color=True, color_system=None),
         cwd=tmp_path,
         load_config=load_config,
-        load_lattice=load_lattice,
+        load_lattice=_unreachable_loader(),
     )
 
     with warnings.catch_warnings():
