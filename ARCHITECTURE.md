@@ -65,18 +65,21 @@ Within the cache package, `cache/schema.py` and
 the network.
 
 The filesystem boundary is scoped to accidents, not adversaries, confirmed 2026-08-13. The guards
-that hold are the ones an ordinary mistake runs into: project-root containment and
-`path_utils.safe_resolve()` with its no-follow checks keep a configured or journal-supplied path
-from escaping the project root or being redirected through a symlink, before and after images plus
-their recorded fingerprints and the recovery journal keep an unrelated concurrent edit from being
-overwritten or silently rolled back, and the advisory reconcile lock serializes cooperating
-doc-lattice processes on one project. What is excluded is a hostile local process sharing the
-working tree: it may simply ignore the advisory lock, or win a race between a path check and the
-operation that follows it, and no check in this engine is written to survive that. The exclusion
-cuts both ways. 'It is not hostile-safe' is not a reason to drop an accident guard, since every
-one of them earns its place against the mistakes it does catch, and 'a co-tenant could defeat it'
-is not a reason to harden reconcile further, since the threat it would harden against is the one
-this decision deliberately places out of scope.
+that hold are the ones an ordinary mistake runs into: `path_utils.safe_resolve()` resolves a path
+through any symlinks and then enforces project-root containment, so a configured or
+journal-supplied path cannot land outside the project root, while an in-project symlink stays a
+legitimate document location; the narrower no-follow checks in `reconcile_transaction.py` reject a
+symlink or nonregular file standing in for the reconcile journal or a staged recovery artifact,
+where the recorded name itself is the authority rather than whatever it points at; before and after
+images plus their recorded fingerprints and the recovery journal keep an unrelated concurrent edit
+from being overwritten or silently rolled back; and the advisory reconcile lock serializes
+cooperating doc-lattice processes on one project. What is excluded is a hostile local process
+sharing the working tree: it may simply ignore the advisory lock, or win a race between a path
+check and the operation that follows it, and no check in this engine is written to survive that.
+The exclusion cuts both ways. 'It is not hostile-safe' is not a reason to drop an accident guard,
+since every one of them earns its place against the mistakes it does catch, and 'a co-tenant could
+defeat it' is not a reason to harden reconcile further, since the threat it would harden against is
+the one this decision deliberately places out of scope.
 **Consequences:** Every command's logic is unit-tested with no I/O; the network slice
 is quarantined to one module. The reconcile lock is the package's only lock capability, so no
 nesting is possible.
