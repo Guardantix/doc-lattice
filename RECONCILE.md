@@ -99,7 +99,9 @@ version 2 journal missing any of them is rejected rather than recovered with bla
   `2026-08-17T12:00:00.123456Z`. The value must match that syntax: a naive timestamp, a nonzero
   offset, and anything spelling a number rather than a date-time are all rejected, so a
   hand-edited value cannot be reinterpreted as some other instant. Both `0` and `"0"` would
-  otherwise read as 1970-01-01.
+  otherwise read as 1970-01-01. `Z` and `+00:00` are equivalent and both accepted; `-00:00` is
+  not, because ISO 8601 forbids it and RFC 3339 gives it a separate meaning this field does not
+  carry.
 - `tool_version`: the doc-lattice version that wrote the journal.
 - `selector`: the selection the batch was planned from, as `mode` (`all` or `downstream`),
   `downstream_id` (the node for a `downstream` selection, `null` for `all`), and `ref` (the single

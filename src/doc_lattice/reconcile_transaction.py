@@ -86,11 +86,17 @@ class JournalEntry(BaseModel):
 # The date-time syntax a journal timestamp may use: a calendar date, a T separator, a full clock
 # time, optional fractional seconds, and a zone designator. Case in the T and Z designators is
 # tolerated because a hand-normalized file may lower them; the space separator RFC 3339 permits by
-# agreement is not, since doc-lattice is the only writer of this file and never emits one. The
-# designator is required here but its value is not checked: _require_utc_offset owns that, so a
-# syntax failure and a wrong-zone failure each report as themselves.
+# agreement is not, since doc-lattice is the only writer of this file and never emits one.
+#
+# The designator's value is otherwise not judged here: _require_utc_offset owns that, so a syntax
+# failure and a wrong-zone failure each report as themselves. The single exception is -00:00,
+# which has to be refused on the text because datetime parsing normalizes it to an ordinary zero
+# offset, leaving nothing downstream to distinguish it by. It denotes the same instant as Z, so
+# this is a conformance rule rather than a correctness one: ISO 8601 forbids the negative-zero
+# offset, RFC 3339 gives it the separate meaning "UTC time known, local offset unknown", and this
+# field records an instant and has no such meaning to carry.
 _TIMESTAMP_TEXT = re.compile(
-    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})"
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|\+\d{2}:\d{2}|-(?!00:00)\d{2}:\d{2})"
 )
 
 

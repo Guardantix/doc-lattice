@@ -2216,6 +2216,16 @@ def _v2_payload() -> dict:
             lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00-08:00"),
             id="created-at-west-of-utc",
         ),
+        # Refused on the text, not on the parsed offset: datetime parsing normalizes -00:00 to an
+        # ordinary zero, so by the time _require_utc_offset runs there is nothing left to see.
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00-00:00"),
+            id="created-at-negative-zero-offset",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00-0000"),
+            id="created-at-offset-without-a-colon",
+        ),
         pytest.param(lambda p: p["provenance"].update(tool_version=""), id="tool-version-empty"),
         pytest.param(lambda p: p["provenance"].update(tool_version=4), id="tool-version-not-text"),
         pytest.param(
@@ -2423,14 +2433,37 @@ def test_created_at_accepts_every_spelling_of_the_same_utc_instant(accepted: str
     )
 
 
-def test_created_at_syntax_and_zone_failures_report_separately():
-    """The two validators own different questions, so their messages must not blur together."""
+@pytest.mark.parametrize(
+    "offset", ["2026-08-17T12:00:00+05:00", "2026-08-17T12:00:00-08:00"], ids=["east", "west"]
+)
+def test_created_at_syntax_and_zone_failures_report_separately(offset: str):
+    """The two validators own different questions, so their messages must not blur together.
+
+    Refusing -00:00 in the pattern must not drag every negative offset into the syntax branch:
+    a real zone mistake still has to say so, whichever side of UTC it falls on.
+    """
     with pytest.raises(ValidationError) as syntax:
         JournalProvenance.model_validate(_provenance_with("1755432000"))
     with pytest.raises(ValidationError) as zone:
-        JournalProvenance.model_validate(_provenance_with("2026-08-17T12:00:00+05:00"))
+        JournalProvenance.model_validate(_provenance_with(offset))
 
     assert "must be an ISO 8601 timestamp string" in str(syntax.value)
     assert "must be expressed in UTC" in str(zone.value)
     assert "must be expressed in UTC" not in str(syntax.value)
     assert "must be an ISO 8601 timestamp string" not in str(zone.value)
+
+
+def test_negative_zero_offset_is_refused_even_though_it_denotes_the_utc_instant():
+    """A conformance rule, not a correctness one, so the reasoning is pinned here.
+
+    ISO 8601 forbids -00:00 and RFC 3339 gives it the distinct meaning "UTC time known, local
+    offset unknown". Either way it denotes the same instant as Z, which is exactly why parsing
+    normalizes it away and why the refusal has to happen on the original text.
+    """
+    accepted = JournalProvenance.model_validate(_provenance_with("2026-08-17T12:00:00+00:00"))
+
+    with pytest.raises(ValidationError) as caught:
+        JournalProvenance.model_validate(_provenance_with("2026-08-17T12:00:00-00:00"))
+
+    assert accepted.created_at == datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    assert "must be an ISO 8601 timestamp string" in str(caught.value)
