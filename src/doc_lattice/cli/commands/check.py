@@ -10,7 +10,7 @@ from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
-from ..output import github_annotation, select_output, write_json, write_text
+from ..output import annotation_root, github_annotation, select_output, write_json, write_text
 from ..runtime import CliRuntime, get_runtime
 
 
@@ -110,7 +110,7 @@ def register_check(app: typer.Typer) -> None:
                     runtime,
                     github_annotation(
                         path,
-                        runtime.cwd,
+                        annotation_root(runtime, path),
                         f"doc-lattice {status.state}",
                         f"{status.source_id} -> {status.target_ref} is {status.state}",
                     ),

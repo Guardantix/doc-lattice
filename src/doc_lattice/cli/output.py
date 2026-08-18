@@ -104,6 +104,28 @@ def escape_github_property(value: str) -> str:
     return escape_github_message(value).replace(":", "%3A").replace(",", "%2C")
 
 
+def annotation_root(runtime: CliRuntime, path: Path) -> Path:
+    """Select the base one document's GitHub annotation path is rendered against.
+
+    GitHub Actions checks the repository out at ``GITHUB_WORKSPACE``, so that is the base
+    inline annotations must be relative to no matter which subdirectory the command ran in.
+    The selection happens here rather than inside the renderer because ``github_annotation``
+    falls back to an absolute path for a document outside the root it is handed: passing a
+    set-but-non-containing workspace straight through would skip the cwd fallback entirely.
+
+    Args:
+        runtime: The invocation runtime carrying the cwd and the captured checkout root.
+        path: Absolute path of the source document being annotated.
+
+    Returns:
+        The checkout root when it is known and contains ``path``, else the invocation cwd.
+    """
+    workspace = runtime.workspace
+    if workspace is not None and path.is_relative_to(workspace):
+        return workspace
+    return runtime.cwd
+
+
 def github_annotation(path: Path, root: Path, title: str, message: str) -> str:
     """Render one ``::error`` GitHub Actions annotation for a finding.
 
@@ -113,7 +135,7 @@ def github_annotation(path: Path, root: Path, title: str, message: str) -> str:
 
     Args:
         path: Absolute path of the source document.
-        root: Invocation cwd used for relative path reporting.
+        root: Base for relative path reporting, chosen by ``annotation_root``.
         title: Annotation title, before escaping.
         message: Annotation message, before escaping.
 

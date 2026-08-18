@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 
 import doc_lattice.frontmatter_parser as frontmatter_parser_module
 from doc_lattice.constants import LATTICE_INTENT_KEYS
-from doc_lattice.error_types import ConfigError, UnreadableDocError
+from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
     parse_meta,
     split_frontmatter,
@@ -219,10 +219,10 @@ def test_parse_meta_non_mapping_yaml_is_untracked_not_a_skip(raw):
     ],
 )
 def test_parse_meta_id_less_lattice_intent_raises_naming_file_and_keys(raw: str, declared: str):
-    with pytest.raises(ConfigError) as exc:
+    with pytest.raises(FrontmatterError) as exc:
         parse_meta(raw, Path("typo.md"))
 
-    assert exc.value.code == "CONFIG_ERROR"
+    assert exc.value.code == "FRONTMATTER_ERROR"
     assert str(exc.value) == (
         f"frontmatter in typo.md declares {declared} but has no 'id' key, so the file and "
         "every edge it declares would be dropped from the lattice; add an 'id' (check it for "
@@ -239,7 +239,7 @@ def test_parse_meta_intent_keys_are_an_exact_set_not_every_node_meta_field():
 
 
 def test_parse_meta_unknown_key_raises():
-    with pytest.raises(ConfigError):
+    with pytest.raises(FrontmatterError):
         parse_meta("id: x\nbogus: 1\n", Path("a.md"))
 
 
@@ -252,10 +252,10 @@ def test_parse_meta_unknown_key_raises():
         "id: x\nderives_from:\n  - ref: a\n    bogus: 1\n",  # RawEdge extra=forbid
     ],
 )
-def test_parse_meta_invalid_value_raises_config_error(raw):
-    with pytest.raises(ConfigError) as exc:
+def test_parse_meta_invalid_value_raises_frontmatter_error(raw):
+    with pytest.raises(FrontmatterError) as exc:
         parse_meta(raw, Path("a.md"))
-    assert exc.value.code == "CONFIG_ERROR"
+    assert exc.value.code == "FRONTMATTER_ERROR"
     assert "a.md" in str(exc.value)  # message names the source file
 
 

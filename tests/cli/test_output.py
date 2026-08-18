@@ -1,6 +1,7 @@
 """Tests for shared CLI output selection and exact writers."""
 
 import json
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import typer
 from rich.console import Console
 
 from doc_lattice.cli.output import (
+    annotation_root,
     escape_github_message,
     escape_github_property,
     github_annotation,
@@ -137,3 +139,42 @@ def test_escape_github_property_encodes_message_and_property_metacharacters():
     assert escape_github_property("100%\rfirst\nsecond: a,b") == (
         "100%25%0Dfirst%0Asecond%3A a%2Cb"
     )
+
+
+def test_annotation_root_prefers_a_workspace_that_contains_the_document(
+    runtime: CliRuntime, tmp_path: Path
+):
+    # Under Actions the checkout root is the base that makes an annotation land on the file
+    # in the diff, whatever subdirectory the command was invoked from.
+    workspace = tmp_path / "checkout"
+    nested = workspace / "packages" / "game"
+    nested.mkdir(parents=True)
+    document = nested / "docs" / "down.md"
+
+    in_workspace = replace(runtime, cwd=nested, workspace=workspace)
+
+    assert annotation_root(in_workspace, document) == workspace
+
+
+def test_annotation_root_falls_back_to_cwd_when_the_workspace_excludes_the_document(
+    runtime: CliRuntime, tmp_path: Path
+):
+    # A set but non-containing GITHUB_WORKSPACE must not reach the renderer: it would emit an
+    # absolute path rather than taking the cwd fallback the selection exists to preserve.
+    workspace = tmp_path / "other-checkout"
+    workspace.mkdir()
+    cwd = tmp_path / "elsewhere"
+    document = cwd / "docs" / "down.md"
+
+    outside = replace(runtime, cwd=cwd, workspace=workspace)
+
+    assert annotation_root(outside, document) == cwd
+
+
+def test_annotation_root_falls_back_to_cwd_when_no_workspace_is_set(
+    runtime: CliRuntime, tmp_path: Path
+):
+    document = tmp_path / "docs" / "down.md"
+
+    assert runtime.workspace is None
+    assert annotation_root(runtime, document) == tmp_path

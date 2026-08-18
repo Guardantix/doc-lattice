@@ -57,6 +57,13 @@ class UnreadableDocError(ProjectError):
         super().__init__(message, code="UNREADABLE_DOC")
 
 
+class FrontmatterError(ProjectError):
+    """A doc's frontmatter fails schema validation or declares lattice intent with no id."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="FRONTMATTER_ERROR")
+
+
 class LinearError(ProjectError):
     """A Linear network, credential, or response error."""
 

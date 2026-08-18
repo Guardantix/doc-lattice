@@ -531,4 +531,77 @@ def test_check_exits_2_naming_the_file_when_an_id_less_block_declares_lattice_in
 
     assert completed.returncode == 2
     assert f"frontmatter in {typo} declares 'derives_from' but has no 'id' key" in completed.stderr
-    assert "CONFIG_ERROR" in completed.stderr
+    # The typo is a frontmatter defect, so it must not send the user to the config file.
+    assert "FRONTMATTER_ERROR" in completed.stderr
+    assert "CONFIG_ERROR" not in completed.stderr
+
+
+def _nested_annotation_project(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a lattice at the checkout root and return its nested cwd and broken document."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    nested = tmp_path / "tools" / "scripts"
+    nested.mkdir(parents=True)
+    return nested, docs / "down.md"
+
+
+def test_check_github_annotation_is_workspace_relative_from_a_nested_cwd(
+    tmp_path: Path, monkeypatch
+):
+    # Invoking from a subdirectory used to emit an absolute path, which GitHub cannot attach
+    # to a diff, so inline annotations silently vanished for anyone not running from the root.
+    nested, _ = _nested_annotation_project(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, ["check", "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )
+
+
+def test_check_github_annotation_uses_cwd_when_no_workspace_is_set(tmp_path: Path, monkeypatch):
+    # Outside Actions the base is the invocation cwd, which keeps the absolute fallback for a
+    # document that cwd does not contain.
+    nested, document = _nested_annotation_project(tmp_path)
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, ["check", "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        f"::error file={escape_github_property(str(document))},"
+        "title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )
+
+
+def test_check_github_annotation_ignores_a_workspace_that_excludes_the_document(
+    tmp_path: Path, monkeypatch
+):
+    # A workspace pointing somewhere else must not reach the renderer: it would emit the
+    # absolute path instead of the cwd-relative one the fallback is there to produce.
+    nested, _ = _nested_annotation_project(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-other"
+    elsewhere.mkdir()
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(elsewhere))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check", "--format", "github"])
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )
+    assert nested.exists()

@@ -89,6 +89,36 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
 
 ### Changed
 
+- **BREAKING:** frontmatter schema and lattice-intent failures now carry the new
+  `FRONTMATTER_ERROR` code instead of `CONFIG_ERROR`, which sent users to the config file for a
+  broken document. Both raise sites move together: a `NodeMeta` validation failure, and the guard
+  that fires when a block declares `authority`, `derives_from`, or `tickets` with no `id`. Moving
+  only the first would have left the reported `idd` plus `derives_from` typo still pointing at
+  config, which is the defect the change exists to close. Read, decode, and YAML parse failures
+  keep `UNREADABLE_DOC`; that boundary was already coherent. Anything matching on the printed code
+  or catching `ConfigError` around `parse_meta` or `load_lattice` needs repointing, since
+  `FrontmatterError` is a sibling of `ConfigError`, not a subclass.
+- Config validation errors are now formatted by doc-lattice rather than delegated to pydantic's
+  multi-line renderer. The message names the config file, which the sibling read and parse errors
+  already did and this one did not, and renders one line per error carrying the full field
+  location and pydantic's human message. The `pydantic.dev` URL and the echoed input value are
+  gone; the domain-authored messages themselves are unchanged, so a message that deliberately
+  quotes the offending value still does. A key rejected by `extra: forbid` also lists the accepted
+  keys, derived from the model so a future config field cannot leave the list stale, and
+  `binding_layers` additionally gets the 1.x migration sentence, since the blanket forbid is the
+  only thing that catches it. A validator that runs on the whole model, such as the
+  `cache_trust_stat` check, reports an explicit `<config>` marker rather than an invented field
+  name.
+- `--format github` annotations are now rendered relative to `GITHUB_WORKSPACE` when it is set and
+  contains the document, rather than always to the invocation working directory. Under GitHub
+  Actions that is the repository checkout root, so inline pull-request annotations no longer
+  vanish for a run invoked from a subdirectory, where the previous behavior silently degraded to
+  an absolute path GitHub cannot attach to a diff. The base is selected before rendering, so a
+  workspace set to a directory that does not contain the document still takes the working-
+  directory fallback instead of being passed through to an absolute path. With the variable unset
+  the behavior is unchanged, including the absolute fallback. The base is deliberately not the
+  config file's project root: using it would strip the leading path from a monorepo config under
+  `packages/game`. See the `--format` section of README.md.
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a
   crash could not tell when it was written, which doc-lattice wrote it, or what command produced

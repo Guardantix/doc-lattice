@@ -12,7 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .constants import LATTICE_INTENT_KEYS
-from .error_types import ConfigError, UnreadableDocError
+from .error_types import FrontmatterError, UnreadableDocError
 from .model import NodeMeta, ParsedMeta
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
@@ -123,8 +123,8 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
 
     Raises:
         UnreadableDocError: If the YAML cannot be parsed.
-        ConfigError: If the frontmatter has an unknown or malformed key, or declares lattice
-            intent with no ``id``.
+        FrontmatterError: If the frontmatter has an unknown or malformed key, or declares
+            lattice intent with no ``id``.
     """
     if raw_meta is None:
         return _UNTRACKED
@@ -144,7 +144,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
         return ParsedMeta(meta=NodeMeta.model_validate(data), disposition="tracked")
     except ValidationError as exc:
         msg = f"invalid lattice frontmatter in {source}: {exc}"
-        raise ConfigError(msg) from exc
+        raise FrontmatterError(msg) from exc
 
 
 def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
@@ -158,7 +158,7 @@ def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
         The id-less disposition with a null node, when the block declares no lattice intent.
 
     Raises:
-        ConfigError: If the block declares any lattice intent key.
+        FrontmatterError: If the block declares any lattice intent key.
     """
     declared = sorted(LATTICE_INTENT_KEYS.intersection(data))
     if not declared:
@@ -169,4 +169,4 @@ def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
         "edge it declares would be dropped from the lattice; add an 'id' (check it for a typo) "
         "or remove the lattice keys"
     )
-    raise ConfigError(msg)
+    raise FrontmatterError(msg)

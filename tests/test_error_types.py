@@ -6,6 +6,7 @@ from doc_lattice.error_types import (
     BrokenRefError,
     ConfigError,
     DuplicateIdError,
+    FrontmatterError,
     LinearError,
     ProjectError,
     UnreadableDocError,
@@ -42,6 +43,15 @@ def test_error_codes():
     assert UnreadableDocError("x").code == "UNREADABLE_DOC"
 
 
+def test_frontmatter_error_inherits_and_has_its_own_code():
+    # A frontmatter defect is not a config defect: sharing CONFIG_ERROR sent users to the
+    # config file for a broken document.
+    err = FrontmatterError("frontmatter in a.md declares 'derives_from' but has no 'id' key")
+    assert isinstance(err, ProjectError)
+    assert not isinstance(err, ConfigError)
+    assert err.code == "FRONTMATTER_ERROR"
+
+
 def test_linear_error_inherits_and_has_code():
     err = LinearError("network down")
     assert isinstance(err, ProjectError)
@@ -63,6 +73,7 @@ def test_project_error_default_code():
         (DuplicateIdError, "DUPLICATE_ID"),
         (BrokenRefError, "BROKEN_REF"),
         (UnreadableDocError, "UNREADABLE_DOC"),
+        (FrontmatterError, "FRONTMATTER_ERROR"),
         (LinearError, "LINEAR_ERROR"),
     ],
 )

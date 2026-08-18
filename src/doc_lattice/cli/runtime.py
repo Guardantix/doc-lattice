@@ -38,13 +38,19 @@ class RuntimeFactory(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CliRuntime:
-    """Output streams, cwd, and loaders captured for one CLI invocation."""
+    """Output streams, cwd, checkout root, and loaders captured for one CLI invocation.
+
+    ``workspace`` is the GitHub Actions checkout root taken from ``GITHUB_WORKSPACE``, or None
+    outside Actions. It is the base GitHub annotations are rendered against so a run invoked
+    from a subdirectory still emits repository-relative paths; see ``output.annotation_root``.
+    """
 
     stdout: Console
     stderr: Console
     cwd: Path
     load_config: Callable[[Path | None, Path], ProjectConfig]
     load_lattice: LatticeLoader
+    workspace: Path | None = None
 
     def project(self, config: Path | None) -> ProjectConfig:
         """Load a project config relative to this invocation's cwd.
@@ -93,6 +99,17 @@ class CliRuntime:
         self.stdout.file.flush()
 
 
+def _github_workspace() -> Path | None:
+    """Read the GitHub Actions checkout root from the environment.
+
+    Returns:
+        The resolved ``GITHUB_WORKSPACE`` directory, or None when the variable is unset or
+        empty, which is every invocation outside GitHub Actions.
+    """
+    value = os.environ.get("GITHUB_WORKSPACE", "")
+    return Path(value).resolve() if value else None
+
+
 def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
     # `--no-color` and `NO_COLOR` mean "no styling", not merely "no color": deliberately
     # broader than the NO_COLOR standard (https://no-color.org/), which leaves bold,
@@ -122,6 +139,7 @@ def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
         cwd=cwd,
         load_config=load_config,
         load_lattice=load_lattice,
+        workspace=_github_workspace(),
     )
 
 

@@ -141,3 +141,65 @@ def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 2
+
+
+def _nested_lint_project(tmp_path: Path) -> Path:
+    """Write a ladder violation at the checkout root and return a nested cwd inside it."""
+    _write_lint_docs(tmp_path)
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    nested = tmp_path / "tools" / "scripts"
+    nested.mkdir(parents=True)
+    return nested
+
+
+def test_lint_github_annotation_is_workspace_relative_from_a_nested_cwd(
+    tmp_path: Path, monkeypatch
+):
+    nested = _nested_lint_project(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, ["lint", "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice ladder violation::"
+        "down (binding) -> up (derived)\n"
+    )
+
+
+def test_lint_github_annotation_uses_cwd_when_no_workspace_is_set(tmp_path: Path, monkeypatch):
+    nested = _nested_lint_project(tmp_path)
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, ["lint", "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 1
+    document = tmp_path / "docs" / "down.md"
+    assert result.stdout == (
+        f"::error file={escape_github_property(str(document))},"
+        "title=doc-lattice ladder violation::down (binding) -> up (derived)\n"
+    )
+
+
+def test_lint_github_annotation_ignores_a_workspace_that_excludes_the_document(
+    tmp_path: Path, monkeypatch
+):
+    _nested_lint_project(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-other"
+    elsewhere.mkdir()
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(elsewhere))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["lint", "--format", "github"])
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice ladder violation::"
+        "down (binding) -> up (derived)\n"
+    )
