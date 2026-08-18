@@ -698,9 +698,17 @@ around a wrapped phase collects nothing and an embedder's `logging.captureWarnin
 bypassed for its duration. Declining to substitute when another callable already owns the stage
 would fix that, but only by reading the private `warnings._showwarning_orig`, so the cost is
 accepted and pinned by a test instead.
-`warnings.showwarning` is process-global, so scoping the substitution to the synchronous phases one
-invocation performs narrows but cannot eliminate the window in which another thread's warning
-renders through this invocation's stderr.
+`warnings.showwarning` is process-global while each caller restores the snapshot it took, so
+scoping the substitution to the synchronous phases one invocation performs narrows but cannot
+eliminate what concurrency does to it. The exposure is worse than a window: for two threads whose
+phases overlap and finish in entry order, the first restores the original and the second then
+restores the first's renderer, leaving the hook pointing at a finished invocation's stderr
+indefinitely, not merely for the overlap. Correcting that needs the hook installed once under a
+reference count with the active runtime carried in a `ContextVar`, since serializing the swap and
+restore alone does not change the ordering that causes it, and holding a lock across whole phases
+would serialize every concurrent load in the process. It is not built, because the CLI creates no
+threads and one invocation owns its process; a caller driving `CliRuntime` from several threads is
+the unsupported case this records rather than solves.
 
 **Consequences:** A typo'd `id` is a tool error naming the file, and unrecognized frontmatter is a
 named skip rather than a silent one, at the cost of a new warning for corpora carrying non-lattice
