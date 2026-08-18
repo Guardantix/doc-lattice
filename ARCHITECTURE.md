@@ -689,8 +689,9 @@ it to re-raise the `BrokenPipeError` instead, which also settles the identical e
 `cli/errors.py` carries: every CLI write now fails like an ordinary stream write, and the entry
 point's existing `OSError` handling governs it. The one write that handling cannot govern is its
 own: an exception raised inside an `except` clause is never retried against a sibling clause, so
-the entry point suppresses `OSError` around the error report itself and keeps the tool-error
-exit, since a report to a stderr that refuses the write cannot be delivered anyway.
+the entry point suppresses `OSError` and `ValueError`, a closed stream's write error, around
+the error report itself and keeps the tool-error exit, since a report to a stderr that refuses
+the write cannot be delivered anyway.
 `BrokenPipeError` alone is caught ahead of that generic `OSError` handling, and it exits 141
 (128+SIGPIPE) silently rather than joining the tool-error mapping: a departed reader is
 truncation, not a tool failure, and reusing 2 for it would make the 0/1/2 contract CI relies on

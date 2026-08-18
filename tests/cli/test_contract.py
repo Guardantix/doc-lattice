@@ -553,18 +553,24 @@ def test_main_exits_silently_with_141_on_a_broken_pipe(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize(
+    "stream_error",
+    [BrokenPipeError, lambda: ValueError("I/O operation on closed file")],
+    ids=["broken-pipe", "closed-file"],
+)
+@pytest.mark.parametrize(
     "exc",
     [ConfigError("cfg"), RuntimeError("loop")],
     ids=["project-error", "internal-error"],
 )
-def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, exc):
+def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, exc, stream_error):
     # An exception raised inside an `except` clause is never retried against a sibling
     # clause of the same `try`, so an unguarded report to a dead stderr would escape
-    # main() as an unhandled BrokenPipeError instead of the clean tool-error exit.
+    # main() as an unhandled BrokenPipeError, or the ValueError a closed (rather than
+    # broken) stream raises, instead of the clean tool-error exit.
     class _DeadStream(io.StringIO):
         def write(self, s: str) -> int:
             del s
-            raise BrokenPipeError
+            raise stream_error()
 
     def boom():
         raise exc
