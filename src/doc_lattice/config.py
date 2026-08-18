@@ -21,6 +21,10 @@ _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Rendered in place of a field path for a model-level validator, whose pydantic error
 # location is empty; naming a field there would invent one the user never wrote.
 _ROOT_LOCATION = "<config>"
+# pydantic prefixes the message of every validator that raises ValueError with this literal.
+# It is pydantic boilerplate, not part of the domain-authored sentence, so it is stripped for
+# the same reason the url and the echoed input are: the diagnostic contract is owned here.
+_VALUE_ERROR_PREFIX = "Value error, "
 _BINDING_LAYERS_KEY = "binding_layers"
 _BINDING_LAYERS_MIGRATION = (
     "binding_layers has been unsupported since 2.0; delete it from 1.x configs, there is "
@@ -118,10 +122,11 @@ def _format_validation_error(exc: ValidationError, source: Path | None) -> str:
     """Render pydantic's structured validation errors as one diagnostic line each.
 
     The message is built from ``exc.errors()`` rather than ``str(exc)`` so the user contract
-    is owned here: pydantic's ``url`` and ``input`` fields are dropped, its human ``msg`` is
-    kept, and every line carries the full field location. A key rejected by ``extra="forbid"``
-    additionally lists the keys the config does accept, derived from ``Config.model_fields``
-    so a future field cannot make the diagnostic stale.
+    is owned here: pydantic's ``url`` and ``input`` fields are dropped, its ``Value error, ``
+    boilerplate prefix is stripped so a domain-authored sentence reads as written, its human
+    ``msg`` is otherwise kept, and every line carries the full field location. A key rejected
+    by ``extra="forbid"`` additionally lists the keys the config does accept, derived from
+    ``Config.model_fields`` so a future field cannot make the diagnostic stale.
 
     Args:
         exc: The validation error raised by ``Config.model_validate``.
@@ -135,6 +140,8 @@ def _format_validation_error(exc: ValidationError, source: Path | None) -> str:
     for error in exc.errors(include_url=False, include_input=False):
         location = _format_location(error["loc"])
         detail = error["msg"]
+        if error["type"] == "value_error":
+            detail = detail.removeprefix(_VALUE_ERROR_PREFIX)
         if error["type"] == "extra_forbidden":
             detail = f"{detail} ({_extra_key_help(error['loc'])})"
         lines.append(f"  {location}: {detail}")

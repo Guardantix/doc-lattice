@@ -127,6 +127,13 @@ def test_config_error_names_the_file_and_omits_pydantic_url_and_input(tmp_path: 
     assert "pydantic.dev" not in message
     assert "Input should be" not in message
     assert "input_value" not in message
+    # pydantic prefixes every ValueError-raising validator with its own boilerplate, which
+    # would leave the domain-authored sentence reading "cache_key: Value error, cache_key ...".
+    assert "Value error," not in message
+    assert message.endswith(
+        "  cache_key: cache_key 'a/b' must be one safe path segment matching "
+        r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (no separators or traversal)"
+    )
 
 
 def test_multiple_config_errors_render_one_line_each(tmp_path: Path):
@@ -164,8 +171,8 @@ def test_model_level_validator_error_renders_a_config_marker_not_a_field(tmp_pat
         load_config(None, tmp_path)
 
     message = str(exc.value)
-    assert "  <config>: " in message
-    assert "cache_trust_stat requires cache_key to be set" in message
+    assert "  <config>: cache_trust_stat requires cache_key to be set" in message
+    assert "Value error," not in message
 
 
 def test_root_escaping_project_is_rejected(tmp_path: Path):

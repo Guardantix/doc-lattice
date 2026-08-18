@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Two things to act on, plus one format change below that needs no action. The first is the printed
+Three things to act on, plus one format change below that needs no action. The first is the printed
 workflow, and it applies to every ordinary and recipe install. The workflow `doc-lattice init`
 prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -24,7 +24,14 @@ The second is the managed GitHub and Linear CI setup, which this release removes
 installation converts rather than upgrades, and it will not tell you so itself; see **Removed**
 below for why, and `MANAGED_CI.md` for the procedure.
 
-The third needs nothing from you, and is recorded here because a format bump usually would. The
+The third is the frontmatter error code, and it applies only to a caller that reads the code
+rather than the message. A broken frontmatter block now exits with `FRONTMATTER_ERROR` instead
+of `CONFIG_ERROR`, so repoint anything matching on the printed code, and anything catching
+`ConfigError` around `parse_meta` or `load_lattice`, at `FrontmatterError`. It is a sibling of
+`ConfigError`, not a subclass, so an existing `except ConfigError` stops catching it. Catching
+`ProjectError` keeps working unchanged. See **Changed** below.
+
+The fourth needs nothing from you, and is recorded here because a format bump usually would. The
 reconcile transaction journal moves to version 2, adding a required `provenance` block and
 pretty-printing. Upgrading across an interrupted run is safe in both directions of the crash
 window: a version 1 journal left by an earlier release is still recovered normally, whether it is

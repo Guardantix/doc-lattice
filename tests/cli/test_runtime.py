@@ -1,5 +1,6 @@
 """Tests for per-invocation CLI runtime state."""
 
+import os
 import sys
 from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
@@ -10,7 +11,12 @@ from typer.testing import CliRunner
 
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice.cli.application import create_app
-from doc_lattice.cli.runtime import CliRuntime, default_runtime, get_runtime
+from doc_lattice.cli.runtime import (
+    CliRuntime,
+    default_runtime,
+    diagnostic_runtime,
+    get_runtime,
+)
 from doc_lattice.config import Config, ProjectConfig
 from doc_lattice.model import Lattice
 
@@ -72,6 +78,36 @@ def test_default_runtime_writes_unicode_to_strict_ascii_stdout(monkeypatch):
     runtime.write_stdout("café")
 
     assert buffer.getvalue() == b"caf\xc3\xa9\n"
+
+
+def test_default_runtime_captures_an_absolute_workspace(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+
+    assert default_runtime(no_color=True).workspace == tmp_path.resolve()
+
+
+def test_default_runtime_has_no_workspace_when_the_variable_is_unset_or_empty(monkeypatch):
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    assert default_runtime(no_color=True).workspace is None
+
+    monkeypatch.setenv("GITHUB_WORKSPACE", "")
+    assert default_runtime(no_color=True).workspace is None
+
+
+def test_diagnostic_runtime_ignores_a_relative_workspace_without_reading_the_cwd(monkeypatch):
+    # `diagnostic_runtime` exists to stay usable when the cwd is gone, so resolving a relative
+    # GITHUB_WORKSPACE there would trade a clean exit-2 diagnostic for a FileNotFoundError
+    # traceback. Actions always exports an absolute root, so a relative value is not one.
+    monkeypatch.setenv("GITHUB_WORKSPACE", "../checkout")
+
+    def _no_cwd() -> str:
+        msg = "the current working directory is gone"
+        raise FileNotFoundError(msg)
+
+    # Resolving a relative path is what reaches os.getcwd(); an absolute one never does.
+    monkeypatch.setattr(os, "getcwd", _no_cwd)
+
+    assert diagnostic_runtime(no_color=True).workspace is None
 
 
 def test_get_runtime_reads_context_object(tmp_path: Path):

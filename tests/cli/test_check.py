@@ -592,7 +592,7 @@ def test_check_github_annotation_ignores_a_workspace_that_excludes_the_document(
 ):
     # A workspace pointing somewhere else must not reach the renderer: it would emit the
     # absolute path instead of the cwd-relative one the fallback is there to produce.
-    nested, _ = _nested_annotation_project(tmp_path)
+    _nested_annotation_project(tmp_path)
     elsewhere = tmp_path.parent / f"{tmp_path.name}-other"
     elsewhere.mkdir()
     monkeypatch.setenv("GITHUB_WORKSPACE", str(elsewhere))
@@ -604,4 +604,3 @@ def test_check_github_annotation_ignores_a_workspace_that_excludes_the_document(
     assert result.stdout == (
         "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
     )
-    assert nested.exists()

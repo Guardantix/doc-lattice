@@ -102,12 +102,16 @@ class CliRuntime:
 def _github_workspace() -> Path | None:
     """Read the GitHub Actions checkout root from the environment.
 
+    Only an absolute value is accepted. Resolving a relative one would read the current
+    working directory, which ``diagnostic_runtime`` must never do, and Actions always exports
+    an absolute checkout root, so a relative value is not one and is treated as unset.
+
     Returns:
-        The resolved ``GITHUB_WORKSPACE`` directory, or None when the variable is unset or
-        empty, which is every invocation outside GitHub Actions.
+        The resolved ``GITHUB_WORKSPACE`` directory, or None when the variable is unset,
+        empty, or relative, which is every invocation outside GitHub Actions.
     """
-    value = os.environ.get("GITHUB_WORKSPACE", "")
-    return Path(value).resolve() if value else None
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE", ""))
+    return workspace.resolve() if workspace.is_absolute() else None
 
 
 def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
