@@ -1,30 +1,21 @@
 # Protected Linear reporting in CI
 
-> **Deprecated in 4.x, removed in 5.0.** `init --github`, `ci audit`, and `ci refresh` are
-> deprecated. They keep working, byte for byte, through every 4.x release, and 5.0 removes them.
-> The [hand-installable recipe](#the-hand-installable-recipe) below replaces them, and it is what
-> a new adoption should install.
->
-> An installed managed setup does not break on its own when 5.0 ships. It keeps running the exact
-> 4.x version its workflows pin, which is the trap: it will sit on an unsupported release until
-> someone converts it. The managed offline workflow also runs `ci audit`, so pinning it forward to
-> 5.0 is what actually fails. Convert while 4.x is still supported, using
-> [Converting a managed installation to the recipe](#converting-a-managed-installation-to-the-recipe).
+This document owns the hand-installable recipe for running `doc-lattice linear` in CI without
+exposing its API key to every workflow in the repository. You add two workflows that you own, and
+the protection comes from a GitHub environment whose deployment allow list is exactly `main`,
+together with a workflow that maps the dedicated secret only onto its final step.
 
-This document covers two setups that produce the same protected Linear reporting.
+The recipe replaced a managed product, removed in 5.0, that generated and maintained four
+committed, create-only artifacts around the same boundary: two GitHub Actions workflows, a
+bootstrap script that configured the protected GitHub environment, and a scoped `.gitattributes`
+file. It added drift detection, byte-level refresh, and a scripted remote readback on top of that
+boundary. Those additions, not the boundary itself, are what this recipe does without. An
+installation left over from 4.1.0 converts with
+[Converting a managed installation to the recipe](#converting-a-managed-installation-to-the-recipe),
+and [CHANGELOG.md](CHANGELOG.md) carries the release-facing summary of the removal.
 
-The **recipe** is the supported one. You add two workflows that you own, and the protection comes
-from a GitHub environment whose deployment allow list is exactly `main`, together with a workflow
-that maps the dedicated secret only onto its final step.
-
-The **managed setup** is the deprecated product. A human maintainer generated and reviewed four
-committed, create-only artifacts: two GitHub Actions workflows, a bootstrap script that configures
-the protected GitHub environment, and a scoped `.gitattributes` file. It added drift detection,
-byte-level refresh, and a scripted remote readback on top of the same boundary. Those additions,
-not the boundary, are what the recipe gives up.
-
-Both setups share the [requirements](#requirements) and the [security model](#security-model)
-below.
+The [requirements](#requirements) and the [security model](#security-model) below apply to every
+installation.
 
 ## The hand-installable recipe
 
@@ -96,8 +87,8 @@ otherwise. Inspect it and decide deliberately rather than running the create cal
 uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init --default-branch main
 ```
 
-Do not pass `--github`. Plain `init` writes `.doc-lattice.yml` when it is absent and prints three
-blocks: the `.gitignore` lines, the pre-commit hooks, and the offline workflow. Install all three.
+Plain `init` writes `.doc-lattice.yml` when it is absent and prints three blocks: the
+`.gitignore` lines, the pre-commit hooks, and the offline workflow. Install all three.
 Save the printed workflow as `.github/workflows/doc-lattice.yml`, and follow
 [README.md](README.md#ordinary-offline-setup) for the other two. The `.gitignore` block is needed
 before step 5, which runs `reconcile` and writes the artifacts that block covers.
@@ -169,7 +160,7 @@ jobs:
         run: '"$RUNNER_TEMP/doc-lattice-venv/bin/doc-lattice" linear --exit-code'
 ```
 
-Every line of that job is load-bearing, and no part of it is checked for you after 5.0:
+Every line of that job is load-bearing, and no part of it is checked for you:
 
 - The trigger set is `push` to `main` plus `workflow_dispatch`, and nothing else. Never add a
   pull-request-family trigger to this file. `pull_request_target` in particular resolves
@@ -573,20 +564,19 @@ the exact `main` branch, the dedicated secret exists only inside it, and that se
 `LINEAR_API_KEY` only on the final step of the trusted job. The workflow-level guards, the action
 pins, the least-privilege token, the disabled caching, and the rule that neither workflow runs
 real `reconcile` are all unchanged. The [security model](#security-model) below describes that
-boundary, and it holds here; the parts of it that name `ci audit` or the bootstrap script describe
-the machinery this recipe drops, listed next.
+boundary.
 
-It drops the machinery that watched that boundary for you:
+It does without the machinery the managed product used to watch that boundary for you:
 
 - **Repository-wide audit.** Nothing checks for `pull_request_target` or for another workflow
-  reading a Linear secret. That check becomes the review discipline described in step 6.
+  reading a Linear secret. That check is the review discipline described in step 6.
 - **Drift detection.** Nothing notices when someone edits the Linear workflow, weakens the `if:`
   guard, promotes the secret to a job-level `env:`, or adds a step after the final one.
 - **Byte-level refresh.** No command upgrades the workflow, rewrites it after a repository rename,
   or refuses to move an installation backward. Upgrades are the manual procedure below.
 - **Scripted remote readback.** There is no `plan`, `apply`, or `verify` that proves the remote
   environment policy, the environment secret, and the absence of repository-scoped copies in one
-  run. The `gh` commands in steps 3 and 6 are the manual replacement, and running them is on you.
+  run. The `gh` commands in steps 3 and 6 are the manual equivalent, and running them is on you.
 - **Ownership markers.** The two workflows are ordinary repository files with no managed identity,
   no version marker, and no create-only protection.
 - **Guarded, resumable setup.** The bootstrap script classified the remote state before touching
@@ -626,36 +616,43 @@ change between releases independently of the version it installs.
 
 ### Converting a managed installation to the recipe
 
+An installation generated by the removed product still runs, because its workflows pin the exact
+4.1.0 they were generated from and nothing tells them a later release exists. That is the reason
+to convert rather than a reason to wait: it sits on an unsupported release until someone moves it.
+[CHANGELOG.md](CHANGELOG.md) states that consequence for the release as a whole; the procedure is
+here.
+
 Nothing remote changes. The environment, its `main`-only policy, and
 `DOC_LATTICE_LINEAR_API_KEY` should already be exactly what the recipe wants.
 
 Confirm that before you begin, by running the [step 6](#6-verify-by-hand) checks while
-`.github/doc-lattice-bootstrap.sh` and `ci audit` are both still present to explain a
-disagreement. A managed installation whose bootstrap `apply` never ran, or ran only partially, has
-remote state that premise does not hold for, and the steps below delete the two tools that could
-diagnose it.
+`.github/doc-lattice-bootstrap.sh` is still present to explain a disagreement. A managed
+installation whose bootstrap `apply` never ran, or ran only partially, has remote state that
+premise does not hold for, and step 3 below deletes the one tool left that could diagnose it.
 
 The local files then change ownership from the tool to you, in one reviewed change:
 
-1. Replace `.github/workflows/doc-lattice.yml`. The managed offline workflow runs `ci audit`,
-   which 5.0 removes, so it cannot simply be carried forward. Run plain `init --default-branch
-   main` at your current release and save the workflow it prints over the managed one. The managed
-   workflow you are replacing was pinned to `main`, so omitting the flag is what would change the
-   branch it gates.
+1. Replace `.github/workflows/doc-lattice.yml`. The managed offline workflow invokes `ci audit`,
+   which no longer exists, so it cannot be carried forward and pinning it at 5.0 or later fails
+   outright. Run plain `init --default-branch main` at the release you are converting to and
+   save the workflow it prints over the managed one. The managed workflow you are replacing was
+   pinned to `main`, so omitting the flag is what would change the branch it gates.
 2. Convert `.github/workflows/doc-lattice-linear.yml` by deleting its four ownership marker
    comment lines, the ones beginning `# doc-lattice-managed:`, `# doc-lattice-artifact:`,
-   `# doc-lattice-version:`, and `# doc-lattice-repository:`. What remains is the step 2 workflow
-   for the release you have installed. Compare it against step 2 of `MANAGED_CI.md` at that
-   release rather than this copy, since the pins and the structure move between releases. Treat
-   any structural difference as a stop, and do not reconcile one by bumping the `doc-lattice==`
-   pin alone.
+   `# doc-lattice-version:`, and `# doc-lattice-repository:`. What remains is the trusted Linear
+   workflow of whichever release generated it. Replace that whole with the step 2 block above and
+   reapply your repository identity, rather than keeping the older shape or bumping only its
+   `doc-lattice==` pin: a workflow's structure and its action pins move between releases
+   independently of the version it installs, which is the same reason step 1 replaces the
+   offline workflow whole.
 3. Delete `.github/doc-lattice-bootstrap.sh`. Its remote work is already done, and its readback is
    replaced by the `gh` commands in step 6.
 4. Convert `.github/.gitattributes`, which is a managed artifact carrying the same four ownership
    marker lines as the workflow, followed by the `doc-lattice-bootstrap.sh text eol=lf` rule.
    Delete the file outright if it holds only those five lines. If your repository added rules of
    its own, delete the rule line and the four marker lines and keep the rest.
-5. Stop running `ci audit` and `ci refresh`, and adopt the manual review in step 6 in their place.
+5. Adopt the manual review in step 6 in place of the audit and refresh commands this
+   installation used to run.
 6. Enable the gates if this installation never did. The managed setup printed the same pre-commit
    block as guidance, so it may have been pasted at install time and never activated, in which
    case no local commit has ever been gated. Activate immediately: a conversion has an established
@@ -664,265 +661,30 @@ The local files then change ownership from the tool to you, in one reviewed chan
 
 Run the [step 6](#6-verify-by-hand) verification once more when the change lands.
 
-## What the managed setup installs
-
-> Deprecated. This section describes `init --github`, `ci audit`, and `ci refresh`, which 5.0
-> removes. Use [the recipe](#the-hand-installable-recipe) for a new adoption.
-
-- `.github/workflows/doc-lattice.yml` runs the offline audit, drift, and authority gates.
-- `.github/workflows/doc-lattice-linear.yml` runs the Linear gate only on trusted `main`.
-- `.github/doc-lattice-bootstrap.sh` configures and verifies the GitHub environment.
-- `.github/.gitattributes` keeps the bootstrap script at LF line endings after checkout.
-
-The bootstrap script is a durable managed artifact, not a disposable installer. Keep it committed
-after installation. Bootstrap `verify` checks remote environment policy and secret-name metadata.
-`ci audit` checks that the script is present and carries a valid ownership marker, version, and
-repository identity, but it does not compare the bootstrap script byte for byte. `ci refresh`
-performs the byte-level managed-artifact diff and can recreate a missing script after confirmation.
-
-The scoped attributes file contains `doc-lattice-bootstrap.sh text eol=lf`, so a Windows checkout
-with `core.autocrlf=true` does not turn the Git Bash script into unusable CRLF shell syntax. Audit
-requires that exact effective rule while accepting either LF or CRLF separators in the attributes
-file itself.
-
 ## Requirements
 
-The eligibility and authority rules below are GitHub's own, and both setups need them. The
-platform and shell rules are the bootstrap script's, and a recipe installation, which runs `gh`
-alone, is not bound by them.
+The eligibility and authority rules below are GitHub's own. Beyond an authenticated `gh`, the
+recipe needs no particular platform or shell: the Bash 3.2 rule that used to stand here belonged
+to the managed bootstrap script, and went with it.
 
-**Both setups.** GitHub.com repositories whose default branch is exactly `main`, and an
-authenticated GitHub CLI. The authenticated maintainer must be a repository owner or administrator
-with authority to manage environments and inspect repository secret names. Reading
-organization-plan metadata can require organization-owner or equivalent `admin:org` authority;
-unavailable authority fails closed.
+GitHub.com repositories whose default branch is exactly `main`, and an authenticated GitHub CLI.
+The authenticated maintainer must be a repository owner or administrator with authority to manage
+environments and inspect repository secret names. Reading organization-plan metadata can require
+organization-owner or equivalent `admin:org` authority; unavailable authority fails closed.
 
 GitHub's [deployment and environment documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 defines environment availability and protection behavior. Public repositories are eligible on
 current GitHub plans. Private repositories owned by a user require GitHub Pro; private or internal
 organization repositories require GitHub Team or Enterprise.
 
-**The managed setup only.** The bootstrap script requires Bash 3.2 or later. Run it on macOS or
-Linux, or on Windows through Git Bash or WSL; native PowerShell is not supported. It fails closed
-if visibility, plan eligibility, canonical repository casing, the exact `main` default branch,
-repository secret metadata, or environment policy cannot be verified.
-
-**The recipe.** No script fails closed for you. Step 3 opens with the default-branch and
-existing-environment preconditions that stand in for those checks; confirm plan and visibility
-eligibility yourself before running it, and treat any unexpected readback as a stop.
+No script fails closed for you. Step 3 opens with the default-branch and existing-environment
+preconditions that stand in for the checks the removed bootstrap script performed; confirm plan
+and visibility eligibility yourself before running it, and treat any unexpected readback as a
+stop.
 
 Older GitHub Enterprise Server versions are unsupported pending a separate compatibility review.
 
-## Migrating an existing installation
-
-> Deprecated. This is the migration onto the managed product. A new adoption should install
-> [the recipe](#the-hand-installable-recipe) instead, and an existing managed installation should
-> follow
-> [Converting a managed installation to the recipe](#converting-a-managed-installation-to-the-recipe).
-
-Existing adopters need one local preparation before running `init --github`. Earlier ordinary
-`init` guidance produced an unmarked `.github/workflows/doc-lattice.yml` when its printed workflow
-was installed. In the same reviewed change, inspect that canonical offline target, then remove it
-so `init --github` can install the managed replacement, and inspect and remove any old Linear
-workflow occupying `.github/workflows/doc-lattice-linear.yml`. Run `init --github` only after both
-canonical targets are absent so the final diff shows the new managed replacements. `ci refresh`
-cannot adopt an unmarked file and will fail closed instead of overwriting it.
-
-Canonical target cleanup is only collision handling. Also inventory the repository's workflows and
-remove every old hand-written Linear workflow, regardless of path or filename, in the same reviewed
-migration change. `ci audit` cannot discover legacy workflow indirection at all, since it inspects
-no `run:` commands, so that inventory is a manual review step.
-
-### Rotating the Linear key
-
-For an existing installation, rotate or obtain a Linear key out of band. After the pre-generation
-workflow replacement described above, set the replacement key only as
-`DOC_LATTICE_LINEAR_API_KEY` on the `doc-lattice-linear` environment, and delete every reported
-repository-scoped secret under both the legacy `LINEAR_API_KEY` and dedicated names. Rotation is
-preferred because the broader key may already have been exposed. Repository administrators cannot
-always inspect organization secret visibility, so obtain organization-owner confirmation that
-neither name is exposed to this repository, or have the owner remove or exclude it. Setup is not
-complete until bootstrap `verify` and local `ci audit` both pass.
-
-## Installation
-
-> Deprecated. This is the managed installation procedure, and 5.0 removes the commands it uses.
-> A new adoption should follow [the recipe](#the-hand-installable-recipe) instead.
-
-Run this human-maintainer sequence from reviewed, trusted project state:
-
-1. Generate and review the local managed artifacts.
-
-   ```bash
-   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice init \
-     --github --repository OWNER/REPO
-   ```
-
-2. Establish the reconcile baseline, then enable the gates.
-
-   The baseline is for an initial adoption only. Annotate your documents, then run this once in
-   the same reviewed change, before the generated workflows reach `main` and the gates begin
-   running. Commit the annotated input state first and run from an otherwise clean working tree,
-   so the reconcile-only diff stays reviewable and revertible:
-
-   ```bash
-   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice reconcile --all
-   ```
-
-   An installation migrated per `## Migrating an existing installation` above skips the baseline.
-   When it applies, what the clean-tree precondition buys you, and what the baseline does not
-   promise are owned by [README.md](README.md#adopting-doc-lattice-in-your-docs-repo); the
-   selector semantics are owned by [RECONCILE.md](RECONCILE.md).
-
-   Enabling the gates is not initial-adoption-only, so do it whether or not the baseline applied.
-   The pre-commit block this setup prints is inert until activated, exactly as in the recipe. An
-   initial adoption activates after the baseline, once `check` and `lint` come back clean, and
-   before committing the reconcile diff; a migrated installation activates immediately.
-   [README.md](README.md#enabling-the-gates) owns the commands and both orders.
-
-3. Inspect the remote repository, plan eligibility, environment, and visible secret names.
-
-   ```bash
-   bash .github/doc-lattice-bootstrap.sh plan OWNER/REPO
-   ```
-
-4. Apply and read back the exact `main`-only environment policy after typing the canonical
-   repository identity.
-
-   ```bash
-   bash .github/doc-lattice-bootstrap.sh apply OWNER/REPO
-   ```
-
-5. Set the dedicated environment secret separately.
-
-   Stop unless `apply` printed the exact success phrase: `environment policy verified`.
-
-   ```bash
-   # Continue only after apply prints: environment policy verified
-   gh secret set DOC_LATTICE_LINEAR_API_KEY \
-     --env doc-lattice-linear --repo github.com/OWNER/REPO
-   ```
-
-6. Complete secret migration in the same reviewed change. Run either deletion only when `plan` or
-   `apply` reported that repository-scoped name.
-
-   ```bash
-   gh secret delete LINEAR_API_KEY --repo github.com/OWNER/REPO
-   gh secret delete DOC_LATTICE_LINEAR_API_KEY --repo github.com/OWNER/REPO
-   ```
-
-7. Verify both the remote environment state and the committed local workflow policy.
-
-   ```bash
-   bash .github/doc-lattice-bootstrap.sh verify OWNER/REPO
-   uvx --python 3.13 --from doc-lattice==4.1.0 doc-lattice ci audit \
-     --repository OWNER/REPO
-   ```
-
-Every initial and every later `plan`, `apply`, or `verify` execution must use a bootstrap script
-from reviewed trusted project state. Its ownership marker is useful installation metadata, not a
-substitute for reviewing the executable shell content before running it.
-
-Do not run the secret-setting command until `apply` has re-read and proved the exact `main`-only
-environment policy. `apply` never receives the Linear key. `gh secret set` prompts for the value or
-reads it from stdin, so the value is not part of the command arguments. This ordering is a
-maintainer procedure; the server-side GitHub environment scope is the authorization control.
-
-## Bootstrap script semantics
-
-> Deprecated. The bootstrap script is a managed artifact, and 5.0 removes the commands that
-> generate and maintain it. The recipe replaces its readback with the `gh` commands in
-> [step 6](#6-verify-by-hand).
-
-Bootstrap `plan` and `verify` exit 0 only when the protected policy, dedicated environment secret,
-and repository-secret cleanup are all complete. They exit 1 for coherent but incomplete state and
-2 when inspection is unreliable or setup is unsupported. `apply` first prints and fingerprints the
-reviewed state, requires an attached stdin TTY and the exact canonical `OWNER/REPO`, then reinspects
-before mutation. A first-time `apply` normally exits 1 because the separately entered secret is not
-present yet. It exits 0 if setup is already complete and exits 2 on EOF, non-TTY input, confirmation
-mismatch, changed state, or another tool error. There is no `--yes`, `--force`, environment
-variable, or other noninteractive apply bypass. The same no-bypass rule applies to
-`ci refresh --apply`.
-
-GitHub API updates are not transactional, but completed remote state is re-readable and safe
-partial setup can be resumed with a fresh `plan` and `apply`. The script does not roll back or
-delete preexisting remote state. If an existing environment has broader or ambiguous rules, it
-refuses to narrow or claim ownership of that environment and requires manual remediation.
-
-## Auditing and refresh
-
-> Deprecated. `ci audit` and `ci refresh` are removed in 5.0. The recipe replaces them with the
-> manual review and readback in [step 6](#6-verify-by-hand), and with whole-block replacement in
-> [Upgrading a recipe installation](#upgrading-a-recipe-installation).
-
-### `ci audit`
-
-`ci audit` is meaningful only after `init --github`: before adoption, the absent artifacts
-intentionally produce exit-1 findings. The audit checks every workflow for `pull_request_target`
-and Linear secret references. Least-privilege permissions, action pins, checkout credentials,
-caching, triggers, and exact command structure are scoped to the two canonical managed workflow
-paths, so an unrelated release workflow may legitimately use `contents: write`.
-
-Whole-context, wildcard, or computed `secrets` access fails closed unless inspection proves it
-selects one static unrelated name. A reusable-workflow job's `secrets: inherit` is whole-context
-access because it forwards every available caller secret, so it always produces a
-`LINEAR_SECRET_REFERENCE` finding. For the bootstrap script, audit validates only presence and
-ownership metadata rather than content equality; the adjacent attributes artifact is checked for
-its exact effective LF rule. Local audit also cannot see remote environment or organization-policy
-drift, so rerun bootstrap `verify` from reviewed trusted state after relevant policy, visibility,
-plan, rename, or transfer changes.
-
-When `ci audit` omits `--repository`, it resolves the local `origin` only from GitHub.com SCP
-(`git@github.com:OWNER/REPO.git`), `ssh://git@github.com/OWNER/REPO.git`, or
-`https://github.com/OWNER/REPO.git` form, with the `.git` suffix optional. Comparisons are ASCII
-case-insensitive, and the repository segment is limited to GitHub's 100-character maximum. The
-offline audit cannot establish GitHub's canonical display casing. Bootstrap `plan` and `verify`
-read the API `full_name` and require its spelling and case to match the generated literal exactly.
-Origin lookup runs from the already-resolved Git top-level, so identity resolution and managed-file
-inspection always refer to the same worktree.
-
-### `ci refresh`
-
-A repository name, transfer, or casing change requires:
-
-```bash
-doc-lattice ci refresh --repository CANONICAL/NAME
-doc-lattice ci refresh --repository CANONICAL/NAME --apply
-```
-
-The preview exits 0 when current, 1 after printing an update diff, and 2 for an unreadable,
-unmarked, or otherwise unsafe target. The diff renders non-line-ending byte controls as visible
-`\xNN` escapes and Unicode format controls as `\uNNNN` or `\UNNNNNNNN` instead of sending
-repository-controlled sequences to the terminal. Apply prints the same diff, requires typing the
-explicit repository identity exactly, repeats preflight after confirmation, and atomically replaces
-only marked canonical artifacts or creates a missing one.
-
-Before publishing a missing artifact, both an initial create and a retry synchronize every
-validated ancestor directory entry. Mixed versions after an interruption are safe to preview and
-resume. Use this flow for generator upgrades and repository renames, then review and commit the
-resulting diff. Refresh moves a managed artifact forward only. When an installed ownership marker
-pins a version newer than the one being generated, the preview refuses rather than rewriting the
-artifact backward, so running an older doc-lattice against a newer installation cannot silently
-downgrade it. GitHub generation and refresh accept only final-version syntax such as `2.0.0`:
-this rejects pins that can never resolve as final releases, but it does not prove the release is
-already published or that an unreleased source checkout matches that release.
-
-Publication holds a nonblocking advisory lock on the repository root for its whole run, so
-`init --github` and `ci refresh --apply` never write over each other. A competing run refuses with
-`managed artifact refresh is in progress; retry after it exits` and leaves every managed artifact
-unchanged. The guarantee covers the four managed artifacts, not the whole `init --github` run:
-that command scaffolds `.doc-lattice.yml` before publication, so a run refused the lock, or
-refused for want of locking, can still have created the config. Rerunning after the competing run
-exits leaves that config untouched and publishes the artifacts. Publication requires POSIX
-advisory locking and refuses on a platform without it; preview, `ci audit`, and every other
-read-only path take no lock.
-
 ## Security model
-
-This section describes the boundary both setups share. The recipe installs the same workflow shape
-into the same environment, so the boundary itself and the trusted job's own guards hold identically
-in either. Where a paragraph below names `ci audit`, bootstrap `verify`, or a generator release, it
-is describing managed machinery a recipe installation does not have, and says so as it arises.
 
 The environment is the authoritative secret boundary. It allows only the exact `main`
 branch, and the dedicated environment-only secret is mapped to `LINEAR_API_KEY` only on the final
@@ -930,11 +692,11 @@ step of the trusted workflow. Removing the environment binding removes secret ac
 ordinary `pull_request`, `pull_request_review`, and `pull_request_review_comment` runs use
 `refs/pull/N/merge`, which the environment policy rejects. `pull_request_target` is different: it
 uses the default branch ref, so the environment can authorize it while it handles untrusted input.
-For that reason audit bans `pull_request_target` repository-wide, the trusted job's own event
-allowlist refuses it a second time, and trusted default-branch review remains a load-bearing
-control. A recipe installation keeps the second and third of those three and loses only the first,
-which is why step 2 forbids adding a pull-request-family trigger and step 6 asks you to check the
-rest of the repository by hand. GitHub's
+The trusted job's own event allowlist refuses it, and trusted default-branch review remains a
+load-bearing control. Nothing scans the rest of the repository for it: the managed product's
+repository-wide audit did, and it retired with the product, which is why step 2 forbids adding a
+pull-request-family trigger and step 6 asks you to check the rest of the repository by hand.
+GitHub's
 [December 2025 ref-semantics changelog](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/)
 records this behavior change.
 
@@ -946,45 +708,41 @@ this design does not claim that the rule repairs the older behavior.
 
 Neither workflow runs real `reconcile`; the offline workflow does not run even
 `reconcile --dry-run` in this release. Both trigger sets deliberately omit `merge_group`, so merge
-queues are unsupported in either setup. In a recipe installation adding that event is an edit you
-own, and it needs the same security review as any other trigger widening. Both workflows disable
-persistent cross-run setup-uv and Actions caching; `uv` may still use its ephemeral job-local cache
-while one runner job is active. Introducing persistent caching requires a separate security review.
-Optional required environment reviewers and disabled administrator bypass can add manual approval
-to each Linear run, but they are administered manually outside either setup and depend on
-repository visibility and plan support.
+queues are unsupported. Adding that event is an edit you own, and it needs the same security
+review as any other trigger widening. Both workflows disable persistent cross-run setup-uv and
+Actions caching; `uv` may still use its ephemeral job-local cache while one runner job is active.
+Introducing persistent caching requires a separate security review. Optional required environment
+reviewers and disabled administrator bypass can add manual approval to each Linear run, but they
+are administered manually outside this recipe and depend on repository visibility and plan
+support.
 
 The boundary does not protect malicious code already reviewed and admitted to `main`. Other
 residual risks include a compromised maintainer workstation or `gh` binary, pinned action, package
 artifact, or dependency; a maintainer later broadening the environment; invisible organization
 secret policy; and later visibility or billing changes that disable controls. Branch governance,
-bootstrap `verify`, local `ci audit`, key rotation, and optional environment review address
-different parts of that residual risk rather than replacing the environment boundary. A recipe
-installation loses the two of those that were commands, so its residual risk is higher by exactly
-that much.
+key rotation, the readbacks in step 6, and optional environment review address different parts of
+that residual risk rather than replacing the environment boundary. The managed product's bootstrap
+verifier and its offline audit covered two further parts of it and are gone, so a recipe
+installation carries residual risk higher by exactly that much.
 
-## Why the managed product is being retired
+## Why the managed product was retired
 
 [AD-32](ARCHITECTURE.md#ad-32-the-managed-github-ci-product-retires-to-a-documented-recipe) owns
-that decision: why the product retires, the alternatives it rejected, and what the two stages are.
+that decision: why the product retired, the alternatives it rejected, and how the retirement was
+sequenced.
 
-The consequence for you is that the deprecation is documentation and help text only. Invocation
-stdout, stderr, and exit codes for `init --github`, `ci audit`, and `ci refresh` are unchanged in
-4.x, because a stderr warning cannot be made compatibility-safe for a script that already parses
-those channels;
-[AD-10](ARCHITECTURE.md#ad-10-output-selector-compatibility-converges-in-20) records that
-reasoning and the same documentation-only migration notice it produced before. A script that
-parses those channels keeps working through every 4.x release.
+The consequence for an installation is a version freeze. Generated workflows pin the exact release
+that produced them and never learn that a later one exists, so a managed installation kept running
+unchanged when 5.0 removed the commands, and goes on running until someone converts it. Pinning it
+forward is what fails, because its offline workflow invokes `ci audit`, which no longer exists.
 
 ## Out of scope: shell run-body linting
 
 Shell run-body linting is not part of this contract. It was extracted to the standalone
 [doc-lattice-shell-lint](https://github.com/Guardantix/doc-lattice-shell-lint) tool, runnable as
-`uvx doc-lattice-shell-lint`. `doc-lattice ci audit` performs no shell analysis and reports the
-structural workflow findings above only. Anyone who wants that lint adds it to a separate workflow
-file of their own, not to a managed workflow: audit compares the full action and command sequences
-of the two canonical managed paths, so an added `run:` step there reports `MANAGED_COMMAND` drift
-and an added `uses:` step reports `MANAGED_ACTION`. A recipe installation has no managed paths, so
-adding that lint to either workflow is simply an edit you own.
+`uvx doc-lattice-shell-lint`. doc-lattice itself performs no shell analysis. Anyone who wants that
+lint adds it as a step in a workflow file of their own, or accepts that adding it to either recipe
+workflow is an edit they own: both are ordinary repository files with no generator for them to
+drift from.
 [AD-25](ARCHITECTURE.md#ad-25-the-ci-shell-scanner-is-extracted-to-doc-lattice-shell-lint) owns
 that extraction.

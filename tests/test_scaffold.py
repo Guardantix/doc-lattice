@@ -149,7 +149,7 @@ def test_snippets_pin_pypi_version_and_python():
 
 
 def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
-    # A floating tag re-resolves on every run, which is what the managed workflows exist to
+    # A floating tag re-resolves on every run, which is exactly what a commit pin exists to
     # avoid; the printed snippet has to match that posture.
     ci = build_scaffold(("docs",), None, "0.2.0", default_branch="main").ci_text
 
@@ -161,8 +161,8 @@ def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
             assert re.fullmatch(r"[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+", ref), action
 
 
-def test_ci_snippet_carries_the_managed_least_privilege_posture():
-    # The snippet's docstring claims the managed workflows' posture, and the step that follows
+def test_ci_snippet_carries_the_documented_least_privilege_posture():
+    # The snippet's docstring claims that posture, and the step that follows
     # checkout resolves and executes third-party packages. Without these settings the job's
     # token stays in .git/config and is writable while that happens, and a persistent cache any
     # other workflow on the repository can populate is restored into the gate job.

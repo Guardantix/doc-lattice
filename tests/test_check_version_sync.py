@@ -175,7 +175,7 @@ def test_pinned_doc_without_pin_is_consistent():
 
 
 def test_managed_ci_stale_pin_is_reported_by_that_name():
-    managed_ci = "uvx --from doc-lattice==0.3.0 doc-lattice init --github\n"
+    managed_ci = "uvx --from doc-lattice==0.3.0 doc-lattice init --default-branch main\n"
     docs = {"README.md": _README, "MANAGED_CI.md": managed_ci}
     messages = check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, docs)
     assert len(messages) == 1
@@ -187,7 +187,7 @@ def test_managed_ci_stale_pin_is_reported_by_that_name():
 
 def test_every_stale_pinned_doc_gets_its_own_message():
     readme = "uvx --from doc-lattice==0.2.0 doc-lattice\n"
-    managed_ci = "uvx --from doc-lattice==0.3.0 doc-lattice init --github\n"
+    managed_ci = "uvx --from doc-lattice==0.3.0 doc-lattice init --default-branch main\n"
     docs = {"README.md": readme, "MANAGED_CI.md": managed_ci}
     messages = check_version_consistency("0.4.0", _PYPROJECT, _CHANGELOG, docs)
     assert len(messages) == 2
@@ -199,7 +199,7 @@ def test_every_stale_pinned_doc_gets_its_own_message():
 
 
 def test_doc_absent_from_the_mapping_is_not_scanned():
-    managed_ci = "uvx --from doc-lattice==0.3.0 doc-lattice init --github\n"
+    managed_ci = "uvx --from doc-lattice==0.3.0 doc-lattice init --default-branch main\n"
     # The same stale text is reported when supplied and invisible when omitted.
     with_doc = check_version_consistency(
         "0.4.0", _PYPROJECT, _CHANGELOG, {"MANAGED_CI.md": managed_ci}

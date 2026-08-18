@@ -1,7 +1,7 @@
 """Contract tests for the trusted Linear workflow published in MANAGED_CI.md.
 
 The recipe is documentation, but this particular block is security-sensitive project output:
-a reader installs it verbatim, and after 5.0 removes the managed commands it is the only
+a reader installs it verbatim, and now that the managed commands are gone it is the only
 description of the protected setup this project ships. Nothing else checks it.
 ``scripts/check_version_sync.py`` reads only ``doc-lattice==`` refs, and
 ``tests/test_workflow_pinning.py`` inspects this repository's own ``.github/workflows`` files
@@ -9,13 +9,8 @@ rather than fenced YAML inside a Markdown document. Without this module the bloc
 invalid YAML, lose its event allowlist, promote the secret above the final step, or drift from
 the shipped action pins while every other gate stayed green.
 
-Two independent kinds of check run here on purpose. The renderer-coupled pair at the bottom pins
-the block to the managed renderer and enforces MANAGED_CI.md's own conversion claim; both are
-deleted alongside the renderer in 5.0. Everything above them re-derives the security properties
-from the parsed document against literals declared in this module, so those checks keep working
-once the renderer is gone. Nothing outside the renderer-coupled pair may import from
-``doc_lattice.github_ci``, or the module would fail at import time in exactly the release it was
-written to survive.
+Every check re-derives its security property from the parsed document against literals declared
+in this module, so nothing here depends on a renderer the project no longer ships.
 
 The ``gh`` procedure is covered too. It is copy-paste shell that establishes the boundary the
 workflow depends on, so an edit that retargets the environment, renames the secret, widens the
@@ -358,21 +353,12 @@ def test_documented_init_invocations_pin_the_default_branch():
     probed branch would install a `check` and `lint` gate that never runs on the branch every
     other step in this document assumes, and no readback here would report it: they all inspect
     the Linear gate.
-
-    The deprecated ``--github`` invocations are held to the opposite rule, because the CLI rejects
-    the two flags together: the managed artifacts are pinned to the exact ``main`` branch as a
-    security control, so there is nothing for the flag to select and passing it would make the
-    documented command exit non-zero.
     """
     invocations = [command for command in _shell_commands() if " doc-lattice init" in command]
-    recipe = [command for command in invocations if "--github" not in command]
-    managed = [command for command in invocations if "--github" in command]
 
-    assert recipe, "MANAGED_CI.md must document the recipe init invocations this test pins"
-    for command in recipe:
+    assert invocations, "MANAGED_CI.md must document the init invocations this test pins"
+    for command in invocations:
         assert f"--default-branch {_DEFAULT_BRANCH}" in command, command
-    for command in managed:
-        assert "--default-branch" not in command, command
 
 
 def test_gh_procedure_triggers_a_run_before_it_verifies_one():
@@ -418,7 +404,7 @@ def test_gh_procedure_triggers_a_run_before_it_verifies_one():
 
 
 def test_every_intra_document_anchor_resolves():
-    """The deprecation banners are navigational, so a stale anchor strands the reader.
+    """The document cross-links its own sections, so a stale anchor strands the reader.
 
     Anchors are resolved with the engine's own pinned slugger rather than a second
     implementation, which also means fenced code blocks cannot contribute phantom headings.
@@ -431,52 +417,3 @@ def test_every_intra_document_anchor_resolves():
     assert not sorted(targets - known), (
         f"MANAGED_CI.md links to headings that do not exist: {sorted(targets - known)}"
     )
-
-
-def test_recipe_names_the_removal_release_for_every_deprecated_command():
-    document = _document()
-
-    for command in ("init --github", "ci audit", "ci refresh"):
-        assert f"`{command}`" in document
-    assert "removed in 5.0" in document
-
-
-# The two checks below are the only ones coupled to the managed renderer, and they are deleted
-# together with it in 5.0. Every check above this point is deliberately independent of
-# doc_lattice.github_ci so that removal leaves this module importable and useful.
-
-
-def test_published_workflow_matches_the_managed_renderer_without_its_markers():
-    """The block is the managed Linear artifact minus its four ownership marker lines.
-
-    MANAGED_CI.md tells a converting adopter to delete exactly those lines and keep the rest,
-    so that claim has to hold byte for byte rather than approximately.
-    """
-    # Imported here rather than at module scope on purpose: a top-level import of the renderer
-    # would make this whole file unimportable in 5.0, taking the renderer-independent checks
-    # above down with it.
-    from doc_lattice.github_ci.model import MARKER_PREFIXES  # noqa: PLC0415
-    from doc_lattice.github_ci.render import render_workflows  # noqa: PLC0415
-
-    _, linear = render_workflows(_PLACEHOLDER_REPOSITORY, __version__)
-    rendered_lines = linear.text.splitlines(keepends=True)
-    marker_lines = rendered_lines[: len(MARKER_PREFIXES)]
-
-    assert [line.split(":", 1)[0] + ":" for line in marker_lines] == list(MARKER_PREFIXES)
-    assert _published_workflow_text() == "".join(rendered_lines[len(MARKER_PREFIXES) :])
-
-
-def test_conversion_instructions_name_every_ownership_marker_prefix():
-    """The conversion step is executed by hand, so the prose has to list the real prefixes.
-
-    Deleting the wrong lines leaves managed markers in a file the tool no longer owns, and the
-    byte-equality check above cannot catch that: it derives the prefixes from the same constant
-    the renderer uses, so a rename there would move both sides together.
-    """
-    from doc_lattice.github_ci.model import MARKER_PREFIXES  # noqa: PLC0415
-
-    document = _document()
-
-    assert len(MARKER_PREFIXES) == 4, "the conversion prose says four marker lines"
-    for prefix in MARKER_PREFIXES:
-        assert f"`{prefix}`" in document, f"the conversion step must name {prefix!r}"

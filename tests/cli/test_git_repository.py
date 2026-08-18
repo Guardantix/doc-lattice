@@ -1,4 +1,4 @@
-"""Tests for Git repository root discovery and best-effort default-branch probing."""
+"""Tests for best-effort default-branch probing and branch-name validation."""
 
 import subprocess
 from pathlib import Path
@@ -6,11 +6,7 @@ from pathlib import Path
 import pytest
 
 from doc_lattice.cli import git_repository
-from doc_lattice.cli.git_repository import (
-    probe_default_branch,
-    resolve_git_repository_root,
-    validate_default_branch,
-)
+from doc_lattice.cli.git_repository import probe_default_branch, validate_default_branch
 from doc_lattice.error_types import ConfigError
 
 
@@ -66,107 +62,6 @@ def _repository_with_origin_head(tmp_path: Path, branch: str, *, dangling: bool 
     return tmp_path
 
 
-def test_resolve_git_repository_root_returns_top_level_from_nested_directory(
-    tmp_path: Path,
-):
-    subprocess.run(
-        ["git", "init", "--quiet"],  # noqa: S607 - test requires the local git executable
-        cwd=tmp_path,
-        check=True,
-    )
-    nested = tmp_path / "nested/deeper"
-    nested.mkdir(parents=True)
-
-    assert resolve_git_repository_root(nested) == tmp_path.resolve()
-
-
-def test_resolve_git_repository_root_rejects_non_working_tree(tmp_path: Path):
-    with pytest.raises(ConfigError, match="require a Git working tree"):
-        resolve_git_repository_root(tmp_path)
-
-
-def test_resolve_git_repository_root_reports_missing_git(tmp_path: Path, monkeypatch):
-    def missing(*_args: object, **_kwargs: object) -> object:
-        raise FileNotFoundError("git unavailable")
-
-    monkeypatch.setattr(git_repository, "run", missing)
-
-    with pytest.raises(ConfigError, match="git executable not found"):
-        resolve_git_repository_root(tmp_path)
-
-
-def test_resolve_git_repository_root_reports_git_missing_from_every_trusted_path(
-    tmp_path: Path,
-    monkeypatch,
-):
-    monkeypatch.setattr(git_repository, "which", lambda _name: None)
-
-    with pytest.raises(ConfigError, match="git executable not found"):
-        resolve_git_repository_root(tmp_path)
-
-
-def test_resolve_git_repository_root_refuses_a_git_planted_in_the_worktree(
-    tmp_path: Path,
-    monkeypatch,
-):
-    planted, marker = _plant_fake_git(tmp_path)
-    monkeypatch.setattr(git_repository, "which", lambda _name: str(planted))
-
-    with pytest.raises(ConfigError, match="git executable not found"):
-        resolve_git_repository_root(tmp_path)
-
-    assert not marker.exists()
-
-
-def test_resolve_git_repository_root_refuses_a_git_reached_through_a_relative_path_entry(
-    tmp_path: Path,
-    monkeypatch,
-):
-    checkout = tmp_path / "checkout"
-    nested = checkout / "nested"
-    nested.mkdir(parents=True)
-    _, marker = _plant_fake_git(checkout)
-    monkeypatch.chdir(nested)
-    monkeypatch.setenv("PATH", "..")
-
-    with pytest.raises(ConfigError, match="git executable not found"):
-        resolve_git_repository_root(nested)
-
-    assert not marker.exists()
-
-
-def test_resolve_git_repository_root_runs_git_from_an_absolute_path(tmp_path: Path, monkeypatch):
-    recorded: list[list[str]] = []
-
-    def record(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        recorded.append(command)
-        return subprocess.CompletedProcess(command, 0, f"{tmp_path}\n".encode(), b"")
-
-    monkeypatch.setattr(git_repository, "run", record)
-
-    assert resolve_git_repository_root(tmp_path) == tmp_path.resolve()
-    assert Path(recorded[0][0]).is_absolute()
-
-
-@pytest.mark.parametrize(
-    "completed",
-    [
-        subprocess.CompletedProcess([], 1, b"", b"ignored"),
-        subprocess.CompletedProcess([], 0, b"", b""),
-        subprocess.CompletedProcess([], 0, b"relative/path\n", b""),
-    ],
-)
-def test_resolve_git_repository_root_rejects_unreliable_results(
-    tmp_path: Path,
-    monkeypatch,
-    completed: subprocess.CompletedProcess[bytes],
-):
-    monkeypatch.setattr(git_repository, "run", lambda *_args, **_kwargs: completed)
-
-    with pytest.raises(ConfigError):
-        resolve_git_repository_root(tmp_path)
-
-
 @pytest.mark.parametrize("branch", ["trunk", "develop", "release/2.x", "v1.0", "a"])
 def test_probe_default_branch_reads_a_live_origin_head(tmp_path: Path, branch: str):
     repository = _repository_with_origin_head(tmp_path, branch)
@@ -184,7 +79,7 @@ def test_probe_default_branch_reads_origin_head_from_a_nested_directory(tmp_path
 
 def test_probe_default_branch_returns_none_without_a_remote(tmp_path: Path):
     # Plain init has no Git prerequisite and a fresh clone often has no origin/HEAD at all, so
-    # this degrades rather than raising the way resolve_git_repository_root does.
+    # the probe degrades to no candidate rather than raising.
     _git(tmp_path, "init", "--quiet")
 
     assert probe_default_branch(tmp_path) is None

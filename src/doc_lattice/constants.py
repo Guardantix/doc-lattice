@@ -75,18 +75,13 @@ CACHE_VERSION: int = 4
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 
-# GitHub Actions commit pins, shared by both workflow renderers: the ordinary snippet that
-# `init` prints (scaffold.py) and the managed templates (github_ci/render.py). Each action
-# owns two halves that must move together, the immutable commit SHA and the release tag it
-# corresponds to, because the tag is rendered as a trailing `# vX.Y.Z` comment beside every
-# pinned `uses:` line. Both halves live here so both renderers read one owner, but a bump is
-# not a single edit: this repository's own `.github/workflows/*.yml`, the golden fixtures under
-# `tests/fixtures/managed-workflows/`, and the deliberately spelled-out copies in
-# `tests/test_github_ci_render.py` and `tests/cli/test_init.py` each assert the value
+# GitHub Actions commit pins for the ordinary workflow snippet that `init` prints
+# (scaffold.py). Each action owns two halves that must move together, the immutable commit SHA
+# and the release tag it corresponds to, because the tag is rendered as a trailing `# vX.Y.Z`
+# comment beside every pinned `uses:` line. Both halves live here so one module owns them, but a
+# bump is not a single edit: this repository's own `.github/workflows/*.yml` and the
+# deliberately spelled-out copies in `tests/cli/test_init.py` each assert the value
 # independently, and each one fails until it follows.
-# This module is the correct owner because it is the leaf both renderers
-# already sit above: scaffold.py imports it, github_ci/render.py imports PYTHON_PIN from
-# scaffold.py, so the dependency only ever points this way.
 #
 # These are the same pins this repository's own workflows run, which
 # `tests/test_workflow_pinning.py` enforces: a frozen SHA cannot drift from a floating tag on
