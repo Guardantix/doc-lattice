@@ -7,7 +7,13 @@ from ...lint import lint_json, lint_lattice
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
-from ..output import annotation_root, github_annotation, select_output, write_json, write_text
+from ..output import (
+    github_annotation,
+    select_output,
+    warn_unattachable_annotations,
+    write_json,
+    write_text,
+)
 from ..runtime import get_runtime
 
 
@@ -46,12 +52,16 @@ def register_lint(app: typer.Typer) -> None:
                     runtime,
                     github_annotation(
                         path,
-                        annotation_root(runtime, path),
+                        runtime.annotation_root(path),
                         "doc-lattice ladder violation",
                         f"{violation.source_id} ({violation.source_authority}) -> "
                         f"{violation.target_ref} ({violation.target_authority})",
                     ),
                 )
+            warn_unattachable_annotations(
+                runtime,
+                [lattice.nodes_by_id[violation.source_id].path for violation in result.violations],
+            )
         else:
             render_lint(runtime.stdout, result)
         raise typer.Exit(EXIT_FINDING if result.violations else 0)

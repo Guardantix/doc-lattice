@@ -1,7 +1,6 @@
 """Tests for shared CLI output selection and exact writers."""
 
 import json
-from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 
@@ -10,11 +9,11 @@ import typer
 from rich.console import Console
 
 from doc_lattice.cli.output import (
-    annotation_root,
     escape_github_message,
     escape_github_property,
     github_annotation,
     select_output,
+    warn_unattachable_annotations,
     write_json,
 )
 from doc_lattice.cli.runtime import CliRuntime
@@ -141,40 +140,39 @@ def test_escape_github_property_encodes_message_and_property_metacharacters():
     )
 
 
-def test_annotation_root_prefers_a_workspace_that_contains_the_document(
+def test_warn_unattachable_annotations_is_silent_when_every_document_is_contained(
     runtime: CliRuntime, tmp_path: Path
 ):
-    # Under Actions the checkout root is the base that makes an annotation land on the file
-    # in the diff, whatever subdirectory the command was invoked from.
-    workspace = tmp_path / "checkout"
-    nested = workspace / "packages" / "game"
-    nested.mkdir(parents=True)
-    document = nested / "docs" / "down.md"
+    contained = tmp_path / "docs" / "down.md"
 
-    in_workspace = replace(runtime, cwd=nested, workspace=workspace)
+    warn_unattachable_annotations(runtime, [contained])
 
-    assert annotation_root(in_workspace, document) == workspace
+    assert _contents(runtime.stderr) == ""
 
 
-def test_annotation_root_falls_back_to_cwd_when_the_workspace_excludes_the_document(
+def test_warn_unattachable_annotations_names_the_base_and_each_outside_document(
     runtime: CliRuntime, tmp_path: Path
 ):
-    # A set but non-containing GITHUB_WORKSPACE must not reach the renderer: it would emit an
-    # absolute path rather than taking the cwd fallback the selection exists to preserve.
-    workspace = tmp_path / "other-checkout"
-    workspace.mkdir()
-    cwd = tmp_path / "elsewhere"
-    document = cwd / "docs" / "down.md"
+    # An annotation rendered against a base that does not contain the document degrades to an
+    # absolute path GitHub drops in silence, so the gate fails with nothing shown on the diff.
+    outside = tmp_path.parent / "elsewhere" / "down.md"
 
-    outside = replace(runtime, cwd=cwd, workspace=workspace)
+    warn_unattachable_annotations(runtime, [outside])
 
-    assert annotation_root(outside, document) == cwd
+    stderr = _contents(runtime.stderr)
+    assert "warning" in stderr
+    assert str(tmp_path) in stderr
+    assert str(outside) in stderr
 
 
-def test_annotation_root_falls_back_to_cwd_when_no_workspace_is_set(
+def test_warn_unattachable_annotations_reports_once_for_a_repeated_document(
     runtime: CliRuntime, tmp_path: Path
 ):
-    document = tmp_path / "docs" / "down.md"
+    # Findings are per edge, so one document can be annotated many times in a run; the warning
+    # is per run.
+    outside = tmp_path.parent / "elsewhere" / "down.md"
 
-    assert runtime.workspace is None
-    assert annotation_root(runtime, document) == tmp_path
+    warn_unattachable_annotations(runtime, [outside, outside, outside])
+
+    assert _contents(runtime.stderr).count(str(outside)) == 1
+    assert "1 annotated document(s)" in _contents(runtime.stderr)

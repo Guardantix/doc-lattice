@@ -191,8 +191,8 @@ def test_lint_github_annotation_ignores_a_workspace_that_excludes_the_document(
     tmp_path: Path, monkeypatch
 ):
     _nested_lint_project(tmp_path)
-    elsewhere = tmp_path.parent / f"{tmp_path.name}-other"
-    elsewhere.mkdir()
+    # Inside tmp_path, since the workspace only has to exclude docs/down.md, not the whole tree.
+    elsewhere = tmp_path / "tools"
     monkeypatch.setenv("GITHUB_WORKSPACE", str(elsewhere))
     monkeypatch.chdir(tmp_path)
 

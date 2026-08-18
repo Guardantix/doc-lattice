@@ -105,17 +105,19 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
   keep `UNREADABLE_DOC`; that boundary was already coherent. Anything matching on the printed code
   or catching `ConfigError` around `parse_meta` or `load_lattice` needs repointing, since
   `FrontmatterError` is a sibling of `ConfigError`, not a subclass.
-- Config validation errors are now formatted by doc-lattice rather than delegated to pydantic's
-  multi-line renderer. The message names the config file, which the sibling read and parse errors
-  already did and this one did not, and renders one line per error carrying the full field
-  location and pydantic's human message. The `pydantic.dev` URL and the echoed input value are
-  gone; the domain-authored messages themselves are unchanged, so a message that deliberately
-  quotes the offending value still does. A key rejected by `extra: forbid` also lists the accepted
-  keys, derived from the model so a future config field cannot leave the list stale, and
-  `binding_layers` additionally gets the 1.x migration sentence, since the blanket forbid is the
-  only thing that catches it. A validator that runs on the whole model, such as the
-  `cache_trust_stat` check, reports an explicit `<config>` marker rather than an invented field
-  name.
+- Config and frontmatter validation errors are now formatted by doc-lattice rather than delegated
+  to pydantic's multi-line renderer. Both load boundaries render through one formatter, so they
+  cannot drift apart. The message names the file it came from, which the sibling read and parse
+  errors already did and these did not, and renders one line per error carrying the full field
+  location and pydantic's human message. The `pydantic.dev` URL, the echoed input value, and the
+  machine-readable `type` tag are gone; the domain-authored messages themselves are unchanged, so
+  a message that deliberately quotes the offending value still does. A key rejected by
+  `extra: forbid` also lists the accepted keys, derived from the model so a future field cannot
+  leave the list stale, and `binding_layers` additionally gets the 1.x migration sentence, since
+  the blanket forbid is the only thing that catches it. An error pydantic reports against no
+  field, which is either a validator that runs on the whole model, such as the `cache_trust_stat`
+  check, or a file whose top level is not a mapping at all, gets an explicit `<config>` or
+  `<frontmatter>` marker rather than an invented field name.
 - `--format github` annotations are now rendered relative to `GITHUB_WORKSPACE` when it is set and
   contains the document, rather than always to the invocation working directory. Under GitHub
   Actions that is the repository checkout root, so inline pull-request annotations no longer
@@ -126,6 +128,16 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
   the behavior is unchanged, including the absolute fallback. The base is deliberately not the
   config file's project root: using it would strip the leading path from a monorepo config under
   `packages/game`. See the `--format` section of README.md.
+- `--format github` now warns on stderr when a run emitted an annotation GitHub cannot attach to
+  the pull-request diff. The absolute-path fallback above is a correct last resort but a silent
+  one, and its symptom is a failing gate with nothing shown on the diff, which is unpleasant to
+  debug from a workflow log. The warning fires at most once per run and names the base and every
+  document outside it. Stdout stays exactly the workflow commands GitHub parses.
+- Error codes are now a declared domain in `constants.py` rather than a string literal per
+  exception type. The code a `ProjectError` carries is printed beside every diagnostic and is a
+  documented migration surface, so it is typed like the project's other shared string domains,
+  and the test suite derives its expectations from the class tree instead of a hand-maintained
+  list that had already fallen three types behind. No code value changes.
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a
   crash could not tell when it was written, which doc-lattice wrote it, or what command produced

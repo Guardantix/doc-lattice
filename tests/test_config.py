@@ -145,11 +145,13 @@ def test_multiple_config_errors_render_one_line_each(tmp_path: Path):
 
     detail_lines = [line for line in str(exc.value).splitlines()[1:] if line.strip()]
     assert len(detail_lines) == 3
-    assert [line.split(":")[0].strip() for line in detail_lines] == [
+    # The set, not the order: pydantic does not document the order it reports errors in, and a
+    # location or message may itself contain a colon, so neither is safe to pin.
+    assert {line.strip().split(":", 1)[0] for line in detail_lines} == {
         "docs_roots",
         "cache_key",
         "bogus",
-    ]
+    }
 
 
 def test_unknown_key_lists_the_accepted_keys(tmp_path: Path):
@@ -161,6 +163,32 @@ def test_unknown_key_lists_the_accepted_keys(tmp_path: Path):
 
     accepted = ", ".join(sorted(Config.model_fields))
     assert f"accepted keys: {accepted}" in str(exc.value)
+    # An ordinary unknown key must not inherit the retired key's migration sentence; without
+    # this, dropping the conditional would leave every unknown key citing a 1.x field.
+    assert "binding_layers has been unsupported" not in str(exc.value)
+
+
+def test_list_entry_error_renders_its_index_in_the_location(tmp_path: Path):
+    # The location is the full path to the offending value, indices included, so a user reading
+    # the diagnostic knows which list entry to edit.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['docs', 5]\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    assert "  docs_roots.1: " in str(exc.value)
+
+
+def test_non_mapping_config_renders_the_config_marker(tmp_path: Path):
+    # A YAML file holding a list reaches validation, because _read_yaml normalizes only None.
+    # pydantic reports no location for it, which is the same empty loc a whole-model validator
+    # produces and must render the same whole-config marker.
+    source = tmp_path / ".doc-lattice.yml"
+    source.write_text("- a\n- b\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    assert str(exc.value).startswith(f"invalid config {source}:")
+    assert "  <config>: " in str(exc.value)
 
 
 def test_model_level_validator_error_renders_a_config_marker_not_a_field(tmp_path: Path):
@@ -258,13 +286,6 @@ def test_symlinked_file_root_escaping_project_is_rejected(tmp_path: Path):
         load_config(None, project)
     assert exc.value.code == "CONFIG_ERROR"
     assert "resolves outside the project root" in str(exc.value)
-
-
-def test_unknown_key_rejected(tmp_path: Path):
-    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
-    with pytest.raises(ConfigError) as exc:
-        load_config(None, tmp_path)
-    assert "invalid config" in str(exc.value)
 
 
 @pytest.mark.parametrize(

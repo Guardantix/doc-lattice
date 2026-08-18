@@ -243,6 +243,45 @@ def test_parse_meta_unknown_key_raises():
         parse_meta("id: x\nbogus: 1\n", Path("a.md"))
 
 
+def test_parse_meta_unknown_key_lists_the_accepted_keys():
+    # The frontmatter boundary renders through the same curated formatter as the config
+    # boundary, so an unknown key here gets the same help a config key does.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: x\nbogus: 1\n", Path("a.md"))
+
+    accepted = ", ".join(sorted(NodeMeta.model_fields))
+    assert str(exc.value) == (
+        "invalid lattice frontmatter in a.md:\n"
+        f"  bogus: Extra inputs are not permitted (accepted keys: {accepted})"
+    )
+
+
+def test_parse_meta_error_omits_pydantic_url_and_echoed_input():
+    # str(ValidationError) leaks a versioned docs URL and echoes the offending value back; the
+    # diagnostic contract is owned by validation_render, on both load boundaries alike.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: 123\n", Path("a.md"))
+
+    message = str(exc.value)
+    assert "pydantic.dev" not in message
+    assert "input_value" not in message
+    assert "[type=" not in message
+
+
+def test_parse_meta_value_error_reads_as_the_domain_wrote_it():
+    # A validator that raises ValueError is prefixed "Value error, " by pydantic; that is
+    # boilerplate, not part of the sentence the domain authored.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: 'a#b'\n", Path("a.md"))
+
+    assert str(exc.value) == (
+        "invalid lattice frontmatter in a.md:\n"
+        "  id: node id 'a#b' must not contain '#'; "
+        "'#' separates a file id from a section anchor"
+    )
+    assert "Value error," not in str(exc.value)
+
+
 @pytest.mark.parametrize(
     "raw",
     [

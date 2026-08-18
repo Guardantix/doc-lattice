@@ -283,6 +283,12 @@ under `packages/game` still reports `packages/game/docs/down.md`, not `docs/down
 run with no workspace set, from inside `packages/game`, reports `docs/down.md`, because there
 the base is that working directory.
 
+When a document falls outside that base, its annotation carries an absolute path, which GitHub
+drops instead of attaching. That is reported: the run warns once on stderr, naming the base and
+every document outside it, so a gate that fails with nothing shown on the diff is diagnosable
+from the workflow log. Stdout stays exactly the workflow commands, so the warning never
+interferes with what GitHub parses.
+
 Structured output is always selected with `--format`; the accepted values per command are in the
 table above, and `init` is deliberately excluded from structured-output selection.
 The 1.x silent `--json` alias was removed in 2.0; see

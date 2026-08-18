@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from .constants import LATTICE_INTENT_KEYS
 from .error_types import FrontmatterError, UnreadableDocError
 from .model import NodeMeta, ParsedMeta
+from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 _FENCE = "---"
@@ -22,6 +23,11 @@ _LOADER = SafeYamlLoader()
 # The two node-free outcomes are immutable and carry no per-file state, so they are shared.
 _UNTRACKED = ParsedMeta(meta=None, disposition="untracked")
 _ID_LESS = ParsedMeta(meta=None, disposition="id-less")
+# Rendered in place of a field path when pydantic reports no location. NodeMeta declares no
+# model-level validator today, and a non-mapping block is returned as untracked before it ever
+# reaches validation, so this is defensive: it exists so a future whole-block rule cannot
+# render a field name the author never wrote.
+_ROOT_LOCATION = "<frontmatter>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +149,12 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     try:
         return ParsedMeta(meta=NodeMeta.model_validate(data), disposition="tracked")
     except ValidationError as exc:
-        msg = f"invalid lattice frontmatter in {source}: {exc}"
+        msg = format_validation_error(
+            exc,
+            header=f"invalid lattice frontmatter in {source}:",
+            model=NodeMeta,
+            root_label=_ROOT_LOCATION,
+        )
         raise FrontmatterError(msg) from exc
 
 

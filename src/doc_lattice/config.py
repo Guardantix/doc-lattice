@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .error_types import ConfigError
 from .path_utils import safe_resolve
+from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
@@ -18,13 +19,10 @@ _LOADER = SafeYamlLoader()
 # never express a separator or a traversal. Length capped at 64 characters total.
 _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
-# Rendered in place of a field path for a model-level validator, whose pydantic error
-# location is empty; naming a field there would invent one the user never wrote.
+# Rendered in place of a field path when pydantic reports no location: a validator that runs on
+# the whole model, or a config file whose top level is not a mapping at all, which reaches
+# validation because _read_yaml passes a list or a scalar straight through.
 _ROOT_LOCATION = "<config>"
-# pydantic prefixes the message of every validator that raises ValueError with this literal.
-# It is pydantic boilerplate, not part of the domain-authored sentence, so it is stripped for
-# the same reason the url and the echoed input are: the diagnostic contract is owned here.
-_VALUE_ERROR_PREFIX = "Value error, "
 _BINDING_LAYERS_KEY = "binding_layers"
 _BINDING_LAYERS_MIGRATION = (
     "binding_layers has been unsupported since 2.0; delete it from 1.x configs, there is "
@@ -119,65 +117,44 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
 
 
 def _format_validation_error(exc: ValidationError, source: Path | None) -> str:
-    """Render pydantic's structured validation errors as one diagnostic line each.
-
-    The message is built from ``exc.errors()`` rather than ``str(exc)`` so the user contract
-    is owned here: pydantic's ``url`` and ``input`` fields are dropped, its ``Value error, ``
-    boilerplate prefix is stripped so a domain-authored sentence reads as written, its human
-    ``msg`` is otherwise kept, and every line carries the full field location. A key rejected
-    by ``extra="forbid"`` additionally lists the keys the config does accept, derived from
-    ``Config.model_fields`` so a future field cannot make the diagnostic stale.
+    """Render a config validation failure as the diagnostic this project owns.
 
     Args:
         exc: The validation error raised by ``Config.model_validate``.
-        source: The config file the raw mapping was read from, or None in zero-config mode.
+        source: The config file the raw mapping was read from. None is defensive only:
+            zero-config validates ``{}``, and every ``Config`` field has a default, so
+            ``model_validate`` cannot fail on that path.
 
     Returns:
         A multi-line message: a header naming the config file, then one line per error.
     """
     where = str(source) if source is not None else "<no config file>"
-    lines = [f"invalid config {where}:"]
-    for error in exc.errors(include_url=False, include_input=False):
-        location = _format_location(error["loc"])
-        detail = error["msg"]
-        if error["type"] == "value_error":
-            detail = detail.removeprefix(_VALUE_ERROR_PREFIX)
-        if error["type"] == "extra_forbidden":
-            detail = f"{detail} ({_extra_key_help(error['loc'])})"
-        lines.append(f"  {location}: {detail}")
-    return "\n".join(lines)
+    return format_validation_error(
+        exc,
+        header=f"invalid config {where}:",
+        model=Config,
+        root_label=_ROOT_LOCATION,
+        extra_note=_binding_layers_note,
+    )
 
 
-def _format_location(location: tuple[int | str, ...]) -> str:
-    """Render a pydantic error location, marking the model-level one explicitly.
+def _binding_layers_note(location: tuple[int | str, ...]) -> str | None:
+    """Supply the 1.x migration sentence when the forbidden key is the retired one.
 
-    A validator that runs on the whole model reports an empty location. Naming a field there
-    would invent one, so that case renders as an explicit whole-file marker instead.
-
-    Args:
-        location: The ``loc`` tuple from one pydantic error.
-
-    Returns:
-        A dotted field path, or the whole-config marker for a model-level error.
-    """
-    return ".".join(str(part) for part in location) if location else _ROOT_LOCATION
-
-
-def _extra_key_help(location: tuple[int | str, ...]) -> str:
-    """Build the accepted-key help for one forbidden key, with the binding_layers migration.
+    ``extra="forbid"`` is the only thing that catches ``binding_layers``, so the diagnostic is
+    where the migration has to be said. The match is on the whole location rather than its last
+    segment: were ``Config`` ever to nest a model, a field of the same name inside it would not
+    be the retired top-level key.
 
     Args:
         location: The ``loc`` tuple from one ``extra_forbidden`` error.
 
     Returns:
-        The sorted accepted-key list, prefixed by the migration sentence when the forbidden
-        key is ``binding_layers``, which ``extra="forbid"`` is otherwise the only guard for.
+        The migration sentence for the retired top-level key, else None.
     """
-    accepted = ", ".join(sorted(Config.model_fields))
-    help_text = f"accepted keys: {accepted}"
-    if location and location[-1] == _BINDING_LAYERS_KEY:
-        return f"{_BINDING_LAYERS_MIGRATION} {help_text}"
-    return help_text
+    if location == (_BINDING_LAYERS_KEY,):
+        return _BINDING_LAYERS_MIGRATION
+    return None
 
 
 def _read_yaml(path: Path) -> object:
