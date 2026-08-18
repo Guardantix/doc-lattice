@@ -51,8 +51,8 @@ shared low-level durable staging, replace, create-if-absent, fingerprint, sync, 
 cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capability and
 mechanics, independent live destination preflight for commits, durable commit and
 rollback, journal and artifact recovery containment and validation, and cleanup.
-`cli/git_repository.py` owns the package's only subprocess use, the single bounded `git`
-invocation ordinary `init` runs to probe the default branch. The
+`cli/git_repository.py` owns the package's only subprocess use, the bounded `git`
+invocations ordinary `init` runs to probe the default branch. The
 `doc_lattice.cli` package owns the application boundary; AD-5 owns the split between its
 `cli/commands/reconcile.py` adapter and `reconcile_transaction.py`.
 Within the cache package, `cache/schema.py` and
@@ -951,7 +951,7 @@ internal template, so SECURITY.md names it in scope and `tests/test_managed_ci_r
 trigger set, guards, environment binding, secret mapping, and action pins. Those structural checks
 were written to outlive the renderer they once cross-checked against, and they have. An installed
 managed setup does not break when 5.0 ships: a generated workflow pins the exact version that
-produced it and never hears that a later one exists, so a 4.1.0 installation goes on running until
+produced it and never hears that a later one exists, so an installation goes on running until
 someone converts it, and pinning it forward is what fails, because its offline workflow invokes
 `ci audit`. Conversion changes no remote state and is a local file-ownership change, which
 MANAGED_CI.md owns and CHANGELOG.md announces. Removing the commands is a breaking change to a

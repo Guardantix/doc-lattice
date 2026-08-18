@@ -218,11 +218,11 @@ below for why, and `MANAGED_CI.md` for the procedure.
 
   **If you have a managed installation**, nothing breaks when this release ships, which is the
   trap. A generated workflow pins the exact version that produced it and never hears that a later
-  one exists, so the installation goes on running 4.1.0 quietly and indefinitely, on a release
-  that is no longer supported. Pinning it forward is what fails, because the managed offline
-  workflow invokes `ci audit`. Convert it instead: replace that offline workflow with the one
-  plain `init` scaffolds, adopt the recipe's Linear workflow, leave the protected environment and
-  its `DOC_LATTICE_LINEAR_API_KEY` exactly as they are, and retire
+  one exists, so the installation goes on running that older release quietly and indefinitely,
+  long after it stopped being supported. Pinning it forward is what fails, because the managed
+  offline workflow invokes `ci audit`. Convert it instead: replace that offline workflow with the
+  one plain `init` scaffolds, adopt the recipe's Linear workflow, leave the protected environment
+  and its `DOC_LATTICE_LINEAR_API_KEY` exactly as they are, and retire
   `.github/doc-lattice-bootstrap.sh` together with the `.github/.gitattributes` rule that existed
   only to hold it at LF after checkout. Conversion changes no remote state, and is a local change
   of file ownership from the tool to you. `MANAGED_CI.md` carries the step-by-step procedure, and

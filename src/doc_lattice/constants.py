@@ -79,9 +79,11 @@ CACHE_FILE_NAME: str = "load-cache.json"
 # (scaffold.py). Each action owns two halves that must move together, the immutable commit SHA
 # and the release tag it corresponds to, because the tag is rendered as a trailing `# vX.Y.Z`
 # comment beside every pinned `uses:` line. Both halves live here so one module owns them, but a
-# bump is not a single edit: this repository's own `.github/workflows/*.yml` and the
-# deliberately spelled-out copies in `tests/cli/test_init.py` each assert the value
-# independently, and each one fails until it follows.
+# bump is not a single edit: this repository's own `.github/workflows/*.yml`, the trusted Linear
+# workflow published in `MANAGED_CI.md`, which a reader installs verbatim and which
+# `tests/test_managed_ci_recipe.py` compares against these constants, and the deliberately
+# spelled-out copies in `tests/cli/test_init.py` each assert the value independently, and each
+# one fails until it follows.
 #
 # These are the same pins this repository's own workflows run, which
 # `tests/test_workflow_pinning.py` enforces: a frozen SHA cannot drift from a floating tag on
@@ -91,7 +93,7 @@ CHECKOUT_VERSION: str = "v7.0.1"
 SETUP_UV_REF: str = "20cfd1bf945f4377ade1205e4dbc17946fc9a30d"  # pragma: allowlist secret
 SETUP_UV_VERSION: str = "v10.0.1"
 
-# The composed `uses:` fragment both renderers emit verbatim. Owning the assembled form here,
+# The composed `uses:` fragment the renderer emits verbatim. Owning the assembled form here,
 # not just its halves, keeps the `@<sha> # vX.Y.Z` shape in one place rather than hand-spelled
 # beside every pinned step.
 CHECKOUT_USES: str = f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}"
