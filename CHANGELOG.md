@@ -8,8 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Ordinary installs only; managed installs need no artifact change from this release. The workflow
-`doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
+Two things to act on. The first is the printed workflow, and it applies to every ordinary and
+recipe install. The workflow `doc-lattice init` prints now triggers on a resolved default branch
+rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
 and replace the checked-in file, exactly as the ordinary upgrade path in README.md already
 describes. Check the branch the run reports on stderr against the branch you actually gate on
@@ -18,6 +19,10 @@ dependent on the `origin/HEAD` of whichever checkout you ran it in; a repository
 that regenerates from a checkout with a healthy `origin/HEAD` gets a byte-identical workflow.
 Adopters whose default branch is not `main` were previously running a workflow that installed
 cleanly and never triggered, and this is the release that fixes it.
+
+The second is the managed GitHub and Linear CI setup, which this release removes. A managed
+installation converts rather than upgrades, and it will not tell you so itself; see **Removed**
+below for why, and `MANAGED_CI.md` for the procedure.
 
 ### Added
 
@@ -32,16 +37,14 @@ cleanly and never triggered, and this is the release that fixes it.
   source line and the explicit flag exist to cover. A branch name that is supplied or detected but
   is not a supported ASCII literal name is rejected with an actionable error rather than rendered,
   because a GitHub `branches:` filter is a glob pattern and would match `*`, `?`, `[`, `]`, and
-  `!` as patterns. `--default-branch` is rejected outright with `--github`: the managed artifacts
-  stay pinned to the exact `main` branch as a security control, and are unchanged by this release.
-  See the `init` section of README.md.
+  `!` as patterns. See the `init` section of README.md.
 - A hand-installable recipe for protected Linear reporting in CI, published in `MANAGED_CI.md`.
-  It is the successor to the managed GitHub and Linear setup, and it is complete: the offline
-  workflow plain `init` scaffolds, the trusted-main Linear workflow as copyable text, the exact
-  `gh` sequence that creates the `main`-only environment and its dedicated secret, the
-  preconditions and readbacks that gate it, the manual review that replaces `ci audit`, and the
-  upgrade and conversion procedures. A reader can install the protected setup from it without
-  running `init --github`, `ci audit`, or `ci refresh`. `SECURITY.md` now names that published
+  It is the successor to the managed GitHub and Linear setup removed below, and it is complete:
+  the offline workflow plain `init` scaffolds, the trusted-main Linear workflow as copyable text,
+  the exact `gh` sequence that creates the `main`-only environment and its dedicated secret, the
+  preconditions and readbacks that gate it, the manual review that replaces the removed offline
+  audit, and the upgrade and conversion procedures. It is the only documented path to the
+  protected setup. `SECURITY.md` now names that published
   workflow in its in-scope boundary, and tests parse both the documented workflow and the
   documented `gh` procedure, enforcing the trigger set, the whole `if:` guard, the environment
   binding, final-step-only secret mapping, action-pin parity, and the branch policy and host
@@ -196,29 +199,34 @@ cleanly and never triggered, and this is the release that fixes it.
   entries in earlier releases keep the spelling that was correct at the time. Its contents were
   also rewritten to track the three release projects rather than the shipped 4.x work.
 
-### Deprecated
+### Removed
 
-- `init --github`, `ci audit`, and `ci refresh` are deprecated and will be removed in 5.0. They
-  are unchanged in this release: invocation stdout, stderr, and exit codes are byte-identical,
-  because a stderr warning cannot be made compatibility-safe for a script that already parses
-  those channels, so the notice lives in `--help` output and documentation only. AD-10 in
-  ARCHITECTURE.md records that reasoning, and AD-32 records the retirement itself. A test pins all
-  three channels for the three commands so the deprecation cannot leak into machine-facing output.
+- **BREAKING:** the managed GitHub and Linear CI product is gone. `ci audit` and `ci refresh` no
+  longer exist, `init` no longer accepts `--github` or `--repository`, and the
+  `doc_lattice.github_ci` package and the Git top-level resolver those commands required are
+  deleted with them. Nothing generates the four committed artifacts
+  (`.github/workflows/doc-lattice.yml`, `.github/workflows/doc-lattice-linear.yml`,
+  `.github/doc-lattice-bootstrap.sh`, and `.github/.gitattributes`) any more. Plain `init` is
+  unaffected and still prints its three blocks. AD-32 in ARCHITECTURE.md records the decision.
 
-  The replacement is the hand-installable recipe now published in `MANAGED_CI.md`, which reaches
-  the same protected boundary with workflows you own. It keeps the GitHub environment as the
-  authoritative secret boundary, the `main`-only deployment allow list, the trusted job's
+  The replacement is the hand-installable recipe published in `MANAGED_CI.md`, added above, which
+  reaches the same protected boundary with workflows you own. It keeps the GitHub environment as
+  the authoritative secret boundary, the `main`-only deployment allow list, the trusted job's
   repository, ref, and event guards, and final-step-only mapping of `DOC_LATTICE_LINEAR_API_KEY`
-  onto `LINEAR_API_KEY`. It drops repository-wide audit, drift detection, byte-level refresh, the
-  scripted bootstrap readback, and the managed ownership markers; `MANAGED_CI.md` states that
-  trade in full.
+  onto `LINEAR_API_KEY`. It has no repository-wide audit, drift detection, byte-level refresh,
+  scripted bootstrap readback, or ownership markers; `MANAGED_CI.md` states that trade in full.
 
-  **If you have a managed installation**, convert it while 4.x is still supported. Nothing breaks
-  on its own when 5.0 ships, which is the trap: the installed workflows keep running the 4.x
-  version they pin, and pinning them forward to 5.0 is what actually fails, because the managed
-  offline workflow runs `ci audit`. Conversion changes no remote state, and is a local change of
-  file ownership from the tool to you. `MANAGED_CI.md` carries the procedure, and the upgrade path
-  for a recipe installation once you are on it.
+  **If you have a managed installation**, nothing breaks when this release ships, which is the
+  trap. A generated workflow pins the exact version that produced it and never hears that a later
+  one exists, so the installation goes on running that older release quietly and indefinitely,
+  long after it stopped being supported. Pinning it forward is what fails, because the managed
+  offline workflow invokes `ci audit`. Convert it instead: replace that offline workflow with the
+  one plain `init` scaffolds, adopt the recipe's Linear workflow, leave the protected environment
+  and its `DOC_LATTICE_LINEAR_API_KEY` exactly as they are, and retire
+  `.github/doc-lattice-bootstrap.sh` together with the `.github/.gitattributes` rule that existed
+  only to hold it at LF after checkout. Conversion changes no remote state, and is a local change
+  of file ownership from the tool to you. `MANAGED_CI.md` carries the step-by-step procedure, and
+  the upgrade path for a recipe installation once you are on it.
 
 ### Fixed
 
@@ -237,10 +245,10 @@ cleanly and never triggered, and this is the release that fixes it.
   `extra: !!omap` followed by two items spelling the same key escaped every YAML boundary as an
   uncaught `AssertionError` and printed a traceback, from `check`, `lint`, `impact`, `graph`,
   `linear`, and `reconcile` alike; it is now the ordinary `UNREADABLE_DOC` tool error naming the
-  file, and exits 2. This is the same gap as the `!!bool` `KeyError` above and was missed the same
-  way: ruamel's safe `construct_yaml_omap` enforces key uniqueness with a bare `assert` rather
-  than raising a `YAMLError`, so `AssertionError` was the one member the shared load-error family
-  did not name. `github_ci`'s workflow parser already caught it and is unaffected. No shape that
+  file, and exits 2. It was missed the way any gap that turns on which builtin the safe
+  constructor raises is missed: ruamel's `construct_yaml_omap` enforces key uniqueness with a bare
+  `assert` rather than raising a `YAMLError`, so `AssertionError` was the one member the shared
+  load-error family did not name. No shape that
   loaded before loads differently, and no document that was already refused changes its message.
 - `linear stale-shipped` no longer hard-wraps its human output at the terminal width, and no
   longer leaks terminal escapes when styling is off. Each finding and the all-clear line are now
@@ -251,14 +259,6 @@ cleanly and never triggered, and this is the release that fixes it.
   `--no-color`. This was the one renderer the 4.0.0 `impact` fix and the 4.1.0 `check`, `lint`,
   and `--no-color` fixes did not reach; no renderer now relies on Rich's default
   auto-highlighting. `--format json` output is unchanged.
-- The `ci` commands no longer crash on a workflow whose scalar carries a YAML tag its type
-  rejects. A value such as `runs-on: !!bool nope` in a repository's own
-  `.github/workflows/*.yml` escaped the workflow parser as an uncaught `KeyError` and printed a
-  traceback; it is now reported as a malformed-YAML `ConfigError` naming the file, like every
-  other unparseable workflow. The gap was tag-dependent and so easy to miss: the safe
-  constructor raises whichever builtin the target type rejected the value with, and only the
-  `ValueError` that `!!int` and `!!float` raise was handled, while the `KeyError` from `!!bool`
-  was not. Duplicate-key and reused-anchor workflows keep their own more specific messages.
 - A `%YAML 1.1` directive in one document's frontmatter no longer changes how the documents read
   after it in the same run. The shared safe loader cleared `YAML.version` between loads, which is
   enough on `ruamel.yaml` 0.19 but not on 0.18, where the versioned resolver is built once and
@@ -269,22 +269,22 @@ cleanly and never triggered, and this is the release that fixes it.
   directive touched it, which is version independent. The `yaml-compatibility` CI leg gained the
   accelerator-absent half of its matrix, since the C parser ignores directives entirely and so
   hid this on both of the ruamel versions it tested.
-- Adopters now have upgrade guidance. README.md gained an Upgrading section split by install kind,
-  since ownership differs: the printed pre-commit block is hand-maintained in both setups and must
-  be replaced wholesale rather than pin-bumped, an ordinary install replaces its workflow from
-  fresh `init` output, and a managed install previews and applies `ci refresh` for the four managed
-  artifacts instead of re-running create-only `init --github`. Every command names the target
-  release explicitly, because both generators render from the running version, so an old binary
-  regenerates the old artifacts.
+- Adopters now have upgrade guidance. README.md gained an Upgrading section split by install
+  kind, since ownership differs: the printed pre-commit block is hand-maintained everywhere and
+  must be replaced wholesale rather than pin-bumped, an ordinary install replaces its workflow
+  from fresh `init` output, and a recipe install additionally replaces its Linear workflow whole
+  from MANAGED_CI.md. A managed installation left over from 4.1.0 has no upgrade path and converts
+  instead. Every command names the target release explicitly, because `init` prints from the
+  running version, so an old binary prints the old blocks.
 - Both `reconcile --all` adoption sites now say to commit the annotated input state and start from
   an otherwise clean working tree, so the baseline diff is reviewable and revertible with `git`.
   Neither document previously offered git as the safety net, and reconcile's own failure rollback
   does not reverse a successful but mistaken baseline. README.md owns the rule and MANAGED_CI.md
   links to it at the command site.
 - RELEASING.md's checklist now requires a `### Migration` subsection in the changelog section of
-  any release that changes generated output in shape or behavior, excluding the version-pin and
-  ownership-marker substitution every release performs. The 4.1.0 section gained that subsection
-  retroactively; it is the release whose printed and managed workflow output changed.
+  any release that changes output an adopter installs, in shape or behavior, excluding the
+  version-pin substitution every release performs. The 4.1.0 section gained that subsection
+  retroactively; it is the release whose printed and generated workflow output changed.
 
 ### Security
 
@@ -293,12 +293,12 @@ cleanly and never triggered, and this is the release that fixes it.
   `.` to any ancestor, and an absolute result resolving inside the invocation directory or the
   process's own working directory is refused too. Earlier versions ran a bare `git`, which on
   Windows searches the invoking process's current directory ahead of `PATH`, so a repository
-  carrying its own `git.exe` could have been executed by the `ci` commands and `init --github`.
+  carrying its own `git.exe` could have been executed by the managed `ci` commands and
+  `init --github`, all of which this release removes.
   `init` gained the default branch probe in this release, which would have widened that to the
   ordinary command run in freshly cloned repositories, so it is fixed before it ships. On POSIX
-  the same applies to a relative `PATH` entry. When no trusted `git` is found, the managed
-  commands report it as a
-  missing executable and the `init` probe falls back to `main`, unchanged from any other
+  the same applies to a relative `PATH` entry. When no trusted `git` is found, the `init` probe
+  falls back to `main`, unchanged from any other
   discovery failure. SECURITY.md's scope states the promise this keeps.
 
 ## [4.1.0] - 2026-08-14

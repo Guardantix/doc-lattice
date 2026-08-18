@@ -9,8 +9,6 @@ import pytest
 import doc_lattice.cli.commands.init as init_command
 from doc_lattice import __version__, persistence
 from doc_lattice.cli import app
-from doc_lattice.github_ci import filesystem
-from doc_lattice.github_ci.render import render_managed_artifacts
 
 from .helpers import runner
 
@@ -107,11 +105,7 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
     def capture(path: Path, data: bytes, *, prefix: str) -> None:
         calls.append((path, data, prefix))
 
-    def unexpected_github_prepare(*_args, **_kwargs) -> None:
-        raise AssertionError("ordinary init must not prepare GitHub artifacts")
-
     monkeypatch.setattr(init_command, "atomic_create_bytes", capture)
-    monkeypatch.setattr(init_command, "_prepare_github_init", unexpected_github_prepare)
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init"])
 
@@ -142,26 +136,6 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         # across a hard newline, which would break the command on copy and in redirection.
         f"{_EXPECTED_BASELINE_GUIDANCE}\n"
     )
-
-
-def test_init_github_requires_repository_before_any_write(tmp_path: Path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--github"])
-
-    assert result.exit_code == 2
-    assert "--repository is required with --github" in result.stderr
-    assert {path.name for path in tmp_path.iterdir()} == {".git"}
-
-
-def test_init_repository_requires_github_before_any_write(tmp_path: Path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--repository", "Guardantix/doc-lattice"])
-
-    assert result.exit_code == 2
-    assert "--repository requires --github" in result.stderr
-    assert {path.name for path in tmp_path.iterdir()} == {".git"}
 
 
 def _origin_head(cwd: Path, branch: str) -> None:
@@ -267,283 +241,6 @@ def test_init_rejects_a_probed_branch_outside_the_supported_domain(tmp_path: Pat
     assert {path.name for path in tmp_path.iterdir()} == {".git"}
 
 
-def test_init_rejects_default_branch_with_github_before_any_write(tmp_path: Path, monkeypatch):
-    # Accepting the flag and silently ignoring it would be misleading: every managed artifact is
-    # pinned to the exact main branch as a security control, not as an unparameterized template.
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(
-        app,
-        [
-            "init",
-            "--github",
-            "--repository",
-            "Guardantix/doc-lattice",
-            "--default-branch",
-            "trunk",
-        ],
-    )
-
-    assert result.exit_code == 2
-    assert "--default-branch cannot be combined with --github" in result.stderr
-    assert {path.name for path in tmp_path.iterdir()} == {".git"}
-
-
-def test_init_github_never_probes_the_local_default_branch(tmp_path: Path, monkeypatch):
-    def unexpected_probe(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("managed init must not probe local Git state for a branch")
-
-    _origin_head(tmp_path, "trunk")
-    monkeypatch.setattr(init_command, "probe_default_branch", unexpected_probe)
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--github", "--repository", "Guardantix/doc-lattice"])
-
-    assert result.exit_code == 0
-    assert "workflow triggers on branch" not in result.stderr
-    assert "workflow triggers on branch" not in result.stdout
-    for name in ("doc-lattice.yml", "doc-lattice-linear.yml"):
-        assert "branches: [main]" in (tmp_path / ".github/workflows" / name).read_text()
-        assert "trunk" not in (tmp_path / ".github/workflows" / name).read_text()
-
-
-def test_init_github_creates_managed_artifacts_and_prints_review_guidance(
-    tmp_path: Path,
-    monkeypatch,
-):
-    repository = "Guardantix/doc-lattice"
-    artifacts = render_managed_artifacts(repository, __version__)
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert result.exit_code == 0
-    assert (tmp_path / ".doc-lattice.yml").exists()
-    for artifact in artifacts:
-        assert (tmp_path / artifact.relative_path).read_bytes() == artifact.text.encode("utf-8")
-        assert artifact.relative_path.as_posix() in result.stderr
-    assert result.stdout == _shared_guidance(__version__)
-    assert "# ===== .github/workflows/doc-lattice.yml (new file) =====" not in result.stdout
-    assert "Review" in result.stderr
-    assert f"bash .github/doc-lattice-bootstrap.sh plan {repository}" in result.stderr
-
-
-def test_init_github_from_subdirectory_anchors_at_git_top_level(
-    tmp_path: Path,
-    monkeypatch,
-):
-    repository = "Guardantix/doc-lattice"
-    subprocess.run(
-        ["git", "init", "--quiet"],  # noqa: S607 - test requires the local git executable
-        cwd=tmp_path,
-        check=True,
-    )
-    nested = tmp_path / "nested"
-    nested.mkdir()
-    monkeypatch.chdir(nested)
-
-    result = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert result.exit_code == 0
-    assert (tmp_path / ".doc-lattice.yml").is_file()
-    assert all(
-        (tmp_path / artifact.relative_path).is_file()
-        for artifact in render_managed_artifacts(repository, __version__)
-    )
-    assert not (nested / ".doc-lattice.yml").exists()
-    assert not (nested / ".github").exists()
-
-
-def test_init_github_creates_managed_lf_attributes_policy(tmp_path: Path, monkeypatch):
-    repository = "Guardantix/doc-lattice"
-    attributes = tmp_path / ".github/.gitattributes"
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert result.exit_code == 0
-    assert attributes.read_text(encoding="utf-8").splitlines()[-1] == (
-        "doc-lattice-bootstrap.sh text eol=lf"
-    )
-    assert ".github/.gitattributes" in result.stderr
-    checked = subprocess.run(
-        [  # noqa: S607 - test requires the local git executable
-            "git",
-            "check-attr",
-            "eol",
-            "--",
-            ".github/doc-lattice-bootstrap.sh",
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    assert checked.stdout == ".github/doc-lattice-bootstrap.sh: eol: lf\n"
-
-
-def test_init_github_warns_pinned_version_must_be_published(tmp_path: Path, monkeypatch):
-    repository = "Guardantix/doc-lattice"
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert result.exit_code == 0
-    narration = " ".join(result.stderr.split())
-    assert f"exact pinned version {__version__} is published on PyPI" in narration
-
-
-def test_init_github_preflights_conflict_before_config_or_other_artifact_write(
-    tmp_path: Path,
-    monkeypatch,
-):
-    artifacts = render_managed_artifacts("Guardantix/doc-lattice", __version__)
-    conflict = tmp_path / artifacts[1].relative_path
-    conflict.parent.mkdir(parents=True)
-    conflict_bytes = b"user-owned linear workflow\r\n"
-    conflict.write_bytes(conflict_bytes)
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(
-        app,
-        ["init", "--github", "--repository", "Guardantix/doc-lattice"],
-    )
-
-    assert result.exit_code == 2
-    assert "doc-lattice-linear.yml" in result.stderr
-    assert not (tmp_path / ".doc-lattice.yml").exists()
-    assert not (tmp_path / artifacts[0].relative_path).exists()
-    assert conflict.read_bytes() == conflict_bytes
-    assert not (tmp_path / artifacts[2].relative_path).exists()
-    assert not (tmp_path / artifacts[3].relative_path).exists()
-
-
-def test_init_github_exact_rerun_preserves_all_bytes(tmp_path: Path, monkeypatch):
-    repository = "Guardantix/doc-lattice"
-    artifacts = render_managed_artifacts(repository, __version__)
-    monkeypatch.chdir(tmp_path)
-    first = runner.invoke(app, ["init", "--github", "--repository", repository])
-    assert first.exit_code == 0
-    paths = [tmp_path / ".doc-lattice.yml"]
-    paths.extend(tmp_path / artifact.relative_path for artifact in artifacts)
-    before = [path.read_bytes() for path in paths]
-
-    def unexpected_artifact_create(*_args, **_kwargs) -> None:
-        raise AssertionError("exact managed artifacts must not be created again")
-
-    monkeypatch.setattr(filesystem, "atomic_create_bytes_at", unexpected_artifact_create)
-    second = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert second.exit_code == 0
-    assert [path.read_bytes() for path in paths] == before
-
-
-def test_init_github_rerun_creates_only_missing_managed_artifact(
-    tmp_path: Path,
-    monkeypatch,
-):
-    repository = "Guardantix/doc-lattice"
-    artifacts = render_managed_artifacts(repository, __version__)
-    monkeypatch.chdir(tmp_path)
-    first = runner.invoke(app, ["init", "--github", "--repository", repository])
-    assert first.exit_code == 0
-    config = tmp_path / ".doc-lattice.yml"
-    offline = tmp_path / artifacts[0].relative_path
-    missing = tmp_path / artifacts[1].relative_path
-    bootstrap = tmp_path / artifacts[2].relative_path
-    preserved = [config.read_bytes(), offline.read_bytes(), bootstrap.read_bytes()]
-    missing.unlink()
-    created: list[tuple[str, bytes, str]] = []
-    real_create = filesystem.atomic_create_bytes_at
-
-    def capture_create(
-        directory_fd: int,
-        destination_name: str,
-        data: bytes,
-        *,
-        prefix: str,
-    ) -> None:
-        created.append((destination_name, data, prefix))
-        real_create(directory_fd, destination_name, data, prefix=prefix)
-
-    monkeypatch.setattr(filesystem, "atomic_create_bytes_at", capture_create)
-    second = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert second.exit_code == 0
-    assert created == [
-        (
-            missing.name,
-            artifacts[1].text.encode("utf-8"),
-            f".{missing.name}.doc-lattice-create.",
-        )
-    ]
-    assert [config.read_bytes(), offline.read_bytes(), bootstrap.read_bytes()] == preserved
-    assert missing.read_bytes() == artifacts[1].text.encode("utf-8")
-
-
-@pytest.mark.parametrize(
-    "version",
-    ["2.0.0.dev1", "2.1.0rc1", "2.0.0+local", "not-a-final-release"],
-)
-def test_init_github_rejects_nonfinal_command_version_before_any_write(
-    tmp_path: Path,
-    monkeypatch,
-    version: str,
-):
-    monkeypatch.setattr(init_command, "__version__", version)
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(
-        app,
-        ["init", "--github", "--repository", "Guardantix/doc-lattice"],
-    )
-
-    assert result.exit_code == 2
-    assert "must be a final release version" in result.stderr
-    assert {path.name for path in tmp_path.iterdir()} == {".git"}
-
-
-def test_init_github_create_race_preserves_winner_and_error_notes(
-    tmp_path: Path,
-    monkeypatch,
-):
-    repository = "Guardantix/doc-lattice"
-    artifacts = render_managed_artifacts(repository, __version__)
-    winner_path = tmp_path / artifacts[0].relative_path
-    winner = b"concurrent workflow winner\n"
-    real_create = filesystem.atomic_create_bytes_at
-
-    def collide(
-        directory_fd: int,
-        destination_name: str,
-        data: bytes,
-        *,
-        prefix: str,
-    ) -> None:
-        winner_path.write_bytes(winner)
-        try:
-            real_create(directory_fd, destination_name, data, prefix=prefix)
-        except FileExistsError as error:
-            error.add_note("concurrent winner must remain untouched")
-            raise
-
-    monkeypatch.setattr(filesystem, "atomic_create_bytes_at", collide)
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["init", "--github", "--repository", repository])
-
-    assert result.exit_code == 2
-    assert "CONFIG_ERROR" in result.stderr
-    assert "destination appeared after preflight" in result.stderr
-    assert "concurrent winner must remain untouched" in result.stderr
-    assert "without rollback" in result.stderr
-    assert (tmp_path / ".doc-lattice.yml").exists()
-    assert winner_path.read_bytes() == winner
-    assert not (tmp_path / artifacts[1].relative_path).exists()
-    assert not (tmp_path / artifacts[2].relative_path).exists()
-    assert not (tmp_path / artifacts[3].relative_path).exists()
-
-
 def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init"])
@@ -560,31 +257,20 @@ def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
     assert "tag is pushed" not in narration
 
 
-@pytest.mark.parametrize(
-    "extra_args",
-    [
-        pytest.param([], id="unmanaged"),
-        pytest.param(["--github", "--repository", "Guardantix/doc-lattice"], id="managed"),
-    ],
-)
-def test_init_prints_first_adoption_baseline_guidance_in_both_branches(
-    tmp_path: Path,
-    monkeypatch,
-    extra_args: list[str],
-):
+def test_init_prints_first_adoption_baseline_guidance(tmp_path: Path, monkeypatch):
     # Without a baseline, a fresh adoption turns CI red on its first run and reads as a
-    # misconfiguration. Both branches must say so, and must say the same thing.
+    # misconfiguration, so init has to say so.
     monkeypatch.chdir(tmp_path)
 
-    result = runner.invoke(app, ["init", *extra_args])
+    result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 0
     narration = " ".join(result.stderr.split())
     assert _EXPECTED_BASELINE_GUIDANCE in narration
 
 
-def test_baseline_guidance_has_one_owner_shared_by_both_branches():
-    # Both branches print the same module-level constant, so they cannot drift apart.
+def test_baseline_guidance_has_one_owner():
+    # init prints the module-level constant verbatim, so the narration cannot drift from it.
     assert " ".join(init_command._BASELINE_GUIDANCE.split()) == _EXPECTED_BASELINE_GUIDANCE
 
 

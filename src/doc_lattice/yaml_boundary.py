@@ -5,15 +5,12 @@ loader, and `reconcile` catches the same failure family without loading through 
 things are genuinely shared: which exceptions a safe load can raise, and the directive state
 a reused loader has to clear before each document. Both live here so one module owns them.
 
-`github_ci/workflow_parser` and `reconcile` build their own loaders instead of using the one
-below, because AD-26 makes the pure Python parser part of their compatibility surface: they
-read source marks, resolver state, and directive state that a plain safe loader gives up the
-moment the optional `ruamel.yaml.clib` accelerator is installed. Do not route either through
-`SafeYamlLoader`; it would silently drop `pure=True`. They still answer for this failure
-family, which is why it lives here rather than inside one loader: `reconcile` catches the
-tuple directly, and `github_ci/workflow_parser` tracks the same members by hand because it
-separates the `YAMLError` subfamilies for their own diagnoses. A member added below therefore
-has to be checked against that module's handlers too.
+`reconcile` builds its own loader instead of using the one below, because AD-26 makes the pure
+Python parser part of its compatibility surface: it reads source marks, resolver state, and
+directive state that a plain safe loader gives up the moment the optional `ruamel.yaml.clib`
+accelerator is installed. Do not route it through `SafeYamlLoader`; that would silently drop
+`pure=True`. It still answers for this failure family, which is why the family lives here
+rather than inside one loader: `reconcile` catches the tuple directly.
 
 What does not live here is policy. Each caller keeps its own error translation, because a
 malformed config and a malformed frontmatter block are different errors to the user, and

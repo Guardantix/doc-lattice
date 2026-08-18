@@ -150,12 +150,13 @@ def render_ci(version: str, *, default_branch: str) -> str:
     adapter and nothing is probed here.
 
     Both actions are pinned by commit SHA with a trailing version comment, and the job carries
-    the same least-privilege posture as the managed workflows: a read-only ``contents`` token,
+    the same least-privilege posture the recipe in MANAGED_CI.md documents: a read-only
+    ``contents`` token,
     ``persist-credentials: false`` so the job's token is not left in ``.git/config`` while the
     following step resolves and runs third-party packages, and ``enable-cache: false`` so no
     persistent cross-run cache another workflow on the repository can populate is restored into
-    the gate job. The pinned ``uses:`` fragments are read from ``constants.py``, the single
-    owner shared with the managed renderer, so bumping a pin updates both.
+    the gate job. The pinned ``uses:`` fragments are read from ``constants.py``, the single owner
+    of both halves of every pin, so a bump is one edit here.
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")

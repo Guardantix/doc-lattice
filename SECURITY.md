@@ -65,11 +65,11 @@ no code from the project directory; the only program it runs is `git`, with fixe
 resolved to an absolute path outside the directory it was pointed at, so a `git` carried by the
 project itself is refused rather than run. Its
 only network use is the `linear` command's ticket lookup, which talks to
-`https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. It also renders GitHub
-Actions workflows through `ci refresh`, and publishes one in [MANAGED_CI.md](MANAGED_CI.md) for
-users to install by hand; those workflows are the only output of the project that handles a
-secret. So the security-relevant surface is what the engine does with the paths and file
-contents it was pointed at, plus that one credentialed call and what it renders or publishes.
+`https://api.linear.app/graphql` and only when `LINEAR_API_KEY` is set. It also publishes a
+GitHub Actions workflow in [MANAGED_CI.md](MANAGED_CI.md) for users to install by hand; that
+workflow is the only output of the project that handles a secret. So the security-relevant
+surface is what the engine does with the paths and file contents it was pointed at, plus that one
+credentialed call and what it publishes.
 
 In scope, as examples rather than an exhaustive list:
 
@@ -85,27 +85,19 @@ In scope, as examples rather than an exhaustive list:
 * Anything that sends `LINEAR_API_KEY` somewhere other than the Linear GraphQL endpoint, or that
   leaks it into output, an error message, or a log. The client pins that URL over HTTPS and
   refuses every redirect specifically to prevent this, so a way around either is a vulnerability.
-* A workflow rendered by `ci refresh` that mishandles the Linear API key, for example by
-  widening where the secret is readable or exposing it in a log.
-  [MANAGED_CI.md](MANAGED_CI.md) owns that security model and is the place to read what the
-  generated artifacts are meant to guarantee. The managed commands are deprecated and removed in
-  5.0, but a rendered workflow remains in scope for as long as they ship.
 * The trusted Linear workflow published in [MANAGED_CI.md](MANAGED_CI.md) as the hand-installable
   recipe, if installing it as documented mishandles the Linear API key. A missing or ineffective
   guard in that published text counts, for example a trigger set or `if:` condition that lets an
   untrusted event reach the environment, or a secret mapping that makes the key readable earlier
   or more widely than the final step. It is published, security-sensitive project output, so a
-  defect in it is a vulnerability in the same sense a rendered artifact is. Applying the
+  defect in it is a vulnerability rather than a documentation bug. Applying the
   substitutions the recipe calls for, the repository identity and the version pin, leaves it in
   scope. A recipe installation changed beyond those is out of scope, because the recipe transfers
-  ownership of those files.
+  ownership of those files. [MANAGED_CI.md](MANAGED_CI.md) owns the security model that text is
+  written to establish, and is the place to read what it is meant to guarantee.
 
 Out of scope:
 
-* Findings that `ci audit` does not report. It performs a structural workflow check, not an
-  adversarial one, and it has performed no shell analysis since 3.0.0
-  ([ARCHITECTURE.md](ARCHITECTURE.md), AD-25). A gap in what it detects is a feature request, so
-  file it as an ordinary issue.
 * The extracted shell linter. Report anything about `doc-lattice-shell-lint` to
   [its own repository](https://github.com/Guardantix/doc-lattice-shell-lint); the two projects
   are fully severed and share no code.

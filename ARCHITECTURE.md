@@ -18,8 +18,7 @@ Typer to the engine. Shared output policy lives in `cli/output.py`;
 `cli/errors.py` supplies diagnostics and command-level error conversion, while
 `cli/__init__.py` owns entry-point exception mapping.
 `orchestrate.load_lattice(project)` is the single wiring point that runs the pipeline;
-`init` and the `ci` commands are separate: they never load the lattice, and `ci` reads
-and refreshes the managed GitHub artifacts AD-16 describes. The central
+`init` is separate and never loads the lattice. The central
 structure is the `Lattice` (model.py), which every lattice-reading command reads.
 This file owns the durable module boundaries and load-bearing decisions. CLAUDE.md
 routes contributors and agents to those decisions and lists enforced repository rules.
@@ -52,15 +51,8 @@ shared low-level durable staging, replace, create-if-absent, fingerprint, sync, 
 cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capability and
 mechanics, independent live destination preflight for commits, durable commit and
 rollback, journal and artifact recovery containment and validation, and cleanup.
-`github_ci/filesystem.py` owns managed-artifact filesystem work over those primitives: a
-separate nonblocking advisory lock on the repository root, and a descriptor-relative
-parent walk that opens every ancestor with no-follow flags and hands `persistence.py` a
-directory descriptor rather than a pathname, so publication keeps writing into the
-directory it validated even if that directory's pathname is renamed or recreated mid-run.
-The `ci` command adapters together with `cli/git_repository.py` own the package's only
-subprocess use, bounded `git` invocations that resolve the working-tree top level and read
-the local origin. The rest of `github_ci`, its render, audit, identity, and parser
-modules, is filesystem-free; see AD-16 for the policy those adapters enforce. The
+`cli/git_repository.py` owns the package's only subprocess use, the bounded `git`
+invocations ordinary `init` runs to probe the default branch. The
 `doc_lattice.cli` package owns the application boundary; AD-5 owns the split between its
 `cli/commands/reconcile.py` adapter and `reconcile_transaction.py`.
 Within the cache package, `cache/schema.py` and
@@ -69,9 +61,8 @@ Within the cache package, `cache/schema.py` and
 `linear_fetch` is impure wiring and `linear_client` is the only module that touches
 the network.
 **Consequences:** Every command's logic is unit-tested with no I/O; the network slice
-is quarantined to one module. Two lock capabilities exist and never nest, since neither
-publication path acquires the reconcile lock; reconcile and managed-artifact publication
-do not coordinate with each other.
+is quarantined to one module. The reconcile lock is the package's only lock capability, so no
+nesting is possible.
 
 ### AD-3: Untyped-to-typed boundary policy
 
@@ -80,10 +71,10 @@ do not coordinate with each other.
 **Context:** Document frontmatter YAML, workflow YAML, and Linear JSON arrive untyped.
 **Decision:** `typing.Any`/`typing.cast` are allowed only in boundary modules
 (`scripts/check_typing_boundaries.py`); the real boundaries are `frontmatter_parser`
-(document frontmatter YAML), `linear_parser` (Linear JSON), `github_ci/workflow_parser`
-(workflow YAML), and `yaml_boundary` (the shared ruamel safe-load mechanics the first of
-those and `config` both read through), which validate into typed models. Everywhere else
-passes typed values. `yaml_boundary` is the narrowest of the four: it returns the loaded
+(document frontmatter YAML), `linear_parser` (Linear JSON), and `yaml_boundary` (the shared
+ruamel safe-load mechanics the first of those and `config` both read through), which validate
+into typed models. Everywhere else
+passes typed values. `yaml_boundary` is the narrowest of the three: it returns the loaded
 value still untyped and each caller validates it, which is why the untyped return does not
 widen the boundary past the module that produces it.
 **Consequences:** Untyped data cannot leak past the named boundary modules; CI enforces
@@ -240,15 +231,16 @@ registers Typer; `cli/runtime.py` creates a frozen runtime for each invocation w
 stdout, stderr, cwd, and config and lattice loaders; and `cli/output.py` centralizes
 format validation, indentation, exact output, and GitHub annotations. The package also
 holds `options.py` (shared Typer option types) and `git_repository.py` (local Git discovery
-for the `ci` adapters, GitHub-mode `init`, and ordinary `init`). Each module under
+for `init`). Each module under
 `cli/commands/` is a narrow command adapter.
 
-`git_repository.py` owns two discovery contracts that fail differently on purpose. Git
-top-level resolution is a prerequisite of the managed commands, so every failure is a
-`ConfigError`. Default-branch discovery for ordinary `init` is a hint: that command has no
+`git_repository.py` owns one discovery contract, and it is a hint rather than a prerequisite.
+Default-branch discovery for `init` is best-effort: that command has no
 Git prerequisite at all, so a missing executable, a directory outside a worktree, a missing
 or dangling `origin/HEAD`, a timeout, and unusable output all yield no candidate and the
-adapter falls back to `main`. Only a branch name that was actually supplied or discovered and
+adapter falls back to `main`. A second contract, top-level resolution for the managed commands,
+sat beside it until AD-32 retired those commands; every failure of that one was a `ConfigError`.
+Only a branch name that was actually supplied or discovered and
 then fails the module's ASCII branch-name policy raises, because a GitHub `branches:` filter
 is a glob pattern rather than a literal and must never receive a pattern. The module stays the
 sole owner of the Git subprocess boundary and its timeout: `scaffold.py` remains pure and
@@ -265,16 +257,15 @@ directory or the process's own working directory, which catches an absolute entr
 the tree being operated on, including one holding a symlink into it.
 
 The earlier decision to run a bare `git` from the maintainer's `PATH` is withdrawn. It was
-defensible while only the managed commands shelled out, since those run inside a repository the
-maintainer already trusts, but ordinary `init` runs in freshly cloned ones, and Windows searches
+defensible while only the managed commands shelled out, since those ran inside a repository the
+maintainer already trusts, but `init` runs in freshly cloned ones, and Windows searches
 the invoking process's current directory ahead of `PATH`. A repository carrying its own `git.exe`
 would have been executed, which SECURITY.md's scope says cannot happen. Resolution failure keeps
-each contract's existing shape rather than introducing a third: no candidate for the probe, a
-`ConfigError` for the managed resolver.
+the probe's shape rather than introducing a second one: no candidate, and the fallback.
 
 Enumerating untrusted directories is deliberately not how the relative case is handled. A
-relative entry can name any ancestor, and the managed contract has not resolved the project root
-at the point the executable is chosen, so rejecting relative results is the only form of the
+relative entry can name any ancestor, and no project root has been resolved at the point the
+executable is chosen, so rejecting relative results is the only form of the
 check that is complete. What remains accepted is an absolute `PATH` entry somewhere in the
 project, which is a directory the user explicitly chose to trust and that no repository can put
 on `PATH` itself.
@@ -399,27 +390,27 @@ configuration keys are not reserved as inert surface without an approved require
 **Context:** Workflow files are repository-controlled input, so a same-repository pull request can
 edit a workflow that receives a broadly scoped secret. The normal package code must not receive
 GitHub administration credentials while establishing a safer authorization boundary.
-**Decision:** `doc_lattice.github_ci` renders and audits the managed workflows, bootstrap artifact,
-and a scoped `.github/.gitattributes` policy that preserves LF for the bootstrap after checkout.
-CLI filesystem adapters resolve the Git top-level, then create, inspect, audit, and refresh those
-local files without loading the lattice or accessing the network. A reviewed external `gh` script
-is run explicitly by a human maintainer to configure and read back a GitHub environment whose
-deployment allow list is exactly the `main` branch. The dedicated
-`DOC_LATTICE_LINEAR_API_KEY` exists only in that environment and is mapped to `LINEAR_API_KEY`
-only on the final Linear step. Repository-global audit policy bans `pull_request_target` and
-whole-context reusable-workflow secret inheritance, and generated workflows never run real
-`reconcile`.
+**Decision:** GitHub administration stays outside this package entirely. A human maintainer runs
+a reviewed external `gh` sequence to configure and read back a GitHub environment whose deployment
+allow list is exactly the `main` branch. The dedicated `DOC_LATTICE_LINEAR_API_KEY` exists only in
+that environment, and it is mapped onto `LINEAR_API_KEY` only on the final step of the trusted
+Linear job. No package code ever receives a GitHub administration credential, and no workflow that
+can reach that secret runs real `reconcile`.
+
+MANAGED_CI.md publishes that sequence, and the workflow it protects, as a hand-installable recipe.
+For a time the same boundary was reached through a generator instead: `doc_lattice.github_ci`
+rendered and audited two workflows, a bootstrap script, and a scoped `.github/.gitattributes`
+policy that preserved LF for the bootstrap after checkout, and CLI adapters resolved the Git
+top-level to create, inspect, audit, and refresh those files without loading the lattice or
+touching the network. AD-32 records why that half retired. The boundary never depended on it.
 **Consequences:** `linear_client` remains the only Python network module. Remote setup is explicit,
-reviewable, resumable, and separate from the Linear secret entry. Bootstrap verification covers
-remote environment and secret-name metadata. Local audit covers workflow policy and bootstrap
-ownership metadata rather than byte equality, plus the exact effective bootstrap LF attribute,
-while managed refresh owns byte-level comparison and replacement. None of the local checks can
-observe GitHub environment or organization-policy drift, so the bootstrap verifier remains
-necessary. Workflow and branch governance for trusted `main` remains the residual authorization
-boundary. AD-32 retires the generator side of this record: the environment boundary, its `main`-only
-allow list, and final-step-only secret mapping are unchanged and are now reached by the
-hand-installable recipe MANAGED_CI.md publishes, while the rendering, auditing, and refreshing
-described above are deprecated in 4.x and removed in 5.0.
+reviewable, and separate from the Linear secret entry, and it is now established and re-verified by
+hand: the readbacks MANAGED_CI.md's steps 3 and 6 prescribe are the whole of it. Nothing observes
+GitHub environment or organization-policy drift, and nothing observes local drift in the two
+workflows either, which the retired bootstrap verifier and offline audit each covered a part of.
+The trusted job's own repository, ref, and event guards are therefore what refuse a
+`pull_request_target` run the environment policy would otherwise authorize, and workflow and
+branch governance for trusted `main` remains the residual authorization boundary.
 
 ### AD-17 through AD-23: Shell scanner decision history (removed)
 
@@ -464,7 +455,7 @@ tool, not a feature of a document traceability engine.
 independently on PyPI as `doc-lattice-shell-lint`. The two repositories are fully severed: neither
 has a runtime, build, or CI dependency on the other, in either direction.
 
-`ci audit` therefore performs no shell analysis at all. The `PR_LINEAR_INVOCATION` and
+`ci audit` therefore performed no shell analysis at all. The `PR_LINEAR_INVOCATION` and
 `PR_MUTATING_RECONCILE` finding codes are retired, as is the exit-2 unsupported-shell-semantics
 outcome. An optional-import integration was rejected because an audit's contract must not vary
 with what happens to be installed on the runner; a hard dependency was rejected because it
@@ -502,18 +493,14 @@ implementation is part of that surface, not only the version: every loader this 
 for the pure Python parser explicitly, because a plain safe loader switches to the C one whenever
 the optional `ruamel.yaml.clib` accelerator is installed, which any other package in a user's
 environment may pull in, and that parser reports coarser marks and exposes no scanner at all. The
-accelerator is not reconcile's problem alone. `github_ci/workflow_parser.py` asks for the pure
-parser for its own reasons, since the C one reads neither the resolver that module edits to keep
-implicit timestamps as strings nor the version and anchor state its `%YAML` directive and
-duplicate-anchor rejections inspect, so all three of those guards degrade together wherever the
-accelerator is installed. The `yaml-compatibility` CI leg runs the suite at the declared floor and
+`yaml-compatibility` CI leg runs the suite at the declared floor and
 at the resolved ceiling of the range with that accelerator present, so both the range and the
 choice of implementation are verified rather than asserted. The installed parser is one axis of
 that degradation and the interpreter is the other. ruamel enforces `!!omap` key uniqueness and the
 `%YAML` version range with bare `assert` statements rather than raised errors, so `python -O` or
 `PYTHONOPTIMIZE` compiles both checks out: a repeated `!!omap` key then loads last-wins instead of
-being refused, and an unsupported `%YAML 1.3` reaches `github_ci/workflow_parser.py` as a `KeyError`
-that its `AssertionError` handler does not catch. Enabled assertions are therefore a condition of
+being refused, and an unsupported `%YAML 1.3` surfaces as a `KeyError` that no `AssertionError`
+handler catches. Enabled assertions are therefore a condition of
 every guard this project layers on ruamel, this engine is supported only in that default mode, and
 `yaml_boundary.py` reimplements neither check to escape the dependence, since doing so would put
 constructor internals into the one boundary that consumes loaded values alone. Where an event mark
@@ -935,9 +922,11 @@ design rests on is the GitHub environment, not the generator that produces files
 the shell scanner left under AD-25, a generator, an offline auditor, a byte-level refresher, and a
 bootstrap script remained in service of a product with zero installations, and the check and lint
 half of what it produced is already what plain `init` scaffolds.
-**Decision:** The managed product retires to a hand-installable recipe published in MANAGED_CI.md,
-in two stages. GTX-109 publishes the recipe and deprecates `init --github`, `ci audit`, and
-`ci refresh` in 4.x. GTX-163 removes those commands and the `github_ci` package in 5.0.
+**Decision:** The managed product retires to a hand-installable recipe published in MANAGED_CI.md.
+GTX-109 committed that recipe to the unreleased tree, and GTX-163 removed `init --github`,
+`ci audit`, `ci refresh`, and the `github_ci` package during 5.0 development. No deprecation stage
+ever shipped: 4.1.0 is the last release that carried the managed product and it carried it live,
+so an adopter migrates directly from the 4.1.0 managed setup to the 5.0 recipe.
 
 The recipe supplies the trusted Linear workflow as copyable text, because plain `init` does not
 print it, together with the `gh` sequence that creates the `main`-only environment and its
@@ -947,20 +936,24 @@ repository, ref, and event guards, the pinned actions, and the least-privilege t
 machinery that watched that boundary: repository-wide audit, drift detection, byte-level refresh,
 the scripted remote readback, the ownership markers, and the script's guarded, resumable setup.
 
-The 4.x deprecation is help text and documentation only. Invocation stdout, stderr, and exit codes
-are unchanged, for the reason AD-10 records: a stderr warning cannot be made compatibility-safe for
-a script that already parses those channels.
+A 4.x deprecation stage was drafted and then overtaken. It would have been help text and
+documentation only, because a stderr warning cannot be made compatibility-safe for a script that
+already parses those channels, which is the reason AD-10 records; removal landed in the same
+unreleased tree, so no release ever carried the notice.
 
 Keeping the product was rejected because no installation justified maintaining four subsystems for
-a boundary a documented procedure reaches directly. Removing the commands outright in 4.x was
-rejected because they are a published CLI contract. Publishing the recipe without deprecating them
-was rejected because it would leave two supported paths to the same boundary, one unmaintained.
-**Consequences:** The published workflow becomes security-sensitive project output rather than an
+a boundary a documented procedure reaches directly. Removing the commands with no successor was
+rejected because they are a published CLI contract. Publishing the recipe while leaving the
+commands supported was rejected because it would leave two paths to the same boundary, one
+unmaintained.
+**Consequences:** The published workflow is security-sensitive project output rather than an
 internal template, so SECURITY.md names it in scope and `tests/test_managed_ci_recipe.py` holds its
 trigger set, guards, environment binding, secret mapping, and action pins. Those structural checks
-are written to outlive the renderer they currently cross-check against. An installed managed setup
-does not break when 5.0 ships: it keeps running the exact 4.x version its workflows pin, and
-pinning it forward is what fails, because the managed offline workflow runs `ci audit`. Conversion
-changes no remote state and is a local file-ownership change, which MANAGED_CI.md owns. Removing
-the commands in 5.0 is a breaking change to a published CLI surface and therefore a major version.
-AD-16's environment boundary survives this record intact; only its generator side retires.
+were written to outlive the renderer they once cross-checked against, and they have. An installed
+managed setup does not break when 5.0 ships: a generated workflow pins the exact version that
+produced it and never hears that a later one exists, so an installation goes on running until
+someone converts it, and pinning it forward is what fails, because its offline workflow invokes
+`ci audit`. Conversion changes no remote state and is a local file-ownership change, which
+MANAGED_CI.md owns and CHANGELOG.md announces. Removing the commands is a breaking change to a
+published CLI surface and therefore a major version.
+AD-16's environment boundary survives this record intact; only its generator side retired.

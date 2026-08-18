@@ -48,12 +48,12 @@ check its current state.
 2. Run `uv lock` and commit the refreshed `uv.lock`.
 3. Confirm the new changelog section is nonempty. The release job checks this too, before it
    pushes the tag, but failing there costs a release run.
-4. Add a `### Migration` subsection to that changelog section when the release changes generated
-   output in shape or behavior: the printed pre-commit or workflow snippets, or any of the four
-   managed artifacts. The trigger is a semantic change, not the version-pin and ownership-marker
-   substitution every release performs, which on its own would make the subsection mandatory
-   every time. Name the adopter-visible steps, separated by install kind. The generic upgrade
-   procedure covering routine pin bumps is owned by
+4. Add a `### Migration` subsection to that changelog section when the release changes output an
+   adopter installs, in shape or behavior: the `.gitignore`, pre-commit, and workflow blocks
+   `init` prints, or the trusted Linear workflow and `gh` procedure MANAGED_CI.md publishes. The
+   trigger is a semantic change, not the version-pin substitution every release performs, which
+   on its own would make the subsection mandatory every time. Name the adopter-visible steps,
+   separated by install kind. The generic upgrade procedure covering routine pin bumps is owned by
    [README.md](README.md#upgrading); this checklist owns only the rule that a qualifying release
    must carry the subsection.
 5. Run the full verification suite, open a pull request, and wait for every CI check to pass.
@@ -411,8 +411,9 @@ gh api repos/Guardantix/doc-lattice/private-vulnerability-reporting --jq .enable
 The environment response reports only that custom branch policies are in use, which is why the
 allowed branches take their own query. That query keeps `type` because the name alone does not
 identify a branch policy: a *tag* policy named `main` prints the same name and authorizes
-nothing. The repository's own bootstrap verifier reads the same pair and accepts only
-`main` with type `branch`, so this check matches the one the tooling already enforces.
+nothing. The recipe in [MANAGED_CI.md](MANAGED_CI.md) reads the same pair back for its own
+environment and accepts only `main` with type `branch`, so this check applies the standard this
+project documents there.
 
 Read every answer against what this document claims rather than against the absence of an error:
 

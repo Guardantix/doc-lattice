@@ -6,8 +6,8 @@ doc-lattice is a deterministic traceability engine for dependencies between Mark
 
 - [README.md](README.md) owns supported user behavior, configuration, commands, and examples.
 - [MANAGED_CI.md](MANAGED_CI.md) owns the hand-installable recipe for protected Linear CI, the
-  deprecated managed setup it replaces, their migration and conversion procedures, and the
-  security model both rest on.
+  procedure for converting a managed installation to it, and the security model the recipe
+  rests on.
 - [RECONCILE.md](RECONCILE.md) owns the reconcile selector, dry-run, transaction durability, and
   recovery contract.
 - [ARCHITECTURE.md](ARCHITECTURE.md) owns durable decisions and pure/impure module boundaries.

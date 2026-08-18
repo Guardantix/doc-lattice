@@ -6,7 +6,6 @@ import typer
 
 from .. import __version__
 from .commands.check import register_check
-from .commands.ci import register_ci
 from .commands.graph import register_graph
 from .commands.impact import register_impact
 from .commands.init import register_init
@@ -65,7 +64,6 @@ def create_app(*, runtime_factory: RuntimeFactory = default_runtime) -> typer.Ty
     register_reconcile(application)
     register_graph(application)
     register_linear(application)
-    register_ci(application)
     register_init(application)
     return application
 

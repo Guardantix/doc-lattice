@@ -20,15 +20,13 @@ The release in flight. `## [Unreleased]` already carries breaking changes, so th
 to be true at the moment a major ships. Everything else waits for 5.x, which is what keeps this
 release from staying open indefinitely.
 
-Start at GTX-163 and GTX-126. They are the two items the rest of the release sequences behind.
+Start at GTX-110 and GTX-126. They are the two items the rest of the release sequences behind,
+now that GTX-163 has removed the managed GitHub and Linear CI code and repaired every document
+that described it.
 
-- Remove the managed GitHub and Linear CI code and repair every document that described it
-  (GTX-163). It is 31 percent of `src` with zero installations, and the recipe in
-  [MANAGED_CI.md](MANAGED_CI.md) already replaces it. Removal is what unblocks the persistence
-  consolidation below, and it frees the two recipe simplifications parked in 5.x.
-- Consolidate the persistence primitives that removal orphans, and record the filesystem threat
+- Consolidate the persistence primitives that removal orphaned, and record the filesystem threat
   model in AD-2 (GTX-110). Roughly half of `persistence.py` is the same five operations written
-  twice, and the dirfd family's only consumer is the code GTX-163 deletes, so this is the release
+  twice, and the dirfd family's only consumer was the code GTX-163 deleted, so this is the release
   where the duplicate family stops being load-bearing. Carrying it across a whole minor train
   instead would leave a dead primitive family in the module for no benefit.
 - Move the reconcile journal to v2, so a crash journal records when, by what version, and from
@@ -123,6 +121,6 @@ and neither should be allowed to hold 5.0 open.
 - Hardening against a hostile local writer. The containment and locking model defends against
   accidents, symlink confusion, and concurrent runs; an adversarial co-tenant on the same
   filesystem is out of scope, recorded with the threat model in GTX-110.
-- A productized managed CI offering. Superseded by the recipe GTX-109 published in 4.x, which
-  [MANAGED_CI.md](MANAGED_CI.md) owns; the earlier scanner half of that ambition moved out in
-  AD-25.
+- A productized managed CI offering. Superseded by the recipe GTX-109 wrote, which first ships
+  in 5.0 and which [MANAGED_CI.md](MANAGED_CI.md) owns; the earlier scanner half of that ambition
+  moved out in AD-25.

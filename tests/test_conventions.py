@@ -231,10 +231,12 @@ PUBLICATION_OWNERS = frozenset({"persistence.py", TRANSACTION_MODULE})
 # one overwrites a document without ever naming the publication helper and would slip past a scan
 # that reads only that helper's name. The descriptor-relative variant does not even route through
 # it. Each primitive's present users write their own artifacts rather than documents, so they are
-# pinned per primitive and any new user of either route fails closed.
+# pinned per primitive and any new user of either route fails closed. A primitive with no users
+# left stays registered with an empty allowlist: the guard iterates these keys to reject
+# unapproved callers, so dropping the key would drop the route it guards.
 COMPOSITE_PUBLISH_USERS: dict[str, frozenset[str]] = {
     "atomic_replace_bytes": frozenset({"cache/store.py"}),
-    "atomic_replace_bytes_at": frozenset({"github_ci/filesystem.py"}),
+    "atomic_replace_bytes_at": frozenset(),
 }
 # The whole document a rewrite may reassemble, as the exact order it reattaches. Requiring only
 # that some verified value appears would accept `f"{new_meta}"`, which drops the fences and the
@@ -936,7 +938,8 @@ def _publication_reach_violations(trees: dict[str, ast.Module]) -> list[str]:
     module can overwrite a reconcile destination through one of them without ever naming
     ``replace_staged``; the descriptor-relative variant does not even call it. Each primitive's
     current users publish their own artifacts rather than documents and are pinned per
-    primitive, so a new user of either route fails here too.
+    primitive, so a new user of either route fails here too. A primitive with no remaining users
+    keeps an empty allowlist, which rejects every caller.
 
     The check reads every mention of the identifier, not just a ``from ... import`` of it. A
     module can reach the helper as ``from . import persistence`` followed by

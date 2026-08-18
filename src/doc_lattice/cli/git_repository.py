@@ -1,19 +1,16 @@
-"""Local Git discovery for the ``ci``, GitHub-mode ``init``, and ordinary ``init`` adapters.
+"""Local Git discovery for the ordinary ``init`` adapter.
 
-Two discovery contracts live here, and they fail in deliberately different ways.
-``resolve_git_repository_root`` is a prerequisite: the managed commands cannot act without a
-worktree, so every failure becomes a ``ConfigError``. ``probe_default_branch`` is a hint:
-ordinary ``init`` has no Git prerequisite at all, so every discovery failure yields ``None``
-and the caller falls back. Only a candidate that was actually supplied or discovered and then
-fails the branch-name policy raises, through ``validate_default_branch``.
+``probe_default_branch`` is a hint, never a prerequisite: ``init`` has no Git requirement at
+all, so every discovery failure yields ``None`` and the caller falls back. Only a candidate
+that was actually supplied or discovered and then fails the branch-name policy raises, through
+``validate_default_branch``.
 
-Both contracts run Git through ``_resolve_git_executable`` rather than by name, so the program
-this module executes can never come from the directory it was pointed at. SECURITY.md states
-that doc-lattice executes no code from the project directory, and running a bare ``git`` would
-break that promise: Windows searches the invoking process's current directory ahead of ``PATH``,
-so a repository carrying its own ``git.exe`` would run it, and a relative ``PATH`` entry does the
-same on POSIX. Ordinary ``init`` is why this matters now. The managed commands are run by a
-maintainer inside their own repository, but ``init`` is run in freshly cloned ones.
+The probe runs Git through ``_resolve_git_executable`` rather than by name, so the program this
+module executes can never come from the directory it was pointed at. SECURITY.md states that
+doc-lattice executes no code from the project directory, and running a bare ``git`` would break
+that promise: Windows searches the invoking process's current directory ahead of ``PATH``, so a
+repository carrying its own ``git.exe`` would run it, and a relative ``PATH`` entry does the same
+on POSIX. ``init`` is why this matters: it is run in freshly cloned repositories.
 """
 
 import re
@@ -25,25 +22,17 @@ from ..error_types import ConfigError
 
 _GIT_TIMEOUT_SECONDS = 5
 _GIT_EXECUTABLE_NAME = "git"
-_MISSING_GIT_MESSAGE = (
-    "git executable not found on an absolute PATH entry outside the invocation directory; "
-    "install Git, or remove relative entries such as '.' and '..' from PATH, before using "
-    "managed GitHub CI commands"
-)
 
-# The ordinary workflow's branch filter when nothing better is known. Deliberately not shared
-# with the ``main`` literals in ``github_ci/render.py``: those are a security control that pins
-# the managed environment to one exact branch, and a shared constant would let a change here
-# relax that control silently.
+# The ordinary workflow's branch filter when nothing better is known.
 DEFAULT_BRANCH_FALLBACK = "main"
 
 _ORIGIN_HEAD_REF = "refs/remotes/origin/HEAD"
 _ORIGIN_BRANCH_PREFIX = "refs/remotes/origin/"
 
-# ASCII allowlist for common literal branch names, in the style of github_ci/identity.py. Each
-# slash-separated component starts with a letter, digit, or underscore and cannot end in a dot,
-# which covers Git's own structural exclusions (no leading dot, no empty or "." component, no
-# trailing dot) while excluding every glob and pattern metacharacter by construction. That
+# ASCII allowlist for common literal branch names. Each slash-separated component starts with a
+# letter, digit, or underscore and cannot end in a dot, which covers Git's own structural
+# exclusions (no leading dot, no empty or "." component, no trailing dot) while excluding every
+# glob and pattern metacharacter by construction. That
 # second property is the load-bearing one: a GitHub ``branches:`` filter is a glob pattern
 # rather than a literal, so "*", "?", "[", "]", and "!" must never reach it. Consecutive dots
 # survive the component pattern, so ".." is excluded separately below; Git rejects it anywhere
@@ -60,57 +49,6 @@ _DEFAULT_BRANCH_RE = re.compile(
     rf"{_BRANCH_COMPONENT}(?:/{_BRANCH_COMPONENT})*",
     flags=re.ASCII,
 )
-
-
-def resolve_git_repository_root(cwd: Path) -> Path:
-    """Resolve and validate the Git top-level containing an invocation directory.
-
-    Args:
-        cwd: Existing invocation directory from which Git should resolve the worktree.
-
-    Returns:
-        The canonical absolute Git worktree root containing ``cwd``.
-
-    Raises:
-        ConfigError: If Git is unavailable outside the invocation directory, the directory is
-            outside a worktree, or Git's top-level result cannot be validated safely.
-    """
-    git = _resolve_git_executable(cwd)
-    if git is None:
-        raise ConfigError(_MISSING_GIT_MESSAGE)
-    try:
-        completed = run(  # noqa: S603 - resolved executable, arguments are module-local literals
-            [git, "rev-parse", "--show-toplevel"],
-            cwd=cwd,
-            capture_output=True,
-            check=False,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except FileNotFoundError as exc:
-        # Resolution succeeded, so this is the narrow race where Git disappeared in between.
-        raise ConfigError(_MISSING_GIT_MESSAGE) from exc
-    except (OSError, TimeoutExpired) as exc:
-        raise ConfigError("cannot resolve Git repository root") from exc
-    if completed.returncode != 0:
-        raise ConfigError("managed GitHub CI commands require a Git working tree")
-    try:
-        stdout = completed.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ConfigError("cannot decode Git repository root as UTF-8") from exc
-    lines = stdout.splitlines()
-    if len(lines) != 1 or not lines[0]:
-        raise ConfigError("cannot resolve Git repository root")
-    logical_root = Path(lines[0])
-    if not logical_root.is_absolute():
-        raise ConfigError("cannot resolve Git repository root")
-    try:
-        root = logical_root.resolve(strict=True)
-        invocation = cwd.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ConfigError("cannot resolve Git repository root") from exc
-    if not root.is_dir() or not invocation.is_relative_to(root):
-        raise ConfigError("cannot resolve Git repository root")
-    return root
 
 
 def validate_default_branch(value: str) -> str:
@@ -186,8 +124,8 @@ def _resolve_git_executable(cwd: Path) -> str | None:
     relative. That covers every reachable plant rather than one directory of them: ``.`` reaches
     the process directory, ``..`` reaches its parent, and the Windows search that prepends the
     process directory to ``PATH`` yields ``.`` as well. Trying instead to enumerate untrusted
-    directories cannot work here, since a relative entry can name any ancestor and the managed
-    contract has not resolved the project root at this point.
+    directories cannot work here, since a relative entry can name any ancestor and no project
+    root has been resolved at this point.
 
     An absolute result is then refused when it resolves inside ``cwd`` or the process's own
     working directory. This is the residual case where a ``PATH`` entry is absolute but points

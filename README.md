@@ -241,24 +241,19 @@ Contributor commands, gates, and the full verification set live in
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY] [--default-branch NAME] [--github --repository OWNER/REPO]` | Scaffold `.doc-lattice.yml`; with explicit GitHub mode, create the four managed GitHub artifacts at the Git top-level. `--github` is deprecated and removed in 5.0. | 2 on tool error or unsafe existing artifact |
-| `ci audit [--repository OWNER/REPO]` | Audit repository-global workflow prohibitions and the managed GitHub installation without loading the lattice or using the network. Deprecated, removed in 5.0. | 1 on findings, 2 on unreadable or ambiguous state |
-| `ci refresh --repository OWNER/REPO [--apply]` | Preview a managed artifact upgrade or rename, then optionally apply it after exact interactive confirmation. Deprecated, removed in 5.0. | 1 when a preview has updates, 2 on refusal, unsafe state, or tool error |
+| `init [--docs-root ...] [--linear-team KEY] [--default-branch NAME]` | Scaffold `.doc-lattice.yml` and print the `.gitignore`, pre-commit, and GitHub Actions blocks to install by hand. | 2 on tool error |
 
 `check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
-`ci audit` uses the same finding code for a coherent policy violation, and a read-only `ci refresh`
-preview uses it when an update is available. `impact`, `reconcile`, `graph`, and ordinary `init`
-are informational and exit 0 on success, so wiring `impact` into a CI gate never turns the build
-red. `linear` also exits 0 by default; pass `--exit-code` to gate on any DANGER or BLOCKED finding,
-and add `--warn-exit` to gate on WARNING as well.
+`impact`, `reconcile`, `graph`, and `init` are informational and exit 0 on success, so wiring
+`impact` into a CI gate never turns the build red. `linear` also exits 0 by default; pass
+`--exit-code` to gate on any DANGER or BLOCKED finding, and add `--warn-exit` to gate on WARNING
+as well.
 
 The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, and `linear` accept
 `--config PATH` (path to `.doc-lattice.yml`; defaults to the file in the current directory).
-`init`, `ci audit`, and `ci refresh` deliberately do not accept config or load the lattice.
-GitHub-mode `init` and both `ci` commands require a Git working tree and resolve its top-level
-before inspecting or writing managed files, even when invoked from a subdirectory. Ordinary
-`init` retains its current-directory behavior and does not require Git: it reads local Git state
-only to guess the workflow's default branch, and falls back when that read finds nothing.
+`init` deliberately does not accept config or load the lattice. It keeps its current-directory
+behavior and does not require Git: it reads local Git state only to guess the workflow's default
+branch, and falls back when that read finds nothing.
 Run `uv run doc-lattice <command> --help` for the full flag list.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
@@ -541,10 +536,9 @@ name `HEAD`: no branch can carry such a name, so a filter built from one would n
 that exact spelling of `HEAD` is reserved, so `head`, `release/HEAD`, and similar names are
 ordinary branch names and are accepted.
 
-`--default-branch` applies only to this printed workflow and is rejected outright when combined
-with `--github`. The managed artifacts are pinned to the exact `main` branch as a security
-control, not as an unparameterized template; see
-[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md).
+`--default-branch` applies only to this printed workflow. The Linear workflow the recipe in
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) publishes is
+pinned to the exact `main` branch as a security control, so nothing there takes a branch either.
 
 To test an unreleased commit, replace the PyPI requirement with a Git source such as
 `--from git+https://github.com/Guardantix/doc-lattice@<commit>`; released configurations should
@@ -626,34 +620,33 @@ which holds one dedicated secret. That secret is mapped onto `LINEAR_API_KEY` on
 step of the trusted job. The environment is the boundary; the workflows are ordinary files in your
 repository.
 
-The recipe replaces the **managed setup**, in which `init --github` generated four create-only
-artifacts, `ci audit` checked repository-global workflow prohibitions and the installation
-offline, and `ci refresh` previewed and applied byte-level upgrades and renames. All three are
-deprecated and removed in 5.0; they behave exactly as before through 4.x. The same document
-carries the conversion procedure, which changes no remote state.
+The recipe replaced a managed setup that generated and maintained four committed artifacts for
+the same boundary, removed in 5.0. The same document carries the procedure for converting an
+installation left over from it, which changes no remote state.
 
 See [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for the
-recipe, what it keeps and drops relative to the managed setup, requirements, migration, and the
+recipe, what it does without relative to the managed setup, requirements, conversion, and the
 security model.
 
 ## Upgrading
 
-Upgrades are hand-applied: nothing in your repository updates itself. Both generators render from
-the version of doc-lattice actually running, so every command below has to name the release you
-are moving to, and an old binary regenerates the old artifacts. Substitute the target release for
+Upgrades are hand-applied: nothing in your repository updates itself. `init` prints its blocks
+from the version of doc-lattice actually running, so every command below has to name the release
+you are moving to, and an old binary prints the old blocks. Substitute the target release for
 `NEW_VERSION` throughout. Read that release's section in
 [CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md) first: a release
 that changes generated output carries a `### Migration` subsection with the steps specific to it.
 
-Which paths apply depends on how you installed, because ownership differs. The pre-commit snippet
-is yours in all three setups. The ordinary workflow is yours. A recipe installation's Linear
-workflow is yours too. The four managed artifacts are not.
+Which paths apply depends on how you installed. The pre-commit snippet is yours either way, the
+ordinary workflow is yours, and a recipe installation's Linear workflow is yours too. A managed
+installation left over from 4.1.0 converts rather than upgrades; see
+[Managed installs](#managed-installs).
 
 ### The pre-commit snippet (every install)
 
-The pre-commit block is printed guidance rather than a managed artifact in all three setups, so no
-command updates your `.pre-commit-config.yaml` for you. Print the block from the target release
-and compare it against the one you checked in:
+The pre-commit block is printed guidance rather than a generated file, so no command updates
+your `.pre-commit-config.yaml` for you. Print the block from the target release and compare it
+against the one you checked in:
 
 ```bash
 uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init
@@ -699,34 +692,15 @@ replaced whole.
 
 ### Managed installs
 
-Deprecated. `init --github`, `ci audit`, and `ci refresh` are removed in 5.0, and the managed
-offline workflow runs `ci audit`, so a managed installation cannot simply be pinned forward to
-5.0. Convert it to the recipe while 4.x is still supported;
-[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) carries that
-procedure, and it changes no remote state. Until you convert, the upgrade path is unchanged:
+A managed installation is one generated by the removed `init --github` before 5.0. It has no
+upgrade path, because its offline workflow invokes `ci audit`, a command 5.0 removed, so pinning
+it forward fails outright. It does not break on its own either: its workflows pin the exact
+release that generated them and go on running it, which is why nothing prompts the conversion.
 
-Take the pre-commit block from the plain `init` run above and ignore the ordinary workflow it
-prints alongside it, which is not the managed workflow and does not belong in a managed
-repository. Do not re-run `init --github` to upgrade: it is create-only and refuses outright when
-an existing managed artifact's bytes differ from the ones it would write.
-
-The four managed artifacts (`.github/workflows/doc-lattice.yml`,
-`.github/workflows/doc-lattice-linear.yml`, `.github/doc-lattice-bootstrap.sh`, and
-`.github/.gitattributes`) are upgraded by `ci refresh`, which is deliberately two-stage. The
-preview only prints the pending diff; the separate `--apply` run is the one that writes, and it
-requires typing the repository identity to confirm:
-
-```bash
-uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice ci refresh \
-  --repository OWNER/REPO
-uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice ci refresh \
-  --repository OWNER/REPO --apply
-```
-
-Review and commit the resulting diff, and do not hand-edit the four artifacts. See
-[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) for the refresh
-contract, including its exit codes, its ownership markers, and its refusal to move an installed
-artifact backward.
+Convert it instead. The procedure is in
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md), it changes no
+remote state, and it is a local change of file ownership from the tool to you. Once converted,
+follow [Recipe installs](#recipe-installs) above for every later upgrade.
 
 ## Linear integration
 
@@ -755,8 +729,8 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success; no coherent policy or gate finding, and no refresh update is pending. |
-| `1` | Coherent finding: lattice drift, authority or Linear gate failure, GitHub CI policy violation, incomplete bootstrap state, or a managed refresh update. |
+| `0` | Success; no coherent policy or gate finding. |
+| `1` | Coherent finding: lattice drift, an authority inversion, or a Linear gate failure. |
 | `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal and persistence or recovery failure. |
 
 ## Troubleshooting
@@ -803,7 +777,7 @@ collision. Equal anchors in different files do not collide.
 | Document | Purpose |
 |----------|---------|
 | [ARCHITECTURE.md](https://github.com/Guardantix/doc-lattice/blob/main/ARCHITECTURE.md) | System design and the decision log |
-| [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) | The protected Linear CI recipe, the deprecated managed setup, and their shared security model |
+| [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) | The protected Linear CI recipe, its security model, and the conversion procedure |
 | [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) | Reconcile selectors, transaction durability, and recovery |
 | [CLAUDE.md](https://github.com/Guardantix/doc-lattice/blob/main/CLAUDE.md) | Short contributor and agent guide |
 | [ROADMAP.md](https://github.com/Guardantix/doc-lattice/blob/main/ROADMAP.md) | Future direction |
@@ -821,7 +795,6 @@ doc-lattice/
 │   ├── persistence.py          # shared durable single-path filesystem primitives
 │   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery
 │   ├── cli/                    # per-invocation runtime and one adapter per command
-│   ├── github_ci/              # offline workflow audit and managed artifact generation
 │   └── cache/               # phase-separated incremental load cache
 │       ├── schema.py        # filesystem-free models and codec
 │       ├── state.py         # filesystem-free run-local state
