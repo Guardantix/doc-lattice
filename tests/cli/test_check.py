@@ -477,9 +477,9 @@ def _check_in(cwd: Path, env: dict[str, str] | None = None) -> subprocess.Comple
     """Run ``check`` end to end in a real interpreter.
 
     ``CliRuntime.lattice()`` renders warnings itself, so an in-process run can see them; a
-    separate interpreter is still what proves the two claims this file makes about them:
-    that interpreter-startup ``PYTHONWARNINGS`` handling reaches the load, and that the
-    bytes a user's stderr actually receives carry no category, package path, or source line.
+    separate interpreter is still what proves the claims this file makes about them: that
+    interpreter-startup ``PYTHONWARNINGS`` handling reaches the load, and that the bytes a
+    user's stderr actually receives carry no category, package path, or source line.
     ``PYTHONPATH`` carries the source tree because pytest's ``pythonpath`` setting only
     reaches the interpreter running the suite, not one this test spawns.
     """
@@ -522,6 +522,40 @@ def test_check_warning_stays_filterable_through_pythonwarnings(tmp_path: Path):
     assert silenced.stderr == ""
     assert prefixed.returncode == 0
     assert prefixed.stderr == ""
+
+
+def test_check_warning_under_pythonwarnings_error_escapes_the_exit_code_contract(tmp_path: Path):
+    # The one presentation cost AD-29 still accepts: `error` is applied before the
+    # replaceable stage, so no hook can reach it and the entry point's ProjectError mapping
+    # never runs. Pinned because exit 1 collides with EXIT_FINDING, which check reserves for
+    # drift, and a change to main()'s mapping would otherwise make AD-29 stale in silence.
+    _frontmatter_tiers(tmp_path)
+
+    raised = _check_in(tmp_path, {"PYTHONWARNINGS": "error"})
+
+    assert raised.returncode == 1
+    assert "UserWarning" in raised.stderr  # a traceback, not the CLI's voice
+
+
+def test_check_reports_a_symlink_escape_in_the_same_stderr_voice(tmp_path: Path):
+    # The second warning family, raised at stacklevel=2 from discovery rather than
+    # orchestrate. It is the security-adjacent one, so its rendered form is worth pinning.
+    project_root = tmp_path / "repo"
+    docs = project_root / "docs"
+    docs.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret content", encoding="utf-8")
+    (docs / "leak.md").symlink_to(outside / "secret.md")
+    (docs / "keep.md").write_text("---\nid: keep\n---\n# Keep\n", encoding="utf-8")
+
+    completed = _check_in(project_root)
+
+    assert completed.returncode == 0
+    assert completed.stderr == (
+        f"warning: skipping {docs / 'leak.md'}: it escapes the project root via a symlink "
+        "or absolute path and was not read\n"
+    )
 
 
 def test_check_id_less_stderr_is_byte_identical_uncached_cold_and_warm(tmp_path: Path):

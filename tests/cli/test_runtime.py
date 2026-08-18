@@ -12,7 +12,13 @@ from typer.testing import CliRunner
 
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice.cli.application import create_app
-from doc_lattice.cli.runtime import CliRuntime, LatticeLoader, default_runtime, get_runtime
+from doc_lattice.cli.runtime import (
+    CliConsole,
+    CliRuntime,
+    LatticeLoader,
+    default_runtime,
+    get_runtime,
+)
 from doc_lattice.config import Config, ProjectConfig
 from doc_lattice.model import Lattice
 
@@ -349,3 +355,237 @@ def test_lattice_restores_the_previous_showwarning_after_a_loader_exception(tmp_
 
     assert len(seen) == 1
     assert seen[0] is not sentinel
+
+
+class _RefusingStream(StringIO):
+    """A stream that refuses every write, recording how many were attempted."""
+
+    def __init__(self, error: OSError):
+        super().__init__()
+        self.error = error
+        self.attempts = 0
+
+    def write(self, s: str) -> int:
+        del s
+        self.attempts += 1
+        raise self.error
+
+
+def _refusing_runtime(stream: _RefusingStream, tmp_path: Path, load_lattice: LatticeLoader):
+    """Build a runtime whose stderr is a `CliConsole` over a stream that refuses writes."""
+    return CliRuntime(
+        stdout=Console(file=StringIO()),
+        stderr=CliConsole(file=stream, stderr=True, no_color=True, color_system=None),
+        cwd=tmp_path,
+        load_config=lambda _config, _cwd: ProjectConfig(Config(), tmp_path, (tmp_path,)),
+        load_lattice=load_lattice,
+    )
+
+
+def _twice_warning_loader(lattice: Lattice) -> LatticeLoader:
+    """Build a loader that raises two distinct warnings and then succeeds."""
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        warnings.warn("skipping docs/one.md: no 'id'", stacklevel=1)
+        warnings.warn("skipping docs/two.md: no 'id'", stacklevel=1)
+        return lattice
+
+    return load_lattice
+
+
+@pytest.mark.parametrize(
+    "error",
+    [BrokenPipeError(), OSError(5, "Input/output error"), OSError(28, "No space left on device")],
+    ids=["broken-pipe", "eio", "enospc"],
+)
+def test_a_stderr_that_refuses_the_warning_does_not_abort_the_load(tmp_path: Path, error: OSError):
+    # CPython's own warning printer swallows OSError for this reason: the load is
+    # succeeding, and its report is the whole point of the invocation.
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+    stream = _RefusingStream(error)
+    runtime = _refusing_runtime(stream, tmp_path, _twice_warning_loader(lattice))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        assert runtime.lattice(project) is lattice
+
+    assert stream.attempts == 1  # the second warning is dropped, not retried on a dead stream
+
+
+def test_a_refusing_stderr_does_not_redirect_the_process_stdout(tmp_path: Path, capsys):
+    # rich's own Console.on_broken_pipe points sys.stdout at os.devnull before it raises, so
+    # the report would be discarded even by a caller that caught the SystemExit. CliConsole
+    # keeps the failure local to the write that failed.
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+    stream = _RefusingStream(BrokenPipeError())
+    runtime = _refusing_runtime(stream, tmp_path, _twice_warning_loader(lattice))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        runtime.lattice(project)
+
+    print("the report")
+    assert capsys.readouterr().out == "the report\n"
+
+
+def test_a_load_error_still_propagates_through_the_warning_guard(tmp_path: Path):
+    # The guard must not span the load: a real read failure is an OSError too.
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        msg = "docs/a.md is unreadable"
+        raise OSError(msg)
+
+    runtime = _warning_runtime(StringIO(), tmp_path, load_lattice)
+
+    with pytest.raises(OSError, match=r"docs/a\.md is unreadable"):
+        runtime.lattice(project)
+
+
+def _render_through(
+    stderr: StringIO, tmp_path: Path, message: str, *, no_color: bool = True, **console_kwargs
+) -> None:
+    """Raise one warning inside a wrapped load and let the runtime render it."""
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        warnings.warn(message, stacklevel=1)
+        return lattice
+
+    runtime = CliRuntime(
+        stdout=Console(file=StringIO()),
+        stderr=Console(file=stderr, stderr=True, no_color=no_color, **console_kwargs),
+        cwd=tmp_path,
+        load_config=lambda _config, _cwd: ProjectConfig(Config(), tmp_path, (tmp_path,)),
+        load_lattice=load_lattice,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        runtime.lattice(project)
+
+
+def test_warning_renderer_keeps_a_colon_delimited_word_in_a_path_literal(tmp_path: Path):
+    # `rich.markup.escape` only escapes brackets, so without emoji=False Rich rewrites the
+    # `:x:` in this legal POSIX filename as an emoji. It does that regardless of color.
+    stderr = StringIO()
+    _render_through(stderr, tmp_path, "skipping docs/a:x:b.md: no 'id'", color_system=None)
+
+    assert stderr.getvalue() == "warning: skipping docs/a:x:b.md: no 'id'\n"
+
+
+def test_warning_renderer_does_not_wrap_a_long_message_on_a_narrow_console(tmp_path: Path):
+    # soft_wrap=True is load-bearing: a path split across lines is not greppable.
+    stderr = StringIO()
+    message = "skipping docs/a/very/long/path/to/some/document/named/at/length.md: no 'id'"
+    _render_through(stderr, tmp_path, message, color_system=None, width=40)
+
+    assert stderr.getvalue() == f"warning: {message}\n"
+
+
+def test_warning_renderer_emits_no_trailing_space_for_an_empty_message(tmp_path: Path):
+    stderr = StringIO()
+    _render_through(stderr, tmp_path, "   ", color_system=None)
+
+    assert stderr.getvalue() == "warning:\n"
+
+
+def test_warning_renderer_leaves_no_ansi_in_an_escaped_markup_message(tmp_path: Path):
+    # The escaping test above runs without color, where it can only catch tag stripping.
+    # On a styled console the risk is the opposite one: injected ANSI.
+    stderr = StringIO()
+    _render_through(
+        stderr,
+        tmp_path,
+        "skipping [bold]docs/a.md[/bold]: no 'id'",
+        no_color=False,
+        color_system="standard",
+        force_terminal=True,
+    )
+
+    rendered = stderr.getvalue()
+    assert "\x1b[1m" not in rendered  # the message never becomes markup
+    assert "\x1b[33m" in rendered  # but the prefix is still styled
+    assert "[bold]docs/a.md[/bold]" in rendered
+
+
+def test_warning_renderer_does_not_highlight_a_path_inside_the_message(tmp_path: Path):
+    # highlight=False matches report_render.py and linear_render.py: Rich's ReprHighlighter
+    # would otherwise recolor the path and the quoted 'id' inside user-controlled text.
+    stderr = StringIO()
+    _render_through(
+        stderr,
+        tmp_path,
+        "skipping docs/a.md: no 'id'",
+        no_color=False,
+        color_system="standard",
+        force_terminal=True,
+    )
+
+    rendered = stderr.getvalue()
+    assert rendered.endswith("skipping docs/a.md: no 'id'\n")  # unstyled after the prefix
+
+
+def test_wrapped_load_warnings_bypass_an_outer_record_capture(tmp_path: Path):
+    # Documented in AD-29 rather than worked around: replacing `showwarning` makes CPython
+    # dispatch straight to the substitute, so a recording `catch_warnings` never sees it.
+    # Pinned here so a future CLI-level `pytest.warns` cannot pass vacuously by accident.
+    stderr = StringIO()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _render_through(stderr, tmp_path, "skipping docs/a.md: no 'id'", color_system=None)
+
+    assert caught == []
+    assert stderr.getvalue() == "warning: skipping docs/a.md: no 'id'\n"
+
+
+def test_project_restores_the_previous_showwarning_after_a_config_error(tmp_path: Path):
+    # `project()` and `lattice()` share one context manager; pin both exception paths so a
+    # refactor that inlines it into one of them cannot leave the global hook dangling.
+    def load_config(config: Path | None, cwd: Path) -> ProjectConfig:
+        del config, cwd
+        msg = "config blew up"
+        raise RuntimeError(msg)
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        raise AssertionError("the config read must not reach the lattice loader")
+
+    runtime = CliRuntime(
+        stdout=Console(file=StringIO()),
+        stderr=Console(file=StringIO(), stderr=True, no_color=True, color_system=None),
+        cwd=tmp_path,
+        load_config=load_config,
+        load_lattice=load_lattice,
+    )
+
+    with warnings.catch_warnings():
+        sentinel = warnings.showwarning
+        with pytest.raises(RuntimeError, match="config blew up"):
+            runtime.project(None)
+        assert warnings.showwarning is sentinel

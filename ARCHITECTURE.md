@@ -657,37 +657,50 @@ Every load path (cache-free, cache-miss, and cache-hit) reports through one func
 `orchestrate.py` at the default `stacklevel`, because Python filters repeats by a warning's
 raising location, so a second call site would change when the warning is shown.
 Raising it through `warnings` rather than calling the per-invocation `CliRuntime.stderr` that
-AD-9 makes the owner of CLI diagnostics is deliberate, and it is the one place an engine
-diagnostic is emitted outside that boundary. The reason is that a skip is the only diagnostic
-here a user may legitimately want to suppress on an otherwise healthy corpus, and `warnings` is
-the standard, already-documented suppression mechanism; `cli/errors.py` has no equivalent.
+AD-9 makes the owner of CLI diagnostics is deliberate, and this warning family, raised from
+`orchestrate.py`, `discovery.py`, and `loader.py`, is the only engine diagnostic emitted outside
+that boundary. The reason is that a skip is the only diagnostic here a user may legitimately want
+to suppress on an otherwise healthy corpus, and `warnings` is the standard, already-documented
+suppression mechanism; `cli/errors.py` has no equivalent.
 Presentation is nevertheless AD-9's, because the two are separable: Python decides whether to
 ignore, display, or raise a warning before it reaches the replaceable `showwarning` stage, so
-`CliRuntime.project()` and `CliRuntime.lattice()` substitute only that stage for the duration of
-the load each wraps. Both are wrapped rather than the lattice load alone, because a dependency
-raises the same warning family from either one: a reused YAML anchor warns from `config.py` and
-from `frontmatter_parser.py` through the same `SafeYamlLoader`, so leaving the config read out
-would print one of the two in Python's default format and the other in this one. The substitute
-renders `warning: <message>` through the invocation's stderr `Console`, discarding the category,
-filename, line number, and source line Python's default formatter would have shown, stripping a
-message that opens with a newline so the prefix never lands on a line of its own, and restoring
-the previous callable in a `finally` on both the normal and the exception path. Filtering,
-category matching, and repeat suppression stay engine-owned and unreimplemented, and a library
-consumer calling `load_lattice()` directly is untouched. Routing the three `warnings.warn` sites
-through the stderr renderer instead would have forfeited that filtering, which README documents.
-Three costs survive. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
+`CliRuntime.rendered_warnings()` substitutes only that stage, for the duration of a phase that
+can reach a parser. Every such phase is wrapped, not the lattice load alone, because a dependency
+raises the same warning family from more than one: a reused YAML anchor warns from `config.py` and
+from `frontmatter_parser.py` through the same `SafeYamlLoader` class, and again from the fresh
+reread `reconcile`'s rewrite phase performs after that load has returned. Leaving any of them out
+would print one of a run's warnings in Python's default format and the next in this one. The
+substitute renders `warning: <message>` through the invocation's stderr `Console`, discarding the
+category, filename, line number, and source line Python's default formatter would have shown,
+stripping a message that opens with a newline so the prefix never lands on a line of its own, and
+restoring the previous callable in a `finally` on both the normal and the exception path.
+Filtering, category matching, and repeat suppression stay engine-owned and unreimplemented, and a
+library consumer calling `load_lattice()` directly is untouched. Routing the three `warnings.warn`
+sites through the stderr renderer instead would have forfeited that filtering, which README
+documents.
+An advisory must not be able to end the command that raised it, so a write the stderr stream
+refuses is contained for the whole wrapped phase: the render is guarded, and a stream that refused
+one warning is not asked again. The guard deliberately stops at the phase boundary, because the
+work inside raises `OSError` for real read failures and those must keep propagating. Rich's own
+`Console.on_broken_pipe` is unusable here for the same reason: it points `sys.stdout` at
+`os.devnull` and raises `SystemExit(1)`, so a dead *stderr* discards the report a succeeding
+command is still computing, and it does that before any caller could catch. `CliConsole` overrides
+it to re-raise the `BrokenPipeError` instead, which also settles the identical exposure
+`cli/errors.py` carries: every CLI write now fails like an ordinary stream write, and the entry
+point's existing `OSError` handling governs it.
+Costs survive it. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
 `ProjectError` mapping entirely, printing a traceback and exiting 1, the code otherwise reserved
 for drift: it is raised before `showwarning` is consulted, so no hook can reach it, and that is
-why the exit-status guarantee below is stated for ordinary warning configuration.
-`warnings.showwarning` is process-global, so scoping the substitution to the synchronous loads one
+why the exit-status guarantee below is stated for ordinary warning configuration. And replacing
+`showwarning` takes the warning out of reach of anything that records rather than prints it:
+CPython dispatches to the substitute instead of the recording branch, so a `catch_warnings(record=True)`
+around a wrapped phase collects nothing and an embedder's `logging.captureWarnings(True)` router is
+bypassed for its duration. Declining to substitute when another callable already owns the stage
+would fix that, but only by reading the private `warnings._showwarning_orig`, so the cost is
+accepted and pinned by a test instead.
+`warnings.showwarning` is process-global, so scoping the substitution to the synchronous phases one
 invocation performs narrows but cannot eliminate the window in which another thread's warning
-renders through this invocation's stderr. And a warning raised on a broken stderr is no longer
-survivable: CPython's `showwarning` ends in `except OSError: pass`, while Rich's
-`Console.on_broken_pipe` points `sys.stdout` at `os.devnull` and raises `SystemExit(1)`. That
-exposure is not new to the CLI, since `cli/errors.py` writes through the same class, but it is new
-to this path, and it is deliberately not patched at this one site: by the time a guard here could
-catch, the process's stdout has already been redirected. It is a CLI-wide decision, tracked
-separately.
+renders through this invocation's stderr.
 
 **Consequences:** A typo'd `id` is a tool error naming the file, and unrecognized frontmatter is a
 named skip rather than a silent one, at the cost of a new warning for corpora carrying non-lattice

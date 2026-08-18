@@ -20,9 +20,12 @@ def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:
         runtime: Active invocation state.
         exc: Typed project error to report.
     """
+    # emoji=False for the same reason the warning renderer carries it: these details embed
+    # discovered paths verbatim, and a legal `:name:` in one is not an emoji request.
     runtime.stderr.print(
         f"[red]error[/red]: {escape(exception_details(exc))} ({exc.code})",
         soft_wrap=True,
+        emoji=False,
     )
 
 
@@ -53,4 +56,6 @@ def print_internal_error(runtime: CliRuntime, exc: Exception) -> None:
         runtime: Fresh invocation state bound to stderr.
         exc: Unexpected error to report.
     """
-    runtime.stderr.print(f"[red]internal error[/red]: {type(exc).__name__}: {escape(str(exc))}")
+    runtime.stderr.print(
+        f"[red]internal error[/red]: {type(exc).__name__}: {escape(str(exc))}", emoji=False
+    )
