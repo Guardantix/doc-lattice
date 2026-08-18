@@ -2159,6 +2159,27 @@ def _v2_payload() -> dict:
             lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00"),
             id="created-at-naive",
         ),
+        # A bare number is the one provenance value a wrong JSON type turns into a
+        # plausible-looking timestamp instead of an error: datetime validation reads it as a
+        # Unix timestamp, so 0 would otherwise recover as 1970-01-01.
+        pytest.param(lambda p: p["provenance"].update(created_at=0), id="created-at-zero"),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at=1755432000),
+            id="created-at-epoch-seconds",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at=1755432000.5),
+            id="created-at-epoch-float",
+        ),
+        pytest.param(lambda p: p["provenance"].update(created_at=True), id="created-at-boolean"),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00+05:00"),
+            id="created-at-east-of-utc",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00-08:00"),
+            id="created-at-west-of-utc",
+        ),
         pytest.param(lambda p: p["provenance"].update(tool_version=""), id="tool-version-empty"),
         pytest.param(lambda p: p["provenance"].update(tool_version=4), id="tool-version-not-text"),
         pytest.param(
@@ -2304,3 +2325,41 @@ def test_v1_fixtures_stay_byte_pinned(state: str):
             }
         ],
     }
+
+
+def test_created_at_accepts_the_forms_the_engine_actually_produces():
+    """The tightened validators must not reject the two shapes the engine round-trips."""
+    direct = JournalProvenance(
+        created_at=FIXED_CREATED_AT,
+        tool_version="9.9.9",
+        selector=JournalSelector(mode="all", downstream_id=None, ref=None),
+    )
+
+    payload = _v2_payload()
+    payload["provenance"] = json.loads(direct.model_dump_json())
+    loaded = reconcile_transaction._parse_journal(json.dumps(payload))
+
+    assert payload["provenance"]["created_at"].endswith("Z")
+    assert loaded.provenance == direct
+
+
+def test_created_at_rejection_messages_name_the_actual_problem():
+    with pytest.raises(ValidationError) as numeric:
+        JournalProvenance.model_validate(
+            {
+                "created_at": 0,
+                "tool_version": "9.9.9",
+                "selector": {"mode": "all", "downstream_id": None, "ref": None},
+            }
+        )
+    with pytest.raises(ValidationError) as offset:
+        JournalProvenance.model_validate(
+            {
+                "created_at": "2026-08-17T12:00:00+05:00",
+                "tool_version": "9.9.9",
+                "selector": {"mode": "all", "downstream_id": None, "ref": None},
+            }
+        )
+
+    assert "must be an ISO 8601 timestamp string" in str(numeric.value)
+    assert "must be expressed in UTC" in str(offset.value)

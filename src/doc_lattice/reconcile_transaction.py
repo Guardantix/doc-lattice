@@ -6,11 +6,21 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Literal, NoReturn, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from . import __version__
 from .constants import (
@@ -72,6 +82,58 @@ class JournalEntry(BaseModel):
     after_sha256: Sha256Digest
 
 
+def _reject_numeric_timestamp(value: object) -> object:
+    """Refuse a JSON number where the journal's wire format spells a timestamp string.
+
+    Datetime validation reads a bare number as a Unix timestamp, so ``"created_at": 0`` would
+    otherwise be accepted as 1970-01-01 rather than refused. That is the one provenance field
+    a wrong JSON type can turn into a plausible-looking value instead of a validation error.
+
+    Args:
+        value: The raw ``created_at`` input, before datetime validation.
+
+    Returns:
+        The value unchanged when it is not a number, including the ``datetime`` this module
+        passes when it constructs provenance directly.
+
+    Raises:
+        ValueError: If the value is a number.
+    """
+    if isinstance(value, int | float):
+        message = f"created_at must be an ISO 8601 timestamp string, got the number {value!r}"
+        raise ValueError(message)
+    return value
+
+
+def _require_utc_offset(value: datetime) -> datetime:
+    """Refuse an aware timestamp that is not expressed in UTC.
+
+    Args:
+        value: The validated timezone-aware timestamp.
+
+    Returns:
+        The value unchanged when its offset is zero.
+
+    Raises:
+        ValueError: If the timestamp carries a nonzero offset. The engine only ever writes UTC,
+            so an offset journal did not come from this tool and is not the documented format.
+    """
+    offset = value.utcoffset()
+    if offset != timedelta(0):
+        message = f"created_at must be expressed in UTC, got offset {offset}"
+        raise ValueError(message)
+    return value
+
+
+# The journal's timestamp type: aware, UTC, and spelled as a string on the wire. AwareDatetime
+# alone rules out only a naive value; these two validators close the coercions it still permits.
+UtcTimestamp = Annotated[
+    AwareDatetime,
+    BeforeValidator(_reject_numeric_timestamp),
+    AfterValidator(_require_utc_offset),
+]
+
+
 class JournalSelector(BaseModel):
     """The reconcile selection a transaction was planned from.
 
@@ -115,7 +177,7 @@ class JournalProvenance(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    created_at: AwareDatetime
+    created_at: UtcTimestamp
     tool_version: str = Field(min_length=1)
     selector: JournalSelector
 
