@@ -6,6 +6,7 @@ import pytest
 from ruamel.yaml import YAML
 from ruamel.yaml.parser import Parser
 
+from doc_lattice import frontmatter_parser as frontmatter_parser_module
 from doc_lattice import reconcile as reconcile_module
 from doc_lattice.check import check_lattice
 from doc_lattice.config import load_config
@@ -786,6 +787,21 @@ def test_reconcile_reads_through_the_pure_python_parser():
     # marks and exposes no scanner, so every offset this module measures would move: the
     # implementation is part of the compatibility surface AD-26 records, not a detail.
     assert reconcile_module._yaml().Parser is Parser
+
+
+def test_the_strict_read_and_the_reconcile_reread_agree_about_a_declared_version():
+    # AD-33's headline consequence is that the engine's two reads of the same bytes agree.
+    # Before the pin they did not: the reread has always honored a declared `%YAML` version,
+    # while the strict read ignored it entirely wherever the accelerator was installed, so a
+    # block heading itself 1.1 resolved `id: on` to the string "on" on one read and to a boolean
+    # on the other. Each half is pinned on its own elsewhere; this asserts the agreement itself,
+    # which is the property the decision claims and neither half proves alone.
+    block = "%YAML 1.1\n--- !!map\nid: on\n"
+
+    strict = frontmatter_parser_module._LOADER.load(block)
+    reread = reconcile_module._yaml().load(block)
+
+    assert strict == reread == {"id": True}
 
 
 def test_apply_reconcile_relocates_block_seen_anchor_into_flow_collection_safely():

@@ -37,6 +37,17 @@ AUTHORITY_LADDER: tuple[Authority, ...] = ("exploratory", "derived", "binding")
 FrontmatterDisposition = Literal["tracked", "untracked", "id-less"]
 VALID_FRONTMATTER_DISPOSITIONS: frozenset[str] = frozenset(get_args(FrontmatterDisposition))
 
+# Which ruamel parser a YAML boundary reads through. The two members are not symmetric and the
+# domain exists to keep them from reading as though they were. "pure" is a pin: it fixes the
+# accepted document set regardless of what else an adopter has installed. "platform-default" is
+# the absence of a pin, taking whichever parser ruamel picks, which is the optional
+# `ruamel.yaml.clib` accelerator wherever it is present. Spelling the second one out is the point:
+# an unstated choice resolving to whatever the environment supplied is what made a tracked-document
+# verdict depend on the environment (AD-33), so a caller states which contract it wants rather than
+# passing a bare flag that cannot tell "I chose the default" from "I did not choose".
+YamlParser = Literal["pure", "platform-default"]
+VALID_YAML_PARSERS: frozenset[str] = frozenset(get_args(YamlParser))
+
 # The exact frontmatter keys that declare lattice intent. An id-less block carrying any of them is
 # a typo'd node rather than incidental metadata, so it is a tool error instead of a warning. This
 # is an intent set, not "every NodeMeta field except id": `title` and `layer` describe a document
@@ -91,7 +102,7 @@ C1_CONTROL_MAX: int = 0x9F
 # releases.
 # MAX_STAT_ROOTS bounds the per-root stat ledger. CACHE_FILE_NAME is the single JSON document under
 # the cache slot.
-CACHE_VERSION: int = 4
+CACHE_VERSION: int = 5
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 

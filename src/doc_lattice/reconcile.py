@@ -264,6 +264,11 @@ def _yaml() -> YAML:
     marks and exposes no scanner at all. Every offset this module measures comes off those
     marks, so the accelerator would change where each edit lands rather than only how fast it
     is found. AD-26 records the mark accounting as the compatibility surface.
+
+    This is the third site choosing a parser, and it constructs its own loader rather than
+    asking ``yaml_boundary.SafeYamlLoader`` for one, because the probe below assigns
+    ``YAML.version`` and clearing that field before every load is precisely what that class is
+    for. The choice it makes is ``constants.YamlParser``'s ``"pure"`` member.
     """
     return YAML(typ="safe", pure=True)
 
@@ -810,6 +815,12 @@ def _seen_scalar_source(new_seen: str, loader: YAML) -> str:
             if loader.load(new_seen) == new_seen:
                 return new_seen
         except YAML_LOAD_ERRORS:
+            # The only site in this project that swallows this family rather than translating
+            # it. This is a probe, not a load of the user's document: the question it asks is
+            # "does this scalar reload as itself when spliced in bare", and a failure to load at
+            # all answers no. Falling through to the quoted form is the conservative answer, and
+            # the reparse gate verifies the rewrite that results either way, so a swallowed
+            # exception here cannot reach a destination file as a silent corruption.
             pass
     return _double_quoted(new_seen)
 

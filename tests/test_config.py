@@ -26,6 +26,16 @@ def test_loads_and_resolves_roots(tmp_path: Path):
     assert project.resolved_roots == (tmp_path.resolve() / "design",)
 
 
+def test_config_reads_through_the_platform_default_parser():
+    # AD-33 pins the frontmatter boundary to the pure parser and deliberately leaves this one on
+    # ruamel's default, so a parser disagreement here costs a config author one clear error
+    # rather than changing which documents the lattice holds. That scope choice has a positive
+    # consequence the record states: a config defining one anchor name twice is still a
+    # ConfigError wherever the accelerator is installed. Pinning this boundary too would be a
+    # quiet reversal of the decision, so it is asserted rather than left to review.
+    assert config_module._LOADER.parser == "platform-default"
+
+
 def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
     original_loader = config_module._LOADER
     calls: list[str] = []
@@ -338,6 +348,11 @@ def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
     assert "cannot parse config" in str(exc.value)
+    # This is the one boundary whose acceptance still depends on the environment, so the message
+    # names the implementation that read the file. Naming the request instead would print the
+    # same word on both `yaml-compatibility` legs and tell the two apart no better than silence.
+    expected = "pure" if config_module._LOADER.running_pure else "ruamel.yaml.clib"
+    assert f"YAML parser: {expected}" in str(exc.value)
 
 
 def test_config_with_an_unconstructible_tagged_scalar_raises_config_error(tmp_path: Path):

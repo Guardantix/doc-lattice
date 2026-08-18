@@ -584,6 +584,33 @@ def test_check_id_less_stderr_is_byte_identical_uncached_cold_and_warm(tmp_path:
     assert (warm.stderr, warm.returncode) == (uncached.stderr, uncached.returncode)
 
 
+def test_check_reused_anchor_stderr_names_the_file_and_survives_a_warm_cache(tmp_path: Path):
+    # The user-facing half of routing the diagnostic. ruamel raises its own warning from inside
+    # its composer, which names `<unicode string>` rather than the document, and does not run at
+    # all on a warm cache. What a user sees must not depend on whether the load was accelerated.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    anchored = docs / "anchored.md"
+    anchored.write_text(
+        "---\nid: anchored\ntitle: &t Anchored\nlayer: &t design\n---\n# Anchored\n",
+        encoding="utf-8",
+    )
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
+
+    uncached = _check_in(tmp_path, env)
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: anchored\n", encoding="utf-8")
+    cold = _check_in(tmp_path, env)  # writes the cache
+    warm = _check_in(tmp_path, env)  # the node is served from it
+
+    assert uncached.returncode == 0  # a rebound alias is a warning, not a gate failure
+    assert f"reused anchor in {anchored}" in uncached.stderr
+    assert "defines an anchor name more than once" in uncached.stderr
+    # ruamel's own warning named no file and pointed into site-packages; it no longer escapes.
+    assert "ReusedAnchorWarning" not in uncached.stderr
+    assert (cold.stderr, cold.returncode) == (uncached.stderr, uncached.returncode)
+    assert (warm.stderr, warm.returncode) == (uncached.stderr, uncached.returncode)
+
+
 def test_check_exits_2_naming_the_file_when_an_id_less_block_declares_lattice_intent(
     tmp_path: Path,
 ):

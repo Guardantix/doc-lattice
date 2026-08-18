@@ -72,11 +72,13 @@ jobs:
         # it tracks whatever the range currently admits. The lock only ever installs the
         # ceiling, so without this leg a difference at the floor would ship unseen.
         ruamel: ['0.18.0', '0.19.*']
-        # Both answers to "is the optional accelerator installed", because the two parsers
-        # disagree about directive state and each one hides the other's regressions: with the
-        # C parser a `%YAML` directive never takes effect at all, so a boundary that leaks one
-        # across documents still passes, and without it the pure Python resolver caching that
-        # differs between the two ruamel ends is what the floor leg has to expose.
+        # Both answers to "is the optional accelerator installed". Since AD-33 these legs assert
+        # the same verdict rather than two, and running both is what proves it: the strict
+        # frontmatter load pins the pure parser, so a regression that let the environment pick
+        # the parser again would show up as the two legs disagreeing. `config.py` is still
+        # declared as taking ruamel's default, so it is the one boundary where the C parser
+        # actually runs here. The pure Python resolver caching that differs between the two
+        # ruamel ends is what the floor leg has to expose.
         clib: [true, false]
     env:
       # The `tests` job owns the coverage gate; this leg only asks whether the suite still
@@ -91,10 +93,11 @@ jobs:
       - run: uv sync --locked --group dev
       - run: uv pip install 'ruamel.yaml==${{ matrix.ruamel }}'
       # `ruamel.yaml.clib` is an optional accelerator no lock of this project installs, but any
-      # other package in a user's environment may. It silently replaces the safe loader's pure
-      # Python parser with a C one that reports different source marks and skips the resolver
-      # and directive state the workflow audit inspects, so the suite runs both with and
-      # without it to keep those boundaries independent of whether it is there.
+      # other package in a user's environment may. Where a loader does not state its parser it
+      # replaces the pure Python one with a C parser that reports different source marks and
+      # skips resolver and directive state entirely. `frontmatter_parser` and `reconcile` state
+      # theirs, so the suite runs both with and without it to prove their behavior does not move;
+      # `config.py` does not, so this is where its remaining environment dependence is exercised.
       - if: matrix.clib
         run: uv pip install ruamel.yaml.clib
       - run: uv run --no-sync pytest

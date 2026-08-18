@@ -4,13 +4,28 @@
 loader, and `reconcile` catches the same failure family without loading through one. Two
 things are genuinely shared: which exceptions a safe load can raise, and the directive state
 a reused loader has to clear before each document. Both live here so one module owns them.
+Parser implementation is not shared but is stated here, because this module discards and
+rebuilds the underlying loader whenever a `%YAML` directive touches it, so it is the only place
+that can keep a caller's choice applied across that rebuild.
 
-`reconcile` builds its own loader instead of using the one below, because AD-26 makes the pure
-Python parser part of its compatibility surface: it reads source marks, resolver state, and
-directive state that a plain safe loader gives up the moment the optional `ruamel.yaml.clib`
-accelerator is installed. Do not route it through `SafeYamlLoader`; that would silently drop
-`pure=True`. It still answers for this failure family, which is why the family lives here
-rather than inside one loader: `reconcile` catches the tuple directly.
+Parser choice is a required argument rather than a default, because leaving it to ruamel
+leaves it to the environment: a plain safe loader switches to the C parser the moment the
+optional `ruamel.yaml.clib` accelerator is installed, which any other package in a user's
+environment may pull in. The two parsers do not accept the same documents, so an unstated
+choice made whether a file counted as tracked depend on what else was installed alongside
+this engine (AD-33). Each caller now states which parser its own contract needs:
+`frontmatter_parser` asks for the pure Python one so a tracked-document verdict is the same
+in both environments, and `config` asks for the default one, whose semantics that pin
+deliberately leaves alone.
+
+`reconcile` still builds its own loaders rather than using the one below, and for a reason
+this argument does not address: it reads source marks, resolver state, and directive state off
+a loader bound to one document, so it needs a fresh instance per read rather than a shared one.
+The constraint is structural rather than a preference: its probe assigns `YAML.version` to test
+a directive, and clearing that field before every load is exactly what the class below exists to
+do. It asks for the pure parser too, for the mark accounting AD-26 records, and it catches
+`YAML_LOAD_ERRORS` from those loaders directly, which is why that family lives at module level
+here rather than on the loader class.
 
 What does not live here is policy. Each caller keeps its own error translation, because a
 malformed config and a malformed frontmatter block are different errors to the user, and
@@ -25,6 +40,9 @@ from typing import Any
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+from ruamel.yaml.parser import Parser as PureParser
+
+from .constants import YamlParser
 
 # Everything a safe load of user-authored YAML can raise. Beyond the YAMLError family the
 # scanner and parser raise, a constructor building a tagged scalar its type cannot accept
@@ -45,11 +63,56 @@ class SafeYamlLoader:
     otherwise steer the parse of the next. `load` discards the underlying loader whenever a
     directive touched it, which is what makes a reused instance behave like a fresh one for
     the values these boundaries consume.
+
+    The parser implementation is fixed for the life of the instance and reapplied to every
+    replacement `load` builds, so a document read after a directive runs on the same parser as
+    one read before it.
     """
 
-    def __init__(self) -> None:
-        """Build the underlying safe loader this instance reuses for every load."""
-        self._yaml = YAML(typ="safe")
+    __slots__ = ("_parser", "_yaml")
+
+    def __init__(self, *, parser: YamlParser) -> None:
+        """Build the underlying safe loader this instance reuses for every load.
+
+        Args:
+            parser: Which parser implementation this boundary's contract needs. "pure" requires
+                ruamel's pure Python parser, so the accepted document set does not depend on
+                whether the optional `ruamel.yaml.clib` accelerator is installed.
+                "platform-default" takes ruamel's own choice, which is that accelerator wherever
+                it is present. There is no default, because an unstated choice is what made
+                acceptance environment dependent in the first place. Note that
+                "platform-default" describes the request, not the outcome: without the
+                accelerator installed ruamel uses the pure parser anyway, and `YAML.pure` on the
+                loader below reports what was asked for rather than what is running. Read
+                `running_pure` for the implementation actually in hand.
+        """
+        self._parser = parser
+        self._yaml = self._build()
+
+    @property
+    def parser(self) -> YamlParser:
+        """Return the parser implementation this instance was built to require."""
+        return self._parser
+
+    @property
+    def running_pure(self) -> bool:
+        """Report whether the loader in hand is really ruamel's pure Python parser.
+
+        ``parser`` records what a boundary asked for, and "platform-default" reads the same in
+        both environments, so it cannot answer which implementation actually saw a document.
+        ruamel resolves that at construction and records it on the loader, so this reads the
+        answer off the instance rather than off the request. A diagnostic that exists to tell
+        two environments apart has to report this one.
+
+        Returns:
+            True when the underlying loader parses in pure Python, False when the optional
+            `ruamel.yaml.clib` accelerator supplied its parser instead.
+        """
+        return self._yaml.Parser is PureParser
+
+    def _build(self) -> YAML:
+        """Return a safe loader on this instance's chosen parser implementation."""
+        return YAML(typ="safe", pure=self._parser == "pure")
 
     def load(self, text: str) -> Any:
         """Load one YAML document with default semantics.
@@ -75,7 +138,8 @@ class SafeYamlLoader:
         # the loader instead is correct under both, and it costs a construction only for the
         # rare document that actually carried a directive. `version` stays None under the
         # optional `ruamel.yaml.clib` parser, which skips directive state entirely (AD-26),
-        # so this never fires there and nothing leaks either.
+        # so this never fires on a `platform-default` loader in an environment that has the
+        # accelerator, and nothing leaks there either.
         if self._yaml.version is not None:
-            self._yaml = YAML(typ="safe")
+            self._yaml = self._build()
         return self._yaml.load(text)

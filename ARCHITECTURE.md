@@ -535,7 +535,10 @@ scalar token that follows it, is what bounds an edit that has to overwrite or re
 read builds its own loader, since a shared instance carries document state (`YAML.version`, and
 the reader and scanner bound to one document) whose reset behavior is itself version dependent.
 The boundary loaders behind `frontmatter_parser.py` and `config.py` may keep shared module-level
-instances despite that, because they consume only loaded values and never a source mark. Those
+instances despite that, because they consume only loaded values and never a source mark. They
+still state a parser: `SafeYamlLoader` takes the implementation as a required argument,
+`frontmatter_parser.py` asks for the pure one under AD-33 so its accepted document set is fixed,
+and `config.py` asks for the platform default one. Those
 mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the reset, and its
 `YAML_LOAD_ERRORS` names the failure family both of those modules and `reconcile.py` catch.
 Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
@@ -665,15 +668,17 @@ suppression mechanism; `cli/errors.py` has no equivalent.
 Presentation is nevertheless AD-9's, because the two are separable: Python decides whether to
 ignore, display, or raise a warning before it reaches the replaceable `showwarning` stage, so
 `CliRuntime.rendered_warnings()` substitutes only that stage, for the duration of a phase that
-can reach a parser. Every such phase is wrapped, not the lattice load alone, because a dependency
-raises the same warning family from more than one: a reused YAML anchor warns from `config.py` and
-from `frontmatter_parser.py` through the same `SafeYamlLoader` class, and again from the fresh
-reread `reconcile`'s rewrite phase performs after that load has returned. Leaving any of them out
-would print one of a run's warnings in Python's default format and the next in this one. The
-substitute renders `warning: <message>` through the invocation's stderr `Console`, discarding the
-category, filename, line number, and source line Python's default formatter would have shown,
-stripping a message that opens with a newline so the prefix never lands on a line of its own, and
-restoring the previous callable in a `finally` on both the normal and the exception path.
+can reach a parser. Every such phase is wrapped, not the lattice load alone, because more than one
+of them can raise about the same document: a reused YAML anchor is reported for a tracked document
+by `orchestrate.py`, which reports it from the shared site after `frontmatter_parser.py` has
+intercepted ruamel's own warning per AD-33, while `config.py` and the fresh reread `reconcile`'s
+rewrite phase performs after that load has returned both still let ruamel raise it directly.
+Leaving any of them out would print one of a run's warnings in Python's default format and the next
+in this one. The substitute renders `warning: <message>` through the invocation's stderr `Console`,
+discarding the category, filename, line number, and source line Python's default formatter would
+have shown, stripping a message that opens with a newline so the prefix never lands on a line of
+its own, and restoring the previous callable in a `finally` on both the normal and the exception
+path.
 Filtering, category matching, and repeat suppression stay engine-owned and unreimplemented, and a
 library consumer calling `load_lattice()` directly is untouched. Routing the three `warnings.warn`
 sites through the stderr renderer instead would have forfeited that filtering, which README
@@ -875,13 +880,16 @@ Four behaviors of the loaded shape are recorded with the matrix rather than insi
 A merge is deliberately not followed inside an ordered map, because the loader builds one from its
 items rather than through mapping construction. Alias detachment may expand an alias site into a
 local mapping, or into a local one-pair item for an ordered map, rather than editing the shared
-node behind it. An anchor name may be defined more than once under the pure Python parser, which
-warns about it: a later definition rebinds the name, so each alias reads the nearest definition
-above it and a relocated value lands only on the alias sites still bound to the anchor it
-displaces. That acceptance is parser-conditional: with the optional `ruamel.yaml.clib` accelerator
-installed the strict tracked-document load refuses a reused name outright as a duplicate anchor,
-while the reread inside `apply_reconcile`, pure by AD-26, still handles it, so the spelling is
-reread-only there.
+node behind it. An anchor name may be defined more than once, and the pure Python
+parser warns about it: a later definition rebinds the name, so each alias reads the nearest
+definition above it and a relocated value lands only on the alias sites still bound to the anchor
+it displaces. That acceptance is unconditional, in both columns. It was not always: a plain safe
+loader switches to the optional `ruamel.yaml.clib` accelerator wherever it is installed, and that
+composer refuses a reused name outright as a duplicate anchor, so the strict tracked-document load
+accepted the spelling in one environment and refused it in another while the reread inside
+`apply_reconcile`, pure by AD-26, handled it in both. The strict load now asks for the pure parser
+explicitly, which settles the spelling as supported rather than parser-conditional; AD-33 records
+that decision and the alternative it was chosen over.
 
 **Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
@@ -890,7 +898,11 @@ A leading run of UTF-8 byte-order marks may precede the opening fence; the whole
 for fence detection and reattached verbatim. A `%YAML` directive is supported, but only alongside
 a document-start line that does not strip to `---`, because `frontmatter_parser.py` closes the
 block at the first line that does. The directive's own document start therefore has to be spelled
-otherwise, and `--- !!map` is the form the suite pins.
+otherwise, and `--- !!map` is the form the suite pins. A declared version governs scalar resolution
+on both reads, not merely the strict one: under a declared 1.1 an unquoted `on`, `off`, `yes`, or
+`no` constructs a boolean rather than a string, so a root `id` spelled that way fails layer 1
+validation and the `Entry` `Scalar spelling` row's "constructed value is a string or null" is read
+under 1.1 too. This was parser-conditional until AD-33, which records why it no longer is.
 
 **Layer 3: preservation envelope.** For a document inside layer 2, a rewrite puts back exactly as
 they were read: a leading run of byte-order marks, both `---` fences including the space around
@@ -1028,3 +1040,93 @@ someone converts it, and pinning it forward is what fails, because its offline w
 MANAGED_CI.md owns and CHANGELOG.md announces. Removing the commands is a breaking change to a
 published CLI surface and therefore a major version.
 AD-16's environment boundary survives this record intact; only its generator side retired.
+
+### AD-33: The strict frontmatter load pins the pure Python parser
+
+**Date:** 2026-08-18
+**Status:** Accepted
+**Context:** Whether a document counted as tracked depended on which packages a user happened to
+have installed beside this engine. `frontmatter_parser.py` performs the strict tracked-document
+load through `yaml_boundary.SafeYamlLoader`, which asked ruamel for a plain safe loader and so
+took whichever parser ruamel picked. ruamel picks the C one whenever the optional
+`ruamel.yaml.clib` accelerator is present, and no lock of this project installs it but any other
+package in an environment may pull it in. The two parsers do not accept the same documents. A
+frontmatter block defining one anchor name twice is accepted by the pure parser, which warns and
+rebinds the name, and refused outright by the C composer as a duplicate anchor. So the same file
+was a tracked node on one machine and an unreadable document on another, with nothing in the
+project's own declared dependency range having changed, and `check` reached different verdicts for
+it. AD-31 recorded the split as observed rather than deciding it, and the suite carried a runtime
+capability probe that routed the shape between its strict and reread-only pools so both legs of the
+`yaml-compatibility` matrix would pass over the disagreement rather than fail on it.
+**Decision:** `SafeYamlLoader` takes the parser implementation as a required keyword argument with
+no default, and applies it at every construction, including the replacement `load` builds when a
+`%YAML` directive forces the reset. `frontmatter_parser.py` asks for the pure Python parser, so
+the set of documents that count as tracked is fixed by this project rather than by an adopter's
+environment. `config.py` asks for the default, deliberately: config has no declared spelling subset
+and no rewriter reading it back, so a parser disagreement there costs a config author one clear
+error rather than changing which documents the lattice holds, and this record leaves its semantics
+alone rather than widening the change to a second boundary that did not need it. That is a scope
+choice, not a claim that config is parser independent: a `.doc-lattice.yml` defining one anchor
+name twice is still a `ConfigError` wherever the accelerator is installed and loads cleanly
+wherever it is not.
+
+Reused anchor names are therefore supported, not refused. YAML 1.2.2 permits a non-unique anchor
+name and resolves an alias to the most recent preceding definition, `reconcile.py` already
+implements and tests that rule on the reread path, and AD-31 layer 2 already listed the spelling.
+Refusing it in both parsers was the alternative, and it was rejected because it would settle an
+environment split by shrinking a valid, already-modeled input surface down to what the weaker
+parser can read. Accepting the split and documenting it was not a candidate: it is the state this
+record replaces.
+
+Warning behavior is part of the decision rather than a side effect of it. The pure parser raises
+`ReusedAnchorWarning` on the spelling it accepts, and the engine stays loud about the rebinding
+rather than swallowing it, at a boundary whose whole job is to report what a document says. What
+changes is who reports it. Preserving ruamel's own warning verbatim was the first form of this
+decision, on the grounds that it kept the strict load's observable behavior identical to an
+accelerator-free environment's. That form is rejected, because the warning is a diagnostic a load
+emits and AD-29 already governs those: it has to be derivable from an `Entry` and rendered at the
+shared site, or the warm path will not reproduce it. Ruamel's warning is neither. It is raised
+from inside the composer, so it names `<unicode string>` and a block-relative line rather than the
+document, and a `CacheHit` returns before `parse_meta` runs at all, so a corpus loaded from a warm
+cache went silent about a rebound alias while still building the edge it rebound. Under the
+accelerator that is a loss of reach as well as of fidelity: a reused anchor used to refuse the load
+on every run until it was fixed.
+
+So `parse_meta` captures the warning, returns the fact on `ParsedMeta`, and `orchestrate.py`
+reports it from a single site against the path the run discovered, exactly as it reports an id-less
+skip. `Entry` carries it as a required field and `CACHE_VERSION` rises with it. Every other warning
+raised by a load that returns is re-emitted at its original location, so only this one category is
+intercepted. Three costs are real and accepted. The strict load's stderr is no longer
+byte-identical to what an accelerator-free environment printed before this record: the text names
+the file now, which is the point. It no longer matches the reread inside `apply_reconcile`, which
+still lets ruamel's warning escape, because that path builds its own loaders per AD-26 and has
+neither a discovered path to name nor a cache entry to write. And the reported category changes
+from `ReusedAnchorWarning` to the `UserWarning` every diagnostic this engine raises carries, so an
+embedder that escalates `UserWarning` to an error now fails the load on a document the pure parser
+merely warned about, and a filter naming ruamel's category no longer reaches this diagnostic.
+Carrying ruamel's category here is rejected for the same reason its warning is: nothing ruamel
+raised survives a warm cache hit, so a category borrowed from it would claim a provenance the
+replay does not have. Targetability is by message prefix under AD-29, which is why the wording of
+each site is chosen to be distinct, and the id-less skip and the symlink escape are already plain
+`UserWarning`; giving this one site a category the other two lack would fragment that surface
+rather than stabilise it.
+**Consequences:** Which files count as tracked is user-visible, so this is a breaking change and
+lands in a major. An adopter running with the accelerator installed sees a document that used to
+fail the load become a tracked node, which can add edges to a report and change a `check` exit
+code; an adopter without it sees nothing change at all. The reused anchor name is not the only
+spelling that moves there. A `%YAML` directive, which layer 2a declares supported alongside a
+document start that does not strip to `---`, took no effect at all under the accelerator, so a
+block heading itself `%YAML 1.1` resolved under 1.2 on the strict read while the reread inside
+`apply_reconcile` resolved it under 1.1. Pinning the parser settles that disagreement in the
+reread's favor, and settling it is user-visible in both directions: `id: on` under a declared 1.1
+now resolves to a boolean and fails validation where it used to be the string `on` and made a
+tracked node. Every such document was already being reread under 1.1, so the alternative was
+leaving the two reads disagreeing about the same bytes. The strict load gives up the accelerator's
+speed on frontmatter, which is a per-document cost on a parse of a block that is small by
+construction. The `yaml-compatibility` matrix keeps both `clib` legs, and they now assert the same
+verdict rather than two: the capability probe and the conditional corpus routing in
+`tests/test_reconcile_fuzz.py` are gone, and the reused-anchor shape is a strict-column shape on
+every leg. A future divergence between the two parsers reaches only `config.py`, which is the one
+boundary still declared as taking ruamel's default. Routing the reused-anchor warning adds a second
+cached diagnostic beside AD-29's disposition, so `CACHE_VERSION` rises to 5 and caches written
+before it are discarded and rebuilt rather than read as files that reused no anchor.

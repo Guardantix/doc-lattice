@@ -8,9 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Three things to act on, plus one format change below that needs no action. The first is the printed
-workflow, and it applies to every ordinary and recipe install. The workflow `doc-lattice init`
-prints now triggers on a resolved default branch rather than a hard-wired
+Three things to act on, plus two changes below that need no action in a default environment. The
+first is the printed workflow, and it applies to every ordinary and recipe install. The workflow
+`doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
 and replace the checked-in file, exactly as the ordinary upgrade path in README.md already
 describes. Check the branch the run reports on stderr against the branch you actually gate on
@@ -42,6 +42,27 @@ transaction after the upgrade writes the new format. What you cannot do is downg
 journal outstanding: an earlier release accepts only version 1 and will refuse a version 2 journal
 as invalid, so run `doc-lattice reconcile --recover` to completion before rolling back. See the
 transaction-artifacts section of `RECONCILE.md` for the field list.
+
+The fifth is the one to check only if you run doc-lattice in an environment that has the optional
+`ruamel.yaml.clib` accelerator installed, which no lock of this project produces but another
+package may pull in. A frontmatter block defining one anchor name twice used to fail the load
+there, and now loads: the document becomes a tracked node, so it can contribute edges to a report
+and change a `check` exit code. If you were relying on that failure to keep a document out of the
+lattice, exclude it with `ignore_globs` or drop its `id` instead. A frontmatter block that declares
+its own `%YAML` version moves too, and in the other direction: the accelerator ignored the
+directive outright, so such a block was read under YAML 1.2 no matter what it declared, and it is
+now read under the version it declares, exactly as `reconcile` has always reread it. Under a
+declared `1.1` an unquoted `on`, `off`, `yes`, or `no` is a boolean rather than a string, so
+`id: on` becomes an invalid-frontmatter error instead of a node named `on`; quote the scalar to
+keep the old value. Only one spelling of that block is supported, so check yours before assuming it
+is affected: the directive has to sit above a document-start line that does not strip to `---`,
+such as `--- !!map`, because a plain `---` closes the frontmatter block instead. An environment
+without the accelerator, which is what every lock of this project produces, sees no change at all
+in what loads.
+
+Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
+warm run can replay a new diagnostic, and entries written before it are discarded rather than read
+as documents that reused no anchor. No action is needed: the next run rebuilds the file.
 
 ### Added
 
@@ -153,6 +174,34 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
   documented migration surface, so it is typed like the project's other shared string domains,
   and the test suite derives its expectations from the class tree instead of a hand-maintained
   list that had already fallen three types behind. No code value changes.
+- Whether a document counts as tracked no longer depends on whether the optional
+  `ruamel.yaml.clib` accelerator is installed. The strict tracked-document load asked ruamel for a
+  plain safe loader, which silently uses the C parser wherever that accelerator is present. No lock
+  of this project installs it, but any other package in an environment may pull it in, and the two
+  parsers do not accept the same documents: a frontmatter block defining one anchor name twice is
+  accepted by the pure Python parser, which warns and rebinds the name, and refused outright by the
+  C composer as a duplicate anchor. The same file was therefore a tracked node on one machine and
+  an unreadable document on another, and `check` reached different verdicts for it with nothing in
+  this project having changed. The load now asks for the pure Python parser explicitly, at every
+  construction including the one a `%YAML` directive forces, so the set of documents that count as
+  tracked is fixed here rather than by an adopter's environment. Reused anchor names are supported
+  rather than refused, which is what YAML 1.2.2 specifies and what the reconcile rewriter already
+  implemented. In an accelerator environment a declared `%YAML` version now takes effect on the
+  strict read as well, since the C parser ignored the directive entirely; that is the same
+  resolution `reconcile` has always reread such a block under, and it is unchanged without the
+  accelerator, where the directive already took effect. Config parsing is deliberately unchanged
+  and still takes ruamel's default. See
+  [AD-33](ARCHITECTURE.md#ad-33-the-strict-frontmatter-load-pins-the-pure-python-parser).
+
+- A frontmatter block that defines one anchor name twice now says so naming the file, on every
+  run. The pure parser raises a `ReusedAnchorWarning` from inside ruamel, which identifies the
+  document only as `<unicode string>` and never fires at all when the file is served from a warm
+  load cache, so a corpus loaded from cache went quiet about a rebound alias while still building
+  the edge it rebound. The warning is now captured and re-reported as
+  `reused anchor in <path>: ...` from the same single site that reports an id-less skip, and the
+  fact is stored in the load cache so a warm run repeats it. `CACHE_VERSION` rises to 5
+  accordingly. Any other warning raised while loading frontmatter is untouched.
+
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a
   crash could not tell when it was written, which doc-lattice wrote it, or what command produced

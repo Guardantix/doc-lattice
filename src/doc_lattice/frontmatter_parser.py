@@ -5,11 +5,13 @@ disposition it returns is what the caller reports from, so the cache-free, cold-
 warm-cache paths can all warn from a single site.
 """
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
+from ruamel.yaml.error import ReusedAnchorWarning
 
 from .constants import LATTICE_INTENT_KEYS
 from .error_types import FrontmatterError, UnreadableDocError
@@ -19,7 +21,19 @@ from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
-_LOADER = SafeYamlLoader()
+# Pinned to the pure Python parser. The two ruamel parsers do not accept the same documents, so
+# leaving the choice to ruamel made a document's tracked status depend on whether the optional
+# `ruamel.yaml.clib` accelerator happened to be installed alongside this engine. Two spellings
+# diverged: an anchor name defined twice was accepted and rebound without the accelerator and
+# refused as a duplicate with it, and a declared `%YAML` version steered resolution without it
+# and was ignored outright with it, so a block heading itself `%YAML 1.1` read `id: on` as the
+# string "on" on the strict path while the reread inside `apply_reconcile` read it as a boolean.
+# AD-33 settles both as supported, so the parser that supports them is the one this boundary
+# asks for, in every environment; AD-31 layer 2 carries the accepted set itself.
+# Constructed at import and deliberately outside the `YAML_LOAD_ERRORS` handler in `parse_meta`:
+# `TypeError` is a member of that family, so a lazily built loader missing its argument would be
+# reported as the user's frontmatter being unreadable.
+_LOADER = SafeYamlLoader(parser="pure")
 # The two node-free outcomes are immutable and carry no per-file state, so they are shared.
 _UNTRACKED = ParsedMeta(meta=None, disposition="untracked")
 _ID_LESS = ParsedMeta(meta=None, disposition="id-less")
@@ -135,7 +149,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     if raw_meta is None:
         return _UNTRACKED
     try:
-        data: Any = _LOADER.load(raw_meta)
+        data, reused_anchors = _load_recording_reused_anchors(raw_meta)
     except YAML_LOAD_ERRORS as exc:
         msg = f"cannot parse frontmatter in {source}: {exc}"
         raise UnreadableDocError(msg) from exc
@@ -147,7 +161,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     if "id" not in data:
         return _id_less(data, source)
     try:
-        return ParsedMeta(meta=NodeMeta.model_validate(data), disposition="tracked")
+        meta = NodeMeta.model_validate(data)
     except ValidationError as exc:
         msg = format_validation_error(
             exc,
@@ -156,6 +170,50 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
             root_label=_ROOT_LOCATION,
         )
         raise FrontmatterError(msg) from exc
+    return ParsedMeta(meta=meta, disposition="tracked", reused_anchors=reused_anchors)
+
+
+def _load_recording_reused_anchors(raw_meta: str) -> tuple[Any, bool]:
+    """Load a frontmatter block, recording whether it defines an anchor name more than once.
+
+    The pure parser accepts a reused anchor name and raises ``ReusedAnchorWarning`` about it.
+    That warning is captured here rather than allowed to escape, because it is raised from
+    inside ruamel: it names no document, and the load it comes from does not run at all on a
+    warm cache. AD-29 requires a diagnostic a load emits to be derivable from a cache entry and
+    rendered at one shared site, so the fact is returned as data and ``orchestrate`` reports it.
+    Every other captured warning raised by a load that returns is re-emitted at its original
+    location, so nothing but this one category is intercepted. A load that raises takes any
+    warning it had already emitted down with it, since the caller translates the failure into an
+    error naming the document and re-emitting from the unwinding path could replace that error
+    with an escalated warning.
+
+    ``catch_warnings`` mutates process-global filter state and is not thread-safe. This engine
+    is single-threaded, and a warning escalated to an error by the caller's filters still
+    escalates, on re-emission below rather than mid-parse. Entering and leaving it also
+    invalidates every ``__warningregistry__``, so another warning ruamel raises for many
+    documents is re-emitted once per document rather than deduplicated to the first. Handing
+    ``warn_explicit`` a registry does not restore that: the same invalidation clears it.
+
+    Args:
+        raw_meta: The YAML frontmatter text to load.
+
+    Returns:
+        The loaded value, still untyped, and whether an anchor name was defined twice.
+
+    Raises:
+        YAMLError: If the document cannot be scanned, parsed, or constructed. Callers catch
+            ``YAML_LOAD_ERRORS`` rather than this one type.
+    """
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        data: Any = _LOADER.load(raw_meta)
+    reused = False
+    for entry in captured:
+        if issubclass(entry.category, ReusedAnchorWarning):
+            reused = True
+            continue
+        warnings.warn_explicit(entry.message, entry.category, entry.filename, entry.lineno)
+    return data, reused
 
 
 def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
