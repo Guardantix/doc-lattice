@@ -44,7 +44,7 @@ class NodePayload(BaseModel):
 
 
 class Entry(BaseModel):
-    """One cached file: its content hash, per-root stat hints, node payload, and disposition.
+    """One cached file: its content hash, per-root stat hints, node payload, and diagnostics.
 
     ``disposition`` is required rather than defaulted. A default would let an entry written
     before the field existed decode as an ordinary skip, which is exactly the silent drop this
@@ -52,6 +52,10 @@ class Entry(BaseModel):
     instead of reinterpreted. It records why a file has no ``node`` so a warm run can replay the
     diagnostic a cold run emitted, and it stores the kind rather than rendered warning text
     because a cache slot is shared across checkouts and the message names the current path.
+
+    ``reused_anchors`` is required for the same reason and records the same kind of fact: the
+    parse noticed a frontmatter block defining one anchor name twice, and a warm run has to say
+    so too or the diagnostic would exist only on the run that first read the file.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -60,6 +64,7 @@ class Entry(BaseModel):
     stats: dict[str, StatRecord]
     node: NodePayload | None
     disposition: FrontmatterDisposition
+    reused_anchors: bool
 
 
 class CacheFile(BaseModel):
@@ -117,8 +122,8 @@ def make_entry(  # noqa: PLR0913
 
     Args:
         data: The raw file bytes hashed for ``file_sha256``.
-        parsed: The fresh parse outcome, whose disposition is recorded whether or not it
-            produced a node.
+        parsed: The fresh parse outcome, whose disposition and diagnostics are recorded whether
+            or not it produced a node.
         body: The verbatim body (unused when ``parsed`` carries no node).
         sections: The pre-derived sections (present when ``parsed`` carries a node).
         st: The stat captured alongside ``data``, stored as the fresh stat hint.
@@ -144,4 +149,5 @@ def make_entry(  # noqa: PLR0913
         stats={current_root: stat_record(st)},
         node=node,
         disposition=parsed.disposition,
+        reused_anchors=parsed.reused_anchors,
     )

@@ -29,11 +29,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from ruamel.yaml.error import ReusedAnchorWarning
 
+from doc_lattice import frontmatter_parser
 from doc_lattice.error_types import FrontmatterError, ProjectError, UnreadableDocError
 from doc_lattice.frontmatter_parser import FrontmatterParts, parse_meta, split_frontmatter_parts
 from doc_lattice.hashing import normalize_newlines
 from doc_lattice.reconcile import Rewrite, apply_reconcile, plan_rewrites
-from doc_lattice.yaml_boundary import SafeYamlLoader
 
 DOC = Path("doc.md")
 BOM = chr(0xFEFF)
@@ -69,7 +69,10 @@ FUZZ_SETTINGS = settings(max_examples=300, derandomize=True, deadline=None)
 # It is silenced per test rather than repo-wide, and the warning is itself asserted by
 # ``test_the_pure_reread_warns_about_a_reused_anchor_name``, so nothing is hidden by silencing it.
 # Both reads that see this shape now run on the pure parser, so every test marked here raises it
-# on every leg rather than only where the optional accelerator is absent.
+# on every leg rather than only where the optional accelerator is absent. What still raises it is
+# the reread: the strict boundary captures ruamel's warning and re-reports the fact through
+# ``orchestrate`` so a warm cache replays it (AD-29), while ``reconcile`` builds its own loaders
+# per AD-26 and lets the original escape.
 EXPECT_REUSED_ANCHOR = pytest.mark.filterwarnings("ignore::ruamel.yaml.error.ReusedAnchorWarning")
 
 # How many times each conditional claim actually fired this session, counted where it fires
@@ -1122,8 +1125,13 @@ def _meta_lines(text: str) -> list[str]:
 
 
 def _reload(text: str) -> object:
-    """Reload a document's frontmatter through the project's safe loader."""
-    return SafeYamlLoader(pure=True).load(_parts(text).raw_meta)
+    """Reload a document's frontmatter through the project's own strict boundary loader.
+
+    The corpus reuses `frontmatter_parser`'s loader rather than building an equivalent one, so
+    "strictly loadable" here means what the product means by it. Spelling the parser choice a
+    second time would let the two drift apart silently.
+    """
+    return frontmatter_parser._LOADER.load(_parts(text).raw_meta)
 
 
 def _rewrite_bytes(text: str, updates: dict[str, str]) -> list[Rewrite]:
@@ -3416,11 +3424,13 @@ def test_a_reused_anchor_keeps_an_alias_bound_to_its_later_definition() -> None:
 def test_the_pure_reread_warns_about_a_reused_anchor_name() -> None:
     """Assert the warning AD-31 declares this spelling carries is really raised.
 
-    Reused anchors are supported rather than refused, and the warning ruamel raises about one
-    is preserved rather than suppressed or translated: that is the declared policy, and it is
-    the same on both ``yaml-compatibility`` legs now that both reads run on the pure parser.
-    The tests above silence the warning to keep it out of their summaries, so pinning it here
-    is what keeps that silencing honest.
+    Reused anchors are supported rather than refused, and on this path the warning ruamel
+    raises about one reaches the caller unchanged, on both ``yaml-compatibility`` legs now that
+    both reads run on the pure parser. The strict boundary is the one that differs: it captures
+    the warning and re-reports the fact against the discovered path so a warm cache replays it
+    (AD-29, AD-33), which a reread with no file to name and no cache to consult cannot do. The
+    tests above silence the warning to keep it out of their summaries, so pinning it here is
+    what keeps that silencing honest.
     """
     document = _reused_anchor_pair()
 

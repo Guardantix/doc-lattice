@@ -47,18 +47,21 @@ def _sample_cache_file() -> CacheFile:
                     sections=[SectionRecordModel(anchor="a-top", start=1, end=1)],
                 ),
                 disposition="tracked",
+                reused_anchors=False,
             ),
             "docs/plain.md": Entry(
                 file_sha256="b" * 64,
                 stats={"/abs/root": StatRecord(size=3, mtime_ns=456)},
                 node=None,
                 disposition="untracked",
+                reused_anchors=False,
             ),
             "docs/id-less.md": Entry(
                 file_sha256="c" * 64,
                 stats={"/abs/root": StatRecord(size=5, mtime_ns=789)},
                 node=None,
                 disposition="id-less",
+                reused_anchors=False,
             ),
         },
     )
@@ -123,10 +126,10 @@ def test_make_entry_non_node_stores_none_but_keeps_why(disposition: str) -> None
     assert entry.disposition == disposition
 
 
-def test_entry_requires_a_disposition_rather_than_defaulting_one() -> None:
-    # A default would let an entry written before this field existed decode as an ordinary
-    # skip, which is the silent drop the field exists to end. CACHE_VERSION is bumped with it
-    # so those entries are discarded instead of reinterpreted.
+def test_entry_requires_every_replayed_diagnostic_rather_than_defaulting_one() -> None:
+    # A default would let an entry written before either field existed decode as an ordinary
+    # quiet file, which is the silent drop these fields exist to end. CACHE_VERSION is bumped
+    # with them so those entries are discarded instead of reinterpreted.
     with pytest.raises(ValidationError) as exc:
         Entry.model_validate(
             {
@@ -136,9 +139,22 @@ def test_entry_requires_a_disposition_rather_than_defaulting_one() -> None:
             }
         )
 
-    assert exc.value.error_count() == 1
-    assert exc.value.errors()[0]["loc"] == ("disposition",)
-    assert exc.value.errors()[0]["type"] == "missing"
+    missing = {error["loc"] for error in exc.value.errors() if error["type"] == "missing"}
+    assert missing == {("disposition",), ("reused_anchors",)}
+
+
+def test_entry_round_trips_a_reused_anchor_flag() -> None:
+    # The flag is the cached half of the reused-anchor diagnostic. If it did not survive the
+    # JSON round trip, a warm run would go quiet about a rebound alias (AD-29).
+    entry = Entry(
+        file_sha256="d" * 64,
+        stats={ROOT: StatRecord(size=7, mtime_ns=1)},
+        node=None,
+        disposition="untracked",
+        reused_anchors=True,
+    )
+
+    assert Entry.model_validate_json(entry.model_dump_json()).reused_anchors is True
 
 
 def test_reconstruct_doc_rebuilds_parsed_doc_at_supplied_path() -> None:
@@ -154,6 +170,7 @@ def test_reconstruct_doc_rebuilds_parsed_doc_at_supplied_path() -> None:
             sections=[SectionRecordModel(anchor="a-top", start=1, end=2)],
         ),
         disposition="tracked",
+        reused_anchors=False,
     )
 
     assert reconstruct_doc(entry, path) == ParsedDoc(
@@ -173,6 +190,7 @@ def test_reconstruct_doc_non_node_returns_none() -> None:
         stats={ROOT: StatRecord(size=3, mtime_ns=456)},
         node=None,
         disposition="untracked",
+        reused_anchors=False,
     )
     assert reconstruct_doc(entry, Path("docs/plain.md")) is None
 

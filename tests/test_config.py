@@ -26,6 +26,16 @@ def test_loads_and_resolves_roots(tmp_path: Path):
     assert project.resolved_roots == (tmp_path.resolve() / "design",)
 
 
+def test_config_reads_through_the_platform_default_parser():
+    # AD-33 pins the frontmatter boundary to the pure parser and deliberately leaves this one on
+    # ruamel's default, so a parser disagreement here costs a config author one clear error
+    # rather than changing which documents the lattice holds. That scope choice has a positive
+    # consequence the record states: a config defining one anchor name twice is still a
+    # ConfigError wherever the accelerator is installed. Pinning this boundary too would be a
+    # quiet reversal of the decision, so it is asserted rather than left to review.
+    assert config_module._LOADER.parser == "platform-default"
+
+
 def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
     original_loader = config_module._LOADER
     calls: list[str] = []

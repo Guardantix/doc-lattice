@@ -421,6 +421,88 @@ def test_id_less_warning_names_the_current_checkouts_path(
     assert str(first_paths["skillish"]) not in from_second[0]
 
 
+# A tracked node whose frontmatter defines one anchor name twice. The anchor is on two scalar
+# fields rather than on `derives_from` entries so the load emits this diagnostic alone, with no
+# duplicate-edge warning from `build_lattice` mixed into the assertions below.
+ANCHORED_DOC = "---\nid: anchored\ntitle: &t Anchored\nlayer: &t design\n---\n# Anchored\n"
+
+
+def _anchored_corpus(root: Path) -> Path:
+    """Write a one-node corpus whose frontmatter defines an anchor name twice."""
+    docs = root / "docs"
+    docs.mkdir()
+    path = docs / "anchored.md"
+    path.write_text(ANCHORED_DOC, encoding="utf-8")
+    return path
+
+
+def test_reused_anchor_warning_is_identical_uncached_cold_and_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The same AD-12 property the id-less skip has, for the second cached diagnostic. ruamel
+    # raises its own warning as a parse side effect, so left alone it fired on the uncached and
+    # cold runs and vanished on the warm one that never reaches the parser (AD-29, AD-33).
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    path = _anchored_corpus(tmp_path)
+
+    uncached = _warnings_from_load(tmp_path)
+    _with_cache(tmp_path)
+    cold = _warnings_from_load(tmp_path)  # writes the cache
+    warm = _warnings_from_load(tmp_path)  # the node is served from it
+
+    assert len(uncached) == 1
+    assert str(path) in uncached[0]
+    assert "defines an anchor name more than once" in uncached[0]
+    assert cold == uncached
+    assert warm == uncached
+
+
+def test_reused_anchor_warning_survives_a_stat_tier_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The stat tier never opens the file, so the flag can only come from the cache entry.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    _anchored_corpus(tmp_path)
+    _with_cache(tmp_path, trust_stat=True)
+
+    cold = _warnings_from_load(tmp_path)
+    warm = _warnings_from_load(tmp_path)
+
+    assert len(cold) == 1
+    assert warm == cold
+
+
+def test_reused_anchor_warning_names_the_current_checkouts_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The entry stores the fact, never the rendered message, so a shared cache slot cannot
+    # replay the first checkout's path in the second.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    first_path = _anchored_corpus(first)
+    second_path = _anchored_corpus(second)
+    _with_cache(first)
+    _with_cache(second)  # the same cache_key, so both checkouts share one slot
+
+    _warnings_from_load(first)
+    from_second = _warnings_from_load(second)
+
+    assert len(from_second) == 1
+    assert str(second_path) in from_second[0]
+    assert str(first_path) not in from_second[0]
+
+
+def test_a_quiet_document_reports_no_reused_anchor_warning(tmp_path: Path):
+    # The diagnostic is not merely always-on: an ordinary node says nothing.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "plain.md").write_text("---\nid: plain\ntitle: Plain\n---\n# Plain\n", encoding="utf-8")
+
+    assert _warnings_from_load(tmp_path) == []
+
+
 @pytest.mark.filterwarnings("ignore:(?s)skipping .*declares no 'id'")
 def test_id_less_frontmatter_declaring_lattice_intent_fails_identically_across_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

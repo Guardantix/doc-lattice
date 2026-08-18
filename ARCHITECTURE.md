@@ -535,11 +535,10 @@ scalar token that follows it, is what bounds an edit that has to overwrite or re
 read builds its own loader, since a shared instance carries document state (`YAML.version`, and
 the reader and scanner bound to one document) whose reset behavior is itself version dependent.
 The boundary loaders behind `frontmatter_parser.py` and `config.py` may keep shared module-level
-instances despite that, because they consume only loaded values and never a source mark. Not
-needing a mark is not the same as not needing a parser choice, though, and treating the two as one
-question is what let a tracked-document verdict depend on the environment: `SafeYamlLoader` takes
-the implementation as a required argument, `frontmatter_parser.py` asks for the pure one under
-AD-33 so its accepted document set is fixed, and `config.py` asks for the default one. Those
+instances despite that, because they consume only loaded values and never a source mark. They
+still state a parser: `SafeYamlLoader` takes the implementation as a required argument,
+`frontmatter_parser.py` asks for the pure one under AD-33 so its accepted document set is fixed,
+and `config.py` asks for the platform default one. Those
 mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the reset, and its
 `YAML_LOAD_ERRORS` names the failure family both of those modules and `reconcile.py` catch.
 Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
@@ -897,7 +896,11 @@ A leading run of UTF-8 byte-order marks may precede the opening fence; the whole
 for fence detection and reattached verbatim. A `%YAML` directive is supported, but only alongside
 a document-start line that does not strip to `---`, because `frontmatter_parser.py` closes the
 block at the first line that does. The directive's own document start therefore has to be spelled
-otherwise, and `--- !!map` is the form the suite pins.
+otherwise, and `--- !!map` is the form the suite pins. A declared version governs scalar resolution
+on both reads, not merely the strict one: under a declared 1.1 an unquoted `on`, `off`, `yes`, or
+`no` constructs a boolean rather than a string, so a root `id` spelled that way fails layer 1
+validation and the `Entry` `Scalar spelling` row's "constructed value is a string or null" is read
+under 1.1 too. This was parser-conditional until AD-33, which records why it no longer is.
 
 **Layer 3: preservation envelope.** For a document inside layer 2, a rewrite puts back exactly as
 they were read: a leading run of byte-order marks, both `---` fences including the space around
@@ -1074,13 +1077,28 @@ parser can read. Accepting the split and documenting it was not a candidate: it 
 record replaces.
 
 Warning behavior is part of the decision rather than a side effect of it. The pure parser raises
-`ReusedAnchorWarning` on the spelling it accepts, and that warning is preserved: not suppressed at
-the boundary and not translated into a project error. Preserving it keeps the strict load's
-observable behavior identical to what an environment without the accelerator already had, which is
-the majority environment and the one every lock of this project produces, and it matches the reread
-inside `apply_reconcile`, which has always raised it. Suppressing it would have made this engine
-quieter about a rebinding the author may not have intended, at a boundary whose whole job is to
-report what a document says.
+`ReusedAnchorWarning` on the spelling it accepts, and the engine stays loud about the rebinding
+rather than swallowing it, at a boundary whose whole job is to report what a document says. What
+changes is who reports it. Preserving ruamel's own warning verbatim was the first form of this
+decision, on the grounds that it kept the strict load's observable behavior identical to an
+accelerator-free environment's. That form is rejected, because the warning is a diagnostic a load
+emits and AD-29 already governs those: it has to be derivable from an `Entry` and rendered at the
+shared site, or the warm path will not reproduce it. Ruamel's warning is neither. It is raised
+from inside the composer, so it names `<unicode string>` and a block-relative line rather than the
+document, and a `CacheHit` returns before `parse_meta` runs at all, so a corpus loaded from a warm
+cache went silent about a rebound alias while still building the edge it rebound. Under the
+accelerator that is a loss of reach as well as of fidelity: a reused anchor used to refuse the load
+on every run until it was fixed.
+
+So `parse_meta` captures the warning, returns the fact on `ParsedMeta`, and `orchestrate.py`
+reports it from a single site against the path the run discovered, exactly as it reports an id-less
+skip. `Entry` carries it as a required field and `CACHE_VERSION` rises with it. Every other warning
+raised during the load is re-emitted at its original location, so only this one category is
+intercepted. Two costs are real and accepted. The strict load's stderr is no longer byte-identical
+to what an accelerator-free environment printed before this record: the text names the file now,
+which is the point. And it no longer matches the reread inside `apply_reconcile`, which still lets
+ruamel's warning escape, because that path builds its own loaders per AD-26 and has neither a
+discovered path to name nor a cache entry to write.
 **Consequences:** Which files count as tracked is user-visible, so this is a breaking change and
 lands in a major. An adopter running with the accelerator installed sees a document that used to
 fail the load become a tracked node, which can add edges to a report and change a `check` exit
@@ -1098,4 +1116,6 @@ construction. The `yaml-compatibility` matrix keeps both `clib` legs, and they n
 verdict rather than two: the capability probe and the conditional corpus routing in
 `tests/test_reconcile_fuzz.py` are gone, and the reused-anchor shape is a strict-column shape on
 every leg. A future divergence between the two parsers reaches only `config.py`, which is the one
-boundary still declared as taking ruamel's default.
+boundary still declared as taking ruamel's default. Routing the reused-anchor warning adds a second
+cached diagnostic beside AD-29's disposition, so `CACHE_VERSION` rises to 5 and caches written
+before it are discarded and rebuilt rather than read as files that reused no anchor.

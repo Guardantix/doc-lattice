@@ -15,9 +15,12 @@ DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
 # Deliberately not pinned to the pure parser, unlike the frontmatter boundary. Config has no
 # declared spelling subset, and no rewriter reads it back, so the two parsers disagreeing about
 # it costs a config author one clear error rather than changing which documents the lattice
-# holds. Whether a given config loads is still environment dependent, which AD-33 records as
-# the scope it deliberately left alone rather than as a property this boundary has.
-_LOADER = SafeYamlLoader(pure=False)
+# holds. Whether a given config loads therefore stays environment dependent: that is an accepted
+# consequence of AD-33 leaving this boundary out of scope, not a guarantee to rely on.
+# Constructed at import rather than per load, and deliberately outside the `YAML_LOAD_ERRORS`
+# handler below: `TypeError` is a member of that family, so a lazily built loader missing its
+# argument would be reported as the user's config being malformed.
+_LOADER = SafeYamlLoader(parser="platform-default")
 
 # A cache_key is one safe path segment: it must start with an alphanumeric (rejecting ".",
 # "..", and hidden-directory names) and thereafter allow only word, dot, and hyphen, so it can
@@ -171,7 +174,10 @@ def _read_yaml(path: Path) -> object:
     try:
         data = _LOADER.load(text)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"cannot parse config {path}: {exc}"
+        # The parser is named because this boundary is the one whose acceptance still depends on
+        # the environment, so "it loads for me and fails for my teammate" is a reachable state
+        # and nothing else at runtime reveals which parser ran.
+        msg = f"cannot parse config {path} (YAML parser: {_LOADER.parser}): {exc}"
         raise ConfigError(msg) from exc
     return data if data is not None else {}
 

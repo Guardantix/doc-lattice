@@ -1,5 +1,6 @@
 """Tests for frontmatter parsing."""
 
+import warnings
 from pathlib import Path
 
 import pytest
@@ -366,12 +367,42 @@ def test_parse_meta_tracks_a_reused_anchor_name_under_either_installed_parser():
     # The verdict is the whole point: before the pure pin this block was tracked without the
     # accelerator and refused as a duplicate anchor with it, so `check` disagreed with itself
     # across two environments holding the same file. Asserted unconditionally, on both legs.
-    with pytest.warns(ReusedAnchorWarning):
-        parsed = parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
+    parsed = parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
 
     assert parsed.disposition == "tracked"
     assert parsed.meta is not None
     assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]
+    assert parsed.reused_anchors is True
+
+
+def test_parse_meta_captures_the_reused_anchor_warning_rather_than_letting_it_escape():
+    # ruamel raises the warning from inside its own composer, so it names no document and does
+    # not run at all on a warm cache. AD-29 requires a load-emitted diagnostic to be derivable
+    # from a cache entry and rendered at one shared site, so the parse returns the fact and
+    # `orchestrate` reports it against the discovered path.
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
+
+    assert [w for w in captured if issubclass(w.category, ReusedAnchorWarning)] == []
+
+
+def test_parse_meta_leaves_every_other_warning_alone(monkeypatch):
+    # Only the one category is intercepted. A warning raised for any other reason during the
+    # load still reaches the caller. Substituting the whole loader rather than patching its
+    # `load` attribute, since `SafeYamlLoader` is slotted and its attributes are read-only.
+    class WarningLoader:
+        def load(self, _text: str) -> dict[str, str]:
+            warnings.warn("unrelated", UserWarning, stacklevel=1)
+            return {"id": "pc"}
+
+    monkeypatch.setattr(frontmatter_parser_module, "_LOADER", WarningLoader())
+
+    with pytest.warns(UserWarning, match="unrelated"):
+        parsed = parse_meta("id: pc\n", Path("a.md"))
+
+    assert parsed.disposition == "tracked"
+    assert parsed.reused_anchors is False
 
 
 def test_parse_meta_resolves_a_block_under_the_yaml_version_it_declares():
@@ -386,8 +417,13 @@ def test_parse_meta_resolves_a_block_under_the_yaml_version_it_declares():
 
     # The same block unquoted resolves to a boolean and fails validation, which is the
     # user-visible half of settling the disagreement and is why CHANGELOG.md calls it out.
-    with pytest.raises(ConfigError):
+    # The message is asserted, not just the type: without it this passes for any ConfigError a
+    # later validation change might raise on the block, rather than for 1.1 resolution.
+    with pytest.raises(ConfigError) as exc:
         parse_meta("%YAML 1.1\n--- !!map\nid: on\n", Path("directive.md"))
+
+    assert "directive.md" in str(exc.value)
+    assert "id" in str(exc.value)
 
 
 def test_parse_meta_tracks_a_reused_anchor_name_after_a_directive_reset():
@@ -397,9 +433,9 @@ def test_parse_meta_tracks_a_reused_anchor_name_after_a_directive_reset():
     # read after a directive rather than for none.
     parse_meta("%YAML 1.1\n--- !!map\nid: first\n", Path("directive.md"))
 
-    with pytest.warns(ReusedAnchorWarning):
-        parsed = parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
+    parsed = parse_meta(REUSED_ANCHOR_FRONTMATTER, Path("a.md"))
 
     assert parsed.disposition == "tracked"
     assert parsed.meta is not None
     assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]
+    assert parsed.reused_anchors is True

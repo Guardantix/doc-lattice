@@ -77,6 +77,35 @@ def _report_skip(disposition: FrontmatterDisposition, path: Path) -> None:
     )
 
 
+def _report_reused_anchors(reused: bool, path: Path) -> None:
+    """Report a tracked file whose frontmatter defines one anchor name more than once.
+
+    A separate function from ``_report_skip`` rather than a branch inside it, for the reason
+    that shapes ``_report_skip`` itself: Python renders a warning with its raising location and
+    filters repeats by that location, so two diagnostics sharing one site would suppress each
+    other. ``stacklevel`` stays at its default 1 for the same reason, and every load path funnels
+    here so a warm run reproduces what the cold run it replays said.
+
+    The message deliberately does not open with ``skipping ``. AD-29 records that
+    ``PYTHONWARNINGS`` cannot single out the id-less skip because ``discovery.py``'s
+    symlink-escape warning shares that prefix; a distinct opening gives this one the targetability
+    those two lack, and it is not a skip in any case.
+
+    Args:
+        reused: Whether the parse that produced this file's node saw an anchor name defined
+            twice. Only ever true for a tracked file: a rebound alias in a file the lattice does
+            not hold changes no edge, so there is nothing actionable to say about it.
+        path: The discovered path as this checkout sees it, named in the message.
+    """
+    if not reused:
+        return
+    warnings.warn(
+        f"reused anchor in {path}: its frontmatter defines an anchor name more than once, so "
+        "each alias reads the nearest definition above it",
+        stacklevel=1,
+    )
+
+
 def _load_uncached(project: ProjectConfig) -> Lattice:
     """Today's cache-free load path, unchanged."""
     parsed: list[ParsedDoc] = []
@@ -87,6 +116,7 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
         raw_meta, body = split_frontmatter(text, path)
         outcome = parse_meta(raw_meta, path)
         _report_skip(outcome.disposition, path)
+        _report_reused_anchors(outcome.reused_anchors, path)
         if outcome.meta is None:
             continue
         parsed.append(ParsedDoc(path=path, meta=outcome.meta, body=body))
@@ -120,6 +150,7 @@ def _load_cached(
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
             _report_skip(result.disposition, doc_path)
+            _report_reused_anchors(result.reused_anchors, doc_path)
             if result.doc is not None:
                 parsed.append(result.doc)
             continue
@@ -127,6 +158,7 @@ def _load_cached(
         raw_meta, body = split_frontmatter(text, doc_path)
         outcome = parse_meta(raw_meta, doc_path)
         _report_skip(outcome.disposition, doc_path)
+        _report_reused_anchors(outcome.reused_anchors, doc_path)
         meta = outcome.meta
         sections = derive_file_sections(body) if meta is not None else None
         state.replace(

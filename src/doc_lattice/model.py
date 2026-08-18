@@ -154,10 +154,16 @@ class ParsedMeta:
     reports the skip, so every load path renders the same diagnostic from one place.
 
     ``meta`` is not None exactly when ``disposition`` is ``"tracked"``.
+
+    ``reused_anchors`` is the same kind of fact: a diagnostic the parse noticed and left for the
+    caller to report. It is defaulted, unlike the cached form in ``cache.schema.Entry``, so the
+    node-free outcomes stay shareable singletons. It is only ever set on a tracked node, because
+    a rebound alias in a file the lattice does not hold changes no edge.
     """
 
     meta: NodeMeta | None
     disposition: FrontmatterDisposition
+    reused_anchors: bool = False
 
 
 @dataclass(frozen=True, slots=True)
