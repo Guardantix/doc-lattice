@@ -38,13 +38,27 @@ class RuntimeFactory(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CliRuntime:
-    """Output streams, cwd, and loaders captured for one CLI invocation."""
+    """Output streams, cwd, checkout root, and loaders captured for one CLI invocation.
+
+    Attributes:
+        stdout: Stream for exact command output.
+        stderr: Stream for diagnostics.
+        cwd: The invocation working directory.
+        load_config: Config loader for this invocation.
+        load_lattice: Lattice loader for this invocation.
+        workspace: The checkout root captured from ``GITHUB_WORKSPACE`` when the factory found
+            an absolute value there, else None. Under GitHub Actions that is the repository
+            root, which is why a run invoked from a subdirectory can still emit
+            repository-relative annotation paths. It is a candidate base rather than the base:
+            ``annotation_root`` yields to the cwd for any document it does not contain.
+    """
 
     stdout: Console
     stderr: Console
     cwd: Path
     load_config: Callable[[Path | None, Path], ProjectConfig]
     load_lattice: LatticeLoader
+    workspace: Path | None = None
 
     def project(self, config: Path | None) -> ProjectConfig:
         """Load a project config relative to this invocation's cwd.
@@ -80,6 +94,29 @@ class CliRuntime:
             persist_cache=persist_cache,
         )
 
+    def annotation_root(self, path: Path) -> Path:
+        """Select the base one document's GitHub annotation path is rendered against.
+
+        The selection happens before rendering rather than inside ``output.github_annotation``
+        because that renderer falls back to an absolute path for a document outside the root it
+        is handed: passing a set-but-non-containing workspace straight through would skip the
+        cwd fallback entirely and emit a path GitHub cannot attach to a diff.
+
+        Containment is lexical. ``_github_workspace`` resolves the checkout root, while
+        discovery deliberately keeps each document's unresolved spelling as its identity, so a
+        checkout reached through a symlink takes the cwd fallback. That is tolerated rather
+        than repaired: the fallback is still a correct base for the run.
+
+        Args:
+            path: Absolute path of the source document being annotated.
+
+        Returns:
+            The checkout root when it is known and contains ``path``, else the invocation cwd.
+        """
+        if self.workspace is not None and path.is_relative_to(self.workspace):
+            return self.workspace
+        return self.cwd
+
     def write_stdout(self, text: str, *, newline: bool = True) -> None:
         """Write exact text to the captured stdout stream.
 
@@ -91,6 +128,24 @@ class CliRuntime:
         if newline:
             self.stdout.file.write("\n")
         self.stdout.file.flush()
+
+
+def _github_workspace() -> Path | None:
+    """Read the GitHub Actions checkout root from the environment.
+
+    Only an absolute value is accepted, because resolving a relative one reads the current
+    working directory and ``diagnostic_runtime`` must stay usable when that directory is gone.
+    A relative value is therefore treated as unset rather than resolved.
+
+    The value is not checked to exist or to be a directory: a wrong-but-absolute checkout root
+    simply fails to contain any document and yields to the cwd in ``annotation_root``.
+
+    Returns:
+        The resolved ``GITHUB_WORKSPACE`` directory, or None when the variable is unset,
+        empty, or relative.
+    """
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE", ""))
+    return workspace.resolve() if workspace.is_absolute() else None
 
 
 def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
@@ -122,6 +177,7 @@ def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
         cwd=cwd,
         load_config=load_config,
         load_lattice=load_lattice,
+        workspace=_github_workspace(),
     )
 
 

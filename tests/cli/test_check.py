@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import get_args
 
+import pytest
+
 from doc_lattice.cli import app
 from doc_lattice.cli.output import escape_github_property
 from doc_lattice.constants import EdgeState
@@ -98,11 +100,17 @@ def test_check_github_escapes_complete_annotation(tmp_path: Path, monkeypatch):
     )
 
 
-def test_check_github_annotation_keeps_config_subdir_prefix(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("with_workspace", [False, True], ids=["no-workspace", "workspace"])
+def test_check_github_annotation_keeps_config_subdir_prefix(
+    tmp_path: Path, monkeypatch, with_workspace: bool
+):
     # A --config pointing at a lattice in a subdirectory (a monorepo layout) must not
-    # strip that subdirectory from the reported path: GitHub Actions checks out the repo
-    # at the invocation cwd, so the annotation needs the full cwd-relative path to land
-    # on the right file in the pull request diff.
+    # strip that subdirectory from the reported path: the annotation needs the full
+    # checkout-relative path to land on the right file in the pull request diff.
+    #
+    # Both bases are exercised because the README documents the same result for each: with the
+    # workspace at the checkout root, and with no workspace but the cwd there. The base that is
+    # never used is the config file's own project root, which would report "docs/down.md".
     project = tmp_path / "packages" / "game"
     docs = project / "docs"
     docs.mkdir(parents=True)
@@ -112,6 +120,8 @@ def test_check_github_annotation_keeps_config_subdir_prefix(tmp_path: Path, monk
     )
     (project / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    if with_workspace:
+        monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
 
     result = runner.invoke(
         app, ["check", "--config", "packages/game/.doc-lattice.yml", "--format", "github"]
@@ -531,4 +541,94 @@ def test_check_exits_2_naming_the_file_when_an_id_less_block_declares_lattice_in
 
     assert completed.returncode == 2
     assert f"frontmatter in {typo} declares 'derives_from' but has no 'id' key" in completed.stderr
-    assert "CONFIG_ERROR" in completed.stderr
+    # The typo is a frontmatter defect, so it must not send the user to the config file.
+    assert "FRONTMATTER_ERROR" in completed.stderr
+    assert "CONFIG_ERROR" not in completed.stderr
+
+
+def test_check_exits_2_with_frontmatter_error_for_a_schema_defect(tmp_path: Path):
+    # The other raise site the code moved with. Both are documented as BREAKING for a caller
+    # matching on the printed code, so both need pinning at the level that prints it.
+    _frontmatter_tiers(tmp_path)
+    bad = tmp_path / "docs" / "down.md"
+    bad.write_text("---\nid: down\nbogus: 1\n---\n# Down\n", encoding="utf-8")
+
+    completed = _check_in(tmp_path)
+
+    assert completed.returncode == 2
+    assert f"invalid lattice frontmatter in {bad}:" in completed.stderr
+    assert "FRONTMATTER_ERROR" in completed.stderr
+    assert "CONFIG_ERROR" not in completed.stderr
+    # The curated diagnostic reaches the terminal intact, not pydantic's renderer.
+    assert "pydantic.dev" not in completed.stderr
+    assert "accepted keys: authority, derives_from, id, layer, tickets, title" in completed.stderr
+
+
+def _nested_annotation_project(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a lattice at the checkout root and return its nested cwd and broken document."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    nested = tmp_path / "tools" / "scripts"
+    nested.mkdir(parents=True)
+    return nested, docs / "down.md"
+
+
+def test_check_github_annotation_is_workspace_relative_from_a_nested_cwd(
+    tmp_path: Path, monkeypatch
+):
+    # Invoking from a subdirectory used to emit an absolute path, which GitHub cannot attach
+    # to a diff, so inline annotations silently vanished for anyone not running from the root.
+    nested, _ = _nested_annotation_project(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, ["check", "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )
+
+
+def test_check_github_annotation_uses_cwd_when_no_workspace_is_set(tmp_path: Path, monkeypatch):
+    # Outside Actions the base is the invocation cwd, which keeps the absolute fallback for a
+    # document that cwd does not contain.
+    nested, document = _nested_annotation_project(tmp_path)
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, ["check", "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        f"::error file={escape_github_property(str(document))},"
+        "title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )
+
+
+def test_check_github_annotation_ignores_a_workspace_that_excludes_the_document(
+    tmp_path: Path, monkeypatch
+):
+    # A workspace pointing somewhere else must not reach the renderer: it would emit the
+    # absolute path instead of the cwd-relative one the fallback is there to produce.
+    _nested_annotation_project(tmp_path)
+    # Inside tmp_path, since the workspace only has to exclude docs/down.md, not the whole tree.
+    elsewhere = tmp_path / "tools"
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(elsewhere))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check", "--format", "github"])
+
+    assert result.exit_code == 1
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )

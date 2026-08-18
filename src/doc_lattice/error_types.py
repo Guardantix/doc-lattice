@@ -1,5 +1,7 @@
 """Custom exception types."""
 
+from .constants import ErrorCode
+
 
 def exception_details(error: BaseException) -> str:
     """Flatten an exception message and its diagnostic notes into one line."""
@@ -17,9 +19,9 @@ def copy_exception_notes(target: BaseException, source: BaseException) -> None:
 class ProjectError(Exception):
     """Base exception for this project."""
 
-    def __init__(self, message: str, code: str = "UNKNOWN") -> None:
+    def __init__(self, message: str, code: ErrorCode = "UNKNOWN") -> None:
         super().__init__(message)
-        self.code = code
+        self.code: ErrorCode = code
 
 
 class ConfigError(ProjectError):
@@ -55,6 +57,13 @@ class UnreadableDocError(ProjectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="UNREADABLE_DOC")
+
+
+class FrontmatterError(ProjectError):
+    """A doc's frontmatter fails schema validation or declares lattice intent with no id."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="FRONTMATTER_ERROR")
 
 
 class LinearError(ProjectError):

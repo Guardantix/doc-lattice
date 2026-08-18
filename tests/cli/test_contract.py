@@ -638,3 +638,28 @@ def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, a
     assert cold.exit_code == uncached.exit_code
     assert warm.stdout == uncached.stdout
     assert warm.exit_code == uncached.exit_code
+
+
+def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Path, monkeypatch):
+    # The config diagnostic is now multi-line, and three things in print_project_error carry it
+    # to the terminal intact: soft_wrap keeps a narrow terminal from rewrapping the per-error
+    # lines and destroying the two-space indent, escape() keeps the cache_key message's literal
+    # rich markup from being eaten, and the code suffix still lands. None of that is visible to
+    # a unit test of the formatter, so it is pinned here.
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: 'a/b'\nbogus: 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "60")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 2
+    lines = result.stderr.splitlines()
+    assert lines[0] == f"error: invalid config {tmp_path / '.doc-lattice.yml'}:"
+    # One line per error, still indented, despite a terminal far narrower than any of them.
+    assert len(lines) == 3
+    assert all(line.startswith("  ") for line in lines[1:])
+    assert lines[1] == (
+        "  cache_key: cache_key 'a/b' must be one safe path segment matching "
+        r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (no separators or traversal)"
+    )
+    assert lines[2].endswith("(CONFIG_ERROR)")

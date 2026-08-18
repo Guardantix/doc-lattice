@@ -10,6 +10,19 @@ import pytest
 os.environ.pop("FORCE_COLOR", None)
 
 
+@pytest.fixture(autouse=True)
+def _no_github_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear GITHUB_WORKSPACE so annotation tests do not inherit the ambient environment.
+
+    Every invocation reads this variable to pick the base GitHub annotations render against, so
+    a developer shell or a self-hosted runner that exports it silently rebases the paths the
+    `--format github` tests assert on. Autouse rather than the module-level pop above, because
+    monkeypatch restores the value afterwards, and the tests that exercise a workspace set it
+    themselves on top of this.
+    """
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+
+
 @pytest.fixture
 def lattice_dir(tmp_path: Path) -> Path:
     """Write a small synthetic lattice and return the project root.

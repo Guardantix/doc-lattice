@@ -10,7 +10,7 @@ import pytest
 from doc_lattice import orchestrate
 from doc_lattice.cache import cache_path
 from doc_lattice.config import load_config
-from doc_lattice.error_types import ConfigError, DuplicateIdError, UnreadableDocError
+from doc_lattice.error_types import DuplicateIdError, FrontmatterError, UnreadableDocError
 from doc_lattice.model import TargetId
 from doc_lattice.orchestrate import load_lattice
 
@@ -122,7 +122,7 @@ def test_duplicate_id_propagates(tmp_path: Path):
     ("text", "exc_type", "code"),
     [
         ("---\nid: x\nlayer: [unterminated\n---\n# X\n", UnreadableDocError, "UNREADABLE_DOC"),
-        ("---\nid: x\nbogus_key: 1\n---\n# X\n", ConfigError, "CONFIG_ERROR"),
+        ("---\nid: x\nbogus_key: 1\n---\n# X\n", FrontmatterError, "FRONTMATTER_ERROR"),
     ],
 )
 def test_load_lattice_surfaces_parse_errors(tmp_path: Path, text, exc_type, code):
@@ -438,13 +438,13 @@ def test_id_less_frontmatter_declaring_lattice_intent_fails_identically_across_t
         "a typo) or remove the lattice keys"
     )
 
-    with pytest.raises(ConfigError) as uncached:
+    with pytest.raises(FrontmatterError) as uncached:
         load_lattice(load_config(None, tmp_path))
 
     _with_cache(tmp_path)
-    with pytest.raises(ConfigError) as cold:
+    with pytest.raises(FrontmatterError) as cold:
         load_lattice(load_config(None, tmp_path))
-    with pytest.raises(ConfigError) as warm:
+    with pytest.raises(FrontmatterError) as warm:
         load_lattice(load_config(None, tmp_path))
 
     assert str(uncached.value) == expected

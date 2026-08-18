@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .error_types import ConfigError
 from .path_utils import safe_resolve
+from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
@@ -17,6 +18,16 @@ _LOADER = SafeYamlLoader()
 # "..", and hidden-directory names) and thereafter allow only word, dot, and hyphen, so it can
 # never express a separator or a traversal. Length capped at 64 characters total.
 _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# Rendered in place of a field path when pydantic reports no location: a validator that runs on
+# the whole model, or a config file whose top level is not a mapping at all, which reaches
+# validation because _read_yaml passes a list or a scalar straight through.
+_ROOT_LOCATION = "<config>"
+_BINDING_LAYERS_KEY = "binding_layers"
+_BINDING_LAYERS_MIGRATION = (
+    "binding_layers has been unsupported since 2.0; delete it from 1.x configs, there is "
+    "no replacement."
+)
 
 
 class Config(BaseModel):
@@ -99,11 +110,51 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     try:
         config = Config.model_validate(raw)
     except ValidationError as exc:
-        msg = f"invalid config: {exc}"
-        raise ConfigError(msg) from exc
+        raise ConfigError(_format_validation_error(exc, source)) from exc
 
     roots = _resolve_roots(config.docs_roots, project_root)
     return ProjectConfig(config=config, project_root=project_root, resolved_roots=roots)
+
+
+def _format_validation_error(exc: ValidationError, source: Path | None) -> str:
+    """Render a config validation failure as the diagnostic this project owns.
+
+    Args:
+        exc: The validation error raised by ``Config.model_validate``.
+        source: The config file the raw mapping was read from. None is defensive only:
+            zero-config validates ``{}``, and every ``Config`` field has a default, so
+            ``model_validate`` cannot fail on that path.
+
+    Returns:
+        A multi-line message: a header naming the config file, then one line per error.
+    """
+    where = str(source) if source is not None else "<no config file>"
+    return format_validation_error(
+        exc,
+        header=f"invalid config {where}:",
+        model=Config,
+        root_label=_ROOT_LOCATION,
+        extra_note=_binding_layers_note,
+    )
+
+
+def _binding_layers_note(location: tuple[int | str, ...]) -> str | None:
+    """Supply the 1.x migration sentence when the forbidden key is the retired one.
+
+    ``extra="forbid"`` is the only thing that catches ``binding_layers``, so the diagnostic is
+    where the migration has to be said. The match is on the whole location rather than its last
+    segment: were ``Config`` ever to nest a model, a field of the same name inside it would not
+    be the retired top-level key.
+
+    Args:
+        location: The ``loc`` tuple from one ``extra_forbidden`` error.
+
+    Returns:
+        The migration sentence for the retired top-level key, else None.
+    """
+    if location == (_BINDING_LAYERS_KEY,):
+        return _BINDING_LAYERS_MIGRATION
+    return None
 
 
 def _read_yaml(path: Path) -> object:

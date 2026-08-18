@@ -10,7 +10,13 @@ from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
-from ..output import github_annotation, select_output, write_json, write_text
+from ..output import (
+    github_annotation,
+    select_output,
+    warn_unattachable_annotations,
+    write_json,
+    write_text,
+)
 from ..runtime import CliRuntime, get_runtime
 
 
@@ -102,19 +108,22 @@ def register_check(app: typer.Typer) -> None:
         if selection.format == "json":
             write_json(runtime, statuses_json(displayed, summary), indent=selection.indent)
         elif selection.format == "github":
-            for status in displayed:
-                if status.state == "OK":
-                    continue
+            drifted = [status for status in displayed if status.state != "OK"]
+            for status in drifted:
                 path = lattice.nodes_by_id[status.source_id].path
                 write_text(
                     runtime,
                     github_annotation(
                         path,
-                        runtime.cwd,
+                        runtime.annotation_root(path),
                         f"doc-lattice {status.state}",
                         f"{status.source_id} -> {status.target_ref} is {status.state}",
                     ),
                 )
+            warn_unattachable_annotations(
+                runtime,
+                [lattice.nodes_by_id[status.source_id].path for status in drifted],
+            )
         else:
             render_statuses(runtime.stdout, _human_rows(displayed, only_states), summary)
         raise typer.Exit(EXIT_FINDING if has_drift(statuses) else 0)

@@ -38,8 +38,8 @@ def load_lattice(
         id-less fenced block additionally emits a warning naming the file on the way past.
 
     Raises:
-        ConfigError: If a discovered file's frontmatter has an unknown or malformed key, or
-            declares lattice intent with no ``id``.
+        FrontmatterError: If a discovered file's frontmatter has an unknown or malformed key,
+            or declares lattice intent with no ``id``.
         UnreadableDocError: If a discovered file cannot be read or decoded, or its frontmatter
             opens a fence it never closes or cannot be parsed as YAML.
         DuplicateIdError: If two discovered files, or two headings in one file, register the

@@ -8,13 +8,13 @@ from hypothesis import strategies as st
 
 import doc_lattice.frontmatter_parser as frontmatter_parser_module
 from doc_lattice.constants import LATTICE_INTENT_KEYS
-from doc_lattice.error_types import ConfigError, UnreadableDocError
+from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
     parse_meta,
     split_frontmatter,
     split_frontmatter_parts,
 )
-from doc_lattice.model import NodeMeta
+from doc_lattice.model import NodeMeta, RawEdge
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
@@ -219,10 +219,10 @@ def test_parse_meta_non_mapping_yaml_is_untracked_not_a_skip(raw):
     ],
 )
 def test_parse_meta_id_less_lattice_intent_raises_naming_file_and_keys(raw: str, declared: str):
-    with pytest.raises(ConfigError) as exc:
+    with pytest.raises(FrontmatterError) as exc:
         parse_meta(raw, Path("typo.md"))
 
-    assert exc.value.code == "CONFIG_ERROR"
+    assert exc.value.code == "FRONTMATTER_ERROR"
     assert str(exc.value) == (
         f"frontmatter in typo.md declares {declared} but has no 'id' key, so the file and "
         "every edge it declares would be dropped from the lattice; add an 'id' (check it for "
@@ -239,8 +239,59 @@ def test_parse_meta_intent_keys_are_an_exact_set_not_every_node_meta_field():
 
 
 def test_parse_meta_unknown_key_raises():
-    with pytest.raises(ConfigError):
+    with pytest.raises(FrontmatterError):
         parse_meta("id: x\nbogus: 1\n", Path("a.md"))
+
+
+def test_parse_meta_unknown_key_lists_the_accepted_keys():
+    # The frontmatter boundary renders through the same curated formatter as the config
+    # boundary, so an unknown key here gets the same help a config key does.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: x\nbogus: 1\n", Path("a.md"))
+
+    accepted = ", ".join(sorted(NodeMeta.model_fields))
+    assert str(exc.value) == (
+        "invalid lattice frontmatter in a.md:\n"
+        f"  bogus: Extra inputs are not permitted (accepted keys: {accepted})"
+    )
+
+
+def test_parse_meta_unknown_key_in_an_edge_lists_the_edge_keys_not_the_node_keys():
+    # derives_from holds RawEdge, so a key rejected inside one is answered by RawEdge's fields.
+    # Offering NodeMeta's would name keys that are invalid exactly where the user is editing.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: x\nderives_from:\n  - ref: a\n    bogus: 1\n", Path("a.md"))
+
+    message = str(exc.value)
+    assert "  derives_from.0.bogus: " in message
+    assert f"accepted keys: {', '.join(sorted(RawEdge.model_fields))}" in message
+    assert "authority" not in message
+
+
+def test_parse_meta_error_omits_pydantic_url_and_echoed_input():
+    # str(ValidationError) leaks a versioned docs URL and echoes the offending value back; the
+    # diagnostic contract is owned by validation_render, on both load boundaries alike.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: 123\n", Path("a.md"))
+
+    message = str(exc.value)
+    assert "pydantic.dev" not in message
+    assert "input_value" not in message
+    assert "[type=" not in message
+
+
+def test_parse_meta_value_error_reads_as_the_domain_wrote_it():
+    # A validator that raises ValueError is prefixed "Value error, " by pydantic; that is
+    # boilerplate, not part of the sentence the domain authored.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: 'a#b'\n", Path("a.md"))
+
+    assert str(exc.value) == (
+        "invalid lattice frontmatter in a.md:\n"
+        "  id: node id 'a#b' must not contain '#'; "
+        "'#' separates a file id from a section anchor"
+    )
+    assert "Value error," not in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -252,10 +303,10 @@ def test_parse_meta_unknown_key_raises():
         "id: x\nderives_from:\n  - ref: a\n    bogus: 1\n",  # RawEdge extra=forbid
     ],
 )
-def test_parse_meta_invalid_value_raises_config_error(raw):
-    with pytest.raises(ConfigError) as exc:
+def test_parse_meta_invalid_value_raises_frontmatter_error(raw):
+    with pytest.raises(FrontmatterError) as exc:
         parse_meta(raw, Path("a.md"))
-    assert exc.value.code == "CONFIG_ERROR"
+    assert exc.value.code == "FRONTMATTER_ERROR"
     assert "a.md" in str(exc.value)  # message names the source file
 
 
