@@ -30,7 +30,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from ruamel.yaml.error import ReusedAnchorWarning
 
-from doc_lattice.error_types import ConfigError, ProjectError, UnreadableDocError
+from doc_lattice.error_types import FrontmatterError, ProjectError, UnreadableDocError
 from doc_lattice.frontmatter_parser import FrontmatterParts, parse_meta, split_frontmatter_parts
 from doc_lattice.hashing import normalize_newlines
 from doc_lattice.reconcile import Rewrite, apply_reconcile, plan_rewrites
@@ -3230,7 +3230,7 @@ def _assert_not_strictly_tracked(text: str) -> None:
     assert parts is not None
     try:
         disposition = parse_meta(parts.raw_meta, DOC).disposition
-    except (ConfigError, UnreadableDocError):
+    except (FrontmatterError, UnreadableDocError):
         return
     assert disposition != "tracked", "a recovery shape must not pass strict validation"
 

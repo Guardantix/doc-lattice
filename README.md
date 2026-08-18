@@ -274,6 +274,21 @@ emits one escaped GitHub Actions `::error` workflow command per drift finding or
 violation, each with a repo-relative file path, so findings attach inline to the offending doc
 in the pull-request diff. Output selection never changes gate exit codes.
 
+The reported path is relative to `GITHUB_WORKSPACE` when that variable is set and contains the
+document, which is the repository checkout root under GitHub Actions; annotations therefore
+stay attachable no matter which subdirectory the command runs in. Otherwise the base is the
+invocation working directory, and a document outside it is reported by absolute path rather
+than failing. Under a workspace the base is never the config file's project root: a config
+under `packages/game` still reports `packages/game/docs/down.md`, not `docs/down.md`. Only a
+run with no workspace set, from inside `packages/game`, reports `docs/down.md`, because there
+the base is that working directory.
+
+When a document falls outside that base, its annotation carries an absolute path, which GitHub
+drops instead of attaching. That is reported: the run warns once on stderr, naming the base and
+every document outside it, so a gate that fails with nothing shown on the diff is diagnosable
+from the workflow log. Stdout stays exactly the workflow commands, so the warning never
+interferes with what GitHub parses.
+
 Structured output is always selected with `--format`; the accepted values per command are in the
 table above, and `init` is deliberately excluded from structured-output selection.
 The 1.x silent `--json` alias was removed in 2.0; see

@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Two things to act on, plus one format change below that needs no action. The first is the printed
+Three things to act on, plus one format change below that needs no action. The first is the printed
 workflow, and it applies to every ordinary and recipe install. The workflow `doc-lattice init`
 prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -24,7 +24,14 @@ The second is the managed GitHub and Linear CI setup, which this release removes
 installation converts rather than upgrades, and it will not tell you so itself; see **Removed**
 below for why, and `MANAGED_CI.md` for the procedure.
 
-The third needs nothing from you, and is recorded here because a format bump usually would. The
+The third is the frontmatter error code, and it applies only to a caller that reads the code
+rather than the message. A broken frontmatter block now exits with `FRONTMATTER_ERROR` instead
+of `CONFIG_ERROR`, so repoint anything matching on the printed code, and anything catching
+`ConfigError` around `parse_meta` or `load_lattice`, at `FrontmatterError`. It is a sibling of
+`ConfigError`, not a subclass, so an existing `except ConfigError` stops catching it. Catching
+`ProjectError` keeps working unchanged. See **Changed** below.
+
+The fourth needs nothing from you, and is recorded here because a format bump usually would. The
 reconcile transaction journal moves to version 2, adding a required `provenance` block and
 pretty-printing. Upgrading across an interrupted run is safe in both directions of the crash
 window: a version 1 journal left by an earlier release is still recovered normally, whether it is
@@ -104,6 +111,48 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
   wrapped phase a warning reaches this renderer rather than a `catch_warnings(record=True)`
   recorder or a `logging.captureWarnings()` router. See
   [AD-29](ARCHITECTURE.md#ad-29-a-skipped-files-reason-is-cached-data-and-is-reported-from-one-site).
+- **BREAKING:** frontmatter schema and lattice-intent failures now carry the new
+  `FRONTMATTER_ERROR` code instead of `CONFIG_ERROR`, which sent users to the config file for a
+  broken document. Both raise sites move together: a `NodeMeta` validation failure, and the guard
+  that fires when a block declares `authority`, `derives_from`, or `tickets` with no `id`. Moving
+  only the first would have left the reported `idd` plus `derives_from` typo still pointing at
+  config, which is the defect the change exists to close. Read, decode, and YAML parse failures
+  keep `UNREADABLE_DOC`; that boundary was already coherent. Anything matching on the printed code
+  or catching `ConfigError` around `parse_meta` or `load_lattice` needs repointing, since
+  `FrontmatterError` is a sibling of `ConfigError`, not a subclass.
+- Config and frontmatter validation errors are now formatted by doc-lattice rather than delegated
+  to pydantic's multi-line renderer. Both load boundaries render through one formatter, so they
+  cannot drift apart. The message names the file it came from, which the sibling read and parse
+  errors already did and these did not, and renders one line per error carrying the full field
+  location and pydantic's human message. The `pydantic.dev` URL, the echoed input value, and the
+  machine-readable `type` tag are gone; the domain-authored messages themselves are unchanged, so
+  a message that deliberately quotes the offending value still does. A key rejected by
+  `extra: forbid` also lists the accepted keys, derived from the model so a future field cannot
+  leave the list stale, and `binding_layers` additionally gets the 1.x migration sentence, since
+  the blanket forbid is the only thing that catches it. An error pydantic reports against no
+  field, which is either a validator that runs on the whole model, such as the `cache_trust_stat`
+  check, or a file whose top level is not a mapping at all, gets an explicit `<config>` or
+  `<frontmatter>` marker rather than an invented field name.
+- `--format github` annotations are now rendered relative to `GITHUB_WORKSPACE` when it is set and
+  contains the document, rather than always to the invocation working directory. Under GitHub
+  Actions that is the repository checkout root, so inline pull-request annotations no longer
+  vanish for a run invoked from a subdirectory, where the previous behavior silently degraded to
+  an absolute path GitHub cannot attach to a diff. The base is selected before rendering, so a
+  workspace set to a directory that does not contain the document still takes the working-
+  directory fallback instead of being passed through to an absolute path. With the variable unset
+  the behavior is unchanged, including the absolute fallback. The base is deliberately not the
+  config file's project root: using it would strip the leading path from a monorepo config under
+  `packages/game`. See the `--format` section of README.md.
+- `--format github` now warns on stderr when a run emitted an annotation GitHub cannot attach to
+  the pull-request diff. The absolute-path fallback above is a correct last resort but a silent
+  one, and its symptom is a failing gate with nothing shown on the diff, which is unpleasant to
+  debug from a workflow log. The warning fires at most once per run and names the base and every
+  document outside it. Stdout stays exactly the workflow commands GitHub parses.
+- Error codes are now a declared domain in `constants.py` rather than a string literal per
+  exception type. The code a `ProjectError` carries is printed beside every diagnostic and is a
+  documented migration surface, so it is typed like the project's other shared string domains,
+  and the test suite derives its expectations from the class tree instead of a hand-maintained
+  list that had already fallen three types behind. No code value changes.
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a
   crash could not tell when it was written, which doc-lattice wrote it, or what command produced

@@ -13,6 +13,7 @@ from doc_lattice.cli.output import (
     escape_github_property,
     github_annotation,
     select_output,
+    warn_unattachable_annotations,
     write_json,
 )
 from doc_lattice.cli.runtime import CliRuntime
@@ -137,3 +138,41 @@ def test_escape_github_property_encodes_message_and_property_metacharacters():
     assert escape_github_property("100%\rfirst\nsecond: a,b") == (
         "100%25%0Dfirst%0Asecond%3A a%2Cb"
     )
+
+
+def test_warn_unattachable_annotations_is_silent_when_every_document_is_contained(
+    runtime: CliRuntime, tmp_path: Path
+):
+    contained = tmp_path / "docs" / "down.md"
+
+    warn_unattachable_annotations(runtime, [contained])
+
+    assert _contents(runtime.stderr) == ""
+
+
+def test_warn_unattachable_annotations_names_the_base_and_each_outside_document(
+    runtime: CliRuntime, tmp_path: Path
+):
+    # An annotation rendered against a base that does not contain the document degrades to an
+    # absolute path GitHub drops in silence, so the gate fails with nothing shown on the diff.
+    outside = tmp_path.parent / "elsewhere" / "down.md"
+
+    warn_unattachable_annotations(runtime, [outside])
+
+    stderr = _contents(runtime.stderr)
+    assert "warning" in stderr
+    assert str(tmp_path) in stderr
+    assert str(outside) in stderr
+
+
+def test_warn_unattachable_annotations_reports_once_for_a_repeated_document(
+    runtime: CliRuntime, tmp_path: Path
+):
+    # Findings are per edge, so one document can be annotated many times in a run; the warning
+    # is per run.
+    outside = tmp_path.parent / "elsewhere" / "down.md"
+
+    warn_unattachable_annotations(runtime, [outside, outside, outside])
+
+    assert _contents(runtime.stderr).count(str(outside)) == 1
+    assert "1 annotated document(s)" in _contents(runtime.stderr)

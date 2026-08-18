@@ -2,6 +2,26 @@
 
 from typing import Literal, get_args
 
+# The code every ProjectError carries. This is a printed contract, not an internal tag: the CLI
+# renders it beside each error, and a caller matching on it is a documented migration surface,
+# so the domain is pinned here rather than spelled as a bare string per subclass. "UNKNOWN" is
+# the base default and the only member no subclass claims. Declaration order mirrors
+# error_types.py.
+ErrorCode = Literal[
+    "UNKNOWN",
+    "CONFIG_ERROR",
+    "VALIDATION_ERROR",
+    "DUPLICATE_ID",
+    "BROKEN_REF",
+    "UNREADABLE_DOC",
+    "FRONTMATTER_ERROR",
+    "LINEAR_ERROR",
+    "RECONCILE_IN_PROGRESS",
+    "RECONCILE_CONFLICT",
+    "RECONCILE_PERSISTENCE",
+]
+VALID_ERROR_CODES: frozenset[str] = frozenset(get_args(ErrorCode))
+
 Layer = Literal["design", "technical", "production"]
 VALID_LAYERS: frozenset[str] = frozenset(get_args(Layer))
 

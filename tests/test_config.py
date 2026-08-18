@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import doc_lattice.config as config_module
-from doc_lattice.config import load_config
+from doc_lattice.config import Config, load_config
 from doc_lattice.error_types import ConfigError
 
 
@@ -96,13 +96,111 @@ def test_optional_fields_default_to_none(tmp_path: Path):
     assert project.config.linear_team is None
 
 
-def test_binding_layers_is_rejected_as_an_extra_key(tmp_path: Path):
+def test_binding_layers_is_rejected_with_the_migration_sentence_and_accepted_keys(tmp_path: Path):
+    # `binding_layers` is caught only by the blanket extra="forbid", so the diagnostic is the
+    # only place a 1.x config learns the key is gone. The accepted-key list stays alongside it.
     (tmp_path / ".doc-lattice.yml").write_text(
         "binding_layers: [binding, derived]\n", encoding="utf-8"
     )
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
-    assert "extra_forbidden" in str(exc.value)
+
+    message = str(exc.value)
+    assert "binding_layers has been unsupported since 2.0" in message
+    assert "there is no replacement" in message
+    assert "accepted keys: cache_key, cache_trust_stat, docs_roots, ignore_globs, linear_team" in (
+        message
+    )
+
+
+def test_config_error_names_the_file_and_omits_pydantic_url_and_input(tmp_path: Path):
+    # str(ValidationError) leaks a pydantic.dev URL and echoes the rejected input back. Both
+    # are noise to a user editing YAML, and the config file the sibling messages name was
+    # missing entirely.
+    source = tmp_path / ".doc-lattice.yml"
+    source.write_text("cache_key: 'a/b'\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    message = str(exc.value)
+    assert str(source) in message
+    assert "pydantic.dev" not in message
+    assert "Input should be" not in message
+    assert "input_value" not in message
+    # pydantic prefixes every ValueError-raising validator with its own boilerplate, which
+    # would leave the domain-authored sentence reading "cache_key: Value error, cache_key ...".
+    assert "Value error," not in message
+    assert message.endswith(
+        "  cache_key: cache_key 'a/b' must be one safe path segment matching "
+        r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (no separators or traversal)"
+    )
+
+
+def test_multiple_config_errors_render_one_line_each(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "bogus: 1\ncache_key: 'a/b'\ndocs_roots: 5\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    detail_lines = [line for line in str(exc.value).splitlines()[1:] if line.strip()]
+    assert len(detail_lines) == 3
+    # The set, not the order: pydantic does not document the order it reports errors in, and a
+    # location or message may itself contain a colon, so neither is safe to pin.
+    assert {line.strip().split(":", 1)[0] for line in detail_lines} == {
+        "docs_roots",
+        "cache_key",
+        "bogus",
+    }
+
+
+def test_unknown_key_lists_the_accepted_keys(tmp_path: Path):
+    # The list is derived from Config.model_fields so a new config field cannot leave a stale
+    # accepted-key list behind in this diagnostic.
+    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    accepted = ", ".join(sorted(Config.model_fields))
+    assert f"accepted keys: {accepted}" in str(exc.value)
+    # An ordinary unknown key must not inherit the retired key's migration sentence; without
+    # this, dropping the conditional would leave every unknown key citing a 1.x field.
+    assert "binding_layers has been unsupported" not in str(exc.value)
+
+
+def test_list_entry_error_renders_its_index_in_the_location(tmp_path: Path):
+    # The location is the full path to the offending value, indices included, so a user reading
+    # the diagnostic knows which list entry to edit.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['docs', 5]\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    assert "  docs_roots.1: " in str(exc.value)
+
+
+def test_non_mapping_config_renders_the_config_marker(tmp_path: Path):
+    # A YAML file holding a list reaches validation, because _read_yaml normalizes only None.
+    # pydantic reports no location for it, which is the same empty loc a whole-model validator
+    # produces and must render the same whole-config marker.
+    source = tmp_path / ".doc-lattice.yml"
+    source.write_text("- a\n- b\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    assert str(exc.value).startswith(f"invalid config {source}:")
+    assert "  <config>: " in str(exc.value)
+
+
+def test_model_level_validator_error_renders_a_config_marker_not_a_field(tmp_path: Path):
+    # The cache_trust_stat check runs on the whole model, so pydantic reports an empty
+    # location. Naming a field there would invent one the user never wrote.
+    (tmp_path / ".doc-lattice.yml").write_text("cache_trust_stat: true\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    message = str(exc.value)
+    assert "  <config>: cache_trust_stat requires cache_key to be set" in message
+    assert "Value error," not in message
 
 
 def test_root_escaping_project_is_rejected(tmp_path: Path):
@@ -188,13 +286,6 @@ def test_symlinked_file_root_escaping_project_is_rejected(tmp_path: Path):
         load_config(None, project)
     assert exc.value.code == "CONFIG_ERROR"
     assert "resolves outside the project root" in str(exc.value)
-
-
-def test_unknown_key_rejected(tmp_path: Path):
-    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
-    with pytest.raises(ConfigError) as exc:
-        load_config(None, tmp_path)
-    assert "invalid config" in str(exc.value)
 
 
 @pytest.mark.parametrize(
