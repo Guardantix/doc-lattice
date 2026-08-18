@@ -63,6 +63,20 @@ Within the cache package, `cache/schema.py` and
 `cache/lookup.py` reads and stats documents to select the verify or stat tier.
 `linear_fetch` is impure wiring and `linear_client` is the only module that touches
 the network.
+
+The filesystem boundary is scoped to accidents, not adversaries, confirmed 2026-08-13. The guards
+that hold are the ones an ordinary mistake runs into: project-root containment and
+`path_utils.safe_resolve()` with its no-follow checks keep a configured or journal-supplied path
+from escaping the project root or being redirected through a symlink, before and after images plus
+their recorded fingerprints and the recovery journal keep an unrelated concurrent edit from being
+overwritten or silently rolled back, and the advisory reconcile lock serializes cooperating
+doc-lattice processes on one project. What is excluded is a hostile local process sharing the
+working tree: it may simply ignore the advisory lock, or win a race between a path check and the
+operation that follows it, and no check in this engine is written to survive that. The exclusion
+cuts both ways. 'It is not hostile-safe' is not a reason to drop an accident guard, since every
+one of them earns its place against the mistakes it does catch, and 'a co-tenant could defeat it'
+is not a reason to harden reconcile further, since the threat it would harden against is the one
+this decision deliberately places out of scope.
 **Consequences:** Every command's logic is unit-tested with no I/O; the network slice
 is quarantined to one module. The reconcile lock is the package's only lock capability, so no
 nesting is possible.
@@ -697,7 +711,7 @@ bytes, recovery artifacts, and the before-image rollback sink are deliberately p
 passing through the gate, and a negative control pins that exemption so the guard does not fail
 on correct code.
 
-Twenty-six near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
+Twenty-five near-miss shapes are pinned explicitly, because each defeated an earlier draft of the
 guard and each was reproduced against it before being closed. The gate must be its own
 unconditional top-level statement, since a gate merely contained in an earlier statement can sit
 inside a conditional and skip the path a later changed return takes. Both operands of the
@@ -717,9 +731,8 @@ and every kind of alias, by import, by assignment, by parameter default, or by i
 `Rewrite as R`, `R = Rewrite`, `def build(..., constructor=Rewrite)`, `class Rogue(Rewrite)`, and
 `persistence.replace_staged(...)` are each a complete route past a bare-name scan. The
 publication-reach rule reads every mention of the identifier rather than only its imports, and
-follows both composite primitives: the one that reaches the helper without naming it, and the
-descriptor-relative variant that publishes without calling it at all. The staging scan reads the
-staged operand as well as the prefix, since a site can bind the after-image infix to a local
+follows the composite primitive that reaches the helper without naming it. The staging scan reads
+the staged operand as well as the prefix, since a site can bind the after-image infix to a local
 first, a shape the transaction module already uses. The producer scan also refuses a dataclass
 field copy, since `dataclasses.replace(rewrite, after=...)` mints a `Rewrite` carrying ungated
 bytes without ever naming the class, and refuses one whose keyword arrives unpacked, since a

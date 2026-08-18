@@ -39,6 +39,7 @@ from .error_types import (
     ReconcileInProgressError,
     ReconcilePersistenceError,
     copy_exception_notes,
+    exception_details,
 )
 from .path_utils import safe_resolve
 from .persistence import (
@@ -641,24 +642,17 @@ def _recovery_operation_error(
     path: Path,
     journal: Path,
     journal_bytes: bytes,
-    cause: object,
+    cause: BaseException,
 ) -> ReconcilePersistenceError:
     """Build a retryable recovery operation diagnostic."""
     journal_status = _journal_retry_status(journal, journal_bytes)
-    cause_details = _cause_details(cause)
+    cause_details = exception_details(cause)
     message = (
         f"reconcile recovery failed while {operation} {path}: {cause_details}; "
         f"{journal_status}; correct the filesystem problem and rerun "
         "'doc-lattice reconcile --recover'"
     )
     return ReconcilePersistenceError(message)
-
-
-def _cause_details(cause: object) -> str:
-    """Render an operation cause plus diagnostic notes into top-level text."""
-    details = [str(cause)]
-    details.extend(str(note) for note in getattr(cause, "__notes__", ()))
-    return "; ".join(details)
 
 
 def _exact_journal_status(journal: Path, journal_bytes: bytes) -> tuple[_JournalStatus, str]:
@@ -1326,7 +1320,7 @@ def _prepare_transaction(
         else:
             message = (
                 f"reconcile preparation failed while {operation} {operation_path}: "
-                f"{_cause_details(primary)}; no destination was changed"
+                f"{exception_details(primary)}; no destination was changed"
             )
         error = ReconcilePersistenceError(message)
         copy_exception_notes(error, primary)
@@ -1348,7 +1342,7 @@ def _commit_operation_error(
 ) -> ReconcilePersistenceError:
     """Wrap one commit I/O failure with its operation and destination."""
     error = ReconcilePersistenceError(
-        f"reconcile commit failed while {operation} {path}: {_cause_details(cause)}"
+        f"reconcile commit failed while {operation} {path}: {exception_details(cause)}"
     )
     copy_exception_notes(error, cause)
     return error
@@ -1395,8 +1389,8 @@ def _abort_prepared(
             f"{primary}; rollback failed: {rollback_error}; recovery artifacts remain; "
             "run 'doc-lattice reconcile --recover'"
         )
-        error.add_note(f"original commit failure: {_cause_details(primary)}")
-        error.add_note(f"rollback failure: {_cause_details(rollback_error)}")
+        error.add_note(f"original commit failure: {exception_details(primary)}")
+        error.add_note(f"rollback failure: {exception_details(rollback_error)}")
         raise error from primary
     if outcome.unresolved:
         destinations = ", ".join(str(destination) for destination in outcome.unresolved)
@@ -1479,8 +1473,8 @@ def _abort_failed_marker(
             "preserve the journal and staged evidence, then run "
             "'doc-lattice reconcile --recover'"
         )
-        error.add_note(f"original marker failure: {_cause_details(primary)}")
-        error.add_note(f"journal reset failure: {_cause_details(reset_error)}")
+        error.add_note(f"original marker failure: {exception_details(primary)}")
+        error.add_note(f"journal reset failure: {exception_details(reset_error)}")
         raise error from primary
     _abort_prepared(prepared, primary, candidates=candidates)
 
