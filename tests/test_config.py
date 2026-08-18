@@ -348,6 +348,11 @@ def test_malformed_config_yaml_raises_config_error(tmp_path: Path):
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
     assert "cannot parse config" in str(exc.value)
+    # This is the one boundary whose acceptance still depends on the environment, so the message
+    # names the implementation that read the file. Naming the request instead would print the
+    # same word on both `yaml-compatibility` legs and tell the two apart no better than silence.
+    expected = "pure" if config_module._LOADER.running_pure else "ruamel.yaml.clib"
+    assert f"YAML parser: {expected}" in str(exc.value)
 
 
 def test_config_with_an_unconstructible_tagged_scalar_raises_config_error(tmp_path: Path):

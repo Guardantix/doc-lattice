@@ -176,8 +176,11 @@ def _read_yaml(path: Path) -> object:
     except YAML_LOAD_ERRORS as exc:
         # The parser is named because this boundary is the one whose acceptance still depends on
         # the environment, so "it loads for me and fails for my teammate" is a reachable state
-        # and nothing else at runtime reveals which parser ran.
-        msg = f"cannot parse config {path} (YAML parser: {_LOADER.parser}): {exc}"
+        # and nothing else at runtime reveals which parser ran. What is named is the parser in
+        # hand rather than `_LOADER.parser`: the request reads "platform-default" in both
+        # environments, so printing it would tell the two apart no better than printing nothing.
+        parser = "pure" if _LOADER.running_pure else "ruamel.yaml.clib"
+        msg = f"cannot parse config {path} (YAML parser: {parser}): {exc}"
         raise ConfigError(msg) from exc
     return data if data is not None else {}
 

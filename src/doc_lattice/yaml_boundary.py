@@ -40,6 +40,7 @@ from typing import Any
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+from ruamel.yaml.parser import Parser as PureParser
 
 from .constants import YamlParser
 
@@ -82,7 +83,8 @@ class SafeYamlLoader:
                 acceptance environment dependent in the first place. Note that
                 "platform-default" describes the request, not the outcome: without the
                 accelerator installed ruamel uses the pure parser anyway, and `YAML.pure` on the
-                loader below reports what was asked for rather than what is running.
+                loader below reports what was asked for rather than what is running. Read
+                `running_pure` for the implementation actually in hand.
         """
         self._parser = parser
         self._yaml = self._build()
@@ -91,6 +93,22 @@ class SafeYamlLoader:
     def parser(self) -> YamlParser:
         """Return the parser implementation this instance was built to require."""
         return self._parser
+
+    @property
+    def running_pure(self) -> bool:
+        """Report whether the loader in hand is really ruamel's pure Python parser.
+
+        ``parser`` records what a boundary asked for, and "platform-default" reads the same in
+        both environments, so it cannot answer which implementation actually saw a document.
+        ruamel resolves that at construction and records it on the loader, so this reads the
+        answer off the instance rather than off the request. A diagnostic that exists to tell
+        two environments apart has to report this one.
+
+        Returns:
+            True when the underlying loader parses in pure Python, False when the optional
+            `ruamel.yaml.clib` accelerator supplied its parser instead.
+        """
+        return self._yaml.Parser is PureParser
 
     def _build(self) -> YAML:
         """Return a safe loader on this instance's chosen parser implementation."""

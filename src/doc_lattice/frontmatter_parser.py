@@ -181,12 +181,18 @@ def _load_recording_reused_anchors(raw_meta: str) -> tuple[Any, bool]:
     inside ruamel: it names no document, and the load it comes from does not run at all on a
     warm cache. AD-29 requires a diagnostic a load emits to be derivable from a cache entry and
     rendered at one shared site, so the fact is returned as data and ``orchestrate`` reports it.
-    Every other captured warning is re-emitted at its original location, so nothing but this one
-    category is intercepted.
+    Every other captured warning raised by a load that returns is re-emitted at its original
+    location, so nothing but this one category is intercepted. A load that raises takes any
+    warning it had already emitted down with it, since the caller translates the failure into an
+    error naming the document and re-emitting from the unwinding path could replace that error
+    with an escalated warning.
 
     ``catch_warnings`` mutates process-global filter state and is not thread-safe. This engine
     is single-threaded, and a warning escalated to an error by the caller's filters still
-    escalates, on re-emission below rather than mid-parse.
+    escalates, on re-emission below rather than mid-parse. Entering and leaving it also
+    invalidates every ``__warningregistry__``, so another warning ruamel raises for many
+    documents is re-emitted once per document rather than deduplicated to the first. Handing
+    ``warn_explicit`` a registry does not restore that: the same invalidation clears it.
 
     Args:
         raw_meta: The YAML frontmatter text to load.

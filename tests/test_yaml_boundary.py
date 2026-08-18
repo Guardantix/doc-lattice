@@ -26,6 +26,14 @@ def test_a_loader_records_the_parser_implementation_it_was_asked_for():
     assert SafeYamlLoader(parser="pure")._yaml.pure is True
 
 
+def test_a_loader_reports_the_parser_implementation_actually_in_hand():
+    # `parser` is the request and reads "platform-default" in both environments, so it cannot
+    # tell a `ConfigError` raised under the accelerator from one raised without it. `config`
+    # names this instead. Only the pure arm is asserted unconditionally: what the platform
+    # default resolves to is exactly what the `yaml-compatibility` legs vary.
+    assert SafeYamlLoader(parser="pure").running_pure is True
+
+
 def test_the_parser_implementation_has_no_default():
     # An unstated choice is the defect this argument exists to remove: it resolved to whichever
     # parser the surrounding environment happened to supply. A caller that forgets to choose
