@@ -1821,7 +1821,7 @@ def alias_and_merge_documents(draw) -> Document:
 
     The reused-anchor shape used to move between this pool and the family 2c safe-outcome
     union depending on which parser the strict boundary happened to be running. The strict
-    boundary now pins the pure parser (AD-31), so the shape is strictly loadable on every leg
+    boundary now pins the pure parser (AD-33), so the shape is strictly loadable on every leg
     and belongs here unconditionally.
     """
     builders = {
@@ -2850,7 +2850,7 @@ def _recovery_shapes() -> tuple[RecoveryShape, ...]:
 
     Every shape here is reread-only on every leg. A reused anchor name used to join this pool
     wherever the optional accelerator made the strict boundary refuse it; the strict boundary
-    now pins the pure parser (AD-31), so that shape is strictly loadable everywhere and family
+    now pins the pure parser (AD-33), so that shape is strictly loadable everywhere and family
     1 owns it outright.
 
     Every shape here but one models the footprint of its update member by member rather than

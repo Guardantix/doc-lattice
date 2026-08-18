@@ -12,9 +12,11 @@ from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
-# Deliberately not pinned to the pure parser, unlike the frontmatter boundary. Config parsing
-# has no declared spelling subset and no user-visible verdict riding on which parser reads it,
-# so it keeps ruamel's own default and its semantics are unchanged by that pin.
+# Deliberately not pinned to the pure parser, unlike the frontmatter boundary. Config has no
+# declared spelling subset, and no rewriter reads it back, so the two parsers disagreeing about
+# it costs a config author one clear error rather than changing which documents the lattice
+# holds. Whether a given config loads is still environment dependent, which AD-33 records as
+# the scope it deliberately left alone rather than as a property this boundary has.
 _LOADER = SafeYamlLoader(pure=False)
 
 # A cache_key is one safe path segment: it must start with an alphanumeric (rejecting ".",

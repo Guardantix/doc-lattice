@@ -539,7 +539,7 @@ instances despite that, because they consume only loaded values and never a sour
 needing a mark is not the same as not needing a parser choice, though, and treating the two as one
 question is what let a tracked-document verdict depend on the environment: `SafeYamlLoader` takes
 the implementation as a required argument, `frontmatter_parser.py` asks for the pure one under
-AD-32 so its accepted document set is fixed, and `config.py` asks for the default one. Those
+AD-33 so its accepted document set is fixed, and `config.py` asks for the default one. Those
 mechanics are owned by `yaml_boundary.py`: its `SafeYamlLoader` performs the reset, and its
 `YAML_LOAD_ERRORS` names the failure family both of those modules and `reconcile.py` catch.
 Each caller still constructs its own `SafeYamlLoader`, so the sharing stays within a module rather
@@ -887,7 +887,7 @@ loader switches to the optional `ruamel.yaml.clib` accelerator wherever it is in
 composer refuses a reused name outright as a duplicate anchor, so the strict tracked-document load
 accepted the spelling in one environment and refused it in another while the reread inside
 `apply_reconcile`, pure by AD-26, handled it in both. The strict load now asks for the pure parser
-explicitly, which settles the spelling as supported rather than parser-conditional; AD-32 records
+explicitly, which settles the spelling as supported rather than parser-conditional; AD-33 records
 that decision and the alternative it was chosen over.
 
 **Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
@@ -1036,7 +1036,7 @@ MANAGED_CI.md owns and CHANGELOG.md announces. Removing the commands is a breaki
 published CLI surface and therefore a major version.
 AD-16's environment boundary survives this record intact; only its generator side retired.
 
-### AD-32: The strict frontmatter load pins the pure Python parser
+### AD-33: The strict frontmatter load pins the pure Python parser
 
 **Date:** 2026-08-18
 **Status:** Accepted
@@ -1058,8 +1058,12 @@ no default, and applies it at every construction, including the replacement `loa
 `%YAML` directive forces the reset. `frontmatter_parser.py` asks for the pure Python parser, so
 the set of documents that count as tracked is fixed by this project rather than by an adopter's
 environment. `config.py` asks for the default, deliberately: config has no declared spelling subset
-and no user-visible verdict riding on which parser reads it, so this record leaves its semantics
-alone rather than widening the change to a second boundary that did not need it.
+and no rewriter reading it back, so a parser disagreement there costs a config author one clear
+error rather than changing which documents the lattice holds, and this record leaves its semantics
+alone rather than widening the change to a second boundary that did not need it. That is a scope
+choice, not a claim that config is parser independent: a `.doc-lattice.yml` defining one anchor
+name twice is still a `ConfigError` wherever the accelerator is installed and loads cleanly
+wherever it is not.
 
 Reused anchor names are therefore supported, not refused. YAML 1.2.2 permits a non-unique anchor
 name and resolves an alias to the most recent preceding definition, `reconcile.py` already
@@ -1080,7 +1084,15 @@ report what a document says.
 **Consequences:** Which files count as tracked is user-visible, so this is a breaking change and
 lands in a major. An adopter running with the accelerator installed sees a document that used to
 fail the load become a tracked node, which can add edges to a report and change a `check` exit
-code; an adopter without it sees nothing change at all. The strict load gives up the accelerator's
+code; an adopter without it sees nothing change at all. The reused anchor name is not the only
+spelling that moves there. A `%YAML` directive, which layer 2a declares supported alongside a
+document start that does not strip to `---`, took no effect at all under the accelerator, so a
+block heading itself `%YAML 1.1` resolved under 1.2 on the strict read while the reread inside
+`apply_reconcile` resolved it under 1.1. Pinning the parser settles that disagreement in the
+reread's favor, and settling it is user-visible in both directions: `id: on` under a declared 1.1
+now resolves to a boolean and fails validation where it used to be the string `on` and made a
+tracked node. Every such document was already being reread under 1.1, so the alternative was
+leaving the two reads disagreeing about the same bytes. The strict load gives up the accelerator's
 speed on frontmatter, which is a per-document cost on a parse of a block that is small by
 construction. The `yaml-compatibility` matrix keeps both `clib` legs, and they now assert the same
 verdict rather than two: the capability probe and the conditional corpus routing in

@@ -354,7 +354,7 @@ def test_safe_yaml_loader_resets_version_after_malformed_frontmatter():
 
 # A frontmatter block defining one anchor name twice. Every alias reads the nearest definition
 # above it, so `*target` rebinds to the second `&target` and the third entry's ref is "second".
-# The strict load is pinned to the pure Python parser (AD-31), so this block is tracked whether
+# The strict load is pinned to the pure Python parser (AD-33), so this block is tracked whether
 # or not the optional `ruamel.yaml.clib` accelerator is installed; the `yaml-compatibility` CI
 # leg runs both answers and neither one is skipped or routed around here.
 REUSED_ANCHOR_FRONTMATTER = (
@@ -372,6 +372,22 @@ def test_parse_meta_tracks_a_reused_anchor_name_under_either_installed_parser():
     assert parsed.disposition == "tracked"
     assert parsed.meta is not None
     assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]
+
+
+def test_parse_meta_resolves_a_block_under_the_yaml_version_it_declares():
+    # The other spelling the pure pin settles. AD-31 layer 2a declares a `%YAML` directive
+    # supported alongside a document start that does not strip to `---`, and the reread inside
+    # `apply_reconcile` has always honored it, but the C parser ignored the directive outright,
+    # so the strict read resolved the block under 1.2 wherever the accelerator was installed.
+    # Under 1.1 an unquoted `on` is a boolean, so the two reads disagreed about the same bytes.
+    quoted = parse_meta("%YAML 1.1\n--- !!map\nid: 'on'\n", Path("quoted.md"))
+    assert quoted.meta is not None
+    assert quoted.meta.id == "on"
+
+    # The same block unquoted resolves to a boolean and fails validation, which is the
+    # user-visible half of settling the disagreement and is why CHANGELOG.md calls it out.
+    with pytest.raises(ConfigError):
+        parse_meta("%YAML 1.1\n--- !!map\nid: on\n", Path("directive.md"))
 
 
 def test_parse_meta_tracks_a_reused_anchor_name_after_a_directive_reset():

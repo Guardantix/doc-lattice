@@ -23,7 +23,7 @@ _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening 
 # so leaving the choice to ruamel made a document's tracked status depend on whether the
 # optional `ruamel.yaml.clib` accelerator happened to be installed alongside this engine: an
 # anchor name defined twice was accepted and rebound without it and refused as a duplicate with
-# it. AD-32 settles that spelling as supported, so the parser that supports it is the one this
+# it. AD-33 settles that spelling as supported, so the parser that supports it is the one this
 # boundary asks for, in every environment; AD-31 layer 2 carries the accepted set itself.
 _LOADER = SafeYamlLoader(pure=True)
 # The two node-free outcomes are immutable and carry no per-file state, so they are shared.

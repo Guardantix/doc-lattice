@@ -16,7 +16,7 @@ BOTH_PARSERS = pytest.mark.parametrize("pure", [True, False])
 def test_a_loader_records_the_parser_implementation_it_was_asked_for():
     # Parser choice is explicit at every construction rather than left to whether the optional
     # `ruamel.yaml.clib` accelerator happens to be installed. `frontmatter_parser` asks for the
-    # pure one so a tracked-document verdict is the same in both environments (AD-31); `config`
+    # pure one so a tracked-document verdict is the same in both environments (AD-33); `config`
     # keeps the default, whose semantics that pin deliberately leaves alone.
     assert SafeYamlLoader(pure=True)._yaml.pure is True
     assert SafeYamlLoader(pure=False)._yaml.pure is False

@@ -47,9 +47,14 @@ The fifth is the one to check only if you run doc-lattice in an environment that
 `ruamel.yaml.clib` accelerator installed, which no lock of this project produces but another
 package may pull in. A frontmatter block defining one anchor name twice used to fail the load
 there, and now loads: the document becomes a tracked node, so it can contribute edges to a report
-and change a `check` exit code. Nothing else about it changes, and there is nothing to edit. If you
-were relying on that failure to keep a document out of the lattice, exclude it with `ignore_globs`
-or drop its `id` instead. An environment without the accelerator, which is what every lock of this
+and change a `check` exit code. If you were relying on that failure to keep a document out of the
+lattice, exclude it with `ignore_globs` or drop its `id` instead. A frontmatter block that declares
+its own `%YAML` version moves too, and in the other direction: the accelerator ignored the
+directive outright, so such a block was read under YAML 1.2 no matter what it declared, and it is
+now read under the version it declares, exactly as `reconcile` has always reread it. Under a
+declared `1.1` an unquoted `on`, `off`, `yes`, or `no` is a boolean rather than a string, so
+`id: on` becomes an invalid-frontmatter error instead of a node named `on`; quote the scalar to
+keep the old value. An environment without the accelerator, which is what every lock of this
 project produces, sees no change at all.
 
 ### Added
@@ -175,8 +180,11 @@ project produces, sees no change at all.
   tracked is fixed here rather than by an adopter's environment. Reused anchor names are supported
   rather than refused, which is what YAML 1.2.2 specifies and what the reconcile rewriter already
   implemented, and the `ReusedAnchorWarning` ruamel raises about one is preserved rather than
-  suppressed or translated. Config parsing is deliberately unchanged and still takes ruamel's
-  default. See AD-32.
+  suppressed or translated. A declared `%YAML` version now takes effect on the strict read as
+  well, since the C parser ignored the directive entirely, which is the same resolution
+  `reconcile` has always reread such a block under. Config parsing is deliberately unchanged and
+  still takes ruamel's default. See
+  [AD-33](ARCHITECTURE.md#ad-33-the-strict-frontmatter-load-pins-the-pure-python-parser).
 
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a

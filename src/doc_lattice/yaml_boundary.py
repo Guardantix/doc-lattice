@@ -1,17 +1,18 @@
 """Boundary module: the ruamel safe-load mechanics the value-consuming YAML entry points share.
 
 `frontmatter_parser` and `config` each read user-authored YAML through a reusable safe
-loader, and `reconcile` catches the same failure family without loading through one. Three
-things are genuinely shared: which exceptions a safe load can raise, the directive state a
-reused loader has to clear before each document, and which parser implementation a loader
-runs on. All of them live here so one module owns them.
+loader, and `reconcile` catches the same failure family without loading through one. Two
+things are genuinely shared: which exceptions a safe load can raise, and the directive state
+a reused loader has to clear before each document. Both live here so one module owns them.
+Parser implementation is not shared but is stated here, because the mechanism that applies a
+caller's choice to every loader it builds is this module's to own.
 
 Parser choice is a required argument rather than a default, because leaving it to ruamel
 leaves it to the environment: a plain safe loader switches to the C parser the moment the
 optional `ruamel.yaml.clib` accelerator is installed, which any other package in a user's
 environment may pull in. The two parsers do not accept the same documents, so an unstated
 choice made whether a file counted as tracked depend on what else was installed alongside
-this engine (AD-32). Each caller now states which parser its own contract needs:
+this engine (AD-33). Each caller now states which parser its own contract needs:
 `frontmatter_parser` asks for the pure Python one so a tracked-document verdict is the same
 in both environments, and `config` asks for the default one, whose semantics that pin
 deliberately leaves alone.
