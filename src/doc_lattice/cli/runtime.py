@@ -1,13 +1,16 @@
 """Immutable per-invocation state for command-line adapters."""
 
 import os
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TextIO
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from ..config import ProjectConfig, load_config
 from ..model import Lattice
@@ -74,11 +77,59 @@ class CliRuntime:
         Returns:
             The loaded lattice.
         """
-        return self.load_lattice(
-            project,
-            require_verified=require_verified,
-            persist_cache=persist_cache,
-        )
+        with self._rendered_warnings():
+            return self.load_lattice(
+                project,
+                require_verified=require_verified,
+                persist_cache=persist_cache,
+            )
+
+    @contextmanager
+    def _rendered_warnings(self) -> Iterator[None]:
+        """Render warnings displayed inside the block through this invocation's stderr.
+
+        Python applies its filters before the replaceable ``showwarning`` stage, so
+        substituting only that stage keeps ``PYTHONWARNINGS``, category matching, and
+        repeat suppression owned by the engine while the presentation matches AD-9's
+        stderr voice. ``warnings.showwarning`` is process-global, so the previous
+        callable is restored on both the normal and the exception path.
+
+        Yields:
+            Control to the wrapped load.
+        """
+        previous = warnings.showwarning
+        # typeshed declares `showwarning` with `def`, so ty types the attribute as that one
+        # function rather than as a callable; substituting the stage is the documented use.
+        warnings.showwarning = self._show_warning  # ty: ignore[invalid-assignment]
+        try:
+            yield
+        finally:
+            warnings.showwarning = previous
+
+    def _show_warning(  # noqa: PLR0913 (signature is `warnings.showwarning`'s, not ours)
+        self,
+        message: Warning | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file: TextIO | None = None,
+        line: str | None = None,
+    ) -> None:
+        """Write one displayed warning as a ``warning: <message>`` diagnostic.
+
+        Category, filename, line number, and source line are discarded deliberately: a
+        skip is reported to a user, not to a maintainer of this package.
+
+        Args:
+            message: Warning instance or message text Python is displaying.
+            category: Warning category, unused by this presentation.
+            filename: Raising file, unused by this presentation.
+            lineno: Raising line, unused by this presentation.
+            file: Stream Python would have written to, unused by this presentation.
+            line: Raising source line, unused by this presentation.
+        """
+        del category, filename, lineno, file, line
+        self.stderr.print(f"[yellow]warning[/yellow]: {escape(str(message))}", soft_wrap=True)
 
     def write_stdout(self, text: str, *, newline: bool = True) -> None:
         """Write exact text to the captured stdout stream.

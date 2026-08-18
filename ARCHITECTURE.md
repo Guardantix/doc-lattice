@@ -654,21 +654,29 @@ stores that disposition as a required `Entry` field, so a hit replays what the m
 into the silent skip. What is stored is the kind, never the rendered message: a cache slot is
 shared across worktrees, so the text is rendered per run from the path that run discovered.
 Every load path (cache-free, cache-miss, and cache-hit) reports through one function in
-`orchestrate.py` at the default `stacklevel`, because Python renders a warning with its raising
-location and filters repeats by it, so a second call site would change both the line a user sees
-and when it is shown.
-Reporting it as a Python warning rather than through the per-invocation `CliRuntime.stderr` that
-AD-9 makes the owner of CLI diagnostics is deliberate, and it is the one place a diagnostic leaves
-that boundary. The reason is that a skip is the only diagnostic here a user may legitimately want
-to suppress on an otherwise healthy corpus, and `warnings` is the standard, already-documented
-suppression mechanism; `cli/errors.py` has no equivalent. The costs are real and were measured
-rather than assumed: the warning is invisible to an in-process `CliRunner` invocation, which is why
-its CLI coverage shells out to a subprocess; `--no-color` and `NO_COLOR` do not reach it, and its
-rendered form exposes this module's own source location; and under `PYTHONWARNINGS=error` it
-escapes the entry point's `ProjectError` mapping entirely, printing a traceback and exiting 1, the
-code otherwise reserved for drift. That last one is why the exit-status guarantee below is stated
-for ordinary warning configuration. Moving the report back inside AD-9's boundary would fix all
-three but forfeit `PYTHONWARNINGS` suppression, so it is a real trade rather than an oversight.
+`orchestrate.py` at the default `stacklevel`, because Python filters repeats by a warning's
+raising location, so a second call site would change when the warning is shown.
+Raising it through `warnings` rather than calling the per-invocation `CliRuntime.stderr` that
+AD-9 makes the owner of CLI diagnostics is deliberate, and it is the one place an engine
+diagnostic is emitted outside that boundary. The reason is that a skip is the only diagnostic
+here a user may legitimately want to suppress on an otherwise healthy corpus, and `warnings` is
+the standard, already-documented suppression mechanism; `cli/errors.py` has no equivalent.
+Presentation is nevertheless AD-9's, because the two are separable: Python decides whether to
+ignore, display, or raise a warning before it reaches the replaceable `showwarning` stage, so
+`CliRuntime.lattice()` substitutes only that stage for the duration of the load it wraps. It
+renders `warning: <message>` through the invocation's stderr `Console`, discarding the category,
+filename, line number, and source line Python's default formatter would have shown, and restores
+the previous callable in a `finally` on both the normal and the exception path. Filtering,
+category matching, and repeat suppression stay engine-owned and unreimplemented, and a library
+consumer calling `load_lattice()` directly is untouched. Routing the three `warnings.warn` sites
+through the stderr renderer instead would have forfeited that filtering, which README documents.
+Two costs survive. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
+`ProjectError` mapping entirely, printing a traceback and exiting 1, the code otherwise reserved
+for drift: it is raised before `showwarning` is consulted, so no hook can reach it, and that is
+why the exit-status guarantee below is stated for ordinary warning configuration. And
+`warnings.showwarning` is process-global, so scoping the substitution to one synchronous load
+narrows but cannot eliminate the window in which another thread's warning renders through this
+invocation's stderr.
 
 **Consequences:** A typo'd `id` is a tool error naming the file, and unrecognized frontmatter is a
 named skip rather than a silent one, at the cost of a new warning for corpora carrying non-lattice

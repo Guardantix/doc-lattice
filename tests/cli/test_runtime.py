@@ -1,16 +1,18 @@
 """Tests for per-invocation CLI runtime state."""
 
 import sys
+import warnings
 from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
+import pytest
 import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice.cli.application import create_app
-from doc_lattice.cli.runtime import CliRuntime, default_runtime, get_runtime
+from doc_lattice.cli.runtime import CliRuntime, LatticeLoader, default_runtime, get_runtime
 from doc_lattice.config import Config, ProjectConfig
 from doc_lattice.model import Lattice
 
@@ -176,3 +178,115 @@ def test_no_color_suppresses_forced_ansi(lattice_dir: Path, monkeypatch):
     assert created[0] is not created[1]
     assert created[0].stdout.no_color is False
     assert created[1].stdout.no_color is True
+
+
+def _warning_runtime(stderr: StringIO, tmp_path: Path, load_lattice: LatticeLoader) -> CliRuntime:
+    """Build a runtime whose loader is the injected callable under test."""
+    return CliRuntime(
+        stdout=Console(file=StringIO()),
+        stderr=Console(file=stderr, stderr=True, no_color=True, color_system=None),
+        cwd=tmp_path,
+        load_config=lambda _config, _cwd: ProjectConfig(Config(), tmp_path, (tmp_path,)),
+        load_lattice=load_lattice,
+    )
+
+
+def test_lattice_renders_loader_warnings_through_the_invocation_stderr(tmp_path: Path):
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        warnings.warn("skipping /docs/thing.md: no 'id'", stacklevel=1)
+        return lattice
+
+    stderr = StringIO()
+    runtime = _warning_runtime(stderr, tmp_path, load_lattice)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        assert runtime.lattice(project) is lattice
+
+    assert stderr.getvalue() == "warning: skipping /docs/thing.md: no 'id'\n"
+
+
+def test_lattice_warning_renderer_escapes_rich_markup_in_the_message(tmp_path: Path):
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        warnings.warn("skipping [bold]docs/a.md[/bold]", stacklevel=1)
+        return lattice
+
+    stderr = StringIO()
+    runtime = _warning_runtime(stderr, tmp_path, load_lattice)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        runtime.lattice(project)
+
+    assert stderr.getvalue() == "warning: skipping [bold]docs/a.md[/bold]\n"
+
+
+def test_lattice_restores_the_previous_showwarning_after_a_normal_return(tmp_path: Path):
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+    seen: list[object] = []
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        seen.append(warnings.showwarning)
+        return lattice
+
+    runtime = _warning_runtime(StringIO(), tmp_path, load_lattice)
+
+    with warnings.catch_warnings():
+        sentinel = warnings.showwarning
+        runtime.lattice(project)
+        assert warnings.showwarning is sentinel
+
+    assert len(seen) == 1
+    assert seen[0] is not sentinel
+
+
+def test_lattice_restores_the_previous_showwarning_after_a_loader_exception(tmp_path: Path):
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    seen: list[object] = []
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        seen.append(warnings.showwarning)
+        msg = "loader blew up"
+        raise RuntimeError(msg)
+
+    runtime = _warning_runtime(StringIO(), tmp_path, load_lattice)
+
+    with warnings.catch_warnings():
+        sentinel = warnings.showwarning
+        with pytest.raises(RuntimeError, match="loader blew up"):
+            runtime.lattice(project)
+        assert warnings.showwarning is sentinel
+
+    assert len(seen) == 1
+    assert seen[0] is not sentinel

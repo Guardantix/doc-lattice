@@ -474,12 +474,14 @@ def _frontmatter_tiers(tmp_path: Path) -> dict[str, Path]:
 
 
 def _check_in(cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run ``check`` in a real subprocess, so warnings render to a real stderr.
+    """Run ``check`` end to end in a real interpreter.
 
-    pytest replaces ``showwarning`` for the duration of a test, so an in-process run records
-    the warning instead of writing it. Only a separate interpreter exercises the stderr a user
-    actually sees. ``PYTHONPATH`` carries the source tree because pytest's ``pythonpath``
-    setting only reaches the interpreter running the suite, not one this test spawns.
+    ``CliRuntime.lattice()`` renders warnings itself, so an in-process run can see them; a
+    separate interpreter is still what proves the two claims this file makes about them:
+    that interpreter-startup ``PYTHONWARNINGS`` handling reaches the load, and that the
+    bytes a user's stderr actually receives carry no category, package path, or source line.
+    ``PYTHONPATH`` carries the source tree because pytest's ``pythonpath`` setting only
+    reaches the interpreter running the suite, not one this test spawns.
     """
     return subprocess.run(
         [sys.executable, "-c", "from doc_lattice.cli import main; main()", "check"],
@@ -497,10 +499,29 @@ def test_check_reports_id_less_frontmatter_on_stderr_without_changing_its_exit(t
     completed = _check_in(tmp_path)
 
     assert completed.returncode == 0  # a skip is a warning, not a gate failure
-    assert f"skipping {paths['skillish']}" in completed.stderr
-    assert "declares no 'id', so it is not a lattice node" in completed.stderr
+    assert completed.stderr == (
+        f"warning: skipping {paths['skillish']}: its frontmatter declares no 'id', "
+        "so it is not a lattice node\n"
+    )
+    # The point of the hook: none of Python's default formatter reaches the user.
+    assert "UserWarning" not in completed.stderr
+    assert "orchestrate.py" not in completed.stderr
+    assert "warnings.warn" not in completed.stderr
     assert str(paths["prose"]) not in completed.stderr  # no opening fence stays silent
     assert str(paths["node"]) not in completed.stderr
+
+
+def test_check_warning_stays_filterable_through_pythonwarnings(tmp_path: Path):
+    # The hook is presentation only: Python applies its filters before ever reaching it.
+    _frontmatter_tiers(tmp_path)
+
+    silenced = _check_in(tmp_path, {"PYTHONWARNINGS": "ignore"})
+    prefixed = _check_in(tmp_path, {"PYTHONWARNINGS": "ignore:skipping"})
+
+    assert silenced.returncode == 0
+    assert silenced.stderr == ""
+    assert prefixed.returncode == 0
+    assert prefixed.stderr == ""
 
 
 def test_check_id_less_stderr_is_byte_identical_uncached_cold_and_warm(tmp_path: Path):

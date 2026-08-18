@@ -89,6 +89,18 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
 
 ### Changed
 
+- Warnings a command emits while loading now render in the CLI's own stderr voice, as
+  `warning: <message>`, instead of through Python's default formatter. A skip previously arrived
+  with an absolute path into this package, a `UserWarning` category, and the raising source line
+  ahead of the text, while every error in the same command rendered as one clean
+  `error: ... (CODE)` line. The id-less-frontmatter skip made that the routine sight rather than
+  an edge case. Filtering is unchanged and still documented in README: Python applies
+  `PYTHONWARNINGS` before the presentation stage this replaces, so `PYTHONWARNINGS=ignore` and the
+  `ignore:skipping` literal-prefix form behave exactly as before, as do category matching and
+  repeat suppression. The substitution is scoped to the load it wraps and restored afterwards on
+  both the normal and the failing path, so importing `doc_lattice` as a library still gets
+  standard `warnings` behavior. See
+  [AD-29](ARCHITECTURE.md#ad-29-a-skipped-files-reason-is-cached-data-and-is-reported-from-one-site).
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a
   crash could not tell when it was written, which doc-lattice wrote it, or what command produced
