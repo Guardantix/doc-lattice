@@ -4,6 +4,7 @@ import json
 import os
 import stat
 from dataclasses import FrozenInstanceError, dataclass
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -15,8 +16,10 @@ from doc_lattice.constants import (
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
+    RECONCILE_JOURNAL_LEGACY_VERSION,
     RECONCILE_JOURNAL_NAME,
     RECONCILE_JOURNAL_VERSION,
+    ReconcileSelectorMode,
 )
 from doc_lattice.error_types import (
     ProjectError,
@@ -26,9 +29,12 @@ from doc_lattice.error_types import (
 )
 from doc_lattice.reconcile import Rewrite
 from doc_lattice.reconcile_transaction import (
-    Journal,
     JournalEntry,
+    JournalProvenance,
+    JournalSelector,
     JournalState,
+    JournalV1,
+    JournalV2,
     RecoveryResult,
     ensure_dry_run_safe,
     reconcile_lock,
@@ -39,6 +45,43 @@ from doc_lattice.reconcile_transaction import (
 from doc_lattice.reconcile_transaction import (
     recover_transaction as _recover_transaction_unlocked,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+# A fixed provenance, so a journal these tests write is byte-stable and no assertion depends
+# on the wall clock. Production captures its own through datetime_utils.utc_now().
+FIXED_CREATED_AT = datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC)
+
+
+def _provenance(
+    *,
+    mode: ReconcileSelectorMode = "downstream",
+    downstream_id: str | None = "doc",
+    ref: str | None = None,
+    tool_version: str = "9.9.9",
+) -> JournalProvenance:
+    """Build a deterministic provenance block for a synthetic journal."""
+    return JournalProvenance(
+        created_at=FIXED_CREATED_AT,
+        tool_version=tool_version,
+        selector=JournalSelector(mode=mode, downstream_id=downstream_id, ref=ref),
+    )
+
+
+def _journal_text(
+    state: JournalState,
+    entries: tuple[JournalEntry, ...],
+    *,
+    provenance: JournalProvenance | None = None,
+) -> str:
+    """Render a v2 journal exactly as the engine publishes one."""
+    journal = JournalV2(
+        version=RECONCILE_JOURNAL_VERSION,
+        state=state,
+        provenance=provenance if provenance is not None else _provenance(),
+        entries=entries,
+    )
+    return reconcile_transaction._serialize_journal(journal).decode("utf-8")
 
 
 def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
@@ -104,16 +147,14 @@ def _write_synthetic_transaction(  # noqa: PLR0913
         after_path=after.relative_to(root).as_posix(),
         after_sha256=sha256(after_bytes).hexdigest(),
     )
-    journal.write_text(
-        Journal(version=RECONCILE_JOURNAL_VERSION, state=state, entries=(entry,)).model_dump_json(),
-        encoding="utf-8",
-    )
+    journal.write_text(_journal_text(state, (entry,)), encoding="utf-8")
     return SyntheticTransaction(destination, before, after, journal)
 
 
 def test_reconcile_constants_are_pinned():
     assert RECONCILE_JOURNAL_NAME == ".doc-lattice-reconcile.json"
-    assert RECONCILE_JOURNAL_VERSION == 1
+    assert RECONCILE_JOURNAL_VERSION == 2
+    assert RECONCILE_JOURNAL_LEGACY_VERSION == 1
     assert PERSISTENCE_TEMP_SUFFIX == ".tmp"
     assert RECONCILE_BEFORE_IMAGE_INFIX == ".doc-lattice-before."
     assert RECONCILE_AFTER_IMAGE_INFIX == ".doc-lattice-after."
@@ -524,9 +565,18 @@ def test_journal_models_are_frozen():
         after_path="docs/.doc.md.doc-lattice-after.after123.tmp",
         after_sha256="b" * 64,
     )
-    journal = Journal(version=RECONCILE_JOURNAL_VERSION, state="prepared", entries=(entry,))
+    journal = JournalV2(
+        version=RECONCILE_JOURNAL_VERSION,
+        state="prepared",
+        provenance=_provenance(),
+        entries=(entry,),
+    )
 
     assert journal.entries == (entry,)
+    with pytest.raises(ValidationError):
+        journal.provenance.tool_version = "0.0.0"
+    with pytest.raises(ValidationError):
+        journal.provenance.selector.mode = "all"
     with pytest.raises(ValidationError):
         entry.destination = "other.md"
 
@@ -555,7 +605,16 @@ def test_journal_entry_rejects_unknown_field_or_invalid_digest(field: str, value
 
 def test_journal_rejects_unknown_state():
     with pytest.raises(ValidationError):
-        Journal.model_validate({"version": 1, "state": "unknown", "entries": []})
+        JournalV1.model_validate({"version": 1, "state": "unknown", "entries": []})
+    with pytest.raises(ValidationError):
+        JournalV2.model_validate(
+            {
+                "version": 2,
+                "state": "unknown",
+                "provenance": _provenance().model_dump(mode="json"),
+                "entries": [],
+            }
+        )
 
 
 def test_recovery_result_is_frozen_and_slotted(tmp_path: Path):
@@ -1206,12 +1265,7 @@ def test_partial_rollback_keeps_only_the_stages_it_did_not_consume(tmp_path: Pat
             )
         )
     journal = tmp_path / RECONCILE_JOURNAL_NAME
-    journal.write_text(
-        Journal(
-            version=RECONCILE_JOURNAL_VERSION, state="prepared", entries=tuple(entries)
-        ).model_dump_json(),
-        encoding="utf-8",
-    )
+    journal.write_text(_journal_text("prepared", tuple(entries)), encoding="utf-8")
 
     result = recover_transaction(tmp_path)
 
@@ -1425,12 +1479,7 @@ def test_prepared_rollback_processes_destinations_in_reverse_order(tmp_path: Pat
             )
         )
     journal = tmp_path / RECONCILE_JOURNAL_NAME
-    journal.write_text(
-        Journal(
-            version=RECONCILE_JOURNAL_VERSION, state="prepared", entries=tuple(entries)
-        ).model_dump_json(),
-        encoding="utf-8",
-    )
+    journal.write_text(_journal_text("prepared", tuple(entries)), encoding="utf-8")
     real_replace = reconcile_transaction.replace_staged
     replacement_order: list[Path] = []
 
@@ -1936,7 +1985,13 @@ def _commit_rewrites_through_lock(
 ) -> None:
     """Run one commit through the required project-bound lock capability."""
     with reconcile_lock(project_root) as lock:
-        _commit_rewrites_unlocked(project_root, rewrites, write_paths, lock=lock)
+        _commit_rewrites_unlocked(
+            project_root,
+            rewrites,
+            write_paths,
+            selector=JournalSelector(mode="all", downstream_id=None, ref=None),
+            lock=lock,
+        )
 
 
 def test_lost_journal_create_race_reports_the_preflight_remediation(tmp_path: Path, monkeypatch):
@@ -1974,3 +2029,278 @@ def test_lost_journal_create_race_reports_the_preflight_remediation(tmp_path: Pa
     assert str(racing.value) == str(preflight.value)
     assert "already exists" in str(racing.value)
     assert destination.read_bytes() == b"old bytes"
+
+
+# --- Journal format: v2 provenance and v1 compatibility (GTX-126) ----------------------------
+
+
+def _write_legacy_transaction(root: Path, state: JournalState) -> SyntheticTransaction:
+    """Lay down the pinned v1 journal bytes plus the artifacts its entry names.
+
+    The journal comes from ``tests/fixtures/reconcile-journal-v1-*.json``, which holds bytes a
+    pre-v2 release actually wrote. It is never regenerated through the current serializer,
+    because bytes this release produced would prove nothing about reading the old format.
+    """
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "doc.md").write_bytes(b"after image\n")
+    (docs / ".doc.md.doc-lattice-before.before123.tmp").write_bytes(b"before image\n")
+    (docs / ".doc.md.doc-lattice-after.after123.tmp").write_bytes(b"after image\n")
+    journal = root / RECONCILE_JOURNAL_NAME
+    journal.write_bytes((FIXTURES / f"reconcile-journal-v1-{state}.json").read_bytes())
+    return SyntheticTransaction(
+        destination=docs / "doc.md",
+        before=docs / ".doc.md.doc-lattice-before.before123.tmp",
+        after=docs / ".doc.md.doc-lattice-after.after123.tmp",
+        journal=journal,
+    )
+
+
+def test_v2_journal_round_trips_through_the_canonical_serializer():
+    entry = JournalEntry(
+        destination="docs/doc.md",
+        before_path="docs/.doc.md.doc-lattice-before.before123.tmp",
+        before_sha256="a" * 64,
+        after_path="docs/.doc.md.doc-lattice-after.after123.tmp",
+        after_sha256="b" * 64,
+    )
+    provenance = _provenance(mode="downstream", downstream_id="pc-design", ref="up#x")
+    journal = JournalV2(
+        version=RECONCILE_JOURNAL_VERSION,
+        state="prepared",
+        provenance=provenance,
+        entries=(entry,),
+    )
+
+    encoded = reconcile_transaction._serialize_journal(journal)
+    loaded = reconcile_transaction._parse_journal(encoded.decode("utf-8"))
+
+    assert loaded.version == RECONCILE_JOURNAL_VERSION
+    assert loaded.state == "prepared"
+    assert loaded.entries == (entry,)
+    assert loaded.provenance == provenance
+    assert loaded.provenance is not None
+    assert loaded.provenance.created_at == FIXED_CREATED_AT
+    assert loaded.provenance.selector.downstream_id == "pc-design"
+    assert loaded.provenance.selector.ref == "up#x"
+
+
+def test_serialized_journal_is_pretty_printed_and_newline_terminated():
+    encoded = reconcile_transaction._serialize_journal(
+        JournalV2(
+            version=RECONCILE_JOURNAL_VERSION,
+            state="prepared",
+            provenance=_provenance(),
+            entries=(),
+        )
+    )
+    text = encoded.decode("utf-8")
+
+    assert text.endswith("}\n")
+    assert '\n  "version": 2,' in text
+    assert '\n    "tool_version":' in text
+    assert json.loads(text)["provenance"]["selector"]["mode"] == "downstream"
+
+
+@pytest.mark.parametrize(
+    ("mode", "downstream_id", "ref"),
+    [
+        ("all", None, None),
+        ("all", None, "up#x"),
+        ("downstream", "pc-design", None),
+        ("downstream", "pc-design", "up#x"),
+    ],
+)
+def test_journal_selector_captures_each_selector_form(
+    mode: ReconcileSelectorMode, downstream_id: str | None, ref: str | None
+):
+    selector = JournalSelector(mode=mode, downstream_id=downstream_id, ref=ref)
+
+    assert json.loads(selector.model_dump_json()) == {
+        "mode": mode,
+        "downstream_id": downstream_id,
+        "ref": ref,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mode", "downstream_id"),
+    [("downstream", None), ("downstream", ""), ("all", "pc-design")],
+)
+def test_journal_selector_rejects_a_mode_its_downstream_id_contradicts(
+    mode: ReconcileSelectorMode, downstream_id: str | None
+):
+    with pytest.raises(ValidationError):
+        JournalSelector(mode=mode, downstream_id=downstream_id, ref=None)
+
+
+def _v2_payload() -> dict:
+    """A minimal, valid v2 journal as plain data, for corruption parametrization."""
+    return json.loads(_journal_text("prepared", ()))
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        pytest.param(lambda p: p.pop("provenance"), id="provenance-absent"),
+        pytest.param(lambda p: p["provenance"].pop("created_at"), id="created-at-absent"),
+        pytest.param(lambda p: p["provenance"].pop("tool_version"), id="tool-version-absent"),
+        pytest.param(lambda p: p["provenance"].pop("selector"), id="selector-absent"),
+        pytest.param(
+            lambda p: p["provenance"]["selector"].pop("downstream_id"),
+            id="downstream-id-absent",
+        ),
+        pytest.param(lambda p: p["provenance"]["selector"].pop("ref"), id="ref-absent"),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="not a timestamp"),
+            id="created-at-malformed",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00"),
+            id="created-at-naive",
+        ),
+        pytest.param(lambda p: p["provenance"].update(tool_version=""), id="tool-version-empty"),
+        pytest.param(lambda p: p["provenance"].update(tool_version=4), id="tool-version-not-text"),
+        pytest.param(
+            lambda p: p["provenance"]["selector"].update(mode="everything"),
+            id="selector-mode-unknown",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(unexpected=True),
+            id="provenance-extra-key",
+        ),
+        pytest.param(
+            lambda p: p["provenance"]["selector"].update(unexpected=True),
+            id="selector-extra-key",
+        ),
+    ],
+)
+def test_v2_journal_with_missing_or_malformed_provenance_is_rejected(corrupt):
+    payload = _v2_payload()
+    corrupt(payload)
+
+    with pytest.raises(ValidationError):
+        reconcile_transaction._parse_journal(json.dumps(payload))
+
+
+def test_v2_provenance_is_never_filled_in_from_a_v1_shaped_journal():
+    """A v2 journal that lost its provenance must fail, not recover with blanks."""
+    payload = _v2_payload()
+    payload.pop("provenance")
+
+    with pytest.raises(ValidationError):
+        JournalV2.model_validate(payload)
+
+
+def test_v1_journal_still_parses_and_carries_no_provenance():
+    text = (FIXTURES / "reconcile-journal-v1-prepared.json").read_text(encoding="utf-8")
+
+    loaded = reconcile_transaction._parse_journal(text)
+
+    assert loaded.version == RECONCILE_JOURNAL_LEGACY_VERSION
+    assert loaded.state == "prepared"
+    assert loaded.provenance is None
+    assert loaded.entries[0].destination == "docs/doc.md"
+
+
+def test_v1_journal_bytes_are_rejected_by_the_v2_model():
+    """The reason version inspection has to run before validation, pinned as a test."""
+    text = (FIXTURES / "reconcile-journal-v1-prepared.json").read_text(encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        JournalV2.model_validate_json(text)
+
+
+def test_v2_journal_bytes_are_rejected_by_the_v1_model():
+    with pytest.raises(ValidationError):
+        JournalV1.model_validate_json(_journal_text("prepared", ()))
+
+
+def test_v1_prepared_journal_is_still_rolled_back_under_v2(tmp_path: Path):
+    transaction = _write_legacy_transaction(tmp_path, "prepared")
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "rolled_back"
+    assert result.restored == 1
+    assert transaction.destination.read_bytes() == b"before image\n"
+    assert not transaction.journal.exists()
+    assert not transaction.before.exists()
+    assert not transaction.after.exists()
+
+
+def test_v1_committed_journal_is_still_cleaned_up_under_v2(tmp_path: Path):
+    transaction = _write_legacy_transaction(tmp_path, "committed")
+
+    result = recover_transaction(tmp_path)
+
+    assert result.action == "cleaned_committed"
+    assert transaction.destination.read_bytes() == b"after image\n"
+    assert not transaction.journal.exists()
+    assert not transaction.before.exists()
+    assert not transaction.after.exists()
+
+
+def test_prepare_rejects_a_journal_whose_provenance_did_not_survive_serialization(
+    tmp_path: Path, monkeypatch
+):
+    """A serializer that dropped or rounded provenance must not reach commit unnoticed."""
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = Rewrite(
+        path=destination,
+        before=b"old bytes",
+        after=b"new bytes",
+        applied=frozenset({"up#x"}),
+    )
+
+    def _forget_the_selector_ref(journal: JournalV2) -> bytes:
+        stripped = journal.provenance.selector.model_copy(update={"ref": None})
+        rewritten = journal.model_copy(
+            update={"provenance": journal.provenance.model_copy(update={"selector": stripped})}
+        )
+        return f"{rewritten.model_dump_json(indent=2)}\n".encode()
+
+    monkeypatch.setattr(reconcile_transaction, "_serialize_journal", _forget_the_selector_ref)
+
+    with reconcile_lock(tmp_path) as lock, pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites_unlocked(
+            tmp_path,
+            [rewrite],
+            {destination: destination},
+            selector=JournalSelector(mode="downstream", downstream_id="doc", ref="up#x"),
+            lock=lock,
+        )
+
+    assert "did not preserve its provenance" in str(caught.value)
+    assert destination.read_bytes() == b"old bytes"
+
+
+@pytest.mark.parametrize("state", ["prepared", "committed"])
+def test_v1_fixtures_stay_byte_pinned(state: str):
+    """The v1 fixtures are evidence, not test data to regenerate.
+
+    They hold the exact bytes a pre-v2 release wrote, down to the compact separators and the
+    absent trailing newline. A formatter or a well-meaning refresh through the current
+    serializer would leave the compatibility tests running against bytes no version produced,
+    so the shape is asserted here rather than assumed.
+    """
+    encoded = (FIXTURES / f"reconcile-journal-v1-{state}.json").read_bytes()
+
+    assert encoded.startswith(b'{"version":1,"state":"%s","entries":[{' % state.encode())
+    assert encoded.endswith(b"}]}")
+    assert b"\n" not in encoded
+    assert b": " not in encoded
+    assert json.loads(encoded) == {
+        "version": 1,
+        "state": state,
+        "entries": [
+            {
+                "destination": "docs/doc.md",
+                "before_path": "docs/.doc.md.doc-lattice-before.before123.tmp",
+                "before_sha256": sha256(b"before image\n").hexdigest(),
+                "after_path": "docs/.doc.md.doc-lattice-after.after123.tmp",
+                "after_sha256": sha256(b"after image\n").hexdigest(),
+            }
+        ],
+    }

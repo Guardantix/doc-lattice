@@ -2,11 +2,12 @@
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from doc_lattice import persistence, reconcile_transaction
+from doc_lattice import __version__, persistence, reconcile_transaction
 from doc_lattice.constants import (
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_NAME,
@@ -18,8 +19,12 @@ from doc_lattice.error_types import (
     ReconcilePersistenceError,
 )
 from doc_lattice.reconcile import Rewrite
+from doc_lattice.reconcile_transaction import JournalSelector
 
 _UNLOCKED_COMMIT_REWRITES = reconcile_transaction.commit_rewrites
+
+# The lock-contract tests below never reach the journal, so they all record the same selector.
+_ANY_SELECTOR = JournalSelector(mode="all", downstream_id=None, ref=None)
 _UNLOCKED_RECOVER_TRANSACTION = reconcile_transaction.recover_transaction
 
 
@@ -27,6 +32,7 @@ def _commit_rewrites(
     project_root: Path,
     rewrites: list[Rewrite],
     write_paths: dict[Path, Path],
+    selector: JournalSelector | None = None,
 ) -> None:
     """Run a behavior test's commit through the required lock capability."""
     with reconcile_transaction.reconcile_lock(project_root) as lock:
@@ -34,6 +40,7 @@ def _commit_rewrites(
             project_root,
             rewrites,
             write_paths,
+            selector=selector or _ANY_SELECTOR,
             lock=lock,
         )
 
@@ -90,6 +97,7 @@ def test_commit_requires_a_valid_active_lock_before_mutation(tmp_path: Path):
             tmp_path,
             [rewrite],
             {destination: destination},
+            selector=_ANY_SELECTOR,
             lock=None,  # ty: ignore[invalid-argument-type] - deliberate misuse
         )
 
@@ -114,6 +122,7 @@ def test_commit_rejects_wrong_root_lock_before_mutation(tmp_path: Path):
             project_root,
             [rewrite],
             {destination: destination},
+            selector=_ANY_SELECTOR,
             lock=wrong_lock,
         )
 
@@ -138,6 +147,7 @@ def test_commit_rejects_replaced_root_directory_before_mutation(tmp_path: Path):
                 project_root,
                 [rewrite],
                 {destination: destination},
+                selector=_ANY_SELECTOR,
                 lock=stale_lock,
             )
 
@@ -158,6 +168,7 @@ def test_commit_rejects_released_lock_before_mutation(tmp_path: Path):
             tmp_path,
             [rewrite],
             {destination: destination},
+            selector=_ANY_SELECTOR,
             lock=released_lock,
         )
 
@@ -175,6 +186,7 @@ def test_commit_accepts_current_root_bound_lock(tmp_path: Path):
             tmp_path,
             [rewrite],
             {destination: destination},
+            selector=_ANY_SELECTOR,
             lock=lock,
         )
 
@@ -205,6 +217,7 @@ def test_commit_rejects_dangling_canonical_journal_before_staging(tmp_path: Path
             tmp_path,
             [rewrite],
             {destination: destination},
+            selector=_ANY_SELECTOR,
             lock=lock,
         )
 
@@ -242,6 +255,7 @@ def test_commit_rejects_same_capability_reentrant_recovery(tmp_path: Path, monke
             tmp_path,
             [rewrite],
             {destination: destination},
+            selector=_ANY_SELECTOR,
             lock=lock,
         )
 
@@ -394,7 +408,7 @@ def test_commit_journal_order_and_artifact_lifecycle(  # noqa: PLR0915
         _rewrite(second, b"old second", b"new second", "up#b"),
     ]
     events: list[str] = []
-    prepared_payload: dict[str, object] = {}
+    prepared_bytes: list[bytes] = []
     stage_calls: list[tuple[Path, bytes, str, Path]] = []
     real_file_sha256 = reconcile_transaction.file_sha256
     real_replace_staged = reconcile_transaction.replace_staged
@@ -409,7 +423,7 @@ def test_commit_journal_order_and_artifact_lifecycle(  # noqa: PLR0915
         assert path == tmp_path / RECONCILE_JOURNAL_NAME
         assert not path.exists()
         assert prefix == f"{RECONCILE_JOURNAL_NAME}."
-        prepared_payload.update(json.loads(data))
+        prepared_bytes.append(data)
         persistence.atomic_create_bytes(path, data, prefix=prefix)
         events.append("journal prepared")
 
@@ -452,6 +466,7 @@ def test_commit_journal_order_and_artifact_lifecycle(  # noqa: PLR0915
         tmp_path,
         rewrites,
         {first: first, second: second},
+        JournalSelector(mode="downstream", downstream_id="first", ref="up#a"),
     )
 
     assert events == [
@@ -471,9 +486,17 @@ def test_commit_journal_order_and_artifact_lifecycle(  # noqa: PLR0915
     ]
     assert len({call[3] for call in stage_calls}) == 4
     assert all(call[3].suffix == ".tmp" for call in stage_calls)
+    prepared_payload = json.loads(prepared_bytes[0])
+    created_at = prepared_payload["provenance"]["created_at"]
+    assert datetime.fromisoformat(created_at).tzinfo is not None
     assert prepared_payload == {
         "version": RECONCILE_JOURNAL_VERSION,
         "state": "prepared",
+        "provenance": {
+            "created_at": created_at,
+            "tool_version": __version__,
+            "selector": {"mode": "downstream", "downstream_id": "first", "ref": "up#a"},
+        },
         "entries": [
             {
                 "destination": "docs/first.md",
@@ -1738,3 +1761,107 @@ def test_cleanup_failure_after_durable_commit_never_rolls_back_and_recovery_fini
     assert result.action == "cleaned_committed"
     assert destination.read_bytes() == b"new bytes"
     _assert_no_transaction_artifacts(tmp_path)
+
+
+# --- Journal provenance forwarding (GTX-126) --------------------------------------------------
+
+
+def _capture_journal_publications(monkeypatch) -> dict[str, bytes]:
+    """Record the exact bytes each journal publication wrote, keyed by journal state."""
+    published: dict[str, bytes] = {}
+    real_create = persistence.atomic_create_bytes
+    real_replace = persistence.atomic_replace_bytes
+
+    def _create(path: Path, data: bytes, *, prefix: str) -> None:
+        published["prepared"] = data
+        real_create(path, data, prefix=prefix)
+
+    def _replace(path: Path, data: bytes, *, prefix: str) -> None:
+        published["committed"] = data
+        real_replace(path, data, prefix=prefix)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _create)
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _replace, raising=False)
+    return published
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        JournalSelector(mode="all", downstream_id=None, ref=None),
+        JournalSelector(mode="all", downstream_id=None, ref="up#x"),
+        JournalSelector(mode="downstream", downstream_id="pc-design", ref=None),
+        JournalSelector(mode="downstream", downstream_id="pc-design", ref="up#x"),
+    ],
+    ids=["all", "all-ref", "downstream", "downstream-ref"],
+)
+def test_committed_marker_carries_the_prepared_provenance_verbatim(
+    tmp_path: Path, monkeypatch, selector: JournalSelector
+):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    published = _capture_journal_publications(monkeypatch)
+
+    _commit_rewrites(
+        tmp_path,
+        [_rewrite(destination, b"old bytes", b"new bytes", "up#x")],
+        {destination: destination},
+        selector,
+    )
+
+    prepared = json.loads(published["prepared"])
+    committed = json.loads(published["committed"])
+
+    assert prepared["state"] == "prepared"
+    assert committed["state"] == "committed"
+    # Copied, never re-captured: a crash journal must not disagree with itself about when
+    # the transaction ran or what selected it.
+    assert committed["provenance"] == prepared["provenance"]
+    assert committed["provenance"]["selector"] == json.loads(selector.model_dump_json())
+    assert committed["provenance"]["tool_version"] == __version__
+    assert committed["entries"] == prepared["entries"]
+    assert destination.read_bytes() == b"new bytes"
+
+
+def test_only_version_two_is_ever_written(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    published = _capture_journal_publications(monkeypatch)
+
+    _commit_rewrites(
+        tmp_path,
+        [_rewrite(destination, b"old bytes", b"new bytes", "up#x")],
+        {destination: destination},
+    )
+
+    assert [json.loads(payload)["version"] for payload in published.values()] == [
+        RECONCILE_JOURNAL_VERSION,
+        RECONCILE_JOURNAL_VERSION,
+    ]
+
+
+def test_prepared_and_committed_bytes_come_from_one_serializer(tmp_path: Path, monkeypatch):
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    published = _capture_journal_publications(monkeypatch)
+    real_serialize = reconcile_transaction._serialize_journal
+    serialized: list[bytes] = []
+
+    def _record(journal) -> bytes:
+        rendered = real_serialize(journal)
+        serialized.append(rendered)
+        return rendered
+
+    monkeypatch.setattr(reconcile_transaction, "_serialize_journal", _record)
+
+    _commit_rewrites(
+        tmp_path,
+        [_rewrite(destination, b"old bytes", b"new bytes", "up#x")],
+        {destination: destination},
+    )
+
+    assert serialized == [published["prepared"], published["committed"]]
+    for payload in published.values():
+        text = payload.decode("utf-8")
+        assert text.endswith("}\n")
+        assert '\n  "provenance": {' in text

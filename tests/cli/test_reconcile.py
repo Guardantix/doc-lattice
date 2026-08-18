@@ -5,6 +5,7 @@ import os
 import shutil
 import stat
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -17,9 +18,12 @@ from doc_lattice.cli import app
 from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
 from doc_lattice.error_types import ReconcilePersistenceError
 from doc_lattice.reconcile_transaction import (
-    Journal,
     JournalEntry,
+    JournalProvenance,
+    JournalSelector,
     JournalState,
+    JournalV2,
+    _serialize_journal,
     reconcile_lock,
 )
 
@@ -65,11 +69,18 @@ def _write_cli_transaction(
         after_sha256=sha256(after_bytes).hexdigest(),
     )
     journal.write_text(
-        Journal(
-            version=RECONCILE_JOURNAL_VERSION,
-            state=state,
-            entries=(entry,),
-        ).model_dump_json(),
+        _serialize_journal(
+            JournalV2(
+                version=RECONCILE_JOURNAL_VERSION,
+                state=state,
+                provenance=JournalProvenance(
+                    created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+                    tool_version="9.9.9",
+                    selector=JournalSelector(mode="all", downstream_id=None, ref=None),
+                ),
+                entries=(entry,),
+            )
+        ).decode("utf-8"),
         encoding="utf-8",
     )
     return journal, before, after
@@ -573,11 +584,11 @@ def test_reconcile_concurrent_edit_is_preserved_without_success_report(
     editor_bytes = b"editor-owned concurrent bytes\n"
     edited_path: Path | None = None
 
-    def edit_then_commit(project_root, rewrites, write_paths, *, lock):
+    def edit_then_commit(project_root, rewrites, write_paths, *, selector, lock):
         nonlocal edited_path
         edited_path = next(iter(write_paths.values()))
         edited_path.write_bytes(editor_bytes)
-        return real_commit(project_root, rewrites, write_paths, lock=lock)
+        return real_commit(project_root, rewrites, write_paths, selector=selector, lock=lock)
 
     monkeypatch.setattr(reconcile_command, "commit_rewrites", edit_then_commit)
     args = ["reconcile", "pc-design"]
@@ -868,3 +879,70 @@ def test_cli_forces_require_verified_only_for_reconcile(
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     _run(args, lattice_dir, env)
     assert (seen["require_verified"], seen["persist_cache"]) == expected
+
+
+# --- Journal selector construction (GTX-126) --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("downstream_id", "reconcile_all", "ref", "expected"),
+    [
+        ("", True, None, {"mode": "all", "downstream_id": None, "ref": None}),
+        ("", True, "up#x", {"mode": "all", "downstream_id": None, "ref": "up#x"}),
+        (
+            "pc-design",
+            False,
+            None,
+            {"mode": "downstream", "downstream_id": "pc-design", "ref": None},
+        ),
+        (
+            "pc-design",
+            False,
+            "up#x",
+            {"mode": "downstream", "downstream_id": "pc-design", "ref": "up#x"},
+        ),
+        # --all wins over a downstream id, exactly as the planner resolves the same pair.
+        ("pc-design", True, None, {"mode": "all", "downstream_id": None, "ref": None}),
+    ],
+    ids=["all", "all-ref", "downstream", "downstream-ref", "all-beats-downstream-id"],
+)
+def test_journal_selector_mirrors_the_planner_precedence(
+    downstream_id: str, reconcile_all: bool, ref: str | None, expected: dict
+):
+    selector = reconcile_command._journal_selector(
+        downstream_id,
+        reconcile_all=reconcile_all,
+        ref=ref,
+    )
+
+    assert json.loads(selector.model_dump_json()) == expected
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (
+            ["reconcile", "pc-design"],
+            {"mode": "downstream", "downstream_id": "pc-design", "ref": None},
+        ),
+        (["reconcile", "--all"], {"mode": "all", "downstream_id": None, "ref": None}),
+    ],
+    ids=["downstream", "all"],
+)
+def test_reconcile_hands_the_selector_it_built_to_the_transaction(
+    lattice_dir: Path, monkeypatch, args: list[str], expected: dict
+):
+    monkeypatch.chdir(lattice_dir)
+    real_commit = transaction.commit_rewrites
+    captured: list[JournalSelector] = []
+
+    def _capture(project_root, rewrites, write_paths, *, selector, lock):
+        captured.append(selector)
+        return real_commit(project_root, rewrites, write_paths, selector=selector, lock=lock)
+
+    monkeypatch.setattr(reconcile_command, "commit_rewrites", _capture)
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    assert [json.loads(selector.model_dump_json()) for selector in captured] == [expected]

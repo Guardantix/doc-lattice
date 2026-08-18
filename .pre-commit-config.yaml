@@ -4,6 +4,10 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # The pinned reconcile journal fixtures are byte-for-byte copies of what a pre-v2
+        # release wrote, and that release wrote no trailing newline. Appending one would make
+        # the compatibility tests run against bytes no version ever produced.
+        exclude: '^tests/fixtures/reconcile-journal-v1-.*\.json$'
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files

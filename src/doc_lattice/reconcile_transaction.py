@@ -8,18 +8,22 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Annotated, Literal, NoReturn
+from typing import Annotated, Literal, NoReturn, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from pydantic import ValidationError as PydanticValidationError
 
+from . import __version__
 from .constants import (
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
+    RECONCILE_JOURNAL_LEGACY_VERSION,
     RECONCILE_JOURNAL_NAME,
     RECONCILE_JOURNAL_VERSION,
+    ReconcileSelectorMode,
 )
+from .datetime_utils import utc_now
 from .error_types import (
     ReconcileConflictError,
     ReconcileInProgressError,
@@ -69,14 +73,96 @@ class JournalEntry(BaseModel):
     after_sha256: Sha256Digest
 
 
-class Journal(BaseModel):
-    """A versioned reconcile recovery journal."""
+class JournalSelector(BaseModel):
+    """The reconcile selection a transaction was planned from.
+
+    Recorded as typed fields rather than the run's argv, so recovery never parses a command
+    line and each selector form stays directly constructible in a test. ``downstream_id`` and
+    ``ref`` are nullable but not optional: a v2 journal must spell both keys, because a
+    defaulted key would let a journal that lost one recover as though it never had it.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: int = Field(strict=True)
+    mode: ReconcileSelectorMode
+    downstream_id: str | None
+    ref: str | None
+
+    @model_validator(mode="after")
+    def _reject_mode_and_downstream_id_disagreement(self) -> Self:
+        """Reject a selector whose downstream id contradicts its mode.
+
+        Returns:
+            The validated selector.
+
+        Raises:
+            ValueError: If a downstream selector carries no id, or an all selector carries one.
+        """
+        if self.mode == "downstream" and not self.downstream_id:
+            message = "a downstream selector requires a downstream_id"
+            raise ValueError(message)
+        if self.mode == "all" and self.downstream_id is not None:
+            message = "an all selector cannot carry a downstream_id"
+            raise ValueError(message)
+        return self
+
+
+class JournalProvenance(BaseModel):
+    """What produced a journal: when it was written, by which version, from which selection.
+
+    Every field is required and the model is frozen, so a v2 journal that lost one fails
+    validation instead of recovering with a blank an operator would read as fact.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    created_at: AwareDatetime
+    tool_version: str = Field(min_length=1)
+    selector: JournalSelector
+
+
+class JournalV1(BaseModel):
+    """The version 1 wire format: state and entries, with no record of what produced them.
+
+    Read-only. Nothing writes a v1 journal any more, but one left behind by a pre-v2 release
+    is still recoverable, so an upgrade never strands an operator holding a crash journal.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[1]
     state: JournalState
     entries: tuple[JournalEntry, ...]
+
+
+class JournalV2(BaseModel):
+    """The version 2 wire format: the v1 fields plus required, immutable provenance.
+
+    This is the only format the engine writes. It is kept a separate strict model rather than
+    a relaxed shared one, because relaxing ``extra`` to admit both shapes would also admit a
+    malformed journal.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[2]
+    state: JournalState
+    provenance: JournalProvenance
+    entries: tuple[JournalEntry, ...]
+
+
+class _JournalVersionProbe(BaseModel):
+    """The version declaration, read before any format-specific validation.
+
+    Deliberately the one lax model here: it ignores every other key so that version dispatch
+    happens before a strict model can reject a field belonging to a format it does not know.
+    A v2 journal parsed by the v1 model fails on its provenance keys long before any version
+    check would run, which is why inspection has to come first.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    version: int = Field(strict=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,10 +263,31 @@ class _ResolvedEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedTransaction:
-    """A published prepared journal and its validated filesystem entries."""
+class _LoadedJournal:
+    """One journal of any supported version, normalized to the shared recovery shape.
 
-    journal: Journal
+    ``provenance`` is None for a v1 journal, which recorded none. Recovery never reads it;
+    the field exists so a freshly published prepared journal can be checked against the
+    provenance it was built from.
+    """
+
+    version: int
+    state: JournalState
+    entries: tuple[JournalEntry, ...]
+    provenance: JournalProvenance | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedTransaction:
+    """A published prepared journal and its validated filesystem entries.
+
+    ``provenance`` is the single capture this transaction made before staging. Commit copies
+    it into the committed marker unchanged rather than re-reading the clock, which would
+    leave a crash journal inconsistent with itself.
+    """
+
+    journal: _LoadedJournal
+    provenance: JournalProvenance
     entries: tuple[_ResolvedEntry, ...]
     journal_path: Path
     journal_bytes: bytes
@@ -343,10 +450,59 @@ def _validate_path_roles(entries: tuple[_ResolvedEntry, ...], journal_path: Path
             artifacts[artifact] = (index, role_field)
 
 
+def _serialize_journal(journal: JournalV2) -> bytes:
+    """Render a journal to the exact bytes every publication of it writes.
+
+    Args:
+        journal: The prepared or committed journal to publish.
+
+    Returns:
+        Pretty-printed UTF-8 JSON with a trailing newline. Prepared and committed bytes both
+        come from here, so the two forms cannot drift in formatting, and an operator holding a
+        crash journal can read it without reformatting it first.
+    """
+    return f"{journal.model_dump_json(indent=2)}\n".encode()
+
+
+def _parse_journal(decoded: str) -> _LoadedJournal:
+    """Dispatch on the declared version, then validate against that version's wire model.
+
+    Args:
+        decoded: The journal's UTF-8 text.
+
+    Returns:
+        The journal normalized to the shared recovery shape, whichever version wrote it.
+
+    Raises:
+        ValueError: If the text is not valid JSON, declares no usable version, does not match
+            the model for the version it declares, or declares a version this release cannot
+            read. Pydantic's own validation error is a ValueError, so both arrive as one kind.
+    """
+    declared = _JournalVersionProbe.model_validate_json(decoded)
+    if declared.version == RECONCILE_JOURNAL_LEGACY_VERSION:
+        legacy = JournalV1.model_validate_json(decoded)
+        return _LoadedJournal(
+            version=legacy.version,
+            state=legacy.state,
+            entries=legacy.entries,
+            provenance=None,
+        )
+    if declared.version == RECONCILE_JOURNAL_VERSION:
+        current = JournalV2.model_validate_json(decoded)
+        return _LoadedJournal(
+            version=current.version,
+            state=current.state,
+            entries=current.entries,
+            provenance=current.provenance,
+        )
+    message = f"unsupported version {declared.version}"
+    raise ValueError(message)
+
+
 def _load_journal(
     project_root: Path,
     journal_path: Path,
-) -> tuple[Journal, tuple[_ResolvedEntry, ...], bytes]:
+) -> tuple[_LoadedJournal, tuple[_ResolvedEntry, ...], bytes]:
     """Read, validate, and contain every path in a reconcile journal."""
     if not _journal_is_present(journal_path):
         cause = FileNotFoundError(f"canonical journal {journal_path} is absent")
@@ -354,11 +510,8 @@ def _load_journal(
     try:
         encoded = journal_path.read_bytes()
         decoded = encoded.decode("utf-8")
-        journal = Journal.model_validate_json(decoded)
-    except (OSError, UnicodeDecodeError, PydanticValidationError) as cause:
-        raise _invalid_journal_error(journal_path, cause) from cause
-    if journal.version != RECONCILE_JOURNAL_VERSION:
-        cause = ValueError(f"unsupported version {journal.version}")
+        journal = _parse_journal(decoded)
+    except (OSError, UnicodeDecodeError, PydanticValidationError, ValueError) as cause:
         raise _invalid_journal_error(journal_path, cause) from cause
     try:
         entries = tuple(
@@ -1003,11 +1156,20 @@ def _prepare_transaction(
     project_root: Path,
     rewrites: list[Rewrite],
     write_paths: dict[Path, Path],
+    selector: JournalSelector,
 ) -> _PreparedTransaction:
     """Stage exact images and durably publish an ordered prepared journal."""
     journal_path = _journal_path(project_root)
     if _journal_is_present(journal_path):
         raise ReconcilePersistenceError(_journal_already_exists_message(journal_path))
+    # Captured once, here, and carried through commit unchanged. Re-reading the clock or the
+    # selector when the committed marker is written would let a crash journal disagree with
+    # the prepared journal it replaced about when and why the transaction ran.
+    provenance = JournalProvenance(
+        created_at=utc_now(),
+        tool_version=__version__,
+        selector=selector,
+    )
     staged_paths: list[Path] = []
     journal_entries: list[JournalEntry] = []
     operation = _PREPARE_VALIDATING
@@ -1046,12 +1208,13 @@ def _prepare_transaction(
                     after_sha256=sha256_bytes(rewrite.after),
                 )
             )
-        prepared = Journal(
+        prepared = JournalV2(
             version=RECONCILE_JOURNAL_VERSION,
             state="prepared",
+            provenance=provenance,
             entries=tuple(journal_entries),
         )
-        prepared_bytes = prepared.model_dump_json().encode("utf-8")
+        prepared_bytes = _serialize_journal(prepared)
         operation = _PREPARE_PUBLISHING_JOURNAL
         operation_path = journal_path
         atomic_create_bytes(
@@ -1081,7 +1244,13 @@ def _prepare_transaction(
         copy_exception_notes(error, primary)
         raise error from primary
     loaded, entries, journal_bytes = _load_journal(project_root, journal_path)
-    return _PreparedTransaction(loaded, entries, journal_path, journal_bytes)
+    if loaded.provenance != provenance:
+        # The published journal is the record commit copies from, so a serializer that lost
+        # or rounded a provenance field would silently hand the committed marker something
+        # the prepared journal never said.
+        cause = ValueError("published prepared journal did not preserve its provenance")
+        raise _invalid_journal_error(journal_path, cause) from cause
+    return _PreparedTransaction(loaded, provenance, entries, journal_path, journal_bytes)
 
 
 def _commit_operation_error(
@@ -1233,6 +1402,7 @@ def commit_rewrites(
     rewrites: list[Rewrite],
     write_paths: dict[Path, Path],
     *,
+    selector: JournalSelector,
     lock: ReconcileLock,
 ) -> None:
     """Commit exact-byte reconcile rewrites as one durable transaction.
@@ -1241,6 +1411,9 @@ def commit_rewrites(
         project_root: Configured project root containing the transaction journal.
         rewrites: Ordered fresh-read rewrites to publish.
         write_paths: Contained resolved destinations keyed by rewrite identity path.
+        selector: The selection this batch was planned from, recorded in the journal so a
+            crash journal says what produced it. The caller builds it, because the arguments
+            it describes never reach this boundary.
         lock: Active capability protecting this project root.
 
     Raises:
@@ -1249,16 +1422,17 @@ def commit_rewrites(
         ReconcilePersistenceError: If preparation or durable commit cannot complete.
     """
     with _reconcile_operation_lease(lock, project_root):
-        _commit_rewrites_locked(project_root, rewrites, write_paths)
+        _commit_rewrites_locked(project_root, rewrites, write_paths, selector)
 
 
 def _commit_rewrites_locked(
     project_root: Path,
     rewrites: list[Rewrite],
     write_paths: dict[Path, Path],
+    selector: JournalSelector,
 ) -> None:
     """Commit rewrites while the public API holds its capability lease."""
-    prepared = _prepare_transaction(project_root, rewrites, write_paths)
+    prepared = _prepare_transaction(project_root, rewrites, write_paths, selector)
     # Destinations this process may already have applied. An entry joins before its
     # replacement is attempted, never after: replace_staged renames first and only then
     # synchronizes the directory, so it can fail with the destination already changed.
@@ -1310,12 +1484,13 @@ def _commit_rewrites_locked(
         except (OSError, ValueError) as cause:
             primary = _commit_operation_error("replacing destination", entry.destination, cause)
             _abort_prepared(prepared, primary, candidates=frozenset(candidates))
-    committed = Journal(
-        version=prepared.journal.version,
+    committed = JournalV2(
+        version=RECONCILE_JOURNAL_VERSION,
         state="committed",
+        provenance=prepared.provenance,
         entries=prepared.journal.entries,
     )
-    committed_bytes = committed.model_dump_json().encode("utf-8")
+    committed_bytes = _serialize_journal(committed)
     try:
         atomic_replace_bytes(
             prepared.journal_path,

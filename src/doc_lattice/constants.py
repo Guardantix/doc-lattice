@@ -99,9 +99,19 @@ SETUP_UV_VERSION: str = "v10.0.1"
 CHECKOUT_USES: str = f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}"
 SETUP_UV_USES: str = f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}"
 
+# Which selection a reconcile run was planned from. "all" is every drifting edge in the lattice,
+# "downstream" is one node's edges. The planner gives --all precedence over a downstream id, so a
+# recorded selector mirrors that rather than the raw argument pair.
+ReconcileSelectorMode = Literal["all", "downstream"]
+VALID_RECONCILE_SELECTOR_MODES: frozenset[str] = frozenset(get_args(ReconcileSelectorMode))
+
 # Reconcile transaction schema plus the shared journal and staged-image naming contract.
+# RECONCILE_JOURNAL_VERSION is the only version ever written; RECONCILE_JOURNAL_LEGACY_VERSION is
+# still read so an upgrade never strands a crash journal an earlier release left behind. Both are
+# Literal-typed because each wire model pins its own version field to that exact value.
 RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
-RECONCILE_JOURNAL_VERSION: int = 1
+RECONCILE_JOURNAL_VERSION: Literal[2] = 2
+RECONCILE_JOURNAL_LEGACY_VERSION: Literal[1] = 1
 PERSISTENCE_TEMP_SUFFIX: str = ".tmp"
 RECONCILE_BEFORE_IMAGE_INFIX: str = ".doc-lattice-before."
 RECONCILE_AFTER_IMAGE_INFIX: str = ".doc-lattice-after."
