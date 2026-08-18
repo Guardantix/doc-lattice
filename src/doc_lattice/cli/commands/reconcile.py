@@ -256,26 +256,31 @@ def register_reconcile(app: typer.Typer) -> None:
                     require_verified=True,
                     persist_cache=not dry_run,
                 )
-                plan = plan_reconcile(
-                    lattice,
-                    downstream_id,
-                    ref=ref,
-                    reconcile_all=reconcile_all,
-                )
-                write_paths = _resolve_reconcile_write_paths(plan, project.project_root)
-                rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_bytes())
-                if not dry_run and rewrites:
-                    commit_rewrites(
-                        project.project_root,
-                        rewrites,
-                        write_paths,
-                        selector=_journal_selector(
-                            downstream_id,
-                            reconcile_all=reconcile_all,
-                            ref=ref,
-                        ),
-                        lock=lock,
+                # The rewrite phase rereads each downstream file's frontmatter, so it is a
+                # second place a YAML warning can reach the user in one invocation. Without
+                # this the load's warnings would carry the CLI's voice and the reread's would
+                # carry Python's default format, in the same run.
+                with runtime.rendered_warnings():
+                    plan = plan_reconcile(
+                        lattice,
+                        downstream_id,
+                        ref=ref,
+                        reconcile_all=reconcile_all,
                     )
+                    write_paths = _resolve_reconcile_write_paths(plan, project.project_root)
+                    rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_bytes())
+                    if not dry_run and rewrites:
+                        commit_rewrites(
+                            project.project_root,
+                            rewrites,
+                            write_paths,
+                            selector=_journal_selector(
+                                downstream_id,
+                                reconcile_all=reconcile_all,
+                                ref=ref,
+                            ),
+                            lock=lock,
+                        )
             _report_reconcile(
                 runtime,
                 plan,

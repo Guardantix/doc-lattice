@@ -654,21 +654,73 @@ stores that disposition as a required `Entry` field, so a hit replays what the m
 into the silent skip. What is stored is the kind, never the rendered message: a cache slot is
 shared across worktrees, so the text is rendered per run from the path that run discovered.
 Every load path (cache-free, cache-miss, and cache-hit) reports through one function in
-`orchestrate.py` at the default `stacklevel`, because Python renders a warning with its raising
-location and filters repeats by it, so a second call site would change both the line a user sees
-and when it is shown.
-Reporting it as a Python warning rather than through the per-invocation `CliRuntime.stderr` that
-AD-9 makes the owner of CLI diagnostics is deliberate, and it is the one place a diagnostic leaves
+`orchestrate.py` at the default `stacklevel`, because Python filters repeats by a warning's
+raising location, so a second call site would change when the warning is shown.
+Raising it through `warnings` rather than calling the per-invocation `CliRuntime.stderr` that
+AD-9 makes the owner of CLI diagnostics is deliberate, and this warning family, raised from
+`orchestrate.py`, `discovery.py`, and `loader.py`, is the only engine diagnostic emitted outside
 that boundary. The reason is that a skip is the only diagnostic here a user may legitimately want
 to suppress on an otherwise healthy corpus, and `warnings` is the standard, already-documented
-suppression mechanism; `cli/errors.py` has no equivalent. The costs are real and were measured
-rather than assumed: the warning is invisible to an in-process `CliRunner` invocation, which is why
-its CLI coverage shells out to a subprocess; `--no-color` and `NO_COLOR` do not reach it, and its
-rendered form exposes this module's own source location; and under `PYTHONWARNINGS=error` it
-escapes the entry point's `ProjectError` mapping entirely, printing a traceback and exiting 1, the
-code otherwise reserved for drift. That last one is why the exit-status guarantee below is stated
-for ordinary warning configuration. Moving the report back inside AD-9's boundary would fix all
-three but forfeit `PYTHONWARNINGS` suppression, so it is a real trade rather than an oversight.
+suppression mechanism; `cli/errors.py` has no equivalent.
+Presentation is nevertheless AD-9's, because the two are separable: Python decides whether to
+ignore, display, or raise a warning before it reaches the replaceable `showwarning` stage, so
+`CliRuntime.rendered_warnings()` substitutes only that stage, for the duration of a phase that
+can reach a parser. Every such phase is wrapped, not the lattice load alone, because a dependency
+raises the same warning family from more than one: a reused YAML anchor warns from `config.py` and
+from `frontmatter_parser.py` through the same `SafeYamlLoader` class, and again from the fresh
+reread `reconcile`'s rewrite phase performs after that load has returned. Leaving any of them out
+would print one of a run's warnings in Python's default format and the next in this one. The
+substitute renders `warning: <message>` through the invocation's stderr `Console`, discarding the
+category, filename, line number, and source line Python's default formatter would have shown,
+stripping a message that opens with a newline so the prefix never lands on a line of its own, and
+restoring the previous callable in a `finally` on both the normal and the exception path.
+Filtering, category matching, and repeat suppression stay engine-owned and unreimplemented, and a
+library consumer calling `load_lattice()` directly is untouched. Routing the three `warnings.warn`
+sites through the stderr renderer instead would have forfeited that filtering, which README
+documents.
+An advisory must not be able to end the command that raised it, so a write the stderr stream
+refuses is contained for the whole wrapped phase: the render is guarded, and a stream that refused
+one warning is not asked again. The guard deliberately stops at the phase boundary, because the
+work inside raises `OSError` for real read failures and those must keep propagating. Rich's own
+`Console.on_broken_pipe` is unusable here for the same reason: it points `sys.stdout` at
+`os.devnull` and raises `SystemExit(1)`, so a dead *stderr* discards the report a succeeding
+command is still computing, and it does that before any caller could catch. `CliConsole` overrides
+it to re-raise the `BrokenPipeError` instead, which also settles the identical exposure
+`cli/errors.py` carries: every CLI write now fails like an ordinary stream write, and the entry
+point's existing `OSError` handling governs it. The one write that handling cannot govern is its
+own: an exception raised inside an `except` clause is never retried against a sibling clause, so
+the entry point suppresses `OSError` and `ValueError`, a closed stream's write error, around
+the error report itself and keeps the tool-error exit, since a report to a stderr that refuses
+the write cannot be delivered anyway.
+`BrokenPipeError` alone is caught ahead of that generic `OSError` handling, and it exits 141
+(128+SIGPIPE) silently rather than joining the tool-error mapping: a departed reader is
+truncation, not a tool failure, and reusing 2 for it would make the 0/1/2 contract CI relies on
+ambiguous between "the tool broke" and "something downstream stopped reading." The handler still
+has one write of its own to answer for, though: flushing already-buffered stdout can raise the
+same `BrokenPipeError` again, and the interpreter's own shutdown flush of the now-dead stream
+would otherwise print exactly the "Exception ignored" noise this handler exists to suppress, so
+it points both stdout and stderr at `os.devnull` before returning.
+Costs survive it. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
+`ProjectError` mapping entirely, printing a traceback and exiting 1, the code otherwise reserved
+for drift: it is raised before `showwarning` is consulted, so no hook can reach it, and that is
+why the exit-status guarantee below is stated for ordinary warning configuration. And replacing
+`showwarning` takes the warning out of reach of anything that records rather than prints it:
+CPython dispatches to the substitute instead of the recording branch, so a `catch_warnings(record=True)`
+around a wrapped phase collects nothing and an embedder's `logging.captureWarnings(True)` router is
+bypassed for its duration. Declining to substitute when another callable already owns the stage
+would fix that, but only by reading the private `warnings._showwarning_orig`, so the cost is
+accepted and pinned by a test instead.
+`warnings.showwarning` is process-global while each caller restores the snapshot it took, so
+scoping the substitution to the synchronous phases one invocation performs narrows but cannot
+eliminate what concurrency does to it. The exposure is worse than a window: for two threads whose
+phases overlap and finish in entry order, the first restores the original and the second then
+restores the first's renderer, leaving the hook pointing at a finished invocation's stderr
+indefinitely, not merely for the overlap. Correcting that needs the hook installed once under a
+reference count with the active runtime carried in a `ContextVar`, since serializing the swap and
+restore alone does not change the ordering that causes it, and holding a lock across whole phases
+would serialize every concurrent load in the process. It is not built, because the CLI creates no
+threads and one invocation owns its process; a caller driving `CliRuntime` from several threads is
+the unsupported case this records rather than solves.
 
 **Consequences:** A typo'd `id` is a tool error naming the file, and unrecognized frontmatter is a
 named skip rather than a silent one, at the cost of a new warning for corpora carrying non-lattice

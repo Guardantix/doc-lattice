@@ -153,9 +153,14 @@ def warn_unattachable_annotations(runtime: CliRuntime, paths: Iterable[Path]) ->
     if not outside:
         return
     listed = ", ".join(str(path) for path in outside)
+    # emoji=False and highlight=False for the reason the load-warning renderer carries them:
+    # this line is mostly discovered paths, and Rich would otherwise rewrite a legal `:name:`
+    # in one as an icon and recolor the rest.
     runtime.stderr.print(
         f"[yellow]warning[/yellow]: {len(outside)} annotated document(s) fall outside "
         f"{escape(str(runtime.cwd))}, so their annotations use absolute paths and will not "
         f"attach to the pull-request diff: {escape(listed)}",
         soft_wrap=True,
+        emoji=False,
+        highlight=False,
     )

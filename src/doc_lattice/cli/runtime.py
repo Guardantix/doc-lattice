@@ -1,17 +1,42 @@
 """Immutable per-invocation state for command-line adapters."""
 
 import os
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from ..config import ProjectConfig, load_config
 from ..model import Lattice
 from ..orchestrate import load_lattice
+
+
+class CliConsole(Console):
+    """A ``Console`` whose broken-pipe handling stays local to the failed write.
+
+    Rich's own ``Console.on_broken_pipe`` points ``sys.stdout`` at ``os.devnull`` and
+    raises ``SystemExit(1)``. Both halves are wrong for this CLI. The redirect is aimed
+    at file descriptor 1 no matter which stream actually failed, so a dead *stderr*
+    silently discards the report a succeeding command is still computing; and the
+    ``SystemExit`` abandons that command from inside whatever write happened to fail.
+    Raising the underlying ``BrokenPipeError`` instead makes a Rich console behave like
+    any other stream, so `main()`'s existing ``OSError`` handling governs a failed write
+    the way it already governs every other one.
+    """
+
+    def on_broken_pipe(self) -> None:
+        """Re-raise the broken pipe rather than redirecting the process's stdout.
+
+        Raises:
+            BrokenPipeError: Always, in place of Rich's redirect-and-exit default.
+        """
+        raise BrokenPipeError
 
 
 class LatticeLoader(Protocol):
@@ -69,7 +94,8 @@ class CliRuntime:
         Returns:
             The loaded project configuration.
         """
-        return self.load_config(config, self.cwd)
+        with self.rendered_warnings():
+            return self.load_config(config, self.cwd)
 
     def lattice(
         self,
@@ -88,10 +114,97 @@ class CliRuntime:
         Returns:
             The loaded lattice.
         """
-        return self.load_lattice(
-            project,
-            require_verified=require_verified,
-            persist_cache=persist_cache,
+        with self.rendered_warnings():
+            return self.load_lattice(
+                project,
+                require_verified=require_verified,
+                persist_cache=persist_cache,
+            )
+
+    @contextmanager
+    def rendered_warnings(self) -> Iterator[None]:
+        """Render warnings displayed inside the block through this invocation's stderr.
+
+        Python applies its filters before the replaceable ``showwarning`` stage, so
+        substituting only that stage keeps ``PYTHONWARNINGS``, category matching, and
+        repeat suppression owned by the engine while the presentation matches AD-9's
+        stderr voice. Every phase of a command that can re-enter a parser is wrapped, so
+        one invocation never mixes this format with Python's default one.
+        ``warnings.showwarning`` is process-global, so the previous callable is restored
+        on both the normal and the exception path.
+
+        A write that fails is contained for the whole block rather than at the single
+        print: an advisory must never abort a load that is otherwise succeeding, which is
+        why CPython's own warning printer swallows ``OSError`` too, and a stream that
+        refused one warning will refuse the rest. The guard deliberately does not span the
+        ``yield``, because the load itself raises ``OSError`` for real read failures and
+        those must keep propagating.
+
+        Yields:
+            Control to the wrapped phase.
+        """
+        unwritable = False
+
+        def show(  # noqa: PLR0913 (signature is `warnings.showwarning`'s, not ours)
+            message: Warning | str,
+            category: type[Warning],
+            filename: str,
+            lineno: int,
+            file: object = None,
+            line: str | None = None,
+        ) -> None:
+            """Present one displayed warning, or drop it once stderr has refused a write."""
+            nonlocal unwritable
+            del category, filename, lineno, file, line
+            if unwritable:
+                return
+            try:
+                self._render_warning(message)
+            except (OSError, ValueError):
+                # ValueError is what a closed (rather than broken) stream raises on write;
+                # an embedder can hand `CliRuntime` one, and the advisory must not abort the
+                # load either way. Rich clears a console's segment buffer only after a write
+                # succeeds, so the refused warning is discarded here: left queued, it would
+                # resurface prepended to the next successful print on this console.
+                unwritable = True
+                del self.stderr._buffer[:]
+
+        previous = warnings.showwarning
+        # typeshed declares `showwarning` with `def`, so ty types the attribute as that one
+        # function rather than as a callable; substituting the stage is the documented use.
+        warnings.showwarning = show  # ty: ignore[invalid-assignment]
+        try:
+            yield
+        finally:
+            warnings.showwarning = previous
+
+    def _render_warning(self, message: Warning | str) -> None:
+        """Write one displayed warning as a ``warning: <message>`` diagnostic.
+
+        The category, filename, line number, and source line Python's default formatter
+        would have shown are discarded by the caller: a skip is reported to a user, not
+        to a maintainer of this package. The message is stripped because a dependency can
+        raise one that opens with a newline, which would otherwise print the prefix on a
+        line of its own; a message that is only whitespace renders as a bare ``warning:``
+        rather than a prefix with a trailing space. A message spanning several lines keeps
+        the prefix on the first alone, and the rest render unprefixed and unindented.
+
+        ``highlight=False`` matches the renderers in ``report_render.py`` and
+        ``linear_render.py``; ``emoji=False`` is also the console-wide default set in
+        ``_create_runtime`` and is repeated here so an injected plain ``Console`` renders
+        identically: this text carries discovered paths verbatim, and Rich would otherwise
+        rewrite a legal ``:name:`` in one as an emoji and recolor the rest.
+
+        Args:
+            message: Warning instance or message text Python is displaying.
+
+        Raises:
+            OSError: If the stderr stream refuses the write.
+        """
+        text = str(message).strip()
+        body = f" {escape(text)}" if text else ""
+        self.stderr.print(
+            f"[yellow]warning[/yellow]:{body}", soft_wrap=True, emoji=False, highlight=False
         )
 
     def annotation_root(self, path: Path) -> Path:
@@ -160,19 +273,25 @@ def _create_runtime(*, cwd: Path, no_color: bool) -> CliRuntime:
     disabled = no_color or os.environ.get("NO_COLOR", "") != ""
     highlight = not disabled
     color_system = None if disabled else "auto"
+    # `emoji=False` is console-wide rather than per-call: nearly every line this CLI prints
+    # can carry a discovered path, and a legal `:name:` in one is not an emoji request. A
+    # site that repeats the kwarg does so only to render identically through an injected
+    # plain `Console`.
     return CliRuntime(
-        stdout=Console(
+        stdout=CliConsole(
             file=typer.get_text_stream("stdout"),
             no_color=disabled,
             highlight=highlight,
             color_system=color_system,
+            emoji=False,
         ),
-        stderr=Console(
+        stderr=CliConsole(
             file=typer.get_text_stream("stderr"),
             stderr=True,
             no_color=disabled,
             highlight=highlight,
             color_system=color_system,
+            emoji=False,
         ),
         cwd=cwd,
         load_config=load_config,

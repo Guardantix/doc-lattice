@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import stat
+import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -28,6 +30,8 @@ from doc_lattice.reconcile_transaction import (
 )
 
 from .helpers import _clean_docs, _run, runner
+
+_SRC = Path(__file__).resolve().parents[2] / "src"
 
 
 def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
@@ -946,3 +950,52 @@ def test_reconcile_hands_the_selector_it_built_to_the_transaction(
 
     assert result.exit_code == 0
     assert [json.loads(selector.model_dump_json()) for selector in captured] == [expected]
+
+
+def _reused_anchor_project(tmp_path: Path) -> Path:
+    """Write a project whose one downstream document reuses a YAML anchor in its frontmatter."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up {#s}\nupstream body\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\ntitle: &shared Down\nlayer: &shared design\n"
+        "derives_from:\n  - ref: up#s\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_reconcile_rewrite_warnings_use_the_same_stderr_voice_as_the_load(tmp_path: Path):
+    """The rewrite phase rereads frontmatter, so it is a second warning site in one command.
+
+    A real interpreter is required twice over: the filter has to be set at startup, and the
+    point of the assertion is the bytes a user's stderr receives. ``always`` is not decoration
+    either. Both the load and the reread raise from the same ruamel composer line, so under
+    the default once-per-location filter the second copy is suppressed and an unwrapped
+    rewrite phase looks identical to a wrapped one.
+    """
+    project_root = _reused_anchor_project(tmp_path)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "from doc_lattice.cli import main; main()", "reconcile", "--all"],
+        cwd=project_root,
+        env={
+            **os.environ,
+            "NO_COLOR": "1",
+            "PYTHONPATH": str(_SRC),
+            "PYTHONWARNINGS": "always",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Never Python's default formatter, whichever way the strict load resolved this document.
+    assert "ReusedAnchorWarning" not in completed.stderr
+    assert "composer.py" not in completed.stderr
+    assert "site-packages" not in completed.stderr
+    if completed.returncode == 0:
+        # The pure-parser cell, where the load warns instead of raising: the reread warns too,
+        # and both arrive in this voice. On the clib cell the strict load rejects the document
+        # before any rewrite, so there is nothing to render and only the negatives above hold.
+        assert "warning: found duplicate anchor 'shared'" in completed.stderr

@@ -96,6 +96,21 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
 
 ### Changed
 
+- Warnings a command emits while loading now render in the CLI's own stderr voice, as
+  `warning: <message>`, instead of through Python's default formatter. A skip previously arrived
+  behind an absolute path into this package and a `UserWarning` category, with the raising source
+  line printed beneath it, while every error in the same command rendered as one clean
+  `error: ... (CODE)` line. The id-less-frontmatter skip made that the routine sight rather than
+  an edge case. Filtering is unchanged and still documented in README: Python applies
+  `PYTHONWARNINGS` before the presentation stage this replaces, so `PYTHONWARNINGS=ignore` and the
+  `ignore:skipping` literal-prefix form behave exactly as before, as do category matching and
+  repeat suppression. The substitution covers the config read and `reconcile`'s rewrite pass as
+  well as the document load, and is scoped to those phases and restored afterwards on both the
+  normal and the failing path, so importing `doc_lattice` as a library still gets standard
+  `warnings` behavior. One consequence is worth knowing when embedding: for the duration of a
+  wrapped phase a warning reaches this renderer rather than a `catch_warnings(record=True)`
+  recorder or a `logging.captureWarnings()` router. See
+  [AD-29](ARCHITECTURE.md#ad-29-a-skipped-files-reason-is-cached-data-and-is-reported-from-one-site).
 - **BREAKING:** frontmatter schema and lattice-intent failures now carry the new
   `FRONTMATTER_ERROR` code instead of `CONFIG_ERROR`, which sent users to the config file for a
   broken document. Both raise sites move together: a `NodeMeta` validation failure, and the guard
@@ -304,6 +319,18 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
 
 ### Fixed
 
+- A command whose stderr is closed or full no longer discards its own report. Every console this
+  CLI writes through now raises the underlying `BrokenPipeError` on a refused write. Rich's
+  default is to point `sys.stdout` at `os.devnull` and raise `SystemExit(1)`, which aimed the
+  redirect at file descriptor 1 no matter which stream had failed, so `doc-lattice check 2>` a
+  closed pipe printed nothing at all on a healthy corpus and produced an empty document under
+  `--format json`. A warning that cannot be written is now dropped rather than allowed to end the
+  load, matching the behavior of Python's own warning printer. A benign broken pipe, such as
+  `doc-lattice check | head -1` on a healthy corpus, now exits 141 silently instead of the old
+  `SystemExit(1)`, which collided with the drift exit code.
+- Diagnostics no longer rewrite a colon-delimited word in a path as an emoji. Discovered paths
+  reach both the `warning:` and `error:` renderers verbatim, and `docs/a:x:b.md` is a legal
+  filename, not a request for an icon.
 - The release job validates the changelog section before it pushes the tag, so a release that
   fails its own notes check no longer strands an immutable tag. Extraction ran inside `Publish
   release notes`, which is two steps after `Create and push the tag`: a missing or empty
