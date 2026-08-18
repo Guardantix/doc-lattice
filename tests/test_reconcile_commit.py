@@ -1781,7 +1781,7 @@ def _capture_journal_publications(monkeypatch) -> dict[str, bytes]:
         real_replace(path, data, prefix=prefix)
 
     monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _create)
-    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _replace, raising=False)
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _replace)
     return published
 
 

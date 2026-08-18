@@ -11,7 +11,6 @@ from threading import Lock
 from typing import Annotated, Literal, NoReturn, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
-from pydantic import ValidationError as PydanticValidationError
 
 from . import __version__
 from .constants import (
@@ -511,7 +510,11 @@ def _load_journal(
         encoded = journal_path.read_bytes()
         decoded = encoded.decode("utf-8")
         journal = _parse_journal(decoded)
-    except (OSError, UnicodeDecodeError, PydanticValidationError, ValueError) as cause:
+    # ValueError is the single kind every non-I/O failure here arrives as: the UTF-8 decode
+    # failure, pydantic's ValidationError, and the unsupported-version refusal _parse_journal
+    # raises itself all derive from it. Naming the subclasses too would suggest they are
+    # handled apart from it, which is exactly the confusion _parse_journal documents away.
+    except (OSError, ValueError) as cause:
         raise _invalid_journal_error(journal_path, cause) from cause
     try:
         entries = tuple(

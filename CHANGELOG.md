@@ -9,9 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Migration
 
 Two things to act on, plus one format change below that needs no action. The first is the printed
-workflow, and it applies to every ordinary and
-recipe install. The workflow `doc-lattice init` prints now triggers on a resolved default branch
-rather than a hard-wired
+workflow, and it applies to every ordinary and recipe install. The workflow `doc-lattice init`
+prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
 and replace the checked-in file, exactly as the ordinary upgrade path in README.md already
 describes. Check the branch the run reports on stderr against the branch you actually gate on
