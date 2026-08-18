@@ -325,7 +325,9 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
   redirect at file descriptor 1 no matter which stream had failed, so `doc-lattice check 2>` a
   closed pipe printed nothing at all on a healthy corpus and produced an empty document under
   `--format json`. A warning that cannot be written is now dropped rather than allowed to end the
-  load, matching the behavior of Python's own warning printer.
+  load, matching the behavior of Python's own warning printer. A benign broken pipe, such as
+  `doc-lattice check | head -1` on a healthy corpus, now exits 141 silently instead of the old
+  `SystemExit(1)`, which collided with the drift exit code.
 - Diagnostics no longer rewrite a colon-delimited word in a path as an emoji. Discovered paths
   reach both the `warning:` and `error:` renderers verbatim, and `docs/a:x:b.md` is a legal
   filename, not a request for an icon.

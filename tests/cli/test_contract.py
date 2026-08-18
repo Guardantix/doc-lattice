@@ -21,6 +21,8 @@ from doc_lattice.error_types import ConfigError
 
 from .helpers import _run, runner
 
+_SRC = Path(__file__).resolve().parents[2] / "src"
+
 # Rich wraps console output to the terminal width, so any assertion against rendered text has to
 # pin that width or it moves with whatever the surrounding environment happens to set. Shared by
 # the help-text tests and by the literal invocation-output expectations further down.
@@ -535,6 +537,21 @@ def test_main_maps_errors_to_exit_2(monkeypatch, exc):
     assert info.value.code == 2
 
 
+def test_main_exits_silently_with_141_on_a_broken_pipe(monkeypatch, capsys):
+    # A departed reader is not a tool error, and it must not collide with the tool-error
+    # exit code 2 or print anything a script piping into `head` would have to filter.
+    def boom():
+        raise BrokenPipeError
+
+    monkeypatch.setattr(cli_mod, "app", boom)
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+    assert info.value.code == 141
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 @pytest.mark.parametrize(
     "exc",
     [ConfigError("cfg"), RuntimeError("loop")],
@@ -690,3 +707,42 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
         r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (no separators or traversal)"
     )
     assert lines[2].endswith("(CONFIG_ERROR)")
+
+
+def _many_broken_docs(tmp_path: Path) -> None:
+    """Write a lattice whose ``check`` output exceeds a pipe's kernel buffer.
+
+    One small document can be written to a closed pipe inside the single already-buffered
+    Rich flush that starts it, which would only prove the first write is guarded; a corpus
+    this size forces the run past a 64KiB pipe buffer, so a reader that closes early proves
+    the interpreter's own shutdown flush of the now-dead stream is guarded too.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for i in range(3000):
+        (docs / f"broken-{i:04d}.md").write_text(
+            f"---\nid: broken-{i:04d}\nderives_from:\n  - ref: ghost-{i:04d}\n---\n# {i}\n",
+            encoding="utf-8",
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_check_exits_141_silently_when_its_reader_closes_the_pipe(tmp_path: Path):
+    _many_broken_docs(tmp_path)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from doc_lattice.cli import main; main()", "check"],
+        cwd=tmp_path,
+        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    # Close the reader before the child produces any output, the same way `head -1` closes
+    # once it has what it wants: every later write from the child hits a dead pipe.
+    assert proc.stdout is not None  # guaranteed by stdout=subprocess.PIPE above
+    proc.stdout.close()
+    _, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 141
+    assert stderr == ""

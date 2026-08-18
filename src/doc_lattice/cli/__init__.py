@@ -44,11 +44,12 @@ def __getattr__(name: str) -> object:
 def main() -> None:
     """Run the console application with lazy no-color and error setup.
 
-    Intended ``SystemExit`` values raised by Typer propagate unchanged. Supported
-    unexpected process errors use the tool-error exit code 2.
+    Intended ``SystemExit`` values raised by Typer propagate unchanged. Mapped project or
+    internal errors exit 2. A broken pipe exits 141 silently.
 
     Raises:
-        SystemExit: With exit code 2 for mapped project or internal errors.
+        SystemExit: With exit code 2 for mapped project or internal errors, or 141 for a
+            broken pipe.
     """
     no_color = "--no-color" in sys.argv[1:] or os.environ.get("NO_COLOR", "") != ""
     if no_color:
@@ -57,6 +58,7 @@ def main() -> None:
 
     from ..error_types import ProjectError  # noqa: PLC0415
     from .errors import (  # noqa: PLC0415
+        EXIT_PIPE_CLOSED,
         EXIT_TOOL_ERROR,
         print_internal_error,
         print_project_error,
@@ -77,6 +79,18 @@ def main() -> None:
         with suppress(OSError):
             print_project_error(diagnostic_runtime(no_color=no_color), exc)
         raise SystemExit(EXIT_TOOL_ERROR) from exc
+    except BrokenPipeError as exc:
+        # A departed reader is not a tool error: die the way SIGPIPE would have killed a
+        # native tool, silently and with its exit code. The devnull redirect keeps the
+        # interpreter's shutdown flush of the dead stream from printing an
+        # "Exception ignored" traceback after this handler has already exited cleanly.
+        with suppress(OSError, ValueError):
+            sys.stdout.flush()
+        with suppress(OSError, ValueError):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.dup2(devnull, sys.stderr.fileno())
+        raise SystemExit(EXIT_PIPE_CLOSED) from exc
     except (OSError, RuntimeError, ValueError) as exc:
         with suppress(OSError):
             print_internal_error(diagnostic_runtime(no_color=no_color), exc)

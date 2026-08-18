@@ -11,6 +11,9 @@ from .runtime import CliRuntime
 
 EXIT_FINDING = 1
 EXIT_TOOL_ERROR = 2
+# 128 + SIGPIPE (13). Kept as a literal, not a signal.SIGPIPE-derived value, so this module
+# still imports on platforms without SIGPIPE.
+EXIT_PIPE_CLOSED = 141
 
 
 def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:

@@ -97,7 +97,8 @@ and exits 1. Invalid config or lattice frontmatter, unreadable or non-UTF-8 docu
 containment failures, and incoherent ids are tool errors that exit 2. An index is incoherent
 when two files repeat a file id or two headings in one file resolve to the same file-scoped
 anchor. Equal anchors in different files, and a file id equal to another file's anchor, remain
-distinct `TargetId(file_id, anchor)` keys and do not collide.
+distinct `TargetId(file_id, anchor)` keys and do not collide. A write refused because the pipe's
+reader closed (for example, piping into `head`) exits 141, printing nothing.
 
 A Markdown file without an opening `---` fence is valid untracked prose. Once a file opens YAML
 frontmatter with `---`, it must include a closing `---` fence; otherwise every lattice-loading

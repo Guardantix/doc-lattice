@@ -691,6 +691,14 @@ point's existing `OSError` handling governs it. The one write that handling cann
 own: an exception raised inside an `except` clause is never retried against a sibling clause, so
 the entry point suppresses `OSError` around the error report itself and keeps the tool-error
 exit, since a report to a stderr that refuses the write cannot be delivered anyway.
+`BrokenPipeError` alone is caught ahead of that generic `OSError` handling, and it exits 141
+(128+SIGPIPE) silently rather than joining the tool-error mapping: a departed reader is
+truncation, not a tool failure, and reusing 2 for it would make the 0/1/2 contract CI relies on
+ambiguous between "the tool broke" and "something downstream stopped reading." The handler still
+has one write of its own to answer for, though: flushing already-buffered stdout can raise the
+same `BrokenPipeError` again, and the interpreter's own shutdown flush of the now-dead stream
+would otherwise print exactly the "Exception ignored" noise this handler exists to suppress, so
+it points both stdout and stderr at `os.devnull` before returning.
 Costs survive it. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
 `ProjectError` mapping entirely, printing a traceback and exiting 1, the code otherwise reserved
 for drift: it is raised before `showwarning` is consulted, so no hook can reach it, and that is
