@@ -417,9 +417,9 @@ def test_parse_meta_resolves_a_block_under_the_yaml_version_it_declares():
 
     # The same block unquoted resolves to a boolean and fails validation, which is the
     # user-visible half of settling the disagreement and is why CHANGELOG.md calls it out.
-    # The message is asserted, not just the type: without it this passes for any ConfigError a
+    # The message is asserted, not just the type: without it this passes for any FrontmatterError a
     # later validation change might raise on the block, rather than for 1.1 resolution.
-    with pytest.raises(ConfigError) as exc:
+    with pytest.raises(FrontmatterError) as exc:
         parse_meta("%YAML 1.1\n--- !!map\nid: on\n", Path("directive.md"))
 
     assert "directive.md" in str(exc.value)

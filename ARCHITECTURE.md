@@ -668,15 +668,17 @@ suppression mechanism; `cli/errors.py` has no equivalent.
 Presentation is nevertheless AD-9's, because the two are separable: Python decides whether to
 ignore, display, or raise a warning before it reaches the replaceable `showwarning` stage, so
 `CliRuntime.rendered_warnings()` substitutes only that stage, for the duration of a phase that
-can reach a parser. Every such phase is wrapped, not the lattice load alone, because a dependency
-raises the same warning family from more than one: a reused YAML anchor warns from `config.py` and
-from `frontmatter_parser.py` through the same `SafeYamlLoader` class, and again from the fresh
-reread `reconcile`'s rewrite phase performs after that load has returned. Leaving any of them out
-would print one of a run's warnings in Python's default format and the next in this one. The
-substitute renders `warning: <message>` through the invocation's stderr `Console`, discarding the
-category, filename, line number, and source line Python's default formatter would have shown,
-stripping a message that opens with a newline so the prefix never lands on a line of its own, and
-restoring the previous callable in a `finally` on both the normal and the exception path.
+can reach a parser. Every such phase is wrapped, not the lattice load alone, because more than one
+of them can raise about the same document: a reused YAML anchor is reported for a tracked document
+by `orchestrate.py`, which reports it from the shared site after `frontmatter_parser.py` has
+intercepted ruamel's own warning per AD-33, while `config.py` and the fresh reread `reconcile`'s
+rewrite phase performs after that load has returned both still let ruamel raise it directly.
+Leaving any of them out would print one of a run's warnings in Python's default format and the next
+in this one. The substitute renders `warning: <message>` through the invocation's stderr `Console`,
+discarding the category, filename, line number, and source line Python's default formatter would
+have shown, stripping a message that opens with a newline so the prefix never lands on a line of
+its own, and restoring the previous callable in a `finally` on both the normal and the exception
+path.
 Filtering, category matching, and repeat suppression stay engine-owned and unreimplemented, and a
 library consumer calling `load_lattice()` directly is untouched. Routing the three `warnings.warn`
 sites through the stderr renderer instead would have forfeited that filtering, which README
