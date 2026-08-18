@@ -1,6 +1,7 @@
 """Serialize reconcile processes and recover durable transaction journals."""
 
 import os
+import re
 import stat
 import sys
 from collections.abc import Iterator
@@ -82,27 +83,43 @@ class JournalEntry(BaseModel):
     after_sha256: Sha256Digest
 
 
-def _reject_numeric_timestamp(value: object) -> object:
-    """Refuse a JSON number where the journal's wire format spells a timestamp string.
+# The date-time syntax a journal timestamp may use: a calendar date, a T separator, a full clock
+# time, optional fractional seconds, and a zone designator. Case in the T and Z designators is
+# tolerated because a hand-normalized file may lower them; the space separator RFC 3339 permits by
+# agreement is not, since doc-lattice is the only writer of this file and never emits one. The
+# designator is required here but its value is not checked: _require_utc_offset owns that, so a
+# syntax failure and a wrong-zone failure each report as themselves.
+_TIMESTAMP_TEXT = re.compile(
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})"
+)
 
-    Datetime validation reads a bare number as a Unix timestamp, so ``"created_at": 0`` would
-    otherwise be accepted as 1970-01-01 rather than refused. That is the one provenance field
-    a wrong JSON type can turn into a plausible-looking value instead of a validation error.
+
+def _require_timestamp_text(value: object) -> object:
+    """Refuse any ``created_at`` that is not spelled as a date-time string.
+
+    An allowlist, deliberately, rather than a list of refusals. Datetime validation accepts
+    several inputs that denote a different instant than they appear to: a bare number and a
+    numeric *string* are both read as Unix timestamps, so ``0`` and ``"0"`` alike land on
+    1970-01-01, and ``"-1"`` lands a second earlier. Enumerating those one at a time only holds
+    until the next coercion exists, so this matches the syntax the format documents and refuses
+    everything else.
 
     Args:
         value: The raw ``created_at`` input, before datetime validation.
 
     Returns:
-        The value unchanged when it is not a number, including the ``datetime`` this module
-        passes when it constructs provenance directly.
+        The value unchanged when it is an accepted timestamp string, or the ``datetime`` this
+        module passes when it builds provenance directly rather than through JSON.
 
     Raises:
-        ValueError: If the value is a number.
+        ValueError: If the value is neither a datetime nor a matching timestamp string.
     """
-    if isinstance(value, int | float):
-        message = f"created_at must be an ISO 8601 timestamp string, got the number {value!r}"
-        raise ValueError(message)
-    return value
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and _TIMESTAMP_TEXT.fullmatch(value):
+        return value
+    message = f"created_at must be an ISO 8601 timestamp string, got {value!r}"
+    raise ValueError(message)
 
 
 def _require_utc_offset(value: datetime) -> datetime:
@@ -129,7 +146,7 @@ def _require_utc_offset(value: datetime) -> datetime:
 # alone rules out only a naive value; these two validators close the coercions it still permits.
 UtcTimestamp = Annotated[
     AwareDatetime,
-    BeforeValidator(_reject_numeric_timestamp),
+    BeforeValidator(_require_timestamp_text),
     AfterValidator(_require_utc_offset),
 ]
 

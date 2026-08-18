@@ -95,9 +95,11 @@ project-relative destination, before-image, and after-image paths plus full SHA-
 A `provenance` object records what produced the transaction. Every field is required, and a
 version 2 journal missing any of them is rejected rather than recovered with blanks:
 
-- `created_at`: when preparation began, as an ISO 8601 timestamp string in UTC. A naive
-  timestamp, one carrying a nonzero offset, and a bare number are all rejected, so a hand-edited
-  value cannot be reinterpreted as some other instant.
+- `created_at`: when preparation began, as an ISO 8601 timestamp string in UTC, for example
+  `2026-08-17T12:00:00.123456Z`. The value must match that syntax: a naive timestamp, a nonzero
+  offset, and anything spelling a number rather than a date-time are all rejected, so a
+  hand-edited value cannot be reinterpreted as some other instant. Both `0` and `"0"` would
+  otherwise read as 1970-01-01.
 - `tool_version`: the doc-lattice version that wrote the journal.
 - `selector`: the selection the batch was planned from, as `mode` (`all` or `downstream`),
   `downstream_id` (the node for a `downstream` selection, `null` for `all`), and `ref` (the single

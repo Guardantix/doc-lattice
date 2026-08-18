@@ -4,7 +4,7 @@ import json
 import os
 import stat
 from dataclasses import FrozenInstanceError, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -2172,6 +2172,42 @@ def _v2_payload() -> dict:
             id="created-at-epoch-float",
         ),
         pytest.param(lambda p: p["provenance"].update(created_at=True), id="created-at-boolean"),
+        # The string forms of the same coercion. Datetime validation reads a numeric string as a
+        # Unix timestamp too, so blocking only JSON numbers left "0" landing on 1970-01-01.
+        pytest.param(lambda p: p["provenance"].update(created_at="0"), id="created-at-text-zero"),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="1755432000"),
+            id="created-at-text-epoch-seconds",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="1755432000.5"),
+            id="created-at-text-epoch-float",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="-1"),
+            id="created-at-text-before-epoch",
+        ),
+        pytest.param(lambda p: p["provenance"].update(created_at=""), id="created-at-empty"),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="not a timestamp"),
+            id="created-at-not-a-timestamp",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17"),
+            id="created-at-date-only",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at=" 2026-08-17T12:00:00Z "),
+            id="created-at-padded",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at="2026-08-17 12:00:00Z"),
+            id="created-at-space-separated",
+        ),
+        pytest.param(
+            lambda p: p["provenance"].update(created_at=["2026-08-17T12:00:00Z"]),
+            id="created-at-wrapped-in-a-list",
+        ),
         pytest.param(
             lambda p: p["provenance"].update(created_at="2026-08-17T12:00:00+05:00"),
             id="created-at-east-of-utc",
@@ -2343,23 +2379,58 @@ def test_created_at_accepts_the_forms_the_engine_actually_produces():
     assert loaded.provenance == direct
 
 
-def test_created_at_rejection_messages_name_the_actual_problem():
-    with pytest.raises(ValidationError) as numeric:
-        JournalProvenance.model_validate(
-            {
-                "created_at": 0,
-                "tool_version": "9.9.9",
-                "selector": {"mode": "all", "downstream_id": None, "ref": None},
-            }
-        )
-    with pytest.raises(ValidationError) as offset:
-        JournalProvenance.model_validate(
-            {
-                "created_at": "2026-08-17T12:00:00+05:00",
-                "tool_version": "9.9.9",
-                "selector": {"mode": "all", "downstream_id": None, "ref": None},
-            }
-        )
+def _provenance_with(created_at: object) -> dict:
+    """One provenance payload differing only in its timestamp."""
+    return {
+        "created_at": created_at,
+        "tool_version": "9.9.9",
+        "selector": {"mode": "all", "downstream_id": None, "ref": None},
+    }
 
-    assert "must be an ISO 8601 timestamp string" in str(numeric.value)
-    assert "must be expressed in UTC" in str(offset.value)
+
+@pytest.mark.parametrize(
+    "numeric",
+    [0, -1, 1755432000, 1755432000.5, "0", "-1", "1755432000", "1755432000.5", "1e9"],
+)
+def test_no_numeric_form_of_created_at_is_read_as_a_unix_timestamp(numeric: object):
+    """A regression guard with a wider net than the shapes that were actually reported.
+
+    Datetime validation reads a number, and a string spelling a number, as seconds since the
+    epoch. Both were accepted at some point during this change: the JSON number first, then its
+    string form after the first fix blocked only the former. ``created_at`` is validated by
+    matching the documented syntax rather than by refusing known coercions, so a future
+    dependency that learns a new numeric spelling cannot quietly reopen this.
+    """
+    with pytest.raises(ValidationError):
+        JournalProvenance.model_validate(_provenance_with(numeric))
+
+
+@pytest.mark.parametrize(
+    "accepted",
+    [
+        "2026-08-17T12:00:00Z",
+        "2026-08-17T12:00:00.123456Z",
+        "2026-08-17t12:00:00z",
+        "2026-08-17T12:00:00+00:00",
+    ],
+    ids=["z", "z-microseconds", "lowercase-designators", "explicit-zero-offset"],
+)
+def test_created_at_accepts_every_spelling_of_the_same_utc_instant(accepted: str):
+    provenance = JournalProvenance.model_validate(_provenance_with(accepted))
+
+    assert provenance.created_at == datetime(2026, 8, 17, 12, 0, tzinfo=UTC) + timedelta(
+        microseconds=123456 if "123456" in accepted else 0
+    )
+
+
+def test_created_at_syntax_and_zone_failures_report_separately():
+    """The two validators own different questions, so their messages must not blur together."""
+    with pytest.raises(ValidationError) as syntax:
+        JournalProvenance.model_validate(_provenance_with("1755432000"))
+    with pytest.raises(ValidationError) as zone:
+        JournalProvenance.model_validate(_provenance_with("2026-08-17T12:00:00+05:00"))
+
+    assert "must be an ISO 8601 timestamp string" in str(syntax.value)
+    assert "must be expressed in UTC" in str(zone.value)
+    assert "must be expressed in UTC" not in str(syntax.value)
+    assert "must be an ISO 8601 timestamp string" not in str(zone.value)
