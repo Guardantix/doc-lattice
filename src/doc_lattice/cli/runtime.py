@@ -58,7 +58,8 @@ class CliRuntime:
         Returns:
             The loaded project configuration.
         """
-        return self.load_config(config, self.cwd)
+        with self._rendered_warnings():
+            return self.load_config(config, self.cwd)
 
     def lattice(
         self,
@@ -91,8 +92,10 @@ class CliRuntime:
         Python applies its filters before the replaceable ``showwarning`` stage, so
         substituting only that stage keeps ``PYTHONWARNINGS``, category matching, and
         repeat suppression owned by the engine while the presentation matches AD-9's
-        stderr voice. ``warnings.showwarning`` is process-global, so the previous
-        callable is restored on both the normal and the exception path.
+        stderr voice. Both loads a command performs are wrapped, so a warning raised
+        while reading the config renders the same way as one raised while reading a
+        document. ``warnings.showwarning`` is process-global, so the previous callable
+        is restored on both the normal and the exception path.
 
         Yields:
             Control to the wrapped load.
@@ -118,7 +121,17 @@ class CliRuntime:
         """Write one displayed warning as a ``warning: <message>`` diagnostic.
 
         Category, filename, line number, and source line are discarded deliberately: a
-        skip is reported to a user, not to a maintainer of this package.
+        skip is reported to a user, not to a maintainer of this package. The message is
+        stripped first because a dependency can raise one that opens with a newline,
+        which would otherwise print the prefix on a line of its own.
+
+        A dead stderr behaves as it does everywhere else this CLI writes: Rich's
+        ``Console.on_broken_pipe`` points ``sys.stdout`` at ``os.devnull`` and raises
+        ``SystemExit(1)``. CPython's own ``showwarning`` ends in ``except OSError: pass``
+        instead, so a warning on a broken pipe used to be survivable here and now is not.
+        The guard is deliberately not reinstated at this one site: by the time it could
+        catch, Rich has already redirected the process's stdout, and `cli/errors.py` has
+        the identical exposure, so a partial fix here would read as a solved problem.
 
         Args:
             message: Warning instance or message text Python is displaying.
@@ -129,7 +142,9 @@ class CliRuntime:
             line: Raising source line, unused by this presentation.
         """
         del category, filename, lineno, file, line
-        self.stderr.print(f"[yellow]warning[/yellow]: {escape(str(message))}", soft_wrap=True)
+        self.stderr.print(
+            f"[yellow]warning[/yellow]: {escape(str(message).strip())}", soft_wrap=True
+        )
 
     def write_stdout(self, text: str, *, newline: bool = True) -> None:
         """Write exact text to the captured stdout stream.

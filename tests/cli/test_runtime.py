@@ -215,6 +215,65 @@ def test_lattice_renders_loader_warnings_through_the_invocation_stderr(tmp_path:
     assert stderr.getvalue() == "warning: skipping /docs/thing.md: no 'id'\n"
 
 
+def test_project_renders_config_load_warnings_through_the_invocation_stderr(tmp_path: Path):
+    # A reused YAML anchor warns from the shared loader on the config read too, so leaving
+    # that read unwrapped would print one command's two warnings in two different formats.
+    def load_config(config: Path | None, cwd: Path) -> ProjectConfig:
+        del config, cwd
+        warnings.warn("found duplicate anchor 'names'", stacklevel=1)
+        return ProjectConfig(Config(), tmp_path, (tmp_path,))
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        raise AssertionError("the config read must not reach the lattice loader")
+
+    stderr = StringIO()
+    runtime = CliRuntime(
+        stdout=Console(file=StringIO()),
+        stderr=Console(file=stderr, stderr=True, no_color=True, color_system=None),
+        cwd=tmp_path,
+        load_config=load_config,
+        load_lattice=load_lattice,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        runtime.project(None)
+
+    assert stderr.getvalue() == "warning: found duplicate anchor 'names'\n"
+
+
+def test_lattice_warning_renderer_strips_a_message_that_opens_with_a_newline(tmp_path: Path):
+    # ruamel raises its anchor and duplicate-key warnings with a leading newline, which
+    # would otherwise print the `warning:` prefix on a line carrying nothing else.
+    project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
+    lattice = Lattice({}, {}, {}, {}, {}, {})
+
+    def load_lattice(
+        project: ProjectConfig,
+        *,
+        require_verified: bool = False,
+        persist_cache: bool = True,
+    ) -> Lattice:
+        del project, require_verified, persist_cache
+        warnings.warn("\nfound duplicate anchor 'shared'\nfirst occurrence\n", stacklevel=1)
+        return lattice
+
+    stderr = StringIO()
+    runtime = _warning_runtime(stderr, tmp_path, load_lattice)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        runtime.lattice(project)
+
+    assert stderr.getvalue() == "warning: found duplicate anchor 'shared'\nfirst occurrence\n"
+
+
 def test_lattice_warning_renderer_escapes_rich_markup_in_the_message(tmp_path: Path):
     project = ProjectConfig(Config(), tmp_path, (tmp_path / "docs",))
     lattice = Lattice({}, {}, {}, {}, {}, {})

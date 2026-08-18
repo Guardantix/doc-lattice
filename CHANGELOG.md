@@ -97,9 +97,9 @@ transaction-artifacts section of `RECONCILE.md` for the field list.
   an edge case. Filtering is unchanged and still documented in README: Python applies
   `PYTHONWARNINGS` before the presentation stage this replaces, so `PYTHONWARNINGS=ignore` and the
   `ignore:skipping` literal-prefix form behave exactly as before, as do category matching and
-  repeat suppression. The substitution is scoped to the load it wraps and restored afterwards on
-  both the normal and the failing path, so importing `doc_lattice` as a library still gets
-  standard `warnings` behavior. See
+  repeat suppression. The substitution covers the config read as well as the document load, and is
+  scoped to those loads and restored afterwards on both the normal and the failing path, so
+  importing `doc_lattice` as a library still gets standard `warnings` behavior. See
   [AD-29](ARCHITECTURE.md#ad-29-a-skipped-files-reason-is-cached-data-and-is-reported-from-one-site).
 - The reconcile transaction journal is now version 2, and records what produced it. A journal
   previously carried only `version`, `state`, and `entries`, so an operator holding one after a
