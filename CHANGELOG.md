@@ -8,9 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Two things to act on. The first is the printed workflow, and it applies to every ordinary and
-recipe install. The workflow `doc-lattice init` prints now triggers on a resolved default branch
-rather than a hard-wired
+Two things to act on, plus one format change below that needs no action. The first is the printed
+workflow, and it applies to every ordinary and recipe install. The workflow `doc-lattice init`
+prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
 and replace the checked-in file, exactly as the ordinary upgrade path in README.md already
 describes. Check the branch the run reports on stderr against the branch you actually gate on
@@ -23,6 +23,18 @@ cleanly and never triggered, and this is the release that fixes it.
 The second is the managed GitHub and Linear CI setup, which this release removes. A managed
 installation converts rather than upgrades, and it will not tell you so itself; see **Removed**
 below for why, and `MANAGED_CI.md` for the procedure.
+
+The third needs nothing from you, and is recorded here because a format bump usually would. The
+reconcile transaction journal moves to version 2, adding a required `provenance` block and
+pretty-printing. Upgrading across an interrupted run is safe in both directions of the crash
+window: a version 1 journal left by an earlier release is still recovered normally, whether it is
+`prepared` or `committed`, because recovery inspects the declared version before validating the
+rest. So you do not need to drain outstanding transactions before upgrading. Only version 2 is
+written, so a recovered version 1 journal is removed rather than rewritten, and the first
+transaction after the upgrade writes the new format. What you cannot do is downgrade with a
+journal outstanding: an earlier release accepts only version 1 and will refuse a version 2 journal
+as invalid, so run `doc-lattice reconcile --recover` to completion before rolling back. See the
+transaction-artifacts section of `RECONCILE.md` for the field list.
 
 ### Added
 
@@ -77,6 +89,19 @@ below for why, and `MANAGED_CI.md` for the procedure.
 
 ### Changed
 
+- The reconcile transaction journal is now version 2, and records what produced it. A journal
+  previously carried only `version`, `state`, and `entries`, so an operator holding one after a
+  crash could not tell when it was written, which doc-lattice wrote it, or what command produced
+  it. Version 2 adds a required `provenance` block carrying `created_at`, `tool_version`, and a
+  typed `selector` (`mode` of `all` or `downstream`, the `downstream_id` when there is one, and
+  the `ref` the run narrowed to), and the journal is written pretty-printed so it can be read
+  without reformatting. The selector is recorded as typed fields rather than a command line, so
+  recovery never parses argv. All three values are captured once when the transaction is prepared
+  and copied unchanged into the committed marker, which previously forwarded only the version and
+  entries, so a crash journal cannot disagree with itself. Provenance is required and immutable: a
+  version 2 journal missing any of it is rejected rather than recovered with blank fields. Version
+  1 journals stay recoverable in both states, so the bump strands no interrupted run; see
+  **Migration** above.
 - **BREAKING:** `reconcile --recover` no longer reports a full rollback it did not perform, and no
   longer deletes the evidence needed to finish one by hand. Rolling back a `prepared` journal
   previously skipped any destination whose contents did not match the recorded after image, then

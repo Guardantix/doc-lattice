@@ -87,9 +87,37 @@ would reconcile from unrecovered bytes.
 
 ## Transaction artifacts
 
-The project-root transaction journal is `.doc-lattice-reconcile.json`. Its state is `prepared` or
-`committed`, and each entry records project-relative destination, before-image, and after-image
-paths plus full SHA-256 fingerprints. Temporary files use these exact patterns:
+The project-root transaction journal is `.doc-lattice-reconcile.json`. It is written
+pretty-printed, so an interrupted run leaves a file you can read without reformatting it. Its
+`version` is `2`, its `state` is `prepared` or `committed`, and each entry under `entries` records
+project-relative destination, before-image, and after-image paths plus full SHA-256 fingerprints.
+
+A `provenance` object records what produced the transaction. Every field is required, and a
+version 2 journal missing any of them is rejected rather than recovered with blanks:
+
+- `created_at`: when preparation began, as an ISO 8601 timestamp string in UTC, for example
+  `2026-08-17T12:00:00.123456Z`. The value must match that syntax: a naive timestamp, a nonzero
+  offset, and anything spelling a number rather than a date-time are all rejected, so a
+  hand-edited value cannot be reinterpreted as some other instant. Both `0` and `"0"` would
+  otherwise read as 1970-01-01. `Z` and `+00:00` are equivalent and both accepted; `-00:00` is
+  not, because ISO 8601 forbids it and RFC 3339 gives it a separate meaning this field does not
+  carry.
+- `tool_version`: the doc-lattice version that wrote the journal.
+- `selector`: the selection the batch was planned from, as `mode` (`all` or `downstream`),
+  `downstream_id` (the node for a `downstream` selection, `null` for `all`), and `ref` (the single
+  upstream ref the run narrowed to, or `null`). `--all` takes precedence over a downstream id, so a
+  run given both records `mode: "all"`.
+
+All three are captured once, when the transaction is prepared, and copied unchanged into the
+committed marker, so a crash journal never disagrees with itself about when or why it ran.
+
+Version 1 journals, which recorded no provenance, are still recoverable: recovery inspects the
+declared version before validating, and both `prepared` and `committed` v1 journals roll back and
+clean up exactly as they did before. Only version 2 is ever written, so a recovered v1 journal is
+removed rather than upgraded in place. A journal declaring any other version is rejected as
+invalid and left for manual inspection.
+
+Temporary files use these exact patterns:
 
 ```gitignore
 .doc-lattice-reconcile.json

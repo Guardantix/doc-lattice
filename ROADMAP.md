@@ -20,19 +20,15 @@ The release in flight. `## [Unreleased]` already carries breaking changes, so th
 to be true at the moment a major ships. Everything else waits for 5.x, which is what keeps this
 release from staying open indefinitely.
 
-Start at GTX-110 and GTX-126. They are the two items the rest of the release sequences behind,
-now that GTX-163 has removed the managed GitHub and Linear CI code and repaired every document
-that described it.
+Start at GTX-110. It is the item the rest of the release sequences behind, now that GTX-163 has
+removed the managed GitHub and Linear CI code and repaired every document that described it, and
+GTX-126 has moved the reconcile journal to v2.
 
 - Consolidate the persistence primitives that removal orphaned, and record the filesystem threat
   model in AD-2 (GTX-110). Roughly half of `persistence.py` is the same five operations written
   twice, and the dirfd family's only consumer was the code GTX-163 deleted, so this is the release
   where the duplicate family stops being load-bearing. Carrying it across a whole minor train
   instead would leave a dead primitive family in the module for no benefit.
-- Move the reconcile journal to v2, so a crash journal records when, by what version, and from
-  which selector it was written, with v1 journals still recoverable across the upgrade (GTX-126).
-  A format bump is honest in a major and awkward in a minor, and two 5.x follow-ons read the new
-  fields.
 - Bring the diagnostics an external user meets first up to the standard the transaction layer
   already sets. The load boundary introduces a frontmatter-specific error code and so has to land
   in this window (GTX-112). Warning presentation matters now that GTX-102 makes the id-less skip

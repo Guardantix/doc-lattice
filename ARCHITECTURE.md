@@ -52,7 +52,10 @@ cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capabilit
 mechanics, independent live destination preflight for commits, durable commit and
 rollback, journal and artifact recovery containment and validation, and cleanup.
 `cli/git_repository.py` owns the package's only subprocess use, the bounded `git`
-invocations ordinary `init` runs to probe the default branch. The
+invocations ordinary `init` runs to probe the default branch. `datetime_utils.py` is the
+narrow impure time boundary and the only caller of the current clock, so reading the time
+stays outside the transaction module's pure validation and every timestamp the engine
+records enters through one substitutable function. The
 `doc_lattice.cli` package owns the application boundary; AD-5 owns the split between its
 `cli/commands/reconcile.py` adapter and `reconcile_transaction.py`.
 Within the cache package, `cache/schema.py` and

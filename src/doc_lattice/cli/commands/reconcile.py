@@ -13,6 +13,7 @@ from ...path_utils import safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
 from ...reconcile import reconcile as plan_reconcile
 from ...reconcile_transaction import (
+    JournalSelector,
     RecoveryAction,
     RecoveryResult,
     commit_rewrites,
@@ -54,6 +55,32 @@ def _print_reconcile_lines(
     verb = "would reconcile" if dry_run else "reconciled"
     for target_ref in sorted(applied):
         runtime.stdout.print(f"{verb} {escape(path.name)}: {escape(target_ref)}")
+
+
+def _journal_selector(
+    downstream_id: str,
+    *,
+    reconcile_all: bool,
+    ref: str | None,
+) -> JournalSelector:
+    """Build the typed selector the transaction journal records for this run.
+
+    The transaction boundary never sees these arguments, so the adapter that owns them
+    builds the selector. It mirrors the planner's precedence rather than the raw argument
+    pair: ``--all`` wins and the downstream id is ignored, exactly as ``reconcile`` plans it,
+    so a recovered journal names the selection that actually ran.
+
+    Args:
+        downstream_id: The node argument, empty when the run selected everything.
+        reconcile_all: Whether the run selected every drifting edge.
+        ref: The single upstream ref the run narrowed to, or None for all of them.
+
+    Returns:
+        The selector to record in the journal.
+    """
+    if reconcile_all:
+        return JournalSelector(mode="all", downstream_id=None, ref=ref)
+    return JournalSelector(mode="downstream", downstream_id=downstream_id, ref=ref)
 
 
 def _resolve_reconcile_write_paths(
@@ -242,6 +269,11 @@ def register_reconcile(app: typer.Typer) -> None:
                         project.project_root,
                         rewrites,
                         write_paths,
+                        selector=_journal_selector(
+                            downstream_id,
+                            reconcile_all=reconcile_all,
+                            ref=ref,
+                        ),
                         lock=lock,
                     )
             _report_reconcile(
