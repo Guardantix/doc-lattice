@@ -1,7 +1,6 @@
 """Tests for shared durable filesystem persistence primitives."""
 
 import hashlib
-import os
 import stat
 from pathlib import Path
 
@@ -227,33 +226,6 @@ def test_atomic_replace_bytes_replaces_target_and_cleans_stage(tmp_path: Path):
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
 
 
-def test_atomic_replace_bytes_at_stays_with_open_directory_after_path_is_replaced(
-    tmp_path: Path,
-):
-    root = tmp_path / "root"
-    displaced_root = tmp_path / "displaced-root"
-    root.mkdir()
-    target = root / "artifact.txt"
-    target.write_bytes(b"old")
-    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        root.rename(displaced_root)
-        root.mkdir()
-        (root / target.name).write_bytes(b"replacement root bytes")
-
-        persistence.atomic_replace_bytes_at(
-            fd,
-            target.name,
-            b"new",
-            prefix=".artifact.txt.replace.",
-        )
-    finally:
-        os.close(fd)
-
-    assert (root / target.name).read_bytes() == b"replacement root bytes"
-    assert (displaced_root / target.name).read_bytes() == b"new"
-
-
 def test_atomic_replace_bytes_preserves_existing_destination_mode(tmp_path: Path):
     destination = tmp_path / "doc.md"
     destination.write_bytes(b"old")
@@ -280,49 +252,6 @@ def test_atomic_replace_bytes_keeps_non_regular_destination_private(tmp_path: Pa
     destination.symlink_to(target)
 
     atomic_replace_bytes(destination, b"new", prefix=".link.md.replace.")
-
-    assert destination.read_bytes() == b"new"
-    assert stat.S_IMODE(destination.stat(follow_symlinks=False).st_mode) == 0o600
-    assert target.read_bytes() == b"target"
-
-
-def test_atomic_replace_bytes_at_preserves_existing_destination_mode(tmp_path: Path):
-    destination = tmp_path / "doc.md"
-    destination.write_bytes(b"old")
-    destination.chmod(0o754)
-
-    fd = os.open(tmp_path, os.O_RDONLY)
-    try:
-        persistence.atomic_replace_bytes_at(
-            fd,
-            destination.name,
-            b"new",
-            prefix=".doc.md.replace.",
-        )
-    finally:
-        os.close(fd)
-
-    assert destination.read_bytes() == b"new"
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o754
-
-
-def test_atomic_replace_bytes_at_keeps_non_regular_destination_private(tmp_path: Path):
-    target = tmp_path / "target.md"
-    target.write_bytes(b"target")
-    target.chmod(0o754)
-    destination = tmp_path / "link.md"
-    destination.symlink_to(target)
-
-    fd = os.open(tmp_path, os.O_RDONLY)
-    try:
-        persistence.atomic_replace_bytes_at(
-            fd,
-            destination.name,
-            b"new",
-            prefix=".link.md.replace.",
-        )
-    finally:
-        os.close(fd)
 
     assert destination.read_bytes() == b"new"
     assert stat.S_IMODE(destination.stat(follow_symlinks=False).st_mode) == 0o600
@@ -500,31 +429,6 @@ def test_atomic_create_bytes_creates_absent_target_and_cleans_stage(tmp_path: Pa
 
     assert destination.read_bytes() == b"created"
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
-
-
-def test_atomic_create_bytes_at_stays_with_open_directory_after_path_is_replaced(
-    tmp_path: Path,
-):
-    root = tmp_path / "root"
-    displaced_root = tmp_path / "displaced-root"
-    root.mkdir()
-    target_name = "artifact.txt"
-    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        root.rename(displaced_root)
-        root.mkdir()
-
-        persistence.atomic_create_bytes_at(
-            fd,
-            target_name,
-            b"created",
-            prefix=".artifact.txt.create.",
-        )
-    finally:
-        os.close(fd)
-
-    assert not (root / target_name).exists()
-    assert (displaced_root / target_name).read_bytes() == b"created"
 
 
 def test_atomic_create_bytes_raises_cleanup_error_after_successful_create(

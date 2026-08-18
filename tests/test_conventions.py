@@ -227,16 +227,12 @@ DESTINATION_READERS = frozenset(
 COLLECTION_ACCUMULATORS = frozenset({"add", "append", "discard", "extend", "insert", "update"})
 COLLECTION_BUILDERS = frozenset({"dict", "list", "set"})
 PUBLICATION_OWNERS = frozenset({"persistence.py", TRANSACTION_MODULE})
-# Each composite primitive below stages and publishes one destination in a single call, so naming
-# one overwrites a document without ever naming the publication helper and would slip past a scan
-# that reads only that helper's name. The descriptor-relative variant does not even route through
-# it. Each primitive's present users write their own artifacts rather than documents, so they are
-# pinned per primitive and any new user of either route fails closed. A primitive with no users
-# left stays registered with an empty allowlist: the guard iterates these keys to reject
-# unapproved callers, so dropping the key would drop the route it guards.
+# The composite primitive below stages and publishes one destination in a single call, so naming
+# it overwrites a document without ever naming the publication helper and would slip past a scan
+# that reads only that helper's name. Its present users write their own artifacts rather than
+# documents, so they are pinned per primitive and any new user of that route fails closed.
 COMPOSITE_PUBLISH_USERS: dict[str, frozenset[str]] = {
     "atomic_replace_bytes": frozenset({"cache/store.py"}),
-    "atomic_replace_bytes_at": frozenset(),
 }
 # The whole document a rewrite may reassemble, as the exact order it reattaches. Requiring only
 # that some verified value appears would accept `f"{new_meta}"`, which drops the fences and the
@@ -933,13 +929,11 @@ def _publication_reach_violations(trees: dict[str, ast.Module]) -> list[str]:
     check pins: a new module naming it at all is a new publication route and fails here instead
     of slipping past a sink audit that never looked at it.
 
-    Reaching it indirectly counts, and so does bypassing it. Each composite primitive in
+    Reaching it indirectly counts, and so does bypassing it. The composite primitive in
     ``COMPOSITE_PUBLISH_USERS`` stages and publishes one destination in a single call, so a
-    module can overwrite a reconcile destination through one of them without ever naming
-    ``replace_staged``; the descriptor-relative variant does not even call it. Each primitive's
-    current users publish their own artifacts rather than documents and are pinned per
-    primitive, so a new user of either route fails here too. A primitive with no remaining users
-    keeps an empty allowlist, which rejects every caller.
+    module can overwrite a reconcile destination through it without ever naming
+    ``replace_staged``. Its current users publish their own artifacts rather than documents and
+    are pinned per primitive, so a new user of that route fails here too.
 
     The check reads every mention of the identifier, not just a ``from ... import`` of it. A
     module can reach the helper as ``from . import persistence`` followed by
@@ -1351,16 +1345,6 @@ def publish(destination: Path, data: bytes) -> None:
     atomic_replace_bytes(destination, data, prefix=".rogue")
 '''
 
-DESCRIPTOR_PUBLISHER_MODULE = '''"""A module publishing at a descriptor-relative destination."""
-
-from .persistence import atomic_replace_bytes_at
-
-
-def publish(directory_fd: int, destination_name: str, data: bytes) -> None:
-    """Publish arbitrary bytes over a reconcile destination without reaching the helper."""
-    atomic_replace_bytes_at(directory_fd, destination_name, data, prefix=".rogue")
-'''
-
 # The forward sink the controls below bend, with the indentation its statement sits at, so an
 # added statement lands in the same block rather than reindenting the module into a syntax error.
 FORWARD_SINK_CALL = "replace_staged(entry.after_path, entry.destination)"
@@ -1466,27 +1450,26 @@ def _positive_controls() -> dict[str, dict[str, str]]:
     closed: a gate nested in a conditional, a line-ending restoration that corrupts through its
     replacement operand, unverified ``raw_meta`` reattached to the envelope, the publication
     helper reached through its module rather than by name, and a producer hidden behind an
-    import alias. The last five came from a second adversarial pass, likewise reproduced first:
-    literal text spliced into the envelope f-string, an after image staged behind a locally
-    bound infix, a document published through ``atomic_replace_bytes`` without ever naming the
-    publication helper, the same through the descriptor-relative ``atomic_replace_bytes_at``,
-    which does not even call that helper, and a Rewrite minted by ``dataclasses.replace`` rather
-    than constructed. The last five came from external review of this guard, again each
-    reproduced first: a restoration replacing one newline with two, a sink pairing one entry's
-    staged image with another entry's destination, a destination republished by a raw
-    ``os.replace``, a destination overwritten through its own write method, and a producer
-    behind an alias introduced by assignment rather than by import. The last records a
-    destination into something that is not a provable local collection, pinning that the
-    bookkeeping exemption cannot be borrowed by anything that merely answers to ``append``. The
-    next three came from a further review pass: the whole document envelope dropped around the
-    verified metadata, the envelope reattached out of order, and a producer behind an alias bound
-    as a parameter default. The next four close the routes that launder a guarded value through
-    another shape: a producer subclassing the record to inherit its constructor, and a
-    destination republished after a container round trip, by subscript of a literal, by subscript
-    of a bookkeeping accumulation, and by iterating one back. The final four close what a matcher
-    reads rather than what it matches: a legal line ending in an illegal envelope position, a
-    field copy whose keyword is unreadable because it arrives unpacked, a destination surviving
-    under a rebound name, and an unrelated method borrowing a pinned reader's terminal name.
+    import alias. The last four came from a second adversarial pass, likewise reproduced first:
+    literal text spliced into the envelope f-string, an after image staged behind a locally bound
+    infix, a document published through ``atomic_replace_bytes`` without ever naming the
+    publication helper, and a Rewrite minted by ``dataclasses.replace`` rather than constructed.
+    The last five came from external review of this guard, again each reproduced first: a
+    restoration replacing one newline with two, a sink pairing one entry's staged image with
+    another entry's destination, a destination republished by a raw ``os.replace``, a destination
+    overwritten through its own write method, and a producer behind an alias introduced by
+    assignment rather than by import. The last records a destination into something that is not a
+    provable local collection, pinning that the bookkeeping exemption cannot be borrowed by
+    anything that merely answers to ``append``. The next three came from a further review pass:
+    the whole document envelope dropped around the verified metadata, the envelope reattached out
+    of order, and a producer behind an alias bound as a parameter default. The next four close the
+    routes that launder a guarded value through another shape: a producer subclassing the record
+    to inherit its constructor, and a destination republished after a container round trip, by
+    subscript of a literal, by subscript of a bookkeeping accumulation, and by iterating one back.
+    The final four close what a matcher reads rather than what it matches: a legal line ending in
+    an illegal envelope position, a field copy whose keyword is unreadable because it arrives
+    unpacked, a destination surviving under a rebound name, and an unrelated method borrowing a
+    pinned reader's terminal name.
 
     Cached alongside the source read so the parametrized run builds this mapping once.
     """
@@ -1562,10 +1545,6 @@ def _positive_controls() -> dict[str, dict[str, str]]:
         "document-published-through-the-composite-primitive": {
             **sources,
             "rogue_composite_publisher.py": COMPOSITE_PUBLISHER_MODULE,
-        },
-        "document-published-through-the-descriptor-relative-primitive": {
-            **sources,
-            "rogue_descriptor_publisher.py": DESCRIPTOR_PUBLISHER_MODULE,
         },
         "rewrite-minted-by-a-dataclass-field-copy": {
             **sources,

@@ -20,15 +20,12 @@ The release in flight. `## [Unreleased]` already carries breaking changes, so th
 to be true at the moment a major ships. Everything else waits for 5.x, which is what keeps this
 release from staying open indefinitely.
 
-Start at GTX-110. It is the item the rest of the release sequences behind, now that GTX-163 has
-removed the managed GitHub and Linear CI code and repaired every document that described it, and
-GTX-126 has moved the reconcile journal to v2.
+Nothing in the release sequences behind a single item any more. GTX-163 has removed the managed
+GitHub and Linear CI code and repaired every document that described it, GTX-126 has moved the
+reconcile journal to v2, and GTX-110 has retired the orphaned dirfd persistence family and
+recorded the filesystem threat model in AD-2. Start with the diagnostics group below, since the
+error codes it settles are what GTX-113 waits on.
 
-- Consolidate the persistence primitives that removal orphaned, and record the filesystem threat
-  model in AD-2 (GTX-110). Roughly half of `persistence.py` is the same five operations written
-  twice, and the dirfd family's only consumer was the code GTX-163 deleted, so this is the release
-  where the duplicate family stops being load-bearing. Carrying it across a whole minor train
-  instead would leave a dead primitive family in the module for no benefit.
 - Bring the diagnostics an external user meets first up to the standard the transaction layer
   already sets. The load boundary introduces a frontmatter-specific error code and so has to land
   in this window (GTX-112). Warning presentation matters now that GTX-102 makes the id-less skip
@@ -116,7 +113,8 @@ and neither should be allowed to hold 5.0 open.
   `impact` make the operation safe without dedicated command surface.
 - Hardening against a hostile local writer. The containment and locking model defends against
   accidents, symlink confusion, and concurrent runs; an adversarial co-tenant on the same
-  filesystem is out of scope, recorded with the threat model in GTX-110.
+  filesystem is out of scope, recorded with the threat model in AD-2 of
+  [ARCHITECTURE.md](ARCHITECTURE.md).
 - A productized managed CI offering. Superseded by the recipe GTX-109 wrote, which first ships
   in 5.0 and which [MANAGED_CI.md](MANAGED_CI.md) owns; the earlier scanner half of that ambition
   moved out in AD-25.
