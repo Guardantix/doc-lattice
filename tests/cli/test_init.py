@@ -127,7 +127,9 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
     assert prefix == ".doc-lattice.yml."
     assert result.stdout == _legacy_stdout(__version__)
     assert result.stderr == (
-        "wrote .doc-lattice.yml\n"
+        # GTX-212: the scaffolded name is display-spelled like every other path in human
+        # output, which quotes a name that used to be printed bare.
+        "wrote '.doc-lattice.yml'\n"
         # The fixture repository has no remote, so the probe finds nothing and the fixed
         # fallback is used. Naming the source is what makes a silent fallback visible.
         "workflow triggers on branch main (fallback)\n"
@@ -328,6 +330,10 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
     assert result.exit_code == 0
     assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
     assert ".github/workflows/doc-lattice.yml" in result.stdout
+    # GTX-212: the benign already-exists line names the file through the display spelling, the
+    # same as the wrote line above it, so both sinks in this function are wrapped rather than
+    # one of them riding an exemption written for the staged-file prefix beside them.
+    assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
 
 
 def test_init_existing_config_with_stage_cleanup_failure_exits_2_and_names_orphan(
@@ -381,7 +387,7 @@ def test_init_other_persistence_error_flattens_exception_notes(tmp_path: Path, m
 
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "cannot write .doc-lattice.yml: publication failed" in result.stderr
+    assert "cannot write '.doc-lattice.yml': publication failed" in result.stderr
     assert "exact orphan remediation note" in result.stderr
     assert "INIT_PERSISTENCE" in result.stderr
     assert "CONFIG_ERROR" not in result.stderr
@@ -404,7 +410,7 @@ def test_init_read_only_filesystem_reports_the_write_boundary_not_the_config(
 
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "cannot write .doc-lattice.yml" in result.stderr
+    assert "cannot write '.doc-lattice.yml'" in result.stderr
     assert "Read-only file system" in result.stderr
     assert "INIT_PERSISTENCE" in result.stderr
     assert "CONFIG_ERROR" not in result.stderr

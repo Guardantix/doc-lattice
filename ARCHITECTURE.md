@@ -1224,13 +1224,47 @@ scan calls that sink clean however it is spelled. It also scans `", ".join(...)`
 transaction layer lists unresolved destinations by joining them above the message that carries
 the result, which is a third place a path enters text outside an f-string.
 
-Its module exemptions are the config, cache, and `init` paths, as strings that carry no
-repo-controlled document filename. GTX-209 retired the `reconcile_transaction.py`,
-`persistence.py`, and `path_utils.py` exemptions that were parked there, so what remains for
-those modules is per-expression and machine-only: the journal serializer, the staged-artifact
-filenames, and the recovery payload's own JSON spelling. Because a name can be a path in one
-module and something else in another, the path-bearing name set is the global one widened per
-module rather than grown globally.
+The guard holds no whole-module exemption. GTX-209 retired the `reconcile_transaction.py`,
+`persistence.py`, and `path_utils.py` entries, and GTX-212 retired the last three -- the config,
+cache, and `init` paths, which had been parked here as strings carrying no repo-controlled
+*document* filename. That reasoning was true and beside the point: `--config` and `--docs-root`
+are user-supplied, and README promises escape-free human-facing output rather than escape-free
+document paths, so the promise was unmet at those sinks. What remains is per-expression and
+machine-only: the journal serializer, the staged-artifact filenames, and the recovery payload's
+own JSON spelling. Every config, cache, and `init` diagnostic now quotes the path it names, the
+way `impact` and `reconcile` already did. Because a name can be a path in one module and
+something else in another, the path-bearing name set is the global one widened per module
+rather than grown globally.
+
+Retiring the module exemptions is not the same as enforcing the boundary, and GTX-212 closed two
+gaps that made the difference. Both scans used to `continue` past a named module, so re-adding
+one silently switched the scan off for that file while every assertion still passed; the scan now
+reports which modules it read and the production test asserts that set is every source module, so
+a reintroduced skip fails rather than hides. And the detector's name vocabulary did not cover the
+operands those modules spell, so dropping the entries alone would have caught three of the
+thirteen operands that needed the helper: the two locals literally named `path` in `config.py`,
+and the cache store's own. The configured `config_path`, `entry`, `project_root`, and `safe`, the
+header's aliased `source`, and every `init` operand were invisible to it. An alias defeats it the
+same way: binding `where = str(source)` above a message removes the path-bearing name before the
+scan reaches it, which is why the config validation header is built in two branches whose guarded
+expression is the helper call alone.
+
+What the guard reaches is therefore bounded by the vocabulary rather than by the module list.
+Retiring the module exemptions widened where it looks, not what it recognizes: a name that is not
+classified for a module is still invisible in it, and a module nobody has audited contributes
+whatever its own operands happen to be named. Widening a name globally is the fix where the name
+is unambiguous, and it is a scope decision rather than a free one, because it reports every
+existing sink spelling that name at once.
+
+One classification is worth recording because it is not about safety. `init` names the config file
+it scaffolds by a compile-time constant, so wrapping it neutralizes nothing today, and quoting it
+moves three lines of visible output. It is classified and wrapped anyway, because the alternative
+is unenforceable: display exemptions are keyed by (module, qualified function, expression), and
+the machine-side staged-file prefix shared both its function and its spelling with the two human
+messages beside it, so one exemption would have covered all three. The prefix is built from
+`DEFAULT_CONFIG_NAME` directly instead, which leaves every remaining use of that name human-facing
+and wrapped, and makes the next widening of it -- to a full path, or to a name supplied by a flag
+-- a guard failure rather than a silent pass.
 
 
 ### AD-35: A frontmatter value carrying a control character is refused, not re-spelled

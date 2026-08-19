@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .error_types import ConfigError
-from .path_utils import safe_resolve
+from .path_utils import format_path_for_display, safe_resolve
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 from .yaml_error_render import format_yaml_error_for_display
@@ -100,7 +100,7 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     """
     if config_path is not None:
         if not config_path.exists():
-            msg = f"config file not found: {config_path}"
+            msg = f"config file not found: {format_path_for_display(config_path)}"
             raise ConfigError(msg)
         source = config_path
     else:
@@ -137,10 +137,18 @@ def _format_validation_error(exc: ValidationError, source: Path | None) -> str:
     Returns:
         A multi-line message: a header naming the config file, then one line per error.
     """
-    where = str(source) if source is not None else "<no config file>"
+    # Built in two branches rather than through one alias. The display guard prunes only the
+    # subtree rooted at the helper call, so a conditional inside the f-string would leave the
+    # `source is not None` test outside it and be reported; binding `where = str(source)` first
+    # would instead hide the path behind a name the guard does not classify. Two branches keep
+    # `source` itself inside the guarded expression, which is the shape the guard can see.
+    if source is None:
+        header = "invalid config <no config file>:"
+    else:
+        header = f"invalid config {format_path_for_display(source)}:"
     return format_validation_error(
         exc,
-        header=f"invalid config {where}:",
+        header=header,
         model=Config,
         root_label=_ROOT_LOCATION,
         extra_note=_binding_layers_note,
@@ -170,7 +178,7 @@ def _read_yaml(path: Path) -> object:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        msg = f"cannot read config {path}: {exc}"
+        msg = f"cannot read config {format_path_for_display(path)}: {exc}"
         raise ConfigError(msg) from exc
     try:
         data = _LOADER.load(text)
@@ -181,8 +189,12 @@ def _read_yaml(path: Path) -> object:
         # hand rather than `_LOADER.parser`: the request reads "platform-default" in both
         # environments, so printing it would tell the two apart no better than printing nothing.
         parser = "pure" if _LOADER.running_pure else "ruamel.yaml.clib"
+        # Only `path` is wrapped here. `detail` is already the display spelling AD-37 owns, and
+        # re-rendering it would quote the parser's own message a second time.
         detail = format_yaml_error_for_display(exc)
-        msg = f"cannot parse config {path} (YAML parser: {parser}): {detail}"
+        msg = (
+            f"cannot parse config {format_path_for_display(path)} (YAML parser: {parser}): {detail}"
+        )
         raise ConfigError(msg) from exc
     return data if data is not None else {}
 
@@ -195,9 +207,13 @@ def _resolve_roots(roots: list[str], project_root: Path) -> tuple[Path, ...]:
         try:
             safe = safe_resolve(absolute_path, project_root)
         except ValueError as exc:
+            # `entry` is the recorded config string, passed to the helper as text: routing it
+            # through Path() first would normalize away a trailing separator or a leading "./",
+            # and a diagnostic that rejects a configured value has to show what it rejected.
             msg = (
-                f"docs_roots entry {entry!r} resolves outside the project root "
-                f"{project_root}; roots must stay inside the project"
+                f"docs_roots entry {format_path_for_display(entry)} resolves outside the "
+                f"project root {format_path_for_display(project_root)}; roots must stay "
+                "inside the project"
             )
             raise ConfigError(msg) from exc
         # A missing entry stays tolerated: discovery skips it, so a docs root that is not
@@ -209,8 +225,9 @@ def _resolve_roots(roots: list[str], project_root: Path) -> tuple[Path, ...]:
         usable = not safe.exists() or safe.is_dir() or (safe.is_file() and safe.suffix == ".md")
         if not usable:
             msg = (
-                f"docs_roots entry {entry!r} exists but is neither a directory nor a regular "
-                f"'.md' file ({safe}); an existing entry must be one or the other"
+                f"docs_roots entry {format_path_for_display(entry)} exists but is neither a "
+                f"directory nor a regular '.md' file ({format_path_for_display(safe)}); an "
+                "existing entry must be one or the other"
             )
             raise ConfigError(msg)
         resolved.append(safe)
