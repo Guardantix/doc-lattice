@@ -7,6 +7,7 @@ import pytest
 import doc_lattice.config as config_module
 from doc_lattice.config import Config, load_config
 from doc_lattice.error_types import ConfigError
+from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
 from doc_lattice.yaml_error_render import format_yaml_error_for_display
 
@@ -199,7 +200,7 @@ def test_non_mapping_config_renders_the_config_marker(tmp_path: Path):
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
 
-    assert str(exc.value).startswith(f"invalid config {source}:")
+    assert str(exc.value).startswith(f"invalid config {format_path_for_display(source)}:")
     assert "  <config>: " in str(exc.value)
 
 

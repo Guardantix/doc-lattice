@@ -12,6 +12,7 @@ from ... import __version__
 from ...config import DEFAULT_CONFIG_NAME
 from ...error_types import ConfigError, InitPersistenceError, copy_exception_notes
 from ...linear_query import is_valid_team_key
+from ...path_utils import format_path_for_display
 from ...persistence import atomic_create_bytes
 from ...scaffold import build_scaffold
 from ...text_utils import strip_control_chars
@@ -89,9 +90,15 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
             raise ConfigError(msg)
     for root in docs_roots:
         if Path(root).is_absolute() or ".." in Path(root).parts:
+            # The recorded flag string is handed to the helper as text. Path(root) would
+            # normalize away a doubled separator, a trailing separator, and a leading "./",
+            # and a diagnostic that rejects a value has to show the value it rejected. The
+            # loop above has already refused every control-bearing root, so this reaches no
+            # control byte today; it goes through the helper so the spelling is centralized
+            # and statically visible rather than correct by coincidence of `!r`.
             msg = (
-                f"--docs-root {root!r} must be a relative path inside the project, "
-                "without '..' or a leading slash"
+                f"--docs-root {format_path_for_display(root)} must be a relative path inside "
+                "the project, without '..' or a leading slash"
             )
             raise ConfigError(msg)
     if linear_team is not None and not is_valid_team_key(linear_team):
@@ -105,7 +112,7 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
 
 def _init_persistence_error(target_name: str, cause: OSError) -> InitPersistenceError:
     """Wrap one scaffold write failure, preserving the low-level remediation notes."""
-    error = InitPersistenceError(f"cannot write {target_name}: {cause}")
+    error = InitPersistenceError(f"cannot write {format_path_for_display(target_name)}: {cause}")
     copy_exception_notes(error, cause)
     return error
 
@@ -168,7 +175,12 @@ def register_init(app: typer.Typer) -> None:
                 atomic_create_bytes(
                     target,
                     scaffold.config_text.encode("utf-8"),
-                    prefix=f"{target.name}.",
+                    # The staged filename, not text: spelled from the constant `target` was
+                    # built from rather than from `target.name`, so this machine construction
+                    # needs no exemption shared with the human messages below. Display
+                    # exemptions are keyed by (module, function, expression), so one written
+                    # for this line would have covered those two sinks as well.
+                    prefix=f"{DEFAULT_CONFIG_NAME}.",
                 )
             # A bare FileExistsError means the destination already existed and the staged file
             # was cleaned up normally, which is the benign already-exists case. Notes are
@@ -180,14 +192,15 @@ def register_init(app: typer.Typer) -> None:
             except FileExistsError as exc:
                 if not getattr(exc, "__notes__", ()):
                     runtime.stderr.print(
-                        f"{escape(target.name)} already exists, leaving it untouched"
+                        f"{escape(format_path_for_display(target.name))} already exists, "
+                        "leaving it untouched"
                     )
                 else:
                     raise _init_persistence_error(target.name, exc) from exc
             except OSError as exc:
                 raise _init_persistence_error(target.name, exc) from exc
             else:
-                runtime.stderr.print(f"wrote {escape(target.name)}")
+                runtime.stderr.print(f"wrote {escape(format_path_for_display(target.name))}")
             runtime.stderr.print(f"workflow triggers on branch {escape(branch)} ({branch_source})")
             runtime.write_stdout("# ===== .gitignore (append these lines) =====")
             runtime.write_stdout(scaffold.gitignore_text)

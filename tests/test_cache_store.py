@@ -10,6 +10,7 @@ from doc_lattice.cache import CacheFile, Entry, NodePayload, SectionRecordModel,
 from doc_lattice.cache.store import StoreSnapshot, cache_home, cache_path, load, save_if_changed
 from doc_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION
 from doc_lattice.model import NodeMeta
+from doc_lattice.path_utils import format_path_for_display
 
 
 def _sample_cache_file() -> CacheFile:
@@ -225,6 +226,6 @@ def test_save_persistence_failure_flattens_cleanup_notes_into_warning(
     captured = capsys.readouterr()
     assert result is None
     assert captured.err == (
-        f"doc-lattice: could not write load cache at {path}: "
+        f"doc-lattice: could not write load cache at {format_path_for_display(path)}: "
         "disk full; exact helper-owned orphan remediation\n"
     )
