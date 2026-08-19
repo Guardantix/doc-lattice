@@ -1352,6 +1352,19 @@ The load cache needs no separate rule. `NodeMeta` is nested inside a cache entry
 snapshot is discarded whole, so a slot written before this change cannot replay a control
 character into a warm run.
 
+This does not close the repo-controlled vector, and the part left open is a decision this record
+does not make. Both halves settled so far assume a control-bearing string is either refused at
+validation or spelled where a message is built. A YAML **load failure** satisfies neither: it
+aborts before validation runs, and its message is built by `ruamel` rather than by this codebase.
+`ruamel`'s duplicate-key error echoes the offending key and both of its values back at the reader,
+and four sites interpolate that message verbatim: `frontmatter_parser.py`'s and `config.py`'s
+parse failures and `reconcile.py`'s two. The value half is what makes it more than cosmetic, since
+a duplicate key defeats this record's own guarantee by failing the load before the value rule can
+run. Closing it means choosing how to spell an untrusted third-party message whose own line
+structure is part of the diagnostic, which `repr` cannot settle the way it settles a path, so it
+is GTX-219's rather than an extension of this one. README's frontmatter section is scoped to a
+block that loads until it lands.
+
 No static construction-site guard accompanies this record, and none is owed. AD-34 needs one
 because a display strategy is only as complete as its sink list; a validation rule has one site,
 and the parser matrix over the five value families is what pins it.

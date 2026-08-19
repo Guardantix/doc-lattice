@@ -416,7 +416,10 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   through the very message refusing it. Only the spelling changed: such a key was already an
   error, and a key carrying no control character still reads exactly as before, so an ordinary
   diagnostic still names `derives_from.0.ref` rather than gaining quotes. This is the key half of
-  the value rule under **Changed** above.
+  the value rule under **Changed** above; the two together do not close the whole of what a
+  document can print, because a block that fails to parse at all is reported through the YAML
+  parser's own message, which quotes the source it choked on. That path is still open and is
+  tracked separately.
 
 ### Removed
 

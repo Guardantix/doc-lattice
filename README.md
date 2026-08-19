@@ -369,9 +369,12 @@ single-line text carrying no control character. A value that decodes to any C0 c
 (`U+0000` to `U+001F`, tab, newline, and carriage return included), DEL (`U+007F`), or any C1
 code point (`U+0080` to `U+009F`) fails the load with a `FRONTMATTER_ERROR` naming the key and
 the code point. Every other character is accepted, accented text, CJK, emoji, and a no-break
-space among them. The rule is what keeps the `--no-color` promise above true for a document as
-well as for a filename: a value reaches your terminal, so it cannot carry bytes your terminal
-acts on.
+space among them. The rule is what carries the `--no-color` promise above into a document's own
+text, as the quoted spelling of a path carries it into a filename: a value reaches your terminal,
+so it cannot carry bytes your terminal acts on. An unknown key that decodes to one is spelled in
+the error rejecting it for the same reason. What the rule is scoped to is a block that loads: a
+block that fails to parse at all is reported through the YAML parser's own message, which quotes
+the source line it choked on, and that path does not yet hold the promise.
 
 Two cases are worth knowing, because they are the ones you can write without meaning to. A
 **literal tab** inside a quoted or block scalar is the one control byte YAML itself admits, and
