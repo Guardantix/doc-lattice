@@ -36,8 +36,8 @@ group below, since the error codes and output spellings it settles are what GTX-
   end of the last detail line and read as that field's parenthetical rather than as the error's
   code, and GTX-112 is what makes such diagnostics routine rather than rare; putting it beside the
   severity changes the rendered shape of every error type, which is what admits it here rather
-  than a minor (GTX-203). Those three settle what the engine prints; the three after them settle
-  what a repository can make it print, and there are two such strings, not one. A document path
+  than a minor (GTX-203). Those three settle what the engine prints; the four after them settle
+  what a repository can make it print, and there are three such strings, not one. A document path
   never passes the frontmatter parser at all, so control bytes in a filename reach output raw, and
   the fix belongs at message construction so it survives whichever renderer prints it; that work
   carries the display contract the other two reuse rather than restate (GTX-125). A typed
@@ -47,13 +47,19 @@ group below, since the error codes and output spellings it settles are what GTX-
   validation, which is why it is not folded in (GTX-208). The reconcile transaction
   and recovery layers interpolate destination, journal, and staged-artifact paths the same way,
   and a stage name inherits its destination's, so a hostile filename propagates into them; they
-  apply GTX-125's contract instead of choosing one (GTX-209). What the three enforce is the output
-  promise [README.md](README.md) already makes, which is why the group is not diagnostics-only.
+  apply GTX-125's contract instead of choosing one (GTX-209). A YAML load failure is the third
+  string, and it is the one neither of the first two reaches: it aborts before validation runs and
+  its message is built by `ruamel` rather than by this codebase, so four sites interpolate a
+  third-party diagnostic that echoes a duplicate key and both of its values back at the reader.
+  Closing it turns on its own decision about how to spell a message whose own line structure is
+  part of the diagnostic, which is why it is not folded into GTX-208 (GTX-219). What the four
+  enforce is the output promise [README.md](README.md) already makes, which is why the group is
+  not diagnostics-only.
 - Make README describe what 5.0 actually prints and enforces (GTX-113). This lands last because
   every item above changes what there is to describe. The error codes and where they print settle
   first, then the output group settles how a path and a typed value are spelled everywhere README
-  shows one, which is why GTX-203, GTX-208, and GTX-209 block it directly and GTX-125 reaches it
-  through them.
+  shows one, which is why GTX-203, GTX-208, GTX-209, and GTX-219 block it directly and GTX-125
+  reaches it through them.
 - Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
   the 5.0 pin (GTX-169). GTX-164's walk found it exits 2 on every release available at the time,
   and the recipe is the sole installation path, so a failure here is release-blocking rather than
@@ -88,6 +94,13 @@ cheap.
 - Close the reconcile follow-ons the v2 journal unblocks: an operator remediation that works for
   the lost-journal double failure (GTX-146), and the provenance-guard simplification (GTX-127)
   with the sink-guard scope question sequenced behind it (GTX-128).
+- Close the journal's own load diagnostic, which is where the 5.0 output group stops one boundary
+  short (GTX-227). `_invalid_journal_error` interpolates a pydantic `ValidationError` that renders
+  a rejected input value through `repr` but its error *location* raw, so a control-bearing extra
+  key in a hand-edited journal still reaches stderr unspelled. AD-36 records the sink and routes
+  it here rather than widening its own scope; the fix is AD-35's `_format_location_part` shape
+  applied at a second boundary. It lands in a minor rather than in that group because a journal is
+  a local artifact an operator edits, not a string a repository's own documents carry.
 - Decide how a stale or deprecated action pin gets noticed at all (GTX-181) before building the
   narrower check that resolves each pinned SHA against its version comment (GTX-180), since the
   chosen mechanism may subsume it.
