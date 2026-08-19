@@ -430,12 +430,12 @@ for path in sorted(pathlib.Path(".").rglob("*.md")):
     try:
         meta = yaml.load("\n".join(lines[1:end]) + "\n") if end else None
     except Exception as exc:
-        print(f"{path}: frontmatter did not parse: {str(exc).splitlines()[0]}")
+        print(f"{str(path)!r}: frontmatter did not parse: {str(exc).splitlines()[0]}")
         continue
     if isinstance(meta, dict):
         for name, value in fields(meta):
             if found := refused(value):
-                print(f"{path}: {name}: {' '.join(found)}")
+                print(f"{str(path)!r}: {name}: {' '.join(found)}")
 PY
 ```
 
@@ -443,6 +443,11 @@ Run it where doc-lattice is installed, since it borrows that installation's `rua
 pure parser, which is the one the loader itself uses. Everything it prints is a value that will
 not load. `doc-lattice check` is the authority after the upgrade, and reports the first document
 it finds, one run at a time.
+
+It prints each path quoted, through the same `repr(str(path))` spelling every command uses, for
+the reason the `--no-color` guarantee under [Commands](#commands) rests on: a filename is
+repo-controlled text too, and a scan that hunts terminal control characters is a poor place to
+print one.
 
 A code point it names is a value that will not load. A `block-scalar` line is a prompt to look
 rather than a verdict, since whether a break survives depends on the lines beneath it, which is
