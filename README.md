@@ -394,41 +394,55 @@ worth knowing, because a `>-` that hits either keeps an interior break anyway: a
 between the lines is a paragraph break, and a line indented past the block keeps its own break.
 Keep a folded value's lines adjacent and equally indented.
 
-To find all three, scan the frontmatter block itself rather than a list of key spellings. Neither
-a tab nor an escape has to share a line with its key: a `derives_from` edge writes `- ref:`
-behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item with no key on
-the line at all, and a block scalar puts its value on later lines entirely, behind an anchor or a
-tag if the author wrote one. This reads the fence the way the loader does, so a file saved with a
-byte-order mark, CRLF endings, or a padded `---` is scanned rather than skipped, and a tab in
-body prose or an indented code block is not a hit:
+To find all three, do not pattern-match the YAML. Load it. Every spelling above is a property of
+the value a loader constructs, not of the line it is written on, and the ways to write one value
+are open-ended: a tab need not share a line with its key, a `derives_from` edge writes `- ref:`
+behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item with no key at
+all, a block scalar puts its value on later lines behind an optional anchor or tag, and an
+explicit `? key` pair puts the key on its own line. A scan that reads the fence the way the
+loader does and then asks the loader for the values is exact against all of them, and reports
+the same field name and code point the error would:
 
 ```bash
-python3 - <<'PY'
-import pathlib, re
-ESC = re.compile(r"\\\\|\\([0abtnvfreN]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})")
-PROP = r"(?:[&!]\S+\s+)*"
-BLOCK = re.compile(
-    rf"(^|[\s-])(id|title|tickets|ref|seen):\s*{PROP}[|>]|^\s*-\s*{PROP}[|>][-+]?\s*$"
-)
-NAMED = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27, "N": 0x85}
+uv run python - <<'PY'
+import pathlib
+from ruamel.yaml import YAML
+
+yaml = YAML(typ="safe", pure=True)
+
+def refused(text):
+    return sorted({f"U+{ord(c):04X}" for c in text
+                   if ord(c) < 0x20 or ord(c) == 0x7F or 0x80 <= ord(c) <= 0x9F})
+
+def fields(meta):
+    yield from ((k, meta[k]) for k in ("id", "title") if isinstance(meta.get(k), str))
+    yield from ((f"tickets[{i}]", t) for i, t in enumerate(meta.get("tickets") or [])
+                if isinstance(t, str))
+    yield from ((f"derives_from[{i}].{k}", e[k])
+                for i, e in enumerate(meta.get("derives_from") or []) if isinstance(e, dict)
+                for k in ("ref", "seen") if isinstance(e.get(k), str))
 
 for path in sorted(pathlib.Path(".").rglob("*.md")):
     lines = path.read_text(errors="replace").lstrip("\ufeff").split("\n")
     if not lines or lines[0].strip() != "---":
         continue
-    for num, line in enumerate(lines[1:], start=2):
-        if line.strip() == "---":
-            break
-        found = {NAMED[e] if e in NAMED else int(e[1:], 16) for e in ESC.findall(line) if e}
-        if "\t" in line:
-            found.add(9)
-        note = sorted(f"U+{c:04X}" for c in found if c < 0x20 or c == 0x7F or 0x80 <= c <= 0x9F)
-        if BLOCK.search(line):
-            note.append("block-scalar: check for a kept line break")
-        if note:
-            print(f"{path}:{num}: {', '.join(note)}: {line!r}")
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), 0)
+    try:
+        meta = yaml.load("\n".join(lines[1:end]) + "\n") if end else None
+    except Exception as exc:
+        print(f"{path}: frontmatter did not parse: {str(exc).splitlines()[0]}")
+        continue
+    if isinstance(meta, dict):
+        for name, value in fields(meta):
+            if found := refused(value):
+                print(f"{path}: {name}: {' '.join(found)}")
 PY
 ```
+
+Run it where doc-lattice is installed, since it borrows that installation's `ruamel.yaml` and its
+pure parser, which is the one the loader itself uses. Everything it prints is a value that will
+not load. `doc-lattice check` is the authority after the upgrade, and reports the first document
+it finds, one run at a time.
 
 A code point it names is a value that will not load. A `block-scalar` line is a prompt to look
 rather than a verdict, since whether a break survives depends on the lines beneath it, which is

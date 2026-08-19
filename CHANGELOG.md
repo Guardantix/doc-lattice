@@ -100,11 +100,12 @@ and only the first is the one the vector was reported for:
 
 The frontmatter reference in README.md carries one scan covering all three. It reads the fence
 the way the loader does, so a file saved with a byte-order mark, CRLF endings, or a padded `---`
-is scanned rather than skipped, and it reads the whole block rather than a list of key spellings,
-because neither a tab nor an escape has to share a line with its key: a `derives_from` edge
-writes `- ref:` behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item
-with no key on the line at all, and a block scalar puts its value on later lines entirely, behind
-an anchor or a tag if the author wrote one.
+is scanned rather than skipped, and then it loads the block and inspects the five values rather
+than pattern-matching the lines they were written on. That distinction is what makes it exact:
+every spelling above is a property of the constructed value, and the ways to write one value are
+open-ended, from a `- ref:` behind a sequence dash to a block scalar carrying an anchor to an
+explicit `? key` pair. Run it where doc-lattice is installed, since it borrows that
+installation's `ruamel.yaml`.
 
 All five had a working use, so treat this as a real scan rather than a formality. A folded
 `title` is the obvious one. Less obviously, an `id` written `|` constructs a trailing newline,
