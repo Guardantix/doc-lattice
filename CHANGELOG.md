@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Three things to act on, plus two changes below that need no action in a default environment. The
+Four things to act on, plus two changes below that need no action in a default environment. The
 first is the printed workflow, and it applies to every ordinary and recipe install. The workflow
 `doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -31,7 +31,18 @@ of `CONFIG_ERROR`, so repoint anything matching on the printed code, and anythin
 `ConfigError`, not a subclass, so an existing `except ConfigError` stops catching it. Catching
 `ProjectError` keeps working unchanged. See **Changed** below.
 
-The fourth needs nothing from you, and is recorded here because a format bump usually would. The
+The fourth is the `init` write error code, and like the third it applies only to a caller that
+reads the code rather than the message. A filesystem failure while `init` writes
+`.doc-lattice.yml` now exits with `INIT_PERSISTENCE` instead of `CONFIG_ERROR`, which sent users
+to a config file `init` never reads. That covers a read-only filesystem, a permission-denied
+working directory, and the abnormal case where cleaning up the staged file also failed and left
+an orphan behind. Repoint anything matching on the printed code, and anything catching
+`ConfigError` around `init`, at `InitPersistenceError`. It is a sibling of `ConfigError`, not a
+subclass, so an existing `except ConfigError` stops catching it. Catching `ProjectError` keeps
+working unchanged. Rerunning `init` in a directory that already has a `.doc-lattice.yml` is
+unaffected: the file is still left untouched and the run still exits 0. See **Changed** below.
+
+The fifth needs nothing from you, and is recorded here because a format bump usually would. The
 reconcile transaction journal moves to version 2, adding a required `provenance` block and
 pretty-printing. Upgrading across an interrupted run is safe in both directions of the crash
 window: a version 1 journal left by an earlier release is still recovered normally, whether it is
@@ -43,7 +54,7 @@ journal outstanding: an earlier release accepts only version 1 and will refuse a
 as invalid, so run `doc-lattice reconcile --recover` to completion before rolling back. See the
 transaction-artifacts section of `RECONCILE.md` for the field list.
 
-The fifth is the one to check only if you run doc-lattice in an environment that has the optional
+The sixth is the one to check only if you run doc-lattice in an environment that has the optional
 `ruamel.yaml.clib` accelerator installed, which no lock of this project produces but another
 package may pull in. A frontmatter block defining one anchor name twice used to fail the load
 there, and now loads: the document becomes a tracked node, so it can contribute edges to a report
@@ -141,6 +152,16 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   keep `UNREADABLE_DOC`; that boundary was already coherent. Anything matching on the printed code
   or catching `ConfigError` around `parse_meta` or `load_lattice` needs repointing, since
   `FrontmatterError` is a sibling of `ConfigError`, not a subclass.
+- **BREAKING:** a filesystem failure from `init` now carries the new `INIT_PERSISTENCE` code
+  instead of `CONFIG_ERROR`. This is the defect the frontmatter code above closed at the load
+  boundary, one layer over: `init` never reads `.doc-lattice.yml`, so pointing at config named a
+  file with no part in the failure. Both raise sites move together: the `OSError` from the
+  scaffold write, which is what a read-only filesystem or an unwritable directory produces, and
+  the noted `FileExistsError` that means the staged file outlived a failed cleanup. Moving only
+  the first would have left the orphan diagnostic, which names a stray staged path in the working
+  directory, still reported as a config error. A bare `FileExistsError` is unchanged and is not
+  an error at all: an existing config is left untouched, the guidance still prints, and the run
+  still exits 0. `InitPersistenceError` is a sibling of `ConfigError`, not a subclass.
 - Config and frontmatter validation errors are now formatted by doc-lattice rather than delegated
   to pydantic's multi-line renderer. Both load boundaries render through one formatter, so they
   cannot drift apart. The message names the file it came from, which the sibling read and parse

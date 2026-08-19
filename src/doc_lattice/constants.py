@@ -19,6 +19,7 @@ ErrorCode = Literal[
     "RECONCILE_IN_PROGRESS",
     "RECONCILE_CONFLICT",
     "RECONCILE_PERSISTENCE",
+    "INIT_PERSISTENCE",
 ]
 VALID_ERROR_CODES: frozenset[str] = frozenset(get_args(ErrorCode))
 

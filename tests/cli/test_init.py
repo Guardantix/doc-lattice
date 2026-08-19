@@ -1,5 +1,6 @@
 """CLI integration tests for the init command."""
 
+import errno
 import os
 import subprocess
 from pathlib import Path
@@ -355,7 +356,9 @@ def test_init_existing_config_with_stage_cleanup_failure_exits_2_and_names_orpha
         "it is not governed by a recovery journal, so inspect and remove it manually when safe"
     )
     assert expected_note in result.stderr
-    assert "CONFIG_ERROR" in result.stderr
+    # The failure is the stage cleanup, not the config file: it names the write boundary.
+    assert "INIT_PERSISTENCE" in result.stderr
+    assert "CONFIG_ERROR" not in result.stderr
 
 
 def test_init_other_persistence_error_flattens_exception_notes(tmp_path: Path, monkeypatch):
@@ -374,7 +377,31 @@ def test_init_other_persistence_error_flattens_exception_notes(tmp_path: Path, m
     assert result.stdout == ""
     assert "cannot write .doc-lattice.yml: publication failed" in result.stderr
     assert "exact orphan remediation note" in result.stderr
-    assert "CONFIG_ERROR" in result.stderr
+    assert "INIT_PERSISTENCE" in result.stderr
+    assert "CONFIG_ERROR" not in result.stderr
+
+
+def test_init_read_only_filesystem_reports_the_write_boundary_not_the_config(
+    tmp_path: Path, monkeypatch
+):
+    # A read-only or permission-denied working directory is a problem in the directory being
+    # scaffolded, so sending the user to .doc-lattice.yml with CONFIG_ERROR was the defect.
+    # Injected at the atomic_create_bytes seam rather than by chmod, which root ignores and
+    # which cannot represent EROFS at all.
+    def fail_create(*_args, **_kwargs) -> None:
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(init_command, "atomic_create_bytes", fail_create)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "cannot write .doc-lattice.yml" in result.stderr
+    assert "Read-only file system" in result.stderr
+    assert "INIT_PERSISTENCE" in result.stderr
+    assert "CONFIG_ERROR" not in result.stderr
 
 
 def test_init_bakes_flag_values(tmp_path: Path, monkeypatch):
