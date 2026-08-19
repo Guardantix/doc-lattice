@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A `--config` path, a cache location, and a `--docs-root` value carrying a terminal control
+  character no longer reach human-facing output raw. Running `check --config` against a config
+  named with an embedded escape sequence printed those bytes verbatim under `NO_COLOR`, so a
+  crafted name could recolor or overwrite the diagnostic printed above it. Eight message
+  construction sites across config loading, the load-cache write warning, and `init` now build
+  their path through the same display spelling every document path has used since 5.0.
+
+  Output moves as a result: these paths are quoted now, as `impact` and `reconcile` paths already
+  were. `init` reports `wrote '.doc-lattice.yml'` rather than `wrote .doc-lattice.yml`, and the
+  same for its already-exists and write-failure lines. Nothing about which files are read or
+  written changes -- the raw path is still what the engine opens, and the staged file `init`
+  writes keeps its exact name.
+
 ### Changed
 
 - The `--no-color` / `NO_COLOR` escape-free promise in README.md is narrowed to human-facing
