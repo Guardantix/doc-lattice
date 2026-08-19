@@ -218,11 +218,14 @@ def _report_provenance(runtime: CliRuntime, recovery: RecoveryResult) -> None:
     if provenance is None:
         if recovery.journal_version is not None:
             runtime.stdout.print(
-                f"  provenance: not recorded by journal version {recovery.journal_version}"
+                f"  provenance: not recorded by journal version {recovery.journal_version}",
+                soft_wrap=True,
             )
         return
     selector = provenance.selector
-    runtime.stdout.print(f"  created_at: {journal_timestamp_text(provenance.created_at)}")
+    runtime.stdout.print(
+        f"  created_at: {journal_timestamp_text(provenance.created_at)}", soft_wrap=True
+    )
     runtime.stdout.print(
         f"  tool_version: {_display_journal_string(provenance.tool_version)}", soft_wrap=True
     )

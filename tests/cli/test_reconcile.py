@@ -230,6 +230,11 @@ def test_reconcile_recover_without_journal_reports_none_human(lattice_dir: Path,
     assert result.stderr == ""
     assert "nothing to recover" in result.stdout
     assert str(lattice_dir / RECONCILE_JOURNAL_NAME) in result.stdout
+    # No journal means no provenance to be absent, so neither the fields nor the sentence
+    # naming their absence is printed. Asserted rather than left implied, because the guard
+    # that produces it would otherwise regress into `not recorded by journal version None`.
+    assert "provenance" not in result.stdout
+    assert "created_at" not in result.stdout
 
 
 def test_reconcile_recover_without_journal_reports_exact_json(lattice_dir: Path, monkeypatch):
@@ -358,6 +363,31 @@ def test_reconcile_recover_reports_v2_provenance_in_human_output(tmp_path: Path,
     assert "  created_at: 2026-08-17T12:00:00.123456Z" in result.stdout
     assert "  tool_version: '5.0.0'" in result.stdout
     assert "  selector: mode 'downstream', downstream_id 'pc-design', ref 'up#x'" in result.stdout
+
+
+def test_reconcile_recover_prints_an_unset_selector_field_as_a_bare_null(
+    tmp_path: Path, monkeypatch
+):
+    """An unset selector field reads as `null`, and a recorded string spelling it as `'null'`.
+
+    AD-36 rests the distinction between the two entirely on the quoting, so both halves are
+    pinned here in one run rather than left to the display helper's docstring.
+    """
+    _prepared_project(
+        tmp_path,
+        provenance=JournalProvenance(
+            created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+            tool_version="null",
+            selector=JournalSelector(mode="all", downstream_id=None, ref=None),
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 0
+    assert "  tool_version: 'null'" in result.stdout
+    assert "  selector: mode 'all', downstream_id null, ref null" in result.stdout
 
 
 def test_reconcile_recover_json_carries_a_downstream_selector(tmp_path: Path, monkeypatch):

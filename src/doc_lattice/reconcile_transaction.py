@@ -399,9 +399,10 @@ class _ResolvedEntry:
 class _LoadedJournal:
     """One journal of any supported version, normalized to the shared recovery shape.
 
-    ``provenance`` is None for a v1 journal, which recorded none. Recovery never reads it;
-    the field exists so a freshly published prepared journal can be checked against the
-    provenance it was built from.
+    ``provenance`` is None for a v1 journal, which recorded none. The rollback itself never
+    reads it. The field exists so a freshly published prepared journal can be checked against
+    the provenance it was built from, and so recovery can carry it out to a report under AD-36
+    before a successful cleanup deletes the file it came from.
     """
 
     version: int

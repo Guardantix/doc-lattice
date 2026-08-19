@@ -896,6 +896,64 @@ def test_recovery_json_under_no_color_keeps_the_raw_machine_spelling(tmp_path: P
     assert payload["orphans"] == [f"docs/{orphan.name}"]
 
 
+# GTX-196. A hand-edited journal, spelled here as the literal bytes one would carry, because the
+# engine cannot write these values itself: `tool_version` comes from the package constant, and a
+# selector is only recorded once its id or ref has matched a control-free frontmatter value. No
+# POSIX guard is needed, unlike the filename-bearing cases above: the control bytes live inside a
+# JSON file, which every platform can hold.
+_CONTROL_BEARING_JOURNAL = """{
+  "version": 2,
+  "state": "committed",
+  "provenance": {
+    "created_at": "2026-08-17T12:00:00Z",
+    "tool_version": "5.0.0\\u001b[31m",
+    "selector": {
+      "mode": "downstream",
+      "downstream_id": "pc\\u001b[Adesign",
+      "ref": null
+    }
+  },
+  "entries": []
+}
+"""
+
+
+def test_journal_provenance_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # AD-36 rests on this: provenance is spelled for display rather than refused, so the whole
+    # security argument for that choice is that the spelling leaves no byte a terminal acts on.
+    # Asserted at the file-descriptor level like its GTX-209 siblings above, because the in-process
+    # runner cannot see a Console that decided to emit color for a real terminal.
+    (tmp_path / ".doc-lattice-reconcile.json").write_text(
+        _CONTROL_BEARING_JOURNAL, encoding="utf-8"
+    )
+
+    completed = _run_bytes(["reconcile", "--recover"], tmp_path)
+
+    assert completed.returncode == 0
+    assert b"cleaned committed reconcile transaction" in completed.stdout
+    assert b"\x1b" not in completed.stdout
+    assert b"\x1b" not in completed.stderr
+    assert rb"tool_version: '5.0.0\x1b[31m'" in completed.stdout
+    assert rb"downstream_id 'pc\x1b[Adesign'" in completed.stdout
+
+
+def test_journal_provenance_json_under_no_color_keeps_the_recorded_value(tmp_path: Path):
+    # The other half of the same run, and the reason AD-36 needs no refusal to keep this channel
+    # safe: the machine payload carries the recorded value rather than a display spelling, and
+    # `json.dumps` escapes the control byte on its own rather than emitting it raw.
+    (tmp_path / ".doc-lattice-reconcile.json").write_text(
+        _CONTROL_BEARING_JOURNAL, encoding="utf-8"
+    )
+
+    completed = _run_bytes(["reconcile", "--recover", "--format", "json"], tmp_path)
+
+    assert completed.returncode == 0
+    assert b"\x1b" not in completed.stdout
+    provenance = json.loads(completed.stdout)["provenance"]
+    assert provenance["tool_version"] == "5.0.0\x1b[31m"
+    assert provenance["selector"]["downstream_id"] == "pc\x1b[Adesign"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
 def test_direct_console_write_under_no_color_emits_no_escape_byte(tmp_path: Path):
     # `impact`'s human report is a success-path write, not a diagnostic: the README promise
