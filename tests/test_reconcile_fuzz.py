@@ -83,6 +83,7 @@ EXPECT_REUSED_ANCHOR = pytest.mark.filterwarnings("ignore::ruamel.yaml.error.Reu
 _CLAIMS: Counter[str] = Counter()
 _REQUIRED_CLAIMS = (
     "comment-at-its-own-site",
+    "control-value-refused",
     "flow-line",
     "member-head",
     "relocation",
@@ -1145,15 +1146,50 @@ def _rewrite_bytes(text: str, updates: dict[str, str]) -> list[Rewrite]:
 # --------------------------------------------------------------------------------------------
 
 
-def _assert_strict_tracked(text: str) -> None:
-    """Assert the real strict load classifies this document as a tracked node.
+def _carries_control_char(value: object) -> bool:
+    """Whether a constructed value holds a C0 control, DEL, or a C1 control.
+
+    Spelled out from code points rather than imported from ``text_utils``, so the corpus keeps
+    an oracle independent of the predicate the product refuses with.
+    """
+    return isinstance(value, str) and any(
+        ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F for char in value
+    )
+
+
+def _refused_values(document: Document) -> list[object]:
+    """Every value in this document AD-35 refuses, read off the model rather than the source.
+
+    A block scalar taking clip or keep chomping constructs a trailing line break, which is what
+    puts most of these documents on the refused side: the spelling is written for the rewriter
+    and the value it happens to construct is what the strict load reads.
+    """
+    values: list[object] = list(document.root.values())
+    for entry in document.entries:
+        values.extend((entry.ref, entry.seen))
+    return [value for value in values if _carries_control_char(value)]
+
+
+def _assert_strict_disposition(document: Document, text: str) -> None:
+    """Assert the strict load puts this document on the side of AD-35 its own values put it.
 
     A failure here is a generator bug rather than a rewriter one: family 1 declares that it
     generates only the strict tracked-document column of layer 2, and this is the machine
     check of that claim.
+
+    AD-35 narrows that column without narrowing the reread column beside it, so the claim has
+    two sides. A document whose ``id``, ``title``, ``tickets``, ``ref``, or ``seen`` constructs
+    a control character is refused as a lattice document while the rewriter still round-trips
+    it byte-correctly, and is asserted to be refused rather than dropped from the corpus, which
+    would take the rewriter coverage for its spelling with it.
     """
     parts = split_frontmatter_parts(normalize_newlines(text), DOC)
     assert parts is not None, "family 1 document has no frontmatter block"
+    if _refused_values(document):
+        with pytest.raises(FrontmatterError):
+            parse_meta(parts.raw_meta, DOC)
+        _CLAIMS["control-value-refused"] += 1
+        return
     assert parse_meta(parts.raw_meta, DOC).disposition == "tracked"
 
 
@@ -1644,7 +1680,7 @@ def _assert_relocation(document: Document, raw_meta: str, updates: dict[str, str
 def _assert_supported_round_trip(document: Document, updates: dict[str, str]) -> None:
     """Assert a layer 2 document rewrites correctly, preserving layer 3 and confining layer 4."""
     text = document.render()
-    _assert_strict_tracked(text)
+    _assert_strict_disposition(document, text)
     expected_applied = document.applied(updates)
     assert expected_applied, "the generator must force at least one applicable update"
 

@@ -3,10 +3,52 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 from .constants import Authority, FrontmatterDisposition, Layer, LocationKind
+from .text_utils import first_control_index
+
+
+def _reject_control_chars(value: str) -> str:
+    """Refuse a frontmatter string carrying a terminal control character.
+
+    Args:
+        value: One frontmatter scalar, as YAML constructed it.
+
+    Returns:
+        The value unchanged when it holds no control character.
+
+    Raises:
+        ValueError: If the value holds a C0 control, DEL, or a C1 control. The message names
+            the code point and its position rather than echoing the value, so the diagnostic
+            cannot carry the character it is refusing. A line break is answered with the
+            chomping fix rather than the general one, since a block scalar written ``|`` or
+            ``>`` keeps a trailing break and is the only way an author reaches this by accident.
+    """
+    index = first_control_index(value)
+    if index is not None:
+        fix = (
+            "frontmatter values are single-line, so chomp a block scalar with '-'"
+            if value[index] in "\n\r"
+            else "remove it, since the value reaches terminal output as written"
+        )
+        msg = (
+            f"must not contain a control character; found U+{ord(value[index]):04X} at index "
+            f"{index}: {fix}"
+        )
+        raise ValueError(msg)
+    return value
+
+
+ControlFreeStr = Annotated[str, AfterValidator(_reject_control_chars)]
+"""A frontmatter string that carries no terminal control character.
+
+YAML refuses a literal control byte in the source stream but decodes a double-quoted
+``\\u001b`` into a real ESC, so every frontmatter string this engine keeps is constrained here
+rather than at the sinks that print it. See AD-35.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +93,8 @@ class RawEdge(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
-    ref: str
-    seen: str | None = None
+    ref: ControlFreeStr
+    seen: ControlFreeStr | None = None
 
 
 class NodeMeta(BaseModel):
@@ -60,12 +102,12 @@ class NodeMeta(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
-    id: str
-    title: str | None = None
+    id: ControlFreeStr
+    title: ControlFreeStr | None = None
     layer: Layer | None = None
     authority: Authority | None = None
     derives_from: list[RawEdge] = Field(default_factory=list)
-    tickets: list[str] = Field(default_factory=list)
+    tickets: list[ControlFreeStr] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod

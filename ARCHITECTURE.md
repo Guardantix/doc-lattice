@@ -853,7 +853,9 @@ refusal that did not already exist.
 
 **Layer 1: semantic schema.** The validated shape a tracked document must load as is owned by
 `NodeMeta` and `RawEdge` in `model.py`, under `strict=True` and `extra="forbid"`. Public `seen` is
-`str | None`.
+`str | None`. AD-35 narrows both string positions further: a `ref` or a `seen` constructing a C0,
+DEL, or C1 code point is refused, which takes clip and keep chomping out of the strict column of
+the `Entry` `seen` and `ref` rows below without moving the reread column beside them.
 
 **Layer 2: supported spellings on the writable path, by position and by load phase.** One row per
 writable position and per dimension, and two columns: what a strict tracked-document load accepts,
@@ -1200,14 +1202,14 @@ decodes a double-quoted `\u001b` into a real ESC, so `id`, `title`, `tickets`, `
 can each carry a control character into human output through a validated frontmatter value. That
 vector turns on a decision this record does not make, between rejecting at validation and a typed
 value display encoding, because those values participate in identity and in structured output;
-it is GTX-208's. The reconcile transaction and recovery sinks interpolated destination, journal,
-and staged-artifact paths the same way this record governs, and stage names inherit
-`destination.name` so a hostile document filename propagates into them; GTX-209 routed those
-sinks through this helper rather than deciding a spelling of their own, and moved
-`path_utils.safe_resolve`'s own containment error with them, because the transaction layer
-embeds that message verbatim when a journal records an escaping path. GTX-125 and GTX-209
-together close the document-path vector; nothing here claims the repo-controlled vector is fully
-closed.
+it is GTX-208's, and AD-35 settles it by refusing such a value at validation rather than adding a
+sibling display spelling here. The reconcile transaction and recovery sinks interpolated
+destination, journal, and staged-artifact paths the same way this record governs, and stage names
+inherit `destination.name` so a hostile document filename propagates into them; GTX-209 routed
+those sinks through this helper rather than deciding a spelling of their own, and moved
+`path_utils.safe_resolve`'s own containment error with them, because the transaction layer embeds
+that message verbatim when a journal records an escaping path. GTX-125 and GTX-209 together close
+the document-path vector; nothing here claims the repo-controlled vector is fully closed.
 
 A static guard in `tests/test_conventions.py` enforces the boundary going forward: inside the
 modules this record covers, a path-bearing name reaching human-facing text must go through the
@@ -1229,3 +1231,95 @@ those modules is per-expression and machine-only: the journal serializer, the st
 filenames, and the recovery payload's own JSON spelling. Because a name can be a path in one
 module and something else in another, the path-bearing name set is the global one widened per
 module rather than grown globally.
+
+
+### AD-35: A frontmatter value carrying a control character is refused, not re-spelled
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Context:** AD-34 closed the document-path half of the repo-controlled output vector and left the
+other half open, because the two halves do not turn on the same question. A path is display-only,
+so a display spelling settles it. A frontmatter value is not: `id` and `ref` participate in
+identity, since edge resolution and duplicate detection compare them, and all five of `id`,
+`title`, `tickets`, `ref`, and `seen` participate in structured output through JSON, the GitHub
+annotation encoder, and the `linear` command.
+
+The premise that the frontmatter parser already filters control characters was half true. YAML
+refuses a literal C0 byte in the source stream, but a double-quoted scalar decodes `\u001b` into a
+real ESC and nothing downstream rejected it. Executing `check` and `graph` under `NO_COLOR=1`
+against a block spelling `id: "node\u001b[31m"`, `title: "t\u001b[2J"`,
+`tickets: ["GTX-1\u001b[31m"]`, and `derives_from: [{ref: "up\u001b[A"}]` put the raw `0x1b` bytes
+on stdout in both. `NodeMeta` and `RawEdge` were otherwise unconstrained strings under
+`strict=True`, with the `#` check on `id` as the only value rule.
+
+The sinks are the same shape AD-34 records for paths and are more numerous: `report_render.py`
+prints `source_id`, `target_ref`, `node.id`, and `tickets`; `render.py` turns ids and titles into
+graph labels behind a quote-only grammar escaper per format; the reconcile adapter prints
+`target_ref`; and `reconcile.py`'s targeted broken-ref error interpolates `node_id` with no
+escaping at all. Every one of them applies `rich.markup.escape` at most, which does nothing to
+ANSI, or nothing.
+
+**Decision:** These values are refused at validation rather than re-spelled at display.
+`ControlFreeStr` in `model.py` is `str` plus an `AfterValidator`, and `id`, `title`, every
+`tickets` element, `ref`, and `seen` are typed with it, so a document spelling any C0 code point
+(`U+0000` to `U+001F`), DEL (`U+007F`), or any C1 code point (`U+0080` to `U+009F`) in one of
+them is a `FRONTMATTER_ERROR` and never becomes a node. The predicate is `text_utils`'
+`is_control_char`, which is the same range `strip_control_chars` has always removed, so the
+project has one definition of what a control character is rather than two. Tab, newline, and
+carriage return are C0 controls and are included deliberately; see the consequences below.
+
+Refusing is what a display encoding could not do here. It closes the vector at one boundary
+instead of at each of eight sinks and every sink added later, it keeps control characters out of
+identity rather than only out of the rendering of identity, and it needs no rule about how a
+display spelling composes with the DOT and Mermaid grammar escapers, which is a question AD-34
+does not have to answer because a path is never a graph label. The alternative was a string-typed
+sibling of `format_path_for_display` plus an analogue of AD-34's static construction-site guard;
+that guard exists because an omitted sink is the failure mode of a display strategy, and the
+strategy chosen here has no sinks to omit.
+
+The diagnostic names the code point and its index rather than echoing the value, because a
+message quoting the value would print the very byte the rule refuses. `validation_render` already
+drops pydantic's echoed input, so both halves hold. The `ControlFreeStr` rule runs ahead of the
+`id` `#` rule, which does quote the id it rejects, so an id carrying both is reported by the rule
+that names no value.
+
+Machine channels are excluded on the same reasoning AD-34 records, and the exclusion means
+something different under this decision: JSON output and the GitHub annotation encoder are
+unchanged for every document that still loads, and a refused document fails uniformly before
+format selection rather than reaching one channel and not another. Keeping control-bearing values
+reachable through the machine channels was never a requirement; had it been, it would have
+preselected display-time encoding.
+
+**Consequences:** This is a breaking change, and it is taken inside 5.0's deliberate window while
+adoption is internal (ROADMAP.md). A document accepted today whose `id`, `title`, `tickets`,
+`ref`, or `seen` constructs a control character becomes a load error, and because a load error is
+reported per document rather than per command, it fails `check`, `lint`, `impact`, `graph`, and
+`reconcile` alike.
+
+Including tab and newline is what makes the rule worth having and is also its whole compatibility
+cost. A newline is not a terminal escape sequence, so the `--no-color` promise alone would not
+have reached it; the output it corrupts is line-oriented, and a `title` or `id` carrying one can
+forge a whole report row rather than merely recolor a real one. AD-34's own spelling escapes
+`\t`, `\n`, and `\r` in a path for the same reason, and a rule that refused a newline in a
+filename while admitting one in an id would be incoherent across two halves of one vector.
+
+The cost lands on AD-31 layer 2, which this record narrows. That table's strict tracked-document
+column accepts, for `ref` and for `seen`, "a block scalar in either style with any chomping or
+explicit indentation indicator". Clip and keep chomping construct a trailing line break, so those
+two chomping modes are no longer in the strict column for those two positions; strip chomping,
+and every folded spelling, join their lines with spaces and are unaffected. The reread column
+beside it does not move at all: `apply_reconcile` still rewrites such a document byte-correctly
+and still re-emits the value as an escape, which is what the two columns exist to distinguish.
+The affected spellings had no working use: a `seen` ending in a line break can never equal a
+content hash, and a `ref` ending in one can never resolve, since every id in the index comes from
+a frontmatter `id` or a heading slug. Such a document was permanently drifting or permanently
+broken, and is now refused with a diagnostic that says why. A folded `title` is the one plausible
+authoring casualty, and `>-` is the spelling that keeps it.
+
+The load cache needs no separate rule. `NodeMeta` is nested inside a cache entry and an invalid
+snapshot is discarded whole, so a slot written before this change cannot replay a control
+character into a warm run.
+
+No static construction-site guard accompanies this record, and none is owed. AD-34 needs one
+because a display strategy is only as complete as its sink list; a validation rule has one site,
+and the parser matrix over the five value families is what pins it.

@@ -364,6 +364,18 @@ selector details, dry-run and JSON output, the durability contract, and recovery
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
 
+`id`, `title`, each `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` must be
+single-line text carrying no control character. YAML refuses a raw control byte in the file
+itself, but a double-quoted scalar can spell one as an escape, so a value that decodes to any C0
+code point (`U+0000` to `U+001F`, tab, newline, and carriage return included), DEL (`U+007F`), or
+any C1 code point (`U+0080` to `U+009F`) fails the load with a `FRONTMATTER_ERROR` naming the key
+and the code point. Every other character is accepted, accented text, CJK, emoji, and a
+no-break space among them. The rule is what keeps the `--no-color` promise above true for a
+document as well as for a filename: a value reaches your terminal, so it cannot carry bytes your
+terminal acts on. A trailing newline is the case worth knowing, since a block scalar written with
+`|` or `>` keeps one; write `|-` or `>-` instead, which is the difference between a folded title
+that loads and one that does not.
+
 ### Files with no `id`
 
 Only a file declaring an `id` joins the lattice. How the rest are treated depends on what they
@@ -785,6 +797,15 @@ into the graph but never named itself, so it and every edge it declares would le
 together. Almost always a typo in the `id` key (`idd:`, `Id:`) or an edit that dropped it: add the
 `id` back, or remove the lattice keys if the file is not meant to be tracked. The same message
 lists `authority` and `tickets` when those are what the block declared.
+
+**`must not contain a control character; found U+000A at index ...` exits 2.** A frontmatter
+value decoded to a byte a terminal acts on, so the document is refused rather than loaded and
+printed. `U+000A`, `U+000D`, and `U+0009` are the common ones and usually mean a block scalar
+kept its trailing line break: change `|` to `|-`, or `>` to `>-`. Anything in the `U+001B`
+neighborhood is an escape sequence written into the value on purpose and should come out. The
+message names the key and the offending code point rather than repeating the value, so reading it
+never puts the byte back on your terminal. See the
+[Frontmatter reference](#frontmatter-reference) for the exact accepted set.
 
 **`skipping ... its frontmatter declares no 'id'` on stderr.** Not an error: a file with fenced
 frontmatter that declares no `id` and no lattice keys is left out of the lattice, and the exit

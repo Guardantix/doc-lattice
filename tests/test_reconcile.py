@@ -12,6 +12,7 @@ from doc_lattice.check import check_lattice
 from doc_lattice.config import load_config
 from doc_lattice.error_types import (
     BrokenRefError,
+    FrontmatterError,
     ProjectError,
     UnreadableDocError,
     ValidationError,
@@ -51,6 +52,18 @@ def _validated_reconcile_meta(text: str) -> NodeMeta:
     meta = parse_meta(raw_meta, Path("downstream.md")).meta
     assert meta is not None
     return meta
+
+
+def _assert_strict_load_refuses(text: str) -> None:
+    """Assert AD-35 refuses reconciled text whose values carry a control character.
+
+    The rewriter's reread is deliberately broader than the strict load (AD-31 layer 2), so a
+    document it round-trips correctly is not necessarily one the lattice admits. Asserting the
+    refusal is what keeps the two columns distinguishable here rather than assumed equal.
+    """
+    raw_meta, _ = split_frontmatter(text, Path("downstream.md"))
+    with pytest.raises(FrontmatterError):
+        parse_meta(raw_meta, Path("downstream.md"))
 
 
 def test_plan_rewrites_applies_updates_from_reader():
@@ -831,20 +844,20 @@ def test_apply_reconcile_relocates_block_seen_anchor_into_flow_collection_safely
 
     assert out == expected
     assert applied == {"a#x"}
-    meta = _validated_reconcile_meta(out)
-    assert meta.derives_from[0].seen == "newhash"
-    assert meta.tickets == ["old value\n"]
+    # The relocated ticket keeps the block scalar's trailing newline, which AD-35 refuses, so
+    # the value is read back through the raw loader and the strict boundary is asserted to
+    # refuse the document the rewriter nonetheless round-trips correctly.
+    assert _reloaded_tickets(out) == ["old value\n"]
+    _assert_strict_load_refuses(out)
 
 
-@pytest.mark.parametrize(
-    "char",
-    ["\x7f", "\x85", "\x9f", "\u2028", "\u2029", "\ufeff", "\t"],
-)
-def test_apply_reconcile_relocates_a_seen_anchor_holding_an_unprintable_character(char: str):
+@pytest.mark.parametrize("char", ["\u2028", "\u2029", "\ufeff"])
+def test_apply_reconcile_relocates_a_seen_anchor_holding_an_admitted_escaped_character(char: str):
     # A character YAML admits only as an escape has to be written back as one: emitting it
     # raw would either leave the document unparseable or fold the value across lines, and
-    # either way the reparse gate would refuse a rewrite the document itself allows.
-    escape = "\\t" if char == "\t" else f"\\u{ord(char):04x}"
+    # either way the reparse gate would refuse a rewrite the document itself allows. These
+    # three sit outside the C0/DEL/C1 set AD-35 refuses, so the rewritten document still loads.
+    escape = f"\\u{ord(char):04x}"
     text = (
         "---\n"
         "id: d\n"
@@ -873,6 +886,42 @@ def test_apply_reconcile_relocates_a_seen_anchor_holding_an_unprintable_characte
     meta = _validated_reconcile_meta(out)
     assert meta.derives_from[0].seen == "newhash"
     assert meta.tickets == [f"old{char}"]
+
+
+@pytest.mark.parametrize("char", ["\x7f", "\x85", "\x9f", "\t"])
+def test_apply_reconcile_relocates_a_seen_anchor_holding_a_refused_control_character(char: str):
+    # The rewriter's reread is broader than the strict load on purpose (AD-31 layer 2), and
+    # AD-35 is where the two now differ for a scalar's own value: a document spelling DEL, a
+    # C1 control, or a tab as an escape is still rewritten byte-correctly and re-emitted as an
+    # escape, and is refused as a lattice document rather than admitted with the byte intact.
+    escape = "\\t" if char == "\t" else f"\\u{ord(char):04x}"
+    text = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        f'    seen: &shared "old{escape}"\n'
+        "tickets: [*shared]\n"
+        "---\n"
+        "body\n"
+    )
+    expected = (
+        "---\n"
+        "id: d\n"
+        "derives_from:\n"
+        "  - ref: a#x\n"
+        "    seen: newhash\n"
+        f'tickets: [&shared "old{escape}"]\n'
+        "---\n"
+        "body\n"
+    )
+
+    out, applied = apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    assert out == expected
+    assert applied == {"a#x"}
+    assert _reloaded_tickets(out) == [f"old{char}"]
+    _assert_strict_load_refuses(out)
 
 
 def test_apply_reconcile_relocates_a_multiline_tagged_seen_anchor_in_its_own_type():

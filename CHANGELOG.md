@@ -71,6 +71,19 @@ such as `--- !!map`, because a plain `---` closes the frontmatter block instead.
 without the accelerator, which is what every lock of this project produces, sees no change at all
 in what loads.
 
+The sixth is the frontmatter value rule, and it is the fourth thing to act on. `id`, `title`,
+every `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` may no longer decode to a
+control character: any C0 code point (`U+0000` to `U+001F`), DEL (`U+007F`), or any C1 code point
+(`U+0080` to `U+009F`) now fails the load with a `FRONTMATTER_ERROR`. A raw control byte was
+already refused by YAML itself, so only a document spelling one as a double-quoted escape is
+affected, plus one spelling nobody writes on purpose: tab, newline, and carriage return are C0
+controls, and a block scalar written `|` or `>` keeps a trailing newline, so a value written that
+way is now refused where `|-` and `>-` are not. Search your docs for `\u00`, `\t`, `\n`, and `\r`
+inside a double-quoted frontmatter scalar, and for a `seen` or a `ref` written as a block scalar
+with no `-`. A folded `title` is the only one of these with a working use today; the others could
+never match a hash or resolve to an id, so the documents affected were already permanently
+drifting or broken. See **Changed** below and the frontmatter reference in README.md.
+
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read
 as documents that reused no anchor. No action is needed: the next run rebuilds the file.
@@ -128,6 +141,30 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
 
 ### Changed
 
+- **BREAKING:** a frontmatter value that decodes to a control character is now refused at load
+  instead of being carried into output. `id`, `title`, every `tickets` entry,
+  `derives_from[].ref`, and `derives_from[].seen` may hold no C0 code point (`U+0000` to
+  `U+001F`), no DEL (`U+007F`), and no C1 code point (`U+0080` to `U+009F`), and a document
+  spelling one fails with a `FRONTMATTER_ERROR` naming the key and the code point rather than
+  echoing the value. This closes the second half of the vector `--no-color` output already
+  promised was closed: YAML refuses a raw control byte in the file, but a double-quoted scalar
+  decodes `\u001b` into a real ESC, and `check` and `graph` printed it, so a crafted document
+  could recolor or overwrite the lines of a gate's report. Refusing at validation rather than
+  escaping at each sink is what keeps control characters out of identity and out of every
+  renderer at once, including the two graph grammars, and needs no rule for how a display
+  spelling would compose with them.
+
+  Tab, newline, and carriage return are C0 controls and are included: the output being protected
+  is line-oriented, so a newline in a value forges a whole report row rather than restyling one.
+  That is also the only compatibility cost worth planning for. It narrows the block-scalar
+  spellings AD-31 declares supported for `ref` and `seen`: clip and keep chomping (`|`, `>`, and
+  their `+` forms) construct a trailing line break, so those are refused where `|-` and `>-` are
+  not. The reconcile rewriter is unchanged and still round-trips such a document byte for byte;
+  only the strict tracked-document load moved. Machine channels are untouched for every document
+  that still loads, and a refused document fails before format selection rather than reaching one
+  channel and not another. See
+  [AD-35](ARCHITECTURE.md#ad-35-a-frontmatter-value-carrying-a-control-character-is-refused-not-re-spelled)
+  and the frontmatter reference in README.md.
 - Warnings a command emits while loading now render in the CLI's own stderr voice, as
   `warning: <message>`, instead of through Python's default formatter. A skip previously arrived
   behind an absolute path into this package and a `UserWarning` category, with the raising source

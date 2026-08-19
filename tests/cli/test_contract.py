@@ -867,3 +867,91 @@ def test_direct_console_write_under_no_color_emits_no_escape_byte(tmp_path: Path
     assert b"down" in completed.stdout
     assert b"\x1b" not in completed.stdout
     assert rb"pwn\x1b[31m\x1b[Aevil.md" in completed.stdout
+
+
+# GTX-208: the other half of the repo-controlled vector. A filename never passes the frontmatter
+# parser; a typed value does, and YAML hands it back with the control byte intact whenever the
+# document spells it as a double-quoted escape. AD-35 refuses such a document at validation, so
+# what these assert end to end is that no lattice-loading command prints the byte and that the
+# refusal itself names the code point instead of echoing the value. The bytes are inspected
+# undecoded for the same reason the cases above are.
+_ESCAPED_CONTROL_DOC = (
+    "---\n"
+    'id: "down\\u001b[31m"\n'
+    'title: "t\\u001b[2J"\n'
+    'tickets: ["GTX-1\\u001b[31m"]\n'
+    "derives_from:\n"
+    '  - ref: "up\\u001b[A"\n'
+    '    seen: "h\\u001b[B"\n'
+    "---\n"
+    "# Down\nbody\n"
+)
+
+
+def _escaped_control_lattice(tmp_path: Path) -> None:
+    """Write a two-document lattice whose downstream spells control bytes as YAML escapes."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\nbody\n", encoding="utf-8")
+    (docs / "down.md").write_text(_ESCAPED_CONTROL_DOC, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["check"], ["lint"], ["impact", "up"], ["graph"], ["reconcile", "--all", "--dry-run"]],
+    ids=["check", "lint", "impact", "graph", "reconcile"],
+)
+def test_escaped_control_values_reach_no_command_output_under_no_color(
+    tmp_path: Path, argv: list[str]
+):
+    _escaped_control_lattice(tmp_path)
+
+    completed = _run_bytes(argv, tmp_path)
+
+    assert completed.returncode == 2
+    assert b"FRONTMATTER_ERROR" in completed.stderr
+    # The refusal names the code point and the position, which is what lets it stay control-free
+    # while still identifying the offending value.
+    assert b"U+001B" in completed.stderr
+    for stream in (completed.stdout, completed.stderr):
+        assert b"\x1b" not in stream, (argv, stream)
+        assert not _control_characters(stream), (argv, stream)
+
+
+def test_an_admitted_value_still_reaches_the_machine_channels_verbatim(tmp_path: Path):
+    # The other half of AD-35's claim: the rule refuses documents, it does not rewrite values.
+    # A document holding the neighbors of the refused ranges still loads, and what JSON and the
+    # GitHub annotation carry for it is the value as written, with no display spelling and no
+    # stripping applied on the way out.
+    neighbors = "".join(chr(code) for code in (0xA0, 0x2028, 0xFEFF))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "down.md").write_text(
+        f'---\nid: "down{neighbors}"\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n',
+        encoding="utf-8",
+    )
+
+    as_json = _run_bytes(["check", "--format", "json"], tmp_path)
+    as_github = _run_bytes(["check", "--format", "github"], tmp_path)
+
+    assert as_json.returncode == 1
+    payload = json.loads(as_json.stdout.decode("utf-8"))
+    assert payload["edges"][0]["source_id"] == f"down{neighbors}"
+    assert as_github.returncode == 1
+    assert f"down{neighbors} -> ghost is BROKEN".encode() in as_github.stdout
+
+
+def _control_characters(stream: bytes) -> list[str]:
+    """Every C0, DEL, or C1 character in captured output, newline excepted.
+
+    Decoded before the scan, deliberately: a C1 control reaches a terminal as the two-byte UTF-8
+    encoding of its code point, and a byte-level scan of ``0x80`` to ``0x9F`` would also flag the
+    continuation byte of ordinary non-ASCII text. The raw-byte assertion for ESC is kept beside
+    this rather than folded into it, since ``0x1b`` is never a continuation byte and is the exact
+    byte a terminal acts on.
+
+    A newline is how output is written at all, so it is the one member of the range a stream
+    legitimately carries.
+    """
+    text = stream.decode("utf-8", errors="surrogateescape")
+    return sorted({char for char in text if ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F} - {"\n"})

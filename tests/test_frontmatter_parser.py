@@ -439,3 +439,137 @@ def test_parse_meta_tracks_a_reused_anchor_name_after_a_directive_reset():
     assert parsed.meta is not None
     assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]
     assert parsed.reused_anchors is True
+
+
+# GTX-208 (AD-35): YAML refuses a literal control byte in the source stream but decodes a
+# double-quoted escape into a real one, so the escaped spelling is the only way one reaches a
+# value and is the spelling every row below is written in. The admitted neighbors sit one code
+# point outside a refused range, which is what keeps the rule from reading as "reject anything
+# unusual": they are the boundaries a widened predicate would swallow first.
+_REFUSED_CONTROLS = (
+    ("\\u001b", 0x1B, "esc"),
+    ("\\u0000", 0x00, "nul"),
+    ("\\t", 0x09, "tab"),
+    ("\\n", 0x0A, "newline"),
+    ("\\r", 0x0D, "carriage-return"),
+    ("\\u001f", 0x1F, "c0-top"),
+    ("\\u007f", 0x7F, "delete"),
+    ("\\u0080", 0x80, "c1-bottom"),
+    ("\\u0085", 0x85, "nel"),
+    ("\\u009b", 0x9B, "csi"),
+    ("\\u009f", 0x9F, "c1-top"),
+)
+_ADMITTED_NEIGHBORS = (
+    ("\\u0020", 0x20, "space"),
+    ("\\u007e", 0x7E, "tilde"),
+    ("\\u00a0", 0xA0, "nbsp"),
+    ("\\u2028", 0x2028, "line-separator"),
+    ("\\ufeff", 0xFEFF, "bom"),
+)
+# One document per value family, each spelling its own field with the escape under test. The
+# five are covered separately because they are validated in three different places: two root
+# scalars, a root list element, and two members of a nested model.
+_VALUE_FAMILIES = (
+    ("id", '---\nid: "node{escape}"\n---\nbody\n'),
+    ("title", '---\nid: node\ntitle: "t{escape}"\n---\nbody\n'),
+    ("tickets.0", '---\nid: node\ntickets: ["GTX-1{escape}"]\n---\nbody\n'),
+    (
+        "derives_from.0.ref",
+        '---\nid: node\nderives_from:\n  - ref: "up{escape}"\n---\nbody\n',
+    ),
+    (
+        "derives_from.0.seen",
+        '---\nid: node\nderives_from:\n  - ref: up\n    seen: "h{escape}"\n---\nbody\n',
+    ),
+)
+_FAMILY_READERS = {
+    "id": lambda meta: meta.id,
+    "title": lambda meta: meta.title,
+    "tickets.0": lambda meta: meta.tickets[0],
+    "derives_from.0.ref": lambda meta: meta.derives_from[0].ref,
+    "derives_from.0.seen": lambda meta: meta.derives_from[0].seen,
+}
+
+
+def _raw_meta(document: str) -> str:
+    """Return a document's frontmatter block, which every row below builds from a template."""
+    raw, _ = split_frontmatter(document, Path("a.md"))
+    assert raw is not None
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+@pytest.mark.parametrize(
+    ("field", "template"), _VALUE_FAMILIES, ids=[row[0] for row in _VALUE_FAMILIES]
+)
+def test_parse_meta_refuses_a_control_character_in_every_value_family(
+    field: str, template: str, escape: str, code: int
+):
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta(_raw_meta(template.format(escape=escape)), Path("a.md"))
+
+    message = str(exc.value)
+    assert "a.md" in message
+    # The field location is asserted, not just the exception type: a rule that fired on the
+    # wrong member, or a nested location rendered as a bare key, is a failure rather than a pass.
+    assert f"  {field}: " in message
+    assert f"U+{code:04X}" in message
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _ADMITTED_NEIGHBORS],
+    ids=[row[2] for row in _ADMITTED_NEIGHBORS],
+)
+@pytest.mark.parametrize(
+    ("field", "template"), _VALUE_FAMILIES, ids=[row[0] for row in _VALUE_FAMILIES]
+)
+def test_parse_meta_admits_the_neighbors_of_every_refused_range(
+    field: str, template: str, escape: str, code: int
+):
+    parsed = parse_meta(_raw_meta(template.format(escape=escape)), Path("a.md"))
+
+    assert parsed.disposition == "tracked"
+    assert parsed.meta is not None
+    assert _FAMILY_READERS[field](parsed.meta).endswith(chr(code))
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+def test_the_refusal_diagnostic_carries_no_control_character_of_its_own(escape: str, code: int):
+    # The point of refusing at validation is that no repo-controlled control byte reaches a
+    # person, and the refusal is output like anything else. `validation_render` drops pydantic's
+    # echoed input and the message names the code point instead of quoting the value, so both
+    # halves have to hold for this to pass. Three fields are spelled at once so the per-error
+    # lines are covered and not only the header.
+    document = '---\nid: "node{escape}"\ntitle: "t{escape}"\ntickets: ["GTX-1{escape}"]\n---\nb\n'
+
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta(_raw_meta(document.format(escape=escape)), Path("a.md"))
+
+    message = str(exc.value)
+    assert not any(
+        ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F
+        for char in message.replace("\n", "")
+    )
+    assert message.count(f"U+{code:04X}") == 3
+
+
+def test_a_control_character_is_refused_before_the_id_hash_rule_echoes_the_value():
+    # `_id_has_no_hash` quotes the id it rejects, which would print the very byte AD-35 exists
+    # to keep out of output. The annotated rule runs ahead of it for that reason, so an id
+    # carrying both is reported by the rule that names no value.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta(_raw_meta('---\nid: "a#b\\u001b"\n---\nbody\n'), Path("a.md"))
+
+    message = str(exc.value)
+    assert "U+001B" in message
+    assert "'#'" not in message
+    assert "\x1b" not in message
