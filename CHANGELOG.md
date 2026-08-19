@@ -435,6 +435,15 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   any release that changes output an adopter installs, in shape or behavior, excluding the
   version-pin substitution every release performs. The 4.1.0 section gained that subsection
   retroactively; it is the release whose printed and generated workflow output changed.
+- README.md no longer presents the `init` branch probe and its stderr narration as behavior of the
+  release it pins. Both the probe and `--default-branch` arrive in 5.0, so an adopter running the
+  pinned 4.1.0 command looked for a `workflow triggers on branch ...` line that never appears, and
+  had no documented way to notice a workflow gating the wrong branch: that release hard-wires
+  `branches: [main]` into both the `push` and the `pull_request` filter of the workflow it prints.
+  The Ordinary offline setup section now states the release boundary first, says what a pre-5.0
+  install renders and that editing both filters by hand is the only correction available there,
+  and marks the probe paragraphs as 5.0 and later. The boundary is worded the way MANAGED_CI.md
+  already words the same one for `--default-branch`, so it stays accurate once the pin moves.
 
 ### Security
 
