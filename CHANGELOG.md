@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-08-19
+
 ### Migration
 
 Seven things to act on, plus two changes below that need no action in a default environment. The
@@ -484,20 +486,6 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   a usage error, or the `reconcile --recover` problem report -- still prints `error: <message>`.
   See **Migration** above for what a stderr scraper matches instead.
 
-### Fixed
-
-- An unknown frontmatter or config key that decodes to a control character is now spelled in the
-  diagnostic that rejects it, instead of being echoed into your terminal raw. Safe YAML decodes a
-  double-quoted `\u001b` in a mapping *key* exactly as it does in a value, and an unknown key is
-  reported by naming the key, so a document spelling `"bad\u001b[31m": 1` put the ESC on stderr
-  through the very message refusing it. Only the spelling changed: such a key was already an
-  error, and a key carrying no control character still reads exactly as before, so an ordinary
-  diagnostic still names `derives_from.0.ref` rather than gaining quotes. This is the key half of
-  the value rule under **Changed** above; the two together did not close the whole of what a
-  document can print, because a block that fails to parse at all is reported through the YAML
-  parser's own message, which echoes the source it choked on. That path is closed by the last
-  entry under **Security** below.
-
 ### Removed
 
 - **BREAKING:** the managed GitHub and Linear CI product is gone. `ci audit` and `ci refresh` no
@@ -528,6 +516,18 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   the upgrade path for a recipe installation once you are on it.
 
 ### Fixed
+
+- An unknown frontmatter or config key that decodes to a control character is now spelled in the
+  diagnostic that rejects it, instead of being echoed into your terminal raw. Safe YAML decodes a
+  double-quoted `\u001b` in a mapping *key* exactly as it does in a value, and an unknown key is
+  reported by naming the key, so a document spelling `"bad\u001b[31m": 1` put the ESC on stderr
+  through the very message refusing it. Only the spelling changed: such a key was already an
+  error, and a key carrying no control character still reads exactly as before, so an ordinary
+  diagnostic still names `derives_from.0.ref` rather than gaining quotes. This is the key half of
+  the value rule under **Changed** above; the two together did not close the whole of what a
+  document can print, because a block that fails to parse at all is reported through the YAML
+  parser's own message, which echoes the source it choked on. That path is closed by the last
+  entry under **Security** below.
 
 - A command whose stderr is closed or full no longer discards its own report. Every console this
   CLI writes through now raises the underlying `BrokenPipeError` on a refused write. Rich's
