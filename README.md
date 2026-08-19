@@ -631,17 +631,14 @@ file. Pass
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
 
-Branch resolution reaches `init` in 5.0, the same release boundary
+Branch resolution reached `init` in 5.0, the same release boundary
 [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) records for
-`--default-branch` and its own recipe. Before that release the printed workflow hard-wires its
-trigger: both the `push` and the `pull_request` filter render as `branches: [main]`, `init` never
-inspects `origin/HEAD`, the run names no branch on stderr, and passing `--default-branch` exits 2
-with `No such option: --default-branch`. On any such release, compare both filters against the
-branch you actually gate on before saving the file and edit both when it is not `main`. That hand
-edit is the only correction available there, and a repository on `master`, `trunk`, or `develop`
-that skips it installs a workflow that never runs.
+`--default-branch` and its own recipe. Every supported release resolves the branch, so what
+follows is simply what `init` does. A workflow printed by an earlier release hard-wires its
+trigger instead, rendering both the `push` and the `pull_request` filter as `branches: [main]`;
+[Upgrading](#upgrading) is how you replace one.
 
-Starting in 5.0, and through the two paragraphs after this one, the printed workflow triggers on
+Through the two paragraphs after this one, the printed workflow triggers on
 one branch that `init` resolves by a fixed precedence: an explicit `--default-branch` wins;
 otherwise the local `origin/HEAD` remote-tracking ref is read; otherwise it falls back to `main`.
 The run always names the branch it used and where that came from on stderr, for example
