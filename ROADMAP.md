@@ -25,19 +25,29 @@ GitHub and Linear CI code and repaired every document that described it, GTX-126
 reconcile journal to v2, GTX-110 has retired the orphaned dirfd persistence family and recorded
 the filesystem threat model in AD-2, and GTX-148 has stopped a document's tracked status depending
 on whether the optional `ruamel.yaml.clib` accelerator is installed. Start with the diagnostics
-group below, since the error codes it settles are what GTX-113 waits on.
+group below, since the error codes and output spellings it settles are what GTX-113 waits on.
 
 - Bring the diagnostics an external user meets first up to the standard the transaction layer
-  already sets. The load boundary introduces a frontmatter-specific error code and so has to land
-  in this window (GTX-112). Warning presentation matters now that GTX-102 makes the id-less skip
-  fire on every adopter run rather than in an edge case (GTX-124). A document path reaches human
-  output without passing the frontmatter parser, so control bytes in a filename can forge or
-  corrupt a diagnostic, and the fix belongs at message construction so it survives whichever
-  renderer prints it (GTX-125). Typed frontmatter values are a second such vector, since YAML
-  decodes a double-quoted escape into a real control character, and closing that one turns on its
-  own decision about rejecting them at validation (GTX-208).
-- Make README describe what 5.0 actually prints and enforces (GTX-113). This lands last, once the
-  error codes and the documentation owners above have stopped moving.
+  already sets, then close the repo-controlled strings that can corrupt what they print. The load
+  boundary introduces a frontmatter-specific error code and so has to land in this window
+  (GTX-112). Warning presentation matters now that GTX-102 makes the id-less skip fire on every
+  adopter run rather than in an edge case (GTX-124). Those two settle what the engine prints; the
+  three after them settle what a repository can make it print, and there are two such strings, not
+  one. A document path never passes the frontmatter parser at all, so control bytes in a filename
+  reach output raw, and the fix belongs at message construction so it survives whichever renderer
+  prints it; that work carries the display contract the other two reuse rather than restate
+  (GTX-125). A typed frontmatter value is the second string: the parser refuses a literal control
+  byte in the source stream but decodes a double-quoted escape into a real one, so `id`, `title`,
+  `tickets`, `ref`, and `seen` carry them through, and closing it turns on its own decision about
+  rejecting at validation, which is why it is not folded in (GTX-208). The reconcile transaction
+  and recovery layers interpolate destination, journal, and staged-artifact paths the same way,
+  and a stage name inherits its destination's, so a hostile filename propagates into them; they
+  apply GTX-125's contract instead of choosing one (GTX-209). What the three enforce is the output
+  promise [README.md](README.md) already makes, which is why the group is not diagnostics-only.
+- Make README describe what 5.0 actually prints and enforces (GTX-113). This lands last because
+  every item above changes what there is to describe. The error codes settle first, then the
+  output group settles how a path and a typed value are spelled everywhere README shows one, which
+  is why GTX-208 and GTX-209 block it directly and GTX-125 reaches it through them.
 - Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
   the 5.0 pin (GTX-169). GTX-164's walk found it exits 2 on every release available at the time,
   and the recipe is the sole installation path, so a failure here is release-blocking rather than
