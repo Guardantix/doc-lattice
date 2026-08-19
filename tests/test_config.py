@@ -7,6 +7,8 @@ import pytest
 import doc_lattice.config as config_module
 from doc_lattice.config import Config, load_config
 from doc_lattice.error_types import ConfigError
+from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
+from doc_lattice.yaml_error_render import format_yaml_error_for_display
 
 
 def test_absent_config_uses_defaults(tmp_path: Path):
@@ -364,6 +366,69 @@ def test_config_with_an_unconstructible_tagged_scalar_raises_config_error(tmp_pa
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
     assert "cannot parse config" in str(exc.value)
+
+
+# GTX-219 (AD-37): the config boundary shares the load-failure shape with the frontmatter one,
+# and a config file is repo-controlled text the same way a document is. The two templates are the
+# two halves `ruamel`'s duplicate-key error echoes back.
+_DUPLICATE_KEY_ECHOES = (
+    ("key", '"k{escape}": 1\n"k{escape}": 2\n'),
+    ("value", 'k: "v{escape}A"\nk: "v{escape}B"\n'),
+)
+# The same range AD-35 refuses in a value, written in the only spelling that reaches one: YAML
+# rejects each of these as a raw byte, so a double-quoted escape is how a config file writes one.
+_REFUSED_CONTROL_ESCAPES = (
+    ("\\u001b", "esc"),
+    ("\\u0000", "nul"),
+    ("\\t", "tab"),
+    ("\\n", "newline"),
+    ("\\u007f", "delete"),
+    ("\\u009b", "csi"),
+)
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [row[0] for row in _REFUSED_CONTROL_ESCAPES],
+    ids=[row[1] for row in _REFUSED_CONTROL_ESCAPES],
+)
+@pytest.mark.parametrize(
+    "template",
+    [row[1] for row in _DUPLICATE_KEY_ECHOES],
+    ids=[row[0] for row in _DUPLICATE_KEY_ECHOES],
+)
+def test_a_config_load_failure_spells_the_control_bytes_it_echoes(
+    tmp_path: Path, template: str, escape: str
+):
+    (tmp_path / ".doc-lattice.yml").write_text(template.format(escape=escape), encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    message = str(exc.value)
+    assert "cannot parse config" in message
+    # Scanned whole, line breaks included: preserving the message's own breaks is what would let
+    # an echoed value forge a line, so the detail is one line and carries no control byte at all.
+    assert not any(
+        ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F for char in message
+    )
+
+
+def test_the_config_load_failure_detail_is_the_display_spelling_of_the_caught_exception(
+    tmp_path: Path,
+):
+    # The readability cost at this boundary, pinned as a relation for the reason the frontmatter
+    # test records: `ruamel`'s wording differs across the releases and accelerator cells CI runs.
+    # The exception is caught from this module's own loader, so the assertion holds on both.
+    text = "docs_roots: [unclosed\n"
+    (tmp_path / ".doc-lattice.yml").write_text(text, encoding="utf-8")
+    with pytest.raises(YAML_LOAD_ERRORS) as caught:
+        config_module._LOADER.load(text)
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(None, tmp_path)
+
+    assert str(exc.value).endswith(f": {format_yaml_error_for_display(caught.value)}")
 
 
 def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):

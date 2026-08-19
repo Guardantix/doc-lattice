@@ -23,6 +23,8 @@ from doc_lattice.loader import build_lattice
 from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId, parse_ref
 from doc_lattice.orchestrate import load_lattice
 from doc_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
+from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
+from doc_lattice.yaml_error_render import format_yaml_error_for_display
 
 
 def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
@@ -2110,6 +2112,64 @@ def test_apply_reconcile_refuses_source_edits_that_leave_unparseable_frontmatter
 
     with pytest.raises(UnreadableDocError, match=r"would leave .* unparseable"):
         apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+
+# GTX-219 (AD-37): both of reconcile's load-failure handlers interpolate `ruamel`'s message, so
+# both are covered here rather than one being inferred from the other through the shared loader.
+# The escape is the one the vector was reported for; the renderer's own suite walks the range.
+_ECHOED_ESCAPE = "\\u001b"
+
+
+def _carries_a_control(text: str) -> bool:
+    """Whether any C0, DEL, or C1 code point survives into a rendered diagnostic."""
+    return any(ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F for char in text)
+
+
+def test_a_reconcile_reparse_failure_spells_the_control_bytes_it_echoes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The post-edit reparse gate. Its message quotes `ruamel`'s, and the block it reports on is
+    # this engine's own splice of a document's bytes, so a control-bearing value the document
+    # carried reaches the gate through text no rule of this project inspected.
+    spliced = f'id: d\nk: "v{_ECHOED_ESCAPE}A"\nk: "v{_ECHOED_ESCAPE}B"\n'
+    monkeypatch.setattr(reconcile_module, "_apply_source_edits", lambda *_: spliced)
+    text = "---\nid: d\nderives_from:\n  - ref: a#x\n    seen: old\n---\nbody\n"
+
+    with pytest.raises(UnreadableDocError, match=r"would leave .* unparseable") as exc:
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    message = str(exc.value)
+    assert not _carries_a_control(message)
+    assert len(message.splitlines()) == 1
+
+
+def test_a_reconcile_load_failure_spells_the_control_bytes_it_echoes():
+    # The load site, reached by an ordinary reconcile of a document whose frontmatter carries a
+    # duplicate key. Nothing is monkeypatched here: this is the path a hostile document takes.
+    text = f'---\nid: d\nk: "v{_ECHOED_ESCAPE}A"\nk: "v{_ECHOED_ESCAPE}B"\n---\nbody\n'
+
+    with pytest.raises(UnreadableDocError, match=r"to reconcile") as exc:
+        apply_reconcile(text, {"a#x": "newhash"}, Path("downstream.md"))
+
+    message = str(exc.value)
+    assert not _carries_a_control(message)
+    assert len(message.splitlines()) == 1
+
+
+def test_the_reconcile_load_failure_detail_is_the_display_spelling_of_the_caught_exception():
+    # Pinned as a relation to the caught exception rather than as a literal, for the reason the
+    # frontmatter and config boundaries record: `ruamel`'s wording differs across the releases
+    # and accelerator cells CI runs. Reconcile reads through its own loader (AD-26), so the
+    # exception is caught from that one rather than from the shared boundary's.
+    raw_meta = "foo: [1, 2\n"
+    text = f"---\n{raw_meta}---\nbody\n"
+    with pytest.raises(YAML_LOAD_ERRORS) as caught:
+        reconcile_module._yaml().load(raw_meta)
+
+    with pytest.raises(UnreadableDocError) as exc:
+        apply_reconcile(text, {"a#x": "h"}, Path("downstream.md"))
+
+    assert str(exc.value).endswith(f": {format_yaml_error_for_display(caught.value)}")
 
 
 def test_apply_reconcile_no_match_leaves_text_and_reports_nothing():
