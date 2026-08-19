@@ -108,11 +108,12 @@ readback in step 3 and step 6, which look only at the Linear gate, still comes b
 documented. Naming the branch costs nothing here, because this recipe is pinned to `main`
 throughout and step 3 stops outright on a repository whose default branch is anything else.
 
-`--default-branch` reaches `init` in 5.0, and so does this recipe, so install both from 5.0 or
-later: on any earlier release the command above exits 2 with `No such option: --default-branch`.
-Do not work around it by dropping the flag: the stale-`origin/HEAD` hazard the flag exists to close
-is the reason this step names the branch, and an installation that silently gates the wrong branch
-is the outcome this whole recipe is written to prevent. Read this document at the release you are
+`--default-branch` reached `init` in 5.0 alongside this recipe, and the pin above carries it. If
+the command above ever exits 2 with `No such option: --default-branch`, you are running an
+earlier release than the pin names. Do not work around that by dropping the flag: the
+stale-`origin/HEAD` hazard the flag exists to close is the reason this step names the branch, and
+an installation that silently gates the wrong branch is the outcome this whole recipe is written
+to prevent. Read this document at the release you are
 installing, and use the `doc-lattice==` pin that copy carries.
 
 That workflow carries the two pinned `uses:` lines the release ships, and the Linear workflow in
