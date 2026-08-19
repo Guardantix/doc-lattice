@@ -19,6 +19,18 @@ EXIT_PIPE_CLOSED = 141
 def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:
     """Render a project error to the invocation's stderr stream.
 
+    The code sits beside the severity rather than after the message, because the message is not
+    reliably one line: ``exception_details`` preserves the line breaks a multi-line diagnostic
+    is built from, so a trailing code landed at the end of the last detail line and read as that
+    field's second parenthetical instead of as the whole error's code. Leading with it is the
+    one placement that does not depend on the message's shape.
+
+    Single-line diagnostics move with it deliberately. The alternative -- attaching the code to
+    the first line only when the message has a newline -- keeps their old shape but leaves two
+    output grammars and makes the placement a function of message content. Usage errors, which
+    carry no code, keep the plain ``error: <message>``, so the parenthetical marks exactly the
+    diagnostics that have a code to match on.
+
     Args:
         runtime: Active invocation state.
         exc: Typed project error to report.
@@ -26,7 +38,7 @@ def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:
     # emoji=False for the same reason the warning renderer carries it: these details embed
     # discovered paths verbatim, and a legal `:name:` in one is not an emoji request.
     runtime.stderr.print(
-        f"[red]error[/red]: {escape(exception_details(exc))} ({exc.code})",
+        f"[red]error[/red] ({exc.code}): {escape(exception_details(exc))}",
         soft_wrap=True,
         emoji=False,
     )

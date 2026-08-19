@@ -4,7 +4,18 @@ from .constants import ErrorCode
 
 
 def exception_details(error: BaseException) -> str:
-    """Flatten an exception message and its diagnostic notes into one line."""
+    """Join an exception's message and its diagnostic notes into one string.
+
+    Only the top-level pieces are joined, with ``"; "``. Line breaks inside the message or
+    inside a note are preserved, so the result is one line only when every piece is: a
+    multi-line diagnostic stays multi-line all the way to the terminal.
+
+    Args:
+        error: The exception to render.
+
+    Returns:
+        The exception's message, followed by each of its ``__notes__`` in order.
+    """
     details = [str(error)]
     details.extend(str(note) for note in getattr(error, "__notes__", ()))
     return "; ".join(details)

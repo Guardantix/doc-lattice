@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Five things to act on, plus two changes below that need no action in a default environment. The
+Six things to act on, plus two changes below that need no action in a default environment. The
 first is the printed workflow, and it applies to every ordinary and recipe install. The workflow
 `doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -115,6 +115,21 @@ carrying a break was already broken, since it could never equal a content hash. 
 carriage return or NEL needs no search: YAML reads both as line breaks and folds them to a space
 before any value is constructed. See **Changed** below and the frontmatter reference in
 README.md.
+
+The eighth is where the error code is printed, and it is the sixth thing to act on. It applies
+only to a caller that scrapes stderr; the exit code and the code values themselves are unchanged.
+Every project error now carries its code beside the severity instead of after the message, so
+`error: docs_roots entry 'notes.txt' ... must be one or the other (CONFIG_ERROR)` becomes
+`error (CONFIG_ERROR): docs_roots entry 'notes.txt' ... must be one or the other`. Match the
+prefix `error (<CODE>): ` rather than a trailing `(<CODE>)`, and match it on the first line rather
+than the last. The move is what makes a multi-line diagnostic readable: the message keeps the line
+breaks it is built from, so a trailing code landed at the end of the last detail line and read as
+part of that field's parenthetical rather than as the error's code, which the multi-line config
+and frontmatter diagnostics above make routine. Single-line diagnostics move with it deliberately,
+so that one prefix matches every project error rather than two grammars splitting on whether the
+message happens to have a newline. A usage error, which has no code, is unaffected and still
+prints `error: <message>`, so the parenthetical now marks exactly the diagnostics that carry a
+code to match on.
 
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read
@@ -430,6 +445,16 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   needs the new spelling. README.md, CLAUDE.md, and ARCHITECTURE.md now reference the new name;
   entries in earlier releases keep the spelling that was correct at the time. Its contents were
   also rewritten to track the three release projects rather than the shipped 4.x work.
+- **BREAKING:** a project error prints its code beside the severity rather than after the
+  message: `error (CONFIG_ERROR): invalid config /p/.doc-lattice.yml:` and its indented detail
+  lines, where the code previously trailed the last of those lines. On a multi-line diagnostic
+  that trailing position read as the last detail field's second parenthetical rather than as a
+  property of the whole error, which the deliberately multi-line config and frontmatter
+  diagnostics made routine rather than rare. Placement is owned by `print_project_error`, so it
+  moved for every error type at once and no message formatter gained CLI metadata. Single-line
+  diagnostics moved with it so one grammar covers both, and a usage error, which carries no code,
+  still prints `error: <message>`. See **Migration** above for what a stderr scraper matches
+  instead.
 
 ### Fixed
 
