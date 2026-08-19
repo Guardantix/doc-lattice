@@ -438,6 +438,30 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
 
 ### Security
 
+- A document filename can no longer forge or corrupt the CLI's own output. Every human-facing
+  path now prints in an unambiguous quoted spelling built at message construction, so terminal
+  control bytes in a filename are visible as escapes rather than acted on. Previously a file named
+  with an embedded `ESC` put those bytes straight onto stderr through both the typed errors and
+  the warnings, and a `ESC[A` in the name moved the cursor up a line and overwrote the diagnostic
+  printed before it. Both renderers applied Rich markup escaping, which neutralizes `[tag]` markup
+  and does nothing to ANSI. The fix lives in `path_utils.format_path_for_display` and is applied
+  where each message is built, so it holds for a direct library consumer that formats a
+  `ProjectError` itself, and it covers the success-path console writes (`impact`'s human report,
+  `reconcile`'s reconciled lines) as well as the diagnostics. This enforces the `--no-color` /
+  `NO_COLOR` promise README already made rather than extending it. AD-34 in ARCHITECTURE.md
+  records the raw-path-versus-display-path boundary.
+
+  Two visible outputs change shape: `impact` prints its path quoted inside the parentheses it
+  already used, and `reconcile` quotes the basename in its `reconciled` and `would reconcile`
+  lines. JSON output and the GitHub annotation `file=` value are deliberately unchanged, because
+  they are machine channels with their own encoders. Warning message prefixes are unchanged, so
+  `PYTHONWARNINGS` filters targeting them keep working.
+
+  This closes the document-path vector. Control characters written as escapes inside typed
+  frontmatter values reach human output by a separate route that is not closed here, and the
+  reconcile transaction and recovery sinks interpolate their paths the same way and are handled
+  separately.
+
 - Every `git` invocation now resolves to an absolute path outside the directory being operated on.
   A `PATH` lookup returning a relative result is refused, which covers every relative entry from
   `.` to any ancestor, and an absolute result resolving inside the invocation directory or the

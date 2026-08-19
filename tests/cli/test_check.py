@@ -510,7 +510,7 @@ def test_check_reports_id_less_frontmatter_on_stderr_without_changing_its_exit(t
 
     assert completed.returncode == 0  # a skip is a warning, not a gate failure
     assert completed.stderr == (
-        f"warning: skipping {paths['skillish']}: its frontmatter declares no 'id', "
+        f"warning: skipping {str(paths['skillish'])!r}: its frontmatter declares no 'id', "
         "so it is not a lattice node\n"
     )
     # The point of the hook: none of Python's default formatter reaches the user.
@@ -563,8 +563,8 @@ def test_check_reports_a_symlink_escape_in_the_same_stderr_voice(tmp_path: Path)
 
     assert completed.returncode == 0
     assert completed.stderr == (
-        f"warning: skipping {docs / 'leak.md'}: it escapes the project root via a symlink "
-        "or absolute path and was not read\n"
+        f"warning: skipping {str(docs / 'leak.md')!r}: it escapes the project root via a "
+        "symlink or absolute path and was not read\n"
     )
 
 
@@ -603,7 +603,7 @@ def test_check_reused_anchor_stderr_names_the_file_and_survives_a_warm_cache(tmp
     warm = _check_in(tmp_path, env)  # the node is served from it
 
     assert uncached.returncode == 0  # a rebound alias is a warning, not a gate failure
-    assert f"reused anchor in {anchored}" in uncached.stderr
+    assert f"reused anchor in {str(anchored)!r}" in uncached.stderr
     assert "defines an anchor name more than once" in uncached.stderr
     # ruamel's own warning named no file and pointed into site-packages; it no longer escapes.
     assert "ReusedAnchorWarning" not in uncached.stderr
@@ -622,7 +622,10 @@ def test_check_exits_2_naming_the_file_when_an_id_less_block_declares_lattice_in
     completed = _check_in(tmp_path)
 
     assert completed.returncode == 2
-    assert f"frontmatter in {typo} declares 'derives_from' but has no 'id' key" in completed.stderr
+    assert (
+        f"frontmatter in {str(typo)!r} declares 'derives_from' but has no 'id' key"
+        in completed.stderr
+    )
     # The typo is a frontmatter defect, so it must not send the user to the config file.
     assert "FRONTMATTER_ERROR" in completed.stderr
     assert "CONFIG_ERROR" not in completed.stderr
@@ -638,7 +641,7 @@ def test_check_exits_2_with_frontmatter_error_for_a_schema_defect(tmp_path: Path
     completed = _check_in(tmp_path)
 
     assert completed.returncode == 2
-    assert f"invalid lattice frontmatter in {bad}:" in completed.stderr
+    assert f"invalid lattice frontmatter in {str(bad)!r}:" in completed.stderr
     assert "FRONTMATTER_ERROR" in completed.stderr
     assert "CONFIG_ERROR" not in completed.stderr
     # The curated diagnostic reaches the terminal intact, not pydantic's renderer.

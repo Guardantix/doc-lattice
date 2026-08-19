@@ -11,6 +11,7 @@ from .discovery import decode_doc, discover_doc_paths, read_doc
 from .frontmatter_parser import parse_meta, split_frontmatter
 from .loader import build_lattice, derive_file_sections
 from .model import Lattice, ParsedDoc
+from .path_utils import format_path_for_display
 
 
 def load_lattice(
@@ -72,7 +73,8 @@ def _report_skip(disposition: FrontmatterDisposition, path: Path) -> None:
     if disposition != "id-less":
         return
     warnings.warn(
-        f"skipping {path}: its frontmatter declares no 'id', so it is not a lattice node",
+        f"skipping {format_path_for_display(path)}: its frontmatter declares no 'id', so it "
+        "is not a lattice node",
         stacklevel=1,
     )
 
@@ -100,8 +102,8 @@ def _report_reused_anchors(reused: bool, path: Path) -> None:
     if not reused:
         return
     warnings.warn(
-        f"reused anchor in {path}: its frontmatter defines an anchor name more than once, so "
-        "each alias reads the nearest definition above it",
+        f"reused anchor in {format_path_for_display(path)}: its frontmatter defines an anchor "
+        "name more than once, so each alias reads the nearest definition above it",
         stacklevel=1,
     )
 

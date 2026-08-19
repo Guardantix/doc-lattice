@@ -14,6 +14,7 @@ from .check import EdgeStatus
 from .constants import EDGE_STATES, EdgeState
 from .lint import LintResult
 from .model import Node
+from .path_utils import format_path_for_display
 
 _STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one trailing space
 
@@ -123,8 +124,9 @@ def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
     """
     for node, _impact_depth_not_shown in affected:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
+        displayed_path = escape(format_path_for_display(node.path))
         console.print(
-            f"{escape(node.id)}  ({escape(str(node.path))})  tickets: {escape(tickets)}",
+            f"{escape(node.id)}  ({displayed_path})  tickets: {escape(tickets)}",
             highlight=False,
             soft_wrap=True,
         )

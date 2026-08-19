@@ -752,3 +752,77 @@ def test_check_exits_141_silently_when_its_reader_closes_the_pipe(tmp_path: Path
 
     assert proc.returncode == 141
     assert stderr == ""
+
+
+# GTX-125: a document filename is a repo-controlled string that reaches human output without
+# passing the frontmatter parser, so these cases inspect the raw bytes a user's terminal
+# receives rather than the decoded text a renderer happened to produce. The name carries an SGR
+# and a cursor-up: without the display spelling, `ESC[A` overwrites the line printed above it.
+_HOSTILE_DOC_NAME = "pwn\x1b[31m\x1b[Aevil.md"
+
+
+def _run_bytes(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
+    """Run one command end to end under NO_COLOR and capture undecoded stdout and stderr."""
+    return subprocess.run(  # noqa: S603 - fixed argv and generated script, no untrusted input
+        [sys.executable, "-c", "from doc_lattice.cli import main; main()", *argv],
+        cwd=cwd,
+        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC)},
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_typed_error_under_no_color_emits_no_escape_byte_from_a_document_filename(tmp_path: Path):
+    # An unclosed fence is the shortest route to a path-bearing UNREADABLE_DOC on stderr.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / _HOSTILE_DOC_NAME).write_text("---\nid: broken\n", encoding="utf-8")
+
+    completed = _run_bytes(["check"], tmp_path)
+
+    assert completed.returncode == 2
+    assert b"UNREADABLE_DOC" in completed.stderr
+    assert b"\x1b" not in completed.stderr
+    assert b"\x1b" not in completed.stdout
+    # The name is still identifiable, in the escaped spelling rather than as raw bytes.
+    assert rb"pwn\x1b[31m\x1b[Aevil.md" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_reused_anchor_warning_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # The warning site GTX-148 added, reached through the renderer GTX-124 introduced.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / _HOSTILE_DOC_NAME).write_text(
+        "---\nid: anchored\nderives_from:\n  - &a {ref: up}\n  - &a {ref: up2}\n---\n# H\n",
+        encoding="utf-8",
+    )
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\n", encoding="utf-8")
+    (docs / "up2.md").write_text("---\nid: up2\n---\n# Up2\n", encoding="utf-8")
+
+    completed = _run_bytes(["check"], tmp_path)
+
+    assert b"reused anchor in " in completed.stderr  # AD-29: the prefix is load-bearing
+    assert b"\x1b" not in completed.stderr
+    assert rb"pwn\x1b[31m\x1b[Aevil.md" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_direct_console_write_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # `impact`'s human report is a success-path write, not a diagnostic: the README promise
+    # covers every command's output, so this sink is in scope alongside the error and warning
+    # ones. Nothing on this path raises, so no diagnostic renderer could be doing the escaping.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\n", encoding="utf-8")
+    (docs / _HOSTILE_DOC_NAME).write_text(
+        "---\nid: down\nderives_from:\n  - ref: up\n---\n# Down\n", encoding="utf-8"
+    )
+
+    completed = _run_bytes(["impact", "up"], tmp_path)
+
+    assert completed.returncode == 0
+    assert b"down" in completed.stdout
+    assert b"\x1b" not in completed.stdout
+    assert rb"pwn\x1b[31m\x1b[Aevil.md" in completed.stdout

@@ -1678,3 +1678,170 @@ def test_provenance_guard_leaves_before_images_and_rollback_alone():
     sources = _extended(_production_sources(), TRANSACTION_MODULE, NON_INVARIANT_ADDITIONS)
     violations = _provenance_violations(sources)
     assert not violations, "\n".join(violations)
+
+
+# GTX-125: the bug class is an omitted construction site, not a wrong renderer, so a behavioral
+# per-sink list cannot close it -- a sink added tomorrow is not in that list. This guard is the
+# static half: inside the modules GTX-125 owns, a path-typed expression may not be interpolated
+# into an f-string unless it goes through `format_path_for_display`. See AD-34.
+#
+# Names treated as path-typed. Deliberately a name heuristic rather than inferred types: the
+# suite has no type resolver, and every sink in the owned modules spells its path with one of
+# these. A false positive is cheap (wrap it, or add it to the exemptions below with a reason).
+# Every component of a dotted expression is tested, not only the last one, so `{path.name}` --
+# the exact shape the reconcile adapter's basename sink had before this change -- is caught
+# rather than read as an interpolation of something called `name`.
+_PATH_BEARING_NAMES = frozenset(
+    {"path", "source", "destination", "journal", "link", "cwd", "staged"}
+)
+
+# Modules outside GTX-125's ownership, each with the reason it is not scanned. Keyed on the
+# module's path under `src/doc_lattice`, not its basename: two packages here already hold a
+# `reconcile.py`, and a basename key would exempt a future sink in the wrong one silently.
+_DISPLAY_GUARD_EXEMPT_MODULES = {
+    # GTX-209 owns the reconcile transaction and recovery path sinks; it reuses this helper.
+    "reconcile_transaction.py",
+    # Also GTX-209's: the durable-write helper names a stage after its destination, so the
+    # orphaned-stage cleanup note carries a staged-artifact path in the same raw spelling the
+    # transaction sinks do. It is shared with `init`'s config write, whose path is not a
+    # document path at all, which is why the spelling is settled there rather than here.
+    "persistence.py",
+    # The helper's own containment error, which is what defines the boundary rather than
+    # crossing it, plus `safe_resolve`'s ValueError about a path it refused to resolve.
+    "path_utils.py",
+    # Not document paths: the config file the user pointed at, the tool's own cache location,
+    # and a `--docs-root` argument echoed back before any document is read. These carry no
+    # repo-controlled document filename, so GTX-125 leaves their spelling alone.
+    "config.py",
+    "cache/store.py",
+    "cli/commands/init.py",
+}
+
+# Individual expressions inside scanned modules that are not paths despite the name, keyed the
+# same way the module exemptions are.
+_DISPLAY_GUARD_EXEMPT_EXPRESSIONS = {
+    # `source` here is a slice of raw YAML text being re-emitted into a rewritten scalar, not a
+    # file path, and it is bytes destined for a document rather than for a human.
+    ("reconcile.py", "source", 873),
+    # The adapter's recovery reporting, which is GTX-209's alongside the transaction sinks it
+    # reports on: the journal path it names and the unresolved destinations it lists come from
+    # the journal, not from the load. The rest of this module is GTX-125's, which is why the
+    # two sinks are named here rather than the module being exempted whole.
+    ("cli/commands/reconcile.py", "recovery.journal", 150),
+    ("cli/commands/reconcile.py", "destination", 161),
+}
+
+
+_DISPLAY_HELPER = "format_path_for_display"
+# Rich's markup escaper. Every human-facing sink in these modules passes its interpolated text
+# through it, which makes it the second reliable marker of text being built for a person.
+_MARKUP_ESCAPE = "escape"
+
+
+def _dotted_label(node: ast.AST) -> str | None:
+    """Spell a bare name or attribute chain, or None for any other expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_label(node.value)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def _unwrapped_path_labels(node: ast.AST) -> set[str]:
+    """Path-bearing names an expression still reaches without the display helper.
+
+    Recursion rather than a bare-name test, because a sink almost never interpolates the
+    path alone: the pre-GTX-125 reconcile adapter wrote ``{escape(path.name)}``, and a test
+    that only reads the top-level expression sees a call and reports nothing. Any subtree
+    rooted at a ``format_path_for_display`` call is pruned, so a correctly wrapped path --
+    including one wrapped and then handed to ``escape`` -- reaches no name.
+    """
+    if isinstance(node, ast.Call) and _dotted_label(node.func) == _DISPLAY_HELPER:
+        return set()
+    label = _dotted_label(node)
+    if label is not None:
+        parts = label.split(".")
+        return {label} if any(part in _PATH_BEARING_NAMES for part in parts) else set()
+    found: set[str] = set()
+    for child in ast.iter_child_nodes(node):
+        found |= _unwrapped_path_labels(child)
+    return found
+
+
+def _path_interpolations(source: str) -> list[tuple[int, str]]:
+    """Return (line, label) for every path-bearing name reaching human-facing text.
+
+    Two construction shapes carry a path into output, and scanning only the first leaves a
+    real sink unguarded. An f-string interpolation is the obvious one. The other is a bare
+    ``escape(...)`` call: the reconcile adapter formats its basename once above the loop that
+    prints it, so the f-string there interpolates an already-formatted local and the raw path
+    never appears inside one. A JoinedStr-only scan reports that sink clean no matter how it
+    is spelled, which is exactly the omission this guard exists to catch.
+    """
+    found: set[tuple[int, str]] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.JoinedStr):
+            for value in node.values:
+                if isinstance(value, ast.FormattedValue):
+                    found.update((value.lineno, name) for name in _unwrapped_path_labels(value))
+        elif isinstance(node, ast.Call) and _dotted_label(node.func) == _MARKUP_ESCAPE:
+            found.update((node.lineno, name) for name in _unwrapped_path_labels(node))
+    return sorted(found)
+
+
+def test_path_interpolation_detector_sees_a_bare_path_and_ignores_a_wrapped_one():
+    bare = 'msg = f"cannot read {path}: boom"'
+    wrapped = 'msg = f"cannot read {format_path_for_display(path)}: boom"'
+
+    assert _path_interpolations(bare) == [(1, "path")]
+    assert _path_interpolations(wrapped) == []
+
+
+def test_path_interpolation_detector_sees_an_attribute_path():
+    assert _path_interpolations('f"{node.path}"') == [(1, "node.path")]
+    assert _path_interpolations('f"{context.source}"') == [(1, "context.source")]
+
+
+def test_path_interpolation_detector_sees_an_attribute_of_a_path():
+    # The regression this guard exists to prevent: the reconcile adapter used to interpolate
+    # the basename, which reads as `name` unless every component of the chain is tested.
+    assert _path_interpolations('f"{path.name}"') == [(1, "path.name")]
+
+
+def test_path_interpolation_detector_looks_through_a_wrapper_call():
+    # The pre-GTX-125 reconcile adapter spelled its sink exactly this way, and a detector that
+    # only reads the top-level expression would see a call and report nothing.
+    assert _path_interpolations('f"{escape(path.name)}"') == [(1, "path.name")]
+    assert _path_interpolations('f"{escape(str(node.path))}"') == [(1, "node.path")]
+
+
+def test_path_interpolation_detector_spares_a_wrapped_path_inside_a_wrapper_call():
+    assert _path_interpolations('f"{escape(format_path_for_display(path))}"') == []
+
+
+def test_path_interpolation_detector_sees_a_path_escaped_outside_an_f_string():
+    # The reconcile adapter formats its basename once above the loop that prints it, so the
+    # raw path never reaches an f-string at all. A JoinedStr-only scan calls that sink clean
+    # however it is spelled, which is the omission this guard exists to catch.
+    assert _path_interpolations("name = escape(path.name)") == [(1, "path.name")]
+    assert _path_interpolations("name = escape(format_path_for_display(path))") == []
+
+
+def test_no_human_facing_sink_interpolates_a_raw_path():
+    offenders: list[str] = []
+    for file in _source_files():
+        module = file.relative_to(SRC_DIR).as_posix()
+        if module in _DISPLAY_GUARD_EXEMPT_MODULES:
+            continue
+        for line, name in _path_interpolations(file.read_text(encoding="utf-8")):
+            if (module, name, line) in _DISPLAY_GUARD_EXEMPT_EXPRESSIONS:
+                continue
+            offenders.append(
+                f"{module}:{line} interpolates {{{name}}} without the display spelling"
+            )
+    assert not offenders, (
+        "GTX-125 (AD-34): route each of these through path_utils.format_path_for_display, or "
+        "add it to the exemptions above with the reason it is not a human-facing document "
+        "path:\n" + "\n".join(offenders)
+    )

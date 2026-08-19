@@ -15,6 +15,7 @@ from .model import (
     TargetId,
     parse_ref,
 )
+from .path_utils import format_path_for_display
 from .sections import anchor_ids, build_toc, section_spans, split_body_lines
 
 
@@ -68,7 +69,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             Location(path=doc.path, kind="file", span=(1, total_lines)),
             index,
             sources,
-            f"file {doc.path}",
+            f"file {format_path_for_display(doc.path)}",
         )
         anchored: list[TargetId] = []
         spans: dict[TargetId, tuple[int, int]] = {}
@@ -82,7 +83,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
                 Location(path=doc.path, kind="section", span=span),
                 index,
                 sources,
-                f"anchor {tid.as_ref()!r} in {doc.path}",
+                f"anchor {tid.as_ref()!r} in {format_path_for_display(doc.path)}",
             )
         _record_ancestors(anchored, spans, ancestors)
 

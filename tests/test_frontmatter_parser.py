@@ -106,7 +106,7 @@ def test_split_frontmatter_unclosed_fence_raises_source_naming_error():
         split_frontmatter(text, Path("broken.md"))
 
     assert exc.value.code == "UNREADABLE_DOC"
-    assert str(exc.value) == ("unclosed YAML frontmatter in broken.md: add a closing '---' fence")
+    assert str(exc.value) == ("unclosed YAML frontmatter in 'broken.md': add a closing '---' fence")
 
 
 def test_split_frontmatter_detects_crlf_fences():
@@ -226,7 +226,7 @@ def test_parse_meta_id_less_lattice_intent_raises_naming_file_and_keys(raw: str,
 
     assert exc.value.code == "FRONTMATTER_ERROR"
     assert str(exc.value) == (
-        f"frontmatter in typo.md declares {declared} but has no 'id' key, so the file and "
+        f"frontmatter in 'typo.md' declares {declared} but has no 'id' key, so the file and "
         "every edge it declares would be dropped from the lattice; add an 'id' (check it for "
         "a typo) or remove the lattice keys"
     )
@@ -253,7 +253,7 @@ def test_parse_meta_unknown_key_lists_the_accepted_keys():
 
     accepted = ", ".join(sorted(NodeMeta.model_fields))
     assert str(exc.value) == (
-        "invalid lattice frontmatter in a.md:\n"
+        "invalid lattice frontmatter in 'a.md':\n"
         f"  bogus: Extra inputs are not permitted (accepted keys: {accepted})"
     )
 
@@ -289,7 +289,7 @@ def test_parse_meta_value_error_reads_as_the_domain_wrote_it():
         parse_meta("id: 'a#b'\n", Path("a.md"))
 
     assert str(exc.value) == (
-        "invalid lattice frontmatter in a.md:\n"
+        "invalid lattice frontmatter in 'a.md':\n"
         "  id: node id 'a#b' must not contain '#'; "
         "'#' separates a file id from a section anchor"
     )
@@ -322,7 +322,7 @@ def test_parse_meta_reports_a_tagged_scalar_its_type_cannot_build(raw_meta: str)
     # A safe constructor asked for a type it cannot build from a scalar raises the builtin
     # that construction failed with rather than a YAMLError, so catching only that family
     # let a bare ValueError out of the boundary and print as an internal error.
-    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in doc\.md"):
+    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in 'doc\.md'"):
         parse_meta(raw_meta, Path("doc.md"))
 
 
@@ -330,7 +330,7 @@ def test_parse_meta_reports_a_duplicate_key_in_an_ordered_map():
     # An `!!omap` rejects a repeated key with a bare `assert` inside the safe constructor,
     # which is neither a YAMLError nor one of the builtins a tagged scalar raises, so it used
     # to leave this boundary as an uncaught AssertionError.
-    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in doc\.md") as exc:
+    with pytest.raises(UnreadableDocError, match=r"cannot parse frontmatter in 'doc\.md'") as exc:
         parse_meta("id: d\nextra: !!omap\n- a: 1\n- a: 2\n", Path("doc.md"))
 
     assert exc.value.code == "UNREADABLE_DOC"

@@ -16,6 +16,7 @@ from ruamel.yaml.error import ReusedAnchorWarning
 from .constants import LATTICE_INTENT_KEYS
 from .error_types import FrontmatterError, UnreadableDocError
 from .model import NodeMeta, ParsedMeta
+from .path_utils import format_path_for_display
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 
@@ -102,7 +103,9 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
                 trailing,
                 "\n".join(lines[closing_fence_index + 1 :]),
             )
-    raise UnreadableDocError(f"unclosed YAML frontmatter in {source}: add a closing '---' fence")
+    raise UnreadableDocError(
+        f"unclosed YAML frontmatter in {format_path_for_display(source)}: add a closing '---' fence"
+    )
 
 
 def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
@@ -151,7 +154,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     try:
         data, reused_anchors = _load_recording_reused_anchors(raw_meta)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"cannot parse frontmatter in {source}: {exc}"
+        msg = f"cannot parse frontmatter in {format_path_for_display(source)}: {exc}"
         raise UnreadableDocError(msg) from exc
     # A fenced block holding no mapping (empty, a scalar, a list) declares no keys at all, so it
     # is the same untracked prose as a file with no fence. Warning on it would fire on any
@@ -165,7 +168,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     except ValidationError as exc:
         msg = format_validation_error(
             exc,
-            header=f"invalid lattice frontmatter in {source}:",
+            header=f"invalid lattice frontmatter in {format_path_for_display(source)}:",
             model=NodeMeta,
             root_label=_ROOT_LOCATION,
         )
@@ -234,8 +237,8 @@ def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
         return _ID_LESS
     keys = ", ".join(repr(key) for key in declared)
     msg = (
-        f"frontmatter in {source} declares {keys} but has no 'id' key, so the file and every "
-        "edge it declares would be dropped from the lattice; add an 'id' (check it for a typo) "
-        "or remove the lattice keys"
+        f"frontmatter in {format_path_for_display(source)} declares {keys} but has no 'id' "
+        "key, so the file and every edge it declares would be dropped from the lattice; add an "
+        "'id' (check it for a typo) or remove the lattice keys"
     )
     raise FrontmatterError(msg)

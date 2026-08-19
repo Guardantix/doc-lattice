@@ -25,7 +25,7 @@ Normal reconcile needs either a downstream id or `--all` (running it with neithe
 ## Dry-run previews
 
 Add `--dry-run` to any normal selector above to preview the plan without writing: it prints
-`would reconcile FILE: REF` per edge that would change (`nothing to reconcile` if none would),
+`would reconcile 'FILE': REF` per edge that would change (`nothing to reconcile` if none would),
 and remains byte-, namespace-, and cache-read-only. It does not create, rewrite, recover, or remove
 the journal or staged images, and it does not persist the optional load cache. If an outstanding
 journal exists, dry-run exits 2, names it, and tells you to run `reconcile --recover` first without

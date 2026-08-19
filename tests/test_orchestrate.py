@@ -79,8 +79,8 @@ def test_id_less_frontmatter_warns_and_is_skipped_without_changing_the_lattice(t
 
     assert set(lattice.nodes_by_id) == {"up"}
     assert [str(w.message) for w in caught] == [
-        f"skipping {paths['skillish']}: its frontmatter declares no 'id', so it is not a "
-        "lattice node"
+        f"skipping {str(paths['skillish'])!r}: its frontmatter declares no 'id', so it is "
+        "not a lattice node"
     ]
 
 
@@ -100,7 +100,7 @@ def test_cached_and_uncached_loads_reject_unclosed_frontmatter_identically(
     with pytest.raises(UnreadableDocError) as cached:
         load_lattice(load_config(None, tmp_path))
 
-    expected = f"unclosed YAML frontmatter in {broken}: add a closing '---' fence"
+    expected = f"unclosed YAML frontmatter in {str(broken)!r}: add a closing '---' fence"
     assert str(uncached.value) == expected
     assert str(cached.value) == expected
 
@@ -515,9 +515,9 @@ def test_id_less_frontmatter_declaring_lattice_intent_fails_identically_across_t
     typo = tmp_path / "docs" / "typo.md"
     typo.write_text("---\nidd: down\nderives_from:\n  - ref: up\n---\n# Down\n", encoding="utf-8")
     expected = (
-        f"frontmatter in {typo} declares 'derives_from' but has no 'id' key, so the file and "
-        "every edge it declares would be dropped from the lattice; add an 'id' (check it for "
-        "a typo) or remove the lattice keys"
+        f"frontmatter in {str(typo)!r} declares 'derives_from' but has no 'id' key, so the "
+        "file and every edge it declares would be dropped from the lattice; add an 'id' "
+        "(check it for a typo) or remove the lattice keys"
     )
 
     with pytest.raises(FrontmatterError) as uncached:

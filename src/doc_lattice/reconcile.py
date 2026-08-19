@@ -38,6 +38,7 @@ from .error_types import BrokenRefError, UnreadableDocError, ValidationError
 from .frontmatter_parser import split_frontmatter_parts
 from .hashing import normalize_newlines
 from .model import Lattice, TargetId, parse_ref
+from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 from .yaml_boundary import YAML_LOAD_ERRORS
 
@@ -713,7 +714,10 @@ def _scalar_span(occurrence: _ScalarOccurrence, context: "_SourceContext") -> _T
     if not matches:
         return None
     if len(matches) != 1:
-        msg = f"frontmatter derives_from entry seen is malformed in {context.source}"
+        msg = (
+            "frontmatter derives_from entry seen is malformed in "
+            f"{format_path_for_display(context.source)}"
+        )
         raise UnreadableDocError(msg)
     return matches[0]
 
@@ -1031,7 +1035,10 @@ def _seen_source_edits(
             span.start, _scalar_source_end(context.raw_meta, seen, span), f"{new_seen}{comment}"
         )
         return [*_property_removal_edits(context, span), value]
-    msg = f"frontmatter derives_from entry seen is malformed in {context.source}"
+    msg = (
+        "frontmatter derives_from entry seen is malformed in "
+        f"{format_path_for_display(context.source)}"
+    )
     raise UnreadableDocError(msg)
 
 
@@ -1135,7 +1142,10 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
     try:
         reloaded = _yaml().load(new_meta)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"reconcile would leave {source} unparseable, so nothing was rewritten: {exc}"
+        msg = (
+            f"reconcile would leave {format_path_for_display(source)} unparseable, "
+            f"so nothing was rewritten: {exc}"
+        )
         raise UnreadableDocError(msg) from exc
     try:
         if reloaded == expected:
@@ -1149,11 +1159,14 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
         # An anchor that contains its own alias loads as a cyclic document, which compares
         # without bound. An unverifiable rewrite is refused rather than published unchecked.
         msg = (
-            f"frontmatter of {source} is self-referential, so a reconcile rewrite cannot be"
-            " verified and nothing was rewritten"
+            f"frontmatter of {format_path_for_display(source)} is self-referential, so a "
+            "reconcile rewrite cannot be verified and nothing was rewritten"
         )
         raise UnreadableDocError(msg) from exc
-    msg = f"reconcile would not reproduce the {changed} of {source}, so nothing was rewritten"
+    msg = (
+        f"reconcile would not reproduce the {changed} of {format_path_for_display(source)}, "
+        "so nothing was rewritten"
+    )
     raise UnreadableDocError(msg)
 
 
@@ -1201,7 +1214,7 @@ def _load_frontmatter_data(raw_meta: str, source: Path) -> object:
     try:
         return _yaml().load(raw_meta)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"cannot parse frontmatter of {source} to reconcile: {exc}"
+        msg = f"cannot parse frontmatter of {format_path_for_display(source)} to reconcile: {exc}"
         raise UnreadableDocError(msg) from exc
 
 
@@ -1218,7 +1231,10 @@ def _derives_from_occurrences(
     if not isinstance(root, (_MappingOccurrence, _SequenceOccurrence)):
         # Only a collection loads as the mapping the caller has already seen, so this refuses
         # a root shape only a mark-accounting change could produce.
-        msg = f"frontmatter of {context.source} is not written as a mapping; cannot reconcile"
+        msg = (
+            f"frontmatter of {format_path_for_display(context.source)} is not written as a "
+            "mapping; cannot reconcile"
+        )
         raise UnreadableDocError(msg)  # pragma: no cover
     occurrences = _resolved_member(context.anchors, root, "derives_from")
     if not isinstance(occurrences, _SequenceOccurrence):  # pragma: no cover
@@ -1227,8 +1243,8 @@ def _derives_from_occurrences(
         # every alias and merge spelling resolves through to the sequence it was defined on.
         # So this refuses a source shape only a mark-accounting change could produce.
         msg = (
-            f"frontmatter derives_from of {context.source} is not written as a list;"
-            " cannot reconcile"
+            f"frontmatter derives_from of {format_path_for_display(context.source)} is not "
+            "written as a list; cannot reconcile"
         )
         raise UnreadableDocError(msg)
     if len(occurrences.value) != len(entries):  # pragma: no cover
@@ -1236,8 +1252,9 @@ def _derives_from_occurrences(
         # refuses a disagreement only a mark-accounting change could produce, rather than
         # measuring an entry's offsets against a different entry.
         msg = (
-            f"frontmatter derives_from of {context.source} reads as {len(entries)} entries but is"
-            f" written as {len(occurrences.value)}; cannot reconcile"
+            f"frontmatter derives_from of {format_path_for_display(context.source)} reads as "
+            f"{len(entries)} entries but is written as {len(occurrences.value)}; "
+            "cannot reconcile"
         )
         raise UnreadableDocError(msg)
     return occurrences
@@ -1325,11 +1342,17 @@ def _plan_source_edits(
         if not isinstance(entry, MutableMapping) or not isinstance(
             entry_occurrence, (_MappingOccurrence, _SequenceOccurrence, _AliasOccurrence)
         ):
-            msg = f"frontmatter derives_from entry in {context.source} is not a mapping"
+            msg = (
+                "frontmatter derives_from entry in "
+                f"{format_path_for_display(context.source)} is not a mapping"
+            )
             raise UnreadableDocError(msg)
         ref = entry.get("ref")
         if not isinstance(ref, str):
-            msg = f"frontmatter derives_from entry ref in {context.source} is not a string"
+            msg = (
+                "frontmatter derives_from entry ref in "
+                f"{format_path_for_display(context.source)} is not a string"
+            )
             raise UnreadableDocError(msg)
         old_seen = entry.get("seen")
         new_seen = updates.get(ref)
@@ -1547,13 +1570,16 @@ def apply_reconcile(
     if data is None:
         return current_file_text, set()
     if not isinstance(data, MutableMapping):
-        msg = f"frontmatter of {source} is not a mapping; cannot reconcile"
+        msg = f"frontmatter of {format_path_for_display(source)} is not a mapping; cannot reconcile"
         raise UnreadableDocError(msg)
     entries = data.get("derives_from")
     if entries is None:
         return current_file_text, set()
     if not isinstance(entries, list):
-        msg = f"frontmatter derives_from of {source} is not a list; cannot reconcile"
+        msg = (
+            f"frontmatter derives_from of {format_path_for_display(source)} is not a list; "
+            "cannot reconcile"
+        )
         raise UnreadableDocError(msg)
     events = list(_yaml().parse(raw_meta))
     source_root = _source_occurrence_tree(events)
@@ -1624,7 +1650,7 @@ def plan_rewrites(
             before = read_bytes(path)
             decoded = before.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            msg = f"cannot read {path} to reconcile: {exc}"
+            msg = f"cannot read {format_path_for_display(path)} to reconcile: {exc}"
             raise UnreadableDocError(msg) from exc
         new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, path)
         if applied:
