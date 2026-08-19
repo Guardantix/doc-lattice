@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Four things to act on, plus two changes below that need no action in a default environment. The
+Five things to act on, plus two changes below that need no action in a default environment. The
 first is the printed workflow, and it applies to every ordinary and recipe install. The workflow
 `doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -71,18 +71,30 @@ such as `--- !!map`, because a plain `---` closes the frontmatter block instead.
 without the accelerator, which is what every lock of this project produces, sees no change at all
 in what loads.
 
-The sixth is the frontmatter value rule, and it is the fourth thing to act on. `id`, `title`,
+The seventh is the frontmatter value rule, and it is the fifth thing to act on. `id`, `title`,
 every `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` may no longer decode to a
 control character: any C0 code point (`U+0000` to `U+001F`), DEL (`U+007F`), or any C1 code point
-(`U+0080` to `U+009F`) now fails the load with a `FRONTMATTER_ERROR`. A raw control byte was
-already refused by YAML itself, so only a document spelling one as a double-quoted escape is
-affected, plus one spelling nobody writes on purpose: tab, newline, and carriage return are C0
-controls, and a block scalar written `|` or `>` keeps a trailing newline, so a value written that
-way is now refused where `|-` and `>-` are not. Search your docs for `\u00`, `\t`, `\n`, and `\r`
-inside a double-quoted frontmatter scalar, and for a `seen` or a `ref` written as a block scalar
-with no `-`. A folded `title` is the only one of these with a working use today; the others could
-never match a hash or resolve to an id, so the documents affected were already permanently
-drifting or broken. See **Changed** below and the frontmatter reference in README.md.
+(`U+0080` to `U+009F`) now fails the load with a `FRONTMATTER_ERROR`. Three spellings reach this,
+and only the first is the one the vector was reported for:
+
+1. **An escape in a double-quoted scalar**, which is the only way to write ESC, DEL, NUL, or a
+   C1 control into a value at all: YAML refuses each of those as a raw byte in the file, so
+   `"\u001b"` and its siblings are the whole of that group. Search for `\u00`, `\t`, `\n`, and
+   `\r` inside a double-quoted frontmatter scalar.
+2. **A literal tab**, which is the one control character YAML does admit as a raw byte, inside a
+   double-quoted, single-quoted, or block scalar. Nothing about it is visible on screen, so
+   search for the byte rather than reading for it: `grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'`
+   over your docs roots, and widen it if your values span lines.
+3. **A block scalar keeping its trailing newline.** Tab, newline, and carriage return are C0
+   controls, and `|` or `>` without `-` keeps a break, so a value written that way is refused
+   where `|-` and `>-` are not. Search for a `seen` or a `ref` written as a block scalar with
+   no `-`.
+
+A folded `title` is the only one of these with a working use today; a `seen` or `ref` carrying a
+break could never match a hash or resolve to an id, so those documents were already permanently
+drifting or broken. A literal carriage return or NEL needs no search: YAML reads both as line
+breaks and folds them to a space before any value is constructed. See **Changed** below and the
+frontmatter reference in README.md.
 
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read

@@ -573,3 +573,92 @@ def test_a_control_character_is_refused_before_the_id_hash_rule_echoes_the_value
     assert "U+001B" in message
     assert "'#'" not in message
     assert "\x1b" not in message
+
+
+# GTX-208 (AD-35): which control characters reach a value as a *raw* byte, per scalar spelling.
+# "YAML refuses control bytes" is the belief the vector hid behind, and it is wrong for exactly
+# one character, so the belief is replaced here by a measured table. A rule written only against
+# escaped spellings would admit a literal tab, which is invisible on screen and therefore the
+# case an author reaches without meaning to. Each row records the outcome and which layer
+# produces it: AD-35's validator, the YAML scanner, or neither, when the byte is read as a line
+# break and folded away before a value exists.
+_REFUSED_BY_VALIDATOR = "frontmatter-error"
+_REFUSED_BY_YAML = "unreadable-doc"
+_FOLDED_TO_A_SPACE = "folded"
+
+_RAW_BYTE_SPELLINGS = {
+    "double-quoted": 'title: "a{char}b"\n',
+    "single-quoted": "title: 'a{char}b'\n",
+    "plain": "title: a{char}b\n",
+    "literal-block": "title: |-\n  a{char}b\n",
+}
+
+# One entry per (character, spelling). Written out rather than derived: the point is to record
+# what the pinned pure parser actually does, so a derivation from the same rule the product uses
+# would assert nothing.
+_RAW_BYTE_REACHABILITY = {
+    ("tab", "\t"): {
+        "double-quoted": _REFUSED_BY_VALIDATOR,
+        "single-quoted": _REFUSED_BY_VALIDATOR,
+        "plain": _REFUSED_BY_YAML,
+        "literal-block": _REFUSED_BY_VALIDATOR,
+    },
+    ("esc", "\x1b"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("del", "\x7f"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("nul", "\x00"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("csi", "\x9b"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("nel", "\x85"): {
+        "double-quoted": _FOLDED_TO_A_SPACE,
+        "single-quoted": _FOLDED_TO_A_SPACE,
+        "plain": _FOLDED_TO_A_SPACE,
+        "literal-block": _REFUSED_BY_YAML,
+    },
+    ("carriage-return", "\r"): {
+        "double-quoted": _FOLDED_TO_A_SPACE,
+        "single-quoted": _FOLDED_TO_A_SPACE,
+        "plain": _REFUSED_BY_YAML,
+        "literal-block": _REFUSED_BY_YAML,
+    },
+}
+
+_REACHABILITY_ROWS = [
+    pytest.param(char, spelling, outcome, id=f"{name}-{spelling}")
+    for (name, char), per_spelling in _RAW_BYTE_REACHABILITY.items()
+    for spelling, outcome in per_spelling.items()
+]
+
+
+@pytest.mark.parametrize(("char", "spelling", "outcome"), _REACHABILITY_ROWS)
+def test_a_raw_control_byte_reaches_a_value_only_as_a_tab(char: str, spelling: str, outcome: str):
+    block = "id: doc\n" + _RAW_BYTE_SPELLINGS[spelling].format(char=char)
+
+    if outcome == _REFUSED_BY_VALIDATOR:
+        with pytest.raises(FrontmatterError) as exc:
+            parse_meta(block, Path("a.md"))
+        assert f"U+{ord(char):04X}" in str(exc.value)
+        return
+    if outcome == _REFUSED_BY_YAML:
+        # Refused before validation is reached, so the byte never becomes a value at all. The
+        # error type is the distinction: this is an unreadable document, not an invalid one.
+        with pytest.raises(UnreadableDocError):
+            parse_meta(block, Path("a.md"))
+        return
+
+    # Read as a line break: the scalar spans two lines and folds, so no control character
+    # survives into the value and AD-35 has nothing to refuse.
+    parsed = parse_meta(block, Path("a.md"))
+    assert parsed.meta is not None
+    assert parsed.meta.title == "a b"
+
+
+def test_the_tab_is_the_only_raw_byte_the_validator_ever_sees():
+    # The claim README and CHANGELOG make to an upgrading adopter, stated once as a property of
+    # the table above rather than left implicit across its rows. If a parser change ever lets a
+    # second raw byte through to validation, the migration guidance is wrong and this fails.
+    reaching_validation = {
+        name
+        for (name, _char), per_spelling in _RAW_BYTE_REACHABILITY.items()
+        if _REFUSED_BY_VALIDATOR in per_spelling.values()
+    }
+
+    assert reaching_validation == {"tab"}

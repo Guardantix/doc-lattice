@@ -1244,13 +1244,23 @@ identity, since edge resolution and duplicate detection compare them, and all fi
 `title`, `tickets`, `ref`, and `seen` participate in structured output through JSON, the GitHub
 annotation encoder, and the `linear` command.
 
-The premise that the frontmatter parser already filters control characters was half true. YAML
-refuses a literal C0 byte in the source stream, but a double-quoted scalar decodes `\u001b` into a
-real ESC and nothing downstream rejected it. Executing `check` and `graph` under `NO_COLOR=1`
+The premise that the frontmatter parser already filters control characters was half true, and the
+half that is true is narrower than it first reads. Executing `check` and `graph` under `NO_COLOR=1`
 against a block spelling `id: "node\u001b[31m"`, `title: "t\u001b[2J"`,
 `tickets: ["GTX-1\u001b[31m"]`, and `derives_from: [{ref: "up\u001b[A"}]` put the raw `0x1b` bytes
 on stdout in both. `NodeMeta` and `RawEdge` were otherwise unconstrained strings under
 `strict=True`, with the `#` check on `id` as the only value rule.
+
+Exactly which spellings reach a value is worth recording, because "YAML refuses control bytes" is
+the belief this vector hid behind, and it is wrong in one place. ESC, DEL, NUL, and the C1
+controls are refused as raw bytes by the scanner in every scalar style, so a double-quoted escape
+is the only way to write one of those into a value. A literal carriage return or NEL is read as a
+line break and folds to a space, so it never reaches a value either. A literal **tab** does: the
+scanner admits it inside a double-quoted, single-quoted, or block scalar, where it constructs
+`U+0009`. The refused set is therefore reachable by escape for most of its members and by a raw
+byte for exactly one, and a rule written only against escaped spellings would have missed the tab.
+`tests/test_frontmatter_parser.py` pins this table so it stays a measured fact rather than a
+belief, since it is the belief that hid the vector in the first place.
 
 The sinks are the same shape AD-34 records for paths and are more numerous: `report_render.py`
 prints `source_id`, `target_ref`, `node.id`, and `tickets`; `render.py` turns ids and titles into
@@ -1302,6 +1312,13 @@ have reached it; the output it corrupts is line-oriented, and a `title` or `id` 
 forge a whole report row rather than merely recolor a real one. AD-34's own spelling escapes
 `\t`, `\n`, and `\r` in a path for the same reason, and a rule that refused a newline in a
 filename while admitting one in an id would be incoherent across two halves of one vector.
+
+Those two are also where the compatibility cost actually falls, and they fall differently. The
+tab is the reachable-as-a-raw-byte case recorded above, so a document carrying one carries it
+invisibly: nothing on screen distinguishes a tabbed `title` from a spaced one, and CHANGELOG's
+migration note therefore gives a byte-level search rather than telling a reader to look. The
+newline is reached through a spelling instead, and that spelling is what the next paragraph
+covers.
 
 The cost lands on AD-31 layer 2, which this record narrows. That table's strict tracked-document
 column accepts, for `ref` and for `seen`, "a block scalar in either style with any chomping or

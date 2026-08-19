@@ -365,16 +365,22 @@ selector details, dry-run and JSON output, the durability contract, and recovery
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
 
 `id`, `title`, each `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` must be
-single-line text carrying no control character. YAML refuses a raw control byte in the file
-itself, but a double-quoted scalar can spell one as an escape, so a value that decodes to any C0
-code point (`U+0000` to `U+001F`, tab, newline, and carriage return included), DEL (`U+007F`), or
-any C1 code point (`U+0080` to `U+009F`) fails the load with a `FRONTMATTER_ERROR` naming the key
-and the code point. Every other character is accepted, accented text, CJK, emoji, and a
-no-break space among them. The rule is what keeps the `--no-color` promise above true for a
-document as well as for a filename: a value reaches your terminal, so it cannot carry bytes your
-terminal acts on. A trailing newline is the case worth knowing, since a block scalar written with
-`|` or `>` keeps one; write `|-` or `>-` instead, which is the difference between a folded title
-that loads and one that does not.
+single-line text carrying no control character. A value that decodes to any C0 code point
+(`U+0000` to `U+001F`, tab, newline, and carriage return included), DEL (`U+007F`), or any C1
+code point (`U+0080` to `U+009F`) fails the load with a `FRONTMATTER_ERROR` naming the key and
+the code point. Every other character is accepted, accented text, CJK, emoji, and a no-break
+space among them. The rule is what keeps the `--no-color` promise above true for a document as
+well as for a filename: a value reaches your terminal, so it cannot carry bytes your terminal
+acts on.
+
+Two cases are worth knowing, because they are the ones you can write without meaning to. A
+**literal tab** inside a quoted or block scalar is the one control byte YAML itself admits, and
+nothing on screen distinguishes it from a run of spaces, so a value that looks fine can fail;
+`grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'` finds them. A **trailing newline** comes from a
+block scalar written `|` or `>`, which keeps the break; write `|-` or `>-` instead, which is the
+difference between a folded title that loads and one that does not. Everything else in the
+refused set, ESC and DEL and the C1 controls among them, YAML rejects as a raw byte, so it can
+only reach a value through a double-quoted escape such as `"\u001b"`.
 
 ### Files with no `id`
 
