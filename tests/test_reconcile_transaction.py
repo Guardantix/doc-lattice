@@ -2054,7 +2054,7 @@ def test_failed_preparation_displays_every_staged_artifact_path_it_names(
 ):
     """A staged path derived from a hostile filename is displayed in the message and its notes.
 
-    The assertion runs against ``exception_details``, which is what ``cli/errors.py`` flattens
+    The assertion runs against ``exception_details``, which is what ``cli/errors.py`` renders
     and prints: it folds the notes in alongside the message, and a note is exactly where the
     unpublished-stage remediation for this failure lands. Asserting on ``str(error)`` alone
     would read the message and miss them.

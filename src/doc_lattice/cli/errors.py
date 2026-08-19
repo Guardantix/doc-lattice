@@ -27,9 +27,10 @@ def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:
 
     Single-line diagnostics move with it deliberately. The alternative -- attaching the code to
     the first line only when the message has a newline -- keeps their old shape but leaves two
-    output grammars and makes the placement a function of message content. Usage errors, which
-    carry no code, keep the plain ``error: <message>``, so the parenthetical marks exactly the
-    diagnostics that have a code to match on.
+    output grammars and makes the placement a function of message content. A diagnostic that
+    carries no code keeps the plain ``error: <message>``, which covers every usage error and the
+    ``reconcile --recover`` problem report its own adapter prints. So the parenthetical marks
+    exactly the diagnostics that have a code to match on, not every stderr line that exits 2.
 
     Args:
         runtime: Active invocation state.

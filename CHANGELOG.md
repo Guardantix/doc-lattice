@@ -127,9 +127,11 @@ breaks it is built from, so a trailing code landed at the end of the last detail
 part of that field's parenthetical rather than as the error's code, which the multi-line config
 and frontmatter diagnostics above make routine. Single-line diagnostics move with it deliberately,
 so that one prefix matches every project error rather than two grammars splitting on whether the
-message happens to have a newline. A usage error, which has no code, is unaffected and still
-prints `error: <message>`, so the parenthetical now marks exactly the diagnostics that carry a
-code to match on.
+message happens to have a newline. A diagnostic that carries no code is unaffected and still
+prints `error: <message>`. That is every usage error, and also the `reconcile --recover` problem
+report, which its own command adapter prints and which exits 2 like a project error does. So the
+parenthetical now marks exactly the diagnostics that carry a code to match on, and not every
+stderr line that ends the run at exit 2.
 
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read
@@ -452,9 +454,9 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   property of the whole error, which the deliberately multi-line config and frontmatter
   diagnostics made routine rather than rare. Placement is owned by `print_project_error`, so it
   moved for every error type at once and no message formatter gained CLI metadata. Single-line
-  diagnostics moved with it so one grammar covers both, and a usage error, which carries no code,
-  still prints `error: <message>`. See **Migration** above for what a stderr scraper matches
-  instead.
+  diagnostics moved with it so one grammar covers both, and a diagnostic that carries no code --
+  a usage error, or the `reconcile --recover` problem report -- still prints `error: <message>`.
+  See **Migration** above for what a stderr scraper matches instead.
 
 ### Fixed
 

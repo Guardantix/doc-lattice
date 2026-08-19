@@ -40,11 +40,11 @@ group below, since the error codes and output spellings it settles are what GTX-
   what a repository can make it print, and there are two such strings, not one. A document path
   never passes the frontmatter parser at all, so control bytes in a filename reach output raw, and
   the fix belongs at message construction so it survives whichever renderer prints it; that work
-  carries the display contract the other two reuse rather than restate
-  (GTX-125). A typed frontmatter value is the second string: the parser refuses a literal control
-  byte in the source stream but decodes a double-quoted escape into a real one, so `id`, `title`,
-  `tickets`, `ref`, and `seen` carry them through, and closing it turns on its own decision about
-  rejecting at validation, which is why it is not folded in (GTX-208). The reconcile transaction
+  carries the display contract the other two reuse rather than restate (GTX-125). A typed
+  frontmatter value is the second string: the parser refuses a literal control byte in the source
+  stream but decodes a double-quoted escape into a real one, so `id`, `title`, `tickets`, `ref`,
+  and `seen` carry them through, and closing it turns on its own decision about rejecting at
+  validation, which is why it is not folded in (GTX-208). The reconcile transaction
   and recovery layers interpolate destination, journal, and staged-artifact paths the same way,
   and a stage name inherits its destination's, so a hostile filename propagates into them; they
   apply GTX-125's contract instead of choosing one (GTX-209). What the three enforce is the output
