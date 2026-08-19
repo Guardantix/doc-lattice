@@ -10,6 +10,7 @@ import pytest
 import doc_lattice.cli.commands.init as init_command
 from doc_lattice import __version__, persistence
 from doc_lattice.cli import app
+from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import runner
 
@@ -351,9 +352,14 @@ def test_init_existing_config_with_stage_cleanup_failure_exits_2_and_names_orpha
     assert len(cleanup_attempts) == 1
     orphan = cleanup_attempts[0]
     assert orphan.exists()
+    # GTX-209 applied AD-34's display spelling to this shared note. The helper is reached from
+    # `init`, the load cache, and reconcile alike, and a reconcile stage inherits a document
+    # filename, so the spelling is settled at the one sink rather than per caller. `init`'s own
+    # path is not a document path, and this assertion records that it moved with it.
     expected_note = (
-        f"durable cleanup failed for helper-owned stage {orphan}: cleanup blocked; "
-        "it is not governed by a recovery journal, so inspect and remove it manually when safe"
+        f"durable cleanup failed for helper-owned stage {format_path_for_display(orphan)}: "
+        "cleanup blocked; it is not governed by a recovery journal, so inspect and remove it "
+        "manually when safe"
     )
     assert expected_note in result.stderr
     # The failure is the stage cleanup, not the config file: it names the write boundary.

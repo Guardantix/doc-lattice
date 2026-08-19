@@ -809,6 +809,47 @@ def test_reused_anchor_warning_under_no_color_emits_no_escape_byte(tmp_path: Pat
 
 
 @pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_recovery_problem_report_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # GTX-209. A reconcile stage is named after the destination it is written beside, so a
+    # hostile document filename propagates into the transaction's own artifact paths. Recovery
+    # then prints those paths back, which is where a crafted name could overwrite a line of the
+    # rollback report a user is reading while deciding how to repair a half-applied
+    # transaction. Nothing here raises: `_report_recovery_problems` writes straight to stderr,
+    # so no diagnostic renderer is doing the escaping.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    orphan = docs / f".{_HOSTILE_DOC_NAME}.doc-lattice-after.leaked.tmp"
+    orphan.write_bytes(b"leaked stage\n")
+
+    completed = _run_bytes(["reconcile", "--recover"], tmp_path)
+
+    assert completed.returncode == 2
+    assert b"orphaned artifact: " in completed.stderr
+    assert b"\x1b" not in completed.stderr
+    assert b"\x1b" not in completed.stdout
+    assert rb"pwn\x1b[31m\x1b[Aevil.md" in completed.stderr
+    # Reported, never removed: the recovery contract deletes nothing it cannot account for.
+    assert orphan.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_recovery_json_under_no_color_keeps_the_raw_machine_spelling(tmp_path: Path):
+    # The other half of the same run. AD-34 excludes machine channels, so `--format json`
+    # still carries the raw filename: JSON's own encoder is what makes it safe to parse, and
+    # substituting a display spelling would change values a consumer resolves against.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    orphan = docs / f".{_HOSTILE_DOC_NAME}.doc-lattice-after.leaked.tmp"
+    orphan.write_bytes(b"leaked stage\n")
+
+    completed = _run_bytes(["reconcile", "--recover", "--format", "json"], tmp_path)
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["orphans"] == [f"docs/{orphan.name}"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
 def test_direct_console_write_under_no_color_emits_no_escape_byte(tmp_path: Path):
     # `impact`'s human report is a success-path write, not a diagnostic: the README promise
     # covers every command's output, so this sink is in scope alongside the error and warning

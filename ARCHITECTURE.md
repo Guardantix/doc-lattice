@@ -1200,22 +1200,32 @@ decodes a double-quoted `\u001b` into a real ESC, so `id`, `title`, `tickets`, `
 can each carry a control character into human output through a validated frontmatter value. That
 vector turns on a decision this record does not make, between rejecting at validation and a typed
 value display encoding, because those values participate in identity and in structured output;
-it is GTX-208's. The reconcile transaction and recovery sinks interpolate destination, journal,
+it is GTX-208's. The reconcile transaction and recovery sinks interpolated destination, journal,
 and staged-artifact paths the same way this record governs, and stage names inherit
-`destination.name` so a hostile document filename propagates into them; those sinks are GTX-209's
-and reuse this helper rather than deciding a spelling of their own. GTX-125 and GTX-209 together
-close the document-path vector; nothing here claims the repo-controlled vector is fully closed.
+`destination.name` so a hostile document filename propagates into them; GTX-209 routed those
+sinks through this helper rather than deciding a spelling of their own, and moved
+`path_utils.safe_resolve`'s own containment error with them, because the transaction layer
+embeds that message verbatim when a journal records an escaping path. GTX-125 and GTX-209
+together close the document-path vector; nothing here claims the repo-controlled vector is fully
+closed.
 
 A static guard in `tests/test_conventions.py` enforces the boundary going forward: inside the
 modules this record covers, a path-bearing name reaching human-facing text must go through the
 helper. The failure mode being guarded is an omitted construction site, which a per-sink
-behavioral list cannot catch for a sink that does not exist yet. Two things make it able to see
+behavioral list cannot catch for a sink that does not exist yet. Three things make it able to see
 the sinks it covers. It reads through wrapper calls and whole attribute chains rather than only
 the top-level expression, because the sink this change repaired was spelled `{escape(path.name)}`
-and a top-level test sees a call there and reports nothing. It also scans bare `escape(...)` calls
+and a top-level test sees a call there and reports nothing. It scans bare `escape(...)` calls
 and not only f-string interpolations, because the reconcile adapter formats its basename once
 above the loop that prints it, so the raw path never reaches an f-string and an interpolation-only
-scan calls that sink clean however it is spelled. Its exemptions name `reconcile_transaction.py`,
-`persistence.py`'s orphaned-stage note, and the adapter's two recovery-reporting sinks as
-GTX-209's, and the config, cache, and `init` paths as strings that carry no repo-controlled
-document filename.
+scan calls that sink clean however it is spelled. It also scans `", ".join(...)`, because the
+transaction layer lists unresolved destinations by joining them above the message that carries
+the result, which is a third place a path enters text outside an f-string.
+
+Its module exemptions are the config, cache, and `init` paths, as strings that carry no
+repo-controlled document filename. GTX-209 retired the `reconcile_transaction.py`,
+`persistence.py`, and `path_utils.py` exemptions that were parked there, so what remains for
+those modules is per-expression and machine-only: the journal serializer, the staged-artifact
+filenames, and the recovery payload's own JSON spelling. Because a name can be a path in one
+module and something else in another, the path-bearing name set is the global one widened per
+module rather than grown globally.

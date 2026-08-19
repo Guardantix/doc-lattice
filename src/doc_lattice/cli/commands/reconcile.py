@@ -132,7 +132,10 @@ def _recovery_json_payload(recovery: RecoveryResult) -> str:
             "already_before": recovery.already_before,
             "unresolved": list(recovery.unresolved),
             "orphans": list(recovery.orphans),
-            "scan_errors": list(recovery.scan_errors),
+            # The machine channel keeps the pre-GTX-209 spelling exactly, path component
+            # included: AD-34 excludes JSON from the display spelling, and `_scan_orphan_artifacts`
+            # already orders the records by this rendering so the array order is unchanged too.
+            "scan_errors": [failure.legacy_text for failure in recovery.scan_errors],
         }
     )
 
@@ -147,7 +150,9 @@ def _report_recovery(runtime: CliRuntime, recovery: RecoveryResult, *, json_out:
         summary = "no reconcile journal to recover"
     else:
         summary = _RECOVERY_SUMMARIES[recovery.action]
-    runtime.stdout.print(f"{summary}: {escape(str(recovery.journal))}", soft_wrap=True)
+    runtime.stdout.print(
+        f"{summary}: {escape(format_path_for_display(recovery.journal))}", soft_wrap=True
+    )
 
 
 def _report_recovery_problems(runtime: CliRuntime, recovery: RecoveryResult) -> None:
@@ -158,7 +163,10 @@ def _report_recovery_problems(runtime: CliRuntime, recovery: RecoveryResult) -> 
             soft_wrap=True,
         )
         for destination in recovery.unresolved:
-            runtime.stderr.print(f"  unresolved destination: {escape(destination)}", soft_wrap=True)
+            runtime.stderr.print(
+                f"  unresolved destination: {escape(format_path_for_display(destination))}",
+                soft_wrap=True,
+            )
         runtime.stderr.print(
             "the prepared journal and every remaining staged image were retained; to finish "
             "the rollback, restore each destination to its recorded before or after image, "
@@ -173,13 +181,23 @@ def _report_recovery_problems(runtime: CliRuntime, recovery: RecoveryResult) -> 
             soft_wrap=True,
         )
         for orphan in recovery.orphans:
-            runtime.stderr.print(f"  orphaned artifact: {escape(orphan)}", soft_wrap=True)
+            runtime.stderr.print(
+                f"  orphaned artifact: {escape(format_path_for_display(orphan))}", soft_wrap=True
+            )
         runtime.stderr.print(
             "inspect each artifact and remove it manually after confirming it is not a destination",
             soft_wrap=True,
         )
-    for detail in recovery.scan_errors:
-        runtime.stderr.print(f"[red]error[/red]: {escape(detail)}", soft_wrap=True)
+    # The human encoder for a scan failure. The display spelling applies to the path
+    # component alone; the operating system's own message is escaped as ordinary prose, exactly
+    # as every other interpolated cause in this adapter is.
+    for failure in recovery.scan_errors:
+        runtime.stderr.print(
+            "[red]error[/red]: cannot scan "
+            f"{escape(format_path_for_display(failure.filename))} for orphaned artifacts: "
+            f"{escape(failure.detail)}",
+            soft_wrap=True,
+        )
 
 
 def register_reconcile(app: typer.Typer) -> None:

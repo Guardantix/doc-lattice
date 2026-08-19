@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -26,7 +27,9 @@ from doc_lattice.error_types import (
     ReconcileConflictError,
     ReconcileInProgressError,
     ReconcilePersistenceError,
+    exception_details,
 )
+from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.reconcile import Rewrite
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
@@ -1363,8 +1366,12 @@ def test_unreadable_directory_is_reported_rather_than_narrowing_the_orphan_scan(
     # letting the run read as clean.
     assert result.is_incomplete
     assert len(result.scan_errors) == 1
-    assert str(unreadable) in result.scan_errors[0]
-    assert "orphaned artifacts" in result.scan_errors[0]
+    failure = result.scan_errors[0]
+    # GTX-209: the failure stays structured until an encoder spells it, so the producer keeps
+    # the path and the operating system's message apart rather than fusing them into prose.
+    assert failure.filename == str(unreadable)
+    assert "orphaned artifacts" in failure.legacy_text
+    assert str(unreadable) in failure.legacy_text
 
 
 def test_journal_recovery_and_its_leaked_publication_stage_are_reported_together(tmp_path: Path):
@@ -1450,8 +1457,9 @@ def test_unsafe_recovery_does_not_claim_an_externally_removed_journal_remains(
     with pytest.raises(ReconcilePersistenceError) as caught:
         recover_transaction(tmp_path)
 
-    assert f"journal {transaction.journal} remains" not in str(caught.value)
-    assert f"journal {transaction.journal} is not present" in str(caught.value)
+    displayed = format_path_for_display(transaction.journal)
+    assert f"journal {displayed} remains" not in str(caught.value)
+    assert f"journal {displayed} is not present" in str(caught.value)
 
 
 def test_prepared_rollback_processes_destinations_in_reverse_order(tmp_path: Path, monkeypatch):
@@ -2029,6 +2037,101 @@ def test_lost_journal_create_race_reports_the_preflight_remediation(tmp_path: Pa
     assert str(racing.value) == str(preflight.value)
     assert "already exists" in str(racing.value)
     assert destination.read_bytes() == b"old bytes"
+
+
+# GTX-209: a stage is named after the destination it is written beside, so a hostile document
+# filename propagates into the transaction's own artifact paths and back out through the
+# diagnostics that report them.
+_HOSTILE_DOC_NAME = "pwn\x1b[31m\x1b[Aevil.md"
+_TERMINAL_CONTROLS = frozenset(chr(code) for code in [*range(0x20), 0x7F, *range(0x80, 0xA0)]) - {
+    "\n"
+}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_failed_preparation_displays_every_staged_artifact_path_it_names(
+    tmp_path: Path, monkeypatch
+):
+    """A staged path derived from a hostile filename is displayed in the message and its notes.
+
+    The assertion runs against ``exception_details``, which is what ``cli/errors.py`` flattens
+    and prints: it folds the notes in alongside the message, and a note is exactly where the
+    unpublished-stage remediation for this failure lands. Asserting on ``str(error)`` alone
+    would read the message and miss them.
+    """
+    destination = tmp_path / _HOSTILE_DOC_NAME
+    destination.write_bytes(b"old bytes")
+    rewrite = Rewrite(
+        path=destination,
+        before=b"old bytes",
+        after=b"new bytes",
+        applied=frozenset({"up#x"}),
+    )
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    staged_paths: list[Path] = []
+    real_stage = reconcile_transaction.stage_bytes
+
+    def _record_stage(target: Path, data: bytes, *, prefix: str) -> Path:
+        staged = real_stage(target, data, prefix=prefix)
+        staged_paths.append(staged)
+        return staged
+
+    def _fail_the_journal(path: Path, data: bytes, *, prefix: str) -> None:
+        del data, prefix
+        raise PermissionError(f"journal {path} refused")
+
+    def _fail_cleanup(_path: Path) -> None:
+        raise OSError("cleanup blocked")
+
+    monkeypatch.setattr(reconcile_transaction, "stage_bytes", _record_stage)
+    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_the_journal)
+    monkeypatch.setattr(reconcile_transaction, "durable_unlink", _fail_cleanup)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites_through_lock(tmp_path, [rewrite], {destination: destination})
+
+    rendered = exception_details(caught.value)
+    # The failure names the journal it could not publish, and one note per stage it could not
+    # clean. Every one of those stage names carries the hostile document filename.
+    assert format_path_for_display(journal) in rendered
+    assert len(staged_paths) == 2
+    for staged in staged_paths:
+        assert _HOSTILE_DOC_NAME in staged.name, staged
+        assert format_path_for_display(staged) in rendered
+    leaked = sorted(ch for ch in _TERMINAL_CONTROLS if ch in rendered)
+    assert not leaked, f"transaction diagnostic leaked raw control bytes {leaked!r}: {rendered!r}"
+    assert destination.read_bytes() == b"old bytes"
+
+
+def test_orphan_scan_orders_failures_by_their_legacy_rendering(tmp_path: Path, monkeypatch):
+    """Structured scan failures keep the array order the rendered strings used to produce.
+
+    The producer used to return ``tuple(sorted(scan_errors))`` over finished strings, so the
+    JSON array's order was the order of those strings. Sorting the records by their fields
+    instead would reorder the array wherever the two orders disagree, and the payload's
+    byte-identity contract covers order as well as wording.
+
+    The two failures below are exactly such a case, and a reachable one under this issue's own
+    threat model: one directory name is the other plus a control byte. By filename, ``/locked``
+    sorts before ``/locked\x01``. In the rendered line a space follows the path, and ``\x01``
+    sorts before a space, so the rendered order is the reverse.
+    """
+    plain, controlled = "/locked", "/locked\x01"
+    assert sorted([plain, controlled]) == [plain, controlled]
+
+    def _two_failures(_root: Path, onerror: Callable[[OSError], None], **_kwargs: object):
+        onerror(PermissionError(13, "Permission denied", plain))
+        onerror(PermissionError(13, "Permission denied", controlled))
+        return iter(())
+
+    monkeypatch.setattr(reconcile_transaction.os, "walk", _two_failures)
+
+    _orphans, failures = reconcile_transaction._scan_orphan_artifacts(tmp_path, frozenset())
+
+    assert [failure.filename for failure in failures] == [controlled, plain]
+    assert [failure.legacy_text for failure in failures] == sorted(
+        failure.legacy_text for failure in failures
+    )
 
 
 # --- Journal format: v2 provenance and v1 compatibility (GTX-126) ----------------------------
