@@ -91,7 +91,7 @@ def _write_cli_transaction(  # noqa: PLR0913
     after_bytes: bytes,
     *,
     state: JournalState = "prepared",
-    provenance: JournalProvenance | None = None,
+    provenance: JournalProvenance = _DEFAULT_CLI_PROVENANCE,
 ) -> tuple[Path, Path, Path]:
     """Write a valid single-entry recovery transaction for CLI integration tests."""
     entry = _cli_transaction_entry(root, destination, before_bytes, after_bytes)
@@ -101,7 +101,7 @@ def _write_cli_transaction(  # noqa: PLR0913
             JournalV2(
                 version=RECONCILE_JOURNAL_VERSION,
                 state=state,
-                provenance=provenance if provenance is not None else _DEFAULT_CLI_PROVENANCE,
+                provenance=provenance,
                 entries=(entry,),
             )
         ).decode("utf-8"),
@@ -328,18 +328,35 @@ def test_reconcile_recover_cleans_committed_without_planning(tmp_path: Path, mon
     assert not after.exists()
 
 
-def _prepared_project(tmp_path: Path, **journal_kwargs) -> tuple[Path, Path]:
-    """Build a project holding one prepared transaction ready to roll back."""
+def _transaction_destination(tmp_path: Path) -> Path:
+    """Create the one document a prepared transaction is staged over."""
     docs = tmp_path / "docs"
     docs.mkdir()
     destination = docs / "down.md"
     destination.write_bytes(b"transaction document\n")
+    return destination
+
+
+def _prepared_project(
+    tmp_path: Path, *, provenance: JournalProvenance = _DEFAULT_CLI_PROVENANCE
+) -> tuple[Path, Path]:
+    """Build a project holding one prepared transaction ready to roll back."""
+    destination = _transaction_destination(tmp_path)
     journal, _before, _after = _write_cli_transaction(
         tmp_path,
         destination,
         b"original document\n",
         b"transaction document\n",
-        **journal_kwargs,
+        provenance=provenance,
+    )
+    return journal, destination
+
+
+def _legacy_prepared_project(tmp_path: Path) -> tuple[Path, Path]:
+    """Build the same prepared transaction under the version 1 journal format."""
+    destination = _transaction_destination(tmp_path)
+    journal = _write_legacy_cli_transaction(
+        tmp_path, destination, b"original document\n", b"transaction document\n"
     )
     return journal, destination
 
@@ -444,13 +461,7 @@ def test_reconcile_recover_normalizes_a_plus_offset_timestamp(tmp_path: Path, mo
 
 def test_reconcile_recover_reports_v1_provenance_as_absent(tmp_path: Path, monkeypatch):
     """A version 1 journal says its format recorded no provenance, rather than showing blanks."""
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    destination = docs / "down.md"
-    destination.write_bytes(b"transaction document\n")
-    journal = _write_legacy_cli_transaction(
-        tmp_path, destination, b"original document\n", b"transaction document\n"
-    )
+    journal, destination = _legacy_prepared_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(app, ["reconcile", "--recover"])
@@ -464,13 +475,7 @@ def test_reconcile_recover_reports_v1_provenance_as_absent(tmp_path: Path, monke
 
 def test_reconcile_recover_v1_json_provenance_is_null(tmp_path: Path, monkeypatch):
     """Version 1 recovery reports null provenance; `action` is what separates it from no journal."""
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    destination = docs / "down.md"
-    destination.write_bytes(b"transaction document\n")
-    journal = _write_legacy_cli_transaction(
-        tmp_path, destination, b"original document\n", b"transaction document\n"
-    )
+    journal, _destination = _legacy_prepared_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
@@ -494,14 +499,12 @@ def test_reconcile_recover_displays_control_bearing_provenance_without_refusing(
     hostile_version = "5.0.0\x1b[31m"
     hostile_id = "pc\x1b[Adesign"
     hostile_ref = "up#\x7fx"
-    journal, destination = _prepared_project(
-        tmp_path,
-        provenance=JournalProvenance(
-            created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
-            tool_version=hostile_version,
-            selector=JournalSelector(mode="downstream", downstream_id=hostile_id, ref=hostile_ref),
-        ),
+    hostile_provenance = JournalProvenance(
+        created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+        tool_version=hostile_version,
+        selector=JournalSelector(mode="downstream", downstream_id=hostile_id, ref=hostile_ref),
     )
+    journal, destination = _prepared_project(tmp_path, provenance=hostile_provenance)
     monkeypatch.chdir(tmp_path)
 
     human = runner.invoke(app, ["reconcile", "--recover"])
@@ -519,11 +522,7 @@ def test_reconcile_recover_displays_control_bearing_provenance_without_refusing(
         destination,
         b"original document\n",
         b"transaction document\n",
-        provenance=JournalProvenance(
-            created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
-            tool_version=hostile_version,
-            selector=JournalSelector(mode="downstream", downstream_id=hostile_id, ref=hostile_ref),
-        ),
+        provenance=hostile_provenance,
     )
     destination.write_bytes(b"transaction document\n")
     machine = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
